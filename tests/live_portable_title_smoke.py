@@ -145,6 +145,9 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str) -> dict:
             except (FileNotFoundError, PermissionError, json.JSONDecodeError):
                 pass
             await asyncio.sleep(.15)
+    preview = await submit(guest_run, "native-inventory-view-fixture", target="stock")
+    assert preview["ok"] and re.fullmatch(r"verified stock guest inventory with \d+ backpack cards",
+                                          preview.get("stock_inventory_proof", "")), preview
     requested = await submit(guest_run, "native-inventory-view-fixture")
     assert requested["ok"], requested
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")

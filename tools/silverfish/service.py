@@ -5264,8 +5264,13 @@ class Client:
                 elif action == "native-inventory-view-fixture":
                     if self.last_game.get("state") != "connected":
                         raise ValueError("Connect the staged inventory viewer first")
-                    self.last_game = await self.bridge.command(action, timeout=5)
+                    target = request.get("target")
+                    if target not in (None, "stock"):
+                        raise ValueError("Unknown staged inventory view")
+                    self.last_game = await self.bridge.command(action, *((target,) if target else ()), timeout=5)
                     result = {"native_inventory_view": self.last_game.get("native_inventory_view", {})}
+                    if target:
+                        result["stock_inventory_proof"] = self.last_game.get("ack", {}).get("message")
                 elif action == "native-client-remote-damage-fixture":
                     if not self.last_game.get("native_client_damage"):
                         raise ValueError("Connect and wait for the authenticated client damage guard")

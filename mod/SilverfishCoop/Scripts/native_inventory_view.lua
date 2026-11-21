@@ -396,7 +396,55 @@ local function poll_keys()
     if changed then choose(current, changed) end
 end
 
-local function fixture(current)
+local function widget_at(array, index)
+    local widget = array[index]
+    if widget and type(widget.type) == "function" and widget:type() == "RemoteUnrealParam" then
+        return widget:get()
+    end
+    return widget
+end
+
+local function stock_preview(state, phase, current, action, stack)
+    local save = save_scope.bind_guest(state, phase)
+    if not valid(save) or not same(current.pawn.Save, save) then
+        error("The stock inventory preview requires the isolated guest save", 0)
+    end
+    local owner, class_field = state.world.OwningGameInstance, "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
+    local controller = current.controller
+    SilverfishClearNativeInventoryViewScope()
+    local success, proof = pcall(function()
+        controller[inventory_action_event](controller, {}, 0, 0, action)
+        local count = stack:GetArrayNum()
+        local screen = count == 1 and widget_at(stack, 1) or nil
+        if not exact(screen, inventory_path) or not same(screen:GetOwningPlayer(), controller)
+            or not same(screen.BackpackPanel.Target, owner) or not same(owner.SaveSlot_Ref, save)
+            or not same(screen.ItemManager.ParentScreen, screen) then
+            error("The stock inventory preview did not bind the guest's backpack")
+        end
+        local expected, displayed = 0, 0
+        for index = 1, save.PlayerBackpack:GetArrayNum() do
+            if valid(save.PlayerBackpack[index][class_field]) then expected = expected + 1 end
+        end
+        local cards = screen.BackpackPanel.Cards
+        for index = 1, cards:GetArrayNum() do
+            local card = widget_at(cards, index)
+            if valid(card) and valid(card.Item[class_field]) then displayed = displayed + 1 end
+        end
+        if displayed ~= expected then error("The stock inventory preview did not render the isolated backpack") end
+        return displayed
+    end)
+    local closed = pcall(function()
+        if stack:GetArrayNum() == 1 and exact(widget_at(stack, 1), inventory_path) then controller:CloseMenu({}) end
+    end)
+    local guarded = SilverfishSetNativeInventoryViewScope(current.pawn:GetAddress(), true)
+    if not closed or not guarded or stack:GetArrayNum() ~= 0 then
+        error("The stock inventory preview could not restore its menu scope", 0)
+    end
+    if not success then error(proof, 0) end
+    return ("verified stock guest inventory with %d backpack cards"):format(proof)
+end
+
+local function fixture(current, state, phase, preview)
     if not headless or not can_view(current) or not same_context(current, binding) then
         error("The fixture requires an enrolled headless stock inventory viewer", 0)
     end
@@ -404,6 +452,7 @@ local function fixture(current)
     if not action or not stack or stack:GetArrayNum() ~= 0 then
         error("The exact stock inventory menu fixture is unavailable", 0)
     end
+    if preview then return stock_preview(state, phase, current, action, stack) end
     current.controller[inventory_action_event](current.controller, {}, 0, 0, action)
     if stack:GetArrayNum() ~= 0 or not take(current)
         or not observation or observation.state == "error" then
@@ -424,7 +473,9 @@ function inventory_view.command(fields, state, phase)
     if not current or not same_context(current, binding) or not can_view(current) then
         error("Stock inventory view requires the exact standing connected guest", 0)
     end
-    if operation == "native-inventory-view-fixture" and #fields == 2 then return fixture(current) end
+    if operation == "native-inventory-view-fixture" and (#fields == 2 or #fields == 3 and fields[3] == "stock") then
+        return fixture(current, state, phase, fields[3] == "stock")
+    end
     local sequence = integer(fields[3], 9007199254740991)
     if not observation or not same_context(current, observation.context)
         or sequence ~= observation.sequence or fields[4] ~= current.map then
