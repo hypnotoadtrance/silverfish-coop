@@ -1,0 +1,49 @@
+import unittest
+from unittest.mock import AsyncMock, Mock
+
+from tools.silverfish.native_anomaly_effects import Playback, VORTEX_SENSORS, project_sensors
+
+
+class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_spatial_cues_play_once_per_authenticated_visit(self):
+        playback = Playback()
+        epoch = "a" * 32
+        game = {"state": "connected", "map": "Crossroads", "pawns": {"local": {"location": [0, 0, 0]}}}
+        frame = {"map": game["map"], "epoch": epoch, "cues": [
+            [1, "charge", [100, 0, 0], 1],
+            [1, "charge", [100, 0, 0], 1],
+            [2, "charge", [4100, 0, 0], 1],
+            [3, "blast", [4100, 0, 0], 1],
+            [4, "blast", [0, 0, 0], float("inf")],
+            [5, "unknown", [0, 0, 0], 1],
+            [6, "vortex", [100, 0, 0], 1],
+        ]}
+        snapshot = {**game, "ack": {"message": "1:1:0,3:1:0,3:1:0,6:1:1,7:0:0"}}
+        bridge = Mock(command=AsyncMock(return_value=snapshot))
+        control = Mock()
+        self.assertIs(await playback.sync(bridge, control, game, frame, epoch, "host"), snapshot)
+        bridge.command.assert_awaited_once_with(
+            "native-anomaly-play-cues", game["map"], epoch, "1|charge|100|0|0|1", "3|blast|4100|0|0|1", "6|vortex|100|0|0|1", timeout=1.5,
+        )
+        self.assertEqual([call.kwargs["serial"] for call in control.event.call_args_list], [1, 3, 6])
+        self.assertTrue(all(call.kwargs["particles"] for call in control.event.call_args_list))
+        self.assertTrue(control.event.call_args.kwargs["animated"])
+        await playback.sync(bridge, control, game, frame, epoch, "host")
+        await playback.sync(bridge, control, game, frame, "b" * 32, "host")
+        self.assertEqual(bridge.command.await_count, 1)
+
+    async def test_sensor_projection_only_updates_changed_placed_actors_in_the_current_visit(self):
+        epoch = "b" * 32
+        game = {"state": "connected", "map": "Funnel", VORTEX_SENSORS: [
+            {"path": "Trap1", "relative": [0, 0, 110]},
+            {"path": "Trap2", "relative": [0, 0, 150]},
+            {"path": None, "relative": [0, 0, 195]},
+        ]}
+        frame = {"map": game["map"], "epoch": epoch, "sensors": [
+            ["Trap1", [0, 0, 185]], ["Trap2", [0, 0, 150]], ["Missing", [0, 0, 102]], [None, [0, 0, 185]],
+        ]}
+        bridge = Mock(command=AsyncMock(return_value=game))
+        await project_sensors(bridge, game, frame, "a" * 32)
+        bridge.command.assert_not_awaited()
+        await project_sensors(bridge, game, frame, epoch)
+        bridge.command.assert_awaited_once_with("native-vortex-apply-sensors", "Funnel", epoch, "Trap1|0|0|185", timeout=1.5)

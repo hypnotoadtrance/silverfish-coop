@@ -43,7 +43,7 @@ from . import native_stock_door
 from . import native_player_avatar
 from . import native_pickup_audio
 from . import native_voice
-from . import native_starburst_effects
+from . import native_anomaly_effects
 from . import native_loose_pickup
 from . import native_stock_enemy_drops
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
@@ -1715,9 +1715,15 @@ class Host:
             self.voice_audio.observed(self.last_game, self.zone_epoch)
             if voice_frame := self.voice_audio.frame(self.last_game, self.zone_epoch, pawn):
                 gameplay[native_voice.KEY] = voice_frame
-            if cues := self.last_game.get(native_starburst_effects.KEY):
-                gameplay[native_starburst_effects.KEY] = {
+            if cues := self.last_game.get(native_anomaly_effects.KEY):
+                gameplay[native_anomaly_effects.KEY] = {
                     "map": self.last_game["map"], "epoch": self.zone_epoch, "cues": cues,
+                }
+            sensors = [[row["path"], row["relative"]] for row in self.last_game.get(native_anomaly_effects.VORTEX_SENSORS, [])
+                       if row["path"]]
+            if sensors:
+                gameplay[native_anomaly_effects.VORTEX_SENSORS] = {
+                    "map": self.last_game["map"], "epoch": self.zone_epoch, "sensors": sensors,
                 }
             equipped = self.last_game.get("native_guest_equipped_weapons", {}).get(pawn, {})
             kind = equipped.get("kind")
@@ -4549,7 +4555,7 @@ class Client:
         self.loot_tracking = None
         self.pickup_playback = native_pickup_audio.Playback()
         self.voice_playback = native_voice.Playback()
-        self.starburst_playback = native_starburst_effects.Playback()
+        self.anomaly_playback = native_anomaly_effects.Playback()
         self.snapshot_request: asyncio.Task | None = None
         self.next_snapshot = 0.0
         self.next_projection = 0.0
@@ -5229,9 +5235,11 @@ class Client:
                 if time.monotonic() - self.gameplay_seen < 3:
                     self.last_game = await self.voice_playback.sync(
                         self.bridge, self.control, self.last_game, self.gameplay.get(native_voice.KEY), self.zone_epoch)
-                    self.last_game = await self.starburst_playback.sync(
-                        self.bridge, self.control, self.last_game, self.gameplay.get(native_starburst_effects.KEY),
+                    self.last_game = await self.anomaly_playback.sync(
+                        self.bridge, self.control, self.last_game, self.gameplay.get(native_anomaly_effects.KEY),
                         self.zone_epoch, self.host_session)
+                    self.last_game = await native_anomaly_effects.project_sensors(
+                        self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.VORTEX_SENSORS), self.zone_epoch)
                     self.last_game = await self.pickup_playback.sync(
                         self.bridge, self.control, self.last_game, self.gameplay.get(native_pickup_audio.KEY),
                         self.zone_epoch, self.host_session)

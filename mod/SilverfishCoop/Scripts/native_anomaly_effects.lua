@@ -6,11 +6,15 @@ local assets = {
     blast = {"/Game/Assets/PFX/FX_Blast_FragGrenade_Converted.FX_Blast_FragGrenade_Converted",
         "/Game/Assets/Sounds/MetaSounds/MS_Grenade01.MS_Grenade01",
         "/Game/Assets/Sounds/SoundClasses/Blast_Attenuation.Blast_Attenuation"},
+    vortex = {"/Game/Assets/PFX/NI_Singularity_01.NI_Singularity_01",
+        "/Game/Assets/Sounds/CUEs/Blast_Cues/ObserverAbsorb_Cue.ObserverAbsorb_Cue",
+        "/Game/Assets/Sounds/SoundClasses/Blast_Attenuation.Blast_Attenuation"},
 }
-local audio_range = {charge = 4000, blast = 500100}
+local audio_range = {charge = 4000, blast = 500100, vortex = 500100}
+local blasts = {starburst = "blast", vortex = "vortex"}
 effects.blast_class = "BlueprintGeneratedClass /Game/Classes/Actors/ExplosionActor_BP.ExplosionActor_BP_C"
 local history, pending, serial, seen, visit = {}, {}, 0, {}, nil
-local captured = {charge = 0, blast = 0}
+local captured = {charge = 0, blast = 0, vortex = 0}
 local charging = {}
 
 local function valid(object) return object and object:IsValid() end
@@ -54,7 +58,7 @@ end
 function effects.clear()
     for index = #charging, 1, -1 do remove_charge(index) end
     history, pending, seen, visit = {}, {}, {}, nil
-    captured = {charge = 0, blast = 0}
+    captured = {charge = 0, blast = 0, vortex = 0}
 end
 
 function effects.observe_charge(entry)
@@ -72,15 +76,16 @@ function effects.observe_blast(actor, active)
     local count = ignored and ignored:GetArrayNum() or 0
     local scale = actor["PFX Scale"]
     if count < 1 or count > 8 or not valid(pfx) or not valid(sfx)
-        or pfx:GetFullName() ~= "NiagaraSystem " .. assets.blast[1]
-        or sfx:GetFullName():match("^%S+ (.+)$") ~= assets.blast[2]
         or type(scale) ~= "number" or not (scale > 0 and scale <= 10) then return end
     for index = 1, count do
         local source = ignored[index]
         local entry = valid(source) and active[source:GetAddress()]
-        if entry and entry.kind == "starburst" and entry.actor:GetAddress() == source:GetAddress() then
-            entry.charged = true
-            record("blast", actor:K2_GetActorLocation(), scale)
+        local cue = entry and blasts[entry.kind]
+        if cue and entry.actor:GetAddress() == source:GetAddress()
+            and pfx:GetFullName() == "NiagaraSystem " .. assets[cue][1]
+            and sfx:GetFullName():match("^%S+ (.+)$") == assets[cue][2] then
+            if cue == "blast" then entry.charged = true end
+            record(cue, actor:K2_GetActorLocation(), scale)
             return
         end
     end
@@ -89,9 +94,9 @@ end
 function effects.rows(row)
     local now = os.clock()
     while pending[1] and pending[1].expires <= now do table.remove(pending, 1) end
-    local rows = {row("native-starburst-capture", captured.charge, captured.blast)}
+    local rows = {row("native-anomaly-capture", captured.charge, captured.blast, captured.vortex)}
     for _, entry in ipairs(pending) do
-        rows[#rows + 1] = row("native-starburst-cue", table.unpack(entry))
+        rows[#rows + 1] = row("native-anomaly-cue", table.unpack(entry))
     end
     return rows
 end
@@ -102,8 +107,8 @@ local function play(pawn, origin, kind, point, scale)
     local niagara = StaticFindObject("/Script/Niagara.Default__NiagaraFunctionLibrary")
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     if not valid(niagara) or not valid(statics) or not valid(particle) or not valid(sound)
-        or kind == "blast" and not valid(attenuation) then return false end
-    effects.retire_charges(point)
+        or kind ~= "charge" and not valid(attenuation) then return false end
+    if kind ~= "vortex" then effects.retire_charges(point) end
     local rotation = {Pitch = 0, Yaw = 0, Roll = 0}
     local component = niagara:SpawnSystemAtLocation(pawn, particle, point, rotation,
         {X = scale, Y = scale, Z = scale}, true, true, 0, true)
@@ -122,12 +127,12 @@ local function play(pawn, origin, kind, point, scale)
     return true, valid(component) == true
 end
 
-function effects.command(args, state, phase)
-    if args[2] ~= "native-starburst-play-cues" then return end
+function effects.command(args, state, phase, animate_vortex)
+    if args[2] ~= "native-anomaly-play-cues" then return end
     local pawn, epoch = state.local_pawn and state.local_pawn.pawn, args[4]
     if phase ~= "connected" or state.map ~= args[3] or not valid(pawn) or not pawn:IsLocallyControlled()
         or not epoch or #epoch ~= 32 or not epoch:match("^[0-9a-f]+$") or #args < 5 or #args > 16 then
-        error("Starburst cue is outside the current guest visit", 0)
+        error("Anomaly cue is outside the current guest visit", 0)
     end
     if visit ~= epoch then
         effects.clear()
@@ -139,9 +144,15 @@ function effects.command(args, state, phase)
         x, y, z, scale = tonumber(x), tonumber(y), tonumber(z), tonumber(scale)
         if id and #id <= 15 and not seen[id] and assets[kind] and x and y and z and scale and scale > 0 and scale <= 10
             and (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= audio_range[kind]^2 then
-            local accepted, particles = play(pawn, origin, kind, {X = x, Y = y, Z = z}, scale)
+            local point = {X = x, Y = y, Z = z}
+            local accepted, particles = play(pawn, origin, kind, point, scale)
             if accepted then
-                played[#played + 1] = id .. ":" .. (particles and "1" or "0")
+                local animated = false
+                if kind == "vortex" then
+                    local ok, playing = pcall(animate_vortex, point)
+                    animated = ok and playing
+                end
+                played[#played + 1] = id .. ":" .. (particles and "1" or "0") .. ":" .. (animated and "1" or "0")
                 history[#history + 1], seen[id] = id, true
                 if #history > 48 then seen[table.remove(history, 1)] = nil end
             end

@@ -28,9 +28,10 @@ namespace
     constexpr auto owner = STR("SilverfishCoopNative");
     constexpr auto field_class = STR("/Game/Classes/Actors/AnomalyField_BP.AnomalyField_BP_C");
     constexpr auto trap_overlap = STR("BndEvt__Starburst_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature");
-    constexpr std::array<std::wstring_view, 2> replicated_classes{
+    constexpr std::array<std::wstring_view, 3> replicated_classes{
         STR("/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C"),
         STR("/Game/Classes/Anomalies/BurnerTrap_BP.BurnerTrap_BP_C"),
+        STR("/Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C"),
     };
     std::array<H::GlobalCallbackId, 5> hooks{H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID};
     U::FName spawn_field, overlap;

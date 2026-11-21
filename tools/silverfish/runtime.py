@@ -32,7 +32,7 @@ from . import native_stock_enemy_drops
 from . import native_stock_door
 from . import native_player_avatar
 from . import native_voice
-from . import native_starburst_effects
+from . import native_anomaly_effects
 from .native_guest_creator import valid_profile
 from . import native_host_stack_drop
 from . import native_black_box
@@ -2379,23 +2379,34 @@ class Bridge:
                     path, kind, x, y, z, collision, role = fields[1:]
                     # Map-loaded guest actors can have ROLE_None until they enter replication range.
                     if (area.startswith("/Game/Classes/Maps/") and path.startswith(f"{area}.{area.rsplit('/', 1)[-1]}:")
-                            and len(path) <= 512 and len(placed) < 1024 and kind in {"starburst", "burner"}
+                            and len(path) <= 512 and len(placed) < 1024 and kind in {"starburst", "burner", "vortex"}
                             and collision in {"0", "1"} and role in {"0", "1", "3"}):
                         placed[path] = {"kind": kind, "location": [_finite(axis) for axis in (x, y, z)],
                                         "collision": collision == "1", "role": int(role)}
-                elif fields[0] == "native-starburst-cue" and len(fields) == 7 and data.get("state") == "hosting":
-                    cues = data.setdefault(native_starburst_effects.KEY, [])
+                elif fields[0] == "native-anomaly-cue" and len(fields) == 7 and data.get("state") == "hosting":
+                    cues = data.setdefault(native_anomaly_effects.KEY, [])
                     serial, kind, *components = fields[1:]
                     location = [_finite(axis) for axis in components[:3]]
                     scale = _finite(components[3])
-                    if (len(cues) < native_starburst_effects.MAX_CUES and serial.isascii() and serial.isdecimal()
-                            and 0 < len(serial) <= 15 and 0 < int(serial) and kind in native_starburst_effects.KINDS
+                    if (len(cues) < native_anomaly_effects.MAX_CUES and serial.isascii() and serial.isdecimal()
+                            and 0 < len(serial) <= 15 and 0 < int(serial) and kind in native_anomaly_effects.KINDS
                             and None not in location and scale is not None and 0 < scale <= 10):
                         cues.append([int(serial), kind, location, scale])
-                elif fields[0] == "native-starburst-capture" and len(fields) == 3 and data.get("state") == "hosting":
-                    charge, blast = map(int, fields[1:])
-                    if charge >= 0 and blast >= 0:
+                elif fields[0] == "native-anomaly-capture" and len(fields) == 4 and data.get("state") == "hosting":
+                    charge, blast, vortex = map(int, fields[1:])
+                    if min(charge, blast, vortex) >= 0:
                         data["native_starburst_capture"] = {"charge": charge, "blast": blast}
+                        data["native_vortex_capture"] = vortex
+                elif fields[0] == "native-vortex-sensor" and len(fields) == 14:
+                    sensors = data.setdefault(native_anomaly_effects.VORTEX_SENSORS, [])
+                    area = data.get("map", "")
+                    path = fields[1]
+                    coords = [_finite(axis) for axis in fields[2:]]
+                    if (len(sensors) < native_anomaly_effects.MAX_SENSORS and None not in coords and
+                            (path == "-" or (area.startswith("/Game/Classes/Maps/") and len(path) <= 512
+                             and path.startswith(f"{area}.{area.rsplit('/', 1)[-1]}:")))):
+                        sensors.append({"path": None if path == "-" else path, "root": coords[:3],
+                                        "relative": coords[3:6], "center": coords[6:9], "visual": coords[9:]})
                 elif fields[0] == "native-burner-jet" and len(fields) == 6:
                     jets = data.setdefault("native_burner_jets", [])
                     if len(jets) < 64 and all(bit in {"0", "1"} for bit in fields[4:]):
@@ -2403,7 +2414,7 @@ class Bridge:
                                      "particles_active": fields[5] == "1"})
                 elif fields[0] == "native-anomaly-position" and len(fields) == 6:
                     positions = data.setdefault("native_anomaly_positions", [])
-                    if len(positions) < 1024 and fields[1] in {"starburst", "burner"} and fields[5] in {"0", "1"}:
+                    if len(positions) < 1024 and fields[1] in {"starburst", "burner", "vortex"} and fields[5] in {"0", "1"}:
                         positions.append({"kind": fields[1], "location": [_finite(value) for value in fields[2:5]],
                                           "collision": fields[5] == "1"})
                 elif fields[0] == "native-kill-volume":

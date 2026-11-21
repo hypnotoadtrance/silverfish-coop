@@ -1,9 +1,10 @@
 local fields = {}
-local effects = require("native_starburst_effects")
+local effects = require("native_anomaly_effects")
 
 local classes = {
     starburst = "/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C",
     burner = "/Game/Classes/Anomalies/BurnerTrap_BP.BurnerTrap_BP_C",
+    vortex = "/Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C",
 }
 local kinds = {}
 for kind, path in pairs(classes) do kinds["BlueprintGeneratedClass " .. path] = kind end
@@ -42,6 +43,51 @@ local function placement(actor)
         local placed, guest = SilverfishQualifyNativePlacedTrap(path)
         if placed then return path, guest end
     end
+end
+
+local function vortex_sensor(actor)
+    local sensor = actor.Sphere_Hit
+    if valid(sensor) and same(sensor:GetOwner(), actor)
+        and sensor:GetClass():GetFullName() == "Class /Script/Engine.SphereComponent" then return sensor end
+end
+
+local function animate_vortex(point)
+    local timeline
+    for _, entry in pairs(active) do
+        local actor = entry.actor
+        if entry.kind == "vortex" and in_world(actor, world) and not actor:GetActorEnableCollision()
+            and valid(actor.Sphere1) and same(actor.Sphere1:GetOwner(), actor) and valid(actor.Anim)
+            and same(actor.Anim:GetOwner(), actor) then
+            local at = actor.Sphere1:K2_GetComponentLocation()
+            if (at.X - point.X)^2 + (at.Y - point.Y)^2 + (at.Z - point.Z)^2 < 9 then
+                if timeline then return false end
+                timeline = actor.Anim
+            end
+        end
+    end
+    if not timeline then return false end
+    timeline:PlayFromStart()
+    return timeline:IsPlaying()
+end
+
+local function project_placed_sensors(args, state, phase)
+    local visit = args[4]
+    if phase ~= "connected" or state.map ~= args[3] or not same(state.world, world)
+        or not visit or #visit ~= 32 or not visit:match("^[0-9a-f]+$") or #args < 5 or #args > 36 then
+        error("Vortex sensors are outside the current guest visit", 0)
+    end
+    for index = 5, #args do
+        local path, x, y, z = args[index]:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
+        x, y, z = tonumber(x), tonumber(y), tonumber(z)
+        local actor = path and #path <= 512 and StaticFindObject(path)
+        local entry = in_world(actor, world) and active[actor:GetAddress()]
+        if entry and entry.placed == path and entry.kind == "vortex" and not actor:GetActorEnableCollision()
+            and x and y and z and math.abs(x) <= 4096 and math.abs(y) <= 4096 and math.abs(z) <= 4096 then
+            local sensor = vortex_sensor(actor)
+            if sensor then sensor:K2_SetRelativeLocation({X = x, Y = y, Z = z}, false, {}, true) end
+        end
+    end
+    return "Applied host placements to the passive Vortex sensors"
 end
 
 local function burner_source(actor)
@@ -105,17 +151,20 @@ function fields.guest(enabled)
 end
 
 function fields.command(args, state, phase)
-    local effect = effects.command(args, state, phase)
+    if args[2] == "native-vortex-apply-sensors" then return project_placed_sensors(args, state, phase) end
+    local effect = effects.command(args, state, phase, animate_vortex)
     if effect ~= nil then return effect end
     if args[2] == "native-anomaly-trigger-fixture" or args[2] == "native-placed-anomaly-guest-fixture" then
         local guest_probe = args[2] == "native-placed-anomaly-guest-fixture"
         local trap = fixtures[args[3]]
+        local kind = trap and args[3]
         if not trap then
             for _, entry in pairs(active) do
-                if entry.placed == args[3] then trap = entry.actor; break end
+                if entry.placed == args[3] then trap, kind = entry.actor, entry.kind; break end
             end
         end
-        if #args ~= 3 or not headless or not in_world(trap, state.world) or not valid(trap.Sphere) then
+        local trigger = in_world(trap, state.world) and (kind == "vortex" and vortex_sensor(trap) or trap.Sphere)
+        if #args ~= 3 or not headless or not valid(trigger) then
             error("Trap trigger probe unavailable", 0)
         end
         if guest_probe then
@@ -124,13 +173,13 @@ function fields.command(args, state, phase)
                 or not valid(pawn.CapsuleComponent) or trap:GetActorEnableCollision() ~= false then
                 error("Placed trap guest overlap probe unavailable", 0)
             end
-            trap[overlap](trap, trap.Sphere, pawn, pawn.CapsuleComponent, 0, false, {})
+            trap[overlap](trap, trigger, pawn, pawn.CapsuleComponent, 0, false, {})
             return "Stock placed trap guest overlap invoked"
         end
         local guest = #state.guests == 1 and state.guests[1].pawn
         if not host_fixture or phase ~= "hosting" or not in_world(guest, state.world)
             or not guest:HasAuthority() or guest:IsLocallyControlled() then error("Trap trigger probe unavailable", 0) end
-        local center = trap.Sphere:K2_GetComponentLocation()
+        local center = trigger:K2_GetComponentLocation()
         if not guest:K2_TeleportTo({X = center.X, Y = center.Y, Z = center.Z + 45}, guest:K2_GetActorRotation()) then
             error("The stock guest could not enter the trap trigger", 0)
         end
@@ -185,6 +234,10 @@ function fields.rows(state, phase, row)
                 actor:SetReplicates(true)
                 actor:SetReplicateMovement(true)
                 if actor.bReplicates and actor.bReplicateMovement then
+                    if entry.kind == "vortex" then
+                        local sensor = vortex_sensor(actor)
+                        if sensor then sensor:SetIsReplicated(true) end
+                    end
                     actor:ForceNetUpdate()
                     active[address] = entry
                 end
@@ -221,6 +274,14 @@ function fields.rows(state, phase, row)
             if entry.placed then
                 rows[#rows + 1] = row("native-placed-anomaly", entry.placed, entry.kind, position.X, position.Y, position.Z,
                     collision, actor:GetLocalRole())
+            end
+            if entry.kind == "vortex" then
+                local sensor, mesh = vortex_sensor(actor), actor.Sphere1
+                if sensor and valid(mesh) and same(mesh:GetOwner(), actor) then
+                    local relative, center, visual = sensor.RelativeLocation, sensor:K2_GetComponentLocation(), mesh:K2_GetComponentLocation()
+                    rows[#rows + 1] = row("native-vortex-sensor", entry.placed or "-", position.X, position.Y, position.Z,
+                        relative.X, relative.Y, relative.Z, center.X, center.Y, center.Z, visual.X, visual.Y, visual.Z)
+                end
             end
         else
             active[address] = nil

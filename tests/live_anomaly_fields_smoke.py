@@ -22,10 +22,11 @@ from tools.silverfish.travel import CROSSROADS, LAB_E206
 PLACED = {
     "lab-e206": (LAB_E206, "burner", "BurnerTrap_BP_C_1", 2),
     "perdition": ("/Game/Classes/Maps/Maps_Dungeons/Perdition_01_P", "starburst", "Starburst_BP_C_5", 5),
+    "funnel": ("/Game/Classes/Maps/Maps_Dungeons/Funnel_01_P", "vortex", "VortexTrap_BP_C_9", 12),
 }
 
 
-async def verify(work, vanilla, activate, placed):
+async def verify(work, vanilla, activate, placed, generated_vortex):
     name = f"anomaly-field-{uuid.uuid4().hex[:8]}"
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
@@ -58,6 +59,12 @@ async def verify(work, vanilla, activate, placed):
     def placed_traps(status):
         return status.get("game", {}).get("native_placed_anomalies", {})
 
+    def sensors(status):
+        return status.get("game", {}).get("native_vortex_sensors", [])
+
+    def vortex_sensor(status):
+        return next((sensor for sensor in sensors(status) if math.dist(sensor["root"], traps["vortex"]["location"]) < 3), None)
+
     def projected(status, trap):
         return next((row for row in positions(status) if row["kind"] == trap["kind"]
                      and math.dist(row["location"], trap["location"]) < 3), None)
@@ -66,16 +73,19 @@ async def verify(work, vanilla, activate, placed):
         return next((row for row in status.get("game", {}).get("native_burner_jets", [])
                      if math.dist(row["location"], position) < reach), None)
 
-    def played_cues():
+    def played_cues(kind):
         log = guest / "events.jsonl"
         if not log.exists():
             return []
         text = log.read_text(encoding="utf-8")
-        x, y, z = traps["starburst"]["location"]
-        # Stock Starburst cues originate at its sphere, 200 units above the actor root.
-        source = [x, y, z + 200]
+        if kind == "starburst":
+            x, y, z = traps[kind]["location"]
+            # Stock Starburst cues originate at its sphere, 200 units above the actor root.
+            source = [x, y, z + 200]
+        else:
+            source = proof["host_vortex_sensor"]["visual"]
         return [event for line in text[:text.rfind("\n")].splitlines()
-                if (event := json.loads(line)).get("event") == "native_starburst_effect_played"
+                if (event := json.loads(line)).get("event") == f"native_{kind}_effect_played"
                 and math.dist(event["location"], source) < 5]
 
     try:
@@ -97,7 +107,8 @@ async def verify(work, vanilla, activate, placed):
         if placed:
             _, kind, name_in_level, expected = PLACED[placed]
             target = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel.{name_in_level}"
-            initial = await wait(host, lambda row: len(placed_traps(row)) == expected and target in placed_traps(row))
+            initial = await wait(host, lambda row: sum(trap["kind"] == kind for trap in placed_traps(row).values()) == expected
+                                 and target in placed_traps(row))
             authored = placed_traps(initial)
             traps[kind] = authored[target]
             targets[kind] = target
@@ -105,7 +116,7 @@ async def verify(work, vanilla, activate, placed):
             proof["placed_host_paths"] = authored
         else:
             # Generate the stock fields before admission to verify hot join receives their placement.
-            for kind in ("starburst", "burner"):
+            for kind in (("vortex",) if generated_vortex else ("starburst", "burner")):
                 earlier = {tuple(entry["location"]) for entry in positions(initial) if entry["kind"] == kind}
                 result = await submit(host, "native-anomaly-field-fixture", target=kind)
                 assert result["ok"], result
@@ -115,13 +126,33 @@ async def verify(work, vanilla, activate, placed):
                 assert trap["collision"], trap
                 traps[kind], targets[kind] = trap, kind
         proof["host"] = traps
+        placed_sensors = {}
+        if "vortex" in traps:
+            sensor_frame = await wait(host, vortex_sensor)
+            proof["host_vortex_sensor"] = vortex_sensor(sensor_frame)
+            placed_sensors = {sensor["path"]: sensor for sensor in sensors(sensor_frame) if sensor["path"]}
+            assert placed_sensors.keys() == {path for path, trap in authored.items() if trap["kind"] == "vortex"}
 
         await launch(guest, "guest", "join", "--profile", name, "--invite", invite["invite_file"], *flags)
         def replicas_visible(row):
             return (row.get("state") == "connected" and all(projected(row, trap) for trap in traps.values())
                     and placed_traps(row).keys() == authored.keys())
 
+        def same_sensor(sensor, expected):
+            return (sensor and math.dist(sensor["relative"], expected["relative"]) < .05
+                    and math.dist(sensor["center"], expected["center"]) < 3)
+
+        def matching_vortex(row):
+            if placed_sensors:
+                guest_sensors = {sensor["path"]: sensor for sensor in sensors(row) if sensor["path"]}
+                return all(same_sensor(guest_sensors.get(path), expected) for path, expected in placed_sensors.items())
+            return same_sensor(vortex_sensor(row), proof["host_vortex_sensor"])
+
         peer = await wait(guest, replicas_visible)
+        if "vortex" in traps:
+            peer = await wait(guest, matching_vortex)
+            proof["guest_vortex_sensor"] = vortex_sensor(peer)
+            proof["matched_vortex_sensors"] = len(placed_sensors) or 1
         replicas = {kind: projected(peer, trap) for kind, trap in traps.items()}
         assert all(not replica["collision"] for replica in replicas.values()), replicas
         proof["guest"] = replicas
@@ -148,6 +179,8 @@ async def verify(work, vanilla, activate, placed):
         resumed = await submit(guest, "reconnect", timeout=35)
         assert resumed["ok"] and resumed["resumed"], resumed
         rejoined = await wait(guest, replicas_visible)
+        if "vortex" in traps:
+            rejoined = await wait(guest, matching_vortex)
         assert all(not projected(rejoined, trap)["collision"] for trap in traps.values()), rejoined
         proof["reconnect"] = True
         if activate:
@@ -159,10 +192,15 @@ async def verify(work, vanilla, activate, placed):
                 triggered = await submit(host, "native-anomaly-trigger-fixture", target=target)
                 assert triggered["ok"], triggered
                 if kind == "starburst":
-                    await wait(guest, lambda _: {event["cue"] for event in played_cues()} == {"charge", "blast"}, timeout=14)
-                    cues = played_cues()
+                    await wait(guest, lambda _: {event["cue"] for event in played_cues(kind)} == {"charge", "blast"}, timeout=14)
+                    cues = played_cues(kind)
                     assert len(cues) == 2 and all(event["particles"] for event in cues), cues
                     proof["starburst_cues"] = cues
+                elif kind == "vortex":
+                    await wait(guest, lambda _: played_cues(kind), timeout=14)
+                    cue, = played_cues(kind)
+                    assert cue["particles"] and cue["animated"], cue
+                    proof["vortex_cue"] = cue
                 else:
                     burning = await wait(host, lambda row: jet(row, traps[kind]["location"], 250), timeout=16)
                     host_jet = jet(burning, traps[kind]["location"], 250)
@@ -216,6 +254,8 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--activate", action="store_true")
-    parser.add_argument("--placed", choices=PLACED)
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--placed", choices=PLACED)
+    selection.add_argument("--generated-vortex", action="store_true")
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), args.activate, args.placed))
+    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), args.activate, args.placed, args.generated_vortex))
