@@ -6,7 +6,7 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 
 ## Locked rules
 
-1. **Connection options.** Players can join through Steam Invite or Direct IP. The host chooses the UDP listening port for Direct IP. Both routes enter the same host session and use the same character roster. A Steam invite may carry a direct endpoint or lead to a lobby that uses Steam's relay. Steam relay sessions use virtual port addressing.
+1. **Connection options.** Direct IP Join asks for the host's IP address, UDP port, and password when the host sets one. The host chooses the UDP port and whether to require a password. Deferred Steam Invite support uses the same host session and character roster. A Steam invite may carry a direct endpoint or lead to a lobby that uses Steam's relay. Steam relay sessions use virtual port addressing.
 
 2. **Connection recovery.** Brief Internet or Steam interruptions can be recovered from using the reconnect rules in rule 14. Reconnecting through Direct IP during a Steam outage requires a reachable direct endpoint and the ability to authenticate the same campaign participant over that route.
 
@@ -14,7 +14,7 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 
 4. **Host authority.** The host owns game settings, world seed, reputation, quest state, time of day, weather, world events, and shared world flags. The host resolves updates and distributes the authoritative state to the party.
 
-5. **Character selection.** All co-op characters, including guest characters, live in the host's campaign save. Joining players can create a character or select one of their existing characters for that campaign.
+5. **Character selection.** All co-op characters, including guest characters, live in the host's campaign save. The host can start a new co-op campaign through the full stock character creator or load an existing co-op campaign. Joining players can create a character or select one of their existing characters for that campaign.
 
 6. **Hot join.** Players can join a running campaign. A new connection spawns at a safe position near the host in the host's current zone when the party is ready. A reconnect within the grace period follows rule 14.
 
@@ -62,9 +62,9 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 
 ## Steam title and save routing
 
-The target is one Steam installation and one running game process per player. The stock title offers Singleplayer and Multiplayer. Singleplayer uses its existing stock save path. Multiplayer selects the private co-op save directory before opening Host or Join and keeps that selection through play, checkpointing, and travel. Returning to Singleplayer requires closing the co-op network session, draining its saves, and restoring the stock title's save selection.
+The target is the original Steam installation and one running game process per player. The stock title offers Singleplayer and Multiplayer. Both modes use the player's existing graphics, audio, input, and other local preferences. Singleplayer uses its existing campaign save path. Multiplayer selects the private co-op campaign save directory before opening Host or Join and keeps that selection through play, checkpointing, and travel. Returning to Singleplayer requires closing the co-op network session, draining its saves, and restoring the stock title's save selection.
 
-The stock `Find_MostRecentSaveFile` first enumerates `GetProjectSavedDirectory()/SaveGames/` for `.sav` files, then checks and loads each candidate by slot. Manage Saves also enumerates that directory. Stock save and delete paths address slots directly. The co-op route needs to cover physical enumeration as well as slot reads and writes, including the stock `Config` slot. Both profiles can use the same slot names and stock save format in separate directories.
+The stock `Find_MostRecentSaveFile` first enumerates `GetProjectSavedDirectory()/SaveGames/` for `.sav` files, then checks and loads each candidate by slot. Manage Saves also enumerates that directory. Stock save and delete paths address slots directly. The co-op route needs to cover physical enumeration and campaign slot reads and writes, and handle the stock `Config` slot explicitly so changing modes preserves the player's local preferences. Both modes can use the same campaign slot names and stock save format in separate directories.
 
 Qualify the routing in an isolated stock replica first. In one process, create the same slot in both modes, verify the stock Continue list and each slot's contents, and delete each mode's test save independently. Then qualify in-process Host and Join on a chosen UDP port with the existing authenticated Direct IP transport. Repeat the save check after co-op travel, disconnect, and return to the stock title.
 
