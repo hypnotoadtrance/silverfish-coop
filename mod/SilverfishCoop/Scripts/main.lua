@@ -48,6 +48,7 @@ local native_green = require("native_green")
 local native_green_cube = require("native_cubes").new("green")
 local native_hazard = require("native_hazard")
 local native_host_save = require("native_host_save")
+local native_save_scope = require("native_save_scope")
 local native_world_flush = require("native_world_flush")
 local native_rest = require("native_rest")
 local native_black_stone = require("native_black_stone")
@@ -427,6 +428,18 @@ end
 local function run_command(fields, state, current_phase)
     local command = fields[2]
     local argument = fields[3]
+
+    if command == "native-save-scope-select" or command == "native-save-scope-release" then
+        if #fields ~= 3 or role ~= "idle" or not native_title_entry.probe(state, current_phase) then
+            error("Switch co-op save scope at the stock title", 0)
+        end
+        if command == "native-save-scope-select" then
+            native_save_scope.select(argument)
+            return "selected co-op save scope"
+        end
+        native_save_scope.release(argument)
+        return "released co-op save scope"
+    end
 
     if command == "travel-party" then
         if not party_travel_guard_available() then return "native_roster_unavailable" end
@@ -1019,6 +1032,7 @@ local function write_status(state, current_phase, failure)
         status_row("seq", sequence),
         status_row("ack", acknowledged_id, acknowledged_result, acknowledged_message),
         status_row("session", role, current_phase, state.map, state.clients, state.server and 1 or 0),
+        status_row("native-save-scope", native_save_scope.selected() or "-"),
         status_row("native-network-timeout", state.connection_timeout or "-"),
     }
     if role == "host" and party_travel_guard_available() then

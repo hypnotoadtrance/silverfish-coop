@@ -1,6 +1,7 @@
 -- Test-only UE4SS entry for an isolated stock title.
 local root = os.getenv("SILVERFISH_SAME_PROCESS_SAVE_PROOF")
 if not root or os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not root:match("[\\/]same%-save%-%x+$") then return end
+local save_scope = require("native_save_scope")
 
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local system_path = "/Script/Engine.Default__KismetSystemLibrary"
@@ -16,12 +17,14 @@ local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local manage_path = "/Game/Classes/GUI/ManageSaves_Widget.ManageSaves_Widget_C"
 local slot = "SameProcessCanary"
 local profile = root .. "/game-user/Saved/SaveGames"
-local branch = "SameProcessCoop"
+local scope_id, other_id = string.rep("a", 32), string.rep("b", 32)
+local branch = "SilverfishCoop/" .. scope_id
 local coop_profile = profile .. "/" .. branch
+local other_profile = profile .. "/SilverfishCoop/" .. other_id
 local mode, ran, active = "solo", false, false
-local routes = {solo = {}, coop = {}}
+local routes = {solo = {}, coop = {}, other = {}}
 local config_candidate, stable_samples = nil, 0
-local pending
+local pending, pending_other
 local preferences = {FOV = 88, MouseSensitivity = 0.75, VolumeMaster = 0.375, VolumetricFog = false}
 
 local function text(value)
@@ -44,8 +47,8 @@ local function report(state, message)
     local path = root .. "/proof.tsv"
     local stream = assert(io.open(path .. ".tmp", "wb"))
     assert(stream:write(state, "\t", tostring(message):gsub("[\r\n\t]", " "), "\n"))
-    for _, side in ipairs({"solo", "coop"}) do
-        for _, name in ipairs({"save", "load", "exists", "delete", "find", "async_load"}) do
+    for _, side in ipairs({"solo", "coop", "other"}) do
+        for _, name in ipairs({"save", "load", "exists", "delete", "find", "async_load", "async_save"}) do
             assert(stream:write(side, "\t", name, "\t", tostring(routes[side][name] or 0), "\n"))
         end
     end
@@ -61,34 +64,35 @@ local function count(name)
     routes[mode][name] = (routes[mode][name] or 0) + 1
 end
 
-local function route_slot(name, parameter, user)
+local function observe_slot(name, parameter, user)
     if not active or text(parameter:get()) ~= slot or user:get() ~= 0 then return end
     count(name)
-    if mode == "coop" then parameter:set(branch .. "/" .. slot) end
 end
 
 RegisterHook("/Script/Engine.GameplayStatics:SaveGameToSlot", function(_, _, parameter, user)
-    route_slot("save", parameter, user)
+    observe_slot("save", parameter, user)
 end)
 RegisterHook("/Script/Engine.GameplayStatics:LoadGameFromSlot", function(_, parameter, user)
-    route_slot("load", parameter, user)
+    observe_slot("load", parameter, user)
 end)
 RegisterHook("/Script/Engine.GameplayStatics:DoesSaveGameExist", function(_, parameter, user)
-    route_slot("exists", parameter, user)
+    observe_slot("exists", parameter, user)
 end)
 RegisterHook("/Script/Engine.GameplayStatics:DeleteGameInSlot", function(_, parameter, user)
-    route_slot("delete", parameter, user)
+    observe_slot("delete", parameter, user)
 end)
 RegisterHook("/Script/Engine.AsyncActionHandleSaveGame:AsyncLoadGameFromSlot", function(_, context, parameter, user)
     if not pending or mode ~= "coop" then return end
     local actor = context:get()
     local world = valid(actor) and actor:GetWorld()
-    if valid(world) and world:GetFullName() == loading_world then route_slot("async_load", parameter, user) end
+    if valid(world) and world:GetFullName() == loading_world then observe_slot("async_load", parameter, user) end
+end)
+RegisterHook("/Script/Engine.AsyncActionHandleSaveGame:AsyncSaveGameToSlot", function(_, _, _, parameter, user)
+    observe_slot("async_save", parameter, user)
 end)
 RegisterHook("/Script/BlueprintFileUtils.BlueprintFileUtilsBPLibrary:FindFiles", function(_, directory, _, extension)
     if not active or text(extension:get()) ~= ".sav" or normalized(text(directory:get())) ~= normalized(profile) then return end
     count("find")
-    if mode == "coop" then directory:set(coop_profile .. "/") end
 end)
 
 local function slurp(path)
@@ -160,6 +164,7 @@ local function prepare(controller, instance, statics, save_class, stock_save)
     local solo_bytes = snapshot_save("solo-before", profile .. "/" .. slot .. ".sav")
     recent(instance, 119)
 
+    save_scope.select(scope_id)
     mode = "coop"
     recent(instance, nil)
     canary.Level = "Observitory_P"
@@ -168,8 +173,40 @@ local function prepare(controller, instance, statics, save_class, stock_save)
     local coop_bytes = snapshot_save("coop-before-delete", coop_profile .. "/" .. slot .. ".sav")
     require_that(solo_bytes ~= coop_bytes, "solo and co-op saves contain identical data")
     recent(instance, 202)
+    check_preferences(statics:LoadGameFromSlot("Config", 0))
+    require_that(not statics:SaveGameToSlot(canary, "../../ScopeEscape", 0), "an invalid save slot was accepted")
+    local wrong_release = pcall(save_scope.release, other_id)
+    require_that(not wrong_release, "another scope released the active campaign")
+    save_scope.release(scope_id)
+    save_scope.select(other_id)
+    mode = "other"
+    recent(instance, nil)
+    canary.Level = "DeadBridge_P"
+    canary.PlayerHealth = 303
+    local async = StaticFindObject("/Script/Engine.Default__AsyncActionHandleSaveGame")
+    local request = valid(async) and async:AsyncSaveGameToSlot(controller, canary, slot, 0)
+    require_that(valid(request), "stock save action was unavailable")
+    request:Activate()
+    pending_other = {instance = instance, stock_save = stock_save, slot_name = text(instance.CurrentSaveSlot),
+                     solo_bytes = solo_bytes}
+end
+
+local function finish_other(statics, world)
+    local file = io.open(other_profile .. "/" .. slot .. ".sav", "rb")
+    if not file then return end
+    local data = file:read("*a")
+    file:close()
+    if #data <= 16 then return end
+    local instance = pending_other.instance
+    local controller = statics:GetPlayerController(world, 0)
+    recent(instance, 303)
+    snapshot_save("other-after-async-save", other_profile .. "/" .. slot .. ".sav")
+    save_scope.release(other_id)
+    save_scope.select(scope_id)
+    mode = "coop"
+    recent(instance, 202)
     prove_manage_saves(controller)
-    pending = {instance = instance, stock_save = stock_save, slot_name = text(instance.CurrentSaveSlot), solo_bytes = solo_bytes}
+    pending, pending_other = pending_other, nil
     instance.CurrentSaveSlot = slot
     statics:OpenLevel(controller, FName(loading_package), true, "")
 end
@@ -184,7 +221,15 @@ local function verify_loaded(statics, world)
     assert_equal(instance.SaveSlot_Ref.PlayerHealth, 202, "stock asynchronous save health")
     instance:Clear_SaveSlot(slot)
     recent(instance, nil)
+    local controller = statics:GetPlayerController(world, 0)
+    require_that(valid(controller), "the loaded campaign controller was unavailable")
+    pending.returning = true
+    statics:OpenLevel(controller, FName("/Game/Classes/Maps/MainMenu_P"), true, "")
+end
 
+local function verify_returned(statics)
+    local instance = pending.instance
+    save_scope.release(scope_id)
     mode = "solo"
     recent(instance, 119)
     require_that(pending.solo_bytes == slurp(profile .. "/" .. slot .. ".sav"), "co-op altered solo save bytes")
@@ -200,13 +245,34 @@ LoopInGameThreadWithDelay(75, function()
     local world = valid(viewport) and viewport.World
     if not valid(world) then return end
     if pending then
+        if pending.returning then
+            local title = world:GetFullName() == stock_world and FindFirstOf(title_class)
+            local statics = StaticFindObject(statics_path)
+            if not valid(title) or not title:IsInViewport() or not title:IsVisible() or not valid(statics) then return end
+            local ok, failure = pcall(verify_returned, statics)
+            active, mode, pending = false, "solo", nil
+            report(ok and "verified" or "failed", failure or "stock save menus, asynchronous save and load shared one process")
+            return true
+        end
         if world:GetFullName() ~= destination_world then return end
         local statics = StaticFindObject(statics_path)
         if not valid(statics) then return end
         local ok, failure = pcall(verify_loaded, statics, world)
-        active, mode, pending = false, "solo", nil
-        report(ok and "verified" or "failed", failure or "stock save menus, asynchronous load and local settings shared one process")
-        return true
+        if not ok then
+            report("failed", failure)
+            return true
+        end
+        return
+    end
+    if pending_other then
+        local statics = StaticFindObject(statics_path)
+        if not valid(statics) or world:GetFullName() ~= stock_world then return end
+        local ok, failure = pcall(finish_other, statics, world)
+        if not ok then
+            report("failed", failure)
+            return true
+        end
+        return
     end
     if ran then return true end
     if world:GetFullName() ~= stock_world then return end

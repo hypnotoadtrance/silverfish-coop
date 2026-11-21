@@ -973,6 +973,10 @@ class Bridge:
                 elif fields[0] == "session" and len(fields) == 6:
                     data.update({"mode": fields[1], "state": fields[2], "map": fields[3],
                                  "remote_clients": int(fields[4]), "server_connection": fields[5] == "1"})
+                elif fields[0] == "native-save-scope":
+                    if len(fields) != 2 or "save_scope" in data or not re.fullmatch(r"-|[a-f0-9]{32}", fields[1]):
+                        raise ValueError("Invalid co-op save scope status")
+                    data["save_scope"] = None if fields[1] == "-" else fields[1]
                 elif fields[0] == native_title_entry.TAG:
                     if native_title_entry.KEY in data:
                         raise ValueError("Repeated stock title report")
