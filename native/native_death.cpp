@@ -66,6 +66,7 @@
 #include "shop_view.hpp"
 #include "nothing_return.hpp"
 #include "kill_volume.hpp"
+#include "anomaly_fields.hpp"
 #include "guest_npc.hpp"
 #include "guest_reload_input.hpp"
 #include "item_roundtrip.hpp"
@@ -1477,6 +1478,7 @@ namespace
             silverfish::native_shop_view::uninstall_hooks();
             silverfish::native_nothing_return::uninstall_hooks();
             silverfish::native_kill_volume::uninstall_hooks();
+            silverfish::native_anomaly_fields::uninstall_hooks();
             silverfish::shared_loot::uninstall_hooks();
             silverfish::native_black_stone::uninstall_hooks();
             invalidate_bridge();
@@ -1530,6 +1532,7 @@ namespace
             silverfish::native_shop_view::install_hooks();
             silverfish::native_nothing_return::install_hooks();
             silverfish::native_kill_volume::install_hooks();
+            silverfish::native_anomaly_fields::install_hooks();
             silverfish::shared_loot::install_hooks();
             silverfish::native_black_stone::install_hooks();
             if (!enabled)
@@ -1630,6 +1633,7 @@ namespace
             silverfish::native_shop_view::register_lua(lua);
             silverfish::native_nothing_return::register_lua(lua);
             silverfish::native_kill_volume::register_lua(lua);
+            silverfish::native_anomaly_fields::register_lua(lua);
             silverfish::native_black_stone::register_lua(lua);
             if (!enabled)
             {

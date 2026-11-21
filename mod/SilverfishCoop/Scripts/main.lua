@@ -56,6 +56,7 @@ local native_authored_arrival = require("native_authored_arrival")
 local native_green = require("native_green")
 local native_green_cube = require("native_cubes").new("green")
 local native_hazard = require("native_hazard")
+local native_anomaly_fields = require("native_anomaly_fields")
 local native_host_save = require("native_host_save")
 local native_save_scope = require("native_save_scope")
 local native_world_flush = require("native_world_flush")
@@ -641,6 +642,7 @@ local function run_command(fields, state, current_phase)
         end
         if dream_kind then native_dream.prepare_duration(state.controller, dream_kind) end
         if expanded_routes then native_authored_arrival.prepare_time(state, current_phase, 0) end
+        native_anomaly_fields.guest(false)
         open_level(state.controller, argument, "listen", listen_port)
         host_listen_port = listen_port
         role = "host"
@@ -962,6 +964,7 @@ local function run_command(fields, state, current_phase)
         if #fields == 6 then native_death.admit_client(fields[4], fields[5], fields[6]) end
         if native_save_scope.selected() then native_save_scope.prepare_guest(state) end
         open_level(state.controller, argument, "")
+        native_anomaly_fields.guest(true)
         role = "client"
         was_connected = false
         return "client travel requested"
@@ -973,6 +976,7 @@ local function run_command(fields, state, current_phase)
         end
         native_death.clear_client()
         if destination then native_zone_loading.begin(state, destination) else native_zone_loading.clear() end
+        native_anomaly_fields.guest(false)
         guest_save.clear()
         vitals.reset()
         if state.map ~= main_menu or state.listening or role == "client" then
@@ -1014,6 +1018,7 @@ local function run_command(fields, state, current_phase)
         or native_death.command(fields, state, current_phase)
         or native_kill_volume.command(fields, state, current_phase)
         or native_hazard.command(fields, state, current_phase)
+        or native_anomaly_fields.command(fields, state, current_phase)
         or native_inventory.command(fields, state, current_phase)
         or native_stash.command(fields, state, current_phase)
         or native_stash_view.command(fields, state, current_phase)
@@ -1368,6 +1373,7 @@ local function write_status(state, current_phase, failure, fields)
             rows[#rows + 1] = row
         end
         for _, row in ipairs(native_hazard.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_anomaly_fields.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         local native_ok, native_rows = pcall(native_world.rows, state, current_phase, status_row)
         if native_ok then
             for _, row in ipairs(native_rows) do rows[#rows + 1] = row end
@@ -1557,6 +1563,7 @@ native_mindcore_carry.start(bridge)
 native_mindcore_carry_view.start(bridge, players.is_downed)
 native_mindcore_replication.start(function() return role == "client" and not leaving end)
 require("native_flare").start(function() return not leaving and role or nil end)
+native_anomaly_fields.start(function() return not leaving and role or nil end)
 native_corpse_view.start(function() return not leaving and role or nil end)
 require("native_damage_feedback").start(function() return role == "host" and not leaving end)
 native_datasilo_lift.start(function() return role == "client" and not leaving end)

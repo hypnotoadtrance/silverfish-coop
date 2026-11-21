@@ -2367,6 +2367,15 @@ class Bridge:
                         "fresh": fields[4] == "1", "status": fields[5],
                         "pawn": None if fields[6] == "-" else fields[6], "volume": None if fields[7] == "-" else fields[7],
                     }
+                elif fields[0] == "native-anomaly-field" and len(fields) == 3:
+                    live, suppressed = map(int, fields[1:])
+                    if 0 <= live <= 1024 and 0 <= suppressed and data.get("state") in {"hosting", "connected"}:
+                        data["native_anomaly_field"] = {"live": live, "suppressed": suppressed}
+                elif fields[0] == "native-anomaly-position" and len(fields) == 6:
+                    positions = data.setdefault("native_anomaly_positions", [])
+                    if len(positions) < 1024 and fields[1] in {"starburst", "burner"} and fields[5] in {"0", "1"}:
+                        positions.append({"kind": fields[1], "location": [_finite(value) for value in fields[2:5]],
+                                          "collision": fields[5] == "1"})
                 elif fields[0] == "native-kill-volume":
                     if native_kill_volume.KEY in data:
                         raise ValueError("Duplicate CrossRoads KillVolume state")

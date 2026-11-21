@@ -112,7 +112,7 @@ Keep a local, versioned JSON interface alongside the menu. It should expose sess
 - Preserve the Crossroads frog's hop animation on peers and let guests pick it up through the same host-authoritative action as the host.
 - Replicate entity death and the transition to the stock corpse or ragdoll on peers. Cover the boar and other enemy types killed by the host.
 - Play the player-hit screen effect only for the struck player. When a target is downed, hostile NPCs should disengage and acquire an eligible standing player.
-- Sync which anomalies the host has generated. Drive health, downing, and game-over from the host so a guest-side anomaly cannot kill a remote player or trigger a party wipe.
+- Extend host-generated anomaly synchronization to the remaining field types, placed anomalies, and their active effects. Drive health, downing, and game-over from the host so a guest-side anomaly cannot kill a remote player or trigger a party wipe.
 - Propagate the host's explosive-canister destruction and explosion to connected guests. Exercise it with stock ranged fire so the receiving view shows the shot and the resulting world change.
 - Replicate a thrown flare's lit world actor after it leaves the equipped hand. Check the throw and light on both peers through expiry.
 - Compare frame times and network traffic at the Observatory and Crossroads. Measure the client projection and host discovery work separately from packet arrival before changing update pacing.
@@ -136,6 +136,8 @@ Guests with an isolated co-op save view use the stock `ShopScreen` at qualified 
 The zone guard discards its exit references when the active map changes and resolves the placed exit again when native qualification rejects a cached actor. Unreal can reuse an old actor address after travel. The travel diagnostic now identifies the rejected guard check. In the muted two-seat test, a guest deposited a pistol in Dead Bridge, left through Crossroads, and withdrew the exact seven-round pistol at the Observatory after a host restart with combined stashes enabled. [Stash transfer test](../tests/live_stash_smoke.py)
 
 The guest damage guard now covers the simulated copies of the other players as well as the guest's own pawn. A focused loopback test forced the guest-side damage and death wrappers on the host's replica, verified that both pawns stayed alive, and then verified ordinary host-authoritative downing and revival separately.
+
+The host replicates stock Starburst and Burner Trap actors spawned by an anomaly field. Guests skip the stock field generation call when it selects either of those trap types, and the replicated traps disable guest collision. A muted Crossroads loopback matched both trap locations on late join, exercised the stock `ForceSpawn` Blueprint branch on the guest, and confirmed that the placements survived a reconnect. The stock attack effects and the other anomaly types still need coverage. [Anomaly field test](../tests/live_anomaly_fields_smoke.py)
 
 The stock damage actor used to apply its screen effects and camera shake on the listen host when the struck pawn belonged to a guest. An Observatory fixture invoked that damage effect for the guest, verified that both host post-process components were disabled, and observed the corresponding shake on the guest's controller.
 

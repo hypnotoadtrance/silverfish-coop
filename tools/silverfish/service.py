@@ -3215,6 +3215,9 @@ class Host:
                     result = {"native_friendly_fire": snapshot.get("native_friendly_fire")}
                 elif action in ("native-hazard-position", "native-hazard-start", "native-hazard-return"):
                     result = await self.native_hazard(bridge, action)
+                elif action == "native-anomaly-field-fixture" and self.fixtures:
+                    snapshot = await bridge.command(action, request.get("target") or "-", timeout=4)
+                    result = {"native_anomaly_field": snapshot.get("native_anomaly_field", {})}
                 elif action == "native-fall-position" and self.native_guest and self.fixtures:
                     guest = self.last_game.get("pawns", {}).get("guest", {})
                     scope = self.last_game.get("native_fall", {})
@@ -5530,6 +5533,9 @@ class Client:
                 elif action == "native-interaction-fixture":
                     self.last_game = await self.bridge.command(action, timeout=5)
                     result = {"native_interaction_fixture": True}
+                elif action == "native-anomaly-field-fixture":
+                    self.last_game = await self.bridge.command(action, request.get("target") or "-", timeout=4)
+                    result = {"native_anomaly_field": self.last_game.get("native_anomaly_field", {})}
                 elif action == native_enemy_shells.FIXTURE and self.transport.game_access:
                     self.last_game, proof = await native_enemy_shells.fixture(
                         self.bridge, self.last_game, self.zone_epoch, request.get("target"),
