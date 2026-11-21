@@ -83,7 +83,9 @@ FAMILY_SCENES = {
     "stock-car-trunk": (CROSSROADS, "Loot_Car_01_BP_C", "StaticMeshActor_488"),
     "stock-van-trunk": (CROSSROADS, "Loot_Car_02_BP_C", "StaticMeshActor_1937"),
     "stock-guest-blowtorch": (CROSSROADS, "Loot_Car_02_BP_C", "StaticMeshActor_1937"),
+    "stock-guest-crowbar": (CROSSROADS, "Loot_Car_02_BP_C", "StaticMeshActor_1937"),
 }
+PRY_TOOL_SCENES = {"stock-guest-blowtorch": "blowtorch", "stock-guest-crowbar": "crowbar"}
 PERMANENT_FAMILY_CRATES = {full_name(area, actor, family) for family, area, actor, _, _, _, replenish in CONTAINER_PLACEMENTS
                            if replenish == 2 or family in {"Loot_Stash_Small_BP_C", "LootCrate_Weapon_BP_C", "Loot_ArtifactChest_01_C"}}
 SCENES.update({name: (area, (actor,)) for name, (area, _, actor) in FAMILY_SCENES.items()})
@@ -123,7 +125,8 @@ def clone_baseline(work: Path, source: str, campaign: Path, area: str, targets: 
     return int(seed)
 
 
-def input_result(run: Path, sequence: int, *events: str, crate: str | None = None) -> dict | None:
+def input_result(run: Path, sequence: int, *events: str, crate: str | None = None,
+                 sequence_key: str = "sequence") -> dict | None:
     path = run / "events.jsonl"
     if not path.is_file():
         return None
@@ -132,7 +135,7 @@ def input_result(run: Path, sequence: int, *events: str, crate: str | None = Non
             row = json.loads(line)
         except ValueError:
             continue
-        if row.get("sequence") == sequence and row.get("event") in events and (crate is None or row.get("crate") == crate):
+        if row.get(sequence_key) == sequence and row.get("event") in events and (crate is None or row.get("crate") == crate):
             return row
     return None
 
@@ -151,7 +154,8 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     cabinet = name == CABINET_SCENE
     desk = name == DESK_SCENE
     family = FAMILY_SCENES[name][1] if name in FAMILY_SCENES else None
-    torch_test = name == "stock-guest-blowtorch"
+    pry_tool = PRY_TOOL_SCENES.get(name)
+    tool_before, tool_after = (3, 2) if pry_tool == "blowtorch" else (-1, -1)
     targets = [full_name(area, actor, family) for actor in actors]
     permanent = name in GUARANTEED_SCENES or cabinet or desk or all(crate in PERMANENT_FAMILY_CRATES for crate in targets)
     random_lids = {crate: lid for crate in targets if (lid := random_lid(crate))}
@@ -219,6 +223,22 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
 
     def lock_status(state, crate):
         return state.get("game", {}).get(native_loot.VEHICLE_LOCKS, {}).get(crate)
+
+    def locked_vehicle(state):
+        locks = state.get("game", {}).get(native_loot.VEHICLE_LOCKS, {})
+        # Prefer the two reference placements when the world rolls either one locked.
+        candidates = (*targets, full_name(area, "StaticMeshActor_488", "Loot_Car_01_BP_C"), *sorted(locks))
+        return next((crate for crate in candidates if locks.get(crate) is True
+                     and status_of(state, crate) == "ready" and vehicle_lock(crate, area)), None)
+
+    def scene_ready(state):
+        if state.get("state") != "hosting":
+            return False
+        if natural_lab_roll:
+            return state.get("game", {}).get("native_fresh_campaign", {}).get("state") == "verified"
+        if pry_tool:
+            return locked_vehicle(state) is not None
+        return all(status_of(state, crate) == "ready" for crate in targets)
 
     def saved_checkpoint():
         saved = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
@@ -303,17 +323,22 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             start_zone = ("--native-start-preset", "wanderer", "--native-world-seed", str(LAB_WANDERER_SEED))
         await start("host", host, "host", *host, "--port", "0", "--headless", "--fixtures", "--native-events",
                     "--native-guest", "--native-zones", "--native-expanded-zones", *start_zone)
-        opening = await wait(run, lambda state: state.get("state") == "hosting"
-                             and (state.get("game", {}).get("native_fresh_campaign", {}).get("state") == "verified"
-                                  if natural_lab_roll else all(status_of(state, crate) == "ready" for crate in targets)))
+        opening = await wait(run, scene_ready)
+        if pry_tool:
+            vehicle = locked_vehicle(opening)
+            targets = [vehicle]
+            random_lids = {vehicle: random_lid(vehicle)}
+            permanent = vehicle in PERMANENT_FAMILY_CRATES
+            verify_restore = True
+            exhaustion_flags = ({vehicle: f"{vehicle.rsplit('.', 1)[1]}-{area.rsplit('/', 1)[1]}-"} if permanent else {})
         if baseline:
             live_seed = opening["game"]["native_scene"]["instance_seed"]
             assert live_seed == seed, (seed, live_seed)
         invitation = await command("invite", *host, "--name", f"{name} crate runner", "--character", "Crate runner")
         character = invitation["character_id"]
         join_zones = ("--native-zones",) if natural_lab_roll else ()
-        if torch_test:
-            join_zones += ("--native-guest-primary-input",)
+        if pry_tool:
+            join_zones += ("--native-guest-primary-input", "--native-guest-inventory-view")
         await start("guest", guest, "join", *guest, "--headless", *join_zones, "--invite", invitation["invite_file"])
         if natural_lab_roll:
             await reach_lab(character)
@@ -324,12 +349,30 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
         bound = await wait(run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
         authority_pawn = bound["game"]["native_guest_save"]["pawn"]
         await command("action", *host, "native-loot-seed", "--target", targets[0])
-        if torch_test:
-            torch_guid = uuid.uuid4().hex.upper()
-            await command("action", *host, "native-guest-weapon-seed", "--target", "guest", "--item-guid", torch_guid,
-                          "--kind", "blowtorch")
-            equipped = (await command("action", *guest, "native-guest-weapon-equip", "--target", torch_guid))["native_guest_weapon"]
-            assert equipped["status"] == "blowtorch_equipped" and equipped["stored_ammo"] == 3, equipped
+        if pry_tool:
+            tool_guid = uuid.uuid4().hex.upper()
+            await command("action", *host, "native-guest-weapon-seed", "--target", "guest", "--item-guid", tool_guid,
+                          "--kind", pry_tool)
+            page = (await command("action", *guest, "native-inventory-list"))["native_inventory"]
+            await command("action", *guest, "native-inventory-view-fixture")
+            await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
+            key = ("action", *guest, "native-inventory-view-key-fixture", "--target")
+            for _ in range(next(index for index, item in enumerate(page["items"]) if item["guid"] == tool_guid)):
+                await command(*key, "down")
+            confirming = (await command(*key, "confirm"))["native_guest_inventory_equip_view"]
+            assert confirming["guid"] == tool_guid and confirming["state"] == "confirming", confirming
+            await command(*key, "confirm")
+            def equip_result():
+                return input_result(guest_run, confirming["sequence"], "native_guest_inventory_equipped",
+                                    "native_guest_inventory_equip_rejected", sequence_key="view_sequence")
+            await wait(guest_run, lambda _: equip_result() is not None)
+            equip_event = equip_result()
+            assert equip_event["event"] == "native_guest_inventory_equipped", equip_event
+            equipped = equip_event["native_guest_weapon"]
+            assert equipped["guid"] == tool_guid and equipped["kind"] == pry_tool, equipped
+            assert equipped["actor_ammo"] == equipped["stored_ammo"] == tool_before, equipped
+            evidence[f"stock_{pry_tool}_inventory_equip"] = equip_event
+            await command(*key, "back")
         if permanent:
             await command("action", *host, "checkpoint")
             initial = permanent_flags(saved_checkpoint())
@@ -346,34 +389,35 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                 assert type(lock) is bool, bound["game"].get(native_loot.VEHICLE_LOCKS)
                 await wait(guest_run, lambda state: lock_status(state, crate) is lock)
                 evidence["stock_vehicle_initial_locked"] = lock
-                if torch_test:
-                    assert lock, "The stock blowtorch scenario requires the van to start locked"
+                if pry_tool:
+                    assert lock, f"The selected stock trunk changed its lock before the {pry_tool} trial"
                 if lock:
                     press = (await command("action", *guest, "native-loot-crate-fixture", "--target", crate))["native_loot_crate_interaction"]
                     await wait(guest_run, lambda _: stock_input_result(guest_run, crate, press["sequence"]) is not None)
                     denied = stock_input_result(guest_run, crate, press["sequence"])
                     assert denied["event"] == "native_stock_crate_interaction_rejected" and denied["reason"] == "stock_vehicle_locked", denied
                     assert not public_roll(await wait(run, lambda state: lock_status(state, crate) is True), crate)
-                    if torch_test:
-                        await wait(guest_run, lambda state: state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == torch_guid)
+                    if pry_tool:
+                        await wait(guest_run, lambda state: state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == tool_guid)
                         fixture = await command("action", *guest, "native-guest-primary-input-fixture", "--target", crate)
                         sequence = fixture["native_guest_primary_fixture"]["sequence"]
-                        def torch_result():
-                            return input_result(guest_run, sequence, "native_guest_blowtorch_input",
-                                                "native_guest_blowtorch_input_rejected")
-                        await wait(guest_run, lambda _: torch_result() is not None)
-                        burned = torch_result()
-                        assert burned["event"] == "native_guest_blowtorch_input", burned
-                        assert burned[native_loot.TORCH_RESULT] == dict(map=area, crate=crate, pawn=authority_pawn,
-                                                                         guid=torch_guid, before=3, after=2)
-                        operation = burned["operation_id"]
-                        assert burned["native_loot_roll"]["id"] == operation
-                        replay = await command("action", *guest, native_loot.TORCH_USE, "--target", f"{torch_guid}@{crate}",
+                        event = f"native_guest_{pry_tool}_input"
+                        def tool_result():
+                            return input_result(guest_run, sequence, event, event + "_rejected")
+                        await wait(guest_run, lambda _: tool_result() is not None)
+                        applied = tool_result()
+                        assert applied["event"] == event, applied
+                        result_key = native_loot.PRY_TOOL_RESULTS[pry_tool]
+                        assert applied[result_key] == dict(map=area, crate=crate, pawn=authority_pawn,
+                                                           guid=tool_guid, before=tool_before, after=tool_after)
+                        operation = applied["operation_id"]
+                        assert applied["native_loot_roll"]["id"] == operation
+                        replay = await command("action", *guest, native_loot.PRY_TOOL_ACTIONS[pry_tool], "--target", f"{tool_guid}@{crate}",
                                                "--operation-id", operation)
-                        assert replay["native_loot_roll"] == burned["native_loot_roll"]
-                        assert replay[native_loot.TORCH_RESULT] == burned[native_loot.TORCH_RESULT]
-                        evidence["stock_blowtorch"] = burned[native_loot.TORCH_RESULT]
-                        evidence["stock_blowtorch_primary_input"] = fixture["native_guest_primary_fixture"]
+                        assert replay["native_loot_roll"] == applied["native_loot_roll"]
+                        assert replay[result_key] == applied[result_key]
+                        evidence[f"stock_{pry_tool}"] = applied[result_key]
+                        evidence[f"stock_{pry_tool}_primary_input"] = fixture["native_guest_primary_fixture"]
                     else:
                         await command("action", *host, "native-loot-vehicle-pry-fixture", "--target", crate)
                     for directory in (run, guest_run):
@@ -392,7 +436,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                 assert (pressed["item_count"], pressed["trait_calls"], pressed["invoked"], pressed["looted"],
                         pressed["ok"]) == (len(forced["items"]), 3, True, True, True), pressed
             elif pried:
-                pressed = {"entry": "pried", "pawn": authority_pawn if torch_test else opening["game"]["pawns"]["local"]["name"],
+                pressed = {"entry": "pried", "pawn": authority_pawn if pry_tool else opening["game"]["pawns"]["local"]["name"],
                            "crate": crate, "map": area}
             else:
                 pressed = (await command("action", *guest, "native-loot-crate-fixture", "--target", crate))["native_loot_crate_interaction"]
@@ -405,8 +449,8 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             committed = await wait(run, lambda state: public_roll(state, crate) and status_of(state, crate) == "exhausted")
             replicated = await wait(guest_run, lambda state: public_roll(state, crate) and status_of(state, crate) == "exhausted")
             roll = public_roll(committed, crate)
-            assert public_roll(replicated, crate) == roll and roll["opener"] == ("host" if pried and not torch_test else character), roll
-            if pried and not torch_test:
+            assert public_roll(replicated, crate) == roll and roll["opener"] == ("host" if pried and not pry_tool else character), roll
+            if pried and not pry_tool:
                 host_events = [json.loads(line) for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
                 assert any(event.get("event") == "native_stock_crate_interaction" and event.get("entry") == "pried"
                            and event.get("operation_id") == roll["id"] for event in host_events)
@@ -414,7 +458,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                 angle = roll[random_lids[crate][0]]
                 await wait(run, lambda state: lid_matches(state, crate, angle))
                 await wait(guest_run, lambda state: lid_matches(state, crate, angle))
-            if not pried or torch_test:
+            if not pried or pry_tool:
                 assert roll["lucky_looter"], roll
             if desk:
                 assert roll["trait_calls"] == 0 and len(roll["items"]) <= 4, roll
@@ -542,10 +586,10 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                         evidence[f"saved_{field}_restart"] = angle
                     if vehicle_lock(crate, area):
                         assert lock_status(resumed, crate) is False and lock_status(peer, crate) is False
-                    if torch_test:
-                        fuel = (await command("action", *guest, "native-guest-weapon-inspect", "--target", torch_guid))["native_guest_weapon"]
-                        assert fuel["stored_ammo"] == 2 and fuel["guid"] == torch_guid, fuel
-                        evidence["stock_blowtorch_fuel_restart"] = fuel["stored_ammo"]
+                    if pry_tool:
+                        tool = (await command("action", *guest, "native-guest-weapon-inspect", "--target", tool_guid))["native_guest_weapon"]
+                        assert tool["kind"] == pry_tool and tool["stored_ammo"] == tool_after and tool["guid"] == tool_guid, tool
+                        evidence[f"stock_{pry_tool}_inventory_restart"] = tool
                     item = entry["typed_guest_item"]
                     if item:
                         restored = await typed_inventory_item(character, item["guid"])

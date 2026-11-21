@@ -17,6 +17,10 @@ local bandage_path = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
 local meals = require("native_guest_mre")
 local mre_enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
+local pry_tool_paths = {
+    ["/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"] = true,
+    ["/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C"] = true,
+}
 local body_armor = require("native_guest_armor")
 local split_ammo = {
     [drop_items.ammo] = true,
@@ -174,7 +178,7 @@ local function page(fields)
         slots[position] = true
         seen[guid] = true
         local equippable = ((source == "backpack" or source == "equipment")
-            and (weapon_profiles.kinds[class] ~= nil or class == camera_path
+            and (weapon_profiles.kinds[class] ~= nil or class == camera_path or pry_tool_paths[class]
                 or (class == "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
                     and cqc[fields[4]] ~= nil)))
             or (source == "backpack" and (body_armor.is_body_path(class) or body_armor.is_helmet_path(class)))

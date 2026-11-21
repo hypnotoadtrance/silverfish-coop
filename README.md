@@ -71,6 +71,8 @@ On native campaign stages, `native-inventory-list` reads an exact stock inventor
 
 Pass `--native-guest-inventory-view` on `join` to open the guest's first inventory page with the stock inventory key. Use Page Up or Page Down to select a row, Home twice to equip a supported weapon, and End to cancel or close. Pass `--native-guest-primary-input` and `--native-guest-reload-input` to route a stock primary press or short reload press to the host for the qualified guest SMG and Light Pistol.
 
+At a locked vehicle trunk, equip a blowtorch and press primary fire, or equip a crowbar and tap Mode Toggle. For local automation, `native-guest-vehicle-blowtorch` and `native-guest-vehicle-crowbar` accept `--target "TOOL_GUID@VEHICLE_FULL_NAME"`. The response includes the tool result and the authoritative loot roll. The blowtorch uses one fuel charge per successful pry.
+
 In a new authored campaign with native guest ownership, set `--native-extraction-keep N` to enable the stock extraction mode and keep up to `N` inventory rows after a wipe. Add `--native-extraction-backpacks` for owner-only drops and `--native-extraction-lose-slot` to reduce the host's saved retention limit after each wipe. These settings are stored in the campaign's native save and resume automatically.
 
 During a stock retention wipe, the host and guests see their own frozen inventory. Use Page Up or Page Down to move, Space to toggle a whole row, and Home twice to submit. An empty selection is allowed. Local automation can use `native-wipe-items` and `keep --keep GUID=1`. Once the party has respawned, the owner's `native_backpacks` status contains their backpack IDs and death positions. Use `native-wipe-recover --target BACKPACK_ID` while nearby.

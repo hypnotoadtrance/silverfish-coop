@@ -11,6 +11,7 @@ local cabinet_rotations = {{Pitch = 0, Yaw = 95, Roll = 0}, {Pitch = 0, Yaw = -9
 local bindings, fixture_sequences = {}, {}
 local active_world
 local blowtorch_path = "/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"
+local crowbar_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C"
 local tool_report
 
 local function valid(value)
@@ -91,7 +92,7 @@ local function ignite(current, state, phase, pawn_name, guid)
     if live_fuel ~= loaded - 1 or crate.Locked ~= false then
         error("mutation_unverified_stock_blowtorch_use", 0)
     end
-    tool_report = {map = state.map, crate = current.profile.name, pawn = pawn_name, guid = guid,
+    tool_report = {kind = "blowtorch", map = state.map, crate = current.profile.name, pawn = pawn_name, guid = guid,
         before = loaded, after = saved_fuel}
     return "stock blowtorch spent one charge and unlocked the vehicle"
 end
@@ -318,16 +319,16 @@ local function project(current, angle)
     return "stock crate exhausted projection verified"
 end
 
-local function fixture_focus(pawn, box, dispatch)
+local function stock_focus(pawn, box, dispatch, focus_refusal)
     local camera = pawn.Camera
     if not exact_component(camera, "/Script/Engine.CameraComponent", pawn) then
-        error("native_loot_crate_stock_fixture_camera_unavailable", 0)
+        error(focus_refusal or "native_loot_crate_stock_fixture_camera_unavailable", 0)
     end
     local rotation, eye = camera.RelativeRotation, camera:K2_GetComponentLocation()
     local center, extent = box:K2_GetComponentLocation(), box:GetScaledBoxExtent()
     if not rotation or not eye or not center or not extent or not close_angle(rotation.Pitch, rotation.Pitch)
         or not close_angle(rotation.Yaw, rotation.Yaw) or not close_angle(rotation.Roll, rotation.Roll) then
-        error("native_loot_crate_stock_fixture_camera_unavailable", 0)
+        error(focus_refusal or "native_loot_crate_stock_fixture_camera_unavailable", 0)
     end
     local original = {Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll}
     local ray = {center}
@@ -354,6 +355,7 @@ local function fixture_focus(pawn, box, dispatch)
                 end
             end
         end
+        if focus_refusal then error(focus_refusal, 0) end
         local focused = pawn.InteractionTarget_Component
         error(string.format("native_loot_crate_stock_fixture_focus_unavailable:%s eye=(%.1f,%.1f,%.1f) box=(%.1f,%.1f,%.1f)",
             valid(focused) and focused:GetFullName() or "-", eye.X, eye.Y, eye.Z, center.X, center.Y, center.Z), 0)
@@ -371,14 +373,55 @@ local function fixture_focus(pawn, box, dispatch)
     return invoked, consumed, detail
 end
 
-function input.blowtorch_primary_fixture(state, phase, target, dispatch)
+local function pry_with_crowbar(current, state, phase, pawn_name, guid)
+    local scope = loot.qualify(state, phase, pawn_name, current.profile.name, true)
+    local pawn, crate, save = scope.pawn, scope.crate, scope.save
+    local crowbar = pawn.EquipedItem
+    local inspect = SilverfishInspectNativeGuestWeapon
+    if same(save, scope.stock) or crate.Locked ~= true or not valid(crowbar)
+        or not same(crowbar:GetClass(), StaticFindObject(crowbar_path)) or crowbar.PryLock_Stgth ~= .5
+        or type(inspect) ~= "function" or type(SilverfishArmNativeGuestVehiclePry) ~= "function"
+        or type(SilverfishCancelNativeGuestVehiclePry) ~= "function" or pawn:Check_CanUseEquipment() ~= true
+        or #guid ~= 32 or not guid:match("^[0-9A-F]+$") then error("stock_crowbar_scope_unavailable", 0) end
+    local ok, status, equipped_ammo, stored = inspect(pawn:GetAddress(), save:GetAddress(), guid)
+    if not ok or status ~= "crowbar_equipped" or equipped_ammo ~= -1 or stored ~= -1 then
+        error("stock_crowbar_owned_tool_unavailable", 0)
+    end
+    local chance = crate["Pick Chance"]
+    if type(chance) ~= "number" or not (chance >= 0 and chance <= 1 and crowbar.PryLock_Stgth >= 1 - chance) then
+        error("stock_crowbar_lock_too_strong", 0)
+    end
+    stock_focus(pawn, scope.box, function()
+        if not same(pawn.ActorBeingLookedAt, crate) then error("stock_crowbar_vehicle_out_of_reach", 0) end
+        if not SilverfishArmNativeGuestVehiclePry(current.profile.index, pawn:GetAddress(), save:GetAddress()) then
+            error("stock_crowbar_vehicle_busy", 0)
+        end
+        local applied = pcall(function()
+            crowbar:ToggleMode(true)
+            crowbar:ToggleMode(false)
+        end)
+        local verified, equipment, live_ammo, saved_ammo = inspect(pawn:GetAddress(), save:GetAddress(), guid)
+        if not applied or not verified or equipment ~= "crowbar_equipped" or live_ammo ~= -1 or saved_ammo ~= -1 then
+            error("mutation_unverified_stock_crowbar_use", 0)
+        end
+        if crate.Locked == true and SilverfishCancelNativeGuestVehiclePry(current.profile.index, pawn:GetAddress()) then
+            error("stock_crowbar_stock_action_busy", 0)
+        end
+        if crate.Locked ~= false then error("mutation_unverified_stock_crowbar_use", 0) end
+    end, "stock_crowbar_vehicle_out_of_reach")
+    tool_report = {kind = "crowbar", map = state.map, crate = current.profile.name, pawn = pawn_name, guid = guid,
+        before = -1, after = -1}
+    return "stock crowbar unlocked the vehicle"
+end
+
+function input.pry_tool_input_fixture(state, phase, target, dispatch)
     local profile = loot.profile(state.map, target)
     local current = headless and client_fixtures and phase == "connected" and profile and profile.keyless_lock
         and input.update(state, phase, profile)
     local _, box
     if current and current.crate.Locked == true then _, box = scene(current) end
-    if not box then error("stock_blowtorch_primary_fixture_unavailable", 0) end
-    fixture_focus(current.pawn, box, dispatch)
+    if not box then error("stock_vehicle_pry_input_fixture_unavailable", 0) end
+    stock_focus(current.pawn, box, dispatch)
 end
 
 local function fixture(current)
@@ -395,7 +438,7 @@ local function fixture(current)
     if before_active ~= true then error("native_loot_crate_stock_fixture_scope_unavailable", 0) end
     local invoked, ok, detail
     if index > legacy_fixture_profiles then
-        invoked, ok, detail = fixture_focus(pawn, box)
+        invoked, ok, detail = stock_focus(pawn, box)
     else
         local original = pawn.InteractionTarget_Component
         pawn.InteractionTarget_Component = box
@@ -413,12 +456,14 @@ end
 
 function input.command(fields, state, phase)
     local command = fields[2]
-    if command == "native-loot-guest-blowtorch-use" then
+    if command == "native-loot-guest-blowtorch-use" or command == "native-loot-guest-crowbar-use" then
+        local crowbar = command == "native-loot-guest-crowbar-use"
         local profile = loot.profile(state.map, fields[3])
         local current = #fields == 5 and phase == "hosting" and profile and profile.keyless_lock
             and input.update(state, phase, profile)
-        if not current then error("stock_blowtorch_scope_unavailable", 0) end
+        if not current then error(crowbar and "stock_crowbar_scope_unavailable" or "stock_blowtorch_scope_unavailable", 0) end
         tool_report = nil
+        if crowbar then return pry_with_crowbar(current, state, phase, fields[4], fields[5]) end
         return ignite(current, state, phase, fields[4], fields[5])
     end
     if command == "native-loot-vehicle-pry-fixture" then
@@ -516,7 +561,7 @@ function input.rows(state, phase, status_row)
     if reported then rows[#rows + 1] = reported end
     if tool_report and phase == "hosting" and tool_report.map == state.map then
         local report = tool_report
-        rows[#rows + 1] = status_row("native-loot-guest-blowtorch-use", report.map, report.crate, report.pawn,
+        rows[#rows + 1] = status_row("native-loot-guest-" .. report.kind .. "-use", report.map, report.crate, report.pawn,
             report.guid, report.before, report.after)
     end
     return rows

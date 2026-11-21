@@ -57,6 +57,7 @@ namespace
     constexpr int rifle_caliber = 3;
     constexpr auto camera_path = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C");
     constexpr auto blowtorch_path = STR("/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C");
+    constexpr auto crowbar_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C");
     constexpr std::int32_t blowtorch_capacity = 3;
     constexpr auto equipment_base_path = STR("/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C");
     constexpr auto old_pipe_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C");
@@ -321,6 +322,7 @@ namespace
             if (!env("SILVERFISH_COOP_HEADLESS")) return "stock_guest_weapon_fixture_profile_unqualified";
             const auto kind = lua.get_string();
             if (kind == "blowtorch") *seed_variant = blowtorch_path;
+            else if (kind == "crowbar") *seed_variant = crowbar_path;
             else
             {
                 const auto profile = std::ranges::find(profiles::firearms, kind, &profiles::Profile::kind);
@@ -570,6 +572,19 @@ namespace
             ? torch : nullptr;
     }
 
+    Unreal::UClass* qualified_melee_item(Unreal::UObject* item_class, const Unreal::TCHAR* path)
+    {
+        auto* melee = find<Unreal::UClass>(path);
+        auto* base = find<Unreal::UClass>(STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C"));
+        if (!melee || item_class != melee || !base || !melee->IsChildOf(base)) return nullptr;
+        auto* defaults = melee->GetClassDefaultObject().Get();
+        auto* category = field<Unreal::FByteProperty>(defaults, STR("ItemType"));
+        auto* ammo = field<Unreal::FIntProperty>(defaults, STR("Ammo"));
+        return defaults && defaults->GetClassPrivate() == melee && defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) &&
+            category && category->GetPropertyValueInContainer(defaults) == 2 && ammo &&
+            ammo->GetPropertyValueInContainer(defaults) == -1 && boolean(defaults, STR("Stacks"), false) ? melee : nullptr;
+    }
+
     Unreal::UClass* qualified_old_pipe(Unreal::UObject* item_class, const Context& context, bool fixture = false)
     {
         if (!env("SILVERFISH_COOP_NATIVE_ZONE") || !live(context.world)) return nullptr;
@@ -579,15 +594,7 @@ namespace
         if (fixture ? (world != STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P") &&
                        world != STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P")) :
                       !silverfish::native_guest_melee::ordinary_world(context.world)) return nullptr;
-        auto* pipe = find<Unreal::UClass>(old_pipe_path);
-        auto* base = find<Unreal::UClass>(STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C"));
-        if (!pipe || item_class != pipe || !base || !pipe->IsChildOf(base)) return nullptr;
-        auto* defaults = pipe->GetClassDefaultObject().Get();
-        auto* category = field<Unreal::FByteProperty>(defaults, STR("ItemType"));
-        auto* ammo = field<Unreal::FIntProperty>(defaults, STR("Ammo"));
-        return defaults && defaults->GetClassPrivate() == pipe && defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) &&
-            category && category->GetPropertyValueInContainer(defaults) == 2 && ammo &&
-            ammo->GetPropertyValueInContainer(defaults) == -1 && boolean(defaults, STR("Stacks"), false) ? pipe : nullptr;
+        return qualified_melee_item(item_class, old_pipe_path);
     }
 
     bool ready_pawn(const Context& context)
@@ -684,10 +691,11 @@ namespace
         if (inventory.item && !ammo_fixture) return result(lua, true, "present");
         auto* source = item_class->GetClassDefaultObject().Get();
         const bool blowtorch = item_class == find<Unreal::UClass>(blowtorch_path);
-        auto* quantity = field<Unreal::FIntProperty>(source, ammo_fixture || blowtorch ? STR("Ammo") : STR("MagSize"));
+        const bool crowbar = item_class == find<Unreal::UClass>(crowbar_path);
+        auto* quantity = field<Unreal::FIntProperty>(source, ammo_fixture || blowtorch || crowbar ? STR("Ammo") : STR("MagSize"));
         const auto capacity = quantity ? quantity->GetPropertyValueInContainer(source) : -1;
         const auto* magazine = ammo_fixture ? nullptr : stock_magazine(item_class);
-        const auto units = ammo_fixture ? ammo_fixture->fixture_units : blowtorch ? blowtorch_capacity :
+        const auto units = ammo_fixture ? ammo_fixture->fixture_units : blowtorch ? blowtorch_capacity : crowbar ? -1 :
             magazine ? std::min(magazine_fixture, magazine->capacity) : magazine_fixture;
         if (!source || !source->HasAnyFlags(Unreal::RF_ClassDefaultObject) || source->GetClassPrivate() != item_class ||
             (magazine && capacity != magazine->capacity) ||
@@ -751,13 +759,14 @@ namespace
     {
         const bool camera = context.weapon == find<Unreal::UClass>(camera_path);
         const bool old_pipe = context.weapon == find<Unreal::UClass>(old_pipe_path);
+        const bool crowbar = context.weapon == find<Unreal::UClass>(crowbar_path);
         const bool blowtorch = context.weapon == find<Unreal::UClass>(blowtorch_path);
         const auto* magazine_profile = camera || blowtorch ? nullptr : stock_magazine(context.weapon);
         if (!ordinary_magazine_payload(magazine_profile, context, inventory))
             return result(lua, false, "guest_weapon_payload_unqualified");
         if (auto* actor = equipped(context, inventory))
         {
-            if (!camera && !old_pipe && !blowtorch)
+            if (!camera && !old_pipe && !blowtorch && !crowbar)
             {
                 const bool verified = ordinary_magazine_payload(magazine_profile, context, inventory, actor);
                 return result(lua, verified, verified ? "equipped" : "guest_weapon_payload_unqualified");
@@ -770,9 +779,10 @@ namespace
                     ammo->GetPropertyValueInContainer(actor) == stored;
                 return result(lua, verified, verified ? "blowtorch_equipped" : "stock_guest_blowtorch_fuel_unqualified");
             }
-            if (old_pipe)
+            if (old_pipe || crowbar)
             {
                 const bool verified = stored == -1 && ammo && ammo->GetPropertyValueInContainer(actor) == stored;
+                if (crowbar) return result(lua, verified, verified ? "crowbar_equipped" : "stock_guest_crowbar_row_unqualified");
                 return result(lua, verified, verified ? "old_pipe_equipped" : "stock_guest_old_pipe_row_unqualified");
             }
             const bool verified = camera_stock_ammo(stored) && ammo && ammo->GetPropertyValueInContainer(actor) == stored &&
@@ -798,9 +808,10 @@ namespace
         {
             if (loaded < 0 || loaded > blowtorch_capacity) return result(lua, false, "stock_guest_blowtorch_fuel_unqualified");
         }
-        else if (old_pipe)
+        else if (old_pipe || crowbar)
         {
-            if (loaded != -1) return result(lua, false, "stock_guest_old_pipe_row_unqualified");
+            if (loaded != -1) return result(lua, false, crowbar ? "stock_guest_crowbar_row_unqualified" :
+                "stock_guest_old_pipe_row_unqualified");
         }
         else
         {
@@ -856,6 +867,8 @@ namespace
         }
         if (old_pipe)
             return result(lua, proven, proven ? "old_pipe_equipped" : "mutation_unverified_guest_old_pipe_equip");
+        if (crowbar)
+            return result(lua, proven, proven ? "crowbar_equipped" : "mutation_unverified_guest_crowbar_equip");
         if (blowtorch)
             return result(lua, proven, proven ? "blowtorch_equipped" : "mutation_unverified_guest_blowtorch_equip");
         return result(lua, proven, proven ? "equipped" : "mutation_unverified_guest_weapon_equip");
@@ -866,8 +879,10 @@ namespace
         const auto stored = inventory.ammo->GetPropertyValueInContainer(inventory.item);
         const bool camera = context.weapon == find<Unreal::UClass>(camera_path);
         const bool old_pipe = context.weapon == find<Unreal::UClass>(old_pipe_path);
+        const bool crowbar = context.weapon == find<Unreal::UClass>(crowbar_path);
         const bool blowtorch = context.weapon == find<Unreal::UClass>(blowtorch_path);
-        if (old_pipe && stored != -1) return proof(lua, false, "stock_guest_old_pipe_row_unqualified");
+        if ((old_pipe || crowbar) && stored != -1) return proof(lua, false, crowbar ? "stock_guest_crowbar_row_unqualified" :
+            "stock_guest_old_pipe_row_unqualified");
         if (camera && !camera_stock_ammo(stored)) return proof(lua, false, "guest_camera_row_unqualified");
         if (blowtorch && (stored < 0 || stored > blowtorch_capacity))
             return proof(lua, false, "stock_guest_blowtorch_fuel_unqualified");
@@ -875,11 +890,11 @@ namespace
         if (!ordinary_magazine_payload(magazine_profile, context, inventory))
             return proof(lua, false, "guest_weapon_payload_unqualified");
         if (inventory.backpack_index >= 0)
-            return proof(lua, true, old_pipe ? "old_pipe_backpack" : camera ? "camera_backpack" :
+            return proof(lua, true, old_pipe ? "old_pipe_backpack" : crowbar ? "crowbar_backpack" : camera ? "camera_backpack" :
                 blowtorch ? "blowtorch_backpack" : "backpack", -1, stored);
         auto* actor = equipped(context, inventory);
         if (!actor)
-            return proof(lua, true, old_pipe ? "old_pipe_stored_equipment" : camera ? "camera_stored_equipment" :
+            return proof(lua, true, old_pipe ? "old_pipe_stored_equipment" : crowbar ? "crowbar_stored_equipment" : camera ? "camera_stored_equipment" :
                 blowtorch ? "blowtorch_stored_equipment" : "stored_equipment", -1, stored);
         if (!ordinary_magazine_payload(magazine_profile, context, inventory, actor))
             return proof(lua, false, "guest_weapon_payload_unqualified");
@@ -888,9 +903,10 @@ namespace
         const auto observed = ammo->GetPropertyValueInContainer(actor);
         if (camera && (observed != stored || !camera_capture_ready(actor)))
             return proof(lua, false, "stock_guest_camera_capture_unavailable");
-        if (old_pipe && observed != stored) return proof(lua, false, "stock_guest_old_pipe_row_unqualified");
+        if ((old_pipe || crowbar) && observed != stored) return proof(lua, false, crowbar ? "stock_guest_crowbar_row_unqualified" :
+            "stock_guest_old_pipe_row_unqualified");
         if (blowtorch && observed != stored) return proof(lua, false, "stock_guest_blowtorch_fuel_unqualified");
-        return proof(lua, true, old_pipe ? "old_pipe_equipped" : camera ? "camera_equipped" :
+        return proof(lua, true, old_pipe ? "old_pipe_equipped" : crowbar ? "crowbar_equipped" : camera ? "camera_equipped" :
             blowtorch ? "blowtorch_equipped" : "equipped", observed, stored);
     }
 
@@ -1936,7 +1952,7 @@ namespace
             const auto path = reserve ? reserve->item : seed_variant;
             auto* expected_class = find<Unreal::UClass>(path);
             if (!expected_class || (operation == Operation::Seed && !qualified_weapon(expected_class) &&
-                !qualified_blowtorch(expected_class)))
+                !qualified_blowtorch(expected_class) && !qualified_melee_item(expected_class, crowbar_path)))
                 return fail(operation == Operation::SeedAmmo ? "stock_guest_ammo_fixture_class_unavailable"
                                                              : "stock_guest_weapon_class_unavailable");
             if (const auto error = locate(context, inventory, expected_class); !error.empty()) return fail(error);
@@ -1956,6 +1972,7 @@ namespace
             if (!context.weapon) context.weapon = qualified_camera(row_class);
             if (!context.weapon) context.weapon = qualified_old_pipe(row_class, context);
             if (!context.weapon) context.weapon = qualified_blowtorch(row_class);
+            if (!context.weapon) context.weapon = qualified_melee_item(row_class, crowbar_path);
         }
         if (!context.weapon) return fail("guest_weapon_class_unqualified");
         if constexpr (operation == Operation::Equip) return equip(lua, context, inventory);

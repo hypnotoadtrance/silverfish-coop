@@ -72,7 +72,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         *native_computer_board.PREFLIGHTS, *native_flood_jammer.PREFLIGHTS, native_meet_broker.PREFLIGHT,
                         native_subway_valve.PREFLIGHT, native_subway_valve.ACTIVATE,
                         "native-inventory-list", native_inventory.SPLIT, native_inventory.SORT, native_stash.LIST, native_stash.MOVE,
-                        "native-loot-inspect", "native-loot-open", "native-loot-claim", native_loot.TORCH_USE,
+                        "native-loot-inspect", "native-loot-open", "native-loot-claim", *native_loot.PRY_TOOL_ACTIONS.values(),
                         *native_guest_drop.ACTIONS,
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
@@ -1649,7 +1649,7 @@ class Host:
             kind = equipped.get("kind")
             if native_gold.valid_guid(equipped.get("guid")) and kind in native_guest_weapon.FIRE_CLASSES:
                 gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=self.last_game["map"])
-            if native_gold.valid_guid(equipped.get("guid")) and kind == "blowtorch" and self.native_loot_input:
+            if native_gold.valid_guid(equipped.get("guid")) and kind in native_loot.PRY_TOOL_ACTIONS and self.native_loot_input:
                 gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=self.last_game["map"])
             if self.native_guest_controls and native_guest_melee.is_equipped(equipped, self.last_game["map"], equipped.get("guid")):
                 gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=self.last_game["map"])
@@ -1766,9 +1766,9 @@ class Host:
             elif action in ("native-loot-inspect", "native-loot-open", "native-loot-claim"):
                 result = await native_loot.perform(self, bridge, character, action.removeprefix("native-loot-"),
                                                    target, request["operation_id"])
-            elif action == native_loot.TORCH_USE:
+            elif action in native_loot.PRY_TOOL_ACTIONS.values():
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
-                    result = await native_loot.use_vehicle_blowtorch(self, bridge, character, target, request["operation_id"])
+                    result = await native_loot.use_vehicle_pry_tool(self, bridge, character, target, request["operation_id"], action)
             elif action == native_inventory.SORT:
                 result = await native_inventory.sort_backpack(self, bridge, character, target, request["operation_id"])
             elif action == "native-inventory-list":
@@ -4532,7 +4532,7 @@ class Client:
             target = native_authored_pickup.request_target(target, self.zone_epoch)
         elif action == native_guest_melee.SWING:
             target = native_guest_melee.request_target(target, self.zone_epoch)
-        elif action == native_loot.TORCH_USE:
+        elif action in native_loot.PRY_TOOL_ACTIONS.values():
             target = f"{self.zone_epoch}@{target}"
         request = {"action": action, "operation_id": operation_id, "target": target}
         if action == "keep":
@@ -4573,7 +4573,8 @@ class Client:
         eligible = (active and not self.stopping and self.host_session and self.zone_epoch and now - self.gameplay_seen < 2
                     and member.get("character_id") == self.invite["character_id"] and member.get("downed") is False
                     and self.gameplay.get("wipe") is None and area == self.last_game.get("map") and pawn and host_pawn
-                    and native_gold.valid_guid(guid) and (camera or melee or kind == "blowtorch" or kind in native_guest_weapon.FIRE_CLASSES))
+                    and native_gold.valid_guid(guid) and (camera or melee or kind in native_loot.PRY_TOOL_ACTIONS
+                                                        or kind in native_guest_weapon.FIRE_CLASSES))
         scope = (area, pawn, guid, kind) if eligible else None
         if (scope and now >= self.next_primary_renewal) or (not scope and self.primary_scope):
             try:
@@ -4601,14 +4602,14 @@ class Client:
                 action, event = native_guest_melee.SWING, "native_guest_melee_input"
             elif event_kind == "camera":
                 action, event = native_turret_photo.SHUTTER, "native_guest_camera_shutter"
-            elif event_kind == "blowtorch":
+            elif event_kind in native_loot.PRY_TOOL_ACTIONS:
                 if not extra:
                     continue
-                action, event = native_loot.TORCH_USE, "native_guest_blowtorch_input"
+                action, event = native_loot.PRY_TOOL_ACTIONS[event_kind], f"native_guest_{event_kind}_input"
             else:
                 action, event = "native-guest-weapon-fire", "native_guest_primary_input"
             try:
-                selection = f"{event_guid}@{extra[0]}" if action == native_loot.TORCH_USE else event_guid
+                selection = f"{event_guid}@{extra[0]}" if action in native_loot.PRY_TOOL_ACTIONS.values() else event_guid
                 result = await self.gameplay_action(action, operation, selection)
                 self.control.event(event, operation_id=operation, sequence=sequence, **result)
             except (ValueError, OSError, RuntimeError) as error:
@@ -4980,10 +4981,10 @@ class Client:
                     if not self.primary_scope or self.last_game.get("state") != "connected":
                         raise ValueError("Equip an authenticated stock guest weapon before exercising primary input")
                     fixture_arguments = ()
-                    if self.primary_scope[3] == "blowtorch":
+                    if self.primary_scope[3] in native_loot.PRY_TOOL_ACTIONS:
                         crate = request.get("target")
                         if not isinstance(crate, str) or not native_loot.vehicle_lock(crate, self.last_game.get("map")):
-                            raise ValueError("The blowtorch input fixture needs a stock vehicle on the current map")
+                            raise ValueError("The pry tool input fixture needs a stock vehicle on the current map")
                         fixture_arguments = (crate,)
                     self.last_game = await self.bridge.command(action, self.primary_scope[1], *fixture_arguments, timeout=5)
                     result = {"native_guest_primary_fixture": self.last_game.get("native_guest_primary_fixture", {})}

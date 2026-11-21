@@ -46,6 +46,9 @@ namespace
         STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_36");
     constexpr auto completed_path =
         STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_37");
+    constexpr auto toggle_path = STR("/Game/Classes/Player/Player_Inputs/IA_ModeToggle.IA_ModeToggle");
+    constexpr auto toggle_completed_path =
+        STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_ModeToggle_K2Node_EnhancedInputActionEvent_29");
     constexpr auto bridge_world = STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P");
     constexpr auto camera_path = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C");
     constexpr auto old_pipe_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C");
@@ -76,6 +79,8 @@ namespace
     constexpr Equipment old_pipe{"old-pipe", old_pipe_path, false, 0, 0, 0.0, false, nullptr, false};
     constexpr Equipment blowtorch{"blowtorch", STR("/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"),
                                     false, 0, 0, 0.0, false, nullptr, false};
+    constexpr Equipment crowbar{"crowbar", STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C"),
+                                   false, 0, 0, 0.0, false, nullptr, false};
 
     template <typename T>
     T* find(const U::TCHAR* path)
@@ -367,7 +372,7 @@ namespace
         if (index < 0 || index >= items.Num() || items.Num() > 4096) return false;
         const auto* row = items.GetRawPtr(index);
         if (schema.row_class(row) != item) return false;
-        if (current.item == &old_pipe)
+        if (current.item == &old_pipe || current.item == &crowbar)
         {
             auto* amount = field<U::FIntProperty>(held, STR("Ammo"));
             auto* held_by_player = field<U::FBoolProperty>(held, STR("HeldByPlayer"));
@@ -597,7 +602,8 @@ namespace
         auto* connection_type = find<U::UClass>(STR("/Script/Engine.NetConnection"));
         auto* local_type = find<U::UClass>(STR("/Script/Engine.LocalPlayer"));
         auto* action_type = find<U::UClass>(STR("/Script/EnhancedInput.InputAction"));
-        auto* action = find<U::UObject>(action_path);
+        const bool toggle = next.item == &crowbar;
+        auto* action = find<U::UObject>(toggle ? toggle_path : action_path);
         if (!pawn_type || !controller_type || !connection_type || !local_type ||
             !action_type || !live(action) || action->GetClassPrivate() != action_type)
             return "stock_guest_primary_classes_unavailable";
@@ -630,6 +636,11 @@ namespace
             return "stock_guest_primary_local_equipment_unqualified";
         if (next.seat.host && !active_photo_quest(next.seat.stock.Get())) return "stock_host_camera_quest_inactive";
         if (equipping) return {};
+        if (toggle)
+        {
+            next.completed = bind_wrapper(pawn_type, action, toggle_completed_path, 16);
+            return next.completed.function.Get() ? std::string_view{} : "stock_guest_crowbar_wrapper_unavailable";
+        }
         next.started = bind_wrapper(pawn_type, action, started_path, 2);
         if (!next.started.function.Get()) return "stock_guest_primary_wrappers_unavailable";
         if (observed) return {};
@@ -765,9 +776,29 @@ namespace
     static_assert(select_started_route(true, false) == StartedRoute::authorized);
     static_assert(select_started_route(true, true) == StartedRoute::authorized);
 
+    void queue_tap(Clock::time_point now)
+    {
+        if (sequence == max_sequence) return;
+        discard_expired(now);
+        if (count == receipt_limit) return;
+        receipts[(head + count) % receipt_limit] = {++sequence, now + receipt_lifetime};
+        ++count;
+    }
+
     void intercept(Iteration& iteration, U::UObject* pawn, U::UFunction* function, const void* arguments)
     {
         if (!available() || !pawn || !function || iteration.OriginalFunctionCallPrevented()) return;
+        if (scope.item == &crowbar && pawn == scope.seat.pawn.Get() && function == scope.completed.function.Get())
+        {
+            const auto now = Clock::now();
+            if (!qualified(scope, now) || !verifies_source(scope.completed, scope.action.Get(), arguments)) return;
+            // A long hold controls the stock flashlight. The short release is the item action.
+            const float triggered = scope.completed.triggered->GetPropertyValueInContainer(arguments);
+            if (!(triggered >= 0.0f && triggered < 0.25f)) return;
+            iteration.PreventOriginalFunctionCall();
+            if (iteration.OriginalFunctionCallPrevented() && can_act(scope.seat)) queue_tap(now);
+            return;
+        }
         const bool released = pawn == press.seat.pawn.Get() && function == press.completed.function.Get();
         const bool started = pawn == scope.seat.pawn.Get() && function == scope.started.function.Get();
         const bool host_candidate = host_shutter_candidate(function);
@@ -800,11 +831,7 @@ namespace
             begin_held(now);
             return;
         }
-        if (sequence == max_sequence) return;
-        discard_expired(now);
-        if (count == receipt_limit) return;
-        receipts[(head + count) % receipt_limit] = {++sequence, now + receipt_lifetime};
-        ++count;
+        queue_tap(now);
     }
 
     int result(const Lua& lua, bool ok, std::string_view status)
@@ -832,6 +859,7 @@ namespace
         if (kind == camera.kind) next.item = &camera;
         else if (kind == old_pipe.kind) next.item = &old_pipe;
         else if (kind == blowtorch.kind) next.item = &blowtorch;
+        else if (!host && kind == crowbar.kind) next.item = &crowbar;
         else
             for (const auto& candidate : silverfish::guest_weapon_profiles::firearms)
                 if (candidate.kind == kind) next.item = &candidate;
@@ -992,20 +1020,25 @@ namespace
         discard_expired(now);
         if (count || (press.seat.pawn.Get() && now < press.expires) || sequence == max_sequence)
             return result(lua, false, "native_guest_primary_fixture_input_busy");
+        const bool toggle = scope.item == &crowbar;
+        const auto& first = toggle ? scope.completed : scope.started;
         ValueFactory factory;
-        if (!factory.bind(action, scope.started.value->GetStruct().Get()))
+        if (!factory.bind(action, first.value->GetStruct().Get()))
             return result(lua, false, "native_guest_primary_fixture_value_unavailable");
         const FixtureMode fixture(FixtureDispatch::tap);
         const auto before = sequence;
-        factory.dispatch(pawn, action, scope.started, true);
-        if (press.seat.pawn.Get() != pawn || !qualified(scope, Clock::now()))
-            return result(lua, false, "native_guest_primary_fixture_start_unverified");
+        if (!toggle)
+        {
+            factory.dispatch(pawn, action, first, true);
+            if (press.seat.pawn.Get() != pawn || !qualified(scope, Clock::now()))
+                return result(lua, false, "native_guest_primary_fixture_start_unverified");
+        }
         factory.dispatch(pawn, action, scope.completed, false);
         if (press.seat.pawn.Get() || sequence != before + 1 || count != 1)
             return result(lua, false, "native_guest_primary_fixture_release_unverified");
         result(lua, true, "stock_pressed");
         lua.set_integer(static_cast<std::int64_t>(sequence));
-        lua.set_integer(2);
+        lua.set_integer(toggle ? 1 : 2);
         return 4;
     }
 

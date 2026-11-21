@@ -244,6 +244,7 @@ def parser() -> argparse.ArgumentParser:
         "native-loot-inspect", "native-loot-open", "native-loot-approach", "native-loot-seed",
         "native-loot-claim", "native-loot-open-fixture", "native-loot-crate-fixture", "native-loot-view-fixture",
         "native-loot-replenishment-fixture", "native-loot-vehicle-pry-fixture", "native-guest-vehicle-blowtorch",
+        "native-guest-vehicle-crowbar",
         "native-wire-quest-preflight", "native-wire-quest-approach", "native-wire-board-fixture",
         "native-turret-photo-preflight", "native-turret-photo-capture", "native-turret-photo-capture-fixture", "native-turret-photo-shutter",
         "native-turret-photo-xp-fixture", "native-bounty-board-list", "native-host-camera-input-fixture",

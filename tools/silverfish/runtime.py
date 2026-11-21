@@ -760,7 +760,7 @@ class Bridge:
                     or len(fields[2]) > 256 or len(fields[3]) > 512):
                 continue
             target = fields[6] if len(fields) == 7 else None
-            if fields[5] == "blowtorch":
+            if fields[5] in native_loot.PRY_TOOL_ACTIONS:
                 if not target or not vehicle_lock(target, fields[2]):
                     continue
             elif target is not None:
@@ -1826,8 +1826,12 @@ class Bridge:
                 elif (fields[0] == "native-loot-guest-blowtorch-use" and len(fields) == 7 and data.get("state") == "hosting"
                       and vehicle_lock(fields[2], fields[1]) and valid_guid(fields[4])
                       and 1 <= (before := int(fields[5])) <= 3 and int(fields[6]) == before - 1):
-                    data["native_guest_blowtorch"] = dict(map=fields[1], crate=fields[2], pawn=fields[3], guid=fields[4],
-                                                          before=before, after=before - 1)
+                    data[native_loot.TORCH_RESULT] = dict(map=fields[1], crate=fields[2], pawn=fields[3], guid=fields[4],
+                                                         before=before, after=before - 1)
+                elif (fields[0] == "native-loot-guest-crowbar-use" and len(fields) == 7 and data.get("state") == "hosting"
+                      and vehicle_lock(fields[2], fields[1]) and valid_guid(fields[4]) and fields[5:] == ["-1", "-1"]):
+                    data[native_loot.CROWBAR_RESULT] = dict(map=fields[1], crate=fields[2], pawn=fields[3], guid=fields[4],
+                                                           before=-1, after=-1)
                 elif (fields[0] == "native-loot-crate-diagnostic" and len(fields) == 10
                       and AUTHORED_CRATES.get(fields[2]) == fields[1]):
                     row = {"map": fields[1], "crate": fields[2], "phase": fields[3],
