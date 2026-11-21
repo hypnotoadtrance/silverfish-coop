@@ -121,4 +121,6 @@ The muted two-seat loopback reproduced the Crossroads hitch. In the first 12-sec
 
 The guest damage guard now covers the simulated copies of the other players as well as the guest's own pawn. A focused loopback test forced the guest-side damage and death wrappers on the host's replica, verified that both pawns stayed alive, and then verified ordinary host-authoritative downing and revival separately.
 
+The stock damage actor used to apply its screen effects and camera shake on the listen host when the struck pawn belonged to a guest. An Observatory fixture invoked that damage effect for the guest, verified that both host post-process components were disabled, and observed the corresponding shake on the guest's controller.
+
 A host's stock red flare produces a lit replica on the guest, and expiration of the host actor ends both copies. The two-player fixture observed the same light intensity on both peers and verified that collision stayed disabled on the guest copy. The guest's ability to throw a flare still needs a gameplay test.
