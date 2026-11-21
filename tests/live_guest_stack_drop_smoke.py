@@ -246,6 +246,22 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
         events = (await command("events", *recipient, "--tail", "50"))["events"]
         event, = [item for item in events if item["event"] == "local_interaction"
                   and item.get(drop.RESULT, {}).get("drop_id") == drop_id]
+        if host_origin_menu in ("drag_to_floor", "equipped_context_menu", "equipped_drag_to_floor") and recipient != host:
+            expected = event["operation_id"]
+            witnesses = {}
+            for target in (host, recipient):
+                for _ in range(15):
+                    log = (await command("events", *target, "--tail", "50"))["events"]
+                    heard = [row for row in log if row["event"] == "native_pickup_sound_played"
+                             and row.get("operation_id") == expected]
+                    if heard:
+                        assert len(heard) == 1 and heard[0]["map"] == record.OBSERVATORY, heard
+                        witnesses[target[0]] = heard[0]
+                        break
+                    await asyncio.sleep(.15)
+                else:
+                    raise RuntimeError(f"The {target[0]} engine did not invoke the stock item pickup sound")
+            evidence["pickup_audio"] = witnesses
         claim_id, reclaimed = event["operation_id"], event[drop.RESULT]
         assert reclaimed == {**dropped, "state": "reclaimed", "claimed_by": recipient_id}, reclaimed
         after = await inventory(recipient, recipient_id)
@@ -482,7 +498,9 @@ if __name__ == "__main__":
                         help="verify the owner after restart, or run a short stock Interact pickup as host or teammate")
     origin = parser.add_mutually_exclusive_group()
     origin.add_argument("--host-origin", action="store_true", help="verify a host drop and a guest's stock Interact pickup")
-    origin.add_argument("--host-origin-menu", choices=("ctrl_click", "context_menu"),
+    origin.add_argument("--host-origin-menu", choices=("ctrl_click", "context_menu", "drag_to_floor",
+                                                       "equipped_ctrl_click", "equipped_context_menu",
+                                                       "equipped_drag_to_floor"),
                         help="drop through the selected stock host inventory route, then pick up the item as the guest")
     pistol = parser.add_mutually_exclusive_group()
     pistol.add_argument("--light-pistol", dest="pistol_kind", action="store_const", const="light-pistol",

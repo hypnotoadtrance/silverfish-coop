@@ -8,7 +8,7 @@ import time
 import uuid
 
 from . import native_guest_drop_record as record
-from . import native_guest_stack_drop as probe, native_host_save, native_inventory, native_inventory_death, party
+from . import native_guest_stack_drop as probe, native_host_save, native_inventory, native_inventory_death, native_pickup_audio, party
 from .native_gold import valid_guid
 
 
@@ -177,6 +177,8 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
         raise
     host.party, host.native_checkpoint_unsafe = candidate, False
     host.control.event("native_guest_stack_drop_committed", phase=verb, revision=revision, **result[RESULT])
+    if action == RECLAIM:
+        native_pickup_audio.committed(host, pawn, operation, row["class_path"])
     return result
 
 

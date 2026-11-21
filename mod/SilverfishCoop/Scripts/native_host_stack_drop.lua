@@ -6,6 +6,8 @@ local players = require("players")
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local binding, pending
+local entries = { ctrl_click = true, context_menu = true, drag_to_floor = true,
+    equipped_ctrl_click = true, equipped_context_menu = true, equipped_drag_to_floor = true }
 
 local function valid(object) return object and object:IsValid() end
 local function same(first, second)
@@ -44,7 +46,7 @@ function menu_drop.sync(state, phase)
         if math.type(sequence) == "integer" and sequence > 0 and sequence < 2 ^ 53
             and token(guid, "^[0-9A-F]+$") and guid:find("[^0]")
             and math.type(count) == "integer" and count >= 1 and count <= 200
-            and (entry == "ctrl_click" or entry == "context_menu") then
+            and entries[entry] then
             pending = {sequence = sequence, guid = guid, count = count, entry = entry}
         end
     end

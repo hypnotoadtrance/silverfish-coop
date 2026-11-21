@@ -4,7 +4,7 @@ import asyncio
 import re
 import time
 
-from . import native_loot, party
+from . import native_loot, native_pickup_audio, party
 from .native_gold import valid_guid
 from .native_guest_drop_record import valid_position
 
@@ -223,6 +223,7 @@ async def claim(host, bridge, character, requested, operation):
         host.loose_pickups.replenished.discard(path)
         host.native_checkpoint_unsafe = False
         host.control.event("native_loose_pickup_claimed", revision=revision, operation_id=operation, **row)
+        native_pickup_audio.committed(host, pawn, operation, row["class_path"])
         return result
     finally:
         if host.native_checkpoint_unsafe:

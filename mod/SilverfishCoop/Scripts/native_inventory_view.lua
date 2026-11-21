@@ -3,6 +3,7 @@ local weapon_profiles = require("guest_weapon_registry")
 local cqc = require("native_enemy_loot_registry")
 local drop_maps = require("native_guest_drop_maps")
 local drop_items = require("native_guest_drop_items")
+local save_scope = require("native_save_scope")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_INVENTORY_VIEW") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -122,6 +123,7 @@ local function take(current)
 end
 
 function inventory_view.sync(state, phase)
+    save_scope.bind_guest(state, phase)
     local current = context(state, phase)
     if not current or type(SilverfishSetNativeInventoryViewScope) ~= "function"
         or type(SilverfishTakeNativeInventoryViewRequest) ~= "function" then

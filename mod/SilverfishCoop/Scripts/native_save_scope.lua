@@ -5,6 +5,8 @@ local registered = {}
 local statics = "/Script/Engine.GameplayStatics:"
 local async = "/Script/Engine.AsyncActionHandleSaveGame:"
 local find_files = "/Script/BlueprintFileUtils.BlueprintFileUtilsBPLibrary:FindFiles"
+local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
+local instance_class = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"
 
 local function text(value)
     return type(value) == "userdata" and value:ToString() or value
@@ -12,6 +14,66 @@ end
 
 local function normalized(path)
     return (path:gsub("\\", "/"):gsub("//+", "/"):gsub("/+$", ""):lower())
+end
+
+local function valid(object)
+    return object ~= nil and object ~= false and object:IsValid()
+end
+
+local function same(first, second)
+    return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function install_guest(guest)
+    local instance = guest.instance
+    instance.SaveSlot_Ref = guest.save
+    instance.CurrentSaveSlot = guest.slot
+    instance.SaveAfterTransition = false
+    if not same(instance.SaveSlot_Ref, guest.save) or text(instance.CurrentSaveSlot) ~= guest.slot
+        or instance.SaveAfterTransition ~= false then
+        error("The game did not retain the isolated co-op guest view", 0)
+    end
+end
+
+function scope.prepare_guest(state)
+    if not active or not valid(state.world) or state.listening and not state.server then
+        error("The guest save view requires a private co-op scope", 0)
+    end
+    local instance = state.world.OwningGameInstance
+    local class, api = StaticFindObject(save_class), StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    if not valid(instance) or not same(instance:GetClass(), StaticFindObject(instance_class))
+        or not valid(class) or not valid(api) then
+        error("The guest save view requires the stock game instance", 0)
+    end
+    if active.guest and not same(active.guest.instance, instance) then
+        error("The game instance changed during the co-op guest session", 0)
+    end
+    if not active.guest then
+        local save = api:CreateSaveGameObject(class)
+        if not valid(save) or not same(save:GetClass(), class) or same(save, instance.SaveSlot_Ref) then
+            error("The game could not allocate the isolated co-op guest view", 0)
+        end
+        active.guest = {instance = instance, save = save, slot = "SFCoopGuest_" .. active.id,
+            previous_save = instance.SaveSlot_Ref, previous_slot = text(instance.CurrentSaveSlot),
+            previous_autosave = instance.SaveAfterTransition}
+    end
+    install_guest(active.guest)
+end
+
+function scope.bind_guest(state, phase)
+    if not active or not active.guest or phase ~= "connected" or state.server ~= true
+        or not valid(state.world) or not same(state.world.OwningGameInstance, active.guest.instance) then return end
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    if not valid(pawn) or pawn:HasAuthority() or not pawn:IsLocallyControlled()
+        or not same(pawn:GetWorld(), state.world) or not same(pawn.Controller, state.controller) then return end
+    local guest = active.guest
+    if not same(guest.instance.SaveSlot_Ref, guest.save) or text(guest.instance.CurrentSaveSlot) ~= guest.slot
+        or guest.instance.SaveAfterTransition ~= false then install_guest(guest) end
+    if not same(pawn.Save, guest.save) then
+        pawn.Save = guest.save
+        if not same(pawn.Save, guest.save) then error("The local co-op pawn did not adopt its view", 0) end
+    end
+    return guest.save, pawn, active.id
 end
 
 local function route(parameter)
@@ -87,6 +149,15 @@ end
 
 function scope.release(id)
     if not active or active.id ~= id then error("The co-op save scope did not match", 0) end
+    local guest = active.guest
+    if guest and valid(guest.instance) then
+        local instance = guest.instance
+        if same(instance.SaveSlot_Ref, guest.save) then
+            instance.SaveSlot_Ref = valid(guest.previous_save) and guest.previous_save or nil
+        end
+        if text(instance.CurrentSaveSlot) == guest.slot then instance.CurrentSaveSlot = guest.previous_slot end
+        instance.SaveAfterTransition = guest.previous_autosave
+    end
     active = nil
 end
 

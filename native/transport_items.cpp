@@ -43,6 +43,7 @@ namespace
     constexpr auto manager_path = STR("/Game/Classes/GUI/New/Components/ItemManager.ItemManager_C");
     constexpr auto card_path = STR("/Game/Classes/GUI/New/Components/ItemCard.ItemCard_C");
     constexpr auto panel_path = STR("/Game/Classes/GUI/New/Components/InventoryPanel.InventoryPanel_C");
+    constexpr auto equipment_slot_path = STR("/Game/Classes/GUI/New/Components/ItemSlot.ItemSlot_C");
     constexpr auto context_menu_path = STR("/Game/Classes/GUI/New/Components/ItemContextMenu.ItemContextMenu_C");
     constexpr auto inventory_screen_path = STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
@@ -135,6 +136,7 @@ namespace
     {
         Unreal::FName drop_item{STR("DropItem")};
         Unreal::FName action_drop{STR("ActionDrop")};
+        Unreal::FName insert_item{STR("InsertItem")};
         Unreal::FName action_use{STR("ActionUse")};
         Unreal::FName quick_move{STR("QuickMove")};
         Unreal::FName use_held{STR("UseHeldItem")};
@@ -842,7 +844,8 @@ namespace
     }
 
     [[nodiscard]] bool exact_canonical_drop_row(Unreal::UObject* save, const ItemView& card,
-                                                const Guid& guid, std::int32_t saved_ammo, Unreal::UObject* item_class)
+                                                const Guid& guid, std::int32_t saved_ammo, Unreal::UObject* item_class,
+                                                std::optional<int> equipped_index = {})
     {
         auto* backpack = field<Unreal::FArrayProperty>(save, STR("PlayerBackpack"));
         auto* equipment = field<Unreal::FArrayProperty>(save, STR("PlayerEquipment"));
@@ -860,25 +863,133 @@ namespace
 
         Unreal::FScriptArrayHelper pack(backpack, backpack->ContainerPtrToValuePtr<void>(save));
         Unreal::FScriptArrayHelper loadout(equipment, equipment->ContainerPtrToValuePtr<void>(save));
-        if (pack.Num() < 1 || pack.Num() > inventory_limit || loadout.Num() < 0 || loadout.Num() > inventory_limit)
+        if (pack.Num() < 0 || pack.Num() > inventory_limit || loadout.Num() < 0 || loadout.Num() > inventory_limit)
             return false;
 
-        bool found = false;
-        for (int index = 0; index < pack.Num(); ++index)
-        {
-            const auto* row = pack.GetRawPtr(index);
-            if (fields.read(row) != guid) continue;
-            if (found || object_value(class_field, row) != item_class ||
-                count_field->GetPropertyValueInContainer(row) != saved_ammo || never_drop->GetPropertyValueInContainer(row))
-                return false;
-            found = true;
-        }
-        for (int index = 0; index < loadout.Num(); ++index)
-        {
-            if (fields.read(loadout.GetRawPtr(index)) == guid) return false;
-        }
-        return found && fields.read(armor->ContainerPtrToValuePtr<void>(save)) != guid &&
+        const void* found{};
+        const auto verify_rows = [&](Unreal::FScriptArrayHelper& rows, bool equipped) {
+            for (int index = 0; index < rows.Num(); ++index)
+            {
+                const auto* row = rows.GetRawPtr(index);
+                if (fields.read(row) != guid) continue;
+                if (found || equipped != equipped_index.has_value() || (equipped && index != *equipped_index) ||
+                    object_value(class_field, row) != item_class ||
+                    count_field->GetPropertyValueInContainer(row) != saved_ammo || never_drop->GetPropertyValueInContainer(row))
+                    return false;
+                found = row;
+            }
+            return true;
+        };
+        return verify_rows(pack, false) && verify_rows(loadout, true) && found &&
+               fields.read(armor->ContainerPtrToValuePtr<void>(save)) != guid &&
                fields.read(helmet->ContainerPtrToValuePtr<void>(save)) != guid;
+    }
+
+    [[nodiscard]] Unreal::UFunction* stock_no_args(Unreal::UObject* object, const Unreal::FName& name);
+
+    [[nodiscard]] std::optional<int> drop_equipment_index(Unreal::UObject* manager, Unreal::UObject* slot)
+    {
+        if (!exact_class(slot, equipment_slot_path) || !same_widget_player(slot) ||
+            object_field(slot, STR("Target")) != scope.pawn.Get() ||
+            object_field(slot, STR("ItemManager")) != manager || !array_has_widget(manager, STR("EquipSlots"), slot, false))
+            return {};
+        auto* index = field<Unreal::FIntProperty>(slot, STR("ItemIndex"));
+        const auto value = index ? index->GetPropertyValueInContainer(slot) : -1;
+        return value >= 0 && value < 8 ? std::optional{value} : std::nullopt;
+    }
+
+    [[nodiscard]] bool pack_equipment_drop(Unreal::UObject* manager, Unreal::UObject* pack, Unreal::UObject* slot,
+                                           const Guid& guid, Unreal::UObject* item_class)
+    {
+        auto* insert = manager->GetClassPrivate()->GetFunctionByNameInChain(entries->insert_item);
+        auto* widget = field<Unreal::FObjectProperty>(insert, STR("InventoryWidget"));
+        auto* index = field<Unreal::FIntProperty>(insert, STR("Index"));
+        const auto held = inventory_item(manager, STR("HeldItem"));
+        const GuidFields fields(held.structure);
+        if (!insert || insert->GetOuterPrivate() != manager->GetClassPrivate() || insert->GetNumParms() != 2 ||
+            insert->GetReturnProperty() || insert->GetParmsSize() > 16 ||
+            insert->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
+            !widget || widget->GetOffset_Internal() != 0 || !index || index->GetOffset_Internal() != 8 ||
+            !fields.valid() || fields.read(held.value) != guid || object_field(manager, STR("ActiveReturnLocation")) != slot ||
+            object_value(field<Unreal::FClassProperty>(held.structure, item_class_name), held.value) != item_class)
+            return false;
+        alignas(void*) std::array<std::byte, 16> arguments{};
+        widget->SetObjectPropertyValue(widget->ContainerPtrToValuePtr<void>(arguments.data()), pack);
+        index->SetPropertyValueInContainer(arguments.data(), -1);
+        manager->ProcessEvent(insert, arguments.data());
+        const auto after = inventory_item(manager, STR("HeldItem"));
+        return after.structure == held.structure &&
+               !object_value(field<Unreal::FClassProperty>(after.structure, item_class_name), after.value);
+    }
+
+    void intercept_drag_drop(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
+                             const void* parameters)
+    {
+        if (!parameters || !live(manager) || !exact_class(manager, manager_path) || !qualified_drop_host() ||
+            function->GetOuterPrivate() != manager->GetClassPrivate() || function->GetNumParms() != 2 ||
+            function->GetReturnProperty() || function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
+        auto* screen = object_field(manager, STR("ParentScreen"));
+        auto* panel = object_field(screen, STR("BackpackPanel"));
+        auto* floor = object_field(screen, STR("FloorPanel"));
+        auto* origin = object_field(manager, STR("ActiveReturnLocation"));
+        const auto equipped_index = drop_equipment_index(manager, origin);
+        if (!exact_drop_screen(manager, screen, panel) ||
+            object_value(field<Unreal::FObjectProperty>(function, STR("InventoryWidget")), parameters) != floor ||
+            (origin != panel && !equipped_index)) return;
+
+        const auto held = inventory_item(manager, STR("HeldItem"));
+        auto* item_class = object_value(field<Unreal::FClassProperty>(held.structure, item_class_name), held.value);
+        const auto stacks = silverfish::drop_item_class::stacks(Unreal::Cast<Unreal::UClass>(item_class));
+        if (!stacks) return;
+        iteration.PreventOriginalFunctionCall();
+        if (!iteration.OriginalFunctionCallPrevented()) return;
+        const auto now = Clock::now();
+        auto* save = canonical_host_save();
+        auto* allow = field<Unreal::FBoolProperty>(manager, STR("CanDropItems"));
+        auto* dead = field<Unreal::FBoolProperty>(scope.pawn.Get(), STR("Dead"));
+        const GuidFields fields(held.structure);
+        auto* count_field = field<Unreal::FIntProperty>(held.structure, item_ammo_name);
+        auto* never_drop = field<Unreal::FBoolProperty>(held.structure, item_never_drop_name);
+        auto* restore = manager->GetClassPrivate()->GetFunctionByNameInChain(Unreal::FName(STR("ReturnItem")));
+        auto* clear = stock_no_args(manager, Unreal::FName(STR("ClearHeldItem")));
+        auto* item = field<Unreal::FStructProperty>(restore, STR("Item"));
+        auto* success = field<Unreal::FBoolProperty>(restore, STR("Success"));
+        if (!host_drop_scope_matches(save) || now >= host_drop_scope.expires ||
+            (host_drop_request && now < host_drop_request->expires) || host_drop_sequence >= max_drop_sequence ||
+            !allow || !allow->GetPropertyValueInContainer(manager) || !dead || dead->GetPropertyValueInContainer(scope.pawn.Get()) ||
+            !fields.valid() || !count_field || !never_drop || never_drop->GetPropertyValueInContainer(held.value) ||
+            !clear || !restore || restore->GetOuterPrivate() != manager->GetClassPrivate() ||
+            restore->GetNumParms() != 2 || restore->GetReturnProperty() || restore->GetParmsSize() > 96 ||
+            restore->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
+            !item_struct(item, held.structure) || item->GetOffset_Internal() != 0 || item->GetSize() != 0x50 ||
+            !success || success->GetOffset_Internal() != 0x50) return;
+
+        const Guid guid = fields.read(held.value);
+        const auto saved_ammo = count_field->GetPropertyValueInContainer(held.value);
+        if (guid == Guid{} || (*stacks && (saved_ammo < 1 || saved_ammo > max_drop_ammo))) return;
+        if (equipped_index && !*stacks && pack_equipment_drop(manager, panel, origin, guid, item_class))
+        {
+            if (exact_canonical_drop_row(save, held, guid, saved_ammo, item_class))
+                host_drop_request = HostDropRequest{guid, 1, ++host_drop_sequence, false,
+                    now + request_lease, manager, screen, panel, "equipped_drag_to_floor"};
+            return;
+        }
+        if (equipped_index) return;
+        // Stock drag has already taken the item from the backpack. Restore that
+        // stock row before the coordinator captures and debits its exact GUID.
+        alignas(std::max_align_t) std::array<std::byte, 96> arguments{};
+        item->InitializeValue(arguments.data());
+        item->CopyCompleteValue(arguments.data(), held.value);
+        manager->ProcessEvent(restore, arguments.data());
+        const bool returned = success->GetPropertyValueInContainer(arguments.data());
+        const ItemView original{held.artifact, held.structure, arguments.data()};
+        const bool exact_return = returned && exact_canonical_drop_row(save, original, guid, saved_ammo, item_class);
+        item->DestroyValue(arguments.data());
+        if (!returned) return;
+        manager->ProcessEvent(clear, nullptr);
+        if (!exact_return) return;
+        host_drop_request = HostDropRequest{guid, *stacks ? saved_ammo : 1, ++host_drop_sequence, false,
+                                           now + request_lease, manager, screen, panel, "drag_to_floor"};
     }
 
     void intercept_host_drop(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
@@ -903,8 +1014,9 @@ namespace
         }
         if (!exact_class(card, card_path)) return;
         const auto candidate = card_item(card);
+        const auto equipped_index = drop_equipment_index(manager, candidate.panel);
         auto* item_class = object_value(field<Unreal::FClassProperty>(candidate.structure, item_class_name), candidate.value);
-        if (candidate.panel != panel || !item_class) return;
+        if ((candidate.panel != panel && !equipped_index) || !item_class) return;
         const auto stacks = silverfish::drop_item_class::stacks(Unreal::Cast<Unreal::UClass>(item_class));
         if (!stacks) return;
         const bool stack = *stacks;
@@ -925,7 +1037,8 @@ namespace
             (from_menu && (object_field(menu, STR("ItemManager")) != manager || !same_widget_player(menu))) ||
             !held_class || object_value(held_class, held.value) ||
             !live(card) || !same_widget_player(card) || object_field(card, STR("ItemManager")) != manager ||
-            !array_has_widget(panel, STR("Cards"), card, false))
+            (equipped_index ? object_field(candidate.panel, STR("ItemCard")) != card :
+             !array_has_widget(panel, STR("Cards"), card, false)))
             return;
 
         const GuidFields fields(candidate.structure);
@@ -934,10 +1047,24 @@ namespace
         const Guid guid = fields.read(candidate.value);
         const auto saved_ammo = count_field->GetPropertyValueInContainer(candidate.value);
         if (guid == Guid{} || (stack && (saved_ammo < 1 || saved_ammo > max_drop_ammo)) ||
-            !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class)) return;
+            !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class, equipped_index)) return;
+        if (equipped_index)
+        {
+            auto* hover = field<Unreal::FObjectProperty>(manager, STR("HoveredCard"));
+            auto* begin = stock_no_args(manager, Unreal::FName(STR("InitiateItemTake")));
+            auto* take = stock_no_args(manager, Unreal::FName(STR("FinalTakeItem")));
+            if (stack || !hover || !begin || !take) return;
+            hover->SetObjectPropertyValue(hover->ContainerPtrToValuePtr<void>(manager), card);
+            manager->ProcessEvent(begin, nullptr);
+            manager->ProcessEvent(take, nullptr);
+            if (!pack_equipment_drop(manager, panel, candidate.panel, guid, item_class) ||
+                !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class)) return;
+        }
         const auto count = stack ? saved_ammo : 1;
+        const auto entry = equipped_index ? (from_menu ? "equipped_context_menu" : "equipped_ctrl_click") :
+                                            (from_menu ? "context_menu" : "ctrl_click");
         host_drop_request = HostDropRequest{guid, count, ++host_drop_sequence, false, now + request_lease, manager,
-                                            screen, panel, from_menu ? "context_menu" : "ctrl_click"};
+                                            screen, panel, entry};
     }
 
     [[nodiscard]] bool request_current(const TransportRequest& request, Unreal::UObject* save)
@@ -1076,6 +1203,11 @@ namespace
             return;
         }
         const auto name = function->GetNamePrivate();
+        if (name == entries->insert_item)
+        {
+            intercept_drag_drop(iteration, context, function, parameters);
+            return;
+        }
         if (name == entries->drop_item || name == entries->action_drop)
         {
             intercept_host_drop(iteration, context, function, name == entries->action_drop);
@@ -1407,7 +1539,7 @@ namespace
         auto* panel = completed.panel.Get();
         if (!exact_drop_screen(manager, completed.screen.Get(), panel))
             return probe_result(lua, true, "screen_closed");
-        if (completed.entry == "context_menu")
+        if (completed.entry == "context_menu" || completed.entry == "equipped_context_menu")
         {
             const Unreal::FName close_name{STR("CloseContextMenu")};
             auto* close = stock_no_args(manager, close_name);

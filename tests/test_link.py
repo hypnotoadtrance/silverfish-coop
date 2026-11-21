@@ -501,6 +501,23 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
             "ok": True, "body": "rejoined",
         })
 
+    async def test_large_world_snapshot_is_compressed_and_game_datagrams_stay_independent(self):
+        world = {"ok": True, "gameplay": {"loot_sources": [
+            f"/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P:PersistentLevel.LootCrate_Small_BP_C_{index}"
+            for index in range(700)
+        ]}}
+
+        async def snapshot(_, request):
+            self.assertEqual(request, {"action": "snapshot"})
+            return world
+
+        self.application_handler = snapshot
+        self.assertGreater(len(link._encode_action(world, limit=100_000)), link._MAX_ACTION_BODY)
+        self.assertLess(len(link._encode_response(world, snapshot=True)), 4_096)
+        self.assertTrue((await self.connect_guest())["accepted"])
+        response, _ = await asyncio.gather(self.client.request({"action": "snapshot"}), self.exchange(1200))
+        self.assertEqual(response, world)
+
     async def test_application_invalid_body_and_handler_error_keep_link_usable(self):
         async def on_request(_, payload):
             if payload.get("fail"):

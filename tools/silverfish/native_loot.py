@@ -5,7 +5,7 @@ import math
 import time
 import uuid
 
-from . import native_host_save, party
+from . import native_host_save, native_pickup_audio, party
 from .authored_loot import (CRATES, DEFERRED_PRY_CLASSES, LEGACY_CRATE, key_unlock_only, lockable_container, loot_capacity, random_lid,
                             valid_item_transform, valid_lid_angle, valid_loot_trait_calls)
 from .native_gold import valid_guid
@@ -677,6 +677,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             host.party = candidate
             host.native_checkpoint_unsafe = False
             host.control.event("native_loot_claim_committed", revision=revision, **claimed)
+            native_pickup_audio.committed(host, pawn, operation_id, claimed["class_path"])
             return result
         if action == "seed":
             if not proof["lucky_looter"]:

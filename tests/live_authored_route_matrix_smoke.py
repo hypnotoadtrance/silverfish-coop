@@ -41,7 +41,8 @@ def select_routes(selectors):
     return routes
 
 
-async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=False, insomnia=False):
+async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=False, insomnia=False,
+                 check_network_budget=False):
     name = "authored-route-" + uuid.uuid4().hex[:8]
     campaign = ("--campaign", name)
     profile = ("--profile", name)
@@ -102,6 +103,11 @@ async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=Fals
         invite = await call("invite", *campaign, "--name", "Stock route observer", "--character", "Pathfinder")
         await launch(client_run, "client", "join", *profile, "--headless", "--invite", invite["invite_file"])
         current = await paired(routes[0].source)
+        if check_network_budget:
+            rated = await wait(run, lambda frame: len(frame.get("game", {}).get("native_replication_rates", {})) == 2)
+            rates = rated["game"]["native_replication_rates"]
+            assert all(row["cap_hz"] == min(row["stock_hz"], 24) for row in rates.values()), rates
+            evidence["native_replication_rates"] = rates
         if sleep_and_wipe:
             _, bed, actor = site(routes[0].source)
             await wait(run, lambda state: state.get("game", {}).get("native_rest_hook", {}).get("fresh") is True)
@@ -208,6 +214,12 @@ async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=Fals
             ), arrival
             leg["arrival"] = arrival
             leg["destination_epoch"] = current["zone_epoch"]
+        if check_network_budget:
+            journal = (client_run / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            covered = [entry for line in journal if (entry := json.loads(line)).get("event") == "native_zone_loading_transition"]
+            assert [entry["destination"] for entry in covered] == [route.destination for route in routes], covered
+            assert all(entry["covered"] for entry in covered), covered
+            evidence["loading_cover"] = covered
         if sleep_and_wipe:
             await act("native-guest-damage", target="guest")
             await wait(run, lambda state: state.get("gameplay", {}).get("players", {}).get("guest", {}).get("downed"))
@@ -246,6 +258,7 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--route", action="append", required=True, metavar="MAP@ENTRANCE[@ACTOR]")
     parser.add_argument("--verify-regroup-message", action="store_true")
+    parser.add_argument("--verify-network-budget", action="store_true")
     parser.add_argument("--sleep-and-wipe", action="store_true",
                         help="sleep at the starting map's stock bed and return there after a wipe")
     parser.add_argument("--stock-insomnia", action="store_true", help="verify the stock Insomnia roll at a neutral bed")
@@ -259,4 +272,5 @@ if __name__ == "__main__":
     except ValueError as error:
         parser.error(str(error))
     asyncio.run(verify(config.work.resolve(), config.vanilla_saved.resolve(), selected,
-                       config.verify_regroup_message, config.sleep_and_wipe, config.stock_insomnia))
+                       config.verify_regroup_message, config.sleep_and_wipe, config.stock_insomnia,
+                       config.verify_network_budget))

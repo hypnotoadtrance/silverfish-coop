@@ -18,7 +18,8 @@ BIND = "native-host-stack-drop-bind"
 FINISH = "native-host-stack-drop-finish"
 FIXTURE = "native-host-stack-drop-menu-fixture"
 CLOSE_FIXTURE = "native-host-stack-drop-menu-close-fixture"
-_ENTRIES = {"ctrl_click", "context_menu"}
+_ENTRIES = {"ctrl_click", "context_menu", "drag_to_floor",
+            "equipped_ctrl_click", "equipped_context_menu", "equipped_drag_to_floor"}
 
 
 def parse(fields: list[str], phase: str, area: str) -> dict:

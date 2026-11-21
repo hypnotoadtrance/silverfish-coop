@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, call, patch
 import uuid
 
-from tools.silverfish import native_guest_consumable, native_guest_weapon, runtime, service
+from tools.silverfish import native_guest_consumable, native_guest_ui, native_guest_weapon, party, runtime, service
 
 
 class NativeGuestControlInvitationTests(unittest.IsolatedAsyncioTestCase):
@@ -86,6 +86,34 @@ class NativeGuestControlInvitationTests(unittest.IsolatedAsyncioTestCase):
                 runtime.write_json(self.invite_file, {**self.invite, "native_guest_controls": controls, "native_zones": zones})
                 with self.assertRaisesRegex(ValueError, "Invitation"):
                     service.load_invite(self.invite_file, self.invite["game_build"])
+
+
+class NativeGuestUIOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    async def test_view_only_uses_the_authenticated_pawn_and_omits_unchanged_content(self):
+        area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+        character, other = str(uuid.uuid4()), str(uuid.uuid4())
+        host = SimpleNamespace(last_game={"state": "hosting", "map": area}, zone_epoch="c" * 32,
+                               transitioning=False, stopping=False, native_checkpoint_unsafe=False,
+                               native_recipients=lambda: {character: {"pawn": "exact-pawn", "connected": True}})
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            contents = f"{area}\t{character}\n".encode()
+
+            async def command(action, pawn, nonce, *, timeout):
+                self.assertEqual((action, pawn), (native_guest_ui.ACTION, "exact-pawn"))
+                (directory / f"native-guest-ui-{nonce}.tsv").write_bytes(contents)
+                return {"state": "hosting", "map": area, "ack": {"message": "captured co-op guest view"}}
+
+            bridge = SimpleNamespace(directory=directory, command=AsyncMock(side_effect=command))
+            with self.assertRaises(party.RuleError):
+                await native_guest_ui.capture(host, bridge, other, "-")
+            bridge.command.assert_not_awaited()
+            first = (await native_guest_ui.capture(host, bridge, character, "-"))["native_guest_ui"]
+            self.assertEqual(first["owner"], character)
+            self.assertIn("payload", first)
+            returned = (await native_guest_ui.capture(host, bridge, character, first["digest"]))["native_guest_ui"]
+            self.assertEqual(returned, {key: value for key, value in first.items() if key != "payload"})
+            self.assertEqual(list(directory.iterdir()), [])
 
 
 class NativeGuestInventoryUseTests(unittest.IsolatedAsyncioTestCase):

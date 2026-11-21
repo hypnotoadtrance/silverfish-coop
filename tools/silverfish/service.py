@@ -32,6 +32,7 @@ from .native_pickup import NativePickup, STAGED_SHOPS
 from . import native_guest_drop, native_guest_drop_projection, native_guest_drop_record
 from . import native_world_loot
 from . import native_guest_melee
+from . import native_guest_ui
 from . import native_host_dig, native_host_dig_live, native_host_landmine, native_package_handoff_journal
 from . import native_kill_volume
 from .native_roster import RosterEnrollment, _census
@@ -40,6 +41,7 @@ from . import native_borough_barter, native_dust_cabinet, native_mindcore, nativ
 from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore_carry, native_mindcore_view
 from . import native_stock_door
 from . import native_player_avatar
+from . import native_pickup_audio
 from . import native_loose_pickup
 from . import native_stock_enemy_drops
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
@@ -47,7 +49,7 @@ from . import native_prototype_drill
 from . import native_dead_drop, native_savlo_locker, native_subway_valve
 from .travel import (AUTHORED_EXITS, AUTHORED_MAPS, BLACK_OCEAN, BOROUGH, CISTERN, CROSSROADS, DEAD_BRIDGE, GOLD_NEXUS,
                      NOTHING, OBSERVATORY, PLAYTEST_MAPS, SLATE, travel_decision)
-from .runtime import (Bridge, MAP, WORLD_WEATHER_FIELDS, game_environment, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
+from .runtime import (Bridge, MAP, MENU, WORLD_WEATHER_FIELDS, game_environment, launch, native_death_backend, qualified_authored_routes, read_json, spare_udp_port, staged_build,
                       staged_guest_controls,
                       staged_script, stop_game, verify_loopback_socket, write_json, write_text)
 from .udp_ownership import owns_udp_port
@@ -76,6 +78,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         *native_computer_board.PREFLIGHTS, *native_flood_jammer.PREFLIGHTS, native_meet_broker.PREFLIGHT,
                         native_subway_valve.PREFLIGHT, native_subway_valve.ACTIVATE,
                         "native-inventory-list", native_inventory.SPLIT, native_inventory.SORT, native_stash.LIST, native_stash.MOVE,
+                        native_guest_ui.ACTION,
                         "native-loot-inspect", "native-loot-open", "native-loot-claim", *native_loot.PRY_TOOL_ACTIONS.values(),
                         native_stock_door.ACTION, *native_stock_door.PRY_ACTIONS.values(),
                         *native_guest_drop.ACTIONS,
@@ -242,6 +245,7 @@ class Host:
         self.loose_pickups = native_loose_pickup.Visibility()
         self.last_stock_enemy_drop_sequence = 0
         self.stock_drop_input = native_host_stack_drop.HostDropInput()
+        self.pickup_audio, self.pickup_playback = native_pickup_audio.PickupAudio(), native_pickup_audio.Playback()
         self.native_zone_walls = native_zone_walls
         self.native_profile = native_profile
         self.persist_native_guest = persist_native_guest
@@ -757,6 +761,8 @@ class Host:
     def public_gameplay(self) -> dict:
         view = party.public_state(self.party, self.roles(), test_fixtures=self.fixtures)
         view["host_world"] = self.native_world_state()
+        if cue_frame := self.pickup_audio.frame(self.last_game, self.zone_epoch):
+            view[native_pickup_audio.KEY] = cue_frame
         if (outfits := native_player_avatar.frame(self)) is not None:
             view[native_player_avatar.KEY] = outfits
         if type(self.last_game.get(native_stash.SETTING)) is bool:
@@ -1806,6 +1812,8 @@ class Host:
                     result = await native_stock_door.pry(self, bridge, character, target, request["operation_id"], kind)
             elif action == native_inventory.SORT:
                 result = await native_inventory.sort_backpack(self, bridge, character, target, request["operation_id"])
+            elif action == native_guest_ui.ACTION:
+                result = await native_guest_ui.capture(self, bridge, character, target)
             elif action == "native-inventory-list":
                 offset = target if target is not None else "0"
                 if not isinstance(offset, str) or not offset.isascii() or not offset.isdigit() or len(offset) > 4:
@@ -3699,6 +3707,9 @@ class Host:
                 except (OSError, ValueError, RuntimeError) as error:
                     self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, crate=crate, reason=str(error))
             await self.stock_drop_input.poll(self, bridge)
+            self.last_game = await self.pickup_playback.sync(
+                bridge, self.control, self.last_game, self.pickup_audio.frame(self.last_game, self.zone_epoch),
+                self.zone_epoch, self.control.generation)
             try:
                 if not shared_pickups:
                     await self.stack_drop_projection.sync_host(self, bridge)
@@ -4454,6 +4465,7 @@ class Client:
         self.viewer_role = "guest"
         self.expected_zone = None
         self.loot_tracking = None
+        self.pickup_playback = native_pickup_audio.Playback()
         self.next_snapshot = 0.0
         self.next_projection = 0.0
         self.gameplay_seen = 0.0
@@ -4465,6 +4477,7 @@ class Client:
         self.native_return_reservation: int | None = None
         self.native_return_retry_allowed = False
         self.empty_zone_retry = native_zone_rejoin.EmptyZoneRetry()
+        self.game_visit: tuple[str, str, str] | None = None
         self.last_reload_intent = 0
         self.guest_primary_input = guest_primary_input
         self.guest_held_input = native_smg_hold.GuestInput(self) if invite.get("native_guest_held_fire") else None
@@ -4473,6 +4486,7 @@ class Client:
         self.last_inventory_use = 0
         self.last_inventory_split = 0
         self.last_inventory_drop = 0
+        self.guest_ui = native_guest_ui.GuestView()
         self.inventory_view_scope = None
         self.inventory_drop_scope = None
         self.last_crate_intent = 0
@@ -4575,13 +4589,18 @@ class Client:
                                local_datagrams=self.transport.game_local_datagrams)
             raise
         self.needs_travel = False
+        self.game_visit = (self.host_session, self.zone_epoch, self.expected_zone) if self.invite.get("native_zones") else None
         self.empty_zone_retry.clear()
 
-    async def leave_for_rejoin(self, state: dict) -> None:
-        if state.get("state") != "ready":
-            left = await self.bridge.command("leave")
+    async def leave_for_rejoin(self, state: dict, cover: str | None = None) -> None:
+        if state.get("state") != "ready" or cover is not None:
+            arguments = (MENU, cover) if cover is not None else ()
+            left = await self.bridge.command("leave", *arguments)
             self.last_game = await self.bridge.wait_for(lambda snapshot: snapshot["state"] == "ready"
                                                         and snapshot["sequence"] > left["sequence"], timeout=15)
+            if cover is not None:
+                self.control.event("native_zone_loading_transition", destination=cover,
+                                   covered=self.last_game.get("native_zone_loading_cover") == cover)
 
     async def reconcile_game(self) -> None:
         state = self.bridge.snapshot()
@@ -4590,7 +4609,12 @@ class Client:
         self.last_game = state
         if not self.needs_travel and state.get("state") not in {"disconnected", "ready"}:
             return
-        await self.leave_for_rejoin(state)
+        previous = self.game_visit
+        if (previous and self.needs_travel and self.host_session == previous[0] and self.zone_epoch != previous[1]
+                and self.expected_zone != previous[2] and self.expected_zone in self.allowed_maps):
+            await self.leave_for_rejoin(state, self.expected_zone)
+        else:
+            await self.leave_for_rejoin(state)
         reservation, epoch = self.native_return_reservation, self.zone_epoch
         early_retry = reservation is not None and self.native_return_retry_allowed
         try:
@@ -5048,6 +5072,9 @@ class Client:
                 await self.downed_markers.sync(self)
                 await native_dead_drop.project_client(self)
                 if time.monotonic() - self.gameplay_seen < 3:
+                    self.last_game = await self.pickup_playback.sync(
+                        self.bridge, self.control, self.last_game, self.gameplay.get(native_pickup_audio.KEY),
+                        self.zone_epoch, self.host_session)
                     self.last_game = await native_player_avatar.project(
                         self.bridge, self.last_game, self.gameplay.get(native_player_avatar.KEY), self.zone_epoch)
                     self.last_game = await native_stock_door.project(
@@ -5363,6 +5390,7 @@ class Client:
         try:
             await self.run_session(pause_exit=pause_exit)
         finally:
+            await self.guest_ui.close()
             if pause_exit is not None:
                 pause_exit.close()
             if self.mindcore_carry:
@@ -5451,6 +5479,7 @@ class Client:
                 draft = self.gameplay.get("wipe") if active and time.monotonic() - self.gameplay_seen < 2 else None
                 self.last_game = await self.wipe_view.sync(self.last_game, draft, frozen_items, retain)
             await self.service_inventory_view(active)
+            await self.guest_ui.sync(self, active)
             await native_stash.service_view(self, active)
             await self.service_inventory_equip(active)
             await self.service_inventory_use(active)

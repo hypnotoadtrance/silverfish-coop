@@ -140,6 +140,7 @@ local function modes(owner)
 end
 
 local function singleplayer(owner)
+    title.refresh_singleplayer(owner.context)
     present(nil)
     show_stock(owner, true)
     owner.solo_back = controls.create(owner.context, owner.parent, "Back to modes", function()
@@ -386,7 +387,8 @@ local function fixture_enabled()
 end
 
 local function stock_profile_fixture(fields, state, phase)
-    if #fields ~= 2 or not fixture_enabled() or not title.probe(state, phase)
+    local inspect_cache = fields[3] == "cache"
+    if (#fields ~= 2 and not (#fields == 3 and inspect_cache)) or not fixture_enabled() or not title.probe(state, phase)
         or require("native_save_scope").selected() then error("title_stock_profile_unavailable", 0) end
     local instance = state.world.OwningGameInstance
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
@@ -408,11 +410,14 @@ local function stock_profile_fixture(fields, state, phase)
         end
         values[#values + 1] = tostring(value)
     end
+    local current, listed = instance.SaveSlot_Ref, instance.SaveFileExists
     local recent = {}
     instance:Find_MostRecentSaveFile(recent, recent)
     if not recent.SaveFileFound or not valid(recent.Save) or type(recent.Save.PlayerHealth) ~= "number" then
         error("title_stock_continue_unavailable", 0)
     end
+    if inspect_cache and (listed ~= true or not valid(current) or not same(current:GetClass(), recent.Save:GetClass())
+        or current.PlayerHealth ~= recent.Save.PlayerHealth) then error("title_stock_continue_cache_stale", 0) end
     values[#values + 1] = tostring(recent.Save.PlayerHealth)
     return table.concat(values, ":")
 end

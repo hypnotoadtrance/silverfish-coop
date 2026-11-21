@@ -1426,11 +1426,17 @@ namespace silverfish::shared_loot
     const authored_loot::Profile* authored_profile(Unreal::UObject* crate)
     {
         if (!live(crate)) return nullptr;
+        static const auto profiles_by_path = [] {
+            std::unordered_map<std::basic_string_view<Unreal::TCHAR>, const authored_loot::Profile*> index;
+            index.reserve(authored_loot::profiles.size());
+            for (const auto& profile : authored_loot::profiles) index.emplace(profile.actor, &profile);
+            return index;
+        }();
         const auto path = crate->GetPathName();
-        const auto& profiles = authored_loot::profiles;
-        const auto match = std::ranges::find_if(profiles, [&](const auto& entry) { return path == entry.actor; });
-        return match != profiles.end() && crate->GetClassPrivate() == find<Unreal::UClass>(match->stock_class->actor_class)
-            ? &*match : nullptr;
+        const auto match = profiles_by_path.find(path);
+        return match != profiles_by_path.end() &&
+                crate->GetClassPrivate() == find<Unreal::UClass>(match->second->stock_class->actor_class)
+            ? match->second : nullptr;
     }
 
     Unreal::UWorld* authored_crate_world(Unreal::UObject* crate, std::string_view* failure)

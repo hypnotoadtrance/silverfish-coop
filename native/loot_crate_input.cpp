@@ -37,6 +37,7 @@ namespace
     constexpr auto controller_path = STR("/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C");
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto lease = std::chrono::milliseconds(1500);
+    constexpr auto scene_recheck = std::chrono::milliseconds(900);
     constexpr auto receipt_lifetime = std::chrono::seconds(4);
     constexpr std::uint64_t max_sequence = (std::uint64_t{1} << 53) - 1;
     constexpr auto& profiles = silverfish::authored_loot::profiles;
@@ -253,7 +254,7 @@ namespace
         bool pried{};
         bool pry_started{};
         U::FWeakObjectPtr pry_guest{};
-        Clock::time_point tool_deadline{};
+        Clock::time_point tool_deadline{}, recheck_at{};
     };
     std::array<Scope, profiles.size()> scopes;
     std::uint64_t sequence{};
@@ -395,6 +396,18 @@ namespace
                 }
                 const auto index = static_cast<std::size_t>(profile_index - 1);
                 auto& scope = scopes[index];
+                const auto now = Clock::now();
+                auto* cached_pawn = scope.pawn.Get();
+                // The periodic observer may reuse a recent live scope. The input
+                // interceptor and open transaction still recheck the exact scene.
+                if (cached_pawn && pawn == reinterpret_cast<std::intptr_t>(cached_pawn) && scope.host == host &&
+                    now < scope.expires && now < scope.recheck_at && scope.crate.Get())
+                {
+                    scope.expires = now + lease;
+                    lua.set_bool(true);
+                    lua.set_string("bound");
+                    return 2;
+                }
                 auto* crate = find<U::AActor>(profiles[index].actor);
                 auto* world = silverfish::shared_loot::authored_crate_world(crate, &status);
                 if (world)
@@ -407,7 +420,8 @@ namespace
                         if (index == 0 || ready_profile(crate, world, &status))
                         {
                             if (!same_scope(scope, crate, local)) scope = {crate, local.pawn, host};
-                            scope.expires = Clock::now() + lease;
+                            scope.expires = now + lease;
+                            scope.recheck_at = now + scene_recheck;
                             status = "bound";
                         }
                     }

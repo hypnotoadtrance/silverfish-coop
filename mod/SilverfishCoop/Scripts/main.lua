@@ -5,6 +5,9 @@ local resident_title = os.getenv("SILVERFISH_COOP_RESIDENT_TITLE") == "1"
 local guest_save = require("guest_save")
 local loot = require("loot")
 local native_player_avatar = require("native_player_avatar")
+local native_replication_budget = require("native_replication_budget")
+local native_zone_loading = require("native_zone_loading")
+local native_pickup_audio = require("native_pickup_audio")
 local native_avatar_capture_fixture = require("native_avatar_capture_fixture")
 local native_bed = require("native_bed")
 local native_bag_projection = require("native_bag_projection")
@@ -63,6 +66,7 @@ local native_inventory = require("native_inventory")
 local native_stash = require("native_stash")
 local native_stash_view = require("native_stash_view")
 local native_inventory_view = require("native_inventory_view")
+local native_guest_ui = require("native_guest_ui")
 local native_wipe_inventory = require("native_wipe_inventory")
 local native_guest_stack_drop = require("native_guest_stack_drop")
 local native_host_stack_drop = require("native_host_stack_drop")
@@ -437,7 +441,8 @@ local function run_command(fields, state, current_phase)
     local argument = fields[3]
 
     if command == "native-save-scope-select" or command == "native-save-scope-release" then
-        if #fields ~= 3 or role ~= "idle" or not native_title_entry.probe(state, current_phase) then
+        local context = native_title_entry.probe(state, current_phase)
+        if #fields ~= 3 or role ~= "idle" or not context then
             error("Switch co-op save scope at the stock title", 0)
         end
         if command == "native-save-scope-select" then
@@ -445,6 +450,7 @@ local function run_command(fields, state, current_phase)
             return "selected co-op save scope"
         end
         native_save_scope.release(argument)
+        native_title_entry.refresh_singleplayer(context)
         native_fresh_campaign.clear()
         native_stock_creator.clear()
         return "released co-op save scope"
@@ -900,15 +906,19 @@ local function run_command(fields, state, current_phase)
         end
         native_death.clear_client()
         if #fields == 6 then native_death.admit_client(fields[4], fields[5], fields[6]) end
+        if resident_title and native_save_scope.selected() then native_save_scope.prepare_guest(state) end
         open_level(state.controller, argument, "")
         role = "client"
         was_connected = false
         return "client travel requested"
     elseif command == "leave" then
-        if #fields > 3 or (argument and argument ~= main_menu) then
+        local destination = fields[4]
+        if #fields > 4 or (argument and argument ~= main_menu)
+            or (destination and (role == "host" or not supported_map(destination))) then
             error("Expected the packaged title-screen map", 0)
         end
         native_death.clear_client()
+        if destination then native_zone_loading.begin(state, destination) else native_zone_loading.clear() end
         guest_save.clear()
         vitals.reset()
         if state.map ~= main_menu or state.listening or role == "client" then
@@ -954,6 +964,7 @@ local function run_command(fields, state, current_phase)
         or native_stash.command(fields, state, current_phase)
         or native_stash_view.command(fields, state, current_phase)
         or native_inventory_view.command(fields, state, current_phase)
+        or native_guest_ui.command(fields, state, current_phase, bridge)
         or native_bag_projection.command(fields, state, current_phase)
         or native_authored_pickup.command(fields, state, current_phase)
         or native_dust_cabinet.command(fields, state, current_phase)
@@ -1000,6 +1011,7 @@ local function run_command(fields, state, current_phase)
         or native_datasilo_door.command(fields, state, current_phase)
         or native_stock_door.command(fields, state, current_phase)
         or native_player_avatar.command(fields, state, current_phase)
+        or native_pickup_audio.command(fields, state, current_phase)
         or native_cistern_lockpick.command(fields, state, current_phase)
         or native_mindcore_fixture.command(fields, state, current_phase)
         or native_mindcore_carry.command(fields, state, current_phase)
@@ -1102,6 +1114,8 @@ local function write_status(state, current_phase, failure)
         end
     end
     for _, row in ipairs(native_player_avatar.rows(status_row)) do rows[#rows + 1] = row end
+    for _, row in ipairs(native_replication_budget.rows(status_row)) do rows[#rows + 1] = row end
+    for _, row in ipairs(native_zone_loading.rows(status_row)) do rows[#rows + 1] = row end
     local guest_save_row = guest_save.row(status_row)
     if guest_save_row then rows[#rows + 1] = guest_save_row end
     local guest_frame = guest_save.frame_row(status_row)
@@ -1352,6 +1366,7 @@ local function tick()
     native_mindcore_replication.sync(state, current_phase)
     native_datasilo_lift.sync(state, current_phase)
     native_datasilo_door.sync(state, current_phase)
+    pcall(native_zone_loading.sync, state, current_phase)
     native_title_panel.sync(state, current_phase)
     native_guest_armor.sync(state, current_phase)
     native_world_view.sync(state, current_phase)
@@ -1433,6 +1448,7 @@ local function tick()
         players.sync(state, current_phase)
         native_stash_view.sync(state, current_phase)
         native_player_avatar.sync(state, current_phase)
+        native_replication_budget.sync(state, current_phase)
         native_avatar_capture_fixture.sync(state, current_phase, native_player_avatar)
         native_host_invite.sync(state, current_phase)
         native_wire_board.sync(state, current_phase)

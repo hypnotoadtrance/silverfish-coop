@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 
-from . import party
+from . import native_pickup_audio, party
 from .authored_loot import valid_item_transform
 from .native_gold import valid_guid
 from .travel import BLACK_MARKET
@@ -295,6 +295,7 @@ async def claim(host, bridge, character, guid, operation):
         host.party = candidate
         host.native_checkpoint_unsafe = False
         host.control.event("native_stock_enemy_loot_claimed", revision=revision, operation_id=operation, **_public(committed))
+        native_pickup_audio.committed(host, pawn, operation, committed["class_path"])
         return result
     finally:
         if host.native_checkpoint_unsafe:

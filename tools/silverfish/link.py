@@ -11,6 +11,7 @@ import math
 import secrets
 import ssl
 import struct
+import zlib
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
@@ -47,6 +48,9 @@ GUEST_LEAVE_CONFIRM = "native-session-leave-confirm"
 _MAX_ADMISSION = 4096
 _MAX_ACTION_BODY = 32 * 1024
 _MAX_ACTION_FRAME = _MAX_ACTION_BODY + 64
+_MAX_SNAPSHOT_BODY = 256 * 1024
+_COMPRESS_SNAPSHOT_MINIMUM = 1024
+_COMPRESSED_SNAPSHOT = b"SFZ\x01"
 _MAX_ACTIONS = 8
 _ACTION_TIMEOUT = 8.0
 _CHECKPOINT_ACTION_TIMEOUTS = {
@@ -92,7 +96,8 @@ _FRAGMENT_SIZE = 1024
 _FRAGMENT_HEADER = struct.Struct("!IHH")
 _FRAGMENT_TTL = 1.0
 _MAX_ASSEMBLIES = 32
-_MAX_QUEUED_FRAMES = 256
+_MAX_QUEUED_FRAMES = 96
+_GAME_QUEUE_AGE = 0.120
 _MAX_CACHED_GUESTS = 16
 _MAX_CATALOG_LINKS = 16
 _MAX_HOST_TASKS = 32
@@ -324,6 +329,31 @@ def _decode_action(data: bytes) -> Action:
     return message
 
 
+def _encode_response(result: Action, *, snapshot: bool) -> bytes:
+    body = _encode_action(result, limit=_MAX_SNAPSHOT_BODY if snapshot else _MAX_ACTION_BODY)
+    frame = b'{"result":' + body + b"}"
+    if snapshot and len(frame) >= _COMPRESS_SNAPSHOT_MINIMUM:
+        compressed = _COMPRESSED_SNAPSHOT + zlib.compress(frame, level=1)
+        if len(compressed) < len(frame):
+            frame = compressed
+    if len(frame) > _MAX_ACTION_FRAME:
+        raise LinkError("application response too large")
+    return frame
+
+
+def _decode_response(frame: bytes) -> Action:
+    if frame.startswith(_COMPRESSED_SNAPSHOT):
+        decoder = zlib.decompressobj()
+        maximum = _MAX_SNAPSHOT_BODY + 16
+        try:
+            frame = decoder.decompress(frame[len(_COMPRESSED_SNAPSHOT):], maximum + 1)
+        except zlib.error:
+            raise LinkError("invalid compressed snapshot") from None
+        if len(frame) > maximum or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+            raise LinkError("invalid compressed snapshot")
+    return _decode_action(frame)
+
+
 def _application_stream(stream_id: int) -> bool:
     return stream_id > _ADMISSION_STREAM and stream_id % 4 == 0
 
@@ -407,6 +437,7 @@ class _LinkProtocol(QuicConnectionProtocol):
         self._admission_finished = False
         self._reassembler = _Reassembler()
         self._next_packet_id = 0
+        self._game_queue_started: float | None = None
 
     def send_admission(self, payload: bytes) -> None:
         self._quic.send_stream_data(_ADMISSION_STREAM, payload, end_stream=True)
@@ -415,10 +446,18 @@ class _LinkProtocol(QuicConnectionProtocol):
     def forward_game_packet(self, data: bytes) -> None:
         if not self.authorized or not self.game_access or self.terminated or not 0 < len(data) <= _MAX_GAME_PACKET:
             return
+        now = self._loop.time()
+        self._expire_game_queue(now)
         count = (len(data) + _FRAGMENT_SIZE - 1) // _FRAGMENT_SIZE
-        # aioquic 1.3.0 queues DATAGRAM writes until congestion control permits them.
-        if len(self._quic._datagrams_pending) + count > _MAX_QUEUED_FRAMES:
-            return
+        pending = self._quic._datagrams_pending
+        # Evict the oldest queued packet as a group when the path is congested.
+        # Unreal implements its own reliability above this datagram transport.
+        while len(pending) + count > _MAX_QUEUED_FRAMES:
+            evicted = pending.popleft()[:4]
+            while pending and pending[0][:4] == evicted:
+                pending.popleft()
+        if not pending:
+            self._game_queue_started = now
         packet_id = self._next_packet_id
         self._next_packet_id = (packet_id + 1) % 2**32
         for index in range(count):
@@ -426,6 +465,17 @@ class _LinkProtocol(QuicConnectionProtocol):
             frame = _FRAGMENT_HEADER.pack(packet_id, len(data), index)
             self._quic.send_datagram_frame(frame + data[start:start + _FRAGMENT_SIZE])
         self.transmit()
+
+    def _expire_game_queue(self, now: float) -> None:
+        if self._game_queue_started is not None and now - self._game_queue_started >= _GAME_QUEUE_AGE:
+            self._quic._datagrams_pending.clear()
+            self._game_queue_started = None
+
+    def transmit(self) -> None:
+        self._expire_game_queue(self._loop.time())
+        super().transmit()
+        if not self._quic._datagrams_pending:
+            self._game_queue_started = None
 
     def _admission_payload(self, event: events.StreamDataReceived) -> bytes | None:
         if event.stream_id != _ADMISSION_STREAM or self._admission_finished:
@@ -829,8 +879,7 @@ class HostLink:
                     result = await result
                 if not isinstance(result, dict):
                     raise LinkError("invalid application callback response")
-                _encode_action(result)
-                return _encode_action({"result": result}, limit=_MAX_ACTION_FRAME)
+                return _encode_response(result, snapshot=payload == {"action": "snapshot"})
         except TimeoutError:
             return _encode_action({"error": "timed_out"})
         except Exception:
@@ -1044,7 +1093,7 @@ class _ClientProtocol(_LinkProtocol):
         if not event.end_stream:
             return
         try:
-            envelope = _decode_action(bytes(action.body))
+            envelope = _decode_response(bytes(action.body))
             result = envelope.get("result")
             if envelope.keys() == {"result"} and isinstance(result, dict):
                 action.response.set_result(result)

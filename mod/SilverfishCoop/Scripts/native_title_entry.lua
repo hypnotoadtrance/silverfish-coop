@@ -98,6 +98,23 @@ function title.probe(state, phase)
     if report and report.state == "ready" then return report end
 end
 
+function title.refresh_singleplayer(context)
+    local instance = context.world.OwningGameInstance
+    if require("native_save_scope").selected() or not exact(instance, instance_path) then
+        error("title_stock_save_scope_unavailable", 0)
+    end
+    local recent = {}
+    instance:Find_MostRecentSaveFile(recent, recent)
+    if type(recent.SaveFileFound) ~= "boolean" or instance.SaveFileExists ~= recent.SaveFileFound
+        or recent.SaveFileFound and not exact(recent.Save, "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C") then
+        error("title_stock_save_refresh_failed", 0)
+    end
+    -- The stock title normally does this on BeginPlay, which can run while
+    -- the previous co-op save scope is still selected.
+    instance.SaveSlot_Ref = recent.SaveFileFound and recent.Save or nil
+    instance.CurrentSaveSlot = ""
+end
+
 local function name(object)
     return object and object:GetFullName() or "-"
 end

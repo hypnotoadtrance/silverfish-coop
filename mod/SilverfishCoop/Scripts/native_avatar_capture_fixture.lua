@@ -2,20 +2,28 @@
 local fixture = {}
 local enabled = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_FIXTURE_CAPTURE") == "1"
+local equipment = os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_EQUIPMENT") == "1"
 local ready_at, captured, framing, fill
 
 function fixture.sync(state, phase, avatar)
     if not enabled or captured or (phase ~= "hosting" and phase ~= "connected") or #state.guests ~= 1 then return end
     local local_pawn, peer = state.local_pawn.pawn, state.guests[1].pawn
     local camera, controller = local_pawn.Camera, state.controller
-    if not avatar.visible(peer) or not camera:IsValid() or not controller:IsValid() then return end
+    if not avatar.visible(peer) or equipment and not avatar.weapon_visible(peer)
+        or not camera:IsValid() or not controller:IsValid() then return end
     local target = peer:K2_GetActorLocation()
     if not framing then
-        local origin = camera:K2_GetComponentLocation()
-        local dx, dy = target.X - origin.X, target.Y - origin.Y
-        local distance = math.sqrt(dx * dx + dy * dy)
-        if distance < 1 then return end
-        framing = { X = target.X - dx * 210 / distance, Y = target.Y - dy * 210 / distance, Z = origin.Z + 24 }
+        if equipment then
+            local forward, right = peer:GetActorForwardVector(), peer:GetActorRightVector()
+            framing = { X = target.X + forward.X * 185 + right.X * 95, Y = target.Y + forward.Y * 185 + right.Y * 95,
+                Z = target.Z + 48 }
+        else
+            local origin = camera:K2_GetComponentLocation()
+            local dx, dy = target.X - origin.X, target.Y - origin.Y
+            local distance = math.sqrt(dx * dx + dy * dy)
+            if distance < 1 then return end
+            framing = { X = target.X - dx * 210 / distance, Y = target.Y - dy * 210 / distance, Z = origin.Z + 24 }
+        end
         local light_type = StaticFindObject("/Script/Engine.PointLight")
         if light_type:IsValid() then
             fill = state.world:SpawnActor(light_type,

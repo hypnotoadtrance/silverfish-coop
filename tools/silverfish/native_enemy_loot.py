@@ -5,7 +5,7 @@ import math
 import os
 import time
 
-from . import native_enemy_shells, native_host_save, native_loot, native_world_loot, party
+from . import native_enemy_shells, native_host_save, native_loot, native_pickup_audio, native_world_loot, party
 from .enemy_loot_profiles import BY_ACTOR, BY_MAP, SHELLS, for_roll
 from .native_downed_markers import location
 from .native_gold import valid_guid
@@ -405,6 +405,7 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
         del receipts[:-party.RECENT_ACTIONS]
         revision = await _commit(host, bridge, candidate, snapshot, require_guest_frames=frozenset({character} - {"host"}))
         host.control.event("native_enemy_loot_claim_committed", revision=revision, operation_id=operation, **report)
+        native_pickup_audio.committed(host, pawn, operation, committed["class_path"])
         return result
     except (OSError, RuntimeError, ValueError):
         if host.native_checkpoint_unsafe:

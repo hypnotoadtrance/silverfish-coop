@@ -11,9 +11,12 @@ local panel_path = "/Game/Classes/GUI/New/Components/InventoryPanel.InventoryPan
 local manager_path = "/Game/Classes/GUI/New/Components/ItemManager.ItemManager_C"
 local card_path = "/Game/Classes/GUI/New/Components/ItemCard.ItemCard_C"
 local context_path = "/Game/Classes/GUI/New/Components/ItemContextMenu.ItemContextMenu_C"
+local slot_path = "/Game/Classes/GUI/New/Components/ItemSlot.ItemSlot_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local item_count = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
+local entries = { ctrl_click = true, context_menu = true, drag_to_floor = true,
+    equipped_ctrl_click = true, equipped_context_menu = true, equipped_drag_to_floor = true }
 
 local function valid(object)
     return object and object:IsValid()
@@ -115,7 +118,29 @@ local function stock_drop(instance, pawn, controller, guid, count, entry)
     if not valid(card) or not same(card.ItemManager, manager) or not same(card.InventoryWidget, panel)
         or not matches(card.Item) then error("host_stack_drop_menu_fixture_card_unavailable", 0) end
 
-    if entry == "ctrl_click" then
+    local equipped = entry:match("^equipped_") ~= nil
+    local origin = panel
+    if equipped then
+        if not pistol then error("host_stack_drop_menu_fixture_requires_stock_pistol", 0) end
+        entry = entry:sub(10)
+        manager.HoveredCard = card
+        manager:EquipToNumberSlot(3)
+        local slots = manager.EquipSlots
+        for index = 1, slots:GetArrayNum() do
+            local slot = slots[index]
+            if exact(slot, slot_path) and named_row(card_item(slot.ItemCard), guid) then
+                origin, card = slot, slot.ItemCard
+                break
+            end
+        end
+        local equipped_row = select_row(save.PlayerEquipment, guid, row_item)
+        if same(origin, panel) or not same(origin.Target, pawn) or not matches(equipped_row) or not matches(card_item(card))
+            or select_row(save.PlayerBackpack, guid, row_item) then
+            error("host_stack_drop_menu_fixture_equipped_item_unavailable", 0)
+        end
+    end
+
+    if entry ~= "context_menu" then
         manager.HoveredCard = card
         if not same(manager.HoveredCard, card) then error("host_stack_drop_menu_fixture_selection_unverified", 0) end
     else
@@ -126,12 +151,26 @@ local function stock_drop(instance, pawn, controller, guid, count, entry)
         end
     end
 
-    -- Both presses occur before the coordinator can settle, so the second must be suppressed too.
-    for _ = 1, 2 do
-        if entry == "ctrl_click" then manager:DropItem() else manager:ActionDrop() end
+    -- Immediate stock commands can repeat before the coordinator settles.
+    local presses = (entry == "drag_to_floor" or equipped) and 1 or 2
+    for _ = 1, presses do
+        if entry == "ctrl_click" then
+            manager:DropItem()
+        elseif entry == "context_menu" then
+            manager:ActionDrop()
+        else
+            manager:InitiateItemTake()
+            manager:FinalTakeItem()
+            if manager.HoldingItem ~= true or not same(manager.ActiveReturnLocation, origin)
+                or not matches(manager.HeldItem) then error("host_stack_drop_menu_fixture_drag_unavailable", 0) end
+            manager:InsertItem(manager.DropLocation, -1)
+            if manager.HoldingItem ~= false then error("host_stack_drop_menu_fixture_drag_not_returned", 0) end
+        end
         local after, remaining = select_row(save.PlayerBackpack, guid, row_item)
         if not same(instance.SaveSlot_Ref, save) or not same(pawn.Save, save) or remaining ~= rows
-            or not matches(after) then error("mutation_unverified_host_stack_drop_menu_fixture_debit", 0) end
+            or not matches(after) or (equipped and select_row(save.PlayerEquipment, guid, row_item)) then
+            error("mutation_unverified_host_stack_drop_menu_fixture_debit", 0)
+        end
     end
     if pistol then return "stock pistol drop invoked with stored ammo " .. tostring(ammo) end
     return "stock drop invoked without direct inventory mutation"
@@ -165,7 +204,9 @@ function fixture.command(fields, state, phase)
     end
     local count, entry = math.tointeger(tonumber(fields[4])), fields[5]
     if command ~= menu_command or #fields ~= 5 or not count or count < 1 or count > 200 or tostring(count) ~= fields[4]
-        or (entry ~= "ctrl_click" and entry ~= "context_menu") then error("host_stack_drop_menu_fixture_arguments", 0) end
+        or not entries[entry] then
+        error("host_stack_drop_menu_fixture_arguments", 0)
+    end
     return stock_drop(instance, pawn, controller, guid, count, entry)
 end
 

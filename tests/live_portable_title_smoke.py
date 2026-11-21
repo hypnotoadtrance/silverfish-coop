@@ -206,6 +206,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         assert proof["sessions"][0]["guest_pid"] == proof["sessions"][1]["host_pid"]
         assert len({leg["campaign_id"] for leg in proof["sessions"]}) == 2
         for seat, (hashes, preferences) in zip(seats, baselines, strict=True):
+            for key in ("singleplayer", "modes", "multiplayer", "modes", "singleplayer"):
+                button = await seat.bridge.command("native-title-button-fixture", key)
+                await seat.bridge.wait_for(lambda frame: frame["sequence"] > button["sequence"])
+            cached = await seat.bridge.command("native-title-stock-profile-fixture", "cache")
+            assert cached["ack"]["message"] == preferences
             observed = stock_save_hashes(seat.profile)
             del observed["Config.sav"]
             assert observed == hashes and await stock_profile(seat.bridge) == preferences

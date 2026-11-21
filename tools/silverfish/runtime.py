@@ -64,6 +64,9 @@ REPO = Path(__file__).resolve().parents[2]
 AUTHORED_PICKUP_TARGETS = frozenset(source.encode("ascii") for source in native_authored_pickup.SOURCES)
 SHIPPING = Path("SilverFish/Binaries/Win64/SilverFish-Win64-Shipping.exe")
 PAKS = Path("SilverFish/Content/Paks")
+STARTUP_MOVIES = frozenset(Path("SilverFish/Content/Movies") / name for name in (
+    "PendrakeLogo_v3.mp4", "PhotoWarning.mp4", "SP_Logo_Quiet.mp4", "UE4_Startup_Moving_Logo_1088_60.mp4",
+))
 JAMMER_ROWS = {
     spec.command(verb): (spec, verb)
     for spec in native_flood_jammer.CONTRACTS.values()
@@ -167,7 +170,8 @@ def prepare_game(work: Path, source: Path, ue4ss: Path, signatures: Path | None,
         if not (ue4ss / relative).is_file():
             raise ValueError(f"UE4SS release folder is missing {relative}")
 
-    files = _manifest_paths(source)
+    # Startup movies can play through media audio even with Unreal's -nosound.
+    files = [path for path in _manifest_paths(source) if path not in STARTUP_MOVIES]
     work.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".stage-", dir=work) as temporary:
         building = Path(temporary) / "stage"
@@ -684,6 +688,8 @@ class Bridge:
         self.wire_board_offset = 0
         self.dialogue_offset = 0
         self.mosby_station_offset = 0
+        self._status_text = ""
+        self._status_snapshot: dict | None = None
 
     def interactions(self) -> list[tuple[str, str | None]]:
         """Consume complete local input records once, even if writing is in progress."""
@@ -1057,8 +1063,12 @@ class Bridge:
         return requests
 
     def snapshot(self) -> dict | None:
+        """Return the current read-only bridge frame, parsing each write once."""
         try:
             text = (self.directory / "status.tsv").read_text(encoding="utf-8")
+            if text == getattr(self, "_status_text", None):
+                return self._status_snapshot
+            self._status_text, self._status_snapshot = text, None
             data = {"pawns": {}, "player_effects": {}, "loot_actors": []}
             quest_rows, board_rows = [], []
             dialogue_frame, dialogue_progress, dialogue_lines, dialogue_choices = None, None, [], []
@@ -2471,20 +2481,36 @@ class Bridge:
                         "id": None if fields[1] == "-" else fields[1],
                         "location": [_finite(axis) for axis in fields[2:5]], "name": fields[5],
                     })
+                elif (fields[0] == "native-zone-loading-cover" and len(fields) == 2
+                      and fields[1].startswith("/Game/Classes/Maps/")):
+                    data["native_zone_loading_cover"] = fields[1]
+                elif fields[0] == "native-replication-rate" and len(fields) == 4 and data.get("state") == "hosting":
+                    before, effective = _finite(fields[2]), _finite(fields[3])
+                    if fields[1].startswith("Player_FP_C ") and 0 < effective <= before <= 1000:
+                        data.setdefault("native_replication_rates", {})[fields[1]] = {"stock_hz": before, "cap_hz": effective}
                 elif fields[0] == "pawn" and len(fields) in (8, 9):
                     data["pawns"][fields[1]] = {"name": fields[2], "health": _finite(fields[3]),
                                                "location": [_finite(axis) for axis in fields[4:7]],
                                                "controller": fields[7],
                                                "max_health": _finite(fields[8]) if len(fields) == 9 else None}
-                elif fields[0] == "native-player-avatar" and len(fields) in (5, 8):
+                elif fields[0] == "native-player-avatar" and len(fields) in (5, 8, 10, 11):
                     area, pawn, status, diagnostic = fields[1:5]
                     if area == data.get("map") and status in ("default_body", "stock_body", "unavailable"):
                         avatar = {"state": status, "diagnostic": diagnostic}
-                        if len(fields) == 8:
-                            player_id, body, head = fields[5:]
+                        if len(fields) >= 8:
+                            player_id, body, head = fields[5:8]
                             if (player_id == "-" or native_player_avatar.valid_id(player_id)) and all(
                                     map(native_player_avatar.valid_path, (body, head))):
                                 avatar.update(player_id=None if player_id == "-" else int(player_id), body=body, head=head)
+                        if len(fields) >= 10:
+                            head_roll = _finite(fields[8])
+                            meshes = native_player_avatar.weapon_meshes(fields[9])
+                            if meshes is not None:
+                                avatar.update(head_roll=head_roll, weapon_meshes=meshes)
+                        if len(fields) == 11:
+                            appearance = native_player_avatar.character_appearance(fields[10])
+                            if appearance is not None:
+                                avatar["appearance"] = appearance
                         data.setdefault("native_player_avatars", {})[pawn] = avatar
                 elif fields[0] == native_player_avatar.TAG:
                     player_id, outfit = native_player_avatar.parse(fields, data.get("state"), data.get("map"))
@@ -2562,12 +2588,13 @@ class Bridge:
                         data["native_matrix"] = parse_matrix_report(matrix_rows)
                     except ValueError:
                         data["native_matrix_error"] = "invalid_stock_report"
+                self._status_snapshot = data
                 return data
         except (OSError, UnicodeError, ValueError):
             return None
         return None
 
-    async def wait_for(self, condition, timeout: float = 30) -> dict:
+    async def wait_for(self, condition, timeout: float = 30, *, interval: float = .15) -> dict:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while loop.time() < deadline:
@@ -2576,7 +2603,7 @@ class Bridge:
             snapshot = self.snapshot()
             if snapshot is not None and condition(snapshot):
                 return snapshot
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(interval)
         raise TimeoutError("The game bridge did not reach the requested state")
 
     async def command(self, action: str, *arguments: str, timeout: float = 8) -> dict:
@@ -2584,7 +2611,7 @@ class Bridge:
         if any(len(value) > 1024 or "\t" in value or "\r" in value or "\n" in value for value in fields):
             raise ValueError("Invalid game bridge command value")
         write_text(self.directory / "command.tsv", "\t".join(fields) + "\n")
-        status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout)
+        status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout, interval=.05)
         ack = status["ack"]
         if ack["result"] != "accepted":
             raise RuntimeError(ack["message"] or f"The game declined the {action} command")

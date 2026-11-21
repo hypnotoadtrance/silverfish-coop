@@ -3,7 +3,7 @@
 import asyncio
 import time
 
-from . import native_black_box, native_dead_drop, native_dust_cabinet, native_host_save, native_savlo_locker, party
+from . import native_black_box, native_dead_drop, native_dust_cabinet, native_host_save, native_pickup_audio, native_savlo_locker, party
 from .authored_cash import BY_SOURCE as STOCK_CASH
 from .authored_supply import BY_SOURCE as STOCK_SUPPLIES, CRASH_SITE
 from .native_dialogue import PROTOTYPE_QUEST
@@ -404,4 +404,5 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
     host.party = candidate
     host.native_checkpoint_unsafe = False
     host.control.event("native_authored_pickup_committed", revision=revision, operation_id=operation_id, **row)
+    native_pickup_audio.committed(host, pawn, operation_id, row["class_path"])
     return result
