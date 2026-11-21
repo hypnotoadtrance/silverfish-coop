@@ -80,6 +80,7 @@ class Item:
     transform: dict
     claim_action: str
     claim_target: str
+    stack_count: int
     ground_snap: bool = False
 
 
@@ -92,7 +93,8 @@ def _crate_items(rolls, area):
             guid = row.get("guid")
             if valid_guid(guid) and not row.get("claimed_by"):
                 identity = uuid.uuid5(uuid.NAMESPACE_OID, f"{roll_id}:{guid}").hex
-                yield Item(identity, row.get("class_path"), row.get("transform"), CRATE_CLAIM, f"{guid}@{crate}")
+                yield Item(identity, row.get("class_path"), row.get("transform"), CRATE_CLAIM, f"{guid}@{crate}",
+                           _display_count(row.get("ammo")))
 
 
 def _enemy_items(frame, rolls, area, zone):
@@ -111,7 +113,8 @@ def _enemy_items(frame, rolls, area, zone):
             continue
         identity = uuid.uuid5(uuid.NAMESPACE_OID, f"enemy-loot:{guid}").hex
         transform = {"position": row["position"], "rotation": [0, 0, 0], "scale": [1, 1, 1]}
-        yield Item(identity, row.get("class_path"), transform, ENEMY_CLAIM, f"{native_enemy_shells.PREFIX}{zone}:{guid}")
+        yield Item(identity, row.get("class_path"), transform, ENEMY_CLAIM, f"{native_enemy_shells.PREFIX}{zone}:{guid}",
+                   _display_count(row.get("quantity")))
 
 
 def player_drop_identity(drop_id):
@@ -129,7 +132,7 @@ def _player_items(drops, area):
             continue
         transform = {"position": row.get("location"), "rotation": [0, 0, 0], "scale": [1, 1, 1]}
         yield Item(player_drop_identity(drop_id), row["class_path"], transform,
-                   native_guest_drop_record.PICKUP_ACTION, drop_id, True)
+                   native_guest_drop_record.PICKUP_ACTION, drop_id, row["quantity"], ground_snap=True)
 
 
 def stock_enemy_identity(guid):
@@ -141,7 +144,12 @@ def _stock_enemy_items(drops, area):
         return
     for guid, row in drops.items():
         if valid_guid(guid) and isinstance(row, dict) and row.get("map") == area:
-            yield Item(stock_enemy_identity(guid), row.get("class_path"), row.get("transform"), native_stock_enemy_drops.CLAIM, guid)
+            yield Item(stock_enemy_identity(guid), row.get("class_path"), row.get("transform"),
+                       native_stock_enemy_drops.CLAIM, guid, _display_count(row.get("ammo")))
+
+
+def _display_count(value):
+    return value if type(value) is int and 0 < value < 2**31 else 0
 
 
 def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drops=None, stock_enemy_drops=None):
@@ -188,7 +196,7 @@ class Projection:
         for identity in self.retired:
             self.items.pop(identity, None)
         args = tuple("|".join((identity, item.class_path, *(("ground",) if item.ground_snap else ()), *(str(axis)
-            for field in ("position", "rotation", "scale") for axis in item.transform[field])))
+            for field in ("position", "rotation", "scale") for axis in item.transform[field]), str(item.stack_count)))
             for identity, item in sorted(self.items.items()))
         signature = (epoch, args)
         now = time.monotonic()

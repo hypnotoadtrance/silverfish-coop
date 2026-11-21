@@ -801,8 +801,8 @@ function inventory_view.command(fields, state, phase)
             if same(screen.FloorActors[index], actor) then guid = stock_item_guid(screen.FloorItems[index]); break end
         end
         if #fields == 4 then
-            local displayed = stock_cards(screen, stock_session.save, fields[4], 1)
             local probe = stock_session.floor_probe
+            local displayed = probe and stock_cards(screen, stock_session.save, fields[4], probe.count)
             local removed = probe and probe.path == fields[3]
             for index = 1, removed and screen.FloorPanel.Cards:GetArrayNum() or 0 do
                 if stock_card_guid(widget_at(screen.FloorPanel.Cards, index)) == probe.guid then removed = false; break end
@@ -815,11 +815,16 @@ function inventory_view.command(fields, state, phase)
         for index = 1, guid and screen.FloorPanel.Cards:GetArrayNum() or 0 do
             local card = widget_at(screen.FloorPanel.Cards, index)
             if stock_card_guid(card) == guid then
+                local count = math.max(1, card.Item[item_ammo])
+                local label = count > 1 and "x" .. count or nil
+                if label and card.Count:GetText():ToString() ~= label then
+                    error("The stock Nearby Items stack label does not match the item card", 0)
+                end
                 screen.ItemManager:OpenContextMenu(card)
                 screen.ItemManager:ActionPickup()
                 if valid(actor) and actor.bHidden == false then
-                    stock_session.floor_probe = {path = fields[3], guid = guid}
-                    return "stock Nearby Items card requested"
+                    stock_session.floor_probe = {path = fields[3], guid = guid, count = count}
+                    return "stock Nearby Items card requested" .. (label and " " .. label or "")
                 end
                 break
             end

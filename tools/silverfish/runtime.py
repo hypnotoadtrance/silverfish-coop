@@ -2222,20 +2222,25 @@ class Bridge:
                     if failure["id"] in errors:
                         raise ValueError("Duplicate stock world loot projection error")
                     errors[failure["id"]] = failure
-                elif fields[0] == "native-loot-item" and len(fields) in (3, 4, 13) and "native_loot" in data:
+                elif fields[0] == "native-loot-item" and len(fields) in (3, 4, 13, 14) and "native_loot" in data:
                     loot = data["native_loot"]
                     if len(loot["items"]) >= loot["item_count"]:
                         raise ValueError("Stock container reported more rows than its receipt")
                     item = {"actor": fields[1], "class_path": fields[2]}
                     if len(fields) >= 4:
                         item["guid"] = fields[3]
-                    if len(fields) == 13:
-                        transform = dict(position=list(map(_finite, fields[4:7])),
-                                         rotation=list(map(_finite, fields[7:10])),
-                                         scale=list(map(_finite, fields[10:13])))
+                    if len(fields) >= 13:
+                        position, rotation, scale = fields[-9:-6], fields[-6:-3], fields[-3:]
+                        transform = dict(position=list(map(_finite, position)),
+                                         rotation=list(map(_finite, rotation)), scale=list(map(_finite, scale)))
                         if not valid_item_transform(transform):
                             raise ValueError("Stock loot actor reported an invalid transform")
                         item["transform"] = transform
+                        if len(fields) == 14:
+                            raw_ammo = int(fields[4])
+                            if not -(2**31) <= raw_ammo < 2**31:
+                                raise ValueError("Stock loot actor reported invalid ammo")
+                            item["ammo"] = raw_ammo
                     loot["items"].append(item)
                 elif fields[0] == "native-loot-cash" and len(fields) == 5 and "native_loot" in data:
                     loot = data["native_loot"]

@@ -159,16 +159,18 @@ local function item_frame(fields, state, phase)
         local values = {}
         for value in fields[index]:gmatch("[^|]+") do values[#values + 1] = value end
         local id, class = values[1], values[2]
-        local snap = #values == 12 and values[3] == "ground"
-        if (#values ~= 11 and not snap) or not identifier(id) or incoming[id] or #class > 256
+        local snap = #values == 13 and values[3] == "ground"
+        local stack_count = math.tointeger(values[#values])
+        if (#values ~= 12 and not snap) or not identifier(id) or incoming[id] or #class > 256
+            or not stack_count or stack_count < 0 or stack_count > 2147483647
             or not class:match("^/Game/Classes/[%w_./%-]+_C$") then error("world_loot_item_identity_invalid", 0) end
         local transform = {}
-        for axis = snap and 4 or 3, #values do
+        for axis = snap and 4 or 3, #values - 1 do
             local value = tonumber(values[axis])
             if not coordinate(value) then error("world_loot_item_transform_invalid", 0) end
             transform[#transform + 1] = value
         end
-        incoming[id] = { class = class, transform = transform, snap = snap }
+        incoming[id] = { class = class, transform = transform, snap = snap, stack_count = stack_count }
     end
     local changed = false
     for id, entry in pairs(world_items) do
@@ -196,11 +198,12 @@ local function item_frame(fields, state, phase)
             local visual_z = previous and previous.visual_z
             if not visual_z then visual_z = item.snap and floor_z(state, t) or t[3] end
             local ok, reason = SilverfishSyncNativeWorldLootItem(pawn:GetAddress(), epoch, id,
-                t[1], t[2], visual_z, visual_z, item.class, t[4], t[5], t[6], t[7], t[8], t[9], slot)
+                t[1], t[2], visual_z, visual_z, item.class, t[4], t[5], t[6], t[7], t[8], t[9], item.stack_count, slot)
             world_items[id] = { map = area, epoch = epoch, pawn = pawn, world = state.world,
                 class = item.class, slot = slot, visual_z = visual_z,
+                stack_count = item.stack_count,
                 error = not ok and (reason or "stock_drop_projection_unavailable") or nil }
-            changed = changed or (ok and (not previous or previous.error ~= nil))
+            changed = changed or (ok and (not previous or previous.error ~= nil or previous.stack_count ~= item.stack_count))
             if not ok then errors = errors + 1 end
         end
     end

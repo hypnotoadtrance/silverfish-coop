@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -77,6 +78,7 @@ namespace
         Position source{};
         Position rotation{}, scale{1, 1, 1};
         double visual_z{};
+        int stack_count{};
         Clock::time_point expiry{};
         std::int64_t intent{}, last_press{};
         Clock::time_point intent_expiry{};
@@ -762,14 +764,16 @@ namespace
         auto& [projection, lease] = entry;
         const auto arguments = lua.get_stack_size();
         const bool stock_loot = &entry != &projections.front();
-        if (!ready() || (stock_loot ? arguments != 14 : arguments != 7 && arguments != 8) ||
+        if (!ready() || (stock_loot ? arguments != 15 : arguments != 7 && arguments != 8) ||
             !lua.is_integer(1) || !lua.is_string(2) || !lua.is_string(3) ||
             (arguments >= 8 && !lua.is_string(8)))
             return report(lua, false, "stock_drop_projection_sync_arguments");
         for (int index = 4; index <= 7; ++index)
             if (!lua.is_number(index)) return report(lua, false, "stock_drop_projection_position_arguments");
-        for (int index = 9; index <= arguments; ++index)
+        for (int index = 9; index <= std::min(arguments, 14); ++index)
             if (!lua.is_number(index)) return report(lua, false, "stock_drop_projection_transform_arguments");
+        if (stock_loot && !lua.is_integer(15))
+            return report(lua, false, "stock_drop_projection_stack_count_invalid");
         const auto address = static_cast<std::uintptr_t>(lua.get_integer());
         const std::string epoch{lua.get_string()}, id{lua.get_string()};
         Position source{};
@@ -790,6 +794,7 @@ namespace
             return report(lua, false, "stock_drop_projection_class_unqualified");
         }
         Position rotation{}, scale{1, 1, 1};
+        int stack_count{};
         if (stock_loot)
         {
             for (auto& angle : rotation) angle = lua.get_number();
@@ -797,6 +802,10 @@ namespace
             if (!std::ranges::all_of(rotation, [](double angle) { return std::abs(angle) <= 360; }) ||
                 !std::ranges::all_of(scale, [](double factor) { return factor != 0 && std::abs(factor) <= 100; }) ||
                 visual != source[2]) return report(lua, false, "stock_drop_projection_transform_unqualified");
+            const auto count = lua.get_integer();
+            if (count < 0 || count > std::numeric_limits<int>::max())
+                return report(lua, false, "stock_drop_projection_stack_count_invalid");
+            stack_count = static_cast<int>(count);
         }
         auto* pawn = input::current_local_pawn(address);
         auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
@@ -823,6 +832,7 @@ namespace
             object(existing, STR("Box")) == projection.box.Get())
         {
             lease.expiry = Clock::now() + heartbeat;
+            lease.stack_count = stack_count;
             if (lease.visible || (inert(existing) && show(lease, existing))) return report(lua, true, "projected");
             clear(entry);
             return report(lua, false, "stock_drop_projection_reappear_unverified");
@@ -842,6 +852,7 @@ namespace
         lease.id = id;
         lease.source = source;
         lease.visual_z = visual;
+        lease.stack_count = stack_count;
         lease.expiry = Clock::now() + heartbeat;
         if (const auto* failure = spawn_projection(entry))
         {
@@ -866,8 +877,8 @@ namespace
 
     int sync_world_item(const Lua& lua)
     {
-        if (lua.get_stack_size() != 15) return report(lua, false, "stock_drop_projection_sync_arguments");
-        auto* entry = requested_projection(lua, 15);
+        if (lua.get_stack_size() != 16) return report(lua, false, "stock_drop_projection_sync_arguments");
+        auto* entry = requested_projection(lua, 16);
         if (!entry || entry == &projections.front()) return report(lua, false, "stock_drop_projection_slot_unqualified");
         return sync_projection(lua, *entry);
     }
@@ -923,6 +934,15 @@ namespace silverfish::native_guest_drop_projection
     bool owns_actor(U::UObject* actor)
     {
         return projection_for(actor) != nullptr;
+    }
+
+    std::optional<int> nearby_stack_count(U::UObject* actor, U::UObject* pawn)
+    {
+        auto* entry = projection_for(actor);
+        if (!entry || !entry->lease.stack_count || !entry->lease.visible ||
+            entry->lease.pawn.Get() != pawn || !scope_current(entry->lease) || !inert(actor)) return {};
+        auto* defaults = actor->GetClassPrivate()->GetClassDefaultObject().Get();
+        return boolean(defaults, STR("Stacks"), true) ? std::optional{entry->lease.stack_count} : std::nullopt;
     }
 
     bool queue_nearby_pickup(U::UObject* actor, U::UObject* pawn)

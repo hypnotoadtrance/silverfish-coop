@@ -460,7 +460,7 @@ namespace
     constexpr auto drop_lease = std::chrono::milliseconds(1800);
     constexpr auto drop_settle = std::chrono::milliseconds(750);
     std::atomic<bool> installed{};
-    std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
+    std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
 
     bool ready() { return U::IsInGameThreadRaw() && installed.load(std::memory_order_acquire); }
 
@@ -1161,6 +1161,7 @@ namespace
         U::FClassProperty* klass = field<U::FClassProperty>(type, STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81"));
         U::FStructProperty* payload = field<U::FStructProperty>(type, STR("DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"));
         U::FStructProperty* guid = field<U::FStructProperty>(type, STR("GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"));
+        U::FIntProperty* ammo = field<U::FIntProperty>(type, STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"));
         std::array<U::FIntProperty*, 4> words{};
 
         bool bind()
@@ -1221,11 +1222,12 @@ namespace
             return left && right && left->GetPropertyValueInContainer(value) == right->GetPropertyValueInContainer(actor);
         }
 
-        bool matches_actor(const void* value, U::UObject* actor) const
+        bool matches_actor(const void* value, U::UObject* actor, std::optional<int> display_count = {}) const
         {
             auto* actor_payload = field<U::FStructProperty>(actor, STR("DataStruct"));
             return authored(value, actor->GetClassPrivate()) && actor_payload && actor_payload->GetStruct().Get() == payload->GetStruct().Get() &&
-                matches<U::FIntProperty>(value, actor, STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"), STR("Ammo")) &&
+                (display_count ? ammo && ammo->GetPropertyValueInContainer(value) == *display_count :
+                    matches<U::FIntProperty>(value, actor, STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"), STR("Ammo"))) &&
                 matches<U::FDoubleProperty>(value, actor, STR("Weight_12_11AB9ED547504E78A849A692A36DC938"), STR("Weight")) &&
                 matches<U::FIntProperty>(value, actor, STR("Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9"), STR("Value")) &&
                 matches<U::FNameProperty>(value, actor, STR("DataTag_22_F7E8E22945F4F943ADE1AE85C4A2B99D"), STR("DataTag")) &&
@@ -1258,6 +1260,37 @@ namespace
         bool matching_row{};
     };
 
+    constexpr auto inventory_screen = STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C");
+
+    void fill_nearby_stack_counts(U::UObject* screen, U::UFunction* function)
+    {
+        static const U::FName find_items{STR("FindFloorItems")};
+        if (!function || function->GetFName() != find_items || !ready() || !live(screen) ||
+            !exact(screen, inventory_screen) || function->GetOuterPrivate() != screen->GetClassPrivate() ||
+            function->GetNumParms() != 0 || function->GetReturnProperty() ||
+            function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
+        auto* pawn = object(screen, STR("PlayerFP"));
+        if (!pawn || silverfish::native_interaction_input::current_local_pawn(address(pawn)) != pawn) return;
+        auto* items_property = field<U::FArrayProperty>(screen, STR("FloorItems"));
+        auto* actors_property = field<U::FArrayProperty>(screen, STR("FloorActors"));
+        auto* item_property = items_property ? U::CastField<U::FStructProperty>(items_property->GetInner()) : nullptr;
+        auto* actor_property = actors_property ? U::CastField<U::FObjectProperty>(actors_property->GetInner()) : nullptr;
+        if (!item_property || !actor_property) return;
+        U::FScriptArrayHelper items(items_property, items_property->ContainerPtrToValuePtr<void>(screen));
+        U::FScriptArrayHelper actors(actors_property, actors_property->ContainerPtrToValuePtr<void>(screen));
+        if (!items.Num() || items.Num() != actors.Num() || items.Num() > 2048) return;
+        RowSchema rows;
+        if (item_property->GetStruct().Get() != rows.type || !rows.ammo || !rows.bind()) return;
+        for (int i = 0; i < items.Num(); ++i)
+        {
+            auto* actor = actor_property->GetObjectPropertyValue(actors.GetRawPtr(i));
+            const auto count = silverfish::native_guest_drop_projection::nearby_stack_count(actor, pawn);
+            auto* item = items.GetRawPtr(i);
+            if (count && rows.matches_actor(item, actor))
+                rows.ammo->SetPropertyValueInContainer(item, *count);
+        }
+    }
+
     FloorSelection nearby_selection(U::UObject* screen, const RowSchema& rows, const Guid& wanted)
     {
         if (wanted == Guid{}) return {};
@@ -1275,7 +1308,9 @@ namespace
         {
             if (rows.identity(items.GetRawPtr(i)) != wanted) continue;
             auto* actor = actor_property->GetObjectPropertyValue(actors.GetRawPtr(i));
-            return {actor, live(actor) && rows.matches_actor(items.GetRawPtr(i), actor)};
+            const auto count = silverfish::native_guest_drop_projection::nearby_stack_count(
+                actor, object(screen, STR("PlayerFP")));
+            return {actor, live(actor) && rows.matches_actor(items.GetRawPtr(i), actor, count)};
         }
         return {};
     }
@@ -1307,9 +1342,8 @@ namespace
 
     void intercept_floor_pickup(Iteration& call, U::UObject* screen, U::UFunction* function, const void* args)
     {
-        constexpr auto screen_path = STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C");
         constexpr auto remove_path = STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C:RemoveItem");
-        if (!args || !live(screen) || !exact(screen, screen_path) || function != find<U::UFunction>(remove_path) ||
+        if (!args || !live(screen) || !exact(screen, inventory_screen) || function != find<U::UFunction>(remove_path) ||
             function->GetOuterPrivate() != screen->GetClassPrivate() || function->GetNumParms() != 4 ||
             function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
 
@@ -2487,7 +2521,7 @@ namespace silverfish::native_authored_pickup
     bool queue_nearby_pickup(U::UObject* screen, U::UObject* pawn, const Guid& guid)
     {
         if (!ready() || !live(screen) ||
-            !exact(screen, STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"))) return false;
+            !exact(screen, inventory_screen)) return false;
         RowSchema rows;
         if (!rows.bind()) return false;
         const auto selected = nearby_selection(screen, rows, guid);
@@ -2535,6 +2569,14 @@ namespace silverfish::native_authored_pickup
             [](Iteration& call, U::UObject* context, U::FFrame& frame, void*) {
                 intercept(call, context, frame.Node(), frame.Locals(), &frame);
             }, {false, false, STR("SilverfishCoopNative"), STR("Qualify authored loose pickup script")});
+        callbacks[2] = Hook::RegisterProcessEventPostCallback(
+            [](Iteration& call, U::UObject* context, U::UFunction* fn, void*) {
+                if (!call.OriginalFunctionCallPrevented()) fill_nearby_stack_counts(context, fn);
+            }, {false, false, STR("SilverfishCoopNative"), STR("Display host loot stack counts in the stock inventory")});
+        callbacks[3] = Hook::RegisterProcessLocalScriptFunctionPostCallback(
+            [](Iteration& call, U::UObject* context, U::FFrame& frame, void*) {
+                if (!call.OriginalFunctionCallPrevented()) fill_nearby_stack_counts(context, frame.Node());
+            }, {false, false, STR("SilverfishCoopNative"), STR("Display host loot stack counts in the stock floor query")});
         const bool ok = std::ranges::all_of(callbacks, [](auto id) { return id != Hook::ERROR_ID; });
         if (!ok) uninstall_hooks();
         installed.store(ok, std::memory_order_release);

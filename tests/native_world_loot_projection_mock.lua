@@ -17,7 +17,8 @@ local state = {map = area, world = world, listening = true, server = true, local
 
 local active, reject = {}, true
 StaticFindObject = function() return world end
-SilverfishSyncNativeWorldLootItem = function(_, item_epoch, id, _, _, _, _, _, _, _, _, _, _, _, slot)
+SilverfishSyncNativeWorldLootItem = function(_, item_epoch, id, _, _, _, _, _, _, _, _, _, _, _, count, slot)
+    assert(count == (id == good and 12 or 0))
     if id == failed and reject then return false, "stock_drop_projection_stock_model_unavailable" end
     active[slot] = {true, item_epoch, id, "stock actor", 1}
     return true
@@ -27,8 +28,8 @@ SilverfishTakeNativeGuestDropProjectionPress = function() return epoch, good end
 
 local projection = require("native_guest_drop_projection")
 local placement = "|1|2|3|0|0|0|1|1|1"
-local frame = {"request", "native-world-loot-frame", area, epoch, good .. "|" .. ammo .. placement,
-    failed .. "|" .. revolver .. placement}
+local frame = {"request", "native-world-loot-frame", area, epoch, good .. "|" .. ammo .. placement .. "|12",
+    failed .. "|" .. revolver .. placement .. "|0"}
 
 local function rows_by_item()
     local result = {}

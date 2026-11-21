@@ -274,7 +274,13 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         host_before = (await submit(host_run, "native-inventory-list"))["native_inventory"]
     dropped_actor = None
     if projected_nearby:
+        if stock_split:
+            picked = await submit(guest_run, native_guest_drop.STOCK_DROP_FIXTURE, target=split_proof["source_guid"])
+            assert picked["ok"], picked
+            stock_drop_proof = picked[native_guest_drop.RESULT]
+            assert stock_drop_proof["quantity"] == split_proof["remaining"] > 1, picked
         identity = native_world_loot.player_drop_identity(stock_drop_proof["drop_id"])
+        await host.bridge.wait_for(lambda state: identity in state.get(native_world_loot.KEY, {}))
         approached = await host.bridge.command(native_world_loot.APPROACH, identity, pawn, timeout=5)
         assert approached["ack"]["message"] == "stock loot height and line of sight verified", approached["ack"]
         frame = await guest.bridge.wait_for(lambda state: identity in state.get(native_world_loot.KEY, {})
@@ -305,20 +311,23 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
     drop_reclaim_proof = None
     if projected_nearby:
         clicked = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=dropped_actor)
-        assert clicked["ok"] and clicked["proof"] == "stock Nearby Items card requested", clicked
+        count = stock_drop_proof["quantity"]
+        expected = "stock Nearby Items card requested" + (f" x{count}" if count > 1 else "")
+        assert clicked["ok"] and clicked["proof"] == expected, clicked
         for run in (host_run, guest_run):
             await wait(run, lambda state: identity not in state.get("game", {}).get(native_world_loot.KEY, {})
                 and stock_drop_proof["drop_id"] not in state.get("gameplay", {}).get("native_guest_stack_drops", {}))
         events = [json.loads(line) for line in (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
         drop_reclaim_proof, = [row for event in events if (row := event.get(native_guest_drop.RESULT))
                                and row.get("state") == "reclaimed" and row.get("drop_id") == stock_drop_proof["drop_id"]]
-        assert drop_reclaim_proof["guid"] == stock_drop_proof["guid"]
+        assert (drop_reclaim_proof["guid"], drop_reclaim_proof["quantity"]) == (stock_drop_proof["guid"], count)
         display = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE,
                                target=f"{dropped_actor}@{drop_reclaim_proof['guid']}")
         assert display["ok"] and display["proof"] == "verified stock Nearby Items transfer", display
         guest_inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
         assert drop_reclaim_proof["claimed_by"] == guest_inventory["owner"]
-        assert sum(row["guid"] == drop_reclaim_proof["guid"] for row in guest_inventory["items"]) == 1
+        returned = [row["quantity"] for row in guest_inventory["items"] if row["guid"] == drop_reclaim_proof["guid"]]
+        assert returned == [count], guest_inventory
         assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before["native_inventory"]
     normal_tab_proof = None
     if stock_drop:
@@ -491,8 +500,8 @@ if __name__ == "__main__":
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
-    if args.projected_nearby and (not args.stock_drop or args.stock_nearby):
-        parser.error("Use --projected-nearby with --stock-drop and without --stock-nearby")
+    if args.projected_nearby and (args.stock_drop == args.stock_split or args.stock_nearby):
+        parser.error("Use --projected-nearby with either --stock-drop or --stock-split and without --stock-nearby")
     legacy = args.second_legacy_work.resolve(strict=True) if args.second_legacy_work else None
     asyncio.run(verify(args.work.resolve(strict=True), args.first_game.resolve(strict=True),
                        args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy,

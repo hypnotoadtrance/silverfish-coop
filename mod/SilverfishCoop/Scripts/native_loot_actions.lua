@@ -240,7 +240,8 @@ function actions.rows(state, phase, status_row)
         records[#records + 1] = status_row("native-loot-cash", cash.guid, cash.amount, cash.before, cash.after)
     end
     for _, item in ipairs(row.items) do
-        records[#records + 1] = status_row("native-loot-item", item.actor, item.class_path, item.guid, table.unpack(item.transform))
+        records[#records + 1] = status_row("native-loot-item", item.actor, item.class_path, item.guid, item.ammo,
+            table.unpack(item.transform))
     end
     return records
 end

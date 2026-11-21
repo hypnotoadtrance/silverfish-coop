@@ -492,7 +492,7 @@ function loot.results(state, phase, scope, item_addresses)
                     if not finite(transform[axis]) then error("native_loot_spawn_transform_unavailable", 0) end
                 end
                 result[index] = { address = address, actor = actor:GetFullName(), class_path = path, object = actor,
-                    transform = transform }
+                    transform = transform, ammo = math.tointeger(actor.Ammo) or 0 }
             end
         end
     end
