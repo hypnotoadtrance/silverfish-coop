@@ -591,6 +591,7 @@ namespace
         std::array<Unreal::FWeakObjectPtr, max_container_slots> items{};
         std::array<bool, max_container_slots> produced{};
         std::array<std::string, max_container_slots> item_classes{};
+        std::array<void*, max_container_slots> spawn_outputs{};
         std::array<int, max_container_slots> spawns{};
         std::array<int, max_container_slots> rolls{};
         int accounts{};
@@ -617,7 +618,7 @@ namespace
     thread_local VerifiedRoll latest_roll;
     std::atomic<bool> installed{};
     Hook::GlobalCallbackId callback = Hook::ERROR_ID;
-    Hook::GlobalCallbackId fixture_callback = Hook::ERROR_ID;
+    Hook::GlobalCallbackId spawn_callback = Hook::ERROR_ID;
 
     struct ActiveOpen
     {
@@ -734,19 +735,49 @@ namespace
         schema.instances->SetPropertyValue(instances, scope.context.lucky ? 1 : 0);
     }
 
+    void* stock_spawn_output(const OpenScope& scope, Iteration& iteration, Unreal::UObject* component, Unreal::FFrame& frame)
+    {
+        auto* caller = frame.PreviousFrame();
+        auto* out = find_output(frame, scope.schema.item);
+        return caller && caller->Object() == scope.context.crate && caller->Node() == scope.schema.script &&
+               frame.Object() == component && out && reinterpret_cast<Address>(out) % alignof(void*) == 0 &&
+               !iteration.OriginalFunctionCallPrevented() ? out : nullptr;
+    }
+
+    void prepare_spawn(Iteration& iteration, Unreal::UObject* object, Unreal::FFrame& frame, void* result_value)
+    {
+        if (!opening || !object || !installed.load(std::memory_order_acquire)) return;
+        auto& scope = *opening;
+        if (frame.Node() != scope.schema.spawn)
+        {
+            seed_fixture_draw(iteration, object, frame, result_value);
+            return;
+        }
+        const auto index = spawner_index(scope.context, object);
+        if (index < 0) return;
+        auto* out = stock_spawn_output(scope, iteration, object, frame);
+        auto& prepared = scope.spawn_outputs[static_cast<std::size_t>(index)];
+        if (!out || prepared)
+        {
+            scope.problem = "stock_loot_spawner_output_unverified";
+            return;
+        }
+        // The Blueprint loop reuses the output variable. SpawnLoot leaves it
+        // untouched when no class is selected, so clear it before each draw.
+        scope.schema.item->SetObjectPropertyValue(out, nullptr);
+        prepared = out;
+    }
+
     void capture_item(OpenScope& scope, Iteration& iteration, Unreal::UObject* component, Unreal::FFrame& frame)
     {
         const auto index = spawner_index(scope.context, component);
         if (index < 0) return;
-        auto* caller = frame.PreviousFrame();
-        auto* out = find_output(frame, scope.schema.item);
+        auto* out = stock_spawn_output(scope, iteration, component, frame);
         const auto* locals = scope.context.guarantee_spawn ? frame.Locals() : nullptr;
         const bool guaranteed_branch = !scope.context.guarantee_spawn ||
             (locals && scope.schema.guaranteed->GetPropertyValueInContainer(locals));
         const auto slot = static_cast<std::size_t>(index);
-        if (!caller || caller->Object() != scope.context.crate || caller->Node() != scope.schema.script ||
-            frame.Object() != component || !out || reinterpret_cast<Address>(out) % alignof(void*) != 0 || !guaranteed_branch ||
-            iteration.OriginalFunctionCallPrevented() || ++scope.spawns[slot] != 1)
+        if (!out || out != scope.spawn_outputs[slot] || !guaranteed_branch || ++scope.spawns[slot] != 1)
         {
             scope.problem = "stock_loot_spawner_frame_unverified";
             return;
@@ -764,7 +795,7 @@ namespace
             scope.items[slot] = actor;
             scope.item_classes[slot] = RC::to_utf8_string(actor->GetClassPrivate()->GetPathName());
         }
-        else if (scope.context.profile->stock_class == &silverfish::authored_loot::office_desk)
+        else if (scope.context.profile->pinned_furniture && scope.context.profile->stock_class == &silverfish::authored_loot::office_desk)
             scope.problem = "stock_office_desk_item_class_unverified";
     }
 
@@ -843,7 +874,7 @@ namespace
         Context context;
         context.lucky = lua.get_bool();
         const bool force_nonempty = argc == 7 && lua.get_bool();
-        if (force_nonempty && (!seeded_fixture_enabled() || fixture_callback == Hook::ERROR_ID))
+        if (force_nonempty && !seeded_fixture_enabled())
             return result(lua, false, "stock_loot_fixture_seed_unavailable");
         if (const auto failure = qualify(addresses[0], addresses[1], addresses[2], addresses[3], addresses[4], context);
             !failure.empty()) return result(lua, false, failure);
@@ -1206,7 +1237,7 @@ namespace silverfish::shared_loot
             if (opened->ContainerPtrToValuePtr<Unreal::FMulticastScriptDelegate>(crate)->IsBound())
                 return refuse("container_opened_delegate_bound");
         }
-        if (profile->stock_class == &authored_loot::small_cabinet || profile->stock_class == &authored_loot::office_desk)
+        if (profile->pinned_furniture)
         {
             auto* items = field<Unreal::FMapProperty>(crate, STR("Loot Table_Items"));
             auto* rate = field<Unreal::FDoubleProperty>(crate, STR("SpawnChance_Item"));
@@ -1281,7 +1312,6 @@ namespace silverfish::shared_loot
         const auto fields = stock.spawner_names.empty() ? std::span<const Unreal::TCHAR* const>{regular}.first(stock.slots)
                                                         : stock.spawner_names;
         if (fields.size() != stock.slots || fields.size() > spawners.size()) return refuse("crate_children_fields");
-        const bool pinned = &stock == &authored_loot::small_cabinet || &stock == &authored_loot::office_desk;
         spawners = {};
         for (std::size_t index = 0; index < fields.size(); ++index)
         {
@@ -1292,7 +1322,7 @@ namespace silverfish::shared_loot
             if (object_field(child, STR("As Game Instance FP")) != instance) return refuse("crate_child_instance");
             if (std::find(spawners.begin(), spawners.begin() + index, child) != spawners.begin() + index)
                 return refuse("crate_child_duplicate");
-            if (pinned)
+            if (profile->pinned_furniture)
             {
                 auto* salt = field<Unreal::FIntProperty>(child, STR("SpawnerSalt"));
                 if (!salt || salt->GetPropertyValueInContainer(child) != profile->child_salts[index])
@@ -1382,21 +1412,19 @@ namespace silverfish::shared_loot
         if (!enabled() || callback != Hook::ERROR_ID) return;
         callback = Hook::RegisterProcessLocalScriptFunctionPostCallback(
             capture, {false, false, owner, STR("Observe exact stock crate loot")});
-        if (callback != Hook::ERROR_ID && seeded_fixture_enabled())
-        {
-            fixture_callback = Hook::RegisterProcessLocalScriptFunctionPreCallback(
-                seed_fixture_draw, {false, false, owner, STR("Seed exact staged stock crate draws")});
-        }
-        installed.store(callback != Hook::ERROR_ID, std::memory_order_release);
+        spawn_callback = Hook::RegisterProcessLocalScriptFunctionPreCallback(
+            prepare_spawn, {false, false, owner, STR("Prepare exact stock crate spawn outputs")});
+        if (callback == Hook::ERROR_ID || spawn_callback == Hook::ERROR_ID) uninstall_hooks();
+        else installed.store(true, std::memory_order_release);
     }
 
     void uninstall_hooks()
     {
         installed.store(false, std::memory_order_release);
         if (callback != Hook::ERROR_ID) Hook::UnregisterCallback(callback);
-        if (fixture_callback != Hook::ERROR_ID) Hook::UnregisterCallback(fixture_callback);
+        if (spawn_callback != Hook::ERROR_ID) Hook::UnregisterCallback(spawn_callback);
         callback = Hook::ERROR_ID;
-        fixture_callback = Hook::ERROR_ID;
+        spawn_callback = Hook::ERROR_ID;
     }
 
     void register_lua(RC::LuaMadeSimple::Lua& lua)

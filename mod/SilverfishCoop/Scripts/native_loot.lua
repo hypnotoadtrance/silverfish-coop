@@ -320,7 +320,8 @@ function loot.approach_fixture(state, phase, pawn_name, requested_crate)
     local scope = loot.qualify(state, phase, pawn_name, requested_crate, true)
     local pawn, point = scope.pawn, scope.position
     local rotation = pawn:K2_GetActorRotation()
-    if scope.profile.capacity >= 4 or scope.profile.guarantee_spawn and scope.profile.map == docks_map then
+    if scope.profile.paired_doors or scope.profile.capacity >= 4
+        or scope.profile.guarantee_spawn and scope.profile.map == docks_map then
         local input = require("native_authored_pickup_input_fixture")
         input.approach_exact_container(state, phase, scope.profile, pawn, scope.crate, scope.box)
         return loot.qualify(state, phase, pawn_name, requested_crate)

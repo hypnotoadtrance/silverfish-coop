@@ -6,7 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
 from tools.silverfish import native_host_save, native_loot, party, runtime
-from tools.silverfish.authored_loot import CRATES, LEGACY_CRATE, OFFICE_DESK, PLACEMENTS, OVERRIDDEN_PLACEMENTS, SMALL_CABINET, full_name
+from tools.silverfish.authored_loot import (CRATES, LEGACY_CRATE, OFFICE_DESK, PLACEMENTS, OVERRIDDEN_PLACEMENTS,
+                                           SMALL_CABINET, full_name, loot_capacity)
 from tools.silverfish.campaign import CampaignFormatError
 from tools.silverfish.generate_authored_loot_registry import outputs, survey
 from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, OBSERVATORY, RAIL_YARD
@@ -48,13 +49,15 @@ class AuthoredCrateRegistryTests(unittest.TestCase):
 
     def test_office_desk_exact_generated_identity_keeps_its_stock_subclass(self):
         self.assertEqual(CRATES[OFFICE_DESK], LAKE)
-        self.assertFalse(any(full_name(LAKE, f"LootCabinet_Desk_BP_C_{index}") in CRATES for index in (1, 2, 4, 7, 8, 9)))
-        self.assertFalse(any("LootCabinet_LowTable_BP_C" in crate for crate in CRATES))
+        for index in (1, 2, 4, 7, 8, 9):
+            self.assertEqual(loot_capacity(full_name(LAKE, f"LootCabinet_Desk_BP_C_{index}")), 4)
+        low_tables = {loot_capacity(crate) for crate in CRATES if crate.startswith("LootCabinet_LowTable_BP_C ")}
+        self.assertEqual(low_tables, {3})
         generated = outputs()
         native = generated["native/authored_loot_registry.hpp"]
         lua = generated["mod/SilverfishCoop/Scripts/authored_loot_registry.lua"]
         self.assertIn("0x449, 4, false, true};", native)
-        self.assertIn('-205206528, STR("Office"), true, 2, &office_desk, {-7851936, -32237128, -43421604, -7392800}', native)
+        self.assertIn('-205206528, STR("Office"), true, 2, &office_desk, {-7851936, -32237128, -43421604, -7392800}, true', native)
         self.assertIn("salt = -205206528, replenish_mode = 2, office_desk = true, guarantee_spawn = true", lua)
 
 

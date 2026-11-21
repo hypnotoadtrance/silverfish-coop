@@ -15,6 +15,8 @@ from .native_guest_drop_record import valid_position
 
 KEY = "native_world_loot_items"
 ROW = "native-world-loot-item"
+ERROR_KEY = "native_world_loot_projection_errors"
+ERROR_ROW = "native-world-loot-projection-error"
 FRAME = "native-world-loot-frame"
 FIXTURE = "native-world-loot-fixture"
 APPROACH = "native-world-loot-approach"
@@ -57,6 +59,17 @@ def parse(fields, phase, area):
         raise ValueError("Invalid projected stock loot actor")
     return dict(map=area, epoch=epoch, id=identity, pawn=pawn, actor=actor,
                 class_path=item_class, sequence=int(press))
+
+
+def parse_projection_error(fields, phase, area):
+    if len(fields) != 6 or phase not in {"hosting", "connected"}:
+        raise ValueError("Unexpected stock world loot projection error")
+    _, world, epoch, identity, item_class, reason = fields
+    if (world != area or not _CLASS.fullmatch(item_class) or len(item_class) > 256
+            or not party.REQUEST_ID.fullmatch(epoch) or not party.REQUEST_ID.fullmatch(identity)
+            or not reason.startswith("stock_drop_projection_") or len(reason) > 256):
+        raise ValueError("Invalid stock world loot projection error")
+    return dict(map=area, epoch=epoch, id=identity, class_path=item_class, reason=reason)
 
 
 @dataclass(frozen=True)

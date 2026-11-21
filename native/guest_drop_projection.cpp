@@ -641,7 +641,7 @@ namespace
         })) return "stock_drop_projection_component_missing_from_census";
         if (stock_loot && !std::ranges::any_of(live_primitives, [&](auto* component) {
             return (component->IsA(mesh_type) && live(object(component, STR("StaticMesh")))) ||
-                (component->IsA(skeletal_type) && live(object(component, STR("SkeletalMeshAsset"))));
+                (component->IsA(skeletal_type) && live(object(component, STR("SkinnedAsset"))));
         })) return "stock_drop_projection_stock_model_unavailable";
         for (int index = 0; index < owned_components.Num(); ++index)
         {

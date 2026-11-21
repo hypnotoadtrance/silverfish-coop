@@ -105,6 +105,8 @@ function projection.rows(state, phase, row)
     for id, item in pairs(world_items) do
         if item.map ~= state.map or not same(pawn, item.pawn) or not same(state.world, item.world) then
             if SilverfishClearNativeGuestDropProjection(item.slot) then world_items[id] = nil end
+        elseif item.error then
+            rows[#rows + 1] = row("native-world-loot-projection-error", item.map, item.epoch, id, item.class, item.error)
         else
             local active, epoch, observed, name, press = SilverfishReadNativeGuestDropProjection(item.slot)
             if active and epoch == item.epoch and observed == id then
@@ -144,7 +146,7 @@ local function item_frame(fields, state, phase)
         end
         if world_items[id] then occupied[entry.slot] = true end
     end
-    local errors = {}
+    local errors = 0
     for id, item in pairs(incoming) do
         local previous = world_items[id]
         local slot = previous and previous.slot
@@ -162,11 +164,12 @@ local function item_frame(fields, state, phase)
             local ok, reason = SilverfishSyncNativeWorldLootItem(pawn:GetAddress(), epoch, id,
                 t[1], t[2], visual_z, visual_z, item.class, t[4], t[5], t[6], t[7], t[8], t[9], slot)
             world_items[id] = { map = area, epoch = epoch, pawn = pawn, world = state.world,
-                class = item.class, slot = slot, visual_z = visual_z }
-            if not ok then errors[#errors + 1] = reason end
+                class = item.class, slot = slot, visual_z = visual_z,
+                error = not ok and (reason or "stock_drop_projection_unavailable") or nil }
+            if not ok then errors = errors + 1 end
         end
     end
-    if #errors > 0 then error(errors[1], 0) end
+    if errors > 0 then return "stock world loot synchronized with projection errors" end
     return "stock world loot synchronized"
 end
 

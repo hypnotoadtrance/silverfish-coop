@@ -125,29 +125,56 @@ end
 
 local function open_poses(profile, second)
     if second then return cabinet_rotations end
-    if profile.open_roll then return {{Pitch = 0, Yaw = 0, Roll = profile.open_roll}} end
+    if profile.open_roll then return {{Pitch = 0, Yaw = profile.open_yaw or 0, Roll = profile.open_roll}} end
     return {open_rotation}
 end
 
-local function exhausted(crate, door, box, second, opened)
+local function matches_pose(door, rotation, location)
+    if not matches_rotation(door, rotation) then return false end
+    if not location then return true end
+    local current = door.RelativeLocation
+    if not current then return false end
+    for _, axis in ipairs({"X", "Y", "Z"}) do
+        if type(current[axis]) ~= "number" or not (math.abs(current[axis] - location[axis]) < 0.05) then return false end
+    end
+    return true
+end
+
+local function set_pose(door, rotation, location)
+    if location then
+        door:K2_SetRelativeLocationAndRotation(location, rotation, false, {}, false)
+    else
+        door:K2_SetRelativeRotation(rotation, false, {}, false)
+    end
+end
+
+local function exhausted(crate, door, box, second, opened, locations)
     if crate.Looted ~= true or not door or box and box:GetCollisionEnabled() ~= 0 then return false end
-    return matches_rotation(door, opened[1]) and (not second or matches_rotation(second, opened[2]))
+    return matches_pose(door, opened[1], locations[1]) and (not second or matches_pose(second, opened[2], locations[2]))
 end
 
 local function project(current)
     local crate = current.crate
     local door, box, second = scene(current)
     local opened = open_poses(current.profile, second)
-    if exhausted(crate, door, box, second, opened) then return "stock crate exhausted projection verified" end
+    local locations = current.profile.door_locations or {}
+    if exhausted(crate, door, box, second, opened, locations) then return "stock crate exhausted projection verified" end
     local original_looted = crate.Looted
     if not door or type(original_looted) ~= "boolean" or not box and not original_looted then
         error("native_loot_crate_exact_scene_unavailable", 0)
     end
-    local doors, original = {door, second}, {}
+    local doors, original, original_locations = {door, second}, {}, {}
     for index, component in ipairs(doors) do
         local rotation = component.RelativeRotation
         if not rotation or not matches_rotation(component, rotation) then error("native_loot_crate_door_rotation_unavailable", 0) end
         original[index] = {Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll}
+        if locations[index] then
+            local location = component.RelativeLocation
+            if not location or not matches_pose(component, rotation, location) then
+                error("native_loot_crate_door_location_unavailable", 0)
+            end
+            original_locations[index] = {X = location.X, Y = location.Y, Z = location.Z}
+        end
     end
     local collision = box and box:GetCollisionEnabled()
     if box and collision ~= 0 and collision ~= 1 and collision ~= 3 then
@@ -157,18 +184,18 @@ local function project(current)
     -- Replicate only the spent door pose and disable the query Box.
     local invoked, verified = pcall(function()
         if box then box:SetCollisionEnabled(0) end
-        for index, component in ipairs(doors) do component:K2_SetRelativeRotation(opened[index], false, {}, false) end
+        for index, component in ipairs(doors) do set_pose(component, opened[index], locations[index]) end
         crate.Looted = true
-        return exhausted(crate, door, box, second, opened)
+        return exhausted(crate, door, box, second, opened, locations)
     end)
     if not invoked or not verified then
         local restored, matches = pcall(function()
             crate.Looted = original_looted
-            for index, component in ipairs(doors) do component:K2_SetRelativeRotation(original[index], false, {}, false) end
+            for index, component in ipairs(doors) do set_pose(component, original[index], original_locations[index]) end
             if box then box:SetCollisionEnabled(collision) end
             if crate.Looted ~= original_looted or box and box:GetCollisionEnabled() ~= collision then return false end
             for index, component in ipairs(doors) do
-                if not matches_rotation(component, original[index]) then return false end
+                if not matches_pose(component, original[index], original_locations[index]) then return false end
             end
             return true
         end)
@@ -294,7 +321,8 @@ function input.rows(state, phase, status_row)
             info.looted == nil and "-" or (info.looted and 1 or 0), info.collision or "-", info.roll or "-")
         if info.qualified then
             rows[#rows + 1] = status_row("native-loot-crate-input", profile.map, profile.name,
-                exhausted(current.crate, info.door, info.box, info.second, open_poses(current.profile, info.second))
+                exhausted(current.crate, info.door, info.box, info.second, open_poses(current.profile, info.second),
+                    current.profile.door_locations or {})
                     and "exhausted" or "ready")
             if current.host and info.looted == false and info.box and (info.collision == 1 or info.collision == 3) then
                 local verified, active = pcall(loot.temporary_activation, current.crate, current.pawn)

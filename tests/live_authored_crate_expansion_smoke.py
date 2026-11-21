@@ -62,6 +62,16 @@ FAMILY_SCENES = {
     "stock-industrial-cargo": (CROSSROADS, "LootCrate_Cargo_BP_C", "LootCrate_Cargo_BP_C_3"),
     "stock-large-cabinet": (CROSSROADS, "LootCabnet_Large_BP_C", "LootCabnet_Large_BP_C_6"),
     "stock-industrial-cabinet": (CROSSROADS, "LootCabnet_Large_BP_C", "LootCabnet_Large_BP_C_1"),
+    "stock-small-cabinet": (CITY, "LootCabnet_Small_BP_C", "LootCabnet_Small_BP_C_4"),
+    "stock-desk": (OFFICE_DESK_PROFILE[0], "LootCabinet_Desk_BP_C", "LootCabinet_Desk_BP_C_1"),
+    "stock-fancy-cabinet": (CITY, "LootCabinet_Fancy_BP_C", "LootCabinet_Fancy_BP_C_13"),
+    "stock-low-table": (CITY, "LootCabinet_LowTable_BP_C", "LootCabinet_LowTable_BP_C_1"),
+    "stock-tool-cabinet": ("/Game/Classes/Maps/Maps_OverWorld/PineRidge_P", "Loot_ToolCabinet_BP_C", "Loot_ToolCabinet_BP_C_1"),
+    "stock-medical-cabinet": ("/Game/Classes/Maps/Maps_Dungeons/Anex_01_P", "LootCabnet_Medical_BP_C", "LootCabnet_Medical_BP_C_3"),
+    "stock-shelf-cabinet": (CITY, "LootCabnet_Shelf_BP_C", "LootCabnet_Shelf_BP_C_1"),
+    "stock-fridge": (CISTERN, "Loot_Fridge_BP_C", "Loot_Fridge_BP_C_1"),
+    "stock-wardrobe": ("/Game/Classes/Maps/Maps_OverWorld/Slums_P", "Loot_Wardrobe_BP_C", "Loot_Wardrobe_BP_C_2"),
+    "stock-gun-wardrobe": (CROSSROADS, "Loot_Wardrobe_Guns_BP_C", "LootCabnet_Large_BP_C_12"),
 }
 PERMANENT_FAMILY_CRATES = {full_name(area, actor, family) for family, area, actor, _, _, _, replenish in CONTAINER_PLACEMENTS
                            if replenish == 2 or family == "Loot_Stash_Small_BP_C"}
@@ -281,7 +291,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             await reach_lab(character)
         ready = await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("gameplay_fresh")
                            and all(status_of(state, crate) == "ready" for crate in targets))
-        assert sibling_names.isdisjoint(scene(opening)) and sibling_names.isdisjoint(scene(ready))
+        assert all(status_of(opening, sibling) != "exhausted" and status_of(ready, sibling) != "exhausted" for sibling in sibling_names)
         pawn = ready["game"]["pawns"]["local"]["name"]
         bound = await wait(run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
         authority_pawn = bound["game"]["native_guest_save"]["pawn"]
@@ -322,7 +332,8 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             assert roll["lucky_looter"], roll
             if desk:
                 assert roll["trait_calls"] == 0 and len(roll["items"]) <= 4, roll
-                assert sibling_names.isdisjoint(scene(committed)) and sibling_names.isdisjoint(scene(replicated))
+                assert all(status_of(committed, sibling) != "exhausted" and status_of(replicated, sibling) != "exhausted"
+                           for sibling in sibling_names)
             elif crate in GUARANTEED_CRATES:
                 assert roll["trait_calls"] == 0 and 1 <= len(roll["items"]) <= loot_capacity(crate), roll
             elif cabinet:

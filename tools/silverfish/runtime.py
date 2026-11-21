@@ -2043,6 +2043,12 @@ class Bridge:
                     if item["id"] in projected:
                         raise ValueError("Duplicate stock world loot actor identity")
                     projected[item["id"]] = item
+                elif fields[0] == native_world_loot.ERROR_ROW:
+                    failure = native_world_loot.parse_projection_error(fields, data.get("state"), data.get("map"))
+                    errors = data.setdefault(native_world_loot.ERROR_KEY, {})
+                    if failure["id"] in errors:
+                        raise ValueError("Duplicate stock world loot projection error")
+                    errors[failure["id"]] = failure
                 elif fields[0] == "native-loot-item" and len(fields) in (3, 4, 13) and "native_loot" in data:
                     loot = data["native_loot"]
                     if len(loot["items"]) >= loot["item_count"]:

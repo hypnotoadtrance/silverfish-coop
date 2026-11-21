@@ -92,3 +92,14 @@ assert(input.command(project, state, "connected") == "stock crate exhausted proj
 assert(query_collision == 0 and crate.Looted and door.RelativeRotation.Yaw == 95 and second_door.RelativeRotation.Yaw == -95)
 assert(input.command(project, state, "connected") == "stock crate exhausted projection verified" and sequence == 1)
 print("Per-cabinet projection proves both exact doors and never replays stock Interact")
+
+profile.door_locations = {{X = -49, Y = 23, Z = 68}, {X = 49, Y = 23, Z = 68}}
+door.RelativeLocation, second_door.RelativeLocation = {X = -47, Y = 20, Z = 68}, {X = 47, Y = 20, Z = 68}
+local function set_pose(component, location, angle)
+    component.RelativeLocation, component.RelativeRotation = location, angle
+end
+door.K2_SetRelativeLocationAndRotation, second_door.K2_SetRelativeLocationAndRotation = set_pose, set_pose
+assert(input.command(project, state, "connected") == "stock crate exhausted projection verified")
+assert(door.RelativeLocation.X == -49 and second_door.RelativeLocation.X == 49)
+assert(door.RelativeLocation.Y == 23 and second_door.RelativeLocation.Y == 23 and sequence == 1)
+print("A cabinet with fixed door locations projects the full stock pose")

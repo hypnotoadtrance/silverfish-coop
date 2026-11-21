@@ -15,6 +15,7 @@ from .travel import AUTHORED_MAPS
 
 QUALIFIED_MAPS = AUTHORED_MAPS | EXPANDED_MAPS
 PLACED_ACTOR = re.compile(r"LootCrate_Small_BP_C_[0-9]+\Z")
+FAMILY_ACTOR = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,95}\Z")
 OVERRIDE_ROWS = {"Cargo", "Coup_Gear", "Industrial", "Millitary_Common", "Rural"}
 GUARANTEED_OVERRIDE_ROWS = OVERRIDE_ROWS | {"Common_Special", "FishCannery", "Luxury"}
 PERMANENT_REPLENISHMENT = "RespawnSetting_Enum::NewEnumerator2"
@@ -27,8 +28,14 @@ SAVE_FIELDS = {"SpawnSalt", "Loot_Override", "GuaranteeSpawn", "Replenish_Mode"}
 BOX_GEOMETRY_FIELDS = {"Arrow", "BlueprintCreatedComponents", "DefaultSceneRoot", "SM_Prop_Cabinet_Small_02", "StreamSeed"}
 STOCK_ROLL = ("CallFunc_Array_Get_Item.SpawnLoot(Loot Table_Items,SpawnChance_Item,0.5,GuaranteeSpawn,"
               "False,True,False,False,False,CallFunc_SpawnLoot_Object)")
+FURNITURE_ROLL = STOCK_ROLL.replace("0.5,", "0.9,")
+WEAPON_ROLL = ("CallFunc_Array_Get_Item_1.SpawnLoot(Loot Table_Weapons,SpawnChance_Weapons,0,GuaranteeSpawn,"
+               "False,False,False,False,False,CallFunc_SpawnLoot_Object_1)")
+SPARE_ROLL = ("CallFunc_Array_Get_Item_2.SpawnLoot(Loot Table_Items,SpawnChance_Item,0,GuaranteeSpawn,"
+              "False,False,False,False,False,CallFunc_SpawnLoot_Object_2)")
 FAMILY_OVERRIDE_ROWS = GUARANTEED_OVERRIDE_ROWS | {"Office", "Garage", "Marine", "TownHouse", "LabSupplies", "Shop_Food",
-                                                   "Uncommon_Basic", "PoliceEquipment", "Uncommon_Special", "Weapon_Specialized"}
+                                                   "Uncommon_Basic", "PoliceEquipment", "Uncommon_Special",
+                                                   "Weapon_Specialized", "Rare"}
 
 
 @dataclass(frozen=True)
@@ -41,6 +48,9 @@ class ContainerFamily:
     replenish: str | None = None
     paired_doors: bool = False
     open_roll: int = -95
+    open_yaw: int = 0
+    door_locations: tuple[tuple[float, float, float], ...] = ()
+    prop_components: tuple[str, ...] = ()
     named_spawners: tuple[str, ...] = ()
     rolls: tuple[str, ...] = (STOCK_ROLL,)
 
@@ -48,12 +58,13 @@ class ContainerFamily:
         return self.named_spawners or ("Loot_Spawner", *(f"Loot_Spawner{i}" for i in range(1, self.slots)))
 
     def door_calls(self):
-        first = "SM_Prop_Cabinet_Small_Door_01"
-        second = "SM_Prop_Cabinet_Small_Door_02"
-        if self.paired_doors:
-            return (f"MoveComponentTo({first},{first}.RelativeLocation,(0, 0, 95),",
-                    f"MoveComponentTo({second},{second}.RelativeLocation,(0, 0, -95),")
-        return (f"MoveComponentTo({first},{first}.RelativeLocation,({self.open_roll}, 0, 0),",)
+        angles = ((0, 0, 95), (0, 0, -95)) if self.paired_doors else ((self.open_roll, 0, self.open_yaw),)
+        calls = []
+        for index, rotation in enumerate(angles):
+            name = f"SM_Prop_Cabinet_Small_Door_0{index + 1}"
+            location = self.door_locations[index] if self.door_locations else f"{name}.RelativeLocation"
+            calls.append(f"MoveComponentTo({name},{location},{rotation},")
+        return calls
 
 
 CONTAINER_FAMILIES = {
@@ -67,11 +78,30 @@ CONTAINER_FAMILIES = {
                                             rolls=(STOCK_ROLL.replace("0.5,", "1,"),)),
     "LootCabnet_Large_BP_C": ContainerFamily("large_cabinet", 0x83D, slots=6, paired_doors=True,
         named_spawners=("Loot_Spawner", "Loot_Spawner1", "Loot_Spawner2", "Loot_Spawner3", "Loot_SpawnerGun", "Loot_SpawnerGun1"),
-        rolls=(STOCK_ROLL,
-              "CallFunc_Array_Get_Item_1.SpawnLoot(Loot Table_Weapons,SpawnChance_Weapons,0,GuaranteeSpawn,"
-              "False,False,False,False,False,CallFunc_SpawnLoot_Object_1)",
-              "CallFunc_Array_Get_Item_2.SpawnLoot(Loot Table_Items,SpawnChance_Item,0,GuaranteeSpawn,"
-              "False,False,False,False,False,CallFunc_SpawnLoot_Object_2)")),
+        rolls=(STOCK_ROLL, WEAPON_ROLL, SPARE_ROLL)),
+    "LootCabnet_Small_BP_C": ContainerFamily("small_cabinet", 0x438, slots=4, paired_doors=True,
+                                             door_locations=((-49, 23, 68), (49, 23, 68))),
+    "LootCabinet_Desk_BP_C": ContainerFamily("office_desk", 0x449, slots=4, paired_doors=True),
+    "LootCabinet_Fancy_BP_C": ContainerFamily("fancy_cabinet", 0x46D, slots=6, paired_doors=True, rolls=(FURNITURE_ROLL,)),
+    "LootCabinet_LowTable_BP_C": ContainerFamily("low_table", 0x437, slots=3, paired_doors=True,
+        prop_components=("SM_TableCabinet_Props",), named_spawners=("Loot_Spawner", "Loot_Spawner2", "Loot_Spawner3"),
+        rolls=(FURNITURE_ROLL,)),
+    "Loot_ToolCabinet_BP_C": ContainerFamily("tool_cabinet", 0x432, slots=3, paired_doors=True),
+    "LootCabnet_Medical_BP_C": ContainerFamily("medical_cabinet", 0x4A2, slots=4, paired_doors=True,
+        door_locations=((-49, 23, 22.5), (49, 23, 22.5)), prop_components=("SM_Prop_Sign_WarningSymbol_04",),
+        rolls=(STOCK_ROLL.replace("SpawnChance_Item,", "CallFunc_FClamp_ReturnValue,"),)),
+    "LootCabnet_Shelf_BP_C": ContainerFamily("shelf_cabinet", 0x444, slots=4, paired_doors=True),
+    "Loot_Fridge_BP_C": ContainerFamily("fridge", 0x3E3, slots=7, open_roll=0, open_yaw=-120,
+        prop_components=("DFX_Flies", "SM_Prop_Fridge_01_Racks_01"),
+        named_spawners=("Loot_Spawner", "Loot_Spawner1", "Loot_Spawner2", "Loot_Spawner3", "Loot_Spawner4", "Loot_Spawner5", "Loot_Spawner7")),
+    "Loot_Wardrobe_BP_C": ContainerFamily("wardrobe", 0x5F4, slots=4, paired_doors=True,
+        named_spawners=("Loot_Spawner1", "Loot_Spawner2", "Loot_Spawner3", "Loot_Armor"),
+        rolls=(FURNITURE_ROLL.replace("CallFunc_Array_Get_Item.", "CallFunc_Array_Get_Item_1."),
+               "CallFunc_Array_Get_Item.SpawnLoot(Loot Table_Armor,SpawnChance_Armor,0,GuaranteeSpawn,"
+               "False,False,True,True,False,CallFunc_SpawnLoot_Object_1)")),
+    "Loot_Wardrobe_Guns_BP_C": ContainerFamily("gun_wardrobe", 0x7E9, slots=4, paired_doors=True,
+        named_spawners=("Loot_Spawner1", "Loot_Spawner2", "Loot_SpawnerGun", "Loot_SpawnerGun1"),
+        rolls=(FURNITURE_ROLL, WEAPON_ROLL, SPARE_ROLL)),
 }
 
 
@@ -136,7 +166,7 @@ def family_placements(audit):
                 or [call for call in calls if ".SpawnLoot(" in call] != list(spec.rolls)
                 or any(sum(call.startswith(pose) for call in calls) != 1 for pose in spec.door_calls())
                 or "Box.K2_DestroyComponent(Self)" not in calls
-                or {name for name in defaults if name.startswith("Loot_Spawner")} !=
+                or {name for name in defaults if name.endswith("_GEN_VARIABLE")} !=
                 {f"{name}_GEN_VARIABLE" for name in spec.spawner_names()}
                 or actor.get("Ping_IfOpened", "False") != str(spec.stock_ping)
                 or actor.get("GuaranteeSpawn", "False") != str(spec.guaranteed)
@@ -144,6 +174,7 @@ def family_placements(audit):
             raise ValueError(f"Cooked container family does not match its stock interaction: {family}")
 
     profiles, seen = [], set()
+    pinned = {SMALL_CABINET_PROFILE[:2], OFFICE_DESK_PROFILE[:2]}
     order = {family: index for index, family in enumerate(CONTAINER_FAMILIES)}
     for row in audit["placements"]:
         family, package, actor = row["type"], row["area"], row["name"]
@@ -153,17 +184,17 @@ def family_placements(audit):
         if not re.fullmatch(r"Maps/(?:[A-Za-z0-9_]+/)*[A-Za-z0-9_]+\.umap", package):
             raise ValueError(f"Invalid stock container package {package}")
         area = "/Game/Classes/" + package.removesuffix(".umap")
-        if area not in QUALIFIED_MAPS:
+        if area not in QUALIFIED_MAPS or (area, actor) in pinned:
             continue
         fields = row["fields"]
-        required = {**SOURCE_FIELDS, **{name: name for name in spec.spawner_names()}}
+        required = {**SOURCE_FIELDS, **{name: name for name in (*spec.spawner_names(), *spec.prop_components)}}
         if spec.paired_doors:
             required["SM_Prop_Cabinet_Small_Door_02"] = "SM_Prop_Cabinet_Small_Door_02"
         if any(fields.get(key) != value for key, value in required.items()):
             continue
         if fields.keys() - required.keys() - SAVE_FIELDS - BOX_GEOMETRY_FIELDS:
             continue
-        if (area, actor) in seen or not re.fullmatch(r"[A-Za-z0-9_]+_C_[0-9]+", actor):
+        if (area, actor) in seen or not FAMILY_ACTOR.fullmatch(actor):
             raise ValueError(f"Invalid or duplicate stock container {area} {actor}")
         seen.add((area, actor))
         guarantee = fields.get("GuaranteeSpawn", str(spec.guaranteed))
@@ -195,6 +226,13 @@ def family_catalog(profiles):
     return "\n".join((*lines, ")", ""))
 
 
+def lua_door_locations(spec):
+    if not spec.door_locations:
+        return ""
+    locations = ", ".join(f"{{X = {x}, Y = {y}, Z = {z}}}" for x, y, z in spec.door_locations)
+    return f", door_locations = {{{locations}}}"
+
+
 def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
     if (not CRATE_PROFILES or len(CRATE_PROFILES) != len({(area, actor) for area, actor, *_ in CRATE_PROFILES})
             or any(mode not in (None, 2) for mode in GUARANTEED_REPLENISHMENT.values())):
@@ -218,17 +256,7 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
         '        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C"),',
         '        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C:SendInteractionToActor"),',
         '        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C:ExecuteUbergraph_LootCrate_Small_BP"),',
-        '        0x376, 2};',
-        '    inline constexpr StockClass small_cabinet{',
-        '        STR("/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C"),',
-        '        STR("/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C:SendInteractionToActor"),',
-        '        STR("/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C:ExecuteUbergraph_LootCabnet_Small_BP"),',
-        '        0x438, 4, false, true};',
-        '    inline constexpr StockClass office_desk{',
-        '        STR("/Game/Classes/Actors/Lootables/LootCabinet_Desk_BP.LootCabinet_Desk_BP_C"),',
-        '        STR("/Game/Classes/Actors/Lootables/LootCabinet_Desk_BP.LootCabinet_Desk_BP_C:SendInteractionToActor"),',
-        '        STR("/Game/Classes/Actors/Lootables/LootCabinet_Desk_BP.LootCabinet_Desk_BP_C:ExecuteUbergraph_LootCabinet_Desk_BP"),',
-        '        0x449, 4, false, true};', "",
+        '        0x376, 2};', "",
     ]
     for family, spec in CONTAINER_FAMILIES.items():
         stem = family[:-2]
@@ -243,7 +271,7 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
                        f'        STR("{path}:SendInteractionToActor"),',
                        f'        STR("{path}:ExecuteUbergraph_{stem}"),',
                        f"        0x{spec.entry:X}, {spec.slots}{flags}}};"))
-    names = ["small_crate", "small_cabinet", "office_desk", *(spec.symbol for spec in CONTAINER_FAMILIES.values())]
+    names = ["small_crate", *(spec.symbol for spec in CONTAINER_FAMILIES.values())]
     header.extend(("    inline constexpr std::array stock_classes{" + ", ".join("&" + name for name in names) + "};", "",
                    "    struct Profile", "    {",
                    "        const RC::CharType* world;",
@@ -252,6 +280,7 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
                    "        std::uint8_t replenish_override{};",
                    "        const StockClass* stock_class{&small_crate};",
                    "        std::array<std::int32_t, 4> child_salts{};",
+                   "        bool pinned_furniture{};",
                    "    };", "", "    inline constexpr std::array worlds{"))
     for area in dict.fromkeys((*[area for area, _, _, _ in CRATE_PROFILES], SMALL_CABINET_PROFILE[0], OFFICE_DESK_PROFILE[0],
                                *(area for _, area, *_ in families))):
@@ -284,18 +313,20 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
         table = f'STR("{override}")' if override else "nullptr"
         guarantee = "true" if guaranteed else "false"
         header.extend((f'        Profile{{STR("{world}"),',
-                       f'                STR("{path}"), {salt}, {table}, {guarantee}, 2, &{family}, {{{child_salts}}}}},'))
+                       f'                STR("{path}"), {salt}, {table}, {guarantee}, 2, &{family}, {{{child_salts}}}, true}},'))
         lua_guarantee = ", guarantee_spawn = true" if guaranteed else ""
+        spec = CONTAINER_FAMILIES[actor.rsplit("_", 1)[0]]
         lua.extend((f'    {{ index = {index}, map = "{area}",',
                     f'      name = "{name}",',
-                    f'      path = "{path}", salt = {salt}, replenish_mode = 2, {family} = true{lua_guarantee} }},'))
+                    f'      path = "{path}", salt = {salt}, replenish_mode = 2, {family} = true{lua_guarantee}'
+                    f'{lua_door_locations(spec)} }},'))
     registered = {(area, actor) for area, actor, *_ in (*CRATE_PROFILES, SMALL_CABINET_PROFILE, OFFICE_DESK_PROFILE)}
     for index, (family, area, actor, salt, row, guaranteed, mode) in enumerate(families, len(CRATE_PROFILES) + 3):
         spec = CONTAINER_FAMILIES.get(family)
         if ((not spec or area not in QUALIFIED_MAPS or type(salt) is not int
              or not -2**31 <= salt < 2**31 or type(guaranteed) is not bool or mode not in {None, 2}
              or row is not None and row not in FAMILY_OVERRIDE_ROWS)
-                or (area, actor) in registered or not re.fullmatch(r"[A-Za-z0-9_]+_C_[0-9]+", actor)):
+                or (area, actor) in registered or not FAMILY_ACTOR.fullmatch(actor)):
             raise ValueError(f"Invalid cooked stock container placement {area} {actor}")
         registered.add((area, actor))
         stem = family[:-2]
@@ -309,8 +340,9 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
         lua_flags = (", guarantee_spawn = true" if guaranteed else "") + (f", replenish_mode = {mode}" if mode else "")
         if spec.paired_doors:
             lua_flags += ", paired_doors = true"
-        elif spec.open_roll != -95:
-            lua_flags += f", open_roll = {spec.open_roll}"
+        elif spec.open_roll != -95 or spec.open_yaw:
+            lua_flags += f", open_roll = {spec.open_roll}, open_yaw = {spec.open_yaw}"
+        lua_flags += lua_door_locations(spec)
         if spec.named_spawners:
             names = ", ".join(f'"{name}"' for name in spec.named_spawners)
             lua_flags += f", spawner_names = {{{names}}}"
