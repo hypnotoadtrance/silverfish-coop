@@ -15,7 +15,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
-from . import (link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dialogue, native_downed_markers,
+from . import (direct_ip, link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dialogue, native_downed_markers,
                native_dream, native_enemy_loot, native_enemy_shells, native_finite_shop, native_flood_jammer, native_lenny,
                native_gold, native_green, native_guest_armor, native_guest_clock, native_guest_consumable, native_guest_npc, native_guest_stack_drop,
                native_guest_weapon, native_host_save, native_host_stack_drop, native_inventory, native_inventory_death, native_loot, native_matrix, native_meet_broker, native_wire_quest,
@@ -2066,13 +2066,8 @@ class Host:
             raise ValueError("Supply a reachable host address for the invitation")
         return address
 
-    def _write_invitation(self, guest: dict, address: str, event: str) -> dict:
-        file = self.control.run / "invites" / f"{guest['guest_id']}.invite.json"
-        write_json(file, {
-            "schema": 1, "certificate": self.identity.certificate_pem,
-            "host": address, "port": self.port, "guest_id": guest["guest_id"],
-            "credential": guest["credential"], "character_id": guest["character_id"],
-            "game_build": self.game_build, "protocol_version": PROTOCOL,
+    def guest_features(self) -> dict:
+        return {
             "native_zones": self.native_zones, "native_zone_walls": self.native_zone_walls,
             "native_guest_controls": self.native_guest_controls,
             "native_guest_held_fire": self.smg_holds is not None,
@@ -2089,6 +2084,16 @@ class Host:
             "native_guest_mre": self.guest_mre,
             "native_mosby_station": self.mosby_station_enabled,
             "native_mindcore_view": self.mindcore_view_enabled,
+        }
+
+    def _write_invitation(self, guest: dict, address: str, event: str) -> dict:
+        file = self.control.run / "invites" / f"{guest['guest_id']}.invite.json"
+        write_json(file, {
+            "schema": 1, "certificate": self.identity.certificate_pem,
+            "host": address, "port": self.port, "guest_id": guest["guest_id"],
+            "credential": guest["credential"], "character_id": guest["character_id"],
+            "game_build": self.game_build, "protocol_version": PROTOCOL,
+            **self.guest_features(),
         })
         self.control.event(event, guest_id=guest["guest_id"], character_id=guest["character_id"])
         return {"invite_file": str(file), "guest_id": guest["guest_id"], "character_id": guest["character_id"]}
@@ -3620,7 +3625,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     guest_held_fire: bool = False, native_dead_bridge_enemy_loot: bool = False,
                     guest_melee_canary: bool = False, host_dig_live_fixture: bool = False,
                     embedded_port: int | None = None, runtime_listener: bool = False,
-                    resident_engine: EmbeddedEngine | None = None) -> None:
+                    resident_engine: EmbeddedEngine | None = None, direct_password: str | None = None) -> None:
     if resident_engine is not None:
         if (embedded_port is not None or resident_engine.internal_port is None
                 or resident_engine.profile != directory / "game-user"):
@@ -3909,9 +3914,19 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     lambda game: game.get(native_host_dig_live.KEY, {}).get("state") == "ready", timeout=5)
                 controller.last_seen = time.monotonic()
                 await native_host_dig_live.settle(controller, bridge)
+            enrollment = (None if direct_password is None else
+                          direct_ip.Enrollment(store, identity, game_build, PROTOCOL, controller.guest_features(), direct_password))
+
+            def admit_guest(request):
+                guest = request["guest_id"]
+                if store.is_direct_guest(guest) and (enrollment is None or not enrollment.authorized(guest)):
+                    return {"accepted": False, "reason": "direct_enrollment_required"}
+                return controller.admit(request)
+
             transport = await link.start_host(bind, port, "127.0.0.1", internal_port, identity,
-                                              controller.admit, on_disconnect=controller.disconnected,
-                                              on_request=controller.guest_request, max_game_guests=max_guests)
+                                              admit_guest, on_disconnect=controller.disconnected,
+                                              on_request=controller.guest_request, max_game_guests=max_guests,
+                                              **({"enroll": enrollment} if enrollment is not None else {}))
             controller.port = transport.address[1]
             control.event("listening", address=bind, port=controller.port)
             await controller.run(bridge, transport)
@@ -3953,16 +3968,21 @@ async def probe_transport(bridge: Bridge, item: str) -> dict:
 
 
 def load_invite(file: Path, build: str) -> dict:
-    invite = read_json(file, limit=32_768)
-    required = {"schema", "host", "port", "certificate", "guest_id", "credential", "character_id",
+    return validate_invite(read_json(file, limit=32_768), build)
+
+
+def validate_invite(invite: dict, build: str, *, catalog: bool = False) -> dict:
+    required = {"schema", "host", "port", "certificate", "guest_id", "credential",
                 "game_build", "protocol_version"}
-    if not required.issubset(invite) or invite["schema"] != 1:
+    if not catalog:
+        required.add("character_id")
+    if type(invite) is not dict or not required.issubset(invite) or invite["schema"] != 1:
         raise ValueError("Unrecognized invitation file")
     if invite["game_build"] != build or invite["protocol_version"] not in {1, PROTOCOL}:
         raise ValueError("Invitation and staged game/mod build are incompatible")
     if not isinstance(invite["host"], str) or type(invite["port"]) is not int or not 0 < invite["port"] < 65536:
         raise ValueError("Invitation has an invalid endpoint")
-    if not all(isinstance(invite[key], str) for key in ("certificate", "guest_id", "credential", "character_id")):
+    if not all(isinstance(invite[key], str) for key in required - {"schema", "port", "protocol_version"}):
         raise ValueError("Invitation has invalid credential fields")
     if any(type(invite[key]) is not bool for key in
            ("native_zones", "native_zone_walls", "native_guest_controls", "native_guest_held_fire", "expanded_zones", "native_shop_view", "native_loot_input",
@@ -4019,7 +4039,19 @@ async def open_admission(transport, invite: dict, request: dict, *, timeout: flo
 async def character_catalog(work: Path, invitation: Path, name: str | None,
                             operation_id: str | None) -> dict:
     invite = load_invite(invitation, staged_build(work))
-    admission = {key: invite[key] for key in ("guest_id", "credential", "character_id", "game_build")}
+    return await _character_catalog(invite, name, operation_id)
+
+
+async def direct_catalog(work: Path, profile: Path, host: str, port: int, password: str,
+                         name: str | None, operation_id: str | None) -> dict:
+    build = staged_build(work)
+    connection = await direct_ip.connect(profile, host, port, password, build, PROTOCOL)
+    invite = validate_invite(connection.session(), build, catalog=True)
+    return await _character_catalog(invite, name, operation_id)
+
+
+async def _character_catalog(invite: dict, name: str | None, operation_id: str | None) -> dict:
+    admission = {key: invite[key] for key in ("guest_id", "credential", "character_id", "game_build") if key in invite}
     admission.update({"protocol_version": PROTOCOL, "catalog": True})
     client = await link.start_client(catalog_only=True)
     try:
@@ -5088,7 +5120,7 @@ def guest_engine_options(work: Path, invite: dict, *, native_zones: bool = False
                 guest_mre=invite.get("native_guest_mre", False))
 
 
-async def join_game(work: Path, directory: Path, invitation: Path, headless: bool,
+async def join_game(work: Path, directory: Path, invitation: Path | direct_ip.Connection, headless: bool,
                     character_id: str | None = None, *, native_zones: bool = False,
                     native_zone_walls: bool = False, guest_reload_input: bool = False,
                     guest_inventory_view: bool = False, guest_primary_input: bool = False,
@@ -5096,7 +5128,11 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
     if resident_engine is not None and (embedded_engine or resident_engine.internal_port is not None
                                         or resident_engine.profile != directory / "game-user"):
         raise ValueError("The resident title does not own this guest profile")
-    invite = load_invite(invitation, staged_build(work))
+    build = staged_build(work)
+    if isinstance(invitation, direct_ip.Connection):
+        invite = validate_invite(invitation.session(character_id), build)
+    else:
+        invite = load_invite(invitation, build)
     game_options = guest_engine_options(work, invite, native_zones=native_zones, native_zone_walls=native_zone_walls,
                                         guest_reload_input=guest_reload_input, guest_inventory_view=guest_inventory_view,
                                         guest_primary_input=guest_primary_input)

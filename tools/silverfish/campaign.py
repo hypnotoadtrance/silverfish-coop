@@ -277,7 +277,8 @@ class CampaignStore:
         if type(guests) is not dict or type(characters) is not dict:
             raise CampaignFormatError("Campaign guests and characters must be maps.")
         for guest_id, guest in guests.items():
-            if not _is_uuid(guest_id) or type(guest) is not dict or set(guest) != {"name", "credential_sha256"}:
+            if (not _is_uuid(guest_id) or type(guest) is not dict or set(guest) - {"direct"} != {"name", "credential_sha256"}
+                    or ("direct" in guest and guest["direct"] is not True)):
                 raise CampaignFormatError("The campaign contains an invalid guest record.")
             if _name(guest["name"]) != guest["name"]:
                 raise CampaignFormatError("A guest display name is not in canonical form.")
@@ -360,6 +361,31 @@ class CampaignStore:
             identity = self._add_guest(candidate, name)
             self._commit(candidate, verify_content=False)
             return identity
+
+    def register_direct_guest(self, guest_id: str, credential: str) -> None:
+        """Enroll the same local guest across retries without replacing an existing owner."""
+        with self._mutex:
+            self._require_open()
+            if not _is_uuid(guest_id) or type(credential) is not str or not _CREDENTIAL_RE.fullmatch(credential):
+                raise AuthenticationError("Campaign guest authentication failed.")
+            if guest_id in self._data["guests"]:
+                self._authenticate(guest_id, credential)
+                return
+            if len(credential) != 43:
+                raise AuthenticationError("Invalid Direct IP guest credential.")
+            candidate = copy.deepcopy(self._data)
+            candidate["guests"][guest_id] = {
+                "name": "Direct IP guest",
+                "credential_sha256": hashlib.sha256(credential.encode("ascii")).hexdigest(),
+                "direct": True,
+            }
+            self._commit(candidate, verify_content=False)
+
+    def is_direct_guest(self, guest_id: str) -> bool:
+        with self._mutex:
+            self._require_open()
+            guest = self._data["guests"].get(guest_id)
+            return bool(guest and guest.get("direct") is True)
 
     def issue_invitation(self, guest_name, character_name):
         """Create a guest and a starter character in the same save revision."""

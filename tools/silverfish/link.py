@@ -95,6 +95,7 @@ _LOG = logging.getLogger(__name__)
 Address = tuple[str, int]
 Admission = dict[str, Any]
 Admit = Callable[[Admission], Admission | Awaitable[Admission]]
+Enroll = Callable[[Admission, str], Awaitable[Admission]]
 OnDisconnect = Callable[[str], None | Awaitable[None]]
 Action = dict[str, Any]
 OnRequest = Callable[[str, Action], Action | Awaitable[Action]]
@@ -247,7 +248,9 @@ def _decode(payload: bytes) -> Admission:
 def _validate_request(request: Admission) -> None:
     if not isinstance(request, dict):
         raise LinkError("invalid admission request")
-    limits = {"guest_id": 96, "credential": 512, "character_id": 96, "game_build": 128}
+    limits = {"guest_id": 96, "credential": 512, "game_build": 128}
+    if request.get("catalog") is not True or "character_id" in request:
+        limits["character_id"] = 96
     for name, maximum in limits.items():
         value = request.get(name)
         if not isinstance(value, str) or not 1 <= len(value) <= maximum:
@@ -441,9 +444,14 @@ class _HostProtocol(_LinkProtocol):
         super().__init__(*args, **kwargs)
         self.host = host
         self.guest_id: str | None = None
+        self.peer_ip = ""
         self._actions: dict[int, _IncomingAction] = {}
         self._end_ack: asyncio.Event | None = None
         self._end_ack_bytes = bytearray()
+
+    def datagram_received(self, data: bytes, addr: Any) -> None:
+        self.peer_ip = addr[0]
+        super().datagram_received(data, addr)
 
     def send_session_end(self, body: bytes) -> asyncio.Event:
         self._end_ack = asyncio.Event()
@@ -537,6 +545,14 @@ class _HostProtocol(_LinkProtocol):
     async def _respond(self, payload: bytes) -> None:
         try:
             request = _decode(payload)
+            if "direct" in request:
+                if self.terminated or self.host._closed:
+                    return
+                response = (_rejection("direct_join_disabled") if self.host._enroll is None else
+                            await self.host._enroll(request, self.peer_ip))
+                if not self.terminated:
+                    self.send_admission(_encode(response))
+                return
             _validate_request(request)
         except LinkError:
             self.send_admission(_encode(_rejection("invalid_request")))
@@ -563,6 +579,7 @@ class HostLink:
         on_request: OnRequest | None = None,
         *,
         max_game_guests: int = 1,
+        enroll: Enroll | None = None,
     ) -> None:
         if type(max_game_guests) is not int or not 1 <= max_game_guests <= _MAX_CACHED_GUESTS:
             raise ValueError(f"Allow between 1 and {_MAX_CACHED_GUESTS} concurrent game guests")
@@ -571,6 +588,7 @@ class HostLink:
         self._admit_callback = admit
         self._disconnect_callback = on_disconnect
         self._request_callback = on_request
+        self._enroll = enroll
         self._guest_routes: dict[str, _GameRoute] = {}
         self._protocols: dict[str, _HostProtocol] = {}
         self._native_admission: frozenset[str] | None = None
@@ -899,11 +917,13 @@ async def start_host(
     *,
     on_request: OnRequest | None = None,
     max_game_guests: int = 1,
+    enroll: Enroll | None = None,
 ) -> HostLink:
     """Open a private game relay and optionally serve admitted application requests."""
     if not _is_loopback(game_host):
         raise ValueError("Unreal relay endpoint must be a loopback address")
-    link = HostLink((game_host, game_port), admit, on_disconnect, on_request, max_game_guests=max_game_guests)
+    link = HostLink((game_host, game_port), admit, on_disconnect, on_request, max_game_guests=max_game_guests,
+                    enroll=enroll)
     configuration = _configuration(is_client=False)
     configuration.certificate = identity.certificate
     configuration.private_key = identity.private_key
@@ -1055,6 +1075,35 @@ async def _open_client_protocol(client: ClientLink, address: Address, configurat
             await protocol.wait_closed()
         finally:
             transport.close()
+
+
+async def direct_request(host: str, port: int, request: Admission, *, certificate: str | None) -> Admission:
+    """Make one discovery or enrollment request without opening a game relay."""
+    if certificate is None and request != {"direct": "discover"}:
+        raise ValueError("Only public host identity discovery can run without a certificate pin")
+    configuration = _configuration(is_client=True)
+    configuration.server_name = _TLS_NAME
+    configuration.verify_mode = ssl.CERT_NONE if certificate is None else ssl.CERT_REQUIRED
+    if certificate is not None:
+        configuration.cadata, _ = _load_pinned_certificate(certificate)
+    client = ClientLink(catalog_only=True)
+    try:
+        async with asyncio.timeout(7):
+            async with _open_client_protocol(client, (host, port), configuration) as protocol:
+                await protocol.handshake.wait()
+                if protocol.terminated:
+                    raise LinkError("The host identity could not be verified")
+                protocol.send_admission(_encode(request))
+                await protocol.reply.wait()
+                if protocol.response is None or protocol.terminated:
+                    raise LinkError("The host did not answer the Direct IP request")
+                if protocol.response.get("game_access") is not False and protocol.response["accepted"]:
+                    raise LinkError("Direct IP enrollment unexpectedly opened game access")
+                return protocol.response
+    except (OSError, TimeoutError) as error:
+        if isinstance(error, LinkError):
+            raise
+        raise LinkError("The Direct IP address or port could not be reached") from None
 
 
 class ClientLink:

@@ -6,6 +6,7 @@ import argparse
 import asyncio
 from collections import deque
 from dataclasses import asdict, replace
+from getpass import getpass
 from ipaddress import ip_address
 import json
 from pathlib import Path
@@ -44,6 +45,22 @@ def _target(parser: argparse.ArgumentParser, *, include_title: bool = False) -> 
     if include_title:
         target.add_argument("--title-profile", help="isolated co-op title profile")
 
+def _join_target(parser: argparse.ArgumentParser) -> None:
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--invite", type=Path, help="private invitation file")
+    target.add_argument("--host", help="numeric Direct IP address")
+    parser.add_argument("--port", type=_port, help="host UDP port, defaults to 7777")
+    parser.add_argument("--password", action="store_true", help="prompt for the Direct IP password")
+
+
+def _direct_input(opts) -> tuple[int, str]:
+    if opts.host is None and (opts.port is not None or opts.password):
+        raise ValueError("--port and --password require --host")
+    port = 7777 if opts.port is None else opts.port
+    if port == 0:
+        raise ValueError("Enter the UDP port the host is listening on")
+    return port, getpass("Direct IP password: ") if opts.password else ""
+
 
 def _handoff_generation(value: str) -> str:
     try:
@@ -81,6 +98,9 @@ def parser() -> argparse.ArgumentParser:
     host.add_argument("--campaign", required=True)
     host.add_argument("--bind", default="127.0.0.1", help="local IP to bind for authenticated Direct IP")
     host.add_argument("--port", type=_port, default=7777)
+    admission = host.add_mutually_exclusive_group()
+    admission.add_argument("--direct", action="store_true", help="accept Direct IP guests without a password")
+    admission.add_argument("--direct-password", action="store_true", help="prompt for a Direct IP password")
     host.add_argument("--max-guests", type=int, choices=range(1, 5), default=1,
                       help="maximum simultaneous guests in the staged session")
     host.add_argument("--headless", action="store_true")
@@ -121,9 +141,9 @@ def parser() -> argparse.ArgumentParser:
     invite.add_argument("--character", required=True)
     invite.add_argument("--address", help="address to put in the invite when different from the bind address")
 
-    join = commands.add_parser("join", help="use a private invitation file")
+    join = commands.add_parser("join", help="join by Direct IP or a private invitation")
     join.add_argument("--profile", required=True)
-    join.add_argument("--invite", type=Path, required=True)
+    _join_target(join)
     join.add_argument("--headless", action="store_true")
     join.add_argument("--native-zones", action="store_true", help="enable natural exit handling in the C++ playtest")
     join.add_argument("--native-zone-walls", action="store_true", help="enable physical blockers at the staged exit")
@@ -136,9 +156,11 @@ def parser() -> argparse.ArgumentParser:
     join.add_argument("--character", help="character ID selected from the guest's catalog")
 
     catalog = commands.add_parser("characters", help="list your host-owned characters before joining")
-    catalog.add_argument("--invite", type=Path, required=True)
+    _join_target(catalog)
+    catalog.add_argument("--profile", default="guest")
     create = commands.add_parser("create-character", help="create a character before joining")
-    create.add_argument("--invite", type=Path, required=True)
+    _join_target(create)
+    create.add_argument("--profile", default="guest")
     create.add_argument("--name", required=True)
     create.add_argument("--operation-id", help="repeat the same 32-digit lowercase hex ID on retry")
 
@@ -421,6 +443,9 @@ async def execute(opts):
             raise ValueError("Set --native-extraction-keep to enable the stock extraction options")
         if rules is not None and opts.native_extraction_keep is not None:
             raise ValueError("Choose the stock extraction options or the wipe fixture settings")
+        direct_password = getpass("Direct IP host password: ") if opts.direct_password else "" if opts.direct else None
+        if opts.direct_password and not direct_password:
+            raise ValueError("Enter a password or use --direct for passwordless hosting")
         await host_game(opts.work, select_run(opts.work, "campaigns", opts.campaign),
                         opts.bind, opts.port, opts.headless, opts.fixtures, rules,
                         native_events=opts.native_events, native_guest=opts.native_guest, native_zones=opts.native_zones,
@@ -432,21 +457,33 @@ async def execute(opts):
                         host_dig_live_fixture=opts.native_host_dig_live_fixtures,
                         native_dead_bridge_enemy_loot=opts.native_dead_bridge_enemy_loot,
                         start_preset=opts.native_start_preset, difficulty=opts.native_difficulty,
-                        world_seed=opts.native_world_seed,
+                        world_seed=opts.native_world_seed, direct_password=direct_password,
                         extraction=None if opts.native_extraction_keep is None else (
                             opts.native_extraction_keep, opts.native_extraction_backpacks, opts.native_extraction_lose_slot))
         return {"ok": True, "state": "stopped"}
     if operation == "join":
-        from .service import join_game
-        await join_game(opts.work, select_run(opts.work, "clients", opts.profile),
-                        opts.invite, opts.headless, opts.character, native_zones=opts.native_zones,
+        from . import direct_ip
+        from .runtime import staged_build
+        from .service import PROTOCOL, join_game
+        profile = select_run(opts.work, "clients", opts.profile)
+        port, password = _direct_input(opts)
+        invitation = opts.invite
+        if opts.host is not None:
+            if not opts.character:
+                raise ValueError("Select a character from your Direct IP catalog with --character")
+            invitation = await direct_ip.connect(profile, opts.host, port, password, staged_build(opts.work), PROTOCOL)
+        await join_game(opts.work, profile, invitation, opts.headless, opts.character, native_zones=opts.native_zones,
                         native_zone_walls=opts.native_zone_walls, guest_reload_input=opts.native_guest_reload_input,
                         guest_inventory_view=opts.native_guest_inventory_view, guest_primary_input=opts.native_guest_primary_input)
         return {"ok": True, "state": "stopped"}
     if operation in {"characters", "create-character"}:
-        from .service import character_catalog
-        return await character_catalog(opts.work, opts.invite, getattr(opts, "name", None),
-                                       getattr(opts, "operation_id", None))
+        from .service import character_catalog, direct_catalog
+        port, password = _direct_input(opts)
+        name, operation_id = getattr(opts, "name", None), getattr(opts, "operation_id", None)
+        if opts.host is not None:
+            profile = select_run(opts.work, "clients", opts.profile)
+            return await direct_catalog(opts.work, profile, opts.host, port, password, name, operation_id)
+        return await character_catalog(opts.work, opts.invite, name, operation_id)
     if operation == "invite":
         directory = select_run(opts.work, "campaigns", opts.campaign) / "run"
         return await submit(directory, "invite", name=opts.name, character=opts.character,
