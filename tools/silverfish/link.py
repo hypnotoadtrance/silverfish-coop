@@ -66,6 +66,8 @@ _CHECKPOINT_ACTION_TIMEOUTS = {
     "native-guest-armor-equip": 20.0,
     "native-guest-helmet-equip": 20.0,
     "native-guest-melee-swing": 20.0,
+    "native-guest-door-blowtorch": 20.0,
+    "native-guest-door-crowbar": 20.0,
     "native-inventory-split": 20.0,
     "native-inventory-sort": 20.0,
     "native-guest-stack-drop": 36.0,

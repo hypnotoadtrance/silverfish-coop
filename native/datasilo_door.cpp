@@ -1,8 +1,10 @@
 #include "datasilo_door.hpp"
+#include "shared_loot.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
@@ -10,6 +12,7 @@
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FFrame.hpp>
+#include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/Hooks.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
@@ -55,6 +58,12 @@ namespace
     U::FName graph{};
     std::atomic<bool> installed{};
     std::array<Hook::GlobalCallbackId, 2> hooks{Hook::ERROR_ID, Hook::ERROR_ID};
+    struct ToolPry
+    {
+        U::FWeakObjectPtr door;
+        bool observed{};
+    };
+    ToolPry tool_pry;
 
     bool enabled()
     {
@@ -133,25 +142,78 @@ namespace
         return role && role->GetPropertyValueInContainer(door) == 3 ? Seat::host : Seat::unavailable;
     }
 
-    bool guarded_graph_entry(U::UFunction* function, const void* args)
+    int graph_entry(U::UFunction* function, const void* args)
     {
         auto* entry = field<U::FIntProperty>(function, STR("EntryPoint"));
         if (!entry || !args || !entry->HasAnyPropertyFlags(U::CPF_Parm) || entry->GetOffset_Internal() != 0 ||
-            function->GetNumParms() != 1 || function->GetReturnProperty()) return false;
-        const int offset = entry->GetPropertyValueInContainer(args);
-        return offset >= 0 && std::ranges::any_of(stock_entries, [offset](const auto& item) { return item.offset == offset; });
+            function->GetNumParms() != 1 || function->GetReturnProperty()) return -1;
+        return entry->GetPropertyValueInContainer(args);
     }
 
     void intercept(Iteration& call, U::UObject* receiver, U::UFunction* function, const void* args)
     {
-        if (!available() || !receiver || !function || call.OriginalFunctionCallPrevented()) return;
+        if (!available() || !live(receiver) || !function || call.OriginalFunctionCallPrevented()) return;
         const auto name = function->GetFName();
         const bool script_graph = name == graph;
         if (!script_graph && std::ranges::find(wrappers, name) == wrappers.end()) return;
-        if (function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || seat(receiver, true) != Seat::guest) return;
+        if (function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
         if (script_graph ? function->GetOuterPrivate() != find<U::UClass>(base_type) :
             receiver->GetClassPrivate()->GetFunctionByNameInChain(name) != function) return;
-        if (!script_graph || guarded_graph_entry(function, args)) call.PreventOriginalFunctionCall();
+        const int offset = script_graph ? graph_entry(function, args) : -1;
+        if (offset == 5349 && receiver == tool_pry.door.Get() && seat(receiver, true) == Seat::host)
+        {
+            tool_pry.observed = true;
+            return;
+        }
+        if (seat(receiver, true) != Seat::guest) return;
+        if (!script_graph || (offset >= 0 && std::ranges::any_of(stock_entries, [offset](const auto& item) {
+                return item.offset == offset;
+            }))) call.PreventOriginalFunctionCall();
+    }
+
+    std::uintptr_t address(const U::UObject* value)
+    {
+        return reinterpret_cast<std::uintptr_t>(value);
+    }
+
+    int begin_tool_pry(const Lua& lua)
+    {
+        const auto fail = [&] { lua.set_bool(false); return 1; };
+        if (!available() || tool_pry.door.Get() || lua.get_stack_size() != 3 ||
+            !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3)) return fail();
+        const auto target = static_cast<std::uintptr_t>(lua.get_integer());
+        const auto pawn = static_cast<std::uintptr_t>(lua.get_integer());
+        const auto save = static_cast<std::uintptr_t>(lua.get_integer());
+        if (!target || !pawn || !save) return fail();
+        U::UObject* door{};
+        U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
+            if (address(candidate) != target) return RC::LoopAction::Continue;
+            door = candidate;
+            return RC::LoopAction::Break;
+        });
+        if (!live(door) || !ordinary_door(door) || seat(door, true) != Seat::host) return fail();
+        auto* locked = field<U::FBoolProperty>(door, STR("Locked"));
+        auto* broken = field<U::FBoolProperty>(door, STR("LockBroken"));
+        if (!locked || !broken || !locked->GetPropertyValueInContainer(door) || broken->GetPropertyValueInContainer(door))
+            return fail();
+        auto* world = static_cast<U::AActor*>(door)->GetWorld();
+        auto* stock = object(object(world, STR("OwningGameInstance")), STR("SaveSlot_Ref"));
+        silverfish::shared_loot::EscrowOwner owner{};
+        if (!silverfish::shared_loot::qualify_escrow_owner_in_world(world, pawn, save, address(stock), owner) ||
+            owner.save == owner.stock) return fail();
+        tool_pry.door = door;
+        tool_pry.observed = false;
+        lua.set_bool(true);
+        return 1;
+    }
+
+    int finish_tool_pry(const Lua& lua)
+    {
+        const bool observed = available() && lua.get_stack_size() == 1 && lua.is_integer(1) &&
+            static_cast<std::uintptr_t>(lua.get_integer()) == address(tool_pry.door.Get()) && tool_pry.observed;
+        tool_pry = {};
+        lua.set_bool(observed);
+        return 1;
     }
 }
 
@@ -180,6 +242,7 @@ namespace silverfish::native_datasilo_door
     void uninstall_hooks()
     {
         installed.store(false, std::memory_order_release);
+        tool_pry = {};
         for (auto& hook : hooks)
         {
             if (hook != Hook::ERROR_ID) Hook::UnregisterCallback(hook);
@@ -198,5 +261,7 @@ namespace silverfish::native_datasilo_door
             state.set_bool(available());
             return 1;
         });
+        lua.register_function("SilverfishBeginNativeGuestDoorPry", begin_tool_pry);
+        lua.register_function("SilverfishFinishNativeGuestDoorPry", finish_tool_pry);
     }
 }

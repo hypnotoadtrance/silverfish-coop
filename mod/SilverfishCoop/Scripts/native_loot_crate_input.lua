@@ -34,15 +34,13 @@ function input.clear()
     end
 end
 
-local function ignite(current, state, phase, pawn_name, guid)
-    local scope = loot.qualify(state, phase, pawn_name, current.profile.name, true)
+function input.fire_blowtorch(scope, guid, arm)
     local pawn, crate, save = scope.pawn, scope.crate, scope.save
     local torch = pawn.EquipedItem
     local tool_type = StaticFindObject(blowtorch_path)
     local inspect = SilverfishInspectNativeGuestWeapon
     if same(save, scope.stock) or crate.Locked ~= true or not valid(torch) or not same(torch:GetClass(), tool_type)
-        or type(inspect) ~= "function" or type(SilverfishArmNativeGuestVehiclePry) ~= "function"
-        or type(SilverfishCancelNativeGuestVehiclePry) ~= "function" or pawn:Check_CanUseEquipment() ~= true
+        or type(inspect) ~= "function" or pawn:Check_CanUseEquipment() ~= true
         or #guid ~= 32 or not guid:match("^[0-9A-F]+$") then error("stock_blowtorch_scope_unavailable", 0) end
     local ok, status, loaded, stored = inspect(pawn:GetAddress(), save:GetAddress(), guid)
     if not ok or status ~= "blowtorch_equipped" or loaded ~= stored or math.type(loaded) ~= "integer"
@@ -65,11 +63,9 @@ local function ignite(current, state, phase, pawn_name, guid)
     hit = hit.OutHit or hit
     local surface = hit.Component and hit.Component:Get()
     if found ~= true or not valid(surface) or not same(surface:GetOwner(), crate) then
-        error("stock_blowtorch_vehicle_obstructed", 0)
+        error(scope.profile and "stock_blowtorch_vehicle_obstructed" or "stock_blowtorch_obstructed", 0)
     end
-    if not SilverfishArmNativeGuestVehiclePry(current.profile.index, pawn:GetAddress(), save:GetAddress()) then
-        error("stock_blowtorch_vehicle_busy", 0)
-    end
+    arm()
 
     local applied = pcall(function()
         camera:K2_SetWorldRotation({Pitch = math.deg(math.atan(z, math.sqrt(x*x + y*y))),
@@ -86,10 +82,22 @@ local function ignite(current, state, phase, pawn_name, guid)
     if not applied or not restored or not now or equipment ~= "blowtorch_equipped" or saved_fuel ~= live_fuel then
         error("mutation_unverified_stock_blowtorch_use", 0)
     end
-    if live_fuel == loaded and crate.Locked == true and SilverfishCancelNativeGuestVehiclePry(current.profile.index, pawn:GetAddress()) then
+    return loaded, saved_fuel
+end
+
+local function ignite(current, state, phase, pawn_name, guid)
+    local scope = loot.qualify(state, phase, pawn_name, current.profile.name, true)
+    local loaded, saved_fuel = input.fire_blowtorch(scope, guid, function()
+        if type(SilverfishArmNativeGuestVehiclePry) ~= "function" or type(SilverfishCancelNativeGuestVehiclePry) ~= "function"
+            or not SilverfishArmNativeGuestVehiclePry(current.profile.index, scope.pawn:GetAddress(), scope.save:GetAddress()) then
+            error("stock_blowtorch_vehicle_busy", 0)
+        end
+    end)
+    if saved_fuel == loaded and scope.crate.Locked == true
+        and SilverfishCancelNativeGuestVehiclePry(current.profile.index, scope.pawn:GetAddress()) then
         error("stock_blowtorch_stock_action_busy", 0)
     end
-    if live_fuel ~= loaded - 1 or crate.Locked ~= false then
+    if saved_fuel ~= loaded - 1 or scope.crate.Locked ~= false then
         error("mutation_unverified_stock_blowtorch_use", 0)
     end
     tool_report = {kind = "blowtorch", map = state.map, crate = current.profile.name, pawn = pawn_name, guid = guid,
@@ -375,29 +383,25 @@ end
 
 input.stock_focus = stock_focus
 
-local function pry_with_crowbar(current, state, phase, pawn_name, guid)
-    local scope = loot.qualify(state, phase, pawn_name, current.profile.name, true)
+function input.swing_crowbar(scope, chance, guid, arm)
     local pawn, crate, save = scope.pawn, scope.crate, scope.save
     local crowbar = pawn.EquipedItem
     local inspect = SilverfishInspectNativeGuestWeapon
     if same(save, scope.stock) or crate.Locked ~= true or not valid(crowbar)
         or not same(crowbar:GetClass(), StaticFindObject(crowbar_path)) or crowbar.PryLock_Stgth ~= .5
-        or type(inspect) ~= "function" or type(SilverfishArmNativeGuestVehiclePry) ~= "function"
-        or type(SilverfishCancelNativeGuestVehiclePry) ~= "function" or pawn:Check_CanUseEquipment() ~= true
+        or type(inspect) ~= "function" or pawn:Check_CanUseEquipment() ~= true
         or #guid ~= 32 or not guid:match("^[0-9A-F]+$") then error("stock_crowbar_scope_unavailable", 0) end
     local ok, status, equipped_ammo, stored = inspect(pawn:GetAddress(), save:GetAddress(), guid)
     if not ok or status ~= "crowbar_equipped" or equipped_ammo ~= -1 or stored ~= -1 then
         error("stock_crowbar_owned_tool_unavailable", 0)
     end
-    local chance = crate["Pick Chance"]
     if type(chance) ~= "number" or not (chance >= 0 and chance <= 1 and crowbar.PryLock_Stgth >= 1 - chance) then
         error("stock_crowbar_lock_too_strong", 0)
     end
+    local reach_error = scope.profile and "stock_crowbar_vehicle_out_of_reach" or "stock_crowbar_out_of_reach"
     stock_focus(pawn, scope.box, function()
-        if not same(pawn.ActorBeingLookedAt, crate) then error("stock_crowbar_vehicle_out_of_reach", 0) end
-        if not SilverfishArmNativeGuestVehiclePry(current.profile.index, pawn:GetAddress(), save:GetAddress()) then
-            error("stock_crowbar_vehicle_busy", 0)
-        end
+        if not same(pawn.ActorBeingLookedAt, crate) then error(reach_error, 0) end
+        arm()
         local applied = pcall(function()
             crowbar:ToggleMode(true)
             crowbar:ToggleMode(false)
@@ -406,13 +410,24 @@ local function pry_with_crowbar(current, state, phase, pawn_name, guid)
         if not applied or not verified or equipment ~= "crowbar_equipped" or live_ammo ~= -1 or saved_ammo ~= -1 then
             error("mutation_unverified_stock_crowbar_use", 0)
         end
-        if crate.Locked == true and SilverfishCancelNativeGuestVehiclePry(current.profile.index, pawn:GetAddress()) then
-            error("stock_crowbar_stock_action_busy", 0)
+    end, reach_error)
+    return -1, -1
+end
+
+local function pry_with_crowbar(current, state, phase, pawn_name, guid)
+    local scope = loot.qualify(state, phase, pawn_name, current.profile.name, true)
+    local before, after = input.swing_crowbar(scope, scope.crate["Pick Chance"], guid, function()
+        if type(SilverfishArmNativeGuestVehiclePry) ~= "function" or type(SilverfishCancelNativeGuestVehiclePry) ~= "function"
+            or not SilverfishArmNativeGuestVehiclePry(current.profile.index, scope.pawn:GetAddress(), scope.save:GetAddress()) then
+            error("stock_crowbar_vehicle_busy", 0)
         end
-        if crate.Locked ~= false then error("mutation_unverified_stock_crowbar_use", 0) end
-    end, "stock_crowbar_vehicle_out_of_reach")
+    end)
+    if scope.crate.Locked == true and SilverfishCancelNativeGuestVehiclePry(current.profile.index, scope.pawn:GetAddress()) then
+        error("stock_crowbar_stock_action_busy", 0)
+    end
+    if scope.crate.Locked ~= false then error("mutation_unverified_stock_crowbar_use", 0) end
     tool_report = {kind = "crowbar", map = state.map, crate = current.profile.name, pawn = pawn_name, guid = guid,
-        before = -1, after = -1}
+        before = before, after = after}
     return "stock crowbar unlocked the vehicle"
 end
 

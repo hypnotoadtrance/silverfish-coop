@@ -5,6 +5,7 @@ import re
 import time
 
 from . import party
+from .native_gold import valid_guid
 
 
 TAG = "native-stock-door"
@@ -16,6 +17,8 @@ INPUT_FIXTURE = "native-stock-door-input-fixture"
 STAGE_FIXTURE = "native-stock-door-stage-fixture"
 TRACE_FIXTURE = "native-stock-door-trace"
 TRACE_RESULT = "native_stock_door_trace"
+PRY_RESULT = "native_stock_door_pry"
+PRY_ACTIONS = {"blowtorch": "native-guest-door-blowtorch", "crowbar": "native-guest-door-crowbar"}
 TARGET_PREFIX = "stock-door:"
 _ACTOR = re.compile(r"[A-Za-z0-9_]+ (/Game/Classes/Maps/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_]+")
 _FLAGS = ("locked", "broken", "open")
@@ -52,6 +55,20 @@ def parse(fields, phase, area):
     return (dict(zip(_FLAGS, (flag == "1" for flag in fields[3:6]))) | dict(zip(_ANGLES, angles))
             | dict(zip(_OFFSET, offsets))
             | {"panel_location": geometry[:3], "knob_location": geometry[3:], "collision": int(fields[18])})
+
+
+def parse_pry(fields, phase, area):
+    if len(fields) != 8 or fields[1] != area or phase != "hosting":
+        raise ValueError("Invalid stock door pry scope")
+    _, _, actor, pawn, guid, kind, before, after = fields
+    if (actor_map(actor) != area or not pawn.startswith(f"Player_FP_C {area}.") or not valid_guid(guid)
+            or kind not in PRY_ACTIONS):
+        raise ValueError("Invalid stock door pry receipt")
+    before, after = int(before), int(after)
+    if ((kind == "crowbar" and (before, after) != (-1, -1))
+            or (kind == "blowtorch" and not (1 <= before <= 3 and after == before - 1))):
+        raise ValueError("Invalid stock door pry tool cost")
+    return dict(map=area, actor=actor, pawn=pawn, guid=guid, kind=kind, before=before, after=after)
 
 
 def frame(game, epoch):
@@ -138,6 +155,65 @@ async def interact(host, bridge, character, requested, operation):
     receipts.append({"id": operation, "request": fingerprint, "result": result})
     del receipts[:-party.RECENT_ACTIONS]
     return result
+
+
+async def pry(host, bridge, character, requested, operation, kind):
+    parts = requested.split("@", 2) if isinstance(requested, str) else []
+    epoch, guid, actor = parts if len(parts) == 3 else (None, None, None)
+    game = host.last_game
+    area = game.get("map")
+    member = host.native_recipients().get(character, {})
+    row = game.get(KEY, {}).get(actor)
+    if (kind not in PRY_ACTIONS or not epoch or epoch != host.zone_epoch or not valid_guid(guid) or actor_map(actor) != area
+            or not row or not host.native_loot_input or game.get("state") != "hosting" or host.transitioning
+            or host.stopping or host.native_checkpoint_unsafe or not member.get("connected") or host.party["wipe"]
+            or character in host.party["pending_spawns"] or host.party["players"][character]["downed"]
+            or not party.REQUEST_ID.fullmatch(operation)):
+        raise party.RuleError("stock_door_pry_scope_unavailable")
+
+    fingerprint = [PRY_ACTIONS[kind], f"{guid}@{actor}", None]
+    for receipt in host.party["receipts"].get(character, []):
+        if receipt["id"] == operation:
+            if receipt["request"] != fingerprint:
+                raise party.RuleError("operation_id_conflict")
+            return receipt["result"]
+    if not row["locked"] or row["broken"]:
+        raise party.RuleError("stock_door_not_locked")
+    if host.smg_holds is not None and host.smg_holds.strokes:
+        raise party.RuleError("stock_door_pry_busy")
+
+    host.native_checkpoint_unsafe = True
+    try:
+        try:
+            snapshot = await bridge.command(TAG + "-guest-pry", actor, member["pawn"], guid, kind, timeout=4)
+        except RuntimeError as error:
+            if str(error).startswith(("stock_door_pry_", f"stock_{kind}_")):
+                host.native_checkpoint_unsafe = False
+                raise party.RuleError(str(error)) from error
+            raise
+        proof = snapshot.get(PRY_RESULT, {})
+        if tuple(proof.get(key) for key in ("map", "actor", "pawn", "guid", "kind")) != (area, actor, member["pawn"], guid, kind):
+            raise RuntimeError("The stock door pry did not report the exact guest and tool")
+
+        def unlocked(frame):
+            observed = frame.get(KEY, {}).get(actor, {})
+            return ((frame.get("state"), frame.get("map")) == ("hosting", area) and observed.get("locked") is False
+                    and observed.get("broken") is True)
+
+        host.last_game = snapshot if unlocked(snapshot) else await bridge.wait_for(unlocked, timeout=4)
+        host.last_seen = time.monotonic()
+        result = {PRY_RESULT: dict(proof, locked=False, broken=True)}
+        candidate = party.load_party(host.party)
+        receipts = candidate["receipts"].setdefault(character, [])
+        receipts.append({"id": operation, "request": fingerprint, "result": result})
+        del receipts[:-party.RECENT_ACTIONS]
+        await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+        host.party = candidate
+        host.native_checkpoint_unsafe = False
+        return result
+    finally:
+        if host.native_checkpoint_unsafe:
+            host.stopping = True
 
 
 async def stage(host, bridge, requested, side):

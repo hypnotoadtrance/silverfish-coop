@@ -244,7 +244,7 @@ def parser() -> argparse.ArgumentParser:
         "native-loot-inspect", "native-loot-open", "native-loot-approach", "native-loot-seed",
         "native-loot-claim", "native-loot-open-fixture", "native-loot-crate-fixture", "native-loot-view-fixture",
         "native-loot-replenishment-fixture", "native-loot-vehicle-pry-fixture", "native-guest-vehicle-blowtorch",
-        "native-guest-vehicle-crowbar",
+        "native-guest-vehicle-crowbar", "native-guest-door-blowtorch", "native-guest-door-crowbar",
         "native-stock-door-interact", "native-stock-door-fixture", "native-stock-door-input-fixture",
         "native-stock-door-stage-fixture",
         "native-stock-door-trace",

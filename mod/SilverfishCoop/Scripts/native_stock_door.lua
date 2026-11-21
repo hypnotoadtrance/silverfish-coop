@@ -7,6 +7,7 @@ local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") =
 local guest_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
 local active_world, scanned_at, actors
 local trace_report
+local tool_report
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -139,6 +140,10 @@ function doors.rows(state, phase, status_row)
         result[#result + 1] = status_row("native-stock-door-trace", state.map, trace_report.actor,
             trace_report.query, trace_report.panel and 1 or 0)
     end
+    if tool_report and phase == "hosting" and same(tool_report.world, state.world) then
+        result[#result + 1] = status_row("native-stock-door-pry", state.map, tool_report.actor, tool_report.pawn,
+            tool_report.guid, tool_report.kind, tool_report.before, tool_report.after)
+    end
     return result
 end
 
@@ -149,6 +154,13 @@ function doors.focused_target(pawn)
     local world = pawn:GetWorld()
     local name = valid(world) and identity(actor, world)
     if name and components(actor) and same(knob, actor.Box_Knob) then return "stock-door:" .. name end
+end
+
+function doors.pry_target(pawn, kind)
+    if not available() or not valid(pawn) or (kind == "crowbar" and pawn.CanInteract ~= true) then return end
+    local actor, world = pawn.ActorBeingLookedAt, pawn:GetWorld()
+    local name = valid(world) and identity(actor, world)
+    if name and actor.Locked == true and actor.LockBroken == false and components(actor) then return name end
 end
 
 function doors.input_fixture(state, phase, target, pawn, dispatch)
@@ -193,6 +205,51 @@ local function interact(fields, state, phase)
     return "stock hinged door interaction dispatched"
 end
 
+local function tool_pry(fields, state, phase)
+    tool_report = nil
+    local target, name, guid, kind = fields[3], fields[4], fields[5], fields[6]
+    local actor = census(state, phase)[target]
+    local knob = valid(actor) and select(3, components(actor))
+    if #fields ~= 6 or phase ~= "hosting" or not knob or (kind ~= "blowtorch" and kind ~= "crowbar")
+        or actor.Locked ~= true or actor.LockBroken ~= false or not guid:match("^[0-9A-F]+$") or #guid ~= 32
+        or type(SilverfishBeginNativeGuestDoorPry) ~= "function" or type(SilverfishFinishNativeGuestDoorPry) ~= "function" then
+        error("stock_door_pry_scope_unavailable", 0)
+    end
+    local qualified, pawn, save = pcall(guest_save.exact_item_context, state, phase, name)
+    local instance = state.world.OwningGameInstance
+    local stock = valid(instance) and instance.SaveSlot_Ref
+    if not qualified or not valid(pawn) or pawn.Dead ~= false or not valid(save) or not valid(stock) or same(save, stock) then
+        error("stock_door_pry_guest_unavailable", 0)
+    end
+    local tools = require("native_loot_crate_input")
+    local scope = {pawn = pawn, crate = actor, save = save, stock = stock, box = knob}
+    local actor_address = actor:GetAddress()
+    local armed = false
+    local function arm()
+        if not SilverfishBeginNativeGuestDoorPry(actor_address, pawn:GetAddress(), save:GetAddress()) then
+            error("stock_door_pry_busy", 0)
+        end
+        armed = true
+    end
+    local ok, before, after = pcall(function()
+        if kind == "blowtorch" then return tools.fire_blowtorch(scope, guid, arm) end
+        return tools.swing_crowbar(scope, actor.LockPick_Chance, guid, arm)
+    end)
+    local observed = armed and SilverfishFinishNativeGuestDoorPry(actor_address)
+    if not ok then
+        if armed then error("mutation_unverified_stock_door_pry:" .. tostring(before), 0) end
+        error(before, 0)
+    end
+    if not observed and before == after and valid(actor) and actor.Locked == true then
+        error("stock_door_pry_stock_action_busy", 0)
+    end
+    if not observed or (kind == "blowtorch" and after ~= before - 1) or not valid(actor) then
+        error("mutation_unverified_stock_door_pry", 0)
+    end
+    tool_report = {world = state.world, actor = target, pawn = name, guid = guid, kind = kind, before = before, after = after}
+    return "stock hinged door pry was invoked for the guest"
+end
+
 local function trace(fields, state, phase)
     local permitted = (phase == "hosting" and host_fixture) or (phase == "connected" and guest_fixture)
     local actor = permitted and census(state, phase)[fields[3]]
@@ -225,6 +282,7 @@ function doors.command(fields, state, phase)
     if fields[2] == "native-stock-door-project" then return project(fields, state, phase) end
     if fields[2] == "native-stock-door-fixture" then return fixture(fields, state, phase) end
     if fields[2] == "native-stock-door-guest-interact" then return interact(fields, state, phase) end
+    if fields[2] == "native-stock-door-guest-pry" then return tool_pry(fields, state, phase) end
     if fields[2] == "native-stock-door-trace" then return trace(fields, state, phase) end
 end
 

@@ -1,5 +1,6 @@
 local primary = {}
 local loot = require("native_loot")
+local native_stock_door = require("native_stock_door")
 local weapon_profiles = require("guest_weapon_registry")
 local cqc = require("native_enemy_loot_registry")
 
@@ -117,8 +118,10 @@ function primary.sync(state, phase)
             local actor = current.pawn.ActorBeingLookedAt
             local name = valid(actor) and actor:GetFullName()
             local profile = name and loot.profile(current.map, name)
-            if not profile or not profile.keyless_lock or actor.Locked ~= true
-                or (kind == "crowbar" and current.pawn.CanInteract ~= true)
+            if not profile or not profile.keyless_lock then
+                name = native_stock_door.pry_target(current.pawn, kind)
+            end
+            if not name or actor.Locked ~= true or (kind == "crowbar" and current.pawn.CanInteract ~= true)
                 or not emit(event_path, {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind, name}) then break end
         elseif not emit(event_path, {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind}) then break end
         emitted = emitted + 1
@@ -189,7 +192,13 @@ function primary.command(fields, state, phase)
             fixture_proof = {context = current, guid = binding.guid, sequence = sequence, wrappers = wrappers}
         end
         if pry_tool then
-            require("native_loot_crate_input").pry_tool_input_fixture(state, phase, fields[4], probe)
+            local target = fields[4]
+            local profile = loot.profile(current.map, target)
+            if profile and profile.keyless_lock then
+                require("native_loot_crate_input").pry_tool_input_fixture(state, phase, target, probe)
+            else
+                native_stock_door.input_fixture(state, phase, target, current.pawn, probe)
+            end
         else
             probe()
         end

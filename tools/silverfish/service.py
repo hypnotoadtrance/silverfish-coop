@@ -74,7 +74,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_subway_valve.PREFLIGHT, native_subway_valve.ACTIVATE,
                         "native-inventory-list", native_inventory.SPLIT, native_inventory.SORT, native_stash.LIST, native_stash.MOVE,
                         "native-loot-inspect", "native-loot-open", "native-loot-claim", *native_loot.PRY_TOOL_ACTIONS.values(),
-                        native_stock_door.ACTION,
+                        native_stock_door.ACTION, *native_stock_door.PRY_ACTIONS.values(),
                         *native_guest_drop.ACTIONS,
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
@@ -1775,6 +1775,10 @@ class Host:
                     result = await native_loot.use_vehicle_pry_tool(self, bridge, character, target, request["operation_id"], action)
             elif action == native_stock_door.ACTION:
                 result = await native_stock_door.interact(self, bridge, character, target, request["operation_id"])
+            elif action in native_stock_door.PRY_ACTIONS.values():
+                kind = action.removeprefix("native-guest-door-")
+                async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
+                    result = await native_stock_door.pry(self, bridge, character, target, request["operation_id"], kind)
             elif action == native_inventory.SORT:
                 result = await native_inventory.sort_backpack(self, bridge, character, target, request["operation_id"])
             elif action == "native-inventory-list":
@@ -4550,7 +4554,8 @@ class Client:
             target = native_authored_pickup.request_target(target, self.zone_epoch)
         elif action == native_guest_melee.SWING:
             target = native_guest_melee.request_target(target, self.zone_epoch)
-        elif action in native_loot.PRY_TOOL_ACTIONS.values() or action == native_stock_door.ACTION:
+        elif (action in native_loot.PRY_TOOL_ACTIONS.values() or action == native_stock_door.ACTION
+              or action in native_stock_door.PRY_ACTIONS.values()):
             target = f"{self.zone_epoch}@{target}"
         request = {"action": action, "operation_id": operation_id, "target": target}
         if action == "keep":
@@ -4623,11 +4628,14 @@ class Client:
             elif event_kind in native_loot.PRY_TOOL_ACTIONS:
                 if not extra:
                     continue
-                action, event = native_loot.PRY_TOOL_ACTIONS[event_kind], f"native_guest_{event_kind}_input"
+                vehicle = native_loot.vehicle_lock(extra[0], event_area)
+                actions = native_loot.PRY_TOOL_ACTIONS if vehicle else native_stock_door.PRY_ACTIONS
+                action = actions[event_kind]
+                event = f"native_guest_{event_kind}_input" if vehicle else f"native_guest_door_{event_kind}_input"
             else:
                 action, event = "native-guest-weapon-fire", "native_guest_primary_input"
             try:
-                selection = f"{event_guid}@{extra[0]}" if action in native_loot.PRY_TOOL_ACTIONS.values() else event_guid
+                selection = f"{event_guid}@{extra[0]}" if extra else event_guid
                 result = await self.gameplay_action(action, operation, selection)
                 self.control.event(event, operation_id=operation, sequence=sequence, **result)
             except (ValueError, OSError, RuntimeError) as error:
@@ -5003,8 +5011,9 @@ class Client:
                     fixture_arguments = ()
                     if self.primary_scope[3] in native_loot.PRY_TOOL_ACTIONS:
                         crate = request.get("target")
-                        if not isinstance(crate, str) or not native_loot.vehicle_lock(crate, self.last_game.get("map")):
-                            raise ValueError("The pry tool input fixture needs a stock vehicle on the current map")
+                        if not isinstance(crate, str) or not (native_loot.vehicle_lock(crate, self.last_game.get("map"))
+                                or crate in self.last_game.get(native_stock_door.KEY, {})):
+                            raise ValueError("The pry tool input fixture needs a stock vehicle or hinged door on the current map")
                         fixture_arguments = (crate,)
                     self.last_game = await self.bridge.command(action, self.primary_scope[1], *fixture_arguments, timeout=5)
                     result = {"native_guest_primary_fixture": self.last_game.get("native_guest_primary_fixture", {})}

@@ -75,6 +75,8 @@ At a locked vehicle trunk, equip a blowtorch and press primary fire, or equip a 
 
 The native campaign status reports qualified hinged doors under `game.native_stock_doors`. Guests use the stock Interact action on an unlocked door, or submit `native-stock-door-interact --target "DOOR_FULL_NAME"` when within stock reach. The result reports whether the host opened or closed the door.
 
+Guests can pry eligible hinged doors with the same stock tool controls as vehicle trunks. The crowbar follows the lock's stock strength limit. For local automation, `native-guest-door-crowbar` and `native-guest-door-blowtorch` accept `--target "TOOL_GUID@DOOR_FULL_NAME"`. The host commits the lock change, tool result, and guest inventory together.
+
 In a new authored campaign with native guest ownership, set `--native-extraction-keep N` to enable the stock extraction mode and keep up to `N` inventory rows after a wipe. Add `--native-extraction-backpacks` for owner-only drops and `--native-extraction-lose-slot` to reduce the host's saved retention limit after each wipe. These settings are stored in the campaign's native save and resume automatically.
 
 During a stock retention wipe, the host and guests see their own frozen inventory. Use Page Up or Page Down to move, Space to toggle a whole row, and Home twice to submit. An empty selection is allowed. Local automation can use `native-wipe-items` and `keep --keep GUID=1`. Once the party has respawned, the owner's `native_backpacks` status contains their backpack IDs and death positions. Use `native-wipe-recover --target BACKPACK_ID` while nearby.

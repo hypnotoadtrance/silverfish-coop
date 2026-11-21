@@ -763,7 +763,7 @@ class Bridge:
                 continue
             target = fields[6] if len(fields) == 7 else None
             if fields[5] in native_loot.PRY_TOOL_ACTIONS:
-                if not target or not vehicle_lock(target, fields[2]):
+                if not target or not (vehicle_lock(target, fields[2]) or native_stock_door.actor_map(target) == fields[2]):
                     continue
             elif target is not None:
                 continue
@@ -1358,6 +1358,8 @@ class Bridge:
                     if fields[2] in doors or len(doors) >= 240:
                         raise ValueError("Repeated or oversized stock hinged door frame")
                     doors[fields[2]] = report
+                elif fields[0] == "native-stock-door-pry":
+                    data[native_stock_door.PRY_RESULT] = native_stock_door.parse_pry(fields, data.get("state"), data.get("map"))
                 elif (fields[0] == native_stock_door.TRACE_FIXTURE and len(fields) == 5
                       and native_stock_door.actor_map(fields[2]) == fields[1] == data.get("map")
                       and fields[3] in ("0", "2") and fields[4] in ("0", "1")):
