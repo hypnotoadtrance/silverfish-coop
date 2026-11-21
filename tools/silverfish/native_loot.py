@@ -151,7 +151,7 @@ class LootView:
             self.previous_items = None
             self.next_lease = 0.0
             self.claimed.clear()
-        rows = {row["guid"]: row for row in roll["items"] if not row.get("claimed_by")}
+        rows = {row["guid"]: row for row in roll["items"] if not row.get("claimed_by") and "transform" not in row}
         self.pending_event = []
         valid_event = (len(event) == 6 and event[0] == "crate-view" and tuple(event[2:5]) == scope
                        and event[1].isascii() and event[1].isdigit() and len(event[1]) <= 16
@@ -262,6 +262,8 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             raise RuntimeError("The crate escrow belongs to a different map")
         await asyncio.to_thread(native_host_save.verify_record, host.native_profile, escrow)
         arguments = (guid, escrow["slot"])
+        if (transform := item.get("transform")) is not None:
+            arguments += tuple(str(axis) for axis in transform["position"])
     elif action == "open":
         arguments = (native_host_save.new_slot(), *(("fixture-nonempty",) if fixture_nonempty else ()))
     mutates = action in ("open", "seed", "claim")

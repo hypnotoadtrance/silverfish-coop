@@ -1,5 +1,7 @@
 """Exact stock persistent-level small crates qualified for shared loot."""
 
+import math
+
 from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, RAIL_YARD
 
 
@@ -514,3 +516,15 @@ def loot_capacity(container: str) -> int:
     if container in FOUR_SLOT_CONTAINERS:
         return 4
     return 2 if container in CRATES else 0
+
+
+def valid_item_transform(transform: object) -> bool:
+    """Verify a stock loot actor's captured position, rotation, and scale."""
+    return (
+        type(transform) is dict and transform.keys() == {"position", "rotation", "scale"}
+        and all(type(transform[field]) is list and len(transform[field]) == 3
+                and all(type(axis) in (int, float) and abs(axis) <= limit and math.isfinite(axis)
+                        for axis in transform[field])
+                for field, limit in (("position", 1e7), ("rotation", 360), ("scale", 100)))
+        and all(axis != 0 for axis in transform["scale"])
+    )

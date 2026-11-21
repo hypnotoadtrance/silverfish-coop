@@ -68,6 +68,8 @@ function actions.command(fields, state, phase)
     local pawn, crate = fields[3], fields[4]
     local fixture_nonempty = action == "open" and fields[6] == "fixture-nonempty"
     local count = action == "open" and (fixture_nonempty and 6 or 5) or action == "claim" and 6 or 4
+    local positioned_claim = action == "claim" and #fields == 9
+    if positioned_claim then count = 9 end
     if not enabled or phase ~= "hosting" or #fields ~= count or not crate or not loot.profile(state.map, crate) then
         error("The exact stock crate operation is unavailable", 0)
     end
@@ -85,7 +87,8 @@ function actions.command(fields, state, phase)
             result.status = "native_loot_escrow_claim_unavailable"
             return "stock loot claim unavailable"
         end
-        local checked, scope = pcall(loot.claim_context, state, phase, pawn, crate)
+        local point = positioned_claim and {X = tonumber(fields[7]), Y = tonumber(fields[8]), Z = tonumber(fields[9])} or nil
+        local checked, scope = pcall(loot.claim_context, state, phase, pawn, crate, point)
         if not checked then
             result.status = tostring(scope)
             return "stock loot claim scope unavailable"
@@ -187,7 +190,7 @@ function actions.rows(state, phase, status_row)
         records[#records + 1] = status_row("native-loot-cash", cash.guid, cash.amount, cash.before, cash.after)
     end
     for _, item in ipairs(row.items) do
-        records[#records + 1] = status_row("native-loot-item", item.actor, item.class_path, item.guid)
+        records[#records + 1] = status_row("native-loot-item", item.actor, item.class_path, item.guid, table.unpack(item.transform))
     end
     return records
 end

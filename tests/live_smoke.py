@@ -80,7 +80,7 @@ options.add_argument("--native-loot", action="store_true", help="roll the qualif
 options.add_argument("--native-loot-input", action="store_true", help="open the stock crate using its actual interaction binding")
 options.add_argument("--native-loot-matrix", action="store_true", help="verify two CrossRoads crates and one in Dead Bridge")
 options.add_argument("--native-loot-nonempty", action="store_true", help="use a deterministic stock crate test draw")
-options.add_argument("--native-loot-view", action="store_true", help="claim a stock crate item through the guest overlay")
+options.add_argument("--native-world-loot", action="store_true", help="claim a physical stock crate item through Interact")
 options.add_argument("--native-quest-flow", action="store_true", help="exercise stock quest turn-in and party rewards")
 options.add_argument("--native-quest-catalog", action="store_true", help="read the current native quest catalog")
 options.add_argument("--native-meet-broker", action="store_true", help="verify the stock Black Market board and personal starter rewards")
@@ -154,8 +154,8 @@ if args.native_loot and not (args.native_guest and args.native_roster and args.a
     options.error("--native-loot requires --native-guest, --native-roster and --authored-zone")
 if args.native_loot_nonempty and not args.native_loot:
     options.error("--native-loot-nonempty requires --native-loot")
-if args.native_loot_view and not (args.native_loot_nonempty and args.native_zones):
-    options.error("--native-loot-view requires --native-zones and a deterministic native loot draw")
+if args.native_world_loot and not (args.native_loot_nonempty and args.native_zones):
+    options.error("--native-world-loot requires --native-zones and a deterministic native loot draw")
 if args.native_shop and not (args.native_guest and args.native_quest_flow):
     options.error("--native-shop requires --native-guest and --native-quest-flow")
 broker_map = args.native_broker or args.native_meet_broker
@@ -1761,6 +1761,8 @@ async def smoke():
                 still_neutral = (await command(*stock, "native-loot-inspect"))["native_loot"]
                 assert still_neutral["lucky_looter"] is False, still_neutral
                 await command(*stock, "native-loot-approach", "--target", "guest")
+                if args.native_world_loot:
+                    await command(*stock, "native-loot-approach", "--target", "host")
                 open_crate = ("action", "--profile", profile, "native-loot-open", "--target", NATIVE_LOOT_CRATE)
                 if args.native_loot_input:
                     await wait(client_run, lambda state: state.get("game", {}).get("native_loot_crate_input", {}).get("state") == "ready")
@@ -1785,20 +1787,27 @@ async def smoke():
                 if loot_roll["items"]:
                     loot_guid = loot_roll["items"][0]["guid"]
                     operation = uuid.uuid4().hex
-                    if args.native_loot_view:
-                        panel = (await wait(client_run, lambda state: state.get("game", {}).get(
-                            "native_loot_view", {}).get("state") == "ready"))["game"]["native_loot_view"]
-                        assert panel["id"] == loot_roll["id"] and panel["guid"] == loot_guid, panel
-                        select = ("action", "--profile", profile, "native-loot-view-fixture", "--target", "take")
-                        assert (await command(*select))["native_loot_view"]["state"] == "confirming"
-                        assert (await command(*select))["native_loot_view"]["state"] == "claiming"
-                        await wait(client_run, lambda state: state.get("gameplay", {}).get(
-                            "native_loot_rolls", {}).get(NATIVE_LOOT_CRATE, {}).get("items", [{}])[0].get("claimed_by") == chosen)
+                    if args.native_world_loot:
+                        visible = {uuid.uuid5(uuid.NAMESPACE_OID, f"{loot_roll['id']}:{row['guid']}").hex: row
+                                   for row in loot_roll["items"]}
+                        for directory in (run, client_run):
+                            shown = (await wait(directory, lambda state: set(
+                                state.get("game", {}).get("native_world_loot_items", {})) == visible.keys()
+                            ))["game"]
+                            assert not shown.get("native_loot_view"), shown
+                            assert all(shown["native_world_loot_items"][key]["class_path"] == row["class_path"]
+                                       for key, row in visible.items()), shown["native_world_loot_items"]
+                        identity = uuid.uuid5(uuid.NAMESPACE_OID, f"{loot_roll['id']}:{loot_guid}").hex
+                        press = await command("action", "--profile", profile, "native-world-loot-fixture", "--target", identity)
+                        assert press["native_world_loot_items"][identity]["sequence"] > 0, press
+                        for directory in (run, client_run):
+                            await wait(directory, lambda state: identity not in
+                                       state.get("game", {}).get("native_world_loot_items", {})
+                                       and set(state.get("game", {}).get("native_world_loot_items", {})) == visible.keys() - {identity})
                         events = (await command("events", "--profile", profile, "--tail", "100"))["events"]
-                        accepted, = [event for event in events if event["event"] == "native_stock_crate_item_taken"]
-                        assert accepted["native_loot_claim"]["guid"] == loot_guid, accepted
+                        accepted, = [event for event in events if event.get("native_loot_claim", {}).get("guid") == loot_guid]
                         operation = accepted["operation_id"]
-                        note("stock_crate_overlay_selects_confirms_and_claims_the_exact_row", accepted)
+                        note("stock_world_item_is_visible_and_collectible_through_interact", accepted)
                     claim_crate = ("action", "--profile", profile, "native-loot-claim", "--target", loot_guid,
                                    "--operation-id", operation)
                     claim = (await command(*claim_crate))["native_loot_claim"]

@@ -268,6 +268,19 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     self.assertNotIn("native_loot", proof or {})
 
+    def test_stock_loot_preserves_actor_transform(self):
+        slot = "SFCoop_" + "a" * 32
+        heading = f"native-loot\topen\t{CROSSROADS}\t{OTHER_CRATE}\t{PAWN}\t1\topened\t1\t1\tcanonical\t1\t100\t1\t1\t{slot}\n"
+        item = f"native-loot-item\tstock actor\t{ITEM['class_path']}\t{ITEM['guid']}"
+        status = self.root / "status.tsv"
+        base = f"schema\t1\nsession\thost\thosting\t{CROSSROADS}\t0\t1\n" + heading + item
+        status.write_text(base + "\t100\t200\t-32.5\t0\t-90\t5\t1\t1\t0.7\n", encoding="utf-8")
+        proof = runtime.Bridge(self.root, None).snapshot()
+        self.assertEqual(proof["native_loot"]["items"][0]["transform"],
+                         {"position": [100, 200, -32.5], "rotation": [0, -90, 5], "scale": [1, 1, 0.7]})
+        status.write_text(base + "\t100\tnan\t-32.5\t0\t-90\t5\t1\t1\t0.7\n", encoding="utf-8")
+        self.assertNotIn("native_loot", runtime.Bridge(self.root, None).snapshot() or {})
+
     async def test_claim_requires_exact_scope_and_retries_keep_the_original_crate(self):
         rolls = {crate: self.roll(CROSSROADS, crate, str(index) * 32)
                  for index, crate in enumerate((LEGACY_CRATE, OTHER_CRATE), start=1)}

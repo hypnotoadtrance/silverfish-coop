@@ -6,6 +6,7 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local headless = enabled and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local color = { R = 0, G = 0, B = 0, A = 1 }
 local current
+local world_items, slot_count = {}, 64
 
 local function valid(object)
     return object ~= nil and object:IsValid()
@@ -59,6 +60,8 @@ end
 function projection.clear()
     current = nil
     if enabled and type(SilverfishClearNativeGuestDropProjection) == "function" then
+        for _, entry in pairs(world_items) do SilverfishClearNativeGuestDropProjection(entry.slot) end
+        world_items = {}
         return SilverfishClearNativeGuestDropProjection()
     end
     return true
@@ -74,29 +77,96 @@ local function proof()
 end
 
 function projection.take_press(pawn)
-    if not current or not same(pawn, current.pawn) or type(SilverfishTakeNativeGuestDropProjectionPress) ~= "function" then return end
+    if not valid(pawn) or type(SilverfishTakeNativeGuestDropProjectionPress) ~= "function" then return end
     local epoch, id = SilverfishTakeNativeGuestDropProjectionPress(pawn:GetAddress())
-    if identifier(epoch) and identifier(id) and current.epoch == epoch and current.id == id then
+    if not identifier(epoch) or not identifier(id) then return end
+    local item = world_items[id]
+    if item and item.epoch == epoch and same(item.pawn, pawn) then return "world-loot:" .. epoch .. ":" .. id end
+    if current and same(pawn, current.pawn) and current.epoch == epoch and current.id == id then
         return "stack-drop:" .. epoch .. ":" .. id
     end
 end
 
 function projection.rows(state, phase, row)
-    if not current then return {} end
-    if current.map ~= state.map or not same(local_pawn(state, phase), current.pawn) or not same(state.world, current.world) then
-        projection.clear()
-        return {}
+    local rows, pawn = {}, local_pawn(state, phase)
+    if current and (current.map ~= state.map or not same(pawn, current.pawn) or not same(state.world, current.world)) then
+        current = nil
+        SilverfishClearNativeGuestDropProjection()
     end
     local actor, sequence = proof()
-    if not actor then return {} end
-    return { row("native-guest-drop-projection", current.map, current.epoch, current.id, current.pawn:GetFullName(), actor, sequence) }
+    if actor then
+        rows[#rows + 1] = row("native-guest-drop-projection", current.map, current.epoch, current.id,
+            current.pawn:GetFullName(), actor, sequence)
+    end
+    for id, item in pairs(world_items) do
+        if item.map ~= state.map or not same(pawn, item.pawn) or not same(state.world, item.world) then
+            if SilverfishClearNativeGuestDropProjection(item.slot) then world_items[id] = nil end
+        else
+            local active, epoch, observed, name, press = SilverfishReadNativeGuestDropProjection(item.slot)
+            if active and epoch == item.epoch and observed == id then
+                rows[#rows + 1] = row("native-world-loot-item", item.map, epoch, id, pawn:GetFullName(), name, press, item.class)
+            end
+        end
+    end
+    return rows
 end
 
-local function fixture(pawn, id)
-    local displayed, before = proof()
-    if not headless or not current or current.id ~= id or not displayed or type(before) ~= "number"
+local function item_frame(fields, state, phase)
+    local area, epoch = fields[3], fields[4]
+    local pawn = local_pawn(state, phase)
+    if not pawn or area ~= state.map or not identifier(epoch) or #fields > slot_count + 4
+        or type(SilverfishSyncNativeWorldLootItem) ~= "function" then
+        error("world_loot_frame_scope_unavailable", 0)
+    end
+    local incoming, occupied = {}, {}
+    for index = 5, #fields do
+        local values = {}
+        for value in fields[index]:gmatch("[^|]+") do values[#values + 1] = value end
+        local id, class = values[1], values[2]
+        if #values ~= 11 or not identifier(id) or incoming[id] or #class > 256
+            or not class:match("^/Game/Classes/[%w_./%-]+_C$") then error("world_loot_item_identity_invalid", 0) end
+        local transform = {}
+        for axis = 3, 11 do
+            local value = tonumber(values[axis])
+            if not coordinate(value) then error("world_loot_item_transform_invalid", 0) end
+            transform[#transform + 1] = value
+        end
+        incoming[id] = { class = class, transform = transform }
+    end
+    for id, entry in pairs(world_items) do
+        if not incoming[id] or entry.epoch ~= epoch or not same(entry.pawn, pawn) then
+            if SilverfishClearNativeGuestDropProjection(entry.slot) then world_items[id] = nil end
+        end
+        if world_items[id] then occupied[entry.slot] = true end
+    end
+    local errors = {}
+    for id, item in pairs(incoming) do
+        local previous = world_items[id]
+        local slot = previous and previous.slot
+        if not slot then
+            for index = 1, slot_count do
+                if not occupied[index] then slot = index; break end
+            end
+        end
+        if slot then
+            occupied[slot] = true
+            if not valid(StaticFindObject(item.class)) then LoadAsset(item.class) end
+            local t = item.transform
+            local ok, reason = SilverfishSyncNativeWorldLootItem(pawn:GetAddress(), epoch, id,
+                t[1], t[2], t[3], t[3], item.class, t[4], t[5], t[6], t[7], t[8], t[9], slot)
+            world_items[id] = { map = area, epoch = epoch, pawn = pawn, world = state.world, class = item.class, slot = slot }
+            if not ok then errors[#errors + 1] = reason end
+        end
+    end
+    if #errors > 0 then error(errors[1], 0) end
+    return "stock world loot synchronized"
+end
+
+local function fixture(pawn, proof_for)
+    local displayed, before = proof_for()
+    if not headless or not displayed or type(before) ~= "number"
         or type(SilverfishProbeNativeInteractInput) ~= "function" then error("stock_drop_projection_fixture_scope_unavailable", 0) end
-    local path = drop_items.actor_path(current.class, current.map, maps[current.map], displayed)
+    local path = displayed:match("^%S+ (/Game/[%w_./:%-]+)$")
     local actor = path and StaticFindObject(path)
     local box = valid(actor) and actor.Box
     local camera = pawn.Camera
@@ -116,10 +186,15 @@ local function fixture(pawn, id)
     local succeeded, detail = pcall(function()
         camera:K2_SetWorldRotation(aimed, false, {}, true)
         pawn:LookTrace()
-        if not same(pawn.InteractionTarget_Component, box) then error("stock_drop_projection_fixture_focus_unverified", 0) end
+        local focused = pawn.InteractionTarget_Component
+        if not same(focused, box) then
+            error(string.format("stock_drop_projection_fixture_focus_unverified: eye=(%.1f,%.1f,%.1f), "
+                .. "box=(%.1f,%.1f,%.1f), focus=%s", eye.X, eye.Y, eye.Z, point.X, point.Y, point.Z,
+                valid(focused) and focused:GetFullName() or "none"), 0)
+        end
         local ok, status = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
         if not ok then error(status, 0) end
-        local exact, after = proof()
+        local exact, after = proof_for()
         if status ~= "stock_started_consumed" or exact ~= displayed or after ~= before + 1 then
             error("stock_drop_projection_fixture_interaction_veto_unverified", 0)
         end
@@ -142,16 +217,29 @@ end
 
 function projection.command(fields, state, phase)
     local command = fields[2]
-    if command == "native-guest-drop-projection-clear" then
+    if command == "native-world-loot-frame" then
+        return item_frame(fields, state, phase)
+    elseif command == "native-world-loot-fixture" then
+        local pawn, id = local_pawn(state, phase), fields[3]
+        local item = world_items[id]
+        if #fields ~= 3 or not item or not same(pawn, item.pawn) or not same(state.world, item.world) then
+            error("world_loot_fixture_scope_unavailable", 0)
+        end
+        return fixture(pawn, function()
+            local active, epoch, exact, actor, press = SilverfishReadNativeGuestDropProjection(item.slot)
+            if active and epoch == item.epoch and exact == id then return actor, press end
+        end)
+    elseif command == "native-guest-drop-projection-clear" then
         if #fields ~= 2 then error("stock_drop_projection_clear_arguments", 0) end
-        if not projection.clear() then error("stock_drop_projection_retirement_pending", 0) end
+        current = nil
+        if not SilverfishClearNativeGuestDropProjection() then error("stock_drop_projection_retirement_pending", 0) end
         return "stock drop projection cleared"
     elseif command == "native-guest-drop-projection-fixture" then
         local pawn = local_pawn(state, phase)
-        if #fields ~= 3 or not pawn or not current or not same(pawn, current.pawn) then
+        if #fields ~= 3 or not pawn or not current or fields[3] ~= current.id or not same(pawn, current.pawn) then
             error("stock_drop_projection_fixture_scope_unavailable", 0)
         end
-        return fixture(pawn, fields[3])
+        return fixture(pawn, proof)
     elseif command == "native-guest-drop-projection-sync" then
         local pawn = local_pawn(state, phase)
         local area, epoch, id = fields[3], fields[4], fields[5]
@@ -167,14 +255,18 @@ function projection.command(fields, state, phase)
         local cached = current and same(pawn, current.pawn) and current.map == area and current.epoch == epoch and current.id == id
             and current.class == class
             and source[1] == current.source[1] and source[2] == current.source[2] and source[3] == current.source[3]
-        if not cached then projection.clear() end
+        if not cached then
+            current = nil
+            SilverfishClearNativeGuestDropProjection()
+        end
         if not valid(StaticFindObject(class)) then LoadAsset(class) end
         local visual_z = cached and current.visual_z or floor_z(state, source)
         local extra = class ~= drop_items.ammo and {class} or {}
         local ok, detail = SilverfishSyncNativeGuestDropProjection(pawn:GetAddress(), epoch, id,
             source[1], source[2], source[3], visual_z, table.unpack(extra))
         if not ok then
-            projection.clear()
+            current = nil
+            SilverfishClearNativeGuestDropProjection()
             error(detail, 0)
         end
         current = { pawn = pawn, world = state.world, map = area, epoch = epoch, id = id, class = class,

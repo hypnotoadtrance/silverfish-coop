@@ -10,7 +10,7 @@ import stat
 import uuid
 
 from .campaign import CampaignFormatError
-from .authored_loot import CRATES, FOUR_SLOT_CONTAINERS, GUARANTEED_CRATES, loot_capacity
+from .authored_loot import CRATES, FOUR_SLOT_CONTAINERS, GUARANTEED_CRATES, loot_capacity, valid_item_transform
 from .enemy_loot_profiles import BY_MAP as ENEMY_LOOT_ZONES, SHELLS, for_roll as enemy_loot_profile
 from .native_gold import valid_guid
 from .native_guest_drop_record import active_frames as stack_drop_frames
@@ -191,6 +191,9 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
         items = roll.get("items")
         if isinstance(items, list) and len(items) > (loot_capacity(container) or 2):
             raise CampaignFormatError("A stock container exceeds its exact escrow capacity")
+        if isinstance(items, list) and any(type(item) is dict and "transform" in item
+                                           and not valid_item_transform(item["transform"]) for item in items):
+            raise CampaignFormatError("The stock loot actor transform is invalid")
         if container not in FOUR_SLOT_CONTAINERS:
             continue
         calls = roll.get("trait_calls")

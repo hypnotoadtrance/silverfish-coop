@@ -26,6 +26,7 @@ from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lif
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
+from . import native_world_loot
 from . import native_host_stack_drop
 from . import native_black_box
 from . import native_spratt
@@ -47,7 +48,7 @@ from . import native_host_dig, native_host_dig_live, native_package_handoff_jour
 from . import native_title_entry
 from .native_host_landmine import parse as parse_host_landmine
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
-from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE, loot_capacity
+from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE, loot_capacity, valid_item_transform
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
 from .native_quest_catalog import parse as parse_quest_catalog
 from .native_roster import Assignment
@@ -2008,13 +2009,26 @@ class Bridge:
                         "distance": _finite(fields[11]), "item_count": count, "invoked": fields[13] == "1",
                         "items": [], "escrow_slot": fields[14] if len(fields) == 15 else "-",
                     }
-                elif fields[0] == "native-loot-item" and len(fields) in (3, 4) and "native_loot" in data:
+                elif fields[0] == native_world_loot.ROW:
+                    item = native_world_loot.parse(fields, data.get("state"), data.get("map"))
+                    projected = data.setdefault(native_world_loot.KEY, {})
+                    if item["id"] in projected:
+                        raise ValueError("Duplicate stock world loot actor identity")
+                    projected[item["id"]] = item
+                elif fields[0] == "native-loot-item" and len(fields) in (3, 4, 13) and "native_loot" in data:
                     loot = data["native_loot"]
                     if len(loot["items"]) >= loot["item_count"]:
                         raise ValueError("Stock container reported more rows than its receipt")
                     item = {"actor": fields[1], "class_path": fields[2]}
-                    if len(fields) == 4:
+                    if len(fields) >= 4:
                         item["guid"] = fields[3]
+                    if len(fields) == 13:
+                        transform = dict(position=list(map(_finite, fields[4:7])),
+                                         rotation=list(map(_finite, fields[7:10])),
+                                         scale=list(map(_finite, fields[10:13])))
+                        if not valid_item_transform(transform):
+                            raise ValueError("Stock loot actor reported an invalid transform")
+                        item["transform"] = transform
                     loot["items"].append(item)
                 elif fields[0] == "native-loot-cash" and len(fields) == 5 and "native_loot" in data:
                     loot = data["native_loot"]

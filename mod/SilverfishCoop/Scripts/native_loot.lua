@@ -322,18 +322,22 @@ function loot.approach_fixture(state, phase, pawn_name, requested_crate)
     error("native_loot_crate_has_no_qualified_fixture_position", 0)
 end
 
-function loot.claim_context(state, phase, pawn_name, requested_crate)
+function loot.claim_context(state, phase, pawn_name, requested_crate, point)
     local profile = requested_crate and loot.profile(state.map, requested_crate)
     if not profile then error("native_loot_expected_exact_crate", 0) end
     local host, world, _, stock = host_context(state, phase, profile)
     local pawn = participant(state, pawn_name, host, world)
     local crate = find_crate(world, profile)
     if crate.Looted ~= true then error("native_loot_crate_not_open", 0) end
-    local target, from = crate:K2_GetActorLocation(), pawn:K2_GetActorLocation()
+    local target, from = point or crate:K2_GetActorLocation(), pawn:K2_GetActorLocation()
+    if not target or not from or not finite(target.X) or not finite(target.Y) or not finite(target.Z) then
+        error("native_loot_item_position_invalid", 0)
+    end
     local dx, dy, dz = target.X - from.X, target.Y - from.Y, target.Z - from.Z
     local range = pawn.InteractionRange
     local distance = math.sqrt(dx * dx + dy * dy + dz * dz)
-    if not finite(range) or range <= 0 or range > 1000 or not finite(distance) or distance > range then
+    if not finite(range) or range <= 0 or range > 1000 or not finite(distance)
+        or distance > (point and math.min(range, 250) or range) then
         error("native_loot_crate_out_of_reach", 0)
     end
     return { pawn = pawn, save = pawn.Save, stock = stock, distance = distance, crate = crate, profile = profile }
@@ -370,7 +374,16 @@ function loot.results(state, phase, scope, item_addresses)
                 if result[index] then error("native_loot_result_item_ambiguous", 0) end
                 local path = actor:GetClass():GetFullName():match("^%S+ (/Game/%S+)$")
                 if not path then error("native_loot_result_item_class_unavailable", 0) end
-                result[index] = { address = address, actor = actor:GetFullName(), class_path = path, object = actor }
+                local location, rotation, scale = actor:K2_GetActorLocation(), actor:K2_GetActorRotation(),
+                    actor:GetActorScale3D()
+                if not location or not rotation or not scale then error("native_loot_spawn_transform_unavailable", 0) end
+                local transform = { location.X, location.Y, location.Z, rotation.Pitch, rotation.Yaw, rotation.Roll,
+                    scale.X, scale.Y, scale.Z }
+                for axis = 1, 9 do
+                    if not finite(transform[axis]) then error("native_loot_spawn_transform_unavailable", 0) end
+                end
+                result[index] = { address = address, actor = actor:GetFullName(), class_path = path, object = actor,
+                    transform = transform }
             end
         end
     end

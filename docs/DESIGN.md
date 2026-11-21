@@ -44,6 +44,13 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 
 ## Implementation milestones
 
+### Physical world loot
+
+- Players use the stock Interact action on individual world items throughout the campaign. This applies to container contents, enemy drops, player drops, and loose items placed in a level. All nearby items remain visible together.
+- The host records each item's identity, stock class, payload, and world transform. Replicas use the stock item appearance at the host's position. The host settles the first eligible pickup once, updates the recipient's inventory or the shared wallet, and removes that item for everyone.
+- Use the stock container, death, drop, and item-interaction paths to discover sources by type and live world identity. A supported source type must work across authored placements without a separate per-crate, per-item, or per-map opt-in.
+- Test representative stock classes and placement cases through the common paths. Cover contested pickup, multiple items in one location, late join, reconnect, travel and revisit, restart, and loading existing co-op saves. Keep structured item and claim status available for automation.
+
 ### First prototype
 
 - Run a two-player Direct IP listen session on the shipped test map. A client can join by address and host-selected port and take control of a separate character.

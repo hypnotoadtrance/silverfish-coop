@@ -30,6 +30,7 @@ from .embedded_engine import BRIDGE_ENV, OPT_IN_ENV, EmbeddedEngine, select_save
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from . import native_guest_drop, native_guest_drop_projection, native_guest_drop_record
+from . import native_world_loot
 from . import native_guest_melee
 from . import native_host_dig, native_host_dig_live, native_host_landmine, native_package_handoff_journal
 from . import native_kill_volume
@@ -229,6 +230,7 @@ class Host:
         self.mindcore_carry = (native_mindcore_carry.Authority(self)
                                if native_guest and native_zones and native_backend == "cpp" else None)
         self.stack_drop_projection = native_guest_drop_projection.Projection()
+        self.world_loot = native_world_loot.Projection()
         self.stock_drop_input = native_host_stack_drop.HostDropInput()
         self.native_zone_walls = native_zone_walls
         self.native_profile = native_profile
@@ -2423,6 +2425,10 @@ class Host:
                 elif action == native_guest_drop_projection.FIXTURE and self.fixtures:
                     proof = await self.stack_drop_projection.fixture_host(self, bridge, request.get("target"))
                     result = {native_guest_drop_projection.KEY: proof}
+                elif action == native_world_loot.FIXTURE and self.fixtures:
+                    self.last_game = await self.world_loot.fixture(bridge, self.last_game, request.get("target"))
+                    self.last_seen = time.monotonic()
+                    result = {native_world_loot.KEY: self.last_game.get(native_world_loot.KEY, {})}
                 elif action in (native_host_stack_drop.FIXTURE, native_host_stack_drop.CLOSE_FIXTURE) and self.fixtures:
                     result = await native_host_stack_drop.fixture(self, bridge, action, request.get("target"))
                 elif action == native_kill_volume.FIXTURE and self.fixtures:
@@ -3476,11 +3482,27 @@ class Host:
                 if self.stack_drop_projection.last_error != reason:
                     self.stack_drop_projection.last_error = reason
                     self.control.event("stock_drop_projection_unavailable", reason=reason)
+            if self.native_loot_input:
+                rolls = self.party.get(native_loot.STATE_KEY, {})
+                try:
+                    self.last_game = await self.world_loot.sync(
+                        bridge, self.last_game, rolls, self.control.generation, self.zone_epoch,
+                        active=not (self.stopping or self.transitioning or self.party.get("wipe")
+                                    or self.native_checkpoint_unsafe),
+                    )
+                except (OSError, RuntimeError) as error:
+                    if self.world_loot.last_error != str(error):
+                        self.world_loot.last_error = str(error)
+                        self.control.event("world_loot_projection_unavailable", reason=str(error))
             for operation_id, target in bridge.interactions():
                 if self.stopping or self.native_checkpoint_unsafe:
                     break
                 try:
-                    if stack_drop := native_guest_drop_projection.target_parts(target):
+                    if world_loot := native_world_loot.target_parts(target):
+                        claim = self.world_loot.claim_target(self.last_game, self.party.get(native_loot.STATE_KEY, {}), world_loot)
+                        result = await native_loot.perform(self, bridge, "host", "claim", claim, operation_id)
+                        self.control.event("local_interaction", operation_id=operation_id, **result)
+                    elif stack_drop := native_guest_drop_projection.target_parts(target):
                         async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                             result = await self.stack_drop_projection.reclaim_host(self, bridge, operation_id, stack_drop)
                         self.control.event("local_interaction", operation_id=operation_id, **result)
@@ -4208,6 +4230,7 @@ class Client:
                               if invite.get("native_mindcore_view") else None)
         self.wipe_view = native_wipe_view.WipeView(bridge, control, invite["character_id"]) if invite.get("native_wipe_view") else None
         self.loot_view = native_loot.LootView(bridge, control) if invite.get("native_loot_input") else None
+        self.world_loot = native_world_loot.Projection()
         self.primary_scope = None
         self.next_primary_renewal = 0.0
         self.bag_projection_key = None
@@ -4895,6 +4918,9 @@ class Client:
                 elif action == native_guest_drop_projection.FIXTURE:
                     proof = await self.stack_drop_projection.fixture(self, request.get("target"))
                     result = {native_guest_drop_projection.KEY: proof}
+                elif action == native_world_loot.FIXTURE:
+                    self.last_game = await self.world_loot.fixture(self.bridge, self.last_game, request.get("target"))
+                    result = {native_world_loot.KEY: self.last_game.get(native_world_loot.KEY, {})}
                 elif action == "native-bag-projection-fixture":
                     self.last_game = await self.bridge.command(action, request.get("target") or "", timeout=5)
                     result = {"native_bag_projection_interaction": self.last_game.get("native_bag_projection_interaction", {})}
@@ -5123,9 +5149,28 @@ class Client:
                     self.bridge, self.last_game, "connected", self.zone_epoch, frame,
                 )
             interactions = self.bridge.interactions()
+            if self.invite.get("native_loot_input"):
+                try:
+                    self.last_game = await self.world_loot.sync(
+                        self.bridge, self.last_game, self.gameplay.get(native_loot.STATE_KEY, {}),
+                        self.host_session, self.zone_epoch,
+                        active=active and self.transport.game_access and not self.stopping
+                        and time.monotonic() - self.gameplay_seen < 2,
+                    )
+                except (OSError, RuntimeError) as error:
+                    if self.world_loot.last_error != str(error):
+                        self.world_loot.last_error = str(error)
+                        self.control.event("world_loot_projection_unavailable", reason=str(error))
             if active and not self.stopping:
                 for operation_id, target in interactions:
                     try:
+                        world_loot = native_world_loot.target_parts(target)
+                        if world_loot:
+                            claim = self.world_loot.claim_target(
+                                self.last_game, self.gameplay.get(native_loot.STATE_KEY, {}), world_loot)
+                            result = await self.gameplay_action("native-loot-claim", operation_id, claim)
+                            self.control.event("local_interaction", operation_id=operation_id, **result)
+                            continue
                         stack_drop = native_guest_drop_projection.target_parts(target)
                         if stack_drop:
                             result = await self.stack_drop_projection.reclaim(self, operation_id, stack_drop)
