@@ -23,6 +23,7 @@ _HOST_FIELDS = (rb"\t([0-9a-f]{32})\t([0-9a-f]{32})\thost\t([A-Za-z0-9_-]{0,64})
                 rb"\t([A-Za-z0-9.:%_-]{0,64})\t([0-9]{0,5})")
 _HOST_REQUEST = re.compile(rb"2" + _HOST_FIELDS + rb"\r?\n")
 _DIRECT_HOST_REQUEST = re.compile(rb"3" + _HOST_FIELDS + rb"\t([^\x00-\x1f\x7f]{0,512})\r?\n")
+_CREATOR_HOST_REQUEST = re.compile(rb"4" + _HOST_FIELDS + rb"\t([^\x00-\x1f\x7f]{0,512})\tcreator\r?\n")
 _CHARACTER_UUID = rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _JOIN_REQUEST = re.compile(rb"2\t([0-9a-f]{32})\t([0-9a-f]{32})\tjoin\t([0-9a-f]{32})"
                            rb"\t([A-Za-z0-9_-]{0,64})\t(" + _CHARACTER_UUID + rb")\r?\n")
@@ -38,6 +39,7 @@ class Claim:
     host_settings: tuple[str, str, str] | None = field(default=None, repr=False)
     join_settings: tuple[str, str, str] | None = field(default=None, repr=False)
     direct_password: str | None = field(default=None, repr=False)
+    stock_creator: bool = False
 
 
 def _stock_title(snapshot):
@@ -224,13 +226,15 @@ class TitleHandoff:
             return None
 
         host_settings = join_settings = direct_password = None
+        stock_creator = False
         choice = _REQUEST.fullmatch(data)
         if choice:
             generation, request_id, action = (field.decode("ascii") for field in choice.groups())
         elif choice := _HOST_REQUEST.fullmatch(data):
             generation, request_id, campaign, bind, port = (field.decode("ascii") for field in choice.groups())
             action, host_settings = "host", (campaign, bind, port)
-        elif choice := _DIRECT_HOST_REQUEST.fullmatch(data):
+        elif choice := _DIRECT_HOST_REQUEST.fullmatch(data) or _CREATOR_HOST_REQUEST.fullmatch(data):
+            stock_creator = choice.re is _CREATOR_HOST_REQUEST
             *fields, password = choice.groups()
             generation, request_id, campaign, bind, port = (field.decode("ascii") for field in fields)
             try:
@@ -263,7 +267,7 @@ class TitleHandoff:
         if not _unlink(self.request_path):
             return None
         claim = Claim(action, request_id, generation, self._bindings[action], host_settings, join_settings,
-                      direct_password)
+                      direct_password, stock_creator)
         self._claim = claim
         self.last_refusal = None
         self.close()

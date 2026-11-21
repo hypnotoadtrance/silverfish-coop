@@ -4,14 +4,14 @@ local display = require("native_title_display")
 local resident = os.getenv("SILVERFISH_COOP_RESIDENT_TITLE") == "1"
 local direct_join = os.getenv("SILVERFISH_COOP_TITLE_DIRECT_JOIN") == "1"
 
-local keys = {host = "F7", join = "F8", hide = "F9"}
+local keys = {host = "F7", join = "F8", hide = "F9", creator = "F10"}
 local actions = {
     ["host"] = {host = true}, ["join"] = {join = true}, ["host,join"] = {host = true, join = true},
 }
 local bridge_path, session_path, request_path, loop, current, session, report
 local dismissed, submitted
 local input_keys = {}
-local key_order = {"hide", "host", "join"}
+local key_order = {"hide", "host", "join", "creator"}
 local queued_keys, bound_keys = {}, false
 local settings_fixture, credits_fixture
 local credits_path = "/Game/Classes/GUI/Credits_MainMenu_Widget.Credits_MainMenu_Widget_C"
@@ -104,7 +104,7 @@ local function write_request(generation, action, form_values)
     local temporary = request_path .. "." .. id .. ".tmp"
     local file = io.open(temporary, "wb")
     if not file then return false end
-    local version = action == "host" and form_values and #form_values == 4 and "3" or "2"
+    local version = action == "host" and form_values and ({[4] = "3", [5] = "4"})[#form_values] or "2"
     local row = form_values and {version, generation, id, action, table.unpack(form_values)}
         or {"1", generation, id, action}
     local written = file:write(table.concat(row, "\t"), "\n")
@@ -176,6 +176,10 @@ local function handle_host_form(action, state, phase, context)
     if action == "join" then return form.api.next(form.draft, state, phase) end
     local values, failure = form.api.selection(form.draft, state, phase)
     if not values then return false, failure end
+    if action == "creator" then
+        if not resident then return false, "title_stock_creator_unavailable" end
+        values[5] = "creator"
+    end
     return choose("host", title.probe(state, phase), values)
 end
 
@@ -284,10 +288,11 @@ local function host_form_fixture_command(fields, state, phase)
         return "title_host_form_next"
     end
     local action = operation == "submit" and "host" or operation == "cancel" and "hide"
+        or operation == "creator" and "creator"
     if not action then error("title_host_form_fixture_arguments", 0) end
     local accepted, failure = handle_host_form(action, state, phase, context)
     if not accepted then error(failure, 0) end
-    return operation == "submit" and "title_host_form_submitted" or "title_host_form_cancelled"
+    return operation == "cancel" and "title_host_form_cancelled" or "title_host_form_submitted"
 end
 
 local function join_form_fixture_command(fields, state, phase)
@@ -439,7 +444,9 @@ local function poll()
     local selected, rises = nil, 0
     local focused = bound_keys and next(events) and SilverfishNativeGameWindowFocused() == true
     for _, action in ipairs(key_order) do
-        if session.form or action == "hide" or not pending and actions[session.offer.choices][action] then
+        local allows_creator = action == "creator" and resident and session.form and session.form.role == "host"
+        if allows_creator or action ~= "creator" and (session.form or action == "hide"
+            or not pending and actions[session.offer.choices][action]) then
             local pressed = focused and events[action] == session
             if not bound_keys then
                 if not input_keys[action] then
@@ -500,7 +507,7 @@ function panel.command(fields, state, phase)
     if fields[2] ~= "native-title-panel-press-fixture" then return end
     if not fixture_enabled() then error("title_panel_fixture_unavailable", 0) end
     local action = fields[3]
-    if #fields ~= 3 or not keys[action] then error("title_panel_fixture_arguments", 0) end
+    if #fields ~= 3 or not keys[action] or action == "creator" then error("title_panel_fixture_arguments", 0) end
     local accepted, reason = choose(action, title.probe(state, phase))
     if not accepted then error(reason, 0) end
     return "qualified staged title control dispatched"
@@ -521,10 +528,13 @@ function panel.start(bridge)
         and type(SilverfishNativeGameWindowFocused) == "function" and Key and Key.F7 and Key.F8 and Key.F9 then
         bound_keys = true
         for _, action in ipairs(key_order) do
-            RegisterKeyBind(Key[keys[action]], function()
-                -- UE4SS reports a down edge. Qualify Unreal objects on the game thread only.
-                if session and current then queued_keys[action] = session end
-            end)
+            local key = Key[keys[action]]
+            if key then
+                RegisterKeyBind(key, function()
+                    -- UE4SS reports a down edge. Qualify Unreal objects on the game thread only.
+                    if session and current then queued_keys[action] = session end
+                end)
+            end
         end
     end
     loop = LoopInGameThreadWithDelay(16, function()

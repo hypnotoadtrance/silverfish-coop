@@ -350,6 +350,8 @@ async def staged_title_menu(opts, *, on_title_ready=None, require_embedded=False
         configured = make_host_plan(opts.campaign, opts.bind, default_port)
 
         def resolve_host(claim):
+            if claim.stock_creator:
+                raise ValueError("Stock character creation requires the resident co-op title")
             if claim.host_settings is None:
                 return make_host_plan(opts.campaign, opts.bind, default_port)
             name, bind, port_text = claim.host_settings

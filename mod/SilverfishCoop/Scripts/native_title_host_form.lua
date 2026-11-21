@@ -1,6 +1,5 @@
 local form = {}
 local editor = require("native_title_settings_widget")
-local controls = "\nF8 Next field   F7 Start   F9 Back"
 local fields = {
     {key = "campaign", label = "Campaign", hint = "Use letters, numbers, underscores or hyphens."},
     {key = "port", label = "UDP port", hint = "Enter a UDP port from 1 to 65535."},
@@ -63,6 +62,8 @@ end
 local function render(draft, state, phase, hint, text)
     local field = fields[draft.index]
     if not form.remove(draft) then error("title_host_form_editor_unavailable", 0) end
+    local controls = draft.count == #fields and "\nF7 Start/Load   F10 New Game\nF8 Next field   F9 Back"
+        or "\nF8 Next field   F7 Start   F9 Back"
     local caption = "Host co-op / " .. field.label .. "\n" .. (hint or field.default or "Blank keeps the configured value.") .. controls
     local handle = editor.mount(state, phase, field.key, caption, text or draft.values[field.key])
     draft.handle = handle

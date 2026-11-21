@@ -71,6 +71,7 @@ local native_enemy_shell_view = require("native_enemy_shell_view")
 local native_broker_input = require("native_broker_input")
 local native_wipe_view = require("native_wipe_view")
 local native_fresh_campaign = require("native_fresh_campaign")
+local native_stock_creator = require("native_stock_creator")
 local native_title_entry = require("native_title_entry")
 local native_title_panel = require("native_title_panel")
 local native_host_invite = require("native_host_invite")
@@ -440,7 +441,21 @@ local function run_command(fields, state, current_phase)
         end
         native_save_scope.release(argument)
         native_fresh_campaign.clear()
+        native_stock_creator.clear()
         return "released co-op save scope"
+    end
+
+    if command == "native-stock-creator" then
+        if #fields ~= 4 or not resident_title or role ~= "idle" then error("stock_creator_unavailable", 0) end
+        return native_stock_creator.begin(state, current_phase, argument, math.tointeger(tonumber(fields[4])),
+            function(target)
+                for map in pairs(zone_maps) do
+                    if supported_map(map) and (target == map or target == map:match("([^/]+)$")) then return map end
+                end
+            end,
+            function(destination, port)
+                role, expected_map, host_listen_port = "host", destination, port
+            end)
     end
 
     if command == "travel-party" then
@@ -1045,6 +1060,7 @@ local function write_status(state, current_phase, failure)
         status_row("native-save-scope", native_save_scope.selected() or "-"),
         status_row("native-network-timeout", state.connection_timeout or "-"),
     }
+    for _, row in ipairs(native_stock_creator.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
     if role == "host" and party_travel_guard_available() then
         rows[#rows + 1] = status_row("native-zone-party-guard", 1)
     end

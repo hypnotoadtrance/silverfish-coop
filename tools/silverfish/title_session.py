@@ -19,7 +19,7 @@ from .title_handoff import ACTIONS, TOKEN, Claim, TitleHandoff, _isolated_stock_
 STATUS_FILE = "title-session-status.json"
 _ROLE = {"host": "host", "join": "client"}
 _GAME_PHASE = {"host": "hosting", "join": "connected"}
-_PROGRESS = {"starting", "waiting_for_host", "hosting", "connected", "reconnecting"}
+_PROGRESS = {"starting", "character_creation", "waiting_for_host", "hosting", "connected", "reconnecting"}
 _TITLE_ACTIVE = {"waiting_title", "offered", "starting", "ready", "failed"}
 _TITLE_EVENTS = {"ready", "stopped", "failed", "cleanup_unverified"}
 
@@ -364,6 +364,9 @@ class TitleSession:
                         break
                     child_generation = status["generation"]
                 if verified and status.get("active") is True and status.get("state") in _PROGRESS:
+                    if (self._resident and claim.action == "host" and status["state"] == "character_creation"
+                            and 0 <= time.time() - status["updated_unix"] <= 5):
+                        deadline = max(deadline, now + self._stall_timeout)
                     if (claim.action == "join" and status["state"] == "waiting_for_host"
                             and status.get("wait_reason") == NATIVE_RUNTIME_RETIRING
                             and 0 <= time.time() - status["updated_unix"] <= 5):
@@ -449,6 +452,10 @@ class TitleSession:
         unsafe = (current and status.get("active") is True) or (child_generation is not None and not cleanup_proven)
         if self._resident and cleanup_proven and not self._solo_title(self._bridge.snapshot()):
             unsafe = True
+        if self._resident and cleanup_proven and not unsafe and status.get("stop_reason") == "creator_cancelled":
+            self._last_failure = None
+            self._publish("stopped", attempt=attempt)
+            return False
         self._last_failure = dict(attempt, code="cleanup_unverified" if unsafe else error)
         self._publish("cleanup_unverified" if unsafe else "failed", attempt=attempt)
         return unsafe

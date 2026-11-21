@@ -3617,6 +3617,28 @@ def menu_host_start(directory: Path, *, profile: Path | None = None) -> tuple[st
     return ("resume", area) if area else ("wanderer", OBSERVATORY)
 
 
+async def _stock_creator_launch(bridge, control, port: int, storage: native_host_save.SaveScope):
+    slot = "SFCoopLive_" + uuid.uuid4().hex
+    game = await bridge.command("native-stock-creator", slot, str(port))
+    while True:
+        receipt = game.get("native_stock_creator", {})
+        if receipt.get("working_slot") != slot or receipt.get("state") == "failed":
+            raise RuntimeError("The stock character creator could not finish the scoped campaign")
+        if receipt["state"] == "cancelled":
+            return None
+        if receipt["state"] == "verified":
+            if (game.get("state"), game.get("map"), game.get("save_scope")) != (
+                    "hosting", receipt.get("map"), storage.id):
+                raise RuntimeError("The stock creator did not start an authoritative session")
+            working_save = native_host_save.directory(storage) / f"{slot}.sav"
+            if not working_save.is_file() or working_save.resolve() != working_save:
+                raise RuntimeError("The stock creator did not write its scoped save")
+            return game
+        control.status(active=True, role="host", state="character_creation", game=game)
+        sequence = game["sequence"]
+        game = await bridge.wait_for(lambda frame: frame["sequence"] > sequence, timeout=15)
+
+
 async def host_game(work: Path, directory: Path, bind: str, port: int, headless: bool,
                     fixtures: bool = False, death_rules: dict | None = None, *,
                     native_events: bool = False, native_guest: bool = False, native_zones: bool = False,
@@ -3628,12 +3650,16 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     guest_held_fire: bool = False, native_dead_bridge_enemy_loot: bool = False,
                     guest_melee_canary: bool = False, host_dig_live_fixture: bool = False,
                     embedded_port: int | None = None, runtime_listener: bool = False,
-                    resident_engine: EmbeddedEngine | None = None, direct_password: str | None = None) -> None:
+                    resident_engine: EmbeddedEngine | None = None, direct_password: str | None = None,
+                    stock_creator: bool = False) -> None:
     if resident_engine is not None:
         if (embedded_port is not None or resident_engine.internal_port is None
                 or resident_engine.session_directory != directory):
             raise ValueError("The resident title does not own this campaign profile")
         embedded_port = resident_engine.internal_port
+    if stock_creator and (resident_engine is None or start_preset or start_zone or extraction is not None
+                          or not staged_script(work, "native_stock_creator.lua")):
+        raise ValueError("Start a new resident campaign to use the stock character creator")
     if embedded_port is not None and (type(embedded_port) is not int or not 1 <= embedded_port <= 65535
                                       or port == embedded_port or not (native_events and native_guest and native_zones)):
         raise ValueError("Embedded hosting requires a staged native campaign and a distinct private game port")
@@ -3705,7 +3731,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             raise ValueError("An existing campaign resumes in its saved zone")
         if start_preset and old_world.get("map"):
             raise ValueError("An existing campaign already has a saved start and world seed")
-        entry_map = old_world.get("map", OBSERVATORY if start_preset else start_zone or MAP)
+        if stock_creator and old_world:
+            raise ValueError("Load an existing campaign from the Host menu")
+        entry_map = old_world.get("map", OBSERVATORY if start_preset or stock_creator else start_zone or MAP)
         authored = entry_map in AUTHORED_MAPS or expanded_zones and entry_map in EXPANDED_MAPS
         if authored and not (native_zones and qualified_authored_routes(work)):
             raise ValueError("Authored co-op routes require the qualified C++ stage and --native-zones")
@@ -3752,6 +3780,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
         process = transport = embedded = None
         controller = None
         result = "stopped"
+        stop_reason = None
         try:
             control.status(active=True, role="host", state="starting")
             identity = _identity(directory / "save")
@@ -3810,8 +3839,17 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     arguments += (dream["kind"],)
             if runtime_listener or embedded_port is not None:
                 arguments += (f"listener={internal_port}",)
-            await bridge.command("host", entry_map, *arguments)
-            initial_game = await bridge.wait_for(lambda state: state["state"] == "hosting")
+            if stock_creator:
+                initial_game = await _stock_creator_launch(bridge, control, internal_port, save_scope)
+                if initial_game is None:
+                    stop_reason = "creator_cancelled"
+                    return
+                entry_map = initial_game["map"]
+                if entry_map not in AUTHORED_MAPS and not (expanded_zones and entry_map in EXPANDED_MAPS):
+                    raise RuntimeError("The stock creator selected an unqualified co-op start")
+            else:
+                await bridge.command("host", entry_map, *arguments)
+                initial_game = await bridge.wait_for(lambda state: state["state"] == "hosting")
             if extraction_rules:
                 initial_game = await bridge.wait_for(
                     lambda game: all(game.get("native_rules", {}).get(key) == value
@@ -3886,6 +3924,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                 revision = await controller.checkpoint_native(bridge)
                 control.event("native_start_preset_committed", revision=revision,
                               preset=start_preset, seed=world_seed)
+            if stock_creator:
+                revision = await controller.checkpoint_native(bridge)
+                control.event("native_stock_creator_committed", revision=revision, map=entry_map)
             rest = old_world.get("native_rest")
             if authored and isinstance(rest, dict):
                 qualified_rest = native_blue.saved_rest(rest.get("destination"), rest.get("bed"))
@@ -3960,7 +4001,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                 raise
             finally:
                 control.status(active=False, role="host", state=result, campaign=store.status(),
-                               stop_reason=controller.session_stop_reason if controller else None)
+                               stop_reason=controller.session_stop_reason if controller else stop_reason)
 
 
 async def probe_transport(bridge: Bridge, item: str) -> dict:

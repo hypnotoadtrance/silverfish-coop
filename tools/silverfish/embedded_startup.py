@@ -409,8 +409,11 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
 
     default_bind, default_port = endpoint(default_bind, default_port)
 
-    def host_plan(selected, bind, port, password=""):
+    def host_plan(selected, bind, port, password="", *, creator_requested=False):
         mode, area = service.menu_host_start(selected, profile=saved.parent)
+        if creator_requested and mode == "resume":
+            raise ValueError("Choose a new campaign name for stock character creation")
+        use_creator = mode != "resume" and (creator_requested or os.environ.get(INSTALLED_ENV) == "1" and not headless)
 
         async def start():
             private = runtime.spare_udp_port()
@@ -422,9 +425,9 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
             await engine.observe_title()
             await service.host_game(
                 work, selected, bind, port, headless, resident_engine=engine,
-                direct_password=password,
+                direct_password=password, stock_creator=use_creator,
                 max_guests=service.MENU_HOST_GUEST_LIMIT, **service.MENU_HOST_OPTIONS,
-                **({"start_preset": mode} if mode == "wanderer" else {}),
+                **({"start_preset": mode} if mode == "wanderer" and not use_creator else {}),
             )
 
         def status():
@@ -432,7 +435,7 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
 
         return SessionPlan(start, status,
                            lambda frame: frame.get("endpoint") == {"address": bind, "port": port}
-                           and frame["game"]["map"] == area)
+                           and (use_creator or frame["game"]["map"] == area))
 
     def resolve(claim):
         if claim.host_settings is None:
@@ -446,7 +449,7 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
             if selected != campaign.parent / name:
                 raise ValueError("The campaign directory is redirected")
         bind, port = endpoint(address or default_bind, int(port_text) if port_text else default_port)
-        return host_plan(selected, bind, port, claim.direct_password or "")
+        return host_plan(selected, bind, port, claim.direct_password or "", creator_requested=claim.stock_creator)
 
     async def no_selection():
         raise ValueError("Choose a host campaign first")

@@ -1460,6 +1460,14 @@ class Bridge:
                     }
                 elif fields[0] == "native-network-timeout" and len(fields) == 2:
                     data["native_network_timeout"] = _finite(fields[1])
+                elif fields[0] == "native-stock-creator" and len(fields) == 4:
+                    creator_state, area, slot = fields[1:]
+                    if (creator_state not in {"opening", "creating", "cancelled", "failed", "travelling", "verified"}
+                            or not re.fullmatch(r"SFCoopLive_[a-f0-9]{32}", slot)
+                            or area != "-" and not re.fullmatch(r"/Game/Classes/Maps/[A-Za-z0-9_/]+", area)):
+                        raise ValueError("Invalid stock character creator receipt")
+                    data["native_stock_creator"] = {"state": creator_state, "map": None if area == "-" else area,
+                                                    "working_slot": slot}
                 elif fields[0] == "native-fresh-campaign" and len(fields) == 17:
                     fresh = dict(zip(("state", "preset", "difficulty", "map", "working_slot"), fields[1:6]))
                     seeds_and_counters = ("instance_seed", "world_seed", "artifact_seed", "storm_seed", "cash", "debt", "xp", "backpack_count")
