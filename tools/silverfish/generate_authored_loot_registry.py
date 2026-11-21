@@ -74,6 +74,10 @@ class ContainerFamily:
     armor_first: bool = False
     jiggle_function: str = "Jiggle_Locked"
     pry_start_entry: int = 0
+    expected_value: int | None = None
+    open_signals: tuple[str, ...] = ()
+    default_salt: int | None = None
+    hinge_arrow: bool = False
 
     def spawner_names(self):
         return self.named_spawners or ("Loot_Spawner", *(f"Loot_Spawner{i}" for i in range(1, self.slots)))
@@ -82,7 +86,7 @@ class ContainerFamily:
         angles = ((0, 0, 95), (0, 0, -95)) if self.paired_doors else ((self.open_roll, self.open_pitch, self.open_yaw),)
         calls = []
         for index, rotation in enumerate(angles):
-            name = f"SM_Prop_Cabinet_Small_Door_0{index + 1}"
+            name = "Arrow_Hinge" if self.hinge_arrow else f"SM_Prop_Cabinet_Small_Door_0{index + 1}"
             location = self.door_locations[index] if self.door_locations else f"{name}.RelativeLocation"
             target = "CallFunc_MakeRotator_ReturnValue" if self.random_lid else rotation
             calls.append(f"MoveComponentTo({name},{location},{target},")
@@ -159,6 +163,35 @@ CONTAINER_FAMILIES = {
                "Loot_Spawner3.SpawnLoot(Loot Table_Items,0.5,0,True,Seeded,False,True,True,False,CallFunc_SpawnLoot_Object_2)"),
         pry_entry=0xF, keys=frozenset({"BrokersKey_C"}), armor_first=True, jiggle_function="JiggleLock",
         pry_start_entry=0x772),
+    "Loot_Machine_01_BP_C": ContainerFamily("loot_machine", 0x802, slots=6, paired_doors=True, pry_entry=0xF,
+        prop_components=("AlarmLight_BP", "Arrow_Latch", "SM_Prop_Sign_Generic_20", "Timeline"),
+        named_spawners=("Loot_Spawner", "Loot_Spawner1", "Loot_Spawner2", "Loot_Spawner3", "Loot_SpawnerGun", "Loot_SpawnerGun1"),
+        rolls=(STOCK_ROLL.replace("0.5,", "0.2,"),), expected_value=260,
+        open_signals=("Event_SignalOpened()", "Resolve_Respawn()", "InterfaceContext.Send_PowerSignal(True,Self)",
+                      "ReportNoiseEvent(Self,CallFunc_K2_GetComponentLocation_ReturnValue,1,Player,2000,Sound)")),
+    "ElectronicLocker_01_BP_C": ContainerFamily("electronic_locker", 0x758, slots=3, open_roll=-90, pry_entry=0x442,
+        prop_components=("AlarmLight_BP", "Arrow_Latch", "TextRender", "Timeline"),
+        named_spawners=("Loot_Spawner", "Loot_Spawner1", "Loot_Spawner2"),
+        rolls=("CallFunc_Array_Get_Item.SpawnLoot(Loot Table_Items,SpawnChance_Item,0,GuaranteeSpawn,"
+               "False,False,True,True,False,CallFunc_SpawnLoot_Object)",), expected_value=600,
+        open_signals=("Resolve_Respawn()", "InterfaceContext.Send_PowerSignal(True,Self)", "InterfaceContext.Send_PowerSignal(False,Self)"),
+        default_salt=0),
+    "PowerBox_Small_BP_C": ContainerFamily("power_box", 0xCAA, guaranteed=True, open_roll=0, open_yaw=-95,
+        pry_entry=0x1F, default_salt=0,
+        prop_components=("Arrow_Latch", "Audio", "Cube", "SM_3warning_sign_11_Cube_49", "SM_Prop_Cable_09",
+                         "SM_Prop_PowerBox_05", "TextRender", "Timeline"),
+        rolls=(STOCK_ROLL.replace("0.5,", "0,"),), expected_value=100,
+        open_signals=("Resolve_Respawn()", "Apply_Power(K2Node_Event_Powered)",
+                      "BeginDeferredActorSpawnFromClass(Self,ExplosionActor_BP_C,CallFunc_MakeTransform_ReturnValue,Byte(1),NoObject,Byte(0))")),
+    "Red_LockBox_BP_C": ContainerFamily("red_lockbox", 0xA1F, slots=4, guaranteed=True,
+        replenish=PERMANENT_REPLENISHMENT, pry_entry=0x101, hinge_arrow=True,
+        prop_components=("Arrow_Hinge", "SM_Lid", "Arrow_Latch", "Timeline"),
+        named_spawners=("Loot_Spawner", "Loot_Spawner1", "Loot_Spawner3", "Loot_SpawnerGun"),
+        rolls=("Loot_SpawnerGun.SpawnLoot(Loot Table_Weapons,1,0.5,GuaranteeSpawn,Seeded,False,True,True,False,CallFunc_SpawnLoot_Object)",
+               "CallFunc_Array_Get_Item.SpawnLoot(K2Node_MakeMap_Map,0.8,0,GuaranteeSpawn,False,True,False,True,False,CallFunc_SpawnLoot_Object_2)",
+               "Loot_Spawner1.SpawnLoot(Loot Table_Items,SpawnChance_Item,0.5,GuaranteeSpawn,Seeded,True,False,True,False,CallFunc_SpawnLoot_Object_1)"),
+        open_signals=("Resolve_Respawn()", "RandomBoolWithWeightFromStream(Random Stream,CallFunc_RandomBoolWithWeightFromStream_Weight_ImplicitCast)",
+                      "K2Node_DynamicCast_AsWeapon_Master_BP.SetAmmoType()")),
 }
 
 
@@ -260,6 +293,28 @@ def family_placements(audit):
                 or [call for call in calls if call.startswith("RandomBoolWithWeightFromStream(StreamSeed,")] !=
                 ["RandomBoolWithWeightFromStream(StreamSeed,0.66)", "RandomBoolWithWeightFromStream(StreamSeed,0.33)"]):
             raise ValueError(f"Cooked armor locker supply draws changed: {family}")
+        if (spec.expected_value is not None and actor.get("ContainerExpectedValue") != str(spec.expected_value)
+                or any(calls.count(signal) != 1 for signal in spec.open_signals)):
+            raise ValueError(f"Cooked stock open effects changed: {family}")
+        if family == "ElectronicLocker_01_BP_C" and (
+                functions.get("Send_PowerSignal") != [f"24 {script}(2793)"]
+                or not any(call.startswith("Delay(Self,10,StructConst(Struct=LatentActionInfo, StructSize=32, "
+                                           "RawValue=[SkipOffsetConst(RawValue=0x46),") for call in calls)
+                or actor.get("SpawnSalt", "0") != "0"):
+            raise ValueError("Cooked electronic locker power continuation changed")
+        if family == "PowerBox_Small_BP_C" and (
+                functions.get("Send_PowerSignal") != [f"24 {script}(3966)"]
+                or functions.get("Apply_Power") != ["21 Audio.Activate(False)", "37 Activate(False)",
+                                                    "4B Audio.Deactivate()", "61 Deactivate()"]
+                or actor.get("SpawnSalt", "0") != "0"):
+            raise ValueError("Cooked power box power path changed")
+        if spec.hinge_arrow:
+            ammo_spawners = ("SetArray(AssigningProperty=K2Node_MakeArray_Array, ArrayInnerProp=-, "
+                             "Elements=[Loot_Spawner, Loot_Spawner3], RawValue=-)")
+            if (actor.get("Empty") != "True" or actor.get("Seeded") != "True"
+                    or actor.get("ForceOverride_MapLootTables") != "True" or actor.get("SpawnChance_Weapons") != "0.8"
+                    or calls.count(ammo_spawners) != 2):
+                raise ValueError("Cooked red lockbox loot routes changed")
         if (spec.lid_ignores_channel is not None and
                 f"SM_Prop_Cabinet_Small_Door_01.SetCollisionResponseToChannel(Byte({spec.lid_ignores_channel}),Byte(0))" not in calls):
             raise ValueError(f"Cooked lid collision response changed: {family}")
@@ -279,11 +334,23 @@ def family_placements(audit):
             continue
         fields = row["fields"]
         required = {**SOURCE_FIELDS, **{name: name for name in (*spec.spawner_names(), *spec.prop_components)}}
+        if spec.hinge_arrow:
+            del required["SM_Prop_Cabinet_Small_Door_01"]
         if spec.paired_doors:
             required["SM_Prop_Cabinet_Small_Door_02"] = "SM_Prop_Cabinet_Small_Door_02"
         if any(fields.get(key) != value for key, value in required.items()):
             continue
         tunable = ({"ContainerExpectedValue", "Seeded"} if spec.weapon_first else set())
+        if spec.expected_value is not None:
+            tunable.add("ContainerExpectedValue")
+        if family in {"ElectronicLocker_01_BP_C", "PowerBox_Small_BP_C"}:
+            tunable.add("Lable")
+        if family == "PowerBox_Small_BP_C":
+            tunable.add("Powered")
+            if fields.get("Powered", "False") not in {"True", "False"}:
+                continue
+        if spec.hinge_arrow:
+            tunable.add("Random Stream")
         if spec.pry_entry:
             tunable |= {"Material", "Locked"}
         if spec.keys:
@@ -304,8 +371,9 @@ def family_placements(audit):
             continue
         if fields.keys() - required.keys() - SAVE_FIELDS - BOX_GEOMETRY_FIELDS - tunable:
             continue
-        if spec.weapon_first and (not re.fullmatch(r"[0-9]{1,9}", fields.get("ContainerExpectedValue", "0"))
-                                  or fields.get("Seeded", "True") not in {"True", "False"}):
+        if ((spec.weapon_first or spec.expected_value is not None)
+                and not re.fullmatch(r"[0-9]{1,9}", fields.get("ContainerExpectedValue", "0"))
+                or spec.weapon_first and fields.get("Seeded", "True") not in {"True", "False"}):
             continue
         if (area, actor) in seen or not FAMILY_ACTOR.fullmatch(actor):
             raise ValueError(f"Invalid or duplicate stock container {area} {actor}")
@@ -321,7 +389,7 @@ def family_placements(audit):
             if not match or match[1] not in FAMILY_OVERRIDE_ROWS:
                 continue
             override = match[1]
-        salt = int(fields["SpawnSalt"])
+        salt = int(fields.get("SpawnSalt", spec.default_salt))
         if not -2**31 <= salt < 2**31:
             raise ValueError(f"Invalid stock container salt {area} {actor}")
         profile = (family, area, actor, salt, override, guarantee == "True", 2 if mode else None)
@@ -414,6 +482,8 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
             names = ", ".join(f'STR("{name}")' for name in spec.named_spawners)
             header.append(f"    inline constexpr std::array {spec.symbol}_spawners{{{names}}};")
             flags += f", {spec.symbol}_spawners"
+        elif spec.weapon_first or spec.pry_entry:
+            flags += ", {}"
         if spec.weapon_first:
             flags += ", true"
         if spec.pry_entry:
@@ -515,6 +585,14 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
             lua_flags += ", armor_first = true"
         if spec.pry_start_entry:
             lua_flags += ", deferred_pry = true"
+        if family == "ElectronicLocker_01_BP_C":
+            lua_flags += ", electronic = true"
+        if family == "PowerBox_Small_BP_C":
+            lua_flags += ", power_box = true"
+        if "AlarmLight_BP" in spec.prop_components:
+            lua_flags += ", stock_alarm = true"
+        if spec.hinge_arrow:
+            lua_flags += ", hinge_arrow = true"
         if not (spec.paired_doors or spec.random_lid) and (spec.open_roll != -95 or spec.open_pitch or spec.open_yaw):
             lua_flags += f", open_roll = {spec.open_roll}, open_yaw = {spec.open_yaw}"
             if spec.open_pitch:

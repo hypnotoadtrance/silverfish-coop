@@ -212,7 +212,7 @@ class Host:
                  dialogue_enabled: bool = False, mosby_dialogue_enabled: bool = False, guest_held_fire: bool = False,
                  mosby_station_enabled: bool = False, shopkeep_dialogue_enabled: bool = False, mama_dialogue_enabled: bool = False,
                  native_dead_bridge_enemy_loot: bool = False, host_dig_live: bool = False, host_dig_live_fixture: bool = False,
-                 mindcore_view_enabled: bool = False):
+                 mindcore_view_enabled: bool = False, sewer_dialogue_enabled: bool = False):
         self.store = store
         self.control = control
         self.game_build = game_build
@@ -260,6 +260,7 @@ class Host:
         self.wire_board_enabled = wire_board_enabled
         self.dialogue_sessions = native_dialogue.DialogueSessions(
             mosby=mosby_dialogue_enabled, shopkeep=shopkeep_dialogue_enabled, mama=mama_dialogue_enabled,
+            sewer=sewer_dialogue_enabled,
         ) if dialogue_enabled else None
         self.mosby_station_enabled = mosby_station_enabled
         self.mindcore_view_enabled = mindcore_view_enabled
@@ -795,6 +796,10 @@ class Host:
             view[native_loot.STATE_KEY] = rolls
         if locks := self.last_game.get(native_loot.VEHICLE_LOCKS):
             view[native_loot.VEHICLE_LOCKS] = locks
+        if alarms := self.last_game.get(native_loot.STOCK_ALARMS):
+            view[native_loot.STOCK_ALARMS] = alarms
+        if boxes := self.last_game.get(native_loot.POWER_BOX_STATES):
+            view[native_loot.POWER_BOX_STATES] = boxes
         if doors := native_stock_door.frame(self.last_game, self.zone_epoch):
             view[native_stock_door.KEY] = doors
         if rolls := self.party.get(native_enemy_loot.STATE_KEY):
@@ -2136,6 +2141,7 @@ class Host:
             "native_dialogue_mosby": bool(self.dialogue_sessions and native_dialogue.SCIENTIST_SHOP in self.dialogue_sessions.maps),
             "native_dialogue_shopkeep": bool(self.dialogue_sessions and native_dialogue.SHOPKEEP in self.dialogue_sessions.maps),
             "native_dialogue_mama": bool(self.dialogue_sessions and BOROUGH in self.dialogue_sessions.maps),
+            "native_dialogue_sewer": bool(self.dialogue_sessions and native_dialogue.CISTERN in self.dialogue_sessions.maps),
             "native_guest_mre": self.guest_mre,
             "native_mosby_station": self.mosby_station_enabled,
             "native_mindcore_view": self.mindcore_view_enabled,
@@ -2840,6 +2846,13 @@ class Host:
                         raise RuntimeError("Stock daily loot update did not verify")
                     self.last_game, self.last_seen = snapshot, time.monotonic()
                     result = {"native_loot_replenishment_fixture": proof}
+                elif action == native_loot.ELECTRONIC_POWER_FIXTURE and self.native_loot_input and self.fixtures:
+                    crate = request.get("target")
+                    if not isinstance(crate, str) or native_loot.CRATES.get(crate) != self.last_game.get("map"):
+                        raise party.RuleError("Select an exact electronic locker on the current map")
+                    self.last_game = await bridge.command(action, crate, timeout=5)
+                    self.last_seen = time.monotonic()
+                    result = {"actor": crate}
                 elif action == "native-loot-vehicle-pry-fixture" and self.native_loot_input and self.fixtures:
                     crate = request.get("target")
                     if not isinstance(crate, str) or self.last_game.get(native_loot.VEHICLE_LOCKS, {}).get(crate) is not True:
@@ -2953,6 +2966,37 @@ class Host:
                     target = request.get("target") or "guest"
                     actor = self.roles().get(target, target)
                     result = await self.dialogue_sessions.approach(self, bridge, actor)
+                elif action == native_dialogue.SEWER_FIXTURE and self.dialogue_sessions and self.fixtures:
+                    target = request.get("target")
+                    if target not in {"enter", "trade"} or self.last_game.get("map") != native_dialogue.CISTERN:
+                        raise party.RuleError("Select the stock Sewer Thing trigger or trade response")
+                    self.last_game = await bridge.command(action, target, timeout=4)
+                    self.last_seen = time.monotonic()
+                    result = {"menu": self.last_game.get("native_dialogue_sewer_host_menu")}
+                elif action == "native-sewer-mushroom-fixture" and self.dialogue_sessions and self.fixtures:
+                    target = request.get("target")
+                    character = self.roles().get(target, target) if isinstance(target, str) else None
+                    if not character or self.last_game.get("map") != native_dialogue.CISTERN:
+                        raise party.RuleError("Select an authenticated guest at the Sewer Thing")
+                    scope = self.dialogue_sessions.member_scope(self, character)
+                    self.native_checkpoint_unsafe = True
+                    try:
+                        self.last_game = await bridge.command(action, scope[-1], timeout=5)
+                        self.last_seen = time.monotonic()
+                        proof = self.last_game.get("native_sewer_mushroom_fixture", {})
+                        if (proof.get("map"), proof.get("pawn"), proof.get("quantity")) != (native_dialogue.CISTERN, scope[-1], 1):
+                            raise RuntimeError("The Sewer Thing fixture did not verify the guest's mushroom")
+                        await self.checkpoint_native(bridge, require_guest_frames=frozenset({character}))
+                        self.native_checkpoint_unsafe = False
+                        result = {"native_sewer_mushroom_fixture": proof}
+                    except RuntimeError as error:
+                        if str(error).startswith(("native_sewer_", "sewer_trade_refused_")):
+                            self.native_checkpoint_unsafe = False
+                            raise party.RuleError(str(error)) from error
+                        raise
+                    finally:
+                        if self.native_checkpoint_unsafe:
+                            self.stopping = True
                 elif action in native_mosby_tape.APPROACHES and self.fixtures:
                     target = request.get("target") or "guest"
                     result = await native_mosby_tape.approach(self, bridge, self.roles().get(target, target), request.get("amount"),
@@ -3624,6 +3668,10 @@ class Host:
                 except (OSError, ValueError, RuntimeError) as error:
                     self.control.event("native_loot_replenishment_unavailable", reason=str(error))
                 try:
+                    await native_loot.observe_powered_electronics(self, bridge)
+                except (OSError, ValueError, RuntimeError) as error:
+                    self.control.event("native_loot_electronic_power_unavailable", reason=str(error))
+                try:
                     await native_loot.restore_key_unlocks(self, bridge)
                 except (OSError, ValueError, RuntimeError) as error:
                     self.control.event("native_loot_key_restore_unavailable", reason=str(error))
@@ -3952,6 +4000,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     shopkeep_dialogue_enabled = dialogue_enabled and staged_script(work, "native_dialogue_shopkeep.lua", "ShopKeep_Shop")
     mama_dialogue_enabled = (dialogue_enabled and staged_script(work, "native_dialogue_mama.lua", "Trade_Mamma")
                              and staged_script(work, "native_borough_barter.lua", "SilverfishTradeNativeBoroughMama"))
+    sewer_dialogue_enabled = (dialogue_enabled and staged_script(work, "native_dialogue_sewer.lua", "Trade_Sewer")
+                              and staged_script(work, "native_sewer_barter.lua"))
     mosby_station_enabled = bool(native_guest and native_zones and expanded_zones and staged_script(work, "native_mosby_station_view.lua"))
     mindcore_view_enabled = bool(native_guest and native_zones and expanded_zones and native_backend == "cpp"
                                  and staged_script(work, "native_mindcore_view.lua", "SilverfishSetNativeMindCoreInput"))
@@ -4172,6 +4222,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                               wire_board_enabled=wire_board_enabled, host_camera_input=host_camera_input,
                               dialogue_enabled=dialogue_enabled, mosby_dialogue_enabled=mosby_dialogue_enabled,
                               shopkeep_dialogue_enabled=shopkeep_dialogue_enabled, mama_dialogue_enabled=mama_dialogue_enabled,
+                              sewer_dialogue_enabled=sewer_dialogue_enabled,
                               mosby_station_enabled=mosby_station_enabled,
                               mindcore_view_enabled=mindcore_view_enabled,
                               native_guest_controls=native_guest_controls, guest_held_fire=guest_held_fire,
@@ -4298,7 +4349,8 @@ def validate_invite(invite: dict, build: str, *, catalog: bool = False) -> dict:
     if any(type(invite[key]) is not bool for key in
            ("native_zones", "native_zone_walls", "native_guest_controls", "native_guest_held_fire", "expanded_zones", "native_shop_view", "native_loot_input",
             "native_broker_input", "native_wipe_view", "native_wire_board", "native_dialogue", "native_dialogue_mosby",
-            "native_mosby_station", "native_mindcore_view", "native_dialogue_shopkeep", "native_dialogue_mama", "native_guest_mre")
+            "native_mosby_station", "native_mindcore_view", "native_dialogue_shopkeep", "native_dialogue_mama", "native_dialogue_sewer",
+            "native_guest_mre")
            if key in invite):
         raise ValueError("Invitation has invalid native travel settings")
     if invite.get("native_guest_controls") and not invite.get("native_zones"):
@@ -4309,6 +4361,8 @@ def validate_invite(invite: dict, build: str, *, catalog: bool = False) -> dict:
         raise ValueError("Invitation enables the ShopKeep conversation without stock dialogue")
     if invite.get("native_dialogue_mama") and not invite.get("native_dialogue"):
         raise ValueError("Invitation enables Mama's conversation without stock dialogue")
+    if invite.get("native_dialogue_sewer") and not invite.get("native_dialogue"):
+        raise ValueError("Invitation enables the Sewer Thing's conversation without stock dialogue")
     if invite.get("native_guest_mre") and not invite.get("native_zones"):
         raise ValueError("Invitation enables stock guest MRE use without native zones")
     return invite
@@ -4426,6 +4480,7 @@ class Client:
             bridge, control, mosby=invite.get("native_dialogue_mosby", False),
             shopkeep=invite.get("native_dialogue_shopkeep", False), shopkeep_view=invite.get("native_shop_view", False),
             mama=invite.get("native_dialogue_mama", False),
+            sewer=invite.get("native_dialogue_sewer", False),
         )
                               if invite.get("native_dialogue") else None)
         self.mosby_station = native_mosby_station_view.StationView(bridge, control) if invite.get("native_mosby_station") else None
@@ -5008,6 +5063,10 @@ class Client:
                     if self.invite.get("native_loot_input"):
                         self.last_game = await native_loot.project_vehicle_locks(
                             self.bridge, self.last_game, self.gameplay.get(native_loot.VEHICLE_LOCKS))
+                        self.last_game = await native_loot.project_stock_alarms(
+                            self.bridge, self.last_game, self.gameplay.get(native_loot.STOCK_ALARMS))
+                        self.last_game = await native_loot.project_power_boxes(
+                            self.bridge, self.last_game, self.gameplay.get(native_loot.POWER_BOX_STATES))
                         self.last_game = await native_loot.project_opened(
                             self.bridge, self.last_game, self.gameplay.get(native_loot.STATE_KEY, {}))
                 await self.project_world_view()
@@ -5503,6 +5562,8 @@ def guest_engine_options(work: Path, invite: dict, *, native_zones: bool = False
         raise ValueError("Restage the native client for the stock ShopKeep counter dialogue")
     if invite.get("native_dialogue_mama") and not staged_script(work, "native_dialogue_mama.lua", "Trade_Mamma"):
         raise ValueError("Restage the native client for Mama's stock Borough dialogue")
+    if invite.get("native_dialogue_sewer") and not staged_script(work, "native_dialogue_sewer.lua", "Trade_Sewer"):
+        raise ValueError("Restage the native client for the Sewer Thing's stock dialogue")
     if invite.get("native_guest_mre") and not staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMre"):
         raise ValueError("Restage the native client for stock guest MRE use")
     if native_loot_input and not staged_script(work, "native_loot_crate_input.lua"):

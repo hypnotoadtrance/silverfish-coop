@@ -23,6 +23,7 @@ local native_wire_quest_turn_in = require("native_wire_quest_turn_in")
 local native_wire_board = require("native_wire_board")
 local native_dialogue = require("native_dialogue")
 local native_borough_barter = require("native_borough_barter")
+local native_sewer_barter = require("native_sewer_barter")
 local native_mosby_tape = require("native_mosby_tape")
 local native_mindcore = require("native_mindcore")
 local native_datasilo_lift = require("native_datasilo_lift")
@@ -992,6 +993,7 @@ local function run_command(fields, state, current_phase)
         or native_wire_board.command(fields, state, current_phase)
         or native_dialogue.command(fields, state, current_phase)
         or native_borough_barter.command(fields, state, current_phase, players)
+        or native_sewer_barter.command(fields, state, current_phase, players)
         or native_mosby_tape.command(fields, state, current_phase)
         or native_mindcore.command(fields, state, current_phase)
         or native_datasilo_lift.command(fields, state, current_phase)
@@ -1169,6 +1171,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_wire_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_dialogue.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_borough_barter.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_sewer_barter.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mosby_tape.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_datasilo_lift.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

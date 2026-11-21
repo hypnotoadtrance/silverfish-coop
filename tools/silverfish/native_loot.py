@@ -16,6 +16,10 @@ STATE_KEY = "native_loot_rolls"
 RETIRED = "native_loot_retired_rolls"
 REPLENISHED = "native_replenished_crates"
 VEHICLE_LOCKS = "native_loot_vehicle_locks"
+STOCK_ALARMS = "native_loot_stock_alarms"
+POWER_BOX_STATES = "native_loot_power_boxes"
+ELECTRONIC_OPENS = "native_loot_electronic_powered_opens"
+ELECTRONIC_POWER_FIXTURE = "native-loot-electronic-power-fixture"
 KEY_UNLOCKS = "native_loot_key_unlocks"
 UNLOCK_RESULT = "native_loot_unlock"
 TORCH_USE = "native-guest-vehicle-blowtorch"
@@ -177,6 +181,55 @@ async def project_opened(bridge, game: dict, rolls: dict) -> dict:
             raise RuntimeError("The exact stock crate did not reflect its committed roll")
         game = snapshot
     return game
+
+
+async def _project_container_signal(bridge, game, published, frame, command, flag):
+    area = game.get("map")
+    current = game.get(frame, {})
+    if game.get("state") != "connected" or not isinstance(published, dict) or not current:
+        return game
+    updates = []
+    for actor, before in current.items():
+        after = published.get(actor)
+        if (not isinstance(after, dict) or CRATES.get(actor) != area or after == before or after.get("map") != area
+                or any(type(after.get(field)) is not bool for field in (flag, "audible"))):
+            continue
+        updates.append((actor, str(int(after[flag])), str(int(after["audible"]))))
+        if len(updates) == 24:
+            break
+    if not updates:
+        return game
+    return await bridge.command(command, area, *(value for update in updates for value in update), timeout=3)
+
+
+async def project_stock_alarms(bridge, game: dict, published_alarms: dict | None) -> dict:
+    return await _project_container_signal(bridge, game, published_alarms, STOCK_ALARMS, "native-loot-stock-alarm-project", "lit")
+
+
+async def project_power_boxes(bridge, game: dict, published_boxes: dict | None) -> dict:
+    return await _project_container_signal(bridge, game, published_boxes, POWER_BOX_STATES, "native-loot-power-box-project", "powered")
+
+
+async def observe_powered_electronics(host, bridge) -> None:
+    game = host.last_game
+    player = host.party["players"].get("host", {})
+    if (game.get("state") != "hosting" or host.stopping or host.transitioning or host.native_checkpoint_unsafe
+            or host.party.get("wipe") or player.get("downed", True)):
+        return
+    openings = sorted(game.get(ELECTRONIC_OPENS, {}).values(), key=lambda row: row["sequence"])
+    for row in openings[:4]:
+        crate, sequence = row["crate"], row["sequence"]
+        if host.last_game.get(ELECTRONIC_OPENS, {}).get(crate) != row:
+            continue
+        operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{host.control.generation}:{host.zone_epoch}:electronic:{crate}:{sequence}").hex
+        try:
+            await perform(host, bridge, "host", "open", crate, operation, power_sequence=sequence)
+        except party.RuleError as error:
+            host.control.event("native_stock_crate_interaction_rejected", sequence=sequence,
+                               operation_id=operation, crate=crate, entry="powered", reason=str(error))
+        else:
+            host.control.event("native_stock_crate_interaction", sequence=sequence,
+                               operation_id=operation, crate=crate, entry="powered")
 
 
 def _same_lid_angle(lid, row, expected):
@@ -423,7 +476,8 @@ def _verified_cash_credit(proof: dict, item: dict, balance: int | None) -> dict:
 
 
 async def perform(host, bridge, character: str, action: str, target: str, operation_id: str, *,
-                  fixture_nonempty: bool = False, pried: bool = False, tool_receipt=None) -> dict:
+                  fixture_nonempty: bool = False, pried: bool = False, tool_receipt=None,
+                  power_sequence: int | None = None) -> dict:
     area = host.last_game.get("map")
     if (not host.native_zones or not (host.fixtures or host.native_loot_input) or host.native_profile is None
             or host.stopping or host.transitioning or (host.native_checkpoint_unsafe and tool_receipt is None)
@@ -461,6 +515,13 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
         raise party.RuleError("native_loot_requires_exact_crate_and_operation")
     if pried and (action != "open" or (character != "host" and tool_receipt is None) or fixture_nonempty or not lockable_container(crate, area)):
         raise party.RuleError("native_loot_pry_receipt_unavailable")
+    if power_sequence is not None:
+        expected = dict(map=area, crate=crate, pawn=pawn, sequence=power_sequence)
+        if (action != "open" or character != "host" or fixture_nonempty or pried or tool_receipt is not None
+                or type(power_sequence) is not int or not 0 < power_sequence < 2**53
+                or not crate.startswith("ElectronicLocker_01_BP_C ")
+                or host.last_game.get(ELECTRONIC_OPENS, {}).get(crate) != expected):
+            raise party.RuleError("stock_electronic_power_receipt_unavailable")
     retired = host.party.get(RETIRED, {})
     if action == "open" and operation_id in retired:
         raise party.RuleError("native_loot_roll_replenished" if retired[operation_id] == crate else "operation_id_conflict")
@@ -516,6 +577,8 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             arguments += ("fixture-nonempty",)
         elif pried:
             arguments += ("stock-vehicle-pried",)
+        elif power_sequence is not None:
+            arguments += ("stock-electronic-powered", str(power_sequence))
     mutates = action in ("open", "seed", "claim")
     if mutates:
         host.native_checkpoint_unsafe = True

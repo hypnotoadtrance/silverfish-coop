@@ -138,6 +138,13 @@ namespace
         },
     };
 
+    constexpr auto sewer_world = STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P");
+    constexpr auto sewer_volume = STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P:PersistentLevel.Trigger_Volume_BP_C_1");
+    constexpr auto sewer_volume_class = STR("/Game/Classes/ScriptingActors/Trigger_Volume_BP.Trigger_Volume_BP_C");
+    constexpr auto sewer_overlap = STR("/Game/Classes/ScriptingActors/Trigger_Volume_BP.Trigger_Volume_BP_C:BndEvt__Trigger_Volume_BP_Box_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature");
+    constexpr DialogueProfile sewer_dialogue{sewer_world, sewer_volume, sewer_volume_class, STR("Box"),
+        STR("/Script/Engine.BoxComponent"), sewer_overlap};
+
     template <typename T>
     T* find(const Unreal::TCHAR* path)
     {
@@ -236,6 +243,7 @@ namespace
     Clock::time_point stash_lease{};
     bool dispatching_valve = false;
     bool event_source_matches{}, event_consumed{};
+    bool sewer_answering{};
 
     bool live_actor(Unreal::UObject* actor, Unreal::UObject* world, std::uint8_t role)
     {
@@ -406,6 +414,7 @@ namespace
     {
         if (!live(world)) return nullptr;
         const auto path = world->GetPathName();
+        if (path == sewer_world) return &sewer_dialogue;
         for (const auto& profile : dialogue_profiles)
             if (path == profile.world) return &profile;
         return nullptr;
@@ -512,7 +521,7 @@ namespace
             !live_scope(scope)) return;
         auto* target = dialogue_input.component.Get();
         const auto* profile = dialogue_profile(scope.world.Get());
-        if (!profile || function != find<Unreal::UFunction>(profile->callback)
+        if (!profile || profile == &sewer_dialogue || function != find<Unreal::UFunction>(profile->callback)
             || !exact_dialogue_actor(*profile, actor, target) || function->GetOuterPrivate() != actor->GetClassPrivate() ||
             function->GetNumParms() != 2 || function->GetParmsSize() != 2 * sizeof(void*) ||
             function->GetReturnProperty() || function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
@@ -529,6 +538,40 @@ namespace
             !interaction_in_reach(pawn, actor, target) ||
             !silverfish::native_interaction_input::consume_current_press(pawn)) return;
         dialogue_input.pending = {++dialogue_sequence, Clock::now() + receipt_lifetime};
+    }
+
+    void intercept_sewer_overlap(Iteration& call, Unreal::UObject* actor, Unreal::UFunction* function, const void* parameters)
+    {
+        static const Unreal::FName overlap_name{STR("BndEvt__Trigger_Volume_BP_Box_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature")};
+        if (!function || function->GetFName() != overlap_name || !live(actor) || !parameters ||
+            call.OriginalFunctionCallPrevented() || actor->GetPathName() != sewer_volume ||
+            actor->GetClassPrivate() != find<Unreal::UClass>(sewer_volume_class) ||
+            function != find<Unreal::UFunction>(sewer_overlap) || function->GetOuterPrivate() != actor->GetClassPrivate() ||
+            function->GetNumParms() != 6 || function->GetReturnProperty()) return;
+        auto* world = static_cast<Unreal::AActor*>(actor)->GetWorld();
+        auto* driver = object_field(world, STR("NetDriver"));
+        auto* other = input<Unreal::FObjectProperty>(function, STR("OtherActor"), sizeof(void*));
+        auto* pawn = other ? other->GetObjectPropertyValue(other->ContainerPtrToValuePtr<void>(parameters)) : nullptr;
+        if (!live(world) || world->GetPathName() != sewer_world || !live(driver) || object_field(driver, STR("World")) != world ||
+            !live(pawn) || pawn->GetClassPrivate() != find<Unreal::UClass>(pawn_path)) return;
+        auto* controller = object_field(pawn, STR("Controller"));
+        auto* player = object_field(controller, STR("Player"));
+        auto* local_type = find<Unreal::UClass>(STR("/Script/Engine.LocalPlayer"));
+        if (!object_field(driver, STR("ServerConnection")) && live(player) && local_type && player->IsA(local_type) &&
+            object_field(controller, STR("Pawn")) == pawn && live_actor(pawn, world, 3)) return;
+        call.PreventOriginalFunctionCall();
+    }
+
+    bool queue_sewer_dialogue(Unreal::UObject* pawn)
+    {
+        const auto now = Clock::now();
+        if (!pawn || pawn != scope.pawn.Get() || pawn != dialogue_input.pawn.Get() || scope.host ||
+            now >= dialogue_input.expires || !dialogue_input.accepting || dialogue_sequence == max_sequence ||
+            !live_scope(scope) || !standing(pawn) || dialogue_profile(scope.world.Get()) != &sewer_dialogue ||
+            !exact_dialogue_actor(sewer_dialogue, dialogue_input.actor.Get(), dialogue_input.component.Get())) return false;
+        if (dialogue_input.pending.sequence && now < dialogue_input.pending.expires) return true;
+        dialogue_input.pending = {++dialogue_sequence, now + receipt_lifetime};
+        return true;
     }
 
     bool exact_valve(Unreal::UObject* actor)
@@ -627,6 +670,7 @@ namespace
     void route_interaction(Iteration& iteration, Unreal::UObject* actor, Unreal::UFunction* function, const void* parameters)
     {
         intercept_wire_board(iteration, actor, function, parameters);
+        intercept_sewer_overlap(iteration, actor, function, parameters);
         intercept_dialogue(iteration, actor, function, parameters);
         intercept_valve(iteration, actor, function, parameters);
         intercept_stash(iteration, actor, function, parameters);
@@ -668,6 +712,12 @@ namespace
             event_consumed = false;
             event_source_matches = parameters && scope.started.source->GetObjectPropertyValue(
                 scope.started.source->ContainerPtrToValuePtr<void>(parameters)) == scope.action.Get();
+            if (sewer_answering && event_source_matches && !iteration.OriginalFunctionCallPrevented() && queue_sewer_dialogue(pawn))
+            {
+                iteration.PreventOriginalFunctionCall();
+                event_consumed = iteration.OriginalFunctionCallPrevented();
+                if (event_consumed) ++consumed_dispatches;
+            }
         }
     }
 
@@ -807,7 +857,9 @@ namespace
     int set_dialogue_scope(const Lua& lua)
     {
         const auto respond = [&](bool value) { lua.set_bool(value); return 1; };
-        if (!available() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_bool(2))
+        const auto arguments = lua.get_stack_size();
+        if (!available() || (arguments != 2 && arguments != 3) || !lua.is_integer(1) || !lua.is_bool(2) ||
+            (arguments == 3 && !lua.is_bool(3)))
             return respond(false);
         const auto requested = lua.get_integer();
         const auto accepting = lua.get_bool();
@@ -821,7 +873,16 @@ namespace
         auto* component = object_field(actor, profile->component);
         if (!exact_dialogue_actor(*profile, actor, component)) return respond(false);
         bind_interaction(dialogue_input, actor, component, pawn, accepting, now);
+        sewer_answering = profile == &sewer_dialogue && arguments == 3 && accepting && lua.get_bool();
         return respond(true);
+    }
+
+    int open_sewer_dialogue(const Lua& lua)
+    {
+        auto* pawn = scope.pawn.Get();
+        lua.set_bool(available() && lua.get_stack_size() == 1 && lua.is_integer(1) && pawn &&
+            address(pawn) == lua.get_integer() && queue_sewer_dialogue(pawn));
+        return 1;
     }
 
     int take_dialogue_press(const Lua& lua) { return take_interaction_press(lua, dialogue_input); }
@@ -888,7 +949,11 @@ namespace
 
     int clear_dialogue_scope(const Lua&)
     {
-        if (Unreal::IsInGameThreadRaw()) dialogue_input = {};
+        if (Unreal::IsInGameThreadRaw())
+        {
+            dialogue_input = {};
+            sewer_answering = false;
+        }
         return 0;
     }
 
@@ -1083,6 +1148,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishTakeNativeWireBoardPress", take_wire_board_press);
         lua.register_function("SilverfishClearNativeWireBoardScope", clear_wire_board);
         lua.register_function("SilverfishSetNativeDialogueInputScope", set_dialogue_scope);
+        lua.register_function("SilverfishOpenNativeSewerDialogue", open_sewer_dialogue);
         lua.register_function("SilverfishTakeNativeDialogueInput", take_dialogue_press);
         lua.register_function("SilverfishClearNativeDialogueInputScope", clear_dialogue_scope);
         lua.register_function("SilverfishTakeNativeSubwayValvePress", take_valve_press);
@@ -1100,6 +1166,7 @@ namespace silverfish::native_interaction_input
         scope = {};
         wire_board = {};
         dialogue_input = {};
+        sewer_answering = false;
         valve_input = {};
         stash_input = {};
         stash_lease = {};

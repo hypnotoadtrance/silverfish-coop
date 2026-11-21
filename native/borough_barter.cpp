@@ -1,5 +1,6 @@
 #include "borough_barter.hpp"
 #include "guest_armor.hpp"
+#include "loot_escrow.hpp"
 #include "shared_loot.hpp"
 
 #include <algorithm>
@@ -10,9 +11,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <format>
+#include <functional>
 #include <limits>
 #include <memory>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
@@ -20,6 +24,7 @@
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/Engine/UDataTable.hpp>
 #include <Unreal/NameTypes.hpp>
+#include <Unreal/Rotator.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/World.hpp>
@@ -43,6 +48,11 @@ namespace
     constexpr auto bench_class = STR("/Game/Assets/StaticMeshes/Mesh_Props/Furnature/CraftingBench_BP.CraftingBench_BP_C");
     constexpr auto board_path = STR("/Game/Classes/Items/Item_CompBoard.Item_CompBoard_C");
     constexpr auto scrap_path = STR("/Game/Classes/Items/Item_ElectronicScrap.Item_ElectronicScrap_C");
+    constexpr auto sewer_world = STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P");
+    constexpr auto sewer_npc = STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P:PersistentLevel.NPC_SewerTrader_C_1");
+    constexpr auto sewer_post = STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P:PersistentLevel.TradePost_BP_C_1");
+    constexpr auto sewer_trigger = STR("/Game/Classes/Maps/Maps_Dungeons/Cistern_P.Cistern_P:PersistentLevel.Trigger_Volume_BP_C_1");
+    constexpr int sewer_offer_count = 26;
 
     struct Recipe
     {
@@ -433,6 +443,449 @@ namespace
         return result;
     }
 
+    struct TradeAmount
+    {
+        U::UClass* item{};
+        int count{};
+    };
+
+    struct SewerOffer
+    {
+        std::vector<TradeAmount> payment;
+        TradeAmount reward;
+        bool hidden{};
+    };
+
+    std::vector<TradeAmount> trade_amounts(U::UScriptStruct* schema, const void* row,
+                                          const U::TCHAR* name, int limit, bool allow_zero)
+    {
+        auto* map = field<U::FMapProperty>(schema, name);
+        auto* key = map ? U::CastField<U::FClassProperty>(map->GetKeyProp()) : nullptr;
+        auto* value = map ? U::CastField<U::FIntProperty>(map->GetValueProp()) : nullptr;
+        auto* base = find<U::UClass>(base_path);
+        if (!key || !value || !base || key->GetMetaClass().Get() != base || key->GetOffset_Internal() != 0) return {};
+        const auto layout = U::FScriptMap::GetScriptLayout(
+            key->GetSize(), key->GetMinAlignment(), value->GetSize(), value->GetMinAlignment());
+        auto* values = map->ContainerPtrToValuePtr<U::FScriptMap>(row);
+        if (value->GetOffset_Internal() != layout.ValueOffset || values->Num() < 1 || values->Num() > limit ||
+            values->GetMaxIndex() > 16) return {};
+        std::vector<TradeAmount> result;
+        for (int index = 0; index < values->GetMaxIndex(); ++index)
+        {
+            if (!values->IsValidIndex(index)) continue;
+            auto* entry = values->GetData(index, layout);
+            auto* item = entry ? static_cast<U::UClass*>(key->GetObjectPropertyValue(entry)) : nullptr;
+            const auto count = entry ? value->GetPropertyValueInContainer(entry) : -1;
+            if (!item || !item->IsChildOf(base) || item->IsUnreachable() || count < (allow_zero ? 0 : 1) ||
+                count > 100 || std::ranges::any_of(result, [item](const TradeAmount& prior) { return prior.item == item; }))
+                return {};
+            result.push_back({item, count});
+        }
+        return result;
+    }
+
+    bool sewer_offers(U::UObject* post, std::array<SewerOffer, sewer_offer_count>& result)
+    {
+        auto* table = find<U::UDataTable>(STR("/Game/Classes/Libraries/DataTables/TradeInventories_DT.TradeInventories_DT"));
+        auto* schema = find<U::UScriptStruct>(STR("/Game/Classes/Libraries/Structs/Trade_Inventory_Struct.Trade_Inventory_Struct"));
+        auto* offer_type = find<U::UScriptStruct>(STR("/Game/Classes/Libraries/Structs/Trade_Struct.Trade_Struct"));
+        auto* handle_type = find<U::UScriptStruct>(STR("/Script/Engine.DataTableRowHandle"));
+        auto* handle = field<U::FStructProperty>(post, STR("ShopInventory"));
+        auto* inventory = field<U::FStructProperty>(post, STR("ShopInv"));
+        auto* handle_table = field<U::FObjectProperty>(handle_type, STR("DataTable"));
+        auto* handle_name = field<U::FNameProperty>(handle_type, STR("RowName"));
+        const U::FName name{STR("SewerThing"), U::FNAME_Find};
+        if (!exact(table, STR("/Script/Engine.DataTable")) || !schema || !offer_type || !handle_type || !handle ||
+            handle->GetStruct().Get() != handle_type || !inventory || inventory->GetStruct().Get() != schema ||
+            !handle_table || !handle_name || name.IsNone() || name.ToString() != STR("SewerThing") ||
+            !bool_value(post, STR("Generate_RandomTrades"), post, false) || table->GetRowStruct().Get() != schema) return false;
+        const auto* handle_value = handle->ContainerPtrToValuePtr<void>(post);
+        if (handle_name->GetPropertyValueInContainer(handle_value) != name ||
+            handle_table->GetObjectPropertyValue(handle_table->ContainerPtrToValuePtr<void>(handle_value)) != table) return false;
+
+        auto* offers = field<U::FArrayProperty>(schema, STR("TradeOffers_6_AAB7177E4D8899D984DE8F8674A7990F"));
+        auto* row_type = offers ? U::CastField<U::FStructProperty>(offers->GetInner()) : nullptr;
+        auto* shown = field<U::FDoubleProperty>(schema, STR("PercentageShown_10_A0EA59BD4DAA778C39DDB080BA16FD67"));
+        auto* reputation = field<U::FMapProperty>(schema, STR("RepGain_16_EBE7110445B7872B32796C8504C42DEB"));
+        auto* chance = field<U::FDoubleProperty>(offer_type, STR("ChanceShown_4_18C5CA7A480470CDF14CAD8FBF228FF7"));
+        auto* cash_give = field<U::FIntProperty>(offer_type, STR("Cash_Give_10_7D278BDA423E1A8C582C23B5C1A91B6F"));
+        auto* cash_receive = field<U::FIntProperty>(offer_type, STR("Cash_Recive_12_FE560CBF4176840FDE3480B7FFB4C4F2"));
+        auto* hide = field<U::FBoolProperty>(offer_type, STR("Hide_IfCantTrade_24_4698C1544884DAA7621280A142208174"));
+        if (!row_type || row_type->GetStruct().Get() != offer_type || !shown || !reputation || !chance ||
+            !cash_give || !cash_receive || !hide) return false;
+        const auto* cooked = table->FindRowUnchecked(name);
+        const auto* live = inventory->ContainerPtrToValuePtr<void>(post);
+        if (!cooked || shown->GetPropertyValueInContainer(cooked) != 1.0 || shown->GetPropertyValueInContainer(live) != 1.0 ||
+            reputation->ContainerPtrToValuePtr<U::FScriptMap>(cooked)->Num() != 0 ||
+            reputation->ContainerPtrToValuePtr<U::FScriptMap>(live)->Num() != 0) return false;
+        U::FScriptArrayHelper authored(offers, offers->ContainerPtrToValuePtr<void>(cooked));
+        U::FScriptArrayHelper active(offers, offers->ContainerPtrToValuePtr<void>(live));
+        if (authored.Num() != sewer_offer_count || active.Num() != sewer_offer_count) return false;
+
+        auto* weapon = find<U::UClass>(STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"));
+        if (!weapon) return false;
+        for (int index = 0; index < sewer_offer_count; ++index)
+        {
+            const auto* stock = authored.GetRawPtr(index);
+            if (chance->GetPropertyValueInContainer(stock) != 1.0 || cash_give->GetPropertyValueInContainer(stock) != 0 ||
+                cash_receive->GetPropertyValueInContainer(stock) != 0 ||
+                !bool_value(offer_type, STR("RemoveAfterTrade_1_B26933FA4BBC62F03E1EE481B5414BA2"), stock, false)) return false;
+            int matches{};
+            for (int check = 0; check < active.Num(); ++check) matches += row_type->Identical(stock, active.GetRawPtr(check));
+            if (matches != 1) return false;
+            auto give = trade_amounts(offer_type, stock, STR("Items_Give_20_B4929C76420B737D08B6E7A56384E8EC"), 3, false);
+            auto receive = trade_amounts(offer_type, stock, STR("Items_Recive_22_BF8DA3D74F10EFDF07693DB9957DFFCD"), 1, true);
+            if (give.empty() || receive.size() != 1 || (!receive[0].count && !receive[0].item->IsChildOf(weapon))) return false;
+            result[index] = {std::move(give), receive.front(), hide->GetPropertyValueInContainer(stock)};
+        }
+        return true;
+    }
+
+    bool inside_sewer_trigger(U::UObject* pawn, U::UWorld* world)
+    {
+        auto* trigger = find<U::UObject>(sewer_trigger);
+        auto* box = object(trigger, STR("Box"));
+        auto* query = find<U::UFunction>(STR("/Script/Engine.PrimitiveComponent:IsOverlappingActor"));
+        auto* target = parameter<U::FObjectProperty>(query, STR("Other"), 0, false);
+        auto* answer = field<U::FBoolProperty>(query, STR("ReturnValue"));
+        if (!exact(trigger, STR("/Game/Classes/ScriptingActors/Trigger_Volume_BP.Trigger_Volume_BP_C")) ||
+            !authority(trigger, world) || !exact(box, STR("/Script/Engine.BoxComponent")) || box->GetOuterPrivate() != trigger ||
+            !query || !target || !answer || query->GetNumParms() != 2 || query->GetReturnProperty() != answer ||
+            answer->GetOffset_Internal() != sizeof(void*) || !query->HasAnyFunctionFlags(U::FUNC_Native)) return false;
+        struct Overlap { U::UObject* pawn; bool inside{}; } args{pawn};
+        if (query->GetParmsSize() < offsetof(Overlap, inside) + sizeof(bool) || query->GetParmsSize() > sizeof(args)) return false;
+        box->ProcessEvent(query, &args);
+        return answer->GetPropertyValueInContainer(&args);
+    }
+
+    struct Debit
+    {
+        Guid guid{};
+        TradeAmount amount;
+        int index{}, remaining{};
+    };
+
+    bool pay_offer(const Inventory& layout, U::UObject* save, const SewerOffer& offer, std::vector<Debit>& debits)
+    {
+        for (auto [item, needed] : offer.payment)
+        {
+            auto* defaults = item->GetClassDefaultObject().Get();
+            auto* stacks = field<U::FBoolProperty>(defaults, STR("Stacks"));
+            if (!stacks) return false;
+            const bool stackable = stacks->GetPropertyValueInContainer(defaults);
+            if (!layout.rows(save, [&](const void* row, int index) {
+                    if (!needed || index < 0 || layout.klass(row) != item || (stackable && !layout.matches_defaults(row, defaults))) return;
+                    const auto id = layout.identity(row);
+                    const auto units = layout.units->GetPropertyValueInContainer(row);
+                    if (id == Guid{} || (stackable ? units <= 0 : units != 0)) return;
+                    const auto used = stackable ? std::min(units, needed) : 1;
+                    debits.push_back({id, {item, used}, index, stackable ? units - used : 0});
+                    needed -= used;
+                }) || needed) return false;
+        }
+        return true;
+    }
+
+    std::string stock_class(U::UClass* item)
+    {
+        return RC::to_utf8_string(item->GetPathName());
+    }
+
+    std::string guid_string(const Guid& guid)
+    {
+        return std::format("{:08X}{:08X}{:08X}{:08X}", guid[0], guid[1], guid[2], guid[3]);
+    }
+
+    int sewer_quantity(const SewerOffer& offer)
+    {
+        auto* defaults = offer.reward.item->GetClassDefaultObject().Get();
+        return bool_value(defaults, STR("Stacks"), defaults, true) ? offer.reward.count : 1;
+    }
+
+    Value sewer_reward(const silverfish::shared_loot::EscrowOwner& owner, const Inventory& layout,
+                        const SewerOffer& offer, bool& retired)
+    {
+        struct Deferred
+        {
+            U::UObject* context{};
+            U::UClass* item{};
+            U::FTransform_As500Plus transform;
+            std::uint8_t collision{1};
+            U::UObject* owner{};
+            std::uint8_t scale{1};
+            U::AActor* result{};
+        } begin;
+        struct Finished
+        {
+            U::AActor* actor{};
+            U::FTransform_As500Plus transform;
+            std::uint8_t scale{1};
+            U::AActor* result{};
+        } finish;
+        static_assert(offsetof(Deferred, transform) == 0x10 && offsetof(Deferred, result) == 0x88);
+        static_assert(offsetof(Finished, transform) == 0x10 && offsetof(Finished, result) == 0x78);
+        const auto* actor_type = find<U::UClass>(STR("/Script/Engine.Actor"));
+        auto* transform = find<U::UScriptStruct>(STR("/Script/CoreUObject.Transform"));
+        auto* statics = find<U::UObject>(STR("/Script/Engine.Default__GameplayStatics"));
+        auto* spawn = find<U::UFunction>(STR("/Script/Engine.GameplayStatics:BeginDeferredActorSpawnFromClass"));
+        auto* complete = find<U::UFunction>(STR("/Script/Engine.GameplayStatics:FinishSpawningActor"));
+        auto* spawn_type = parameter<U::FClassProperty>(spawn, STR("ActorClass"), 8, false);
+        auto* start_transform = field<U::FStructProperty>(spawn, STR("SpawnTransform"));
+        auto* end_transform = field<U::FStructProperty>(complete, STR("SpawnTransform"));
+        auto* spawn_result = field<U::FObjectProperty>(spawn, STR("ReturnValue"));
+        auto* complete_result = field<U::FObjectProperty>(complete, STR("ReturnValue"));
+        if (!actor_type || !transform || !statics || !spawn || !complete || !spawn_type ||
+            spawn_type->GetMetaClass().Get() != actor_type || !start_transform || start_transform->GetStruct().Get() != transform ||
+            start_transform->GetOffset_Internal() != 0x10 || start_transform->GetSize() != 0x60 ||
+            !end_transform || end_transform->GetStruct().Get() != transform || end_transform->GetOffset_Internal() != 0x10 ||
+            end_transform->GetSize() != 0x60 || !spawn_result || !complete_result ||
+            spawn_result->GetPropertyClass().Get() != actor_type || complete_result->GetPropertyClass().Get() != actor_type ||
+            spawn_result->GetOffset_Internal() != 0x88 || complete_result->GetOffset_Internal() != 0x78 ||
+            spawn->GetReturnProperty() != spawn_result || complete->GetReturnProperty() != complete_result ||
+            spawn->GetOuterPrivate() != statics->GetClassPrivate() || complete->GetOuterPrivate() != statics->GetClassPrivate() ||
+            !spawn->HasAnyFunctionFlags(U::FUNC_Native) || !complete->HasAnyFunctionFlags(U::FUNC_Native) ||
+            spawn->GetNumParms() != 7 || spawn->GetParmsSize() != 0x90 ||
+            complete->GetNumParms() != 4 || complete->GetParmsSize() != 0x80) return {};
+        auto* item = offer.reward.item;
+        auto* stock = item->GetClassDefaultObject().Get();
+        auto* default_ammo = field<U::FIntProperty>(stock, STR("Ammo"));
+        auto* weapon = find<U::UClass>(STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"));
+        if (!default_ammo || !weapon) return {};
+        const int units = item->IsChildOf(weapon) ? 0 : offer.reward.count > 0 ? offer.reward.count :
+            default_ammo->GetPropertyValueInContainer(stock);
+        auto location = static_cast<U::AActor*>(owner.pawn)->K2_GetActorLocation();
+        location.SetZ(location.GetZ() + 1500.0);
+        begin.context = owner.pawn;
+        begin.owner = owner.pawn;
+        begin.item = item;
+        begin.transform = U::FTransform{U::FRotator(0.0, 0.0, 0.0).Quaternion(), location, U::FVector(1, 1, 1)};
+        statics->ProcessEvent(spawn, &begin);
+        auto* actor = begin.result;
+        if (!actor) return {};
+        retired = false;
+        actor->SetFlags(U::RF_Transient);
+        actor->SetActorEnableCollision(false);
+        actor->SetActorHiddenInGame(true);
+        auto* row = layout.backpack->GetInner();
+        Value reward(row->AllocateAndInitializeValue(), {row});
+        auto* amount = field<U::FIntProperty>(actor, STR("Ammo"));
+        auto* respawn = field<U::FByteProperty>(actor, STR("Item_RespawnMode"));
+        auto* instigator = field<U::FObjectProperty>(actor, STR("Instigator"));
+        const bool qualified = reward && actor->GetClassPrivate() == item && authority(actor, owner.world) &&
+            !actor->HasAnyFlags(U::RF_WasLoaded) && amount && respawn && instigator && units >= 0;
+        bool converted{};
+        if (qualified)
+        {
+            amount->SetPropertyValueInContainer(actor, units);
+            respawn->SetPropertyValueInContainer(actor, 0);
+            instigator->SetObjectPropertyValue(instigator->ContainerPtrToValuePtr<void>(actor), owner.pawn);
+            finish.actor = actor;
+            finish.transform = begin.transform;
+            statics->ProcessEvent(complete, &finish);
+            if (finish.result == actor && authority(actor, owner.world) && amount->GetPropertyValueInContainer(actor) == units)
+            {
+                actor->SetActorEnableCollision(false);
+                actor->SetActorHiddenInGame(true);
+                converted = silverfish::loot_escrow::convert_stock_item(owner.pawn, actor, reward.get());
+            }
+        }
+        actor->K2_DestroyActor();
+        retired = !authority(actor, owner.world);
+        if (!converted || !retired || layout.klass(reward.get()) != item ||
+            layout.units->GetPropertyValueInContainer(reward.get()) != units) return {};
+        return reward;
+    }
+
+    bool stock_stack(const Inventory& layout, const void* row, int count, U::UObject* defaults)
+    {
+        auto* value = field<U::FIntProperty>(defaults, STR("Value"));
+        auto* weight = field<U::FDoubleProperty>(defaults, STR("Weight"));
+        if (!value || !weight) return false;
+        const int unit_value = value->GetPropertyValueInContainer(defaults);
+        const double unit_weight = weight->GetPropertyValueInContainer(defaults);
+        const auto total = static_cast<std::int64_t>(unit_value) * count;
+        return count > 0 && std::isfinite(unit_weight) && unit_weight >= 0 &&
+            total >= 0 && total <= std::numeric_limits<int>::max() &&
+            layout.value->GetPropertyValueInContainer(row) == total &&
+            layout.units->GetPropertyValueInContainer(row) == count &&
+            std::abs(layout.weight->GetPropertyValueInContainer(row) - unit_weight * count) < 1e-8;
+    }
+
+    bool set_stack_quantity(const Inventory& layout, void* row, int count, U::UObject* defaults)
+    {
+        auto* value = field<U::FIntProperty>(defaults, STR("Value"));
+        auto* weight = field<U::FDoubleProperty>(defaults, STR("Weight"));
+        if (!value || !weight || count <= 0) return false;
+        const auto total = static_cast<std::int64_t>(value->GetPropertyValueInContainer(defaults)) * count;
+        const auto mass = weight->GetPropertyValueInContainer(defaults) * count;
+        if (total < 0 || total > std::numeric_limits<int>::max() || !std::isfinite(mass) || mass < 0) return false;
+        layout.units->SetPropertyValueInContainer(row, count);
+        layout.value->SetPropertyValueInContainer(row, static_cast<int>(total));
+        layout.weight->SetPropertyValueInContainer(row, mass);
+        return stock_stack(layout, row, count, defaults);
+    }
+
+    int sewer_trade(const Lua& lua)
+    {
+        const auto reject = [&](std::string_view reason) {
+            lua.set_bool(false);
+            lua.set_string(reason);
+            return 2;
+        };
+        if (!enabled() || lua.get_stack_size() != 4 || !lua.is_integer(1) || !lua.is_integer(2) ||
+            !lua.is_integer(3) || !lua.is_integer(4)) return reject("sewer_trade_refused_arguments");
+        const auto pawn = lua.get_integer(), save = lua.get_integer(), stock = lua.get_integer(), requested = lua.get_integer();
+        const bool fixture = requested == -1 && flag("SILVERFISH_COOP_HEADLESS") && flag("SILVERFISH_COOP_NATIVE_FIXTURES");
+        if (pawn <= 0 || save <= 0 || stock <= 0 || stock == save || (!fixture && requested < 0) || requested > sewer_offer_count)
+            return reject("sewer_trade_refused_arguments");
+        auto* world = find<U::UWorld>(sewer_world);
+        silverfish::shared_loot::EscrowOwner owner;
+        if (!world || !silverfish::shared_loot::qualify_escrow_owner_in_world(world, pawn, save, stock, owner) ||
+            !inside_sewer_trigger(owner.pawn, world)) return reject("sewer_trade_refused_guest_scope");
+        auto* npc = find<U::UObject>(sewer_npc);
+        auto* post = find<U::UObject>(sewer_post);
+        if (!exact(npc, STR("/Game/Classes/NPCs/NPC_Characters/NPC_SewerTrader.NPC_SewerTrader_C")) || !authority(npc, world) ||
+            !bool_value(npc, STR("Alive"), npc, true) || !exact(post, STR("/Game/Classes/Actors/TradePost_BP.TradePost_BP_C")) ||
+            !authority(post, world)) return reject("sewer_trade_refused_stock_scene");
+        Inventory layout;
+        std::array<SewerOffer, sewer_offer_count> offers;
+        if (!layout.bind(owner.save) || !sewer_offers(post, offers)) return reject("sewer_trade_refused_stock_offers");
+        if (!requested)
+        {
+            std::string encoded;
+            for (std::size_t index = 0; index < offers.size(); ++index)
+            {
+                const auto& offer = offers[index];
+                std::vector<Debit> debits;
+                const bool affordable = pay_offer(layout, owner.save, offer, debits);
+                encoded += std::format("{}|{}|{}|{}|{}", index + 1, static_cast<int>(affordable),
+                    static_cast<int>(offer.hidden), stock_class(offer.reward.item), sewer_quantity(offer));
+                for (const auto& [item, quantity] : offer.payment) encoded += std::format("|{}|{}", stock_class(item), quantity);
+                encoded += '\n';
+            }
+            lua.set_bool(true);
+            lua.set_string("offers");
+            lua.set_string(encoded);
+            return 3;
+        }
+
+        SewerOffer fixture_offer;
+        if (fixture)
+        {
+            if (offers[1].payment.size() != 1 || offers[1].payment.front().count != 1)
+                return reject("sewer_trade_refused_fixture_offer");
+            auto* item = offers[1].payment.front().item;
+            auto* defaults = item->GetClassDefaultObject().Get();
+            auto* stacks = field<U::FBoolProperty>(defaults, STR("Stacks"));
+            if (!stacks || item->GetPathName() != STR("/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C"))
+                return reject("sewer_trade_refused_fixture_mushroom_class");
+            fixture_offer.reward = {item, stacks->GetPropertyValueInContainer(defaults) ? 1 : 0};
+        }
+        const auto& offer = fixture ? fixture_offer : offers[static_cast<std::size_t>(requested - 1)];
+        std::vector<Debit> debits;
+        if (!pay_offer(layout, owner.save, offer, debits)) return reject("sewer_trade_refused_unaffordable");
+        for (const auto& entry : debits)
+        {
+            int matches{};
+            for (auto* frame : {owner.save, owner.stock})
+                if (!layout.rows(frame, [&](const void* row, int) { matches += layout.identity(row) == entry.guid; }))
+                    return reject("sewer_trade_refused_inventory_bounds");
+            if (matches != 1) return reject("sewer_trade_refused_payment_identity");
+        }
+
+        auto* flags = field<U::FMapProperty>(owner.stock, STR("Flags"));
+        auto* flags_value = flags ? flags->ContainerPtrToValuePtr<void>(owner.stock) : nullptr;
+        auto* pack = layout.backpack->ContainerPtrToValuePtr<void>(owner.save);
+        auto* host_pack = layout.backpack->ContainerPtrToValuePtr<void>(owner.stock);
+        const auto old_flags = flags_value ? copy(flags, flags_value) : Value{};
+        const auto old_pack = copy(layout.backpack, pack);
+        const auto old_host = copy(layout.backpack, host_pack);
+        const auto prepared = copy(layout.backpack, pack);
+        if (!old_flags || !old_pack || !old_host || !prepared) return reject("sewer_trade_refused_snapshot");
+        const auto stock_unchanged = [&] {
+            return flags->Identical(flags_value, old_flags.get()) && layout.backpack->Identical(host_pack, old_host.get());
+        };
+
+        U::FScriptArrayHelper replacement(layout.backpack, prepared.get());
+        std::ranges::sort(debits, std::greater{}, &Debit::index);
+        for (const auto& entry : debits)
+        {
+            if (entry.index < 0 || entry.index >= replacement.Num()) return reject("sewer_trade_refused_payment_index");
+            auto* row = replacement.GetRawPtr(entry.index);
+            if (layout.identity(row) != entry.guid) return reject("sewer_trade_refused_payment_identity");
+            if (!entry.remaining) replacement.RemoveValues(entry.index, 1);
+            else
+            {
+                auto* defaults = entry.amount.item->GetClassDefaultObject().Get();
+                if (!stock_stack(layout, row, entry.amount.count + entry.remaining, defaults) ||
+                    !set_stack_quantity(layout, row, entry.remaining, defaults)) return reject("sewer_trade_refused_payment_stack");
+            }
+        }
+
+        bool retired = true;
+        const auto reward = sewer_reward(owner, layout, offer, retired);
+        if (!retired || !stock_unchanged() || !layout.backpack->Identical(pack, old_pack.get()))
+            return reject("mutation_unverified_sewer_trade_stock_reward");
+        if (!reward) return reject("sewer_trade_refused_stock_reward");
+        auto awarded = layout.identity(reward.get());
+        if (awarded == Guid{}) return reject("sewer_trade_refused_reward_identity");
+        bool duplicate{};
+        for (auto* frame : {owner.save, owner.stock})
+            if (!layout.rows(frame, [&](const void* row, int) { duplicate |= layout.identity(row) == awarded; }))
+                return reject("sewer_trade_refused_inventory_bounds");
+        if (duplicate) return reject("sewer_trade_refused_reward_identity");
+
+        auto* award_defaults = offer.reward.item->GetClassDefaultObject().Get();
+        const auto quantity = sewer_quantity(offer);
+        bool merged{};
+        if (bool_value(award_defaults, STR("Stacks"), award_defaults, true))
+        {
+            if (!stock_stack(layout, reward.get(), quantity, award_defaults) &&
+                !set_stack_quantity(layout, reward.get(), quantity, award_defaults)) return reject("sewer_trade_refused_reward_stack");
+            for (int index = 0; index < replacement.Num(); ++index)
+            {
+                auto* row = replacement.GetRawPtr(index);
+                if (layout.klass(row) != offer.reward.item || !layout.matches_defaults(row, award_defaults)) continue;
+                const int units = layout.units->GetPropertyValueInContainer(row);
+                if (units <= 0 || units > std::numeric_limits<int>::max() - quantity || layout.identity(row) == Guid{} ||
+                    !stock_stack(layout, row, units, award_defaults) ||
+                    !set_stack_quantity(layout, row, units + quantity, award_defaults)) return reject("sewer_trade_refused_reward_stack");
+                awarded = layout.identity(row);
+                merged = true;
+                break;
+            }
+        }
+        if (!merged)
+        {
+            if (replacement.Num() >= capacity) return reject("sewer_trade_refused_backpack_capacity");
+            auto* target = replacement.GetRawPtr(replacement.AddValues(1));
+            auto* row = layout.backpack->GetInner();
+            row->CopyCompleteValue(target, reward.get());
+            if (!row->Identical(target, reward.get())) return reject("sewer_trade_refused_prepared_reward");
+        }
+        silverfish::shared_loot::EscrowOwner current;
+        if (!silverfish::shared_loot::qualify_escrow_owner_in_world(world, pawn, save, stock, current) ||
+            current.save != owner.save || !inside_sewer_trigger(current.pawn, world)) return reject("sewer_trade_refused_guest_scope_changed");
+
+        layout.backpack->CopyCompleteValue(pack, prepared.get());
+        if (!layout.backpack->Identical(pack, prepared.get()) || !stock_unchanged())
+        {
+            layout.backpack->CopyCompleteValue(pack, old_pack.get());
+            return reject(layout.backpack->Identical(pack, old_pack.get()) && stock_unchanged()
+                ? "sewer_trade_refused_rolled_back" : "mutation_unverified_sewer_trade_commit");
+        }
+        std::string paid;
+        for (const auto& entry : debits)
+            paid += std::format("{}|{}|{}|{}\n", guid_string(entry.guid), stock_class(entry.amount.item), entry.amount.count, entry.remaining);
+        lua.set_bool(true);
+        lua.set_string(fixture ? "seeded" : "exchanged");
+        lua.set_string(paid);
+        lua.set_string(guid_string(awarded));
+        lua.set_string(stock_class(offer.reward.item));
+        lua.set_integer(quantity);
+        return 6;
+    }
+
     template <bool crafting, bool preview = false>
     int trade(const Lua& lua)
     {
@@ -633,5 +1086,6 @@ namespace silverfish::borough_barter
         lua.register_function("SilverfishTradeNativeCraftingBench", trade<true>);
         lua.register_function("SilverfishPreviewNativeCraftingBench", trade<true, true>);
         lua.register_function("SilverfishSeedNativeCraftingScrap", seed_crafting_scrap);
+        lua.register_function("SilverfishNativeSewerTrade", sewer_trade);
     }
 }

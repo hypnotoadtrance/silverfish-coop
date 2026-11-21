@@ -24,7 +24,7 @@ from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summ
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
 from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore, native_mindcore_carry, native_mindcore_fixture, native_mindcore_view
 from . import native_dust_cabinet, native_savlo_locker
-from . import native_inventory, native_stash
+from . import native_inventory, native_sewer_barter, native_stash
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
 from . import native_loot, native_world_loot
 from . import native_loose_pickup
@@ -909,9 +909,11 @@ class Bridge:
             if len(fields) != 5 or fields[0] != "dialogue-input":
                 continue
             _, serial, pawn, token, choice = fields
+            allowed_ordinals = (native_dialogue.SEWER_ORDINALS if pawn.startswith("Player_FP_C " + native_dialogue.SEWER_LEVEL)
+                                else native_dialogue.ORDINALS)
             if (serial.isascii() and serial.isdigit() and len(serial) <= 16 and 0 < (sequence := int(serial)) < 2**53
                     and pawn.startswith("Player_FP_C ") and len(pawn) <= 512
-                    and ((token, choice) == ("-", "-") or choice in native_dialogue.ORDINALS and native_dialogue.valid_token(token))):
+                    and ((token, choice) == ("-", "-") or choice in allowed_ordinals and native_dialogue.valid_token(token))):
                 events.append((sequence, pawn, token, choice))
         return events
 
@@ -1059,6 +1061,7 @@ class Bridge:
             data = {"pawns": {}, "player_effects": {}, "loot_actors": []}
             quest_rows, board_rows = [], []
             dialogue_frame, dialogue_progress, dialogue_lines, dialogue_choices = None, None, [], []
+            sewer_frame, sewer_rows = None, []
             mosby_frame, mosby_reputation = None, []
             drill_frame, drill_reputation = None, []
             matrix_rows, marker_rows = [], []
@@ -1302,7 +1305,7 @@ class Bridge:
                     pawn, state, serial, row, token = fields[1:]
                     sequence = int(serial)
                     profile = native_dialogue.PROFILES.get(data.get("map"))
-                    has_row = profile and row in profile.rows and native_dialogue.valid_token(token)
+                    has_row = profile and native_dialogue.view_row(profile, row) and native_dialogue.valid_token(token)
                     if (not pawn.startswith("Player_FP_C ") or len(pawn) > 512 or not 0 <= sequence < 2**53
                             or state not in ("waiting", "armed", "pending", "open", "closed")
                             or not (has_row or (row, token) == ("-", "-")) or (state == "open" and not has_row)
@@ -1313,6 +1316,11 @@ class Bridge:
                     if dialogue_frame is not None:
                         raise ValueError("Duplicate stock dialogue frame")
                     dialogue_frame = fields
+                elif fields[0] == "native-dialogue-sewer-host-menu":
+                    if (len(fields) != 3 or fields[1] != native_dialogue.CISTERN or data.get("map") != fields[1]
+                            or data.get("state") != "hosting" or fields[2] not in {"dialogue", "trade"}):
+                        raise ValueError("Invalid host Sewer Thing menu")
+                    data["native_dialogue_sewer_host_menu"] = fields[2]
                 elif fields[0] == "native-dialogue-progress":
                     if dialogue_progress is not None:
                         raise ValueError("Duplicate stock dialogue progress")
@@ -1327,6 +1335,14 @@ class Bridge:
                     if key in data or (data.get("state"), data.get("map")) != ("hosting", proof["map"]):
                         raise ValueError("Invalid stock trade frame scope")
                     data[key] = proof
+                elif fields[0] in (native_sewer_barter.OFFERS, native_sewer_barter.ACTION, native_sewer_barter.FIXTURE):
+                    if sewer_frame is not None:
+                        raise ValueError("Duplicate Sewer Thing trade report")
+                    sewer_frame = fields
+                elif fields[0] in (native_sewer_barter.OFFER_ROW, native_sewer_barter.DEBIT_ROW):
+                    if len(sewer_rows) >= 32:
+                        raise ValueError("Too many Sewer Thing trade rows")
+                    sewer_rows.append(fields)
                 elif profile := native_mosby_tape.BY_PREFIX.get(fields[0]):
                     if profile.key in data:
                         raise ValueError("Duplicate stock tape station proof")
@@ -1885,6 +1901,26 @@ class Bridge:
                 elif fields[0] == "native-loot-crate-interaction" and len(fields) == 6:
                     data["native_loot_crate_interaction"] = {"map": fields[1], "crate": fields[2], "pawn": fields[3],
                                                             "sequence": int(fields[4]), "entry": fields[5]}
+                elif (fields[0] == "native-loot-electronic-powered-open" and len(fields) == 5
+                      and data.get("state") == "hosting" and fields[1] == data.get("map")
+                      and AUTHORED_CRATES.get(fields[2]) == fields[1] and fields[2].startswith("ElectronicLocker_01_BP_C ")
+                      and fields[3] == data.get("pawns", {}).get("local", {}).get("name")
+                      and 0 < (sequence := int(fields[4])) < 2**53):
+                    data.setdefault("native_loot_electronic_powered_opens", {})[fields[2]] = dict(
+                        map=fields[1], crate=fields[2], pawn=fields[3], sequence=sequence)
+                elif (fields[0] == "native-loot-stock-alarm" and len(fields) == 5
+                      and data.get("state") in {"hosting", "connected"} and fields[1] == data.get("map")
+                      and AUTHORED_CRATES.get(fields[2]) == fields[1]
+                      and fields[2].partition(" ")[0] in {"ElectronicLocker_01_BP_C", "Loot_Machine_01_BP_C"}
+                      and all(flag in {"0", "1"} for flag in fields[3:])):
+                    data.setdefault("native_loot_stock_alarms", {})[fields[2]] = dict(
+                        map=fields[1], lit=fields[3] == "1", audible=fields[4] == "1")
+                elif (fields[0] == "native-loot-power-box" and len(fields) == 5
+                      and data.get("state") in {"hosting", "connected"} and fields[1] == data.get("map")
+                      and AUTHORED_CRATES.get(fields[2]) == fields[1] and fields[2].startswith("PowerBox_Small_BP_C ")
+                      and all(flag in {"0", "1"} for flag in fields[3:])):
+                    data.setdefault("native_loot_power_boxes", {})[fields[2]] = dict(
+                        map=fields[1], powered=fields[3] == "1", audible=fields[4] == "1")
                 elif (fields[0] == "native-loot-view-nearby" and len(fields) == 5
                       and AUTHORED_CRATES.get(fields[2]) == fields[1] and 0 < len(fields[3]) <= 512
                       and (distance := _finite(fields[4])) is not None and 0 <= distance < 1000):
@@ -2476,6 +2512,11 @@ class Bridge:
                     if not dialogue_frame or len(dialogue_frame) != 6 or data.get("state") != "hosting" or data.get("map") != dialogue_frame[1]:
                         raise ValueError("Stock dialogue frame has no qualified listen world")
                     data["native_dialogue_stock"] = native_dialogue.parse_stock(dialogue_frame, dialogue_lines, dialogue_choices, dialogue_progress)
+                if sewer_frame or sewer_rows:
+                    if not sewer_frame or (data.get("state"), data.get("map")) != ("hosting", native_sewer_barter.CISTERN):
+                        raise ValueError("Sewer Thing trade report has no qualified listen world")
+                    key, data_value = native_sewer_barter.parse(sewer_frame, sewer_rows)
+                    data[key] = data_value
                 if mosby_frame or mosby_reputation:
                     if not mosby_frame:
                         raise ValueError("Missing Stone Maze quest frame")

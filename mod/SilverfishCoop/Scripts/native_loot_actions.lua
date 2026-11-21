@@ -84,7 +84,9 @@ function actions.command(fields, state, phase)
     local pawn, crate = fields[3], fields[4]
     local fixture_nonempty = action == "open" and fields[6] == "fixture-nonempty"
     local pried = action == "open" and fields[6] == "stock-vehicle-pried"
+    local powered = action == "open" and fields[6] == "stock-electronic-powered"
     local count = action == "open" and ((fixture_nonempty or pried) and 6 or 5) or action == "claim" and 6 or 4
+    if powered then count = 7 end
     local positioned_claim = action == "claim" and #fields == 9
     if positioned_claim then count = 9 end
     if not enabled or phase ~= "hosting" or #fields ~= count or not crate or not loot.profile(state.map, crate) then
@@ -128,7 +130,7 @@ function actions.command(fields, state, phase)
         return "stock loot claim reported"
     end
     local inspect = action == "approach" and loot.approach_fixture or loot.qualify
-    local qualified, scope = pcall(inspect, state, phase, pawn, crate, action == "inspect" or action == "seed" or pried)
+    local qualified, scope = pcall(inspect, state, phase, pawn, crate, action == "inspect" or action == "seed" or pried or powered)
     if not qualified then
         result.status = tostring(scope)
         return "stock loot unavailable"
@@ -162,6 +164,14 @@ function actions.command(fields, state, phase)
         return "stock loot hook unavailable"
     end
     local open_args = pried and {false, true} or fixture_nonempty and {true} or {}
+    if powered then
+        local sequence = math.tointeger(fields[7])
+        if not scope.profile.electronic or not sequence or sequence <= 0 or sequence >= 2^53 then
+            result.status = "stock_electronic_power_receipt_unavailable"
+            return "stock electronic locker receipt unavailable"
+        end
+        open_args = {false, false, sequence}
+    end
     local reply = table.pack(SilverfishOpenNativeLootCrate(
         scope.crate:GetAddress(), scope.pawn:GetAddress(), scope.box:GetAddress(),
         scope.save:GetAddress(), scope.stock:GetAddress(), scope.lucky_looter, table.unpack(open_args)))

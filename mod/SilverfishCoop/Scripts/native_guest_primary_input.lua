@@ -118,8 +118,16 @@ function primary.sync(state, phase)
             local actor = current.pawn.ActorBeingLookedAt
             local name = valid(actor) and actor:GetFullName()
             local profile = name and loot.profile(current.map, name)
-            if not profile or not profile.lockable then
-                name = native_stock_door.pry_target(current.pawn, kind)
+            if not profile or not profile.lockable or actor.Locked ~= true then
+                local component = current.pawn.InteractionTarget_Component
+                local owner = valid(component) and component:GetOwner()
+                local focused = valid(owner) and loot.profile(current.map, owner:GetFullName())
+                if current.pawn.CanInteract == true and focused and focused.lockable
+                    and owner.Locked == true and same(component, owner.Box) then
+                    actor, name = owner, focused.name
+                else
+                    name = native_stock_door.pry_target(current.pawn, kind)
+                end
             end
             if not name or actor.Locked ~= true or (kind == "crowbar" and current.pawn.CanInteract ~= true)
                 or not emit(event_path, {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind, name}) then break end

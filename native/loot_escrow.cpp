@@ -695,6 +695,15 @@ namespace
 
 namespace silverfish::loot_escrow
 {
+    bool convert_stock_item(Unreal::UObject* pawn, Unreal::UObject* actor, void* initialized_row)
+    {
+        Inventory inventory;
+        if (!pawn || !actor || !initialized_row || !inventory.bind()) return false;
+        const auto row = convert(inventory, pawn, actor);
+        if (!row) return false;
+        inventory.row->CopyCompleteValue(initialized_row, row.get());
+        return inventory.identical(initialized_row, row.get());
+    }
     bool backpack_has_class(Unreal::UObject* save, Unreal::UClass* item_class)
     {
         Inventory inventory;

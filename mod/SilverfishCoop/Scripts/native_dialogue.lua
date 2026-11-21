@@ -3,6 +3,7 @@ local guest_save = require("guest_save")
 local mosby = require("native_dialogue_mosby")
 local shopkeep = require("native_dialogue_shopkeep")
 local mama = require("native_dialogue_mama")
+local sewer = require("native_dialogue_sewer")
 local shop_view = require("native_shop_view")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -25,7 +26,7 @@ local castaway = {
     rows = {[root] = {lines = 1, choices = {1, 3}, next = {[1] = false, [3] = story}, count = 3},
         [story] = {lines = 3, choices = {1}, next = {[1] = root}, count = 1, continuation = true}},
 }
-local profiles = {[observatory] = castaway, [mosby.map] = mosby, [shopkeep.map] = shopkeep, [mama.map] = mama}
+local profiles = {[observatory] = castaway, [mosby.map] = mosby, [shopkeep.map] = shopkeep, [mama.map] = mama, [sewer.map] = sewer}
 
 local npc_lines = "NPC_Dialogue_3_CE4B2EF741973F79EF3C89BB03B96687"
 local responses = "PlayerResponces_6_DA452ED342AF8EEEC7BD299C134AF0F3"
@@ -103,6 +104,11 @@ local function catalog(state, profile, progress)
         or not pointer_matches(controller.FirstMeet_Pointer, source, profile.first or false) then
         reject("stock_scope_unqualified")
     end
+    if profile.volume then
+        local trigger = StaticFindObject(profile.target)
+        if not exact(trigger, profile.target_class) or trigger.TriggerOnce ~= false or count(trigger.ActorsToPower) ~= 1
+            or not same(trigger.ActorsToPower[1], controller) then reject("stock_volume_unqualified") end
+    end
     if profile.receiver then
         local receiver = StaticFindObject(profile.receiver)
         if not exact(receiver, "/Game/Classes/ScriptingActors/GlobalPing_ScriptingReciver_BP.GlobalPing_ScriptingReciver_BP_C")
@@ -177,7 +183,8 @@ local function catalog(state, profile, progress)
     return result, controller
 end
 
-local function reach(pawn, target, component)
+local function reach(pawn, target, component, profile)
+    if profile.volume then return component:IsOverlappingActor(pawn) == true end
     local limit, origin = pawn.InteractionRange, pawn:K2_GetActorLocation()
     if type(limit) ~= "number" or not (limit > 0 and limit <= 1000) then return false end
     for _, point in ipairs({target:K2_GetActorLocation(), component:K2_GetComponentLocation()}) do
@@ -245,7 +252,7 @@ local function can_use(current, pending_response)
     local stack = current.controller.MenuStack
     return current.controller.Loading == false and stack and stack:GetArrayNum() == 0 and current.pawn.Dead == false
         and players.is_downed(current.pawn) == false and (pending_response or fresh())
-        and reach(current.pawn, current.target, current.component)
+        and reach(current.pawn, current.target, current.component, current.profile)
 end
 
 local function hide()
@@ -269,11 +276,16 @@ local function show(current)
     for _, line in ipairs(session.content.lines) do lines[#lines + 1] = line end
     lines[#lines + 1] = ""
     local choices = session.content.ordinals
-    for index, ordinal in ipairs(choices) do
+    local first = session.trade and math.max(1, math.min(selected - 3, #choices - 6)) or 1
+    local last = session.trade and math.min(#choices, first + 6) or #choices
+    for index = first, last do
+        local ordinal = choices[index]
         lines[#lines + 1] = (index == selected and "> " or "   ") .. session.content.choices[ordinal]
     end
-    lines[#lines + 1] = (#choices > 1 and "Up / Down to select. " or "") .. "Face " .. current.profile.title
-        .. " and press Interact to answer."
+    local answer = session.trade and "Press Interact to confirm."
+        or current.profile.volume and "Press Interact to answer."
+        or "Face " .. current.profile.title .. " and press Interact to answer."
+    lines[#lines + 1] = (#choices > 1 and "Up / Down to select. " or "") .. answer
     local display = table.concat(lines, "\n")
     if last_text == display and valid(widget) then return end
     if not valid(widget) then
@@ -317,12 +329,14 @@ function dialogue.sync(state, phase)
     local standing, now = can_use(current, true), os.time()
     local allow = standing and fresh() and not shop_view.reception_open(current.pawn)
     if session and (not standing or session.expires <= now
-        or not allow and not session.pending and not (session.response_grace and now <= session.response_grace)) then
+        or not current.profile.volume and not allow and not session.pending
+        and not (session.response_grace and now <= session.response_grace)) then
         session = nil; hide()
     end
     binding.armed = false
     if type(SilverfishSetNativeDialogueInputScope) ~= "function" or type(SilverfishTakeNativeDialogueInput) ~= "function"
-        or SilverfishSetNativeDialogueInputScope(current.pawn:GetAddress(), allow == true) ~= true then
+        or SilverfishSetNativeDialogueInputScope(current.pawn:GetAddress(), allow == true,
+            current.profile.volume == true and session ~= nil and session.content ~= nil and not session.pending) ~= true then
         session = nil; hide(); return
     end
     binding.armed = allow
@@ -331,7 +345,19 @@ function dialogue.sync(state, phase)
         if not pcall(show, current) then hide() end
     end
     move = 0
-    if allow then drain(current) end
+    if current.profile.volume and not reach(current.pawn, current.target, current.component, current.profile) then
+        binding.entered = nil
+    end
+    if allow then
+        if current.profile.volume and not binding.entered and not session
+            and type(SilverfishOpenNativeSewerDialogue) == "function" then
+            local queued = SilverfishOpenNativeSewerDialogue(current.pawn:GetAddress())
+            if not queued then return end
+            binding.entered = drain(current) or nil
+        else
+            drain(current)
+        end
+    end
 end
 
 local function host_command(fields, state, phase)
@@ -340,17 +366,20 @@ local function host_command(fields, state, phase)
     local commit = action == "native-dialogue-commit"
     local readings_open = action == "native-dialogue-mosby-readings-open"
     local mama_open = action == "native-dialogue-mama-open"
-    local shop_open = action == "native-dialogue-shopkeep-open" or mama_open
+    local sewer_open = action == "native-dialogue-sewer-open"
+    local shop_open = action == "native-dialogue-shopkeep-open" or mama_open or sewer_open
     local shop_cash = action == "native-dialogue-shopkeep-cash"
     local mama_trade = action == "native-dialogue-mama-trade"
+    local sewer_trade = action == "native-dialogue-sewer-trade"
     if (commit and #fields ~= 12 and #fields ~= 16)
         or (not commit and #fields ~= (readings_open and 14 or mama_open and 8 or shop_open and 7
-            or (shop_cash or mama_trade) and 6 or 3)) then
+            or (shop_cash or mama_trade or sewer_trade) and 6 or 3)) then
         reject("arguments_unqualified")
     end
     local pawn, profile, npc, target, component, connection = guest_context(state, phase, name)
     if (action == "native-dialogue-shopkeep-open" or shop_cash) and profile ~= shopkeep then reject("shopkeep_scope_unavailable") end
     if (action == "native-dialogue-mama-open" or mama_trade) and profile ~= mama then reject("mama_scope_unavailable") end
+    if (sewer_open or sewer_trade) and profile ~= sewer then reject("sewer_scope_unavailable") end
     if readings_open and profile ~= mosby then reject("readings_scope_unavailable") end
     if action == "native-dialogue-approach" then
         if not (headless and fixtures) then reject("approach_unavailable") end
@@ -359,14 +388,14 @@ local function host_command(fields, state, phase)
             or {{115, 0}, {-115, 0}, {0, 115}, {0, -115}}
         for _, offset in ipairs(offsets) do
             if pawn:K2_TeleportTo({X = location.X + offset[1], Y = location.Y + offset[2], Z = floor + 20},
-                                  pawn:K2_GetActorRotation()) and reach(pawn, target, component) then
+                                  pawn:K2_GetActorRotation()) and reach(pawn, target, component, profile) then
                 pawn:ForceNetUpdate()
                 return "exact " .. profile.title .. " approach verified"
             end
         end
         reject("approach_blocked")
     end
-    if not reach(pawn, target, component) then reject("guest_outside_stock_reach") end
+    if not reach(pawn, target, component, profile) then reject("guest_outside_stock_reach") end
     local identity = connection_identity(connection, state.world.NetDriver)
     local progress, context, effect_name = nil, nil, "read"
     if profile.progress then progress, context = profile.progress(state) end
@@ -395,11 +424,11 @@ local function host_command(fields, state, phase)
             reject(profile.id .. "_open_scope_changed")
         end
         progress, effect_name = profile.open(context, progress)
-    elseif shop_cash or mama_trade then
+    elseif shop_cash or mama_trade or sewer_trade then
         local row, ordinal = fields[4], math.tointeger(tonumber(fields[5]))
         local effect = profile.effects[row] and profile.effects[row][ordinal]
         if not effect or not effect.ping or not rows[row].choices[ordinal] or identity ~= fields[6] then
-            reject(shop_cash and "shopkeep_cash_scope_changed" or "mama_trade_scope_changed")
+            reject(profile.id .. "_trade_scope_changed")
         end
         if shop_cash then
             profile.grant_cash(state, phase, pawn, connection, context)
@@ -459,17 +488,47 @@ end
 
 function dialogue.command(fields, state, phase)
     local action = fields[2]
+    if action == "native-dialogue-sewer-host-fixture" then return sewer.host_fixture(fields, state, phase) end
     if action == "native-dialogue-read" or action == "native-dialogue-approach" or action == "native-dialogue-commit"
         or action == "native-dialogue-mosby-readings-open"
         or action == "native-dialogue-shopkeep-open" or action == "native-dialogue-shopkeep-cash"
-        or action == "native-dialogue-mama-open" or action == "native-dialogue-mama-trade" then
+        or action == "native-dialogue-mama-open" or action == "native-dialogue-mama-trade"
+        or action == "native-dialogue-sewer-open" or action == "native-dialogue-sewer-trade" then
         return host_command(fields, state, phase)
     end
     local handoff = action == "native-dialogue-shopkeep-view"
-    if action ~= "native-dialogue-render" and action ~= "native-dialogue-stock-fixture" and not handoff then return end
+    local trade_view = action == "native-dialogue-sewer-offers"
+    if action ~= "native-dialogue-render" and action ~= "native-dialogue-stock-fixture" and not handoff and not trade_view then return end
     local current = local_context(state, phase)
-    if not same_scope(current, binding) or not can_use(current, action == "native-dialogue-render" or handoff) then
+    if not same_scope(current, binding) or not can_use(current, action == "native-dialogue-render" or handoff or trade_view) then
         reject("client_scope_unavailable")
+    end
+    if trade_view then
+        local sequence, token = tonumber(fields[3]), fields[4]
+        local active = session and session.content and session.content.ordinals[selected]
+        if current.profile ~= sewer or not session or not session.pending or session.sequence ~= sequence
+            or session.expires <= os.time() or not active or active == 0 or not (session.trade or active == 1)
+            or type(token) ~= "string" or #token ~= 32 or not token:match("^[0-9a-f]+$")
+            or #fields < 6 or #fields > 58 or #fields % 2 ~= 0 then reject("sewer_trade_view_unqualified") end
+        local content = {lines = {}, choices = {}, ordinals = {}}
+        local previous, selection = 0, 1
+        for index = 5, #fields, 2 do
+            local raw = fields[index]
+            local ordinal = math.tointeger(tonumber(raw))
+            if not ordinal or tostring(ordinal) ~= raw or (ordinal == 0 and index ~= #fields - 1)
+                or (ordinal ~= 0 and (ordinal <= previous or ordinal > 26)) then reject("sewer_trade_offer_unqualified") end
+            previous = ordinal
+            content.ordinals[#content.ordinals + 1] = ordinal
+            content.choices[ordinal] = text(fields[index + 1])
+            if session.trade and ordinal == active then selection = #content.ordinals end
+        end
+        if previous ~= 0 then reject("sewer_trade_close_unavailable") end
+        local now = os.time()
+        session = {sequence = sequence, row = "Sewer_Trade", token = token, expires = now + 30,
+            response_grace = now + 2, trade = true, content = content}
+        selected = selection
+        show(current)
+        return "exact Sewer Thing trade offers shown"
     end
     if handoff then
         local sequence = math.tointeger(tonumber(fields[3]))
@@ -488,7 +547,9 @@ function dialogue.command(fields, state, phase)
         local target = fields[3]
         if not headless or #fields ~= 3 or type(SilverfishProbeNativeInteractInput) ~= "function"
             or type(SilverfishSetNativeDialogueInputScope) ~= "function"
-            or SilverfishSetNativeDialogueInputScope(current.pawn:GetAddress(), true) ~= true then reject("fixture_unavailable") end
+            or SilverfishSetNativeDialogueInputScope(current.pawn:GetAddress(), true, current.profile.volume == true) ~= true then
+            reject("fixture_unavailable")
+        end
         if target == "open" then
             if session and (session.pending or session.content) then reject("fixture_choice_unavailable") end
         else
@@ -498,7 +559,14 @@ function dialogue.command(fields, state, phase)
             if not index then reject("fixture_choice_unavailable") end
             selected = index
         end
-        stock_press(current)
+        if current.profile.volume then
+            local accepted, status = SilverfishProbeNativeInteractInput(current.pawn:GetAddress(), true)
+            if accepted ~= true or status ~= "stock_started_consumed" or not drain(current) then
+                reject("fixture_volume_answer_unverified:" .. tostring(status))
+            end
+        else
+            stock_press(current)
+        end
         return "exact stock " .. current.profile.title .. " Interact verified"
     end
 
@@ -511,7 +579,12 @@ function dialogue.command(fields, state, phase)
         return "exact pending dialogue response dismissed"
     end
     local profile, following = current.profile, current.profile.root
-    if session.content then following = profile.rows[session.row].next[session.content.ordinals[selected]] end
+    if session.trade then
+        if row ~= "-" or session.content.ordinals[selected] ~= 0 then reject("sewer_trade_close_unavailable") end
+        following = false
+    elseif session.content then
+        following = profile.rows[session.row].next[session.content.ordinals[selected]]
+    end
     if not session.content and profile.first and row == profile.first then following = profile.first end
     if not session.content and profile == mosby and row == profile.readings then following = profile.readings end
     local content
@@ -569,6 +642,7 @@ function dialogue.rows(state, phase, status_row)
         result[1] = status_row("native-dialogue-view", binding.name, status, session and session.sequence or 0,
             session and session.row or "-", session and session.token or "-")
     end
+    for _, row in ipairs(sewer.host_rows(state, phase, status_row)) do result[#result + 1] = row end
     return result
 end
 

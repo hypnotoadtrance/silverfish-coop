@@ -1,5 +1,6 @@
 local loot = require("native_loot")
 local input = {}
+local alarm = require("native_loot_alarm")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -26,12 +27,54 @@ local function exact_component(value, path, owner)
     return valid(value) and same(value:GetClass(), StaticFindObject(path)) and same(value:GetOwner(), owner)
 end
 
+local function power_box_audio(crate)
+    local audio = crate.Audio
+    if exact_component(audio, "/Script/Engine.AudioComponent", crate) and type(crate.Powered) == "boolean" then return audio end
+end
+
 function input.clear()
     bindings, fixture_sequences, active_world = {}, {}, nil
     tool_report = nil
     if enabled and type(SilverfishClearNativeLootCrateInput) == "function" then
         SilverfishClearNativeLootCrateInput()
     end
+end
+
+local function blowtorch_aim(scope, torch, start)
+    local api = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    if not valid(api) then error("stock_blowtorch_trace_unavailable", 0) end
+    local pawn, crate = scope.pawn, scope.crate
+    local center = scope.box:K2_GetComponentLocation()
+    if not center then error("stock_blowtorch_aim_unavailable", 0) end
+    local points = {center}
+    if scope.profile and scope.profile.power_box then
+        for _, name in ipairs({"SM_Prop_Cabinet_Small_Door_01", "SM_Prop_PowerBox_05", "Cube"}) do
+            local mesh = crate[name]
+            if exact_component(mesh, "/Script/Engine.StaticMeshComponent", crate) then
+                points[#points + 1] = mesh:K2_GetComponentLocation()
+            end
+        end
+    end
+    local in_range = false
+    local color = {R = 0, G = 0, B = 0, A = 1}
+    for _, point in ipairs(points) do
+        local x, y, z = point.X - start.X, point.Y - start.Y, point.Z - start.Z
+        local length = math.sqrt(x * x + y * y + z * z)
+        if length >= 1 and length <= torch.Range then
+            in_range = true
+            local scale = torch.Range / length
+            local endpoint = {X = start.X + x * scale, Y = start.Y + y * scale, Z = start.Z + z * scale}
+            local hit = {}
+            local found = api:LineTraceSingle(torch, start, endpoint, 2, true, {pawn, torch}, 0, hit, true, color, color, 0)
+            hit = hit.OutHit or hit
+            local surface = hit.Component and hit.Component:Get()
+            if found == true and valid(surface) and same(surface:GetOwner(), crate) then
+                return {Pitch = math.deg(math.atan(z, math.sqrt(x * x + y * y))), Yaw = math.deg(math.atan(y, x)), Roll = 0}
+            end
+        end
+    end
+    if not in_range then error("stock_blowtorch_out_of_range", 0) end
+    error(scope.profile and "stock_blowtorch_vehicle_obstructed" or "stock_blowtorch_obstructed", 0)
 end
 
 function input.fire_blowtorch(scope, guid, arm)
@@ -48,28 +91,14 @@ function input.fire_blowtorch(scope, guid, arm)
 
     local camera = pawn.Camera
     if not exact_component(camera, "/Script/Engine.CameraComponent", pawn) then error("stock_blowtorch_camera_unavailable", 0) end
-    local relative, start, point = camera.RelativeRotation, camera:K2_GetComponentLocation(), scope.box:K2_GetComponentLocation()
-    if not relative or not start or not point then error("stock_blowtorch_aim_unavailable", 0) end
+    local relative, start = camera.RelativeRotation, camera:K2_GetComponentLocation()
+    if not relative or not start then error("stock_blowtorch_aim_unavailable", 0) end
     local original = {Pitch = relative.Pitch, Yaw = relative.Yaw, Roll = relative.Roll}
-    local x, y, z = point.X - start.X, point.Y - start.Y, point.Z - start.Z
-    local length = math.sqrt(x*x + y*y + z*z)
-    if not (length >= 1 and length <= torch.Range) then error("stock_blowtorch_out_of_range", 0) end
-    local api = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
-    if not valid(api) then error("stock_blowtorch_trace_unavailable", 0) end
-    local point_at_range = {X = start.X + x * torch.Range / length, Y = start.Y + y * torch.Range / length,
-        Z = start.Z + z * torch.Range / length}
-    local hit, color = {}, {R = 0, G = 0, B = 0, A = 1}
-    local found = api:LineTraceSingle(torch, start, point_at_range, 2, true, {pawn, torch}, 0, hit, true, color, color, 0)
-    hit = hit.OutHit or hit
-    local surface = hit.Component and hit.Component:Get()
-    if found ~= true or not valid(surface) or not same(surface:GetOwner(), crate) then
-        error(scope.profile and "stock_blowtorch_vehicle_obstructed" or "stock_blowtorch_obstructed", 0)
-    end
+    local aim = blowtorch_aim(scope, torch, start)
     arm()
 
     local applied = pcall(function()
-        camera:K2_SetWorldRotation({Pitch = math.deg(math.atan(z, math.sqrt(x*x + y*y))),
-            Yaw = math.deg(math.atan(y, x)), Roll = 0}, false, {}, true)
+        camera:K2_SetWorldRotation(aim, false, {}, true)
         torch:Use_Item_Primary(true, 0)
         torch:Use_Item_Primary(false, 0)
     end)
@@ -145,9 +174,11 @@ end
 
 local function observe_scene(current, box_state, box_address)
     local crate = current.crate
-    local door = crate.SM_Prop_Cabinet_Small_Door_01
+    local hinged = current.profile.hinge_arrow
+    local door = hinged and crate.Arrow_Hinge or crate.SM_Prop_Cabinet_Small_Door_01
+    local door_class = hinged and "/Script/Engine.ArrowComponent" or "/Script/Engine.StaticMeshComponent"
     local report = { door_state = "door_identity", box_state = box_state, looted = crate.Looted }
-    if exact_component(door, "/Script/Engine.StaticMeshComponent", crate) then
+    if exact_component(door, door_class, crate) then
         report.door_state, report.door = "live", door
         local angle = door.RelativeRotation
         report.roll = angle and angle.Roll
@@ -168,6 +199,14 @@ local function observe_scene(current, box_state, box_address)
     local box_qualified = report.box
         or report.looted == true and (report.box_state == "retired" or report.box_state == "missing")
     report.qualified = report.door ~= nil and box_qualified
+    if report.qualified and hinged then
+        local frame, lid = crate.SM_Prop_Cabinet_Small_02, crate.SM_Lid
+        if not exact_component(frame, "/Script/Engine.StaticMeshComponent", crate)
+            or not exact_component(lid, "/Script/Engine.StaticMeshComponent", crate)
+            or not same(lid:GetAttachParent(), door) or not same(door:GetAttachParent(), frame) then
+            report.qualified, report.door_state = false, "red_lockbox_hinge_unavailable"
+        end
+    end
     if report.qualified and (current.profile.paired_doors or current.profile.small_cabinet or current.profile.office_desk) then
         local frame, second = crate.SM_Prop_Cabinet_Small_02, crate.SM_Prop_Cabinet_Small_Door_02
         if not exact_component(frame, "/Script/Engine.StaticMeshComponent", crate)
@@ -474,6 +513,57 @@ end
 
 function input.command(fields, state, phase)
     local command = fields[2]
+    if command == "native-loot-stock-alarm-project" then
+        if not enabled or phase ~= "connected" or fields[3] ~= state.map
+            or #fields < 6 or #fields > 75 or (#fields - 3) % 3 ~= 0 then
+            error("stock_loot_alarm_arguments", 0)
+        end
+        local changes = {}
+        for index = 4, #fields, 3 do
+            local profile = loot.profile(state.map, fields[index])
+            local current = profile and profile.stock_alarm and input.update(state, phase, profile)
+            local lit, audio = fields[index + 1], fields[index + 2]
+            if not current or changes[current.crate] or (lit ~= "0" and lit ~= "1") or (audio ~= "0" and audio ~= "1") then
+                error("stock_loot_alarm_scope_unavailable", 0)
+            end
+            changes[current.crate] = {lit == "1", audio == "1"}
+        end
+        for crate, desired in pairs(changes) do alarm.apply(crate, table.unpack(desired)) end
+        return "stock locker alarms synchronized"
+    end
+    if command == "native-loot-power-box-project" then
+        if not enabled or phase ~= "connected" or fields[3] ~= state.map
+            or #fields < 6 or #fields > 75 or (#fields - 3) % 3 ~= 0 then error("stock_power_box_arguments", 0) end
+        local changes = {}
+        for index = 4, #fields, 3 do
+            local profile = loot.profile(state.map, fields[index])
+            local current = profile and profile.power_box and input.update(state, phase, profile)
+            local audio = current and power_box_audio(current.crate)
+            local powered, audible = fields[index + 1], fields[index + 2]
+            if not audio or changes[current.crate] or (powered ~= "0" and powered ~= "1")
+                or (audible ~= "0" and audible ~= "1") then error("stock_power_box_scope_unavailable", 0) end
+            changes[current.crate] = {audio = audio, powered = powered == "1", audible = audible == "1"}
+        end
+        for crate, desired in pairs(changes) do
+            crate.Powered = desired.powered
+            if desired.audio:IsActive() ~= desired.audible then
+                if desired.audible then desired.audio:Activate(false) else desired.audio:Deactivate() end
+            end
+            if crate.Powered ~= desired.powered or desired.audio:IsActive() ~= desired.audible then
+                error("stock_power_box_readback_unverified", 0)
+            end
+        end
+        return "stock power boxes synchronized"
+    end
+    if command == "native-loot-electronic-power-fixture" then
+        local profile = loot.profile(state.map, fields[3])
+        local current = profile and profile.electronic and input.update(state, phase, profile)
+        if not headless or not host_fixtures or phase ~= "hosting" or #fields ~= 3 or not current
+            or current.crate.Looted ~= false then error("stock_electronic_power_fixture_unavailable", 0) end
+        current.crate:Send_PowerSignal(true, current.pawn)
+        if current.crate.Locked ~= false then error("stock_electronic_power_fixture_unverified", 0) end
+        return "stock electronic locker power delay started"
+    end
     if command == "native-loot-guest-blowtorch-use" or command == "native-loot-guest-crowbar-use" then
         local crowbar = command == "native-loot-guest-crowbar-use"
         local profile = loot.profile(state.map, fields[3])
@@ -539,10 +629,10 @@ function input.rows(state, phase, status_row)
     local rows, latest, reported = {}, 0, nil
     for _, profile in ipairs(profiles) do
         local current, scope = input.update(state, phase, profile)
-        local active, sequence, pried, guest, info = false, 0, false, 0, {}
+        local active, sequence, pried, guest, powered, info = false, 0, false, 0, 0, {}
         if current then
             local box_state, box_address
-            active, sequence, box_state, box_address, pried, guest = SilverfishReadNativeLootCrateInput(profile.index)
+            active, sequence, box_state, box_address, pried, guest, powered = SilverfishReadNativeLootCrateInput(profile.index)
             scope = active and "active" or "scope_inactive"
             if active then info = observe_scene(current, box_state, box_address) end
         end
@@ -565,6 +655,22 @@ function input.rows(state, phase, status_row)
                     rows[#rows + 1] = status_row("native-loot-crate-replenished", profile.map, profile.name, current.name)
                 end
             end
+        end
+        if active and profile.stock_alarm then
+            local ok, lit, audible = pcall(alarm.read, current.crate)
+            if ok and type(lit) == "boolean" and type(audible) == "boolean" then
+                rows[#rows + 1] = status_row("native-loot-stock-alarm", profile.map, profile.name, lit and 1 or 0, audible and 1 or 0)
+            end
+        end
+        if active and profile.power_box then
+            local audio = power_box_audio(current.crate)
+            if audio then
+                rows[#rows + 1] = status_row("native-loot-power-box", profile.map, profile.name,
+                    current.crate.Powered and 1 or 0, audio:IsActive() and 1 or 0)
+            end
+        end
+        if active and profile.electronic and current.host and type(powered) == "number" and powered > 0 then
+            rows[#rows + 1] = status_row("native-loot-electronic-powered-open", profile.map, profile.name, current.name, powered)
         end
         if active and pried and guest and guest ~= 0 then
             for _, detail in ipairs(state.guests or {}) do

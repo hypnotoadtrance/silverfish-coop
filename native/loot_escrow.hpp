@@ -13,6 +13,7 @@ namespace RC::LuaMadeSimple
 
 namespace silverfish::loot_escrow
 {
+    bool convert_stock_item(RC::Unreal::UObject* pawn, RC::Unreal::UObject* actor, void* initialized_row);
     bool backpack_has_class(RC::Unreal::UObject* save, RC::Unreal::UClass* item_class);
     bool stock_spade_guid(RC::Unreal::UObject* save, std::string& guid);
     bool sealed_package_guid(RC::Unreal::UObject* save, std::string& guid);

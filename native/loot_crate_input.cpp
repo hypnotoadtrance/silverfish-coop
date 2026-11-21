@@ -1,5 +1,6 @@
 #include "loot_crate_input.hpp"
 #include "authored_loot_registry.hpp"
+#include "electronic_locker.hpp"
 #include "interaction_input.hpp"
 #include "shared_loot.hpp"
 
@@ -189,9 +190,20 @@ namespace
         const auto* profile = silverfish::shared_loot::authored_profile(crate);
         if (!profile) return refuse("crate_ready_profile");
         if (!silverfish::shared_loot::qualified_crate_settings(crate, reason)) return false;
-        auto* door = object(crate, STR("SM_Prop_Cabinet_Small_Door_01"));
-        if (!exact(door, STR("/Script/Engine.StaticMeshComponent")) || door->GetOuterPrivate() != crate)
+        const bool hinged = profile->stock_class == &silverfish::authored_loot::red_lockbox;
+        auto* door = object(crate, hinged ? STR("Arrow_Hinge") : STR("SM_Prop_Cabinet_Small_Door_01"));
+        if (!exact(door, hinged ? STR("/Script/Engine.ArrowComponent") : STR("/Script/Engine.StaticMeshComponent")) ||
+            door->GetOuterPrivate() != crate)
             return refuse("crate_first_door");
+        if (hinged)
+        {
+            auto* lid = object(crate, STR("SM_Lid"));
+            auto* frame = object(crate, STR("SM_Prop_Cabinet_Small_02"));
+            if (!exact(lid, STR("/Script/Engine.StaticMeshComponent")) || lid->GetOuterPrivate() != crate ||
+                !exact(frame, STR("/Script/Engine.StaticMeshComponent")) || frame->GetOuterPrivate() != crate ||
+                object(lid, STR("AttachParent")) != door || object(door, STR("AttachParent")) != frame)
+                return refuse("red_lockbox_hinge_unavailable");
+        }
         if (profile->stock_class->paired_doors)
         {
             auto* second = object(crate, STR("SM_Prop_Cabinet_Small_Door_02"));
@@ -300,6 +312,21 @@ namespace
                 silverfish::shared_loot::permits_stock_script(crate, method)) return;
             const auto point = entry->GetPropertyValueInContainer(args);
             const auto& stock = *profile->stock_class;
+            if (silverfish::electronic_locker::is_electronic(*profile))
+            {
+                if (point == silverfish::electronic_locker::power_signal_entry && !local.host)
+                {
+                    call.PreventOriginalFunctionCall();
+                    return;
+                }
+                if (point == silverfish::electronic_locker::power_open_entry)
+                {
+                    call.PreventOriginalFunctionCall();
+                    if (call.OriginalFunctionCallPrevented() && local.host && boolean(crate, STR("Looted"), false))
+                        silverfish::electronic_locker::observe_power_open(crate, *profile);
+                    return;
+                }
+            }
             if (stock.pry_start_entry && point == stock.pry_start_entry && scoped && local.host &&
                 now < active->tool_deadline && active->pry_guest.Get() && boolean(crate, STR("Locked"), true))
                 active->pry_started = true;
@@ -413,7 +440,10 @@ namespace
         const bool guest_pry = observed && scope->pried && scope->tool_deadline != Clock::time_point{};
         auto* guest = guest_pry ? scope->pry_guest.Get() : nullptr;
         lua.set_integer(guest ? reinterpret_cast<std::intptr_t>(guest) : guest_pry ? -1 : 0);
-        return 6;
+        const auto powered = active && scope->host && boolean(crate, STR("Looted"), false)
+            ? silverfish::electronic_locker::pending_power_open(crate, profiles[static_cast<std::size_t>(index - 1)]) : 0;
+        lua.set_integer(static_cast<std::int64_t>(powered));
+        return 7;
     }
 
     int arm_guest_pry(const Lua& lua)
@@ -479,7 +509,7 @@ namespace
 
     int clear(const Lua&)
     {
-        if (U::IsInGameThreadRaw()) scopes = {};
+        silverfish::native_loot_crate_input::clear_scope();
         return 0;
     }
 }
@@ -544,6 +574,10 @@ namespace silverfish::native_loot_crate_input
 
     void clear_scope()
     {
-        if (U::IsInGameThreadRaw()) scopes = {};
+        if (U::IsInGameThreadRaw())
+        {
+            scopes = {};
+            silverfish::electronic_locker::clear();
+        }
     }
 }

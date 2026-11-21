@@ -1,6 +1,7 @@
 #include "shared_loot.hpp"
 #include "authored_loot_registry.hpp"
 #include "loot_crate_input.hpp"
+#include "electronic_locker.hpp"
 #include "loot_escrow.hpp"
 
 #include <algorithm>
@@ -157,6 +158,7 @@ namespace
         const silverfish::authored_loot::Profile* profile{};
         bool lucky{};
         bool guarantee_spawn{};
+        bool red_lockbox_empty{};
     };
 
     bool qualified_connection(const Context& context, Unreal::UObject* driver, Unreal::UClass* controller_type)
@@ -315,7 +317,7 @@ namespace
         return false;
     }
 
-    std::string_view qualify(Address crate, Address pawn, Address box, Address save, Address stock, Context& context, bool pried)
+    std::string_view qualify(Address crate, Address pawn, Address box, Address save, Address stock, Context& context, bool deferred_open)
     {
         context.crate = live_object_at(crate);
         context.profile = silverfish::shared_loot::authored_profile(context.crate);
@@ -327,6 +329,15 @@ namespace
             !read_bool(context.crate, STR("Looted"), false) ||
             !silverfish::shared_loot::qualified_crate_settings(context.crate)) return "stock_crate_not_ready";
         context.guarantee_spawn = read_bool(context.crate, STR("GuaranteeSpawn"), true);
+        if (context.profile->stock_class == &silverfish::authored_loot::red_lockbox)
+        {
+            auto* empty = field<Unreal::FBoolProperty>(context.crate, STR("Empty"));
+            auto* chance = field<Unreal::FDoubleProperty>(context.crate, STR("SpawnChance_Weapons"));
+            if (!empty || !chance || chance->GetPropertyValueInContainer(context.crate) != 0.8 ||
+                !read_bool(context.crate, STR("Seeded"), true) || !read_bool(context.crate, STR("ForceOverride_MapLootTables"), true))
+                return "stock_red_lockbox_roll_schema_unavailable";
+            context.red_lockbox_empty = empty->GetPropertyValueInContainer(context.crate);
+        }
 
         if (const auto error = qualify_opener(pawn, save, stock, context); !error.empty()) return error;
         context.box = object_field(context.crate, STR("Box"));
@@ -338,9 +349,8 @@ namespace
         if (!silverfish::shared_loot::read_spawners(context.crate, context.instance, context.spawners))
             return "stock_crate_child_spawner_unavailable";
         if (!query_collision_enabled(context.box)) return "stock_crate_box_not_interactable";
-        // A pry continuation still needs its native receipt. The original tool
-        // already qualified its target before scheduling the delayed roll.
-        return pried || qualified_reach(context) ? std::string_view{} : "stock_crate_out_of_reach";
+        // Deferred continuations have already been triggered by a stock tool or power signal.
+        return deferred_open || qualified_reach(context) ? std::string_view{} : "stock_crate_out_of_reach";
     }
 
     struct OpenParams
@@ -900,6 +910,19 @@ namespace
     {
         const auto& stock = *scope.context.profile->stock_class;
         const bool guaranteed = scope.context.guarantee_spawn;
+        if (&stock == &silverfish::authored_loot::red_lockbox)
+        {
+            const auto& gun = scope.spawns[3];
+            const bool ammo = !scope.context.red_lockbox_empty && gun.weapon_returned;
+            const bool fallback = !scope.context.red_lockbox_empty && !gun.finished;
+            const std::array expected{ammo, fallback, ammo, !scope.context.red_lockbox_empty && gun.finished};
+            for (std::size_t index = 0; index < expected.size(); ++index)
+            {
+                const auto& spawn = scope.spawns[index];
+                if (spawn.finished != expected[index] || (spawn.finished && spawn.guaranteed != guaranteed)) return false;
+            }
+            return true;
+        }
         if (stock.armor_first)
         {
             const auto& expected = scope.armor;
@@ -1027,7 +1050,8 @@ namespace
         if (!Unreal::IsInGameThreadRaw() || !installed.load(std::memory_order_acquire) || opening)
             return result(lua, false, "native_loot_scope_unavailable");
         const auto argc = lua.get_stack_size();
-        if (argc < 6 || argc > 8 || !lua.is_bool(6) || (argc >= 7 && !lua.is_bool(7)) || (argc == 8 && !lua.is_bool(8)))
+        if (argc < 6 || argc > 9 || !lua.is_bool(6) || (argc >= 7 && !lua.is_bool(7)) ||
+            (argc >= 8 && !lua.is_bool(8)) || (argc == 9 && !lua.is_integer(9)))
             return result(lua, false, "native_loot_exact_open_arguments_required");
         std::array<Address, 5> addresses{};
         if (!read_addresses(lua, addresses)) return result(lua, false, "native_loot_exact_open_arguments_required");
@@ -1035,14 +1059,18 @@ namespace
         Context context;
         context.lucky = lua.get_bool();
         const bool force_nonempty = argc >= 7 && lua.get_bool();
-        const bool pried = argc == 8 && lua.get_bool();
+        const bool pried = argc >= 8 && lua.get_bool();
+        const std::int64_t power_receipt = argc == 9 ? lua.get_integer() : 0;
+        const bool powered = power_receipt > 0;
+        if (power_receipt < 0 || (argc == 9 && (!powered || force_nonempty || pried)))
+            return result(lua, false, "stock_electronic_power_receipt_unavailable");
         if (force_nonempty && pried) return result(lua, false, "stock_loot_pry_fixture_scope_unavailable");
         if (force_nonempty && !seeded_fixture_enabled())
             return result(lua, false, "stock_loot_fixture_seed_unavailable");
-        if (const auto failure = qualify(addresses[0], addresses[1], addresses[2], addresses[3], addresses[4], context, pried);
+        if (const auto failure = qualify(addresses[0], addresses[1], addresses[2], addresses[3], addresses[4], context, pried || powered);
             !failure.empty()) return result(lua, false, failure);
         Unreal::UClass* key{};
-        if (!pried && context.profile->stock_class->pry_entry && read_bool(context.crate, STR("Locked"), true))
+        if (!pried && !powered && context.profile->stock_class->pry_entry && read_bool(context.crate, STR("Locked"), true))
         {
             auto* key_field = field<Unreal::FClassProperty>(context.crate, STR("KeyItem"));
             if (key_field) key = static_cast<Unreal::UClass*>(
@@ -1057,13 +1085,17 @@ namespace
         Schema schema;
         if (!bind_schema(context, schema)) return result(lua, false, "stock_loot_blueprint_schema_unavailable");
         if (key && !bind_key_lookup(key, schema)) return result(lua, false, "stock_container_key_schema_unavailable");
-        auto* opener = pried ? field<Unreal::FObjectProperty>(context.crate, STR("Player")) : nullptr;
-        if (pried && (!context.profile->stock_class->pry_entry ||
-            !opener || opener->GetPropertyClass().Get() != context.pawn->GetClassPrivate() ||
+        auto* opener = pried || powered ? field<Unreal::FObjectProperty>(context.crate, STR("Player")) : nullptr;
+        if ((pried || powered) && (!opener || opener->GetPropertyClass().Get() != context.pawn->GetClassPrivate() ||
             schema.script->GetParmsSize() != sizeof(std::int32_t) ||
-            !argument<Unreal::FIntProperty>(schema.script, STR("EntryPoint"), false, 0) ||
+            !argument<Unreal::FIntProperty>(schema.script, STR("EntryPoint"), false, 0)))
+            return result(lua, false, "stock_loot_deferred_open_schema_unavailable");
+        if (pried && (!context.profile->stock_class->pry_entry ||
             !silverfish::native_loot_crate_input::consume_vehicle_pry(context.crate, context.pawn)))
             return result(lua, false, "stock_loot_pry_receipt_unavailable");
+        if (powered && (context.save != context.stock || !silverfish::electronic_locker::is_electronic(*context.profile) ||
+            !silverfish::electronic_locker::consume_power_open(context.crate, *context.profile, power_receipt)))
+            return result(lua, false, "stock_electronic_power_receipt_unavailable");
         SeedFixture fixture;
         if (force_nonempty)
         {
@@ -1080,11 +1112,11 @@ namespace
         bool restored = true;
         {
             ActiveOpen guard(scope);
-            if (pried)
+            if (pried || powered)
             {
                 // The delayed entry does not assign the opener the way Interact does.
                 opener->SetObjectPropertyValue(opener->ContainerPtrToValuePtr<void>(context.crate), context.pawn);
-                auto point = context.profile->stock_class->pry_entry;
+                auto point = powered ? silverfish::electronic_locker::power_open_entry : context.profile->stock_class->pry_entry;
                 context.crate->ProcessEvent(schema.script, &point);
             }
             else context.crate->ProcessEvent(schema.open, &input);

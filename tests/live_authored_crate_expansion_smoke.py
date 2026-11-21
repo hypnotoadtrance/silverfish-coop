@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 
 from live_ai_smoke import wait
@@ -24,7 +25,7 @@ from tools.silverfish.authored_loot import (CRATES, GUARANTEED_CRATES, GUARANTEE
                                            OFFICE_DESK_PROFILE, SMALL_CABINET, SMALL_CABINET_PROFILE, full_name,
                                            lockable_container, loot_capacity, random_lid, valid_lid_angle, valid_loot_trait_calls, vehicle_lock)
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
-from tools.silverfish.travel import BLACK_MARKET, CISTERN, CITY, CROSSROADS, FOREST, LAB_E206, LAKE, OBSERVATORY, RAIL_YARD
+from tools.silverfish.travel import BLACK_MARKET, CISTERN, CITY, CROSSROADS, DEAD_BRIDGE, FOREST, LAB_E206, LAKE, OBSERVATORY, RAIL_YARD
 
 
 SCENES = {
@@ -93,16 +94,24 @@ FAMILY_SCENES = {
     "stock-armor-locker": ("/Game/Classes/Maps/Maps_OverWorld/Slums_P", "Loot_ArmorLocker_BP_C", "Loot_ArmorLocker_BP_C_1"),
     "stock-armor-locker-blowtorch": (RAIL_YARD, "Loot_ArmorLocker_BP_C", "Loot_ArmorLocker_BP_C_1"),
     "stock-armor-locker-key": (BLACK_MARKET, "Loot_ArmorLocker_BP_C", "Loot_ArmorLocker_BP_C_1"),
+    "stock-loot-machine": (RAIL_YARD, "Loot_Machine_01_BP_C", "Loot_Machine_01_BP_C_1"),
+    "stock-loot-machine-blowtorch": ("/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P", "Loot_Machine_01_BP_C", "Loot_Machine_01_BP_C_1"),
+    "stock-power-box-blowtorch": (DEAD_BRIDGE, "PowerBox_Small_BP_C", "PowerBox_Small_BP_C_1"),
+    "stock-electronic-locker-powered": ("/Game/Classes/Maps/Maps_OverWorld/TheWall_01_P", "ElectronicLocker_01_BP_C",
+                                         "ElectronicLocker_01_BP_C_1"),
+    "stock-red-lockbox": ("/Game/Classes/Maps/Maps_OverWorld/Trench_01_P", "Red_LockBox_BP_C", "Red_LockBox_BP_C_0"),
 }
 PRY_TOOL_SCENES = {"stock-guest-blowtorch": "blowtorch", "stock-guest-crowbar": "crowbar",
                    "stock-locker-blowtorch": "blowtorch", "stock-secure-locker-blowtorch": "blowtorch",
-                   "stock-armor-locker-blowtorch": "blowtorch"}
+                   "stock-armor-locker-blowtorch": "blowtorch", "stock-loot-machine-blowtorch": "blowtorch",
+                   "stock-red-lockbox": "blowtorch",
+                   "stock-power-box-blowtorch": "blowtorch"}
 SAWMILL_KEY_ACTOR = f"{FOREST}.Forest_01_P:PersistentLevel.Sawmill_Key_C_1"
 BROKER_KEY_CLASS = "/Game/Classes/Items/Key_Items/BrokersKey.BrokersKey_C"
 PERMANENT_FAMILY_CRATES = {full_name(area, actor, family) for family, area, actor, _, _, _, replenish, *_ in CONTAINER_PLACEMENTS
                            if replenish == 2 or family in {"Loot_Stash_Small_BP_C", "LootCrate_Weapon_BP_C",
                                                             "Loot_ArtifactChest_01_C", "LootLocker_Secure_BP_C",
-                                                            "Loot_ArmorLocker_BP_C"}}
+                                                            "Loot_ArmorLocker_BP_C", "Red_LockBox_BP_C"}}
 SCENES.update({name: (area, (actor,)) for name, (area, _, actor) in FAMILY_SCENES.items()})
 FISH_CANNERY_ITEMS = {
     "/Game/Classes/Items/Item_CannedTuna.Item_CannedTuna_C",
@@ -170,6 +179,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     desk = name == DESK_SCENE
     family = FAMILY_SCENES[name][1] if name in FAMILY_SCENES else None
     pry_tool = PRY_TOOL_SCENES.get(name)
+    powered_scene = name == "stock-electronic-locker-powered"
     broker_key_scene = name == "stock-armor-locker-key"
     key_scene = name == "stock-locker-key" or broker_key_scene
     tool_before, tool_after = (3, 2) if pry_tool == "blowtorch" else (-1, -1)
@@ -241,17 +251,20 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     def lock_status(state, crate):
         return state.get("game", {}).get(native_loot.VEHICLE_LOCKS, {}).get(crate)
 
+    def power_box_status(state, crate):
+        return state.get("game", {}).get(native_loot.POWER_BOX_STATES, {}).get(crate)
+
     def locked_container(state):
         locks = state.get("game", {}).get(native_loot.VEHICLE_LOCKS, {})
-        locker = family in {"LootLocker_Small_BP_C", "LootLocker_Secure_BP_C", "Loot_ArmorLocker_BP_C"}
-        if locker:
+        fixed_target = family not in {"Loot_Car_01_BP_C", "Loot_Car_02_BP_C"}
+        if fixed_target:
             candidates = targets
         else:
             # Prefer the reference placements when the world rolls either one locked.
             candidates = (*targets, full_name(area, "StaticMeshActor_488", "Loot_Car_01_BP_C"), *sorted(locks))
         return next((crate for crate in candidates if locks.get(crate) is True
                      and status_of(state, crate) == "ready" and lockable_container(crate, area)
-                     and (locker or vehicle_lock(crate, area))), None)
+                     and (fixed_target or vehicle_lock(crate, area))), None)
 
     def scene_ready(state):
         if state.get("state") != "hosting":
@@ -406,13 +419,20 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             await command("action", *host, "native-loot-approach", "--target", crate)
             if family:
                 await command("action", *host, "native-loot-approach", "--target", f"host@{crate}")
+            if family == "PowerBox_Small_BP_C":
+                power = power_box_status(await wait(run, lambda state: power_box_status(state, crate)), crate)
+                assert power["powered"], power
+                await wait(guest_run, lambda state: power_box_status(state, crate) == power)
+                evidence["stock_power_box_before"] = power
             if lockable_container(crate, area):
                 lock = lock_status(bound, crate)
                 assert type(lock) is bool, bound["game"].get(native_loot.VEHICLE_LOCKS)
                 await wait(guest_run, lambda state: lock_status(state, crate) is lock)
                 evidence["stock_vehicle_initial_locked"] = lock
                 if pry_tool:
-                    assert lock, f"The selected stock trunk changed its lock before the {pry_tool} trial"
+                    assert lock, f"The selected stock container changed its lock before the {pry_tool} trial"
+                if powered_scene:
+                    assert lock, "The exact electronic locker was already powered"
                 if lock:
                     press = (await command("action", *guest, "native-loot-crate-fixture", "--target", crate))["native_loot_crate_interaction"]
                     await wait(guest_run, lambda _: stock_input_result(guest_run, crate, press["sequence"]) is not None)
@@ -493,6 +513,11 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                         assert key_item["class_path"] == key_record["class_path"]
                         evidence["stock_sawmill_key"] = key_item
                         await command("action", *host, "native-loot-approach", "--target", crate)
+                    elif powered_scene:
+                        started = time.monotonic()
+                        await command("action", *host, native_loot.ELECTRONIC_POWER_FIXTURE, "--target", crate)
+                        unlocked = await wait(guest_run, lambda state: lock_status(state, crate) is False)
+                        assert not public_roll(unlocked, crate) and status_of(unlocked, crate) == "ready", unlocked
                     elif pry_tool:
                         await wait(guest_run, lambda state: state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == tool_guid)
                         fixture = await command("action", *guest, "native-guest-primary-input-fixture", "--target", crate)
@@ -520,7 +545,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                         for directory in (run, guest_run):
                             await wait(directory, lambda state: lock_status(state, crate) is False)
                         evidence["stock_vehicle_pry_unlock"] = {"locked_press": denied["reason"], "both_unlocked": True}
-                        pried = True
+                        pried = not powered_scene
             forced = None
             if force_stock_roll:
                 operation = uuid.uuid4().hex
@@ -532,6 +557,9 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                     area, crate, authority_pawn, "open", native_loot.FORCED_ROLL_STATUS), pressed
                 assert (pressed["item_count"], pressed["trait_calls"], pressed["invoked"], pressed["looted"],
                         pressed["ok"]) == (len(forced["items"]), 3, True, True, True), pressed
+            elif powered_scene:
+                pressed = {"entry": "powered", "pawn": opening["game"]["pawns"]["local"]["name"],
+                           "crate": crate, "map": area}
             elif pried:
                 pressed = {"entry": "pried", "pawn": authority_pawn if pry_tool else opening["game"]["pawns"]["local"]["name"],
                            "crate": crate, "map": area}
@@ -546,16 +574,26 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             committed = await wait(run, lambda state: public_roll(state, crate) and status_of(state, crate) == "exhausted")
             replicated = await wait(guest_run, lambda state: public_roll(state, crate) and status_of(state, crate) == "exhausted")
             roll = public_roll(committed, crate)
-            assert public_roll(replicated, crate) == roll and roll["opener"] == ("host" if pried and not pry_tool else character), roll
-            if pried and not pry_tool:
+            assert public_roll(replicated, crate) == roll and roll["opener"] == (
+                "host" if powered_scene or pried and not pry_tool else character), roll
+            if family == "PowerBox_Small_BP_C":
+                power = {"map": area, "powered": True, "audible": False}
+                for directory in (run, guest_run):
+                    await wait(directory, lambda state: power_box_status(state, crate) == power)
+                evidence["stock_power_box_open"] = power
+            if powered_scene or pried and not pry_tool:
                 host_events = [json.loads(line) for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-                assert any(event.get("event") == "native_stock_crate_interaction" and event.get("entry") == "pried"
+                assert any(event.get("event") == "native_stock_crate_interaction" and event.get("entry") == pressed["entry"]
                            and event.get("operation_id") == roll["id"] for event in host_events)
+            if powered_scene:
+                elapsed = time.monotonic() - started
+                assert elapsed >= 9.0, elapsed
+                evidence["stock_electronic_power_delay_seconds"] = elapsed
             if crate in random_lids:
                 angle = roll[random_lids[crate][0]]
                 await wait(run, lambda state: lid_matches(state, crate, angle))
                 await wait(guest_run, lambda state: lid_matches(state, crate, angle))
-            if not pried or pry_tool:
+            if not (pried or powered_scene) or pry_tool:
                 assert roll["lucky_looter"], roll
             if desk:
                 assert roll["trait_calls"] == 0 and len(roll["items"]) <= 4, roll
@@ -566,6 +604,12 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                 assert roll["items"][0]["class_path"].startswith("/Game/Classes/Armor_Items/"), roll
                 if crate in GUARANTEED_CRATES:
                     assert len(roll["items"]) == 3, roll
+            elif family == "Red_LockBox_BP_C":
+                assert roll["trait_calls"] == 0 and not roll["items"], roll
+            elif family == "Loot_Machine_01_BP_C":
+                assert valid_loot_trait_calls(crate, roll["trait_calls"]) and len(roll["items"]) <= 6, roll
+                if crate in GUARANTEED_CRATES:
+                    assert roll["items"], roll
             elif crate in GUARANTEED_CRATES:
                 assert valid_loot_trait_calls(crate, roll["trait_calls"]) and 1 <= len(roll["items"]) <= loot_capacity(crate), roll
             elif cabinet:

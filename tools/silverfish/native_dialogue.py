@@ -6,7 +6,7 @@ import time
 import uuid
 
 from . import party
-from .travel import BOROUGH, OBSERVATORY, SCIENTIST_SHOP, SHOPKEEP
+from .travel import BOROUGH, CISTERN, OBSERVATORY, SCIENTIST_SHOP, SHOPKEEP
 
 
 PROFILE = "castaway"
@@ -51,7 +51,18 @@ MAMA_FIRST, MAMA_QUESTIONS, MAMA_ROOT = "Momma_Intro", "Questions_Mamma", "Momma
 MAMA_ROWS = {MAMA_FIRST: (2, {3: MAMA_QUESTIONS}), MAMA_QUESTIONS: (1, {1: MAMA_ROOT}),
              MAMA_ROOT: (1, {1: None, 3: MAMA_QUESTIONS, 5: None})}
 MAMA_OPEN, MAMA_TRADE = "native-dialogue-mama-open", "native-dialogue-mama-trade"
-MEET_PROFILES = {SHOPKEEP_PROFILE: (SHOPKEEP_OPEN, SHOPKEEP_FIRST), MAMA: (MAMA_OPEN, MAMA_FIRST)}
+SEWER = "sewer"
+SEWER_LEVEL = CISTERN + ".Cistern_P:PersistentLevel."
+SEWER_NPC = "NPC_SewerTrader_C " + SEWER_LEVEL + "NPC_SewerTrader_C_1"
+SEWER_CONTROLLER = "Dialogue_Controler_BP_C " + SEWER_LEVEL + "Dialogue_Controler_BP_C_1"
+SEWER_FIRST, SEWER_ROOT, SEWER_OFFERS = "FirstMeet", "Greet", "Sewer_Trade"
+SEWER_ROWS = {SEWER_FIRST: (3, {1: None, 2: None}), SEWER_ROOT: (1, {1: None, 2: None})}
+SEWER_OPEN, SEWER_TRADE = "native-dialogue-sewer-open", "native-dialogue-sewer-trade"
+SEWER_VIEW = "native-dialogue-sewer-offers"
+SEWER_FIXTURE = "native-dialogue-sewer-host-fixture"
+SEWER_ORDINALS = tuple(map(str, range(27)))
+MEET_PROFILES = {SHOPKEEP_PROFILE: (SHOPKEEP_OPEN, SHOPKEEP_FIRST), MAMA: (MAMA_OPEN, MAMA_FIRST),
+                 SEWER: (SEWER_OPEN, SEWER_FIRST)}
 MAMA_PROGRESS = (*SHOPKEEP_PROGRESS, "rev_orders")
 PROGRESS_KEYS = ("topic_eather_drill", "topic_drill_data", "stone_maze_readings", "quest_step", "cash", "xp")
 PROTOTYPE_KEYS = ("topic_micro_drill", "mosby_drill_test", "topic_drill_lab", "prototype_step")
@@ -78,17 +89,44 @@ class Profile:
 PROFILES = {OBSERVATORY: Profile(PROFILE, OBSERVATORY, NPC, CONTROLLER, ROOT, ROWS),
             SCIENTIST_SHOP: Profile(MOSBY, SCIENTIST_SHOP, MOSBY_NPC, MOSBY_CONTROLLER, GREET, MOSBY_ROWS),
             SHOPKEEP: Profile(SHOPKEEP_PROFILE, SHOPKEEP, SHOPKEEP_NPC, SHOPKEEP_CONTROLLER, SHOPKEEP_ROOT, SHOPKEEP_ROWS),
-            BOROUGH: Profile(MAMA, BOROUGH, MAMA_NPC, MAMA_CONTROLLER, MAMA_ROOT, MAMA_ROWS)}
+            BOROUGH: Profile(MAMA, BOROUGH, MAMA_NPC, MAMA_CONTROLLER, MAMA_ROOT, MAMA_ROWS),
+            CISTERN: Profile(SEWER, CISTERN, SEWER_NPC, SEWER_CONTROLLER, SEWER_ROOT, SEWER_ROWS)}
 
 
-def supported_maps(mosby: bool, shopkeep: bool, mama: bool) -> frozenset:
+def supported_maps(mosby: bool, shopkeep: bool, mama: bool, sewer: bool = False) -> frozenset:
     return frozenset(area for area, enabled in (
-        (OBSERVATORY, True), (SCIENTIST_SHOP, mosby), (SHOPKEEP, shopkeep), (BOROUGH, mama),
+        (OBSERVATORY, True), (SCIENTIST_SHOP, mosby), (SHOPKEEP, shopkeep), (BOROUGH, mama), (CISTERN, sewer),
     ) if enabled)
 
 
 def valid_token(value) -> bool:
     return isinstance(value, str) and party.REQUEST_ID.fullmatch(value) is not None
+
+
+def view_row(profile: Profile, row: str) -> bool:
+    return row in profile.rows or (profile.id, row) == (SEWER, SEWER_OFFERS)
+
+
+def sewer_menu_choices(frame: dict) -> list[dict]:
+    if not isinstance(frame, dict) or frame.get("map") != CISTERN or not isinstance(frame.get("offers"), list):
+        raise RuntimeError("The host did not verify the Sewer Thing's trade offers")
+    choices = []
+    previous = 0
+    for offer in frame["offers"]:
+        if not isinstance(offer, dict):
+            raise RuntimeError("The host did not verify an exact Sewer Thing offer")
+        ordinal, label = offer.get("ordinal"), offer.get("label")
+        if (type(ordinal) is not int or not previous < ordinal <= 26 or not isinstance(label, str)
+                or not 0 < len(label.encode()) <= 900 or any(char in label for char in "\r\n\t\0")
+                or type(offer.get("affordable")) is not bool or type(offer.get("hidden")) is not bool):
+            raise RuntimeError("The host did not verify an exact Sewer Thing offer")
+        previous = ordinal
+        if offer.get("hidden") and not offer["affordable"]:
+            continue
+        if not offer["affordable"]:
+            label = f"{label} (missing items)"
+        choices.append({"ordinal": ordinal, "text": label})
+    return [*choices, {"ordinal": 0, "text": "Close"}]
 
 
 def available_ordinals(profile, row: str, progress: dict) -> tuple[int, ...]:
@@ -215,10 +253,10 @@ class Receipt:
 
 
 class DialogueSessions:
-    def __init__(self, *, mosby=True, shopkeep=False, mama=False):
+    def __init__(self, *, mosby=True, shopkeep=False, mama=False, sewer=False):
         self.sessions: dict[str, Session] = {}
         self.receipts: dict[str, Receipt] = {}
-        self.maps = supported_maps(mosby, shopkeep, mama)
+        self.maps = supported_maps(mosby, shopkeep, mama, sewer)
 
     def forget(self, character: str) -> None:
         self.sessions.pop(character, None)
@@ -383,6 +421,8 @@ class DialogueSessions:
                 raise party.RuleError("operation_id_conflict")
             return previous.reply
         effect, revision = None, None
+        sewer_offers = None
+        barter_result = {}
         if action == OPEN:
             if target != profile.id:
                 raise party.RuleError("native_dialogue_profile_unavailable")
@@ -404,11 +444,22 @@ class DialogueSessions:
             if (not separator or not valid_token(token) or not session or session.token != token
                     or session.scope != scope or session.expires <= now):
                 raise party.RuleError("native_dialogue_choice_expired")
-            if (choice not in ORDINALS or int(choice) not in session.allowed
+            if session.row == SEWER_OFFERS and profile.id == SEWER:
+                from . import native_sewer_barter
+
+                if choice not in SEWER_ORDINALS or int(choice) not in session.allowed:
+                    raise party.RuleError("native_dialogue_choice_unavailable")
+                destination = None
+                if choice != "0":
+                    barter_result = await native_sewer_barter.exchange(host, bridge, character, choice, operation_id)
+                    sewer_offers = (await native_sewer_barter.offers(host, bridge, character))["native_sewer_offers"]
+                    destination = SEWER_OFFERS
+            elif (choice not in ORDINALS or int(choice) not in session.allowed
                     or int(choice) not in available_ordinals(profile, session.row, stock.get("progress"))):
                 raise party.RuleError("native_dialogue_choice_unavailable")
+            else:
+                destination = profile.rows[session.row][1][int(choice)]
             ordinal = int(choice)
-            destination = profile.rows[session.row][1][ordinal]
             if profile.id == MOSBY and (session.row, ordinal) in EFFECTS:
                 stock, effect, revision = await self._commit(host, bridge, character, scope, stock, session.row, ordinal)
                 now = time.monotonic()
@@ -429,6 +480,17 @@ class DialogueSessions:
                     raise RuntimeError("Mama's stock trade dialogue did not verify")
                 stock, effect = observed, "trade-granted"
                 host.control.event("native_borough_mama_trade_granted", character_id=character, row=session.row, ordinal=ordinal)
+            elif profile.id == SEWER and session.row in SEWER_ROWS and ordinal == 1:
+                from . import native_sewer_barter
+
+                observed = await self._read(host, bridge, profile, scope[-2], command=SEWER_TRADE,
+                                            arguments=(session.row, str(ordinal), scope[-1]))
+                if (observed["connection"] != scope[-1]
+                        or observed["progress"] != dict(stock["progress"], effect="trade-granted")
+                        or self._scope(host, character, time.monotonic()) != scope[:4]):
+                    raise RuntimeError("The Sewer Thing's trade dialogue did not verify")
+                stock, effect, destination = observed, "trade-granted", SEWER_OFFERS
+                sewer_offers = (await native_sewer_barter.offers(host, bridge, character))["native_sewer_offers"]
         report = {"profile": profile.id, "map": profile.map, "npc": profile.npc, "row": destination, "token": None,
                   "state": "closed" if destination is None else "open", "lines": [], "choices": []}
         if profile.id == MOSBY:
@@ -443,20 +505,23 @@ class DialogueSessions:
             self.sessions.pop(character, None)
         else:
             token = uuid.uuid4().hex
-            report.update(stock["rows"][destination], token=token)
+            if destination == SEWER_OFFERS:
+                report.update(token=token, choices=sewer_menu_choices(sewer_offers), offers=sewer_offers["offers"])
+            else:
+                report.update(stock["rows"][destination], token=token)
             self.sessions[character] = Session(scope, token, destination,
                                                tuple(choice["ordinal"] for choice in report["choices"]), expires)
-        result = {"native_dialogue": report}
+        result = {"native_dialogue": report, **barter_result}
         self.receipts[character] = Receipt(operation_id, (action, target), scope, expires, result)
         return result
 
 
 class DialogueView:
-    def __init__(self, bridge, control, *, mosby=True, shopkeep=False, shopkeep_view=False, mama=False):
+    def __init__(self, bridge, control, *, mosby=True, shopkeep=False, shopkeep_view=False, mama=False, sewer=False):
         self.bridge, self.control = bridge, control
         self.latest = 0
         self.pending = None
-        self.maps = supported_maps(mosby, shopkeep, mama)
+        self.maps = supported_maps(mosby, shopkeep, mama, sewer)
         self.shopkeep_view = shopkeep and shopkeep_view
 
     async def sync(self, snapshot, epoch, active, action):
@@ -485,13 +550,14 @@ class DialogueView:
         operation = uuid.uuid5(self.bridge.input_namespace, f"{epoch}:{pawn}:{profile.id}:{sequence}").hex
         try:
             verb, target = (OPEN, profile.id) if token == "-" else (CHOOSE, f"{token}@{choice}")
-            reply = (await action(verb, operation, target)).get("native_dialogue", {})
+            result = await action(verb, operation, target)
+            reply = result.get("native_dialogue", {})
             row, next_token = reply.get("row"), reply.get("token")
             if (tuple(reply.get(field) for field in ("profile", "map", "npc")) != (profile.id, profile.map, profile.npc)
                     or (row is None and (next_token is not None or reply.get("state") != "closed"))
-                    or (row is not None and (row not in profile.rows or not valid_token(next_token) or reply.get("state") != "open"))):
+                    or (row is not None and (not view_row(profile, row) or not valid_token(next_token) or reply.get("state") != "open"))):
                 raise RuntimeError("The host did not verify the current stock dialogue response")
-            text = render_text(reply, profile, row)
+            text = () if row == SEWER_OFFERS else render_text(reply, profile, row)
             cash_handoff = (self.shopkeep_view and profile.id == SHOPKEEP_PROFILE and verb == CHOOSE
                             and reply.get("effect") == "cash-granted" and row == SHOPKEEP_ROOT)
             if cash_handoff:
@@ -501,7 +567,12 @@ class DialogueView:
                         pawn, sequence, SHOPKEEP, SHOPKEEP_COUNTER, "pending"):
                     raise RuntimeError("The ShopKeep dialogue did not open its exact local merchant")
             else:
-                rendered = await self.bridge.command(RENDER, str(sequence), row or "-", next_token or "-", *text, timeout=2)
+                if row == SEWER_OFFERS:
+                    choices = sewer_menu_choices({"map": CISTERN, "offers": reply.get("offers")})
+                    message = tuple(value for choice in choices for value in (str(choice["ordinal"]), choice["text"]))
+                    rendered = await self.bridge.command(SEWER_VIEW, str(sequence), next_token, *message, timeout=3)
+                else:
+                    rendered = await self.bridge.command(RENDER, str(sequence), row or "-", next_token or "-", *text, timeout=2)
                 proof = rendered.get("native_dialogue_view", {})
                 if tuple(proof.get(field) for field in ("pawn", "sequence", "row", "token", "state")) != (
                         pawn, sequence, row or "-", next_token or "-", "open" if row else "closed"):
@@ -510,6 +581,9 @@ class DialogueView:
             if profile.id in MEET_PROFILES and reply.get("effect") in ("opened-first", "opened-repeat", "cash-granted", "trade-granted"):
                 status["effect"] = reply["effect"]
             self.control.event("native_dialogue_interaction", **status)
+            if profile.id == SEWER and "native_sewer_trade" in result:
+                self.control.event("native_sewer_trade_interaction", sequence=sequence, operation_id=operation,
+                                   native_sewer_trade=result["native_sewer_trade"])
             return rendered
         except (OSError, ValueError, RuntimeError) as error:
             self.control.event("native_dialogue_rejected", sequence=sequence, reason=str(error))
