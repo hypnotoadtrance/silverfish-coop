@@ -5404,9 +5404,7 @@ class Client:
                     result = {"native_client_damage": self.last_game.get("native_client_damage", {})}
                 elif action in native_stash.VIEW_FIXTURES:
                     target = request.get("target")
-                    if (self.last_game.get("state") != "connected" or not isinstance(target, str)
-                            or not (native_gold.valid_guid(target) or action == "native-stash-view-click-fixture"
-                                    and target in {"stash", "backpack", "previous", "next", "close"})):
+                    if self.last_game.get("state") != "connected" or not native_stash.valid_view_fixture(action, target):
                         raise ValueError("Select a stock stash fixture target")
                     self.last_game = await self.bridge.command(action, target, timeout=5)
                     result = {native_stash.VIEW: self.last_game.get(native_stash.VIEW)}
@@ -5884,6 +5882,10 @@ async def join_game(work: Path, directory: Path, invitation: Path | direct_ip.Co
                 bridge_directory = directory / "run" / "game-bridge" / uuid.uuid4().hex
                 process = launch(work, directory / "game-user", bridge_directory, headless, **game_options)
                 bridge = Bridge(bridge_directory, process)
+                if game_options["guest_inventory_view"]:
+                    await bridge.wait_for(lambda state: state["state"] == "ready")
+                    await select_save_scope(bridge, native_host_save.SaveScope(
+                        directory / "game-user", uuid.UUID(invite["character_id"]).hex))
             maps = PLAYTEST_MAPS | AUTHORED_MAPS if game_options["native_zones"] and qualified_authored_routes(work) else PLAYTEST_MAPS
             if game_options["expanded_zones"]:
                 maps |= EXPANDED_MAPS

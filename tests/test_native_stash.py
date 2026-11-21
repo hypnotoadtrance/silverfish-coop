@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -13,6 +14,31 @@ GUEST = "guest-character"
 
 
 class NativeStashTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stock_screen_reads_every_page_for_the_same_character(self):
+        stock = [dict(guid=f"{index + 1:032X}", source="stash", class_path="/Game/Classes/Weapons/Test.Test_C",
+                      ammo=7, value=29, weight=0.25, never_drop=False) for index in range(17)]
+
+        def page(action, operation, target):
+            assert action == native_stash.LIST and target.startswith(f"{SITE}|")
+            offset = int(target.rsplit("|", 1)[1])
+            return {native_stash.RESULT: dict(site=SITE, owner=GUEST, combined=False, offset=offset,
+                    total=len(stock), items=stock[offset:offset + 16], next_offset=16 if offset == 0 else None)}
+
+        client = SimpleNamespace(invite={"character_id": GUEST}, gameplay_action=AsyncMock(side_effect=page))
+        rows = await native_stash._stock_rows(client, SITE, uuid.uuid4())
+        self.assertEqual(len(rows), 17)
+        self.assertEqual(rows[-1].split("\t"), [stock[-1]["guid"], stock[-1]["class_path"], "7", "0.25", "29", "0\n"])
+
+        def wrong_owner(*args):
+            result = page(*args)
+            if result[native_stash.RESULT]["offset"]:
+                result[native_stash.RESULT]["owner"] = "host"
+            return result
+
+        client.gameplay_action.side_effect = wrong_owner
+        with self.assertRaisesRegex(ValueError, "exact stash"):
+            await native_stash._stock_rows(client, SITE, uuid.uuid4())
+
     async def test_stash_census_reads_only_the_authenticated_characters_frame(self):
         profile = Path(self.enterContext(tempfile.TemporaryDirectory()))
         native_host_save.directory(profile).mkdir(parents=True)

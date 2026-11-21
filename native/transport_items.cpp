@@ -49,6 +49,8 @@ namespace
     constexpr auto context_menu_path = STR("/Game/Classes/GUI/New/Components/ItemContextMenu.ItemContextMenu_C");
     constexpr auto split_popup_path = STR("/Game/Classes/GUI/New/Components/SplitStackPopup.SplitStackPopup_C");
     constexpr auto inventory_screen_path = STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C");
+    constexpr auto stash_screen_path = STR("/Game/Classes/GUI/New/StashScreen.StashScreen_C");
+    constexpr auto stash_actor_path = STR("/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto consumable_path = STR("/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
@@ -148,6 +150,14 @@ namespace
         Unreal::FName action_pickup{STR("ActionPickup")};
         Unreal::FName action_quick_move{STR("ActionQuickMove")};
         Unreal::FName quick_move{STR("QuickMove")};
+        Unreal::FName save_stash{STR("Save_StashToGI")};
+        std::array<Unreal::FName, 15> stash_mutations{
+            Unreal::FName{STR("AddItem")}, Unreal::FName{STR("InsertItem")}, Unreal::FName{STR("RemoveItem")},
+            Unreal::FName{STR("TakeCard")}, Unreal::FName{STR("TakeItem")}, Unreal::FName{STR("SplitCardStack")},
+            Unreal::FName{STR("QuickStack")}, Unreal::FName{STR("TryStackItem")}, Unreal::FName{STR("SplitStack")},
+            Unreal::FName{STR("SortItems")}, Unreal::FName{STR("ReturnItem")}, Unreal::FName{STR("SetItemAtIndex")},
+            Unreal::FName{STR("InitiateItemTake")}, Unreal::FName{STR("FinalTakeItem")}, Unreal::FName{STR("QuickSplitStack")},
+        };
         Unreal::FName use_held{STR("UseHeldItem")};
         Unreal::FName confirm_use{STR("ConfirmUseItem")};
         Unreal::FName use_primary{STR("Use_Item_Primary")};
@@ -235,6 +245,16 @@ namespace
         std::int32_t expected{};
     };
 
+    struct StashScreen
+    {
+        Unreal::FWeakObjectPtr screen, actor, manager, backpack, storage;
+        std::uint64_t generation{};
+        bool accepting{};
+        Guid item{};
+        bool deposit{};
+        Unreal::FWeakObjectPtr backup;
+    };
+
     std::optional<Entries> entries;
     std::array<Hook::GlobalCallbackId, 3> hooks{};
     std::atomic<bool> hooks_ready{};
@@ -246,6 +266,7 @@ namespace
     thread_local HostDropScope host_drop_scope;
     thread_local std::optional<HostDropRequest> host_drop_request;
     thread_local std::int64_t host_drop_sequence{};
+    thread_local StashScreen stash_screen;
 
     [[nodiscard]] bool enabled()
     {
@@ -843,6 +864,138 @@ namespace
                                                                : nullptr;
     }
 
+    bool stash_seat()
+    {
+        return !scope.host && Clock::now() < scope.expires &&
+               scope.generation == generation.load(std::memory_order_acquire) && current_player(scope);
+    }
+
+    Unreal::FArrayProperty* stash_rows(Unreal::UObject* object, const Unreal::TCHAR* name)
+    {
+        auto* array = field<Unreal::FArrayProperty>(object, name);
+        auto* rows = array ? Unreal::CastField<Unreal::FStructProperty>(array->GetInner()) : nullptr;
+        auto* structure = rows ? rows->GetStruct().Get() : nullptr;
+        return structure && structure->GetPathName() == item_path ? array : nullptr;
+    }
+
+    void clear_stash_screen()
+    {
+        if (auto* backup = stash_screen.backup.Get())
+        {
+            auto* actor = stash_screen.actor.Get();
+            auto* from = stash_rows(backup, STR("PlayerBackpack"));
+            auto* to = stash_rows(actor, STR("Inventory"));
+            if (from && to)
+                to->CopyCompleteValue(to->ContainerPtrToValuePtr<void>(actor), from->ContainerPtrToValuePtr<void>(backup));
+            backup->ClearRootSet();
+        }
+        stash_screen = {};
+    }
+
+    bool enroll_stash_screen(std::uintptr_t address, bool ready)
+    {
+        auto* screen = top_stock_menu();
+        if (reinterpret_cast<std::uintptr_t>(screen) != address || !exact_class(screen, stash_screen_path) ||
+            !stash_seat() || !same_widget_player(screen)) return false;
+        const auto current = scope.generation;
+        if (stash_screen.screen.Get() == screen && stash_screen.generation == current)
+        {
+            stash_screen.accepting = ready;
+            return true;
+        }
+
+        auto* manager = object_field(screen, STR("ItemManager"));
+        auto* backpack = object_field(screen, STR("BackpackPanel"));
+        auto* storage = object_field(screen, STR("StashPanel"));
+        auto* actor = object_field(screen, STR("Stash"));
+        auto* actor_class = Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(nullptr, nullptr, stash_actor_path);
+        auto* stash_index = exact_class(storage, panel_path) ? field<Unreal::FIntProperty>(storage, STR("InventoryIndex")) : nullptr;
+        if (!live(actor) || !actor_class || !actor->IsA(actor_class) || static_cast<Unreal::AActor*>(actor)->GetWorld() != scope.world.Get() ||
+            !exact_class(manager, manager_path) || !same_widget_player(manager) || !exact_backpack_panel(backpack, manager) ||
+            !stash_index || stash_index->GetPropertyValueInContainer(storage) != 0 ||
+            object_field(storage, STR("Target")) != actor || object_field(storage, STR("ItemManager")) != manager ||
+            object_field(manager, STR("ParentScreen")) != screen) return false;
+        clear_stash_screen();
+        stash_screen = {screen, actor, manager, backpack, storage, current, ready};
+        return true;
+    }
+
+    int lua_set_stash_screen(const Lua& lua)
+    {
+        bool accepted = false;
+        if (Unreal::IsInGameThreadRaw() && hooks_ready.load(std::memory_order_acquire) &&
+            lua.get_stack_size() == 2 && lua.is_integer(1) && lua.is_bool(2))
+        {
+            const auto address = lua.get_integer();
+            const auto ready = lua.get_bool();
+            accepted = address > 0 && enroll_stash_screen(static_cast<std::uintptr_t>(address), ready);
+        }
+        lua.set_bool(accepted);
+        return 1;
+    }
+
+    int lua_take_stash_move(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1) || stash_screen.item == Guid{})
+            return 0;
+        const auto address = lua.get_integer();
+        auto* screen = stash_screen.screen.Get();
+        if (address <= 0 || reinterpret_cast<std::uintptr_t>(screen) != static_cast<std::uintptr_t>(address) ||
+            stash_screen.generation != scope.generation || !stash_seat() || top_stock_menu() != screen)
+            return 0;
+        const auto guid = format_guid(stash_screen.item);
+        lua.set_string(std::string_view{guid.data(), guid.size()});
+        lua.set_bool(stash_screen.deposit);
+        stash_screen.item = {};
+        return 2;
+    }
+
+    int lua_replace_stash_preview(const Lua& lua)
+    {
+        const auto refuse = [&] { lua.set_bool(false); return 1; };
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(1) ||
+            !lua.is_integer(2) || !lua.is_integer(3) || !stash_seat()) return refuse();
+        const auto screen = lua.get_integer();
+        const auto rows = lua.get_integer();
+        const auto original = lua.get_integer();
+        if (screen <= 0 || rows <= 0 || original < 0 ||
+            reinterpret_cast<std::uintptr_t>(stash_screen.screen.Get()) != static_cast<std::uintptr_t>(screen) ||
+            stash_screen.generation != scope.generation || top_stock_menu() != stash_screen.screen.Get()) return refuse();
+        auto* actor = stash_screen.actor.Get();
+        auto* source = find_object(static_cast<std::uintptr_t>(rows), save_path);
+        auto* backup = original > 0 ? find_object(static_cast<std::uintptr_t>(original), save_path) : stash_screen.backup.Get();
+        const auto local_preview = [&](Unreal::UObject* candidate) {
+            auto* outer = candidate ? candidate->GetOuterPrivate() : nullptr;
+            return outer && outer->GetPathName() == STR("/Engine/Transient") && candidate != canonical_host_save();
+        };
+        if (!local_preview(source) || !local_preview(backup) || source == backup ||
+            (original > 0 && (stash_screen.backup.Get() || backup->IsRootSet()))) return refuse();
+        auto* inventory = stash_rows(actor, STR("Inventory"));
+        auto* from = stash_rows(source, STR("PlayerBackpack"));
+        auto* saved = stash_rows(backup, STR("PlayerBackpack"));
+        if (!inventory || !from || !saved) return refuse();
+        auto* destination = inventory->ContainerPtrToValuePtr<void>(actor);
+        const auto* available = from->ContainerPtrToValuePtr<void>(source);
+        Unreal::FScriptArrayHelper count(from, available);
+        if (count.Num() < 0 || count.Num() > inventory_limit) return refuse();
+        if (original > 0)
+        {
+            // Retain the exact stock rows while the menu owns the displayed copy.
+            saved->CopyCompleteValue(saved->ContainerPtrToValuePtr<void>(backup), destination);
+            backup->SetRootSet();
+            stash_screen.backup = backup;
+        }
+        inventory->CopyCompleteValue(destination, available);
+        lua.set_bool(true);
+        return 1;
+    }
+
+    int lua_clear_stash(const Lua&)
+    {
+        if (Unreal::IsInGameThreadRaw()) clear_stash_screen();
+        return 0;
+    }
+
     [[nodiscard]] bool qualified_drop_seat(bool host)
     {
         return (!host || host_drop_enabled()) && scope.host == host &&
@@ -1361,6 +1514,69 @@ namespace
                array_has_widget(floor, STR("Cards"), card, false) ? card : nullptr;
     }
 
+    bool intercept_stash(Iteration& call, Unreal::UObject* context, Unreal::UFunction* function, const Unreal::FName& name)
+    {
+        auto* screen = stash_screen.screen.Get();
+        if (!screen) return false;
+        // The widget reads the projected rows through the regular stash actor.
+        // Keep its stock save callback from persisting that temporary inventory.
+        if (name == entries->save_stash && context == stash_screen.actor.Get())
+        {
+            call.PreventOriginalFunctionCall();
+            return true;
+        }
+        const bool quick = name == entries->quick_move || name == entries->action_quick_move;
+        const bool mutation = std::ranges::find(entries->stash_mutations, name) != entries->stash_mutations.end();
+        auto* manager = stash_screen.manager.Get();
+        if (context != manager)
+        {
+            if (!mutation || (context != stash_screen.actor.Get() && context != stash_screen.backpack.Get() &&
+                              context != stash_screen.storage.Get() && context != scope.instance.Get() &&
+                              (!exact_class(context, equipment_slot_path) || object_field(context, STR("ItemManager")) != manager)) ||
+                !array_has_widget(scope.controller.Get(), STR("MenuStack"), screen, false))
+                return false;
+            call.PreventOriginalFunctionCall();
+            return true;
+        }
+
+        if (!quick && !mutation && name != entries->drop_item && name != entries->action_drop &&
+            name != entries->action_equip && name != entries->action_use && name != entries->action_pickup &&
+            name != entries->use_held && name != entries->confirm_use && name != entries->final_split &&
+            name != entries->position_split &&
+            std::ranges::find(entries->guarded_inventory_actions, name) == entries->guarded_inventory_actions.end())
+            return false;
+        call.PreventOriginalFunctionCall();
+        if (!call.OriginalFunctionCallPrevented() || !quick || !stash_screen.accepting || !stash_seat() ||
+            stash_screen.generation != scope.generation || top_stock_menu() != screen ||
+            function->GetOuterPrivate() != manager->GetClassPrivate() || function->GetNumParms() != 0 ||
+            function->GetReturnProperty() || function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return true;
+
+        const bool from_menu = name == entries->action_quick_move;
+        auto* menu = from_menu ? object_field(manager, STR("ItemContextMenu")) : nullptr;
+        if (from_menu && (!exact_class(menu, context_menu_path) || !same_widget_player(menu) ||
+                          object_field(menu, STR("ItemManager")) != manager)) return true;
+        auto* card = from_menu ? object_field(menu, STR("Item Card")) : object_field(manager, STR("HoveredCard"));
+        if (!exact_class(card, card_path) || !same_widget_player(card) ||
+            object_field(card, STR("ItemManager")) != manager) return true;
+        const auto item = card_item(card);
+        const bool deposit = item.panel && item.panel == stash_screen.backpack.Get();
+        if ((!deposit && item.panel != stash_screen.storage.Get()) ||
+            !array_has_widget(item.panel, STR("Cards"), card, false)) return true;
+        const GuidFields fields(item.structure);
+        if (!fields.valid()) return true;
+        const auto guid = fields.read(item.value);
+        if (guid == Guid{}) return true;
+        stash_screen.accepting = false;
+        stash_screen.item = guid;
+        stash_screen.deposit = deposit;
+        if (from_menu)
+        {
+            if (auto* close = stock_no_args(manager, Unreal::FName(STR("CloseContextMenu"))))
+                manager->ProcessEvent(close, nullptr);
+        }
+        return true;
+    }
+
     void intercept(Iteration& iteration, Unreal::UObject* context, Unreal::UFunction* function, const void* parameters)
     {
         if (!context || !function || !entries || iteration.OriginalFunctionCallPrevented())
@@ -1368,6 +1584,7 @@ namespace
             return;
         }
         const auto name = function->GetNamePrivate();
+        if (intercept_stash(iteration, context, function, name)) return;
         const auto guarded_inventory = [&] {
             if (!host_drop_scope.stock_inventory || !qualified_drop_seat(false) || !exact_class(context, manager_path) ||
                 function->GetOuterPrivate() != context->GetClassPrivate() ||
@@ -2759,6 +2976,7 @@ void silverfish::native_transport::clear_scope()
         transport_request.reset();
         matrix_inputs = {};
         clear_host_drop();
+        clear_stash_screen();
     }
 }
 
@@ -2781,6 +2999,10 @@ void silverfish::native_transport::register_lua(RC::LuaMadeSimple::Lua& lua)
     {
         lua.register_function("SilverfishSetNativeTransportScope", lua_enroll);
         lua.register_function("SilverfishClearNativeTransportScope", lua_clear);
+        lua.register_function("SilverfishSetNativeStashScreen", lua_set_stash_screen);
+        lua.register_function("SilverfishTakeNativeStashMove", lua_take_stash_move);
+        lua.register_function("SilverfishReplaceNativeStashPreview", lua_replace_stash_preview);
+        lua.register_function("SilverfishClearNativeStashScreen", lua_clear_stash);
         lua.register_function("SilverfishReadNativeTransportStatus", lua_status);
         lua.register_function("SilverfishSetNativeHostDropScope", lua_set_drop<true>);
         lua.register_function("SilverfishSetNativeGuestDropScope", lua_set_drop<false>);

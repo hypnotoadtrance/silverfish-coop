@@ -51,7 +51,7 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False):
 
     async def join(invite, label):
         process = await launch(label, guest_run, "join", "--profile", name, "--invite", invite["invite_file"],
-                               "--headless", "--native-zones")
+                               "--headless", "--native-zones", "--native-guest-inventory-view")
         await wait(run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
         return process
 
@@ -92,11 +92,8 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False):
         seen = await ask(guest_run, "native-stash-view-fixture", target=site)
         opened = seen[native_stash.VIEW]["sequence"]
         await render("stash", after=opened - 1)
-        if mode == "backpack":
-            await click("backpack")
-            await render(mode, after=opened)
-        await click(item)
-        await render(mode, after=opened + int(mode == "backpack"))
+        await click(f"{mode}:{item}")
+        await render(mode, after=opened)
         events = (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines()
         receipt = next(event for line in reversed(events) if (event := json.loads(line))["event"] == "native_stash_view_item_moved"
                        and event["guid"] == item and event["direction"] == direction)

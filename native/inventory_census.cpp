@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <format>
@@ -111,6 +112,8 @@ namespace
         Unreal::UScriptStruct* type = find<Unreal::UScriptStruct>(item_struct_path);
         Unreal::FClassProperty* item_class = field<Unreal::FClassProperty>(type, STR("Item_Class_3_2813641E42AA35FC0693029E4EE49F81"));
         Unreal::FIntProperty* ammo = field<Unreal::FIntProperty>(type, STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"));
+        Unreal::FIntProperty* value = field<Unreal::FIntProperty>(type, STR("Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9"));
+        Unreal::FDoubleProperty* weight = field<Unreal::FDoubleProperty>(type, STR("Weight_12_11AB9ED547504E78A849A692A36DC938"));
         Unreal::FBoolProperty* never_drop = field<Unreal::FBoolProperty>(type, STR("NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D"));
         Unreal::FStructProperty* guid = field<Unreal::FStructProperty>(type, STR("GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"));
         std::array<Unreal::FIntProperty*, 4> guid_words{};
@@ -226,7 +229,15 @@ namespace
             std::format_to(std::back_inserter(lines), "{:08X}{:08X}{:08X}{:08X}\t{}\t{}\t{}\t{}\t{:d}\t{:d}\t{:d}\t{:d}",
                            identity[0], identity[1], identity[2], identity[3], source, index, stock.path, quantity,
                            stock.stackable, stock.important, stock.cannot_keep, droppable);
-            if (include_stock_ammo) std::format_to(std::back_inserter(lines), "\t{}", ammo);
+            if (include_stock_ammo)
+            {
+                if (!inventory.value || !inventory.weight) return "native_stash_census_display_fields_unavailable";
+                const double weight = inventory.weight->GetPropertyValueInContainer(value);
+                if (!std::isfinite(weight) || weight < 0 || weight > 100000) return "native_stash_census_invalid_item_weight";
+                std::format_to(std::back_inserter(lines), "\t{}\t{}\t{}\t{:d}", ammo, weight,
+                               inventory.value->GetPropertyValueInContainer(value),
+                               inventory.never_drop->GetPropertyValueInContainer(value));
+            }
             lines.push_back('\n');
             return {};
         }

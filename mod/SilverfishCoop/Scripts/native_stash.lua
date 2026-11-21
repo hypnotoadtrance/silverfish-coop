@@ -193,7 +193,7 @@ function stash.command(fields, state, phase)
         if seen > offset and seen <= offset + 16 then
             local item = {}
             for value in line:gmatch("[^\t]+") do item[#item + 1] = value end
-            if #item ~= (live and 10 or 9) or item[2] ~= "stash" then error("native_stash_census_item_invalid", 0) end
+            if #item ~= (live and 13 or 9) or item[2] ~= "stash" then error("native_stash_census_item_invalid", 0) end
             items[#items + 1] = item
         end
     end

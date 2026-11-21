@@ -2305,7 +2305,7 @@ class Bridge:
                     data[native_stash.MOVED] = dict(map=fields[1], pawn=fields[2], slot=fields[3], site=fields[4],
                         guid=fields[5], direction=fields[6], combined=fields[7] == "1", class_path=fields[8],
                         quantity=int(fields[9]))
-                elif fields[0] in {"native-inventory-census-item", "native-stash-census-item"} and len(fields) in (9, 10, 11):
+                elif fields[0] in {"native-inventory-census-item", "native-stash-census-item"} and len(fields) in (9, 10, 11, 14):
                     key = fields[0].removesuffix("-item").replace("-", "_")
                     if key not in data:
                         raise ValueError("Item report without an inventory census")
@@ -2318,10 +2318,15 @@ class Bridge:
                         if fields[9] not in {"0", "1"}:
                             raise ValueError("Invalid stock inventory drop eligibility")
                         row["droppable"] = fields[9] == "1"
-                    if len(fields) == 11:
+                    if len(fields) >= 11:
                         if key != "native_stash_census" or data[key]["slot"] != "-" or not -2**31 <= int(fields[10]) < 2**31:
                             raise ValueError("Invalid live stash item ammunition")
                         row["ammo"] = int(fields[10])
+                    if len(fields) == 14:
+                        weight, value, never_drop = _finite(fields[11]), int(fields[12]), fields[13]
+                        if weight is None or not 0 <= weight <= 100000 or not -2**31 <= value < 2**31 or never_drop not in {"0", "1"}:
+                            raise ValueError("Invalid live stash item display values")
+                        row.update(weight=weight, value=value, never_drop=never_drop == "1")
                     data[key]["items"].append(row)
                 elif fields[0] == "native-dream-arrival" and len(fields) == 6:
                     data["native_dream_arrival"] = {

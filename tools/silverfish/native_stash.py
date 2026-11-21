@@ -2,11 +2,12 @@
 
 import asyncio
 from contextlib import suppress
+import math
 import re
 import time
 import uuid
 
-from . import native_host_save, native_inventory, party
+from . import native_host_save, native_inventory, party, runtime
 from .native_gold import valid_guid
 
 
@@ -20,9 +21,9 @@ SETTING = "native_stash_setting"
 SITES = "native_stash_sites"
 VIEW = "native_stash_view"
 VIEW_FIXTURES = {"native-stash-view-fixture", "native-stash-view-click-fixture"}
-VIEW_PAGE_SIZE = 6
 _TARGET = re.compile(r"([0-9A-F]{32})(?:\|(0|[1-9][0-9]{0,3}))?\Z")
 _MOVE_TARGET = re.compile(r"([0-9A-F]{32})\|(deposit|withdraw)\|([0-9A-F]{32})\Z")
+_VIEW_CARD = re.compile(r"(?:stash|backpack):([0-9A-F]{32})\Z")
 _PATH = re.compile(r"([A-Za-z0-9_-]+_C) (/Game/Classes/Maps/[A-Za-z0-9_/-]+)\.([A-Za-z0-9_-]+):PersistentLevel\.([A-Za-z0-9_-]+)\Z")
 _ITEM_CLASS = re.compile(r"/Game/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+_C\Z")
 
@@ -31,6 +32,15 @@ def valid_site(area, name):
     match = _PATH.fullmatch(name)
     return (match is not None and match[2] == area and match[3] == area.rsplit("/", 1)[-1]
             and match[4].startswith(match[1] + "_") and match[4][len(match[1]) + 1:].isdigit())
+
+
+def valid_view_fixture(action, target):
+    if not isinstance(target, str) or action not in VIEW_FIXTURES:
+        return False
+    if action == "native-stash-view-fixture":
+        return valid_guid(target)
+    match = _VIEW_CARD.fullmatch(target)
+    return target == "close" or match is not None and valid_guid(match[1])
 
 
 def _scope(host, character, site):
@@ -148,8 +158,8 @@ async def move(host, bridge, character, target, operation):
 def parse_view(fields, area, phase):
     _, state, sequence, view_area, pawn, site, mode, offset, item = fields
     sequence, offset = int(sequence), int(offset)
-    if (phase != "connected" or view_area != area or not 1 <= sequence < 2**53 or not 0 <= offset <= 4096
-            or offset % VIEW_PAGE_SIZE or not valid_guid(site) or (item != "-" and not valid_guid(item))
+    if (phase != "connected" or view_area != area or not 1 <= sequence < 2**53 or offset != 0
+            or not valid_guid(site) or (item != "-" and not valid_guid(item))
             or not 0 < len(pawn) <= 512 or mode not in {"stash", "backpack"}
             or state not in {"pending", "rendered", "unavailable"}):
         raise ValueError("Invalid stock stash view frame")
@@ -157,33 +167,34 @@ def parse_view(fields, area, phase):
                 mode=mode, offset=offset, item=None if item == "-" else item)
 
 
-async def _view_page(client, view, operation):
-    site, mode, offset = view["site"], view["mode"], view["offset"]
-    if mode == "stash":
-        page = (await client.gameplay_action(LIST, operation, f"{site}|{offset}"))[RESULT]
-        combined = page.get("combined")
-        if page.get("site") != site:
-            raise ValueError("The host returned a different stash site")
-    else:
-        page = (await client.gameplay_action("native-inventory-list", operation, str(offset)))["native_inventory"]
-        combined = client.gameplay.get(SETTING)
-    rows, total = page.get("items"), page.get("total")
-    if (page.get("owner") != client.invite["character_id"] or page.get("offset") != offset or type(combined) is not bool
-            or type(rows) is not list or type(total) is not int or not 0 <= total <= native_inventory.MAX_ITEMS
-            or len(rows) != min(native_inventory.PAGE_SIZE, max(0, total - offset))):
-        raise ValueError("The host did not return the guest's private stash page")
-    source = "stash" if mode == "stash" else "backpack"
-    items = []
-    for row in rows:
-        if row["source"] != source:
-            if mode == "stash":
-                raise ValueError("The host returned a row outside the private stash")
-            break
-        guid, count, path = row["guid"], row["quantity"], row["class_path"]
-        if not valid_guid(guid) or type(count) is not int or not 1 <= count < 2**31 or not _ITEM_CLASS.fullmatch(path):
-            raise ValueError("The host returned an invalid stock item")
-        items.append(f"{guid}|{count}|{path}")
-    return str(int(combined)), str(int(len(items) > VIEW_PAGE_SIZE)), items[:VIEW_PAGE_SIZE]
+async def _stock_rows(client, site, operation):
+    offset, contents, seen, identity = 0, [], set(), None
+    while True:
+        page = (await client.gameplay_action(LIST, uuid.uuid5(operation, str(offset)).hex, f"{site}|{offset}"))[RESULT]
+        rows, total, combined = page["items"], page["total"], page["combined"]
+        if (page["owner"] != client.invite["character_id"] or page["site"] != site or page["offset"] != offset
+                or type(combined) is not bool or type(total) is not int or not 0 <= offset <= total <= 4096
+                or type(rows) is not list or len(rows) != min(native_inventory.PAGE_SIZE, total - offset)
+                or identity is not None and identity != (total, combined)):
+            raise ValueError("The host did not return the guest's exact stash")
+        identity = total, combined
+        for row in rows:
+            guid, path, ammo = row["guid"], row["class_path"], row["ammo"]
+            weight, value, protected = row["weight"], row["value"], row["never_drop"]
+            if (row["source"] != "stash" or not valid_guid(guid) or guid in seen or not _ITEM_CLASS.fullmatch(path)
+                    or len(path) > 512 or type(ammo) is not int or not -2**31 <= ammo < 2**31
+                    or type(weight) not in {int, float} or not math.isfinite(weight) or not 0 <= weight <= 100000
+                    or type(value) is not int or not -2**31 <= value < 2**31 or type(protected) is not bool):
+                raise ValueError("The host returned an invalid stock stash item")
+            seen.add(guid)
+            contents.append(f"{guid}\t{path}\t{ammo}\t{weight}\t{value}\t{int(protected)}\n")
+        offset += len(rows)
+        if offset == total:
+            if page["next_offset"] is not None:
+                raise ValueError("The host returned an unexpected stash continuation")
+            return contents
+        if page["next_offset"] != offset:
+            raise ValueError("The host returned a noncontiguous stash page")
 
 
 async def service_view(client, active):
@@ -202,6 +213,8 @@ async def service_view(client, active):
     scope = client.host_session, client.zone_epoch
     operation = uuid.uuid5(client.bridge.input_namespace, f"{scope}:stash:{view['sequence']}")
     arguments = str(view["sequence"]), view["map"], view["site"]
+    nonce = uuid.uuid4().hex
+    payload = client.bridge.directory / f"native-stash-screen-{nonce}.tsv"
     try:
         if item := view["item"]:
             direction = "deposit" if view["mode"] == "backpack" else "withdraw"
@@ -210,10 +223,12 @@ async def service_view(client, active):
                     (client.invite["character_id"], view["site"], direction, item)):
                 raise RuntimeError("The stock stash transfer did not verify")
             client.control.event("native_stash_view_item_moved", operation_id=operation.hex, **result)
-        combined, more, rows = await _view_page(client, view, uuid.uuid5(operation, "page").hex)
+        rows = await _stock_rows(client, view["site"], operation)
+        await client.guest_ui.refresh(client)
         if scope != (client.host_session, client.zone_epoch):
             raise RuntimeError("The stock stash request left its native world")
-        snapshot = await client.bridge.command("native-stash-view-render", *arguments, combined, more, *rows, timeout=5)
+        runtime.write_text(payload, "".join(rows), newline="")
+        snapshot = await client.bridge.command("native-stash-view-render", *arguments, nonce, str(len(rows)), timeout=5)
         if snapshot.get(VIEW) != {**view, "state": "rendered"}:
             raise RuntimeError("The in-game stash screen did not render the verified page")
         client.last_game = snapshot
@@ -221,3 +236,6 @@ async def service_view(client, active):
         client.control.event("native_stash_view_unavailable", operation_id=operation.hex, reason=str(error))
         with suppress(OSError, RuntimeError, ValueError):
             client.last_game = await client.bridge.command("native-stash-view-unavailable", *arguments, timeout=3)
+    finally:
+        with suppress(FileNotFoundError, PermissionError):
+            payload.unlink()

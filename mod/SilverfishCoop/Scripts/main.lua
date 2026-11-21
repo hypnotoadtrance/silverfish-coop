@@ -960,7 +960,7 @@ local function run_command(fields, state, current_phase)
         end
         native_death.clear_client()
         if #fields == 6 then native_death.admit_client(fields[4], fields[5], fields[6]) end
-        if resident_title and native_save_scope.selected() then native_save_scope.prepare_guest(state) end
+        if native_save_scope.selected() then native_save_scope.prepare_guest(state) end
         open_level(state.controller, argument, "")
         role = "client"
         was_connected = false
@@ -1540,7 +1540,7 @@ native_loot_crate_input.start()
 native_stock_door.start()
 native_enemy_shell_view.start(players.is_downed)
 native_inventory_view.start(bridge, players.is_downed)
-native_stash_view.start(players.is_downed)
+native_stash_view.start(bridge, players.is_downed)
 native_shop_view.start(bridge, players.is_downed)
 native_loot_view.start(bridge, players.is_downed)
 native_guest_primary_input.start(bridge, players.is_downed)
