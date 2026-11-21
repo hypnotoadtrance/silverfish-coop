@@ -1485,6 +1485,11 @@ namespace
 
         auto on_unreal_init() -> void override
         {
+            // The resident bootstrap publishes its settings while UE4SS loads
+            // the native mods. Read them after all startup constructors ran.
+            enabled = environment_equals("SILVERFISH_COOP_NATIVE_DEATH", "cpp");
+            scoped_events = enabled && environment_equals("SILVERFISH_COOP_NATIVE_EVENTS", "1");
+            client_damage = enabled && environment_equals("SILVERFISH_COOP_NATIVE_ZONE", "1");
             silverfish::native_zone::install_hooks();
             silverfish::native_transport::install_hooks();
             silverfish::native_stock_rest::install_hooks();
@@ -1684,9 +1689,9 @@ namespace
             }
         }
 
-        const bool enabled = environment_equals("SILVERFISH_COOP_NATIVE_DEATH", "cpp");
-        const bool scoped_events = enabled && environment_equals("SILVERFISH_COOP_NATIVE_EVENTS", "1");
-        const bool client_damage = enabled && environment_equals("SILVERFISH_COOP_NATIVE_ZONE", "1");
+        bool enabled{};
+        bool scoped_events{};
+        bool client_damage{};
         std::array<Hook::GlobalCallbackId, 4> hooks{};
     };
 }
