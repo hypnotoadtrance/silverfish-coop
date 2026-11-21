@@ -5266,6 +5266,11 @@ class Client:
                         raise ValueError("Connect the staged inventory viewer first")
                     self.last_game = await self.bridge.command(action, timeout=5)
                     result = {"native_inventory_view": self.last_game.get("native_inventory_view", {})}
+                elif action == "native-client-remote-damage-fixture":
+                    if not self.last_game.get("native_client_damage"):
+                        raise ValueError("Connect and wait for the authenticated client damage guard")
+                    self.last_game = await self.bridge.command(action, timeout=5)
+                    result = {"native_client_damage": self.last_game.get("native_client_damage", {})}
                 elif action in native_stash.VIEW_FIXTURES:
                     target = request.get("target")
                     if (self.last_game.get("state") != "connected" or not isinstance(target, str)

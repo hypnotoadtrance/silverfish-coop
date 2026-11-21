@@ -16,6 +16,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_kill_volume as volume
+from tools.silverfish.control import submit
 from tools.silverfish.travel import CROSSROADS
 
 
@@ -130,6 +131,10 @@ async def verify(work, vanilla, both):
         character = invitation["character_id"]
         guest_proc = await launch("join", client, "guest", "--invite", invitation["invite_file"], *setup)
         first, _ = await ready(character)
+        await wait(guest, lambda value: value.get("game", {}).get("native_client_damage"))
+        proxy = await submit(guest, "native-client-remote-damage-fixture")
+        assert proxy["ok"] and not proxy["native_client_damage"]["dead"], proxy
+        evidence["client_remote_damage_guard"] = proxy["native_client_damage"]
         revived = await fall_and_revive("guest", first, authority, character)
         if both:
             revived = await fall_and_revive("host", revived, client, character)

@@ -16,6 +16,7 @@ local area = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
 local path = area .. ".City_01_P:PersistentLevel.LootCrate_Small_BP_C_5"
 local profile = {index = 4, map = area, path = path, name = "LootCrate_Small_BP_C " .. path}
 local crate = object(3, profile.name)
+crate.IsActorBeingDestroyed = function() return false end
 local camera_type, box_type, mesh_type = object(4, "camera class"), object(5, "box class"), object(6, "mesh class")
 local camera, box, door = object(7, "camera"), object(8, "exact crate box"), object(9, "door")
 local sibling = object(10, "another crate box")

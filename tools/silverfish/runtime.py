@@ -2651,7 +2651,7 @@ class Bridge:
         if any(len(value) > 1024 or "\t" in value or "\r" in value or "\n" in value for value in fields):
             raise ValueError("Invalid game bridge command value")
         write_text(self.directory / "command.tsv", "\t".join(fields) + "\n")
-        status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout, interval=.05)
+        status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout, interval=.025)
         ack = status["ack"]
         if ack["result"] != "accepted":
             raise RuntimeError(ack["message"] or f"The game declined the {action} command")

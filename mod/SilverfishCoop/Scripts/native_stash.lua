@@ -27,8 +27,8 @@ local function selected_sites(state, phase)
     local instance, pawn = host_save.canonical_host(state, phase)
     local save = valid(instance) and instance.SaveSlot_Ref
     if not valid(pawn) or not valid(save) or not same(pawn.Save, save) or type(save.CombineStashes) ~= "boolean" then return end
-    local clock = os.time()
-    if not same(world, state.world) or site_time ~= clock then
+    local clock = os.clock()
+    if not same(world, state.world) or clock - site_time >= 2 then
         local base = StaticFindObject(stash_class)
         local leaf = state.map:match("([^/]+)$")
         sites = {}
@@ -210,7 +210,7 @@ function stash.rows(state, phase, row)
 end
 
 function stash.reset()
-    world, site_time, sites, report, moved = nil, nil, nil, nil, nil
+    report, moved = nil, nil
 end
 
 return stash

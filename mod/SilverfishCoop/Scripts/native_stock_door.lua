@@ -5,7 +5,7 @@ local base_path = "/Game/Assets/StaticMeshes/Doors/BasicDoor_Master.BasicDoor_Ma
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local guest_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
-local active_world, scanned_at, actors
+local active_world, scanned_at, actors, door_parts
 local trace_report
 local tool_report
 
@@ -47,11 +47,15 @@ local function census(state, phase)
         or state.server ~= (phase == "connected") or not available() then return {} end
     local now = os.time()
     if not same(active_world, state.world) or scanned_at ~= now then
-        active_world, scanned_at, actors = state.world, now, {}
+        active_world, scanned_at, actors, door_parts = state.world, now, {}, {}
         for _, actor in ipairs(FindAllOf("BasicDoor_Master_C") or {}) do
             local name = identity(actor, state.world)
-            if name and (phase ~= "hosting" or actor:HasAuthority()) and components(actor) then
-                actors[name] = actors[name] == nil and actor or false
+            if name and (phase ~= "hosting" or actor:HasAuthority()) then
+                local arrow, panel, knob = components(actor)
+                if arrow then
+                    actors[name] = actors[name] == nil and actor or false
+                    door_parts[name] = actors[name] and {arrow, panel, knob} or nil
+                end
             end
         end
     end
@@ -121,8 +125,12 @@ function doors.rows(state, phase, status_row)
     local result = {}
     for name, actor in pairs(census(state, phase)) do
         if #result >= 240 then break end
+        local parts = door_parts[name]
         local arrow, panel, knob
-        if valid(actor) then arrow, panel, knob = components(actor) end
+        if valid(actor) and not actor:IsActorBeingDestroyed() and parts
+            and valid(parts[1]) and valid(parts[2]) and valid(parts[3]) then
+            arrow, panel, knob = table.unpack(parts)
+        end
         local value = arrow and pose(actor, arrow)
         local center = panel and panel:K2_GetComponentLocation()
         local grip = knob and knob:K2_GetComponentLocation()

@@ -248,6 +248,7 @@ namespace
     struct Scope
     {
         U::FWeakObjectPtr crate{}, pawn{};
+        U::FWeakObjectPtr world{};
         bool host{};
         Clock::time_point expires{}, receipt{};
         std::uint64_t observed{};
@@ -419,7 +420,7 @@ namespace
                         status = "crate_profile_shape";
                         if (index == 0 || ready_profile(crate, world, &status))
                         {
-                            if (!same_scope(scope, crate, local)) scope = {crate, local.pawn, host};
+                            if (!same_scope(scope, crate, local)) scope = {crate, local.pawn, world, host};
                             scope.expires = now + lease;
                             scope.recheck_at = now + scene_recheck;
                             status = "bound";
@@ -437,13 +438,28 @@ namespace
     int status(const Lua& lua)
     {
         const auto count = lua.get_stack_size();
-        const auto index = count == 0 ? 1 : count == 1 && lua.is_integer(1) ? lua.get_integer() : 0;
+        const auto index = count == 0 ? 1 : count <= 2 && lua.is_integer(1) ? lua.get_integer() : 0;
+        const bool snapshot = count == 2 && lua.is_bool(2) && lua.get_bool();
         const auto* scope = ready() && index > 0 && index <= static_cast<std::int64_t>(scopes.size())
             ? &scopes[static_cast<std::size_t>(index - 1)] : nullptr;
         auto* crate = scope ? scope->crate.Get() : nullptr;
-        auto* world = silverfish::shared_loot::authored_crate_world(crate);
         const auto now = Clock::now();
-        const bool active = world && now < scope->expires && same_scope(*scope, crate, local_owner(world));
+        bool active = false;
+        if (scope && crate && now < scope->expires)
+        {
+            if (snapshot && now < scope->recheck_at)
+            {
+                // This branch supplies telemetry after set_scope. Stock callbacks and
+                // mutations still perform full identity, transport, and scene checks.
+                auto* world = static_cast<U::UWorld*>(scope->world.Get());
+                active = world && actor_in_world(crate, world) && actor_in_world(scope->pawn.Get(), world);
+            }
+            else
+            {
+                auto* world = silverfish::shared_loot::authored_crate_world(crate);
+                active = world && same_scope(*scope, crate, local_owner(world));
+            }
+        }
         const auto box = active ? presentation_box(crate) : PresentationBox{};
         lua.set_bool(active);
         const bool observed = active && now < scope->receipt && scope->observed;
@@ -458,6 +474,28 @@ namespace
             ? silverfish::electronic_locker::pending_power_open(crate, profiles[static_cast<std::size_t>(index - 1)]) : 0;
         lua.set_integer(static_cast<std::int64_t>(powered));
         return 7;
+    }
+
+    int receipts(const Lua& lua)
+    {
+        if (!ready() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto pawn = static_cast<std::uintptr_t>(lua.get_integer());
+        const auto now = Clock::now();
+        int values = 0;
+        for (std::size_t index = 0; index < scopes.size(); ++index)
+        {
+            const auto& scope = scopes[index];
+            if (!scope.observed || now >= scope.receipt || now >= scope.expires ||
+                reinterpret_cast<std::uintptr_t>(scope.pawn.Get()) != pawn || !scope.crate.Get()) continue;
+            const bool guest_pry = scope.pried && scope.tool_deadline != Clock::time_point{};
+            auto* guest = guest_pry ? scope.pry_guest.Get() : nullptr;
+            lua.set_integer(static_cast<std::int64_t>(index + 1));
+            lua.set_integer(static_cast<std::int64_t>(scope.observed));
+            lua.set_bool(scope.pried);
+            lua.set_integer(guest ? reinterpret_cast<std::intptr_t>(guest) : guest_pry ? -1 : 0);
+            values += 4;
+        }
+        return values;
     }
 
     int arm_guest_pry(const Lua& lua)
@@ -581,6 +619,7 @@ namespace silverfish::native_loot_crate_input
         if (!enabled()) return;
         lua.register_function("SilverfishSetNativeLootCrateInputScope", set_scope);
         lua.register_function("SilverfishReadNativeLootCrateInput", status);
+        lua.register_function("SilverfishReadNativeLootCrateReceipts", receipts);
         lua.register_function("SilverfishClearNativeLootCrateInput", clear);
         lua.register_function("SilverfishArmNativeGuestVehiclePry", arm_guest_pry);
         lua.register_function("SilverfishCancelNativeGuestVehiclePry", cancel_guest_pry);

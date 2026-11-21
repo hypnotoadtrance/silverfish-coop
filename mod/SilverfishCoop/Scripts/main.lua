@@ -209,6 +209,32 @@ local function controller_in_world(controller, world)
     return valid(controller) and same_object(controller:GetWorld(), world)
 end
 
+local function session_controllers(world, driver, server)
+    local statics = StaticFindObject(gameplay_statics_path)
+    local controller = valid(statics) and statics:GetPlayerController(world, 0) or nil
+    if not controller_in_world(controller, world) or not controller:IsLocalController()
+        or not controller:GetFullName():match("^PlayerControler_FP_C ") then
+        return FindAllOf("PlayerControler_FP_C") or {}
+    end
+
+    local controllers = { controller }
+    if valid(driver) and not server then
+        local clients = driver.ClientConnections
+        for index = 1, #clients do
+            local connection = clients[index]
+            local peer = valid(connection) and connection.PlayerController or nil
+            if controller_in_world(peer, world) and not peer:IsLocalController()
+                and peer:GetFullName():match("^PlayerControler_FP_C ") then
+                controllers[#controllers + 1] = peer
+            elseif valid(peer) then
+                -- During handoff the world may have a controller outside the stable NetDriver roster.
+                return FindAllOf("PlayerControler_FP_C") or {}
+            end
+        end
+    end
+    return controllers
+end
+
 local function get_pawn_health(pawn)
     local save = pawn.Save
     if valid(save) and finite(save.PlayerHealth) then
@@ -255,7 +281,7 @@ local function inspect()
     end
 
     local known_pawns = {}
-    for _, controller in ipairs(FindAllOf("PlayerControler_FP_C") or {}) do
+    for _, controller in ipairs(session_controllers(world, driver, state.server)) do
         if controller_in_world(controller, world) then
             local is_local = controller:IsLocalController()
             local pawn = controller.Pawn
@@ -1078,7 +1104,6 @@ local function read_command()
     if not id or #id > 80 or not id:match("^[%w_.%-]+$") or seen_commands[id] then
         return
     end
-    seen_commands[id] = true
     return fields
 end
 
@@ -1091,7 +1116,7 @@ local function world_view_row(mode, view)
         view.cloud_density_offset or "-", view.weather_verified and 1 or 0)
 end
 
-local function write_status(state, current_phase, failure)
+local function write_status(state, current_phase, failure, fields)
     sequence = sequence + 1
     local rows = {
         status_row("schema", 1),
@@ -1191,7 +1216,7 @@ local function write_status(state, current_phase, failure)
         for _, row in ipairs(native_guest_regen.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_sickness.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_loot_actions.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
-        for _, row in ipairs(native_loot_crate_input.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_loot_crate_input.rows(state, current_phase, status_row, fields)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_loot_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_quest.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_quest_turn_in.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1372,7 +1397,7 @@ local function observe_session()
     return state, current_phase
 end
 
-local function tick()
+local function tick(fields)
     local state, current_phase = observe_session()
     if not state then return end
     native_mindcore_replication.sync(state, current_phase)
@@ -1414,8 +1439,8 @@ local function tick()
         state, current_phase = observe_session()
         if not state then return end
     end
-    local fields = read_command()
     if fields then
+        seen_commands[fields[1]] = true
         last_quest_catalog = nil
         last_broker_quest = nil
         last_broker_position = nil
@@ -1483,10 +1508,11 @@ local function tick()
     local pause_checked, pause_failure = pcall(native_coop_pause.sync, state, current_phase)
     if not pause_checked then native_coop_pause.clear() end
     native_guest_smg_hold.cache_context(state, current_phase)
-    write_status(state, current_phase, not projected and failure or not pause_checked and pause_failure or nil)
+    write_status(state, current_phase, not projected and failure or not pause_checked and pause_failure or nil, fields)
 end
 
 players.start(bridge)
+native_loot_crate_input.start()
 native_enemy_shell_view.start(players.is_downed)
 native_inventory_view.start(bridge, players.is_downed)
 native_stash_view.start(players.is_downed)
@@ -1505,6 +1531,7 @@ native_mosby_station.start(bridge, players.is_downed)
 native_mindcore_carry.start(bridge)
 native_mindcore_carry_view.start(bridge, players.is_downed)
 native_mindcore_replication.start(function() return role == "client" and not leaving end)
+require("native_flare").start(function() return not leaving and role or nil end)
 native_datasilo_lift.start(function() return role == "client" and not leaving end)
 native_datasilo_door.start(function() return role == "client" and not leaving end)
 native_mindcore_view.start(bridge, players.is_downed)
@@ -1518,7 +1545,12 @@ native_zone.start(bridge)
 native_guest_smg_hold.start_fast(bridge, status_row, function(state)
     return phase(state) == "hosting" and same_object(state.world, current_world())
 end)
-LoopInGameThreadWithDelay(250, function()
-    local ok, failure = pcall(tick)
+local next_snapshot = 0
+LoopInGameThreadWithDelay(25, function()
+    local fields = read_command()
+    local now = os.clock()
+    if not fields and now < next_snapshot then return end
+    next_snapshot = now + 0.25
+    local ok, failure = pcall(tick, fields)
     if not ok then print("[SilverfishCoop] " .. tostring(failure) .. "\n") end
 end)

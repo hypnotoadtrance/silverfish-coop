@@ -100,7 +100,7 @@ Keep a local, versioned JSON interface alongside the menu. It should expose sess
 
 ## Observatory two-PC playtest follow-up
 
-- Verify that guests can open their own backpack from the bound Inventory action after joining from the stock character creator. Exercise the same binding in the packaged build.
+- Open the game's `InventoryScreen` from the guest's bound Inventory action after joining from the stock character creator. Bind it to the guest's own backpack and route changes to the host. Check the rendered screen and item actions in the packaged build.
 - Use the game's `StashScreen` and `ShopScreen` for guests. Stash transfers go through the selected character's host-owned stash, including the host's shared-rest-site setting. Merchant and NPC trades read the host's inventory for the exact trader and settle against the shared wallet and the requesting character's inventory.
 - Route both Interact and Nearby Items pickup to the host claim for the same world actor. Recheck the Observatory bolt, the host's Backpack and Nearby Items cards after a drop, and input-to-pickup time on both peers.
 - Sync a guest's harvest of a wild mushroom so its collected state is visible to the host and other guests.
@@ -112,6 +112,13 @@ Keep a local, versioned JSON interface alongside the menu. It should expose sess
 - Preserve the Crossroads frog's hop animation on peers and let guests pick it up through the same host-authoritative action as the host.
 - Replicate entity death and the transition to the stock corpse or ragdoll on peers. Cover the boar and other enemy types killed by the host.
 - Play the player-hit screen effect only for the struck player. When a target is downed, hostile NPCs should disengage and acquire an eligible standing player.
+- Sync which anomalies the host has generated. Drive health, downing, and game-over from the host so a guest-side anomaly cannot kill a remote player or trigger a party wipe.
 - Propagate the host's explosive-canister destruction and explosion to connected guests. Exercise it with stock ranged fire so the receiving view shows the shot and the resulting world change.
 - Replicate a thrown flare's lit world actor after it leaves the equipped hand. Check the throw and light on both peers through expiry.
 - Compare frame times and network traffic at the Observatory and Crossroads. Measure the client projection and host discovery work separately from packet arrival before changing update pacing.
+
+The muted two-seat loopback reproduced the Crossroads hitch. In the first 12-second sample, 36 host frames and 38 guest frames exceeded 33 ms. After distributing container inspection across game ticks, the counts were 22 and 2, and median bridge work fell from 40 to 25 ms on the host and from 36 to 17 ms on the guest. These measurements used the headless renderer. Internet latency and foreground frame timing still need a playtest.
+
+The guest damage guard now covers the simulated copies of the other players as well as the guest's own pawn. A focused loopback test forced the guest-side damage and death wrappers on the host's replica, verified that both pawns stayed alive, and then verified ordinary host-authoritative downing and revival separately.
+
+A host's stock red flare produces a lit replica on the guest, and expiration of the host actor ends both copies. The two-player fixture observed the same light intensity on both peers and verified that collision stayed disabled on the guest copy. The guest's ability to throw a flare still needs a gameplay test.

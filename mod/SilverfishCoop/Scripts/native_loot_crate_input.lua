@@ -10,7 +10,7 @@ local legacy_fixture_profiles = 3
 local open_rotation = { Pitch = 0, Yaw = 0, Roll = -95 }
 local cabinet_rotations = {{Pitch = 0, Yaw = 95, Roll = 0}, {Pitch = 0, Yaw = -95, Roll = 0}}
 local bindings, fixture_sequences = {}, {}
-local active_world
+local active_world, sampler
 local blowtorch_path = "/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"
 local crowbar_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C"
 local tool_report
@@ -34,7 +34,7 @@ end
 
 function input.clear()
     bindings, fixture_sequences, active_world = {}, {}, nil
-    tool_report = nil
+    sampler, tool_report = nil, nil
     if enabled and type(SilverfishClearNativeLootCrateInput) == "function" then
         SilverfishClearNativeLootCrateInput()
     end
@@ -159,17 +159,24 @@ function input.update(state, phase, profile)
         bindings[index], fixture_sequences[index] = nil, nil
         return nil, reason or "native_scope"
     end
+    local binding = bindings[index]
+    if binding and same(binding.pawn, pawn) and binding.host == host and valid(binding.crate)
+        and same(binding.crate:GetWorld(), state.world) and not binding.crate:IsActorBeingDestroyed() then
+        return binding
+    end
     local crate = StaticFindObject(profile.path)
     if not valid(crate) or crate:GetFullName() ~= profile.name or not same(crate:GetWorld(), state.world) then
         bindings[index], fixture_sequences[index] = nil, nil
         return nil, "lua_crate"
     end
-    local binding = bindings[index]
-    if not binding or not same(binding.crate, crate) or not same(binding.pawn, pawn) then
-        binding = { crate = crate, pawn = pawn, name = detail.name, host = host, profile = profile }
-        bindings[index], fixture_sequences[index] = binding, nil
-    end
+    binding = { crate = crate, pawn = pawn, name = detail.name, host = host, profile = profile }
+    bindings[index], fixture_sequences[index] = binding, nil
     return binding
+end
+
+function input.bound_in_world(world)
+    if not same(active_world, world) then return {} end
+    return bindings
 end
 
 local function observe_scene(current, box_state, box_address)
@@ -620,72 +627,149 @@ function input.command(fields, state, phase)
     error("native_loot_crate_input_arguments", 0)
 end
 
-function input.rows(state, phase, status_row)
-    local profiles = loot.profiles(state.map)
-    if not enabled or #profiles == 0 or not state.listening or phase ~= "hosting" and phase ~= "connected" then
-        if active_world then input.clear() end
-        return {}
+local function sample_profile(state, phase, status_row, profile)
+    local rows = {}
+    local current, scope = input.update(state, phase, profile)
+    local active, powered, info = false, 0, {}
+    if current then
+        local box_state, box_address, sequence, pried, guest
+        active, sequence, box_state, box_address, pried, guest, powered = SilverfishReadNativeLootCrateInput(profile.index, true)
+        scope = active and "active" or "scope_inactive"
+        if active then info = observe_scene(current, box_state, box_address) end
     end
-    local rows, latest, reported = {}, 0, nil
+    rows[#rows + 1] = status_row("native-loot-crate-diagnostic", profile.map, profile.name, phase,
+        scope or "-", info.door_state or "-", info.box_state or "-",
+        info.looted == nil and "-" or (info.looted and 1 or 0), info.collision or "-", info.roll or "-")
+    if info.qualified then
+        local angle = observe_angle(profile, info.door)
+        local spent = exhausted(current.crate, info.door, info.box, info.second, open_poses(profile, info.second, angle),
+            profile.door_locations or {}, profile)
+        local status = spent and "exhausted" or "ready"
+        local args = spent and angle and {angle} or {}
+        rows[#rows + 1] = status_row("native-loot-crate-input", profile.map, profile.name, status, table.unpack(args))
+        if profile.lockable and type(current.crate.Locked) == "boolean" then
+            rows[#rows + 1] = status_row("native-loot-vehicle-lock", profile.map, profile.name, current.crate.Locked and 1 or 0)
+        end
+        if current.host and info.looted == false and info.box and (info.collision == 1 or info.collision == 3) then
+            local verified, active = pcall(loot.temporary_activation, current.crate, current.pawn)
+            if verified and active == false then
+                rows[#rows + 1] = status_row("native-loot-crate-replenished", profile.map, profile.name, current.name)
+            end
+        end
+    end
+    if active and profile.stock_alarm then
+        local ok, lit, audible = pcall(alarm.read, current.crate)
+        if ok and type(lit) == "boolean" and type(audible) == "boolean" then
+            rows[#rows + 1] = status_row("native-loot-stock-alarm", profile.map, profile.name, lit and 1 or 0, audible and 1 or 0)
+        end
+    end
+    if active and profile.power_box then
+        local audio = power_box_audio(current.crate)
+        if audio then
+            rows[#rows + 1] = status_row("native-loot-power-box", profile.map, profile.name,
+                current.crate.Powered and 1 or 0, audio:IsActive() and 1 or 0)
+        end
+    end
+    if active and profile.electronic and current.host and type(powered) == "number" and powered > 0 then
+        rows[#rows + 1] = status_row("native-loot-electronic-powered-open", profile.map, profile.name, current.name, powered)
+    end
+    return rows
+end
+
+local function sample(state, phase, status_row, profiles)
+    local readings = {}
     for _, profile in ipairs(profiles) do
-        local current, scope = input.update(state, phase, profile)
-        local active, sequence, pried, guest, powered, info = false, 0, false, 0, 0, {}
-        if current then
-            local box_state, box_address
-            active, sequence, box_state, box_address, pried, guest, powered = SilverfishReadNativeLootCrateInput(profile.index)
-            scope = active and "active" or "scope_inactive"
-            if active then info = observe_scene(current, box_state, box_address) end
-        end
-        rows[#rows + 1] = status_row("native-loot-crate-diagnostic", profile.map, profile.name, phase,
-            scope or "-", info.door_state or "-", info.box_state or "-",
-            info.looted == nil and "-" or (info.looted and 1 or 0), info.collision or "-", info.roll or "-")
-        if info.qualified then
-            local angle = observe_angle(profile, info.door)
-            local spent = exhausted(current.crate, info.door, info.box, info.second, open_poses(profile, info.second, angle),
-                profile.door_locations or {}, profile)
-            local status = spent and "exhausted" or "ready"
-            local args = spent and angle and {angle} or {}
-            rows[#rows + 1] = status_row("native-loot-crate-input", profile.map, profile.name, status, table.unpack(args))
-            if profile.lockable and type(current.crate.Locked) == "boolean" then
-                rows[#rows + 1] = status_row("native-loot-vehicle-lock", profile.map, profile.name, current.crate.Locked and 1 or 0)
-            end
-            if current.host and info.looted == false and info.box and (info.collision == 1 or info.collision == 3) then
-                local verified, active = pcall(loot.temporary_activation, current.crate, current.pawn)
-                if verified and active == false then
-                    rows[#rows + 1] = status_row("native-loot-crate-replenished", profile.map, profile.name, current.name)
+        readings[profile.index] = sample_profile(state, phase, status_row, profile)
+    end
+    return readings
+end
+
+local function sample_slice()
+    local scan = sampler
+    if not scan or not same(active_world, scan.state.world) then return end
+    local started = os.clock()
+    for _ = 1, math.ceil(#scan.profiles / 20) do
+        local profile = scan.profiles[scan.next]
+        scan.readings[profile.index] = sample_profile(scan.state, scan.phase, scan.status_row, profile)
+        scan.next = scan.next % #scan.profiles + 1
+        if scan.next == 1 then scan.last_pass = os.clock() end
+        if os.clock() - started >= 0.002 then break end
+    end
+end
+
+local periodic_sampling = false
+function input.start()
+    if not enabled or type(SilverfishReadNativeLootCrateReceipts) ~= "function" then return end
+    LoopInGameThreadWithDelay(16, function()
+        if sampler and not pcall(sample_slice) then sampler = nil end
+    end)
+    periodic_sampling = true
+end
+
+local function append_receipts(rows, state, status_row)
+    local detail = state.local_pawn
+    if not detail or not valid(detail.pawn) then return end
+    local latest, reported = 0, nil
+    local receipts = table.pack(SilverfishReadNativeLootCrateReceipts(detail.pawn:GetAddress()))
+    for offset = 1, receipts.n, 4 do
+        local index, sequence, pried, guest = table.unpack(receipts, offset, offset + 3)
+        local binding = bindings[index]
+        if binding and binding.profile.map == state.map and same(binding.pawn, detail.pawn) then
+            local profile = binding.profile
+            if pried and guest ~= 0 then
+                for _, candidate in ipairs(state.guests or {}) do
+                    if valid(candidate.pawn) and candidate.pawn:GetAddress() == guest then
+                        rows[#rows + 1] = status_row("native-loot-guest-pry", state.map, profile.name,
+                            candidate.name, sequence)
+                        break
+                    end
                 end
+            elseif sequence > latest then
+                latest = sequence
+                reported = status_row("native-loot-crate-interaction", state.map, profile.name, detail.name, sequence,
+                    pried and "pried" or sequence == fixture_sequences[index] and "fixture" or "stock")
             end
-        end
-        if active and profile.stock_alarm then
-            local ok, lit, audible = pcall(alarm.read, current.crate)
-            if ok and type(lit) == "boolean" and type(audible) == "boolean" then
-                rows[#rows + 1] = status_row("native-loot-stock-alarm", profile.map, profile.name, lit and 1 or 0, audible and 1 or 0)
-            end
-        end
-        if active and profile.power_box then
-            local audio = power_box_audio(current.crate)
-            if audio then
-                rows[#rows + 1] = status_row("native-loot-power-box", profile.map, profile.name,
-                    current.crate.Powered and 1 or 0, audio:IsActive() and 1 or 0)
-            end
-        end
-        if active and profile.electronic and current.host and type(powered) == "number" and powered > 0 then
-            rows[#rows + 1] = status_row("native-loot-electronic-powered-open", profile.map, profile.name, current.name, powered)
-        end
-        if active and pried and guest and guest ~= 0 then
-            for _, detail in ipairs(state.guests or {}) do
-                if valid(detail.pawn) and detail.pawn:GetAddress() == guest then
-                    rows[#rows + 1] = status_row("native-loot-guest-pry", profile.map, profile.name, detail.name, sequence)
-                    break
-                end
-            end
-        elseif active and sequence > latest then
-            latest = sequence
-            reported = status_row("native-loot-crate-interaction", profile.map, profile.name,
-                current.name, sequence, pried and "pried" or sequence == fixture_sequences[profile.index] and "fixture" or "stock")
         end
     end
     if reported then rows[#rows + 1] = reported end
+end
+
+function input.rows(state, phase, status_row, fields)
+    local profiles = loot.profiles(state.map)
+    local detail = state.local_pawn
+    if not enabled or #profiles == 0 or not state.listening or not detail or not valid(detail.pawn)
+        or phase ~= "hosting" and phase ~= "connected" then
+        if active_world then input.clear() end
+        return {}
+    end
+    local readings
+    if periodic_sampling and #profiles > 12 then
+        local pawn = detail.pawn
+        local now = os.clock()
+        if not sampler or not same(sampler.state.world, state.world) or not same(sampler.pawn, pawn)
+            or sampler.phase ~= phase or now - sampler.last_pass > 1.0 then
+            readings = sample(state, phase, status_row, profiles)
+            sampler = {state = state, pawn = pawn, profiles = profiles, phase = phase, status_row = status_row,
+                readings = readings, next = 1, last_pass = now}
+        else
+            sampler.state = state
+            readings = sampler.readings
+            -- Command acknowledgements include immediate readback for affected containers.
+            if fields then
+                for index = 3, #fields do
+                    local profile = loot.profile(state.map, fields[index])
+                    if profile then readings[profile.index] = sample_profile(state, phase, status_row, profile) end
+                end
+            end
+        end
+    else
+        readings = sample(state, phase, status_row, profiles)
+    end
+    local rows = {}
+    for _, profile in ipairs(profiles) do
+        for _, row in ipairs(readings[profile.index] or {}) do rows[#rows + 1] = row end
+    end
+    if type(SilverfishReadNativeLootCrateReceipts) == "function" then append_receipts(rows, state, status_row) end
     if tool_report and phase == "hosting" and tool_report.map == state.map then
         local report = tool_report
         rows[#rows + 1] = status_row("native-loot-guest-" .. report.kind .. "-use", report.map, report.crate, report.pawn,

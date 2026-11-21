@@ -525,6 +525,27 @@ end
 
 function native_death.command(fields, state, phase)
     local command = fields[2]
+    if command == "native-client-remote-damage-fixture" then
+        local scope, visit = client_scope, client_visit
+        local remote = #state.guests == 1 and state.guests[1].pawn
+        if #fields ~= 2 or os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1"
+            or phase ~= "connected" or not visit or not scope or not valid(remote)
+            or remote:IsLocallyControlled() or remote:HasAuthority() or remote.Dead ~= false
+            or not same(remote:GetWorld(), state.world) then
+            error("The isolated client damage fixture requires one living remote player", 0)
+        end
+        local read = SilverfishReadNativeClientDamageScope
+        local armed, _, before_direct, before_die = read(scope.address, visit.session, visit.epoch)
+        if not armed then error("The authenticated client damage scope is unavailable", 0) end
+        remote:Deal_DirectDamage(1000, remote, FText("Co-op simulated-peer damage probe"), false)
+        remote:Die(remote, FText("Co-op simulated-peer death probe"), {})
+        local active, _, direct, die, faults = read(scope.address, visit.session, visit.epoch)
+        if not active or direct ~= before_direct + 1 or die ~= before_die + 1
+            or faults ~= 0 or remote.Dead ~= false or scope.pawn.Dead ~= false then
+            error("A client-side damage call reached a simulated player", 0)
+        end
+        return "client-side damage and death to the remote player were vetoed"
+    end
     if command == "native-friendly-fire" then
         local host, guest = scope_records["local"], scope_records.guest
         if #fields ~= 2 or not active(state, phase) or not host or not guest or hook_status ~= "ready"

@@ -1175,12 +1175,13 @@ namespace
         return read_object(object_field(object, name), object);
     }
 
-    [[nodiscard]] bool live_client_actor(Unreal::UObject* object, Unreal::UObject* world)
+    [[nodiscard]] bool live_client_actor(Unreal::UObject* object, Unreal::UObject* world,
+                                        std::uint8_t expected_role = autonomous_role)
     {
         if (!live_object(object)) return false;
         auto* role = reflected_field<Unreal::FByteProperty>(object, STR("Role"));
         auto* ending = reflected_field<Unreal::FBoolProperty>(object, STR("bActorIsBeingDestroyed"));
-        return role && role->GetPropertyValueInContainer(object) == autonomous_role &&
+        return role && role->GetPropertyValueInContainer(object) == expected_role &&
             ending && !ending->GetPropertyValueInContainer(object) &&
             static_cast<Unreal::AActor*>(object)->GetWorld() == world;
     }
@@ -1314,8 +1315,14 @@ namespace
                                  void* parameters, Unreal::FFrame* frame)
     {
         auto& scope = client_damage_scope;
-        if (!scope.accepts(callee) || scope.pawn.object.Get() != context || iteration.OriginalFunctionCallPrevented() ||
+        if (!scope.accepts(callee) || iteration.OriginalFunctionCallPrevented() ||
             !qualified_client_damage(scope)) return false;
+        // The guest also has simulated copies of the other players. A locally
+        // evaluated anomaly cannot damage or kill those pawns on this peer.
+        constexpr std::uint8_t simulated_role = 1;
+        if (scope.pawn.object.Get() != context &&
+            (!live_client_actor(context, scope.world.Get(), simulated_role) ||
+             context->GetClassPrivate() != scope.die->GetOuterPrivate())) return false;
         if (frame && frame->Object() != context) return false;
 
         DamageOutputs outputs;

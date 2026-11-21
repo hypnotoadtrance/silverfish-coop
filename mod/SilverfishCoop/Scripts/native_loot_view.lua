@@ -28,25 +28,39 @@ local function bounded_id(text, lower)
         and text:match(lower and "^[0-9a-f]+$" or "^[0-9A-F]+$")
 end
 
-local function scope(state, phase, crate)
-    if not event_path or not crate then return end
-    local binding = crate_input.update(state, phase, loot.profile(state.map, crate))
+local function viewer(state, phase)
     local controller = state.controller
-    if not binding or not valid(controller) then return end
-    local pawn = binding.pawn
-    if not controller:IsLocalController() or not pawn:IsLocallyControlled()
+    local detail = state.local_pawn
+    local pawn = detail and detail.pawn
+    if not event_path or (phase ~= "hosting" and phase ~= "connected") or not valid(controller) or not valid(pawn)
+        or not controller:IsLocalController() or not pawn:IsLocallyControlled()
         or not same(controller.Pawn, pawn) or not same(pawn.Controller, controller)
-        or not same(controller:GetWorld(), state.world) or binding.name ~= pawn:GetFullName()
-        or binding.crate.Looted ~= true then return end
-    local here, target = pawn:K2_GetActorLocation(), binding.crate:K2_GetActorLocation()
+        or not same(controller:GetWorld(), state.world) or not same(pawn:GetWorld(), state.world)
+        or detail.name ~= pawn:GetFullName() then return end
+    local here = pawn:K2_GetActorLocation()
     local range, stack = pawn.InteractionRange, controller.MenuStack
-    if not here or not target or type(range) ~= "number" or range ~= range or range <= 0 or range > 1000
+    if not here or type(range) ~= "number" or range ~= range or range <= 0 or range > 1000
         or controller.Loading ~= false or not stack or stack:GetArrayNum() ~= 0
         or is_downed(pawn) ~= false then return end
+    return {pawn = pawn, controller = controller, here = here, range = range}
+end
+
+local function nearby(binding, observer)
+    if not binding or not same(binding.pawn, observer.pawn) or not valid(binding.crate)
+        or binding.crate.Looted ~= true then return end
+    local target = binding.crate:K2_GetActorLocation()
+    if not target then return end
+    local here = observer.here
     local distance = math.sqrt((here.X - target.X)^2 + (here.Y - target.Y)^2 + (here.Z - target.Z)^2)
-    if distance ~= distance or distance >= range then return end
-    return { pawn = pawn, controller = controller, name = binding.name, crate = crate, actor = binding.crate,
-        distance = distance, capacity = binding.profile.capacity }
+    if distance ~= distance or distance >= observer.range then return end
+    return { pawn = binding.pawn, controller = observer.controller, name = binding.name, crate = binding.profile.name,
+        actor = binding.crate, distance = distance, capacity = binding.profile.capacity }
+end
+
+local function scope(state, phase, crate)
+    local observer = viewer(state, phase)
+    if not observer or not crate then return end
+    return nearby(crate_input.update(state, phase, loot.profile(state.map, crate)), observer)
 end
 
 local function remove_widget()
@@ -209,10 +223,11 @@ function view.sync(state, phase)
 end
 
 function view.rows(state, phase, status_row)
-    if not event_path then return {} end
+    local observer = viewer(state, phase)
+    if not observer then return {} end
     local rows = {}
-    for _, profile in ipairs(loot.profiles(state.map)) do
-        local active = scope(state, phase, profile.name)
+    for _, binding in pairs(crate_input.bound_in_world(state.world)) do
+        local active = nearby(binding, observer)
         if active then
             rows[#rows + 1] = status_row("native-loot-view-nearby", state.map, active.crate, active.name, active.distance)
             if current and current.crate == active.crate and same(current.actor, active.actor)

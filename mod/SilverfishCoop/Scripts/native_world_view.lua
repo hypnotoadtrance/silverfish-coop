@@ -51,16 +51,10 @@ local function bounded(number, low, high)
 end
 
 local function resolve_day(world, instance, profile)
-    local found
-    for _, actor in ipairs(FindAllOf("DayCycle_SunControler_BP_C") or {}) do
-        if live_actor(actor, world) and exact(actor, day_class) then
-            if found or actor:GetFullName() ~= profile.day then
-                error("native_world_day_cycle_ambiguous", 0)
-            end
-            found = actor
-        end
-    end
-    if not found or found.Ready ~= true or found.OnlyTrackTime ~= false or found.bReplicates ~= false
+    local path = profile.day:match("^%S+ (.+)$")
+    local found = path and StaticFindObject(path)
+    if not live_actor(found, world) or not exact(found, day_class) or found:GetFullName() ~= profile.day
+        or found.Ready ~= true or found.OnlyTrackTime ~= false or found.bReplicates ~= false
         or type(found.UpdateInRealTime) ~= "boolean" or not same(found["Game Instance"], instance) then
         error("native_world_day_cycle_unavailable", 0)
     end
