@@ -416,6 +416,8 @@ A second Borough run set the guest's isolated test save to 210 health and 230 re
 
 With the same food option, a guest collected the exact placed Canned Peaches in City through stock Interact and confirmed use in the inventory overlay. It consumed one stock unit and raised food from 50 to 62. Both health and regeneration values stayed at 250. The same-port restart restored the exact use receipt and refused another claim for the consumed pickup.
 
+Canned Beans in City and Crash Site, and Brown Mushroom in CrossRoads, use the same guest inventory path. Three two-instance runs collected these original items through stock Interact and consumed one unit through the inventory overlay. Beans raised guest food from 50 to 64 and the mushroom from 50 to 53.5. The Crash Site guest moved to the tunnel door before eating to get clear of damage near the pickup. Each same-port restart restored the consumed item receipt and refused another claim for the source. Host inventories and all 11 original save hashes matched. These checks cover the raw stock items. [Stock food pickup and use test](../tests/live_city_peaches_smoke.py)
+
 With `--native-guest-sickness`, the stock infection callback rolled 110 sickness for the exact enrolled guest. The host stayed at zero. The guest's saved sickness was 109 by checkpoint and reloaded at 109 on the same Direct IP port. A signed treatment callback then changed only the guest's sickness. The original single-player save hashes matched.
 
 ## Pending live verification

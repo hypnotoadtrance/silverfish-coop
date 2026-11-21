@@ -139,6 +139,18 @@ async def verify(work: Path, original: Path, source=pickup.CITY_PEACHES):
         host_inventory = await inventory(host_run)
         assert guid not in host_inventory, claim
         evidence["stock_pickup"] = {"source": projected(available), "interaction": interaction, "receipt": claim, "item": item}
+        if source == pickup.CRASH_SITE_BEANS:
+            # A guest can take lethal damage beside this pickup. Eat at the checked tunnel door.
+            for target in ("host", "guest"):
+                await action(host_run, "native-door-position", target=target, entrance="Crash_Tut", exit_position="near")
+            current = await wait(host_run, lambda state: state.get("gameplay", {}).get("players", {}).get("guest", {})
+                                 .get("character_id") == character)
+            if current["gameplay"]["players"]["guest"]["downed"]:
+                revived = await action(host_run, "interact", target=character)
+                assert revived["effect"] == "revive", revived
+                evidence["stock_revive"] = True
+            await wait(guest_run, lambda state: state.get("game", {}).get("player_effects", {}).get("local", {}).get("state")
+                       == "standing")
         consumed = await eat(item)
         evidence["stock_food_used"] = consumed
         assert guid not in await inventory(guest_run)
