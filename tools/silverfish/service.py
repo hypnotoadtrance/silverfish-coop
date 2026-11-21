@@ -773,6 +773,10 @@ class Host:
             if self.last_game.get(native_guest_drop_record.GENERIC_CAPABILITY) == 1:
                 view[native_guest_drop_record.GENERIC_CAPABILITY] = 1
         view[native_authored_pickup.STATE_KEY] = self.party.get(native_authored_pickup.STATE_KEY, {})
+        if self.last_game.get("map") == native_authored_pickup.SCAV_BAR:
+            view[native_authored_pickup.GOLD_BAG_VIEW] = (
+                native_authored_pickup.GOLD_BAG not in view[native_authored_pickup.STATE_KEY]
+                and native_authored_pickup._displayed(self.last_game, native_authored_pickup.GOLD_BAG).get("state") == "available")
         if self.last_game.get(native_loose_pickup.CAPABILITY) == 1:
             view[native_loose_pickup.STATE] = self.loose_pickups.hidden(self)
         if dead_drop := native_dead_drop.frame(self):
@@ -2436,6 +2440,13 @@ class Host:
                     self.last_game = await bridge.command(action, actor, timeout=5)
                     self.last_seen = time.monotonic()
                     result = {"actor": actor}
+                elif action == native_authored_pickup.GOLD_BAG_FIXTURE and self.fixtures:
+                    snapshot = await bridge.command(action, timeout=5)
+                    bag = native_authored_pickup._displayed(snapshot, native_authored_pickup.GOLD_BAG)
+                    if bag.get("state") != "available":
+                        raise RuntimeError("The stock Golden Bag pickup step did not open the bag")
+                    self.last_game, self.last_seen = snapshot, time.monotonic()
+                    result = {"native_gold_bag": bag}
                 elif action == native_authored_pickup.ACTION:
                     result = await native_authored_pickup.claim(self, bridge, "host", request.get("target"),
                                                                request.get("operation_id") or path.stem)
@@ -4969,7 +4980,9 @@ class Client:
                         self.bridge, self.last_game, self.gameplay.get(native_stock_door.KEY), self.zone_epoch)
                     await native_inventory_death.project_bags(self, self.bridge, self.invite["character_id"],
                                                                self.gameplay.get("native_backpacks", {}))
-                    await native_authored_pickup.project(self, self.bridge, self.gameplay.get(native_authored_pickup.STATE_KEY, {}))
+                    await native_authored_pickup.project(
+                        self, self.bridge, self.gameplay.get(native_authored_pickup.STATE_KEY, {}),
+                        gold_bag=self.gameplay.get(native_authored_pickup.GOLD_BAG_VIEW))
                     await native_loose_pickup.project(self, self.bridge, self.gameplay.get(native_loose_pickup.STATE))
                     await native_dust_cabinet.project_client(self)
                     await native_savlo_locker.project_client(self)

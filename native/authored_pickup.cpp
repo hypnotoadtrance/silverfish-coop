@@ -108,6 +108,13 @@ namespace
             63519.2477725694, 36406.1978875462, 849.5514682383, 9,
         },
         Profile{
+            "scav-bar-gold-bag",
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P:PersistentLevel.Bag_GoldRush_C_1"),
+            STR("/Game/Classes/Items/Key_Items/Bag_GoldRush.Bag_GoldRush_C"),
+            -6300.0, -2150.0, -179.9237181486, 1,
+        },
+        Profile{
             "railyard-depot-documents",
             STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P"),
             STR("/Game/Classes/Maps/Maps_OverWorld/RailYard_P.RailYard_P:PersistentLevel.Documents_DepotOffice_BP_C_1"),
@@ -937,6 +944,72 @@ namespace
             boolean(pawn, STR("Dead"), false) && in_range(pawn, scope.actor.Get());
     }
 
+    struct PickupListener
+    {
+        std::string_view source;
+        const U::TCHAR* script_class;
+        const U::TCHAR* callback_name;
+        const U::TCHAR* receiver;
+        const U::TCHAR* receiver_class;
+        bool gold_bag;
+    };
+
+    constexpr std::array pickup_listeners{
+        PickupListener{"dead-end-coup-report",
+            STR("/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P.DeadEnd_01_P_C"), STR("PickedUp_Note"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P.DeadEnd_01_P:PersistentLevel.NPC_CoupOfficer_02_C_1"),
+            STR("/Game/Classes/NPCs/NPC_Characters/NPC_CoupOfficer_02.NPC_CoupOfficer_02_C"), false},
+        PickupListener{"scav-bar-gold-bag",
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P_C"), STR("PickedUp_Bag"),
+            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P:PersistentLevel.Dialogue_Controler_BP_C_1"),
+            STR("/Game/Classes/ScriptingActors/Dialogue_Controler_BP.Dialogue_Controler_BP_C"), true},
+    };
+
+    struct PickupBroadcast
+    {
+        U::UObject* script{};
+        U::UFunction* listener{};
+        U::UObject* receiver{};
+        U::UObject* host{};
+        bool gold_bag{}, entered{}, reaction{}, ping{};
+    };
+
+    PickupBroadcast* active_pickup_broadcast{};
+
+    void observe_pickup_broadcast(U::UObject* target, U::UFunction* function, const void* args)
+    {
+        auto* broadcast = active_pickup_broadcast;
+        if (!broadcast) return;
+        if (target == broadcast->script && function == broadcast->listener) broadcast->entered = true;
+        if (!broadcast->entered || !args) return;
+        const auto is = [&](const U::TCHAR* name, U::UObject* expected) {
+            return read(field<U::FObjectProperty>(function, name), args) == expected;
+        };
+        if (broadcast->gold_bag && target == find<U::UObject>(code_library) &&
+            function == find<U::UFunction>(STR("/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.FL_CodeLib01_C:GlobalPing")))
+        {
+            auto* key = field<U::FStrProperty>(function, STR("Ping_ID"));
+            if (!key || !is(STR("Sending_Actor"), broadcast->host) || !is(STR("__WorldContext"), broadcast->script)) return;
+            const auto id = key->GetPropertyValue(key->ContainerPtrToValuePtr<void>(args));
+            broadcast->ping |= std::basic_string_view<U::TCHAR>{*id} == STR("PickedUp_GoldBag");
+        }
+        if (target != broadcast->receiver) return;
+        if (broadcast->gold_bag)
+        {
+            auto* powered = field<U::FBoolProperty>(function, STR("Powered"));
+            if (function == find<U::UFunction>(STR("/Game/Classes/ScriptingActors/Dialogue_Controler_BP.Dialogue_Controler_BP_C:Send_PowerSignal"))
+                && powered && powered->GetPropertyValueInContainer(args) && is(STR("Instigator"), broadcast->host))
+                broadcast->reaction = true;
+        }
+        else
+        {
+            auto* level = field<U::FIntProperty>(function, STR("Aggro_Level"));
+            if (function == find<U::UFunction>(STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:Set Agro on Target"))
+                && level && level->GetPropertyValueInContainer(args) == 1 && is(STR("AgroSource"), broadcast->host))
+                broadcast->reaction = true;
+        }
+    }
+
     U::UObject* cabinet_client_pawn(U::UObject* actor, U::UFunction* function, const void* args)
     {
         if (!args || !live(actor)) return nullptr;
@@ -975,6 +1048,7 @@ namespace
     void intercept(Iteration& call, U::UObject* context, U::UFunction* function, const void* args, U::FFrame* frame)
     {
         if (!ready() || !context || !function || call.OriginalFunctionCallPrevented()) return;
+        observe_pickup_broadcast(context, function, args);
         static const U::FName interact_name{STR("SendInteractionToActor")};
         static const U::FName put_name{STR("PutInInventory")};
         static const U::FName pickup_name{STR("PickUp_Object")};
@@ -2158,6 +2232,62 @@ namespace
         return 6;
     }
 
+    int stock_pickup_callback(const Lua& lua)
+    {
+        if (!ready() || active_pickup_broadcast || lua.get_stack_size() != 4 ||
+            !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_bool(3))
+            return result(lua, false, "authored_pickup_callback_arguments_unqualified");
+        const auto pawn_address = static_cast<Address>(lua.get_integer());
+        const auto save_address = static_cast<Address>(lua.get_integer());
+        const bool broadcast = lua.get_bool();
+        auto* scope = select_source(lua);
+        auto* pawn = live_address(pawn_address, find<U::UClass>(pawn_path));
+        auto* save = object(pawn, STR("Save"));
+        if (!scope || !scope->profile || !save_address || address(save) != save_address || !authorized(*scope, pawn, save))
+            return result(lua, false, "authored_pickup_callback_authority_unqualified");
+        const auto match = std::ranges::find(pickup_listeners, scope->profile->source, &PickupListener::source);
+        if (match == pickup_listeners.end()) return result(lua, false, "authored_pickup_callback_source_unknown");
+
+        auto* world = scope->world.Get();
+        auto* level = object(world, STR("PersistentLevel"));
+        auto* script = object(level, STR("LevelScriptActor"));
+        auto* script_class = find<U::UClass>(match->script_class);
+        if (!live(script) || !script_class || script->GetClassPrivate() != script_class ||
+            role(script) != 3 || static_cast<U::AActor*>(script)->GetWorld() != world ||
+            static_cast<U::AActor*>(script)->GetLevel() != level)
+            return result(lua, false, "authored_pickup_level_script_unqualified");
+        const U::FName listener_name{match->callback_name, U::FNAME_Find};
+        auto* listener = script_class->GetFunctionByNameInChain(listener_name);
+        auto* signature = find<U::UFunction>(STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:Item_PickedUp__DelegateSignature"));
+        auto* property = field<U::FMulticastInlineDelegateProperty>(scope->actor.Get(), STR("Item_PickedUp"));
+        if (listener_name.IsNone() || !listener || listener->GetOuterPrivate() != script_class ||
+            listener->GetNumParms() != 0 || listener->GetReturnProperty() ||
+            listener->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || !signature || signature->GetNumParms() != 0 ||
+            !property || property->GetSize() != sizeof(U::FMulticastScriptDelegate) ||
+            property->GetSignatureFunction().Get() != signature)
+            return result(lua, false, "authored_pickup_callback_layout_unqualified");
+        const auto* delegate = property->ContainerPtrToValuePtr<U::FMulticastScriptDelegate>(scope->actor.Get());
+        if (delegate->Num() != 1 || !delegate->Contains(script, listener_name))
+            return result(lua, false, "authored_pickup_exact_callback_unavailable");
+
+        auto* receiver = find<U::UObject>(match->receiver);
+        if (live(receiver) && (!exact(receiver, match->receiver_class) || role(receiver) != 3 ||
+            static_cast<U::AActor*>(receiver)->GetWorld() != world || static_cast<U::AActor*>(receiver)->GetLevel() != level))
+            return result(lua, false, "authored_pickup_callback_receiver_unqualified");
+        if (match->gold_bag && !live(receiver))
+            return result(lua, false, "authored_pickup_callback_receiver_unavailable");
+        if (!broadcast) return result(lua, true, "verified");
+
+        PickupBroadcast receipt{script, listener, live(receiver) ? receiver : nullptr, scope->pawn.Get(), match->gold_bag};
+        active_pickup_broadcast = &receipt;
+        delegate->ProcessMulticastDelegate<U::UObject>(nullptr);
+        active_pickup_broadcast = nullptr;
+        if (!receipt.entered || (receipt.receiver && !receipt.reaction) || (receipt.gold_bag && !receipt.ping))
+            return result(lua, false, "mutation_unverified_authored_pickup_callback");
+        return result(lua, true, receipt.gold_bag ? "gold_bag_conversation" :
+            receipt.receiver ? "officer_reaction" : "officer_absent");
+    }
+
     int capture(const Lua& lua)
     {
         std::array<Address, 3> supplied{};
@@ -2316,6 +2446,7 @@ namespace silverfish::native_authored_pickup
         lua.register_function("SilverfishObserveNativeCrossroadsDeadDrop", observe_drop);
         lua.register_function("SilverfishProjectNativeCrossroadsDeadDrop", project_drop);
         lua.register_function("SilverfishClearNativeCrossroadsDeadDrop", clear_drop);
+        lua.register_function("SilverfishStockAuthoredPickupCallback", stock_pickup_callback);
         lua.register_function("SilverfishCaptureNativeAuthoredPickup", capture);
         lua.register_function("SilverfishClaimNativeAuthoredCash", claim_cash);
         lua.register_function("SilverfishVerifyNativeAuthoredPickup", verify_escrow);

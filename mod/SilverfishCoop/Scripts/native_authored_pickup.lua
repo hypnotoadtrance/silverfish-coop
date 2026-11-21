@@ -17,6 +17,14 @@ local crash_site = "/Game/Classes/Maps/Maps_Dungeons/CrashSite_01_P"
 local canned_beans = "/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"
 local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough"
 local dead_end = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
+local scav_bar = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
+local gold_bag = {
+    map = scav_bar, source = "scav-bar-gold-bag",
+    path = scav_bar .. ".Shop_ScavBar_P:PersistentLevel.Bag_GoldRush_C_1",
+    class = "/Game/Classes/Items/Key_Items/Bag_GoldRush.Bag_GoldRush_C",
+    name = "Bag_GoldRush_C", callback = true, authority_sight = true, explicit_source = true,
+    approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
+}
 local depot = "/Game/Classes/Maps/Maps_OverWorld/RailYard_P"
 local lab_e206 = "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
@@ -60,12 +68,13 @@ local profiles = {
         name = "Item_VintageWine_C",
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
+    gold_bag,
     {
         map = dead_end,
         source = "dead-end-coup-report",
         path = dead_end .. ".DeadEnd_01_P:PersistentLevel.Note_DeadEnd_01_C_1",
         class = "/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C",
-        name = "Note_DeadEnd_01_C",
+        name = "Note_DeadEnd_01_C", callback = true, authority_sight = true,
         approach = { { -115, 0 }, { 115, 0 }, { 0, -115 }, { 0, 115 } },
     },
     {
@@ -267,6 +276,17 @@ local function guid(value)
     return type(value) == "string" and #value == 32 and value:match("^[0-9A-F]+$") and value ~= string.rep("0", 32)
 end
 
+local function gold_bag_step(save)
+    local key = FName("Trans_Gold_BigIron", EFindName.FNAME_Find)
+    local active = valid(save) and save.ActiveQuests
+    if not active or not key or key:GetComparisonIndex() == 0 then return end
+    local found = active:Contains(key)
+    if found == false then return 0, key end
+    if found ~= true then return end
+    local row = active:Find(key):get()
+    return row and math.tointeger(row.Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A), key
+end
+
 function pickup.clear()
     binding, report, loose_check = nil, nil, nil
     if enabled and type(SilverfishClearNativeAuthoredPickup) == "function" then SilverfishClearNativeAuthoredPickup() end
@@ -292,7 +312,9 @@ function pickup.update(state, phase)
         and SilverfishDiscoverLoosePickups(pawn:GetAddress(), host) or nil
     local active, unavailable, reason = {}, {}, nil
     for _, profile in ipairs(placements) do
-        local ok, detail = SilverfishSetNativeAuthoredPickupScope(pawn:GetAddress(), host, profile.source)
+        local allowed = profile ~= gold_bag or not host or gold_bag_step(pawn.Save) == 1
+        local ok, detail
+        if allowed then ok, detail = SilverfishSetNativeAuthoredPickupScope(pawn:GetAddress(), host, profile.source) end
         if ok == true then
             active[profile.source] = profile
         elseif type(detail) == "string" then
@@ -427,6 +449,15 @@ local function claim(fields, state, phase, profile)
             return "authored loose pickup reported"
         end
     end
+    if profile.callback then
+        local check = SilverfishStockAuthoredPickupCallback
+        if type(check) ~= "function" then error("authored_pickup_callback_unavailable", 0) end
+        local ready, detail = check(pawn:GetAddress(), save:GetAddress(), false, profile.source)
+        if not ready then
+            report.status = tostring(detail)
+            return "authored level pickup callback unavailable"
+        end
+    end
     local scratch = statics:CreateSaveGameObject(save_class)
     if not valid(scratch) then
         report.status = "authored_pickup_escrow_create_failed"
@@ -478,6 +509,21 @@ local function claim(fields, state, phase, profile)
             error("mutation_unverified_loose_pickup_retirement", 0)
         end
     end
+    if report.ok and profile.callback then
+        local delivered, effect = SilverfishStockAuthoredPickupCallback(pawn:GetAddress(), save:GetAddress(), true, profile.source)
+        if not delivered then error(tostring(effect), 0) end
+        local actor = StaticFindObject(profile.path)
+        if not valid(actor) then error("mutation_unverified_authored_callback_source_unavailable", 0) end
+        local mode = math.tointeger(actor.Item_RespawnMode)
+        local leaf = profile.path:match(":PersistentLevel%.([%w_]+)$")
+        actor:ResolveSaveMode()
+        if not mode or not leaf or not verify_stock_mark({
+                mode = mode, cash_flag = leaf .. "-" .. state.map:match("([^/]+)$") .. "-"
+            }, actor) or not SilverfishProjectNativeAuthoredPickup(true, profile.source) then
+            error("mutation_unverified_authored_callback_retirement", 0)
+        end
+        report.effect = effect
+    end
     if drill_before then
         local checked, after = pcall(drill_head.read, state, phase, true)
         if not checked or not drill_head.unchanged(drill_before, after) then
@@ -502,6 +548,60 @@ function pickup.command(fields, state, phase)
     local action = fields[2]
     if action == "native-cistern-nfta-locker-fixture" then
         return stock_input_fixture.cistern_nfta_locker(fields, state, phase)
+    end
+    if action == "native-gold-bag-quest-fixture" then
+        if phase ~= "hosting" or state.map ~= scav_bar or #fields ~= 2 or not (fixtures and host_fixtures) then
+            error("gold_bag_quest_fixture_unavailable", 0)
+        end
+        local local_pawn = state.local_pawn
+        local pawn, save, statics
+        if local_pawn then pawn, save, statics = owner(state, phase, local_pawn.name) end
+        local before, key = gold_bag_step(save)
+        if not valid(pawn) or before ~= 0 then error("gold_bag_quest_fixture_scope_unavailable", 0) end
+        local instance = statics:GetGameInstance(pawn)
+        instance:AddQuest_ByName(key)
+        if gold_bag_step(save) ~= 1 then error("mutation_unverified_gold_bag_quest_fixture", 0) end
+        local library = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C")
+        if not valid(library) then error("gold_bag_quest_fixture_library_unavailable", 0) end
+        library:GlobalPing("Ping_NewQuest", pawn, instance)
+        pickup.update(state, phase)
+        if not binding.active[gold_bag.source] then
+            local actor = StaticFindObject(gold_bag.path)
+            local category = valid(actor) and actor.ItemType
+            error((binding.unavailable[gold_bag.source] or "gold_bag_quest_fixture_source_unavailable")
+                .. " category=" .. tostring(category), 0)
+        end
+        return "stock gold transport quest reached bag pickup step"
+    end
+    if action == "native-gold-bag-view" then
+        local detail = state.local_pawn
+        if phase ~= "connected" or state.map ~= scav_bar or not state.listening or state.server ~= true
+            or #fields ~= 3 or (fields[3] ~= "show" and fields[3] ~= "hide")
+            or not detail or not valid(detail.pawn) or not same(detail.pawn:GetWorld(), state.world)
+            or not detail.pawn:IsLocallyControlled() then error("gold_bag_view_scope_unavailable", 0) end
+        local actor = StaticFindObject(gold_bag.path)
+        if not valid(actor) then return "stock gold bag actor absent" end
+        if not same(actor:GetClass(), StaticFindObject(gold_bag.class)) or not same(actor:GetWorld(), state.world)
+            or not same(actor:GetOuter(), state.world.PersistentLevel) or actor:IsActorBeingDestroyed()
+            or not valid(actor.Box) or not same(actor.Box, actor.RootComponent) or not same(actor.Box:GetOwner(), actor) then
+            error("gold_bag_view_source_unavailable", 0)
+        end
+        if fields[3] == "show" then
+            local placed = actor:K2_SetActorTransform(actor.OriginalTrans, false, {}, true)
+            if not placed then error("gold_bag_view_placement_unverified", 0) end
+            actor:SetActorEnableCollision(true)
+            actor:SetActorHiddenInGame(false)
+        else
+            actor:SetActorEnableCollision(false)
+            actor:SetActorHiddenInGame(true)
+        end
+        local shown = fields[3] == "show"
+        if actor.bHidden ~= (not shown) or actor:GetActorEnableCollision() ~= shown then
+            error("gold_bag_view_readback_unverified", 0)
+        end
+        pickup.update(state, phase)
+        if shown and not binding.active[gold_bag.source] then error("gold_bag_view_interaction_unverified", 0) end
+        return "stock gold bag view synchronized"
     end
     if action == "native-dead-drop-project" then
         local detail = state.local_pawn
@@ -679,6 +779,10 @@ function pickup.rows(state, phase, status_row)
     for _, profile in ipairs(binding.placements) do
         if binding.active[profile.source] then
             local active, claimed, sequence, fixture, amount = SilverfishReadNativeAuthoredPickup(profile.source)
+            if active and not claimed and profile == gold_bag then
+                local actor = StaticFindObject(profile.path)
+                active = valid(actor) and actor.bHidden == false and actor:GetActorEnableCollision() == true
+            end
             if active then
                 local fields = {"native-authored-pickup", profile.source, state.map,
                     profile.name .. " " .. profile.path, profile.class, claimed and "claimed" or "available"}
@@ -719,6 +823,10 @@ function pickup.rows(state, phase, status_row)
     elseif report and phase == "hosting" then
         rows[#rows + 1] = status_row("native-authored-pickup-claim", report.source, state.map, report.pawn,
             report.ok and 1 or 0, report.applied and 1 or 0, report.status, report.guid or "-", report.slot)
+        if report.effect then
+            rows[#rows + 1] = status_row("native-authored-pickup-effect", report.source, state.map, report.pawn,
+                report.slot, report.effect)
+        end
         if report.stack then
             rows[#rows + 1] = status_row("native-authored-supply-merge", report.source, state.map, report.pawn,
                 report.slot, report.guid, report.stack, report.before, report.after)

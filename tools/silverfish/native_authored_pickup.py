@@ -9,7 +9,7 @@ from .authored_supply import BY_SOURCE as STOCK_SUPPLIES, CRASH_SITE
 from .native_dialogue import PROTOTYPE_QUEST
 from .native_gold import valid_guid
 from .native_guest_consumable import BROWN_MUSHROOM_CLASS, CANNED_BEANS_CLASS
-from .travel import BOROUGH, CISTERN, CITY, CROSSROADS, FOREST, LAB_E206, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCIENTIST_SHOP, SCI_TUNNEL
+from .travel import BOROUGH, CISTERN, CITY, CROSSROADS, FOREST, LAB_E206, NORTHEAST_RAIL, OBSERVATORY, RAIL_YARD, SCAV_BAR, SCIENTIST_SHOP, SCI_TUNNEL
 
 
 SOURCE = "observatory-comp-board"
@@ -23,6 +23,12 @@ CRASH_SITE_BEANS = "crash-site-canned-beans"
 CROSSROADS_MUSHROOM = "crossroads-brown-mushroom"
 DEAD_END = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"
 COUP_REPORT = "dead-end-coup-report"
+GOLD_BAG = "scav-bar-gold-bag"
+GOLD_BAG_VIEW = "native_gold_bag_available"
+GOLD_BAG_FIXTURE = "native-gold-bag-quest-fixture"
+EFFECT_TAG = "native-authored-pickup-effect"
+EFFECT_KEY = "native_authored_pickup_effect"
+EFFECTS = {COUP_REPORT: ("officer_reaction", "officer_absent"), GOLD_BAG: ("gold_bag_conversation",)}
 DEPOT_DOCUMENTS = "railyard-depot-documents"
 SCIENTIST_BLANK_TAPE = "scientist-blank-data-tape"
 LAB_E206_BLANK_TAPE = "lab-e206-blank-data-tape"
@@ -58,6 +64,8 @@ SOURCES = {
                           BROWN_MUSHROOM_CLASS),
     COUP_REPORT: (DEAD_END, f"Note_DeadEnd_01_C {DEAD_END}.DeadEnd_01_P:PersistentLevel.Note_DeadEnd_01_C_1",
                   "/Game/Classes/Items/Key_Items/Note_DeadEnd_01.Note_DeadEnd_01_C"),
+    GOLD_BAG: (SCAV_BAR, f"Bag_GoldRush_C {SCAV_BAR}.Shop_ScavBar_P:PersistentLevel.Bag_GoldRush_C_1",
+               "/Game/Classes/Items/Key_Items/Bag_GoldRush.Bag_GoldRush_C"),
     DEPOT_DOCUMENTS: (RAIL_YARD, f"Documents_DepotOffice_BP_C {RAIL_YARD}.RailYard_P:PersistentLevel.Documents_DepotOffice_BP_C_1",
                       "/Game/Classes/Items/Key_Items/Documents_DepotOffice_BP.Documents_DepotOffice_BP_C"),
     SCIENTIST_BLANK_TAPE: (SCIENTIST_SHOP, f"DataTape_Blank_C {SCIENTIST_SHOP}.Shop_Scientist_01:PersistentLevel.DataTape_Blank_C_3",
@@ -116,7 +124,7 @@ def select_source(area: str | None, requested: str | None) -> str:
     sources = MAP_SOURCES.get(area, ())
     if requested is None:
         defaults = [source for source in sources if source not in (DEAD_DROP, OLD_PIPE, PROTOTYPE_DRILL, CROSSROADS_LOCKPICK,
-                                                                 CITY_BEANS, CRASH_SITE_BEANS, CROSSROADS_MUSHROOM)
+                                                                 CITY_BEANS, CRASH_SITE_BEANS, CROSSROADS_MUSHROOM, GOLD_BAG)
                     and source not in STOCK_SUPPLIES and source not in STOCK_CASH]
         if len(defaults) == 1:
             return defaults[0]
@@ -141,10 +149,18 @@ def fixture_proof(game: dict, source: str, entry: str = "fixture") -> dict:
     return {"native_authored_pickup_interaction": row}
 
 
-async def project(service, bridge, pickups: dict) -> None:
+async def project(service, bridge, pickups: dict, *, gold_bag=None) -> None:
     area, phase = service.last_game.get("map"), service.last_game.get("state")
+    if phase == "connected" and area == SCAV_BAR and type(gold_bag) is bool:
+        shown = _displayed(service.last_game, GOLD_BAG).get("state") == "available"
+        if shown != gold_bag:
+            snapshot = await bridge.command("native-gold-bag-view", "show" if gold_bag else "hide", timeout=4)
+            current = _displayed(snapshot, GOLD_BAG).get("state") == "available"
+            if (snapshot.get("state"), snapshot.get("map"), current) != (phase, area, gold_bag):
+                raise RuntimeError("Scav Bar gold bag projection did not verify")
+            service.last_game = snapshot
     for source in MAP_SOURCES.get(area, ()):
-        if source == DEAD_DROP and phase == "connected":
+        if source in (DEAD_DROP, GOLD_BAG) and phase == "connected":
             continue
         if source not in pickups or _displayed(service.last_game, source).get("state") != "available":
             continue
@@ -155,7 +171,7 @@ async def project(service, bridge, pickups: dict) -> None:
 
 
 def _needs_epoch(source: str) -> bool:
-    return source in STOCK_SUPPLIES or source in STOCK_CASH or source in (DEAD_DROP, PROTOTYPE_DRILL, LAB_E206_BLANK_TAPE)
+    return source in STOCK_SUPPLIES or source in STOCK_CASH or source in (DEAD_DROP, PROTOTYPE_DRILL, LAB_E206_BLANK_TAPE, GOLD_BAG)
 
 
 def request_target(target: str | None, epoch: str | None) -> str | None:
@@ -255,6 +271,18 @@ def parse_prototype(fields: list[str], snapshot: dict) -> dict:
     return proof
 
 
+def parse_effect(fields, snapshot):
+    if len(fields) != 6:
+        raise ValueError("Invalid level pickup effect receipt")
+    _, source, area, pawn, slot, effect = fields
+    report = snapshot.get("native_authored_pickup_claim", {})
+    if ((source, area, pawn, slot) != tuple(report.get(key) for key in ("source", "map", "pawn", "slot"))
+            or snapshot.get("map") != area or snapshot.get("state") != "hosting"
+            or effect not in EFFECTS.get(source, ()) or report.get("ok") is not True or report.get("applied") is not True):
+        raise ValueError("Invalid level pickup effect receipt")
+    return effect
+
+
 async def claim(host, bridge, character: str, target: str | None, operation_id: str) -> dict:
     if not isinstance(target, str) or not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_authored_pickup_request")
@@ -331,6 +359,9 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
         elif (credit is not None or not report["ok"] or not report["applied"] or report["status"] not in ("claimed", "merged")
                 or not valid_guid(report["guid"])):
             raise RuntimeError(f"The authored pickup did not verify ({report['status']})")
+        effect = snapshot.get(EFFECT_KEY)
+        if (target in EFFECTS) != (effect is not None) or (effect is not None and effect not in EFFECTS[target]):
+            raise RuntimeError("The exact stock level pickup callback did not verify")
         prototype = snapshot.get(PROTOTYPE_KEY)
         if target == PROTOTYPE_DRILL and (not isinstance(prototype, dict) or not _matches_prototype(report, prototype)):
             raise RuntimeError("The exact Prototype Drill quest and preserved stock topic did not verify")
@@ -350,6 +381,8 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
             row["wallet_credit"] = {key: credit[key] for key in ("amount", "before", "after", "stock_flag")}
         else:
             row["guid"] = report["guid"]
+        if effect is not None:
+            row["effect"] = effect
         if prototype is not None:
             row["topic_micro_drill"] = prototype["topic_after"]
         if merge is not None:
@@ -370,5 +403,5 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
         raise
     host.party = candidate
     host.native_checkpoint_unsafe = False
-    host.control.event("native_authored_pickup_committed", revision=revision, **row)
+    host.control.event("native_authored_pickup_committed", revision=revision, operation_id=operation_id, **row)
     return result

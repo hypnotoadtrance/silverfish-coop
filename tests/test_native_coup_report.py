@@ -87,6 +87,7 @@ class NorthernPassageTests(unittest.IsolatedAsyncioTestCase):
                 "source": SOURCE, "map": area, "pawn": pawn, "slot": slot,
                 "ok": True, "applied": True, "status": "claimed", "guid": GUID,
             }
+            snapshot[native_authored_pickup.EFFECT_KEY] = "officer_reaction"
             self.holds_note = True
             return snapshot
         self.assertTrue(operation.startswith(CONTRACT.prefix + "-"))
@@ -121,6 +122,7 @@ class NorthernPassageTests(unittest.IsolatedAsyncioTestCase):
         picked_up = await native_authored_pickup.claim(self.host, self.bridge, GUEST, SOURCE, "a" * 32)
         self.assertEqual(picked_up["native_authored_pickup_claim"], {
             "source": SOURCE, "map": DEAD_END, "actor": NOTE, "class_path": NOTE_CLASS, "guid": GUID, "owner": GUEST,
+            "effect": "officer_reaction",
         })
         self.assertEqual(self.host.checkpoint_native.call_args.kwargs["require_guest_frames"], {GUEST})
         self.host.last_game["map"] = BOROUGH

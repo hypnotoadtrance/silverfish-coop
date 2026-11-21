@@ -11,7 +11,11 @@ local lab_blank_tape = "lab-e206-blank-data-tape"
 local cistern_keycard = "cistern-old-nfta-keycard"
 local cistern_locker = "cistern-old-nfta-locker"
 local crossroads_lockpick = "crossroads-lockpick"
+local coup_report = "dead-end-coup-report"
+local gold_bag = "scav-bar-gold-bag"
 local sources = {
+    [coup_report] = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P",
+    [gold_bag] = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P",
     ["city-copper-wire"] = city,
     ["city-paladin-brandy"] = city,
     ["city-canned-peaches"] = city,
@@ -49,6 +53,8 @@ local dead_drop = "crossroads-dead-drop-bag"
 local black_box = "gorge-insurrectionist-recorder"
 local city_shelf_supply = city .. ".City_01_P:PersistentLevel.Ammo_Magnum_BP_C_1"
 local precise_distances = {
+    [coup_report] = {65, 95, 125, 155, 185},
+    [gold_bag] = {65, 95, 125, 155, 185},
     [dust_filter] = {125, 160, 195},
     [molasses] = {45, 60, 75, 90, 110, 140, 170, 200},
     [savlo_keycard] = {55, 80, 105, 125, 160, 195},
@@ -212,7 +218,7 @@ function input.authority_sight(state, phase, profile, pawn, actor)
     local cash = cash_sources[profile.source] == profile
     local sight_profile = ((profile.source == stolen_bag or profile.source == dead_drop
         or profile.source == black_box or profile.source == lab_blank_tape or profile.source == cistern_keycard
-        or profile.source == crossroads_lockpick)
+        or profile.source == crossroads_lockpick or profile.source == gold_bag or profile.source == coup_report)
         and profile.map == sources[profile.source] and profile.authority_sight == true)
         or (profile.source == drill_head and profile == require("native_prototype_drill_pickup").profile)
     return (cash or sight_profile or supplies[profile.source] == profile)
