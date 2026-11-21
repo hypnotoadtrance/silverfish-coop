@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import ctypes
 from ctypes import wintypes
 from dataclasses import asdict, dataclass
+from functools import partial
 import hashlib
 from ipaddress import ip_address
 import json
@@ -394,12 +395,13 @@ async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path,
     if set(settings) != {"schema", "bind", "port"} or type(settings["schema"]) is not int or settings["schema"] != 1:
         raise ValueError("Invalid resident Host configuration")
     plan = _resident_host_plan(work, campaign, mailbox, saved, headless, settings["bind"], settings["port"])
-    await _resident_title(mailbox, saved, campaign, {"host": plan})
+    await _resident_title(mailbox, saved, campaign, {"host": plan}, host_campaign=campaign)
 
 
 def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, default_port):
     from . import service
     from .control import select_run
+    from .title_host_campaigns import saved_campaign
     from .title_session import SessionPlan
 
     def endpoint(bind, port):
@@ -409,8 +411,9 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
 
     default_bind, default_port = endpoint(default_bind, default_port)
 
-    def host_plan(selected, bind, port, password="", *, creator_requested=False):
-        mode, area = service.menu_host_start(selected, profile=saved.parent)
+    def host_plan(selected, bind, port, password="", *, creator_requested=False, resume_area=None):
+        mode, area = (("resume", resume_area) if resume_area is not None
+                      else service.menu_host_start(selected, profile=saved.parent))
         if creator_requested and mode == "resume":
             raise ValueError("Choose a new campaign name for stock character creation")
         use_creator = mode != "resume" and (creator_requested or os.environ.get(INSTALLED_ENV) == "1" and not headless)
@@ -425,7 +428,7 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
             await engine.observe_title()
             await service.host_game(
                 work, selected, bind, port, headless, resident_engine=engine,
-                direct_password=password, stock_creator=use_creator,
+                direct_password=password, stock_creator=use_creator, resume_existing=resume_area is not None,
                 max_guests=service.MENU_HOST_GUEST_LIMIT, **service.MENU_HOST_OPTIONS,
                 **({"start_preset": mode} if mode == "wanderer" and not use_creator else {}),
             )
@@ -441,6 +444,10 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
         if claim.host_settings is None:
             return host_plan(campaign, default_bind, default_port)
         name, address, port_text = claim.host_settings
+        bind, port = endpoint(address or default_bind, int(port_text) if port_text else default_port)
+        if claim.stock_resume:
+            selected, area = saved_campaign(campaign, saved, name)
+            return host_plan(selected, bind, port, claim.direct_password or "", resume_area=area)
         selected = campaign
         if name and name != campaign.name:
             if saved.parent == campaign / "game-user":
@@ -448,7 +455,6 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
             selected = select_run(work, "campaigns", name)
             if selected != campaign.parent / name:
                 raise ValueError("The campaign directory is redirected")
-        bind, port = endpoint(address or default_bind, int(port_text) if port_text else default_port)
         return host_plan(selected, bind, port, claim.direct_password or "", creator_requested=claim.stock_creator)
 
     async def no_selection():
@@ -573,17 +579,21 @@ async def _resident_unified(work: Path, seat: Path, mailbox: Path, saved: Path, 
     host = _resident_host_plan(work, campaign, mailbox, saved, headless, settings["bind"], settings["port"])
     join, join_settings = _resident_direct_join_plan(work, guest, mailbox, saved, headless, available=options)
     try:
-        await _resident_title(mailbox, saved, seat, {"host": host, "join": join}, join_settings=join_settings)
+        await _resident_title(mailbox, saved, seat, {"host": host, "join": join}, join_settings=join_settings,
+                              host_campaign=campaign)
     finally:
         await join_settings.close()
 
 
-async def _resident_title(mailbox, saved, directory, plans, *, join_settings=None):
+async def _resident_title(mailbox, saved, directory, plans, *, join_settings=None, host_campaign=None):
+    from .title_host_campaigns import campaign_names
     from .title_session import TitleSession
 
     title = EmbeddedEngine(os.getpid(), mailbox, saved, None, session_directory=directory)
+    host_campaign_scan = partial(campaign_names, host_campaign, saved) if host_campaign is not None else None
     await TitleSession(title.bridge, plans, resident=True, title_saved_directory=saved,
-                       on_title_ready=lambda: None, join_settings=join_settings).run()
+                       on_title_ready=lambda: None, join_settings=join_settings,
+                       host_campaign_scan=host_campaign_scan).run()
 
 
 def run() -> None:

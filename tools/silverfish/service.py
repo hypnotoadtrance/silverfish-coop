@@ -50,6 +50,8 @@ from .udp_ownership import owns_udp_port
 
 PROTOCOL = 2
 MENU_HOST_GUEST_LIMIT = 4
+_MENU_CHECKPOINT_BYTES = 8 * 1024**2
+_MENU_NATIVE_SAVE_BYTES = 128 * 1024**2
 MENU_HOST_OPTIONS = {"native_events": True, "native_guest": True, "native_zones": True,
                      "native_zone_walls": True, "expanded_zones": True}
 POSITION_MAX_AGE = 3.0
@@ -3607,11 +3609,33 @@ def _host_dig_available(work: Path, authored: bool, persist_guest: bool, native_
                 staged_script(work, "native_host_dig_live.lua", "SilverfishRenewNativeHostDigScope"))
 
 
-def menu_host_start(directory: Path, *, profile: Path | None = None) -> tuple[str, str]:
+def _require_resident_host_checkpoint(profile: Path, checkpoint: dict) -> None:
+    world = checkpoint["world"]
+    storage = native_host_save.checkpoint_profile(profile, checkpoint)
+    if (not isinstance(storage, native_host_save.SaveScope) or type(world.get("native_host_save")) is not dict
+            or not isinstance(world.get("map"), str)
+            or world["map"] not in (AUTHORED_MAPS | EXPANDED_MAPS | PLAYTEST_MAPS)):
+        raise CampaignFormatError("The selected campaign lacks a qualified scoped host save")
+    try:
+        sizes = [frame.get("size") for frame in native_host_save.references(checkpoint)]
+    except (AttributeError, KeyError, TypeError, ValueError) as error:
+        raise CampaignFormatError("The selected campaign has invalid stock save references") from error
+    if (any(type(size) is not int or size < 16 for size in sizes)
+            or sum(sizes) > _MENU_NATIVE_SAVE_BYTES):
+        raise CampaignFormatError("The selected campaign has invalid or oversized stock saves")
+
+
+def menu_host_start(directory: Path, *, profile: Path | None = None, require_scoped: bool = False) -> tuple[str, str]:
     profile = directory / "game-user" if profile is None else profile
+
+    def verify(checkpoint):
+        if require_scoped:
+            _require_resident_host_checkpoint(profile, checkpoint)
+        native_host_save.verify_checkpoint(profile, checkpoint)
+
     checkpoint = CampaignStore.read_existing(
-        directory / "save", verify_world=verify_travel_checkpoint,
-        verify_checkpoint=lambda data: native_host_save.verify_checkpoint(profile, data),
+        directory / "save", verify_world=verify_travel_checkpoint, verify_checkpoint=verify,
+        max_read_bytes=_MENU_CHECKPOINT_BYTES if require_scoped else None,
     )
     area = checkpoint["world"].get("map") if checkpoint else None
     return ("resume", area) if area else ("wanderer", OBSERVATORY)
@@ -3651,7 +3675,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     guest_melee_canary: bool = False, host_dig_live_fixture: bool = False,
                     embedded_port: int | None = None, runtime_listener: bool = False,
                     resident_engine: EmbeddedEngine | None = None, direct_password: str | None = None,
-                    stock_creator: bool = False) -> None:
+                    stock_creator: bool = False, resume_existing: bool = False) -> None:
+    if resume_existing and (resident_engine is None or stock_creator or start_preset):
+        raise ValueError("Resume requires the resident campaign and its existing checkpoint")
     if resident_engine is not None:
         if (embedded_port is not None or resident_engine.internal_port is None
                 or resident_engine.session_directory != directory):
@@ -3721,9 +3747,15 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                                and (not native_zone_walls or staged_script(work, "authored_wall_routes.lua"))):
         raise ValueError("Expanded stock routes require --native-zones and the current stage")
     profile = resident_engine.profile if resident_engine is not None else directory / "game-user"
+    save_directory = directory / "save"
+    if resume_existing and save_directory.resolve(strict=True) != save_directory:
+        raise ValueError("The selected campaign save directory has changed")
     with Control(directory / "run") as control, CampaignStore(
-        directory / "save", verify_world=verify_travel_checkpoint,
+        save_directory, verify_world=verify_travel_checkpoint,
         verify_checkpoint=lambda checkpoint: native_host_save.verify_checkpoint(profile, checkpoint),
+        require_existing=resume_existing,
+        verify_initial_checkpoint=partial(_require_resident_host_checkpoint, profile) if resume_existing else None,
+        max_read_bytes=_MENU_CHECKPOINT_BYTES if resume_existing else None,
     ) as store:
         campaign = store.status()
         old_world = campaign["world"]

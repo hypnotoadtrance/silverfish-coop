@@ -6,6 +6,7 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
 import uuid
 
 from .campaign import CampaignFormatError
@@ -104,13 +105,17 @@ def slot_path(profile: Profile, slot: str) -> Path:
     return path
 
 
-def record(profile: Profile, slot: str, map_name: str, *, flush: bool = False) -> dict:
+def record(profile: Profile, slot: str, map_name: str, *, flush: bool = False,
+           expected_size: int | None = None) -> dict:
     path = slot_path(profile, slot)
     try:
         with path.open("r+b" if flush else "rb") as stream:
             if flush:
                 os.fsync(stream.fileno())
-            size = os.fstat(stream.fileno()).st_size
+            info = os.fstat(stream.fileno())
+            size = info.st_size
+            if not stat.S_ISREG(info.st_mode) or (expected_size is not None and size != expected_size):
+                raise CampaignFormatError("The Unreal save generation has an unexpected file type or size")
             if size < 16 or stream.read(4) != b"GVAS":
                 raise CampaignFormatError(f"The Unreal save generation {slot} has an invalid header")
             stream.seek(0)
@@ -141,7 +146,7 @@ def verify_record(profile: Profile, saved: dict) -> None:
         carry = saved["eather_remainder"]
         if type(carry) not in (int, float) or not 0 <= carry < 1:
             raise CampaignFormatError("The campaign's stock Eather carry is invalid")
-    if record(profile, saved["slot"], saved["map"]) != {key: saved[key] for key in core_keys}:
+    if record(profile, saved["slot"], saved["map"], expected_size=saved["size"]) != {key: saved[key] for key in core_keys}:
         raise CampaignFormatError("The Unreal save generation does not match its campaign checkpoint")
 
 

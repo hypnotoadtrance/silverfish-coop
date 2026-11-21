@@ -10,6 +10,7 @@ import math
 import os
 import re
 import secrets
+import stat
 import tempfile
 import threading
 import time
@@ -137,7 +138,8 @@ class CampaignStore:
     state before it is published. Identity-only writes reuse the accepted saves.
     """
 
-    def __init__(self, directory, *, clock=time.monotonic, verify_world=None, verify_checkpoint=None):
+    def __init__(self, directory, *, clock=time.monotonic, verify_world=None, verify_checkpoint=None,
+                 require_existing=False, verify_initial_checkpoint=None, max_read_bytes=None):
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "campaign.json"
@@ -151,7 +153,7 @@ class CampaignStore:
         self._lock_file = self._lock_directory()
         self.recovered = False
         try:
-            self._data = self._load_or_create()
+            self._data = self._load_or_create(require_existing, verify_initial_checkpoint, max_read_bytes)
         except BaseException:
             self.close()
             raise
@@ -192,11 +194,20 @@ class CampaignStore:
             raise
         return handle
 
-    def _load_or_create(self):
-        data, self.recovered = self._select_existing(self.path, self.previous_path, self._read_verified)
+    def _load_or_create(self, require_existing, verify_initial_checkpoint, max_read_bytes):
+        def read_initial(path):
+            data = self._read(path, max_read_bytes=max_read_bytes)
+            if verify_initial_checkpoint is not None:
+                verify_initial_checkpoint(data)
+            self._verify_content(data)
+            return data
+
+        data, self.recovered = self._select_existing(self.path, self.previous_path, read_initial)
         if data is not None and not self.recovered:
             return data
         if data is None:
+            if require_existing:
+                raise CampaignFormatError("The selected campaign checkpoint is missing.")
             data = {
                 "schema_version": SCHEMA_VERSION,
                 "campaign_id": str(uuid.uuid4()),
@@ -226,12 +237,12 @@ class CampaignStore:
             return None, False
 
     @classmethod
-    def read_existing(cls, directory, *, verify_world=None, verify_checkpoint=None):
+    def read_existing(cls, directory, *, verify_world=None, verify_checkpoint=None, max_read_bytes=None):
         """Inspect the currently admissible checkpoint without creating or promoting a save."""
         directory = Path(directory)
 
         def read_verified(path):
-            data = cls._read(path)
+            data = cls._read(path, max_read_bytes=max_read_bytes)
             if verify_world is not None:
                 verify_world(data["world"])
             if verify_checkpoint is not None:
@@ -241,11 +252,6 @@ class CampaignStore:
         data, _ = cls._select_existing(directory / "campaign.json", directory / "campaign.previous.json", read_verified)
         return data
 
-    def _read_verified(self, path):
-        data = self._read(path)
-        self._verify_content(data)
-        return data
-
     def _verify_content(self, data):
         if self._verify_world is not None:
             self._verify_world(data["world"])
@@ -253,9 +259,22 @@ class CampaignStore:
             self._verify_checkpoint(data)
 
     @staticmethod
-    def _read(path):
+    def _read(path, *, max_read_bytes=None):
         try:
-            data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
+            if max_read_bytes is None:
+                body = path.read_text(encoding="utf-8")
+            else:
+                info = path.lstat()
+                if (not stat.S_ISREG(info.st_mode) or info.st_size > max_read_bytes
+                        or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                        or path.resolve(strict=True) != path.absolute()):
+                    raise CampaignFormatError("The campaign checkpoint does not qualify for the title picker.")
+                with path.open("rb") as stream:
+                    body = stream.read(max_read_bytes + 1)
+                if len(body) > max_read_bytes:
+                    raise CampaignFormatError("The campaign checkpoint exceeds the title picker size limit.")
+                body = body.decode("utf-8")
+            data = json.loads(body, object_pairs_hook=_unique_object)
         except (ValueError, RecursionError) as exc:
             raise CampaignFormatError(f"Invalid campaign JSON in {path.name}.") from exc
         CampaignStore._validate(data)

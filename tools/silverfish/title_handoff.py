@@ -11,6 +11,7 @@ from tempfile import NamedTemporaryFile
 import time
 
 from . import native_title_entry
+from .control import NAME
 
 
 DESCRIPTOR_FILE = "title-handoff-session.tsv"
@@ -24,6 +25,7 @@ _HOST_FIELDS = (rb"\t([0-9a-f]{32})\t([0-9a-f]{32})\thost\t([A-Za-z0-9_-]{0,64})
 _HOST_REQUEST = re.compile(rb"2" + _HOST_FIELDS + rb"\r?\n")
 _DIRECT_HOST_REQUEST = re.compile(rb"3" + _HOST_FIELDS + rb"\t([^\x00-\x1f\x7f]{0,512})\r?\n")
 _CREATOR_HOST_REQUEST = re.compile(rb"4" + _HOST_FIELDS + rb"\t([^\x00-\x1f\x7f]{0,512})\tcreator\r?\n")
+_RESUME_HOST_REQUEST = re.compile(rb"5" + _HOST_FIELDS + rb"\t([^\x00-\x1f\x7f]{0,512})\tresume\r?\n")
 _CHARACTER_UUID = rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _JOIN_REQUEST = re.compile(rb"2\t([0-9a-f]{32})\t([0-9a-f]{32})\tjoin\t([0-9a-f]{32})"
                            rb"\t([A-Za-z0-9_-]{0,64})\t(" + _CHARACTER_UUID + rb")\r?\n")
@@ -40,6 +42,7 @@ class Claim:
     join_settings: tuple[str, str, str] | None = field(default=None, repr=False)
     direct_password: str | None = field(default=None, repr=False)
     stock_creator: bool = False
+    stock_resume: bool = False
 
 
 def _stock_title(snapshot):
@@ -226,22 +229,24 @@ class TitleHandoff:
             return None
 
         host_settings = join_settings = direct_password = None
-        stock_creator = False
+        stock_creator = stock_resume = False
         choice = _REQUEST.fullmatch(data)
         if choice:
             generation, request_id, action = (field.decode("ascii") for field in choice.groups())
         elif choice := _HOST_REQUEST.fullmatch(data):
             generation, request_id, campaign, bind, port = (field.decode("ascii") for field in choice.groups())
             action, host_settings = "host", (campaign, bind, port)
-        elif choice := _DIRECT_HOST_REQUEST.fullmatch(data) or _CREATOR_HOST_REQUEST.fullmatch(data):
+        elif choice := (_DIRECT_HOST_REQUEST.fullmatch(data) or _CREATOR_HOST_REQUEST.fullmatch(data)
+                        or _RESUME_HOST_REQUEST.fullmatch(data)):
             stock_creator = choice.re is _CREATOR_HOST_REQUEST
+            stock_resume = choice.re is _RESUME_HOST_REQUEST
             *fields, password = choice.groups()
             generation, request_id, campaign, bind, port = (field.decode("ascii") for field in fields)
             try:
                 direct_password = password.decode("utf-8")
             except UnicodeDecodeError:
                 return self._refuse("malformed_request")
-            if len(direct_password) > 128:
+            if len(direct_password) > 128 or (stock_resume and not NAME.fullmatch(campaign)):
                 return self._refuse("malformed_request")
             action, host_settings = "host", (campaign, bind, port)
         elif choice := _JOIN_REQUEST.fullmatch(data):
@@ -267,7 +272,7 @@ class TitleHandoff:
         if not _unlink(self.request_path):
             return None
         claim = Claim(action, request_id, generation, self._bindings[action], host_settings, join_settings,
-                      direct_password, stock_creator)
+                      direct_password, stock_creator, stock_resume)
         self._claim = claim
         self.last_refusal = None
         self.close()

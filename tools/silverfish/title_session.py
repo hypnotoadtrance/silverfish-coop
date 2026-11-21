@@ -14,6 +14,7 @@ import uuid
 from . import native_session_exit, native_title_entry, runtime
 from .control import Control
 from .title_handoff import ACTIONS, TOKEN, Claim, TitleHandoff, _isolated_stock_title, _stock_title
+from .title_host_campaigns import TitleHostCampaigns
 
 
 STATUS_FILE = "title-session-status.json"
@@ -119,7 +120,8 @@ class TitleSession:
                  retire_title=None, on_title_ready: Callable[[], None] | None = None,
                  title_saved_directory: Path | None = None, poll_interval: float = .1,
                  startup_timeout: float = 120, stall_timeout: float = 60, control: Control | None = None,
-                 join_settings=None, resident: bool = False):
+                 join_settings=None, resident: bool = False,
+                 host_campaign_scan: Callable[[], tuple[str, ...]] | None = None):
         self._plans = dict(plans)
         if any(action not in ACTIONS or not isinstance(plan, SessionPlan) for action, plan in self._plans.items()):
             raise ValueError("Expected supervisor plans for the Host and Join actions")
@@ -130,7 +132,10 @@ class TitleSession:
             raise ValueError("The title handoff requires an isolated save directory and readiness callback")
         if resident and (title_saved_directory is None or retire_title is not None):
             raise ValueError("The resident supervisor requires its current title profile")
+        if host_campaign_scan is not None and (not resident or "host" not in self._plans):
+            raise ValueError("Saved campaign discovery requires a resident Host offer")
         self._bridge = bridge
+        self._host_campaigns = TitleHostCampaigns(bridge.directory, host_campaign_scan) if host_campaign_scan else None
         self._status_path = bridge.directory / STATUS_FILE
         self._retire_title = retire_title or partial(runtime.stop_game, bridge.process)
         self._on_title_ready = on_title_ready
@@ -255,6 +260,8 @@ class TitleSession:
                 snapshot = self._bridge.snapshot()
                 plans = {} if self._resident and snapshot is not None and not self._solo_title(snapshot) else self._plans
                 offered = self._handoff.refresh(snapshot, plans)
+                if self._host_campaigns is not None:
+                    self._host_campaigns.poll(self._handoff.generation if offered else None)
                 if self._on_title_ready is not None:
                     panel = snapshot.get(native_title_entry.PANEL_KEY, {}) if snapshot else {}
                     frame = _isolated_stock_title(snapshot, self._title_saved_directory) if offered else None
@@ -298,6 +305,8 @@ class TitleSession:
                 self._control.respond(self._local_request[0], False, error="title_stock_title_unready")
                 self._local_request = None
             self._handoff.close()
+            if self._host_campaigns is not None:
+                self._host_campaigns.close()
             if self._join_settings is not None:
                 self._join_settings.poll(None)
 
@@ -307,15 +316,22 @@ class TitleSession:
         plan = claim.binding
         attempt = {key: getattr(claim, key) for key in ("action", "request_id", "generation")}
         try:
-            if plan.resolve_claim is not None:
+            if claim.stock_resume:
+                if (self._host_campaigns is None or claim.host_settings is None or plan.resolve_claim is None
+                        or not self._host_campaigns.contains(claim.generation, claim.host_settings[0])):
+                    raise ValueError("The campaign was not offered for resume")
+                plan = await asyncio.to_thread(plan.resolve_claim, claim)
+            elif plan.resolve_claim is not None:
                 plan = plan.resolve_claim(claim)
-                if not isinstance(plan, SessionPlan):
-                    raise ValueError("Expected a resolved title session plan")
+            if not isinstance(plan, SessionPlan):
+                raise ValueError("Expected a resolved title session plan")
         except (OSError, TypeError, ValueError, RuntimeError):
             self._last_failure = dict(attempt, code="title_settings_invalid")
             self._publish("failed", attempt=attempt)
             return False
         finally:
+            if self._host_campaigns is not None:
+                self._host_campaigns.poll(None)
             if self._join_settings is not None:
                 self._join_settings.poll(None)
         baseline = _read_plan_status(plan).get("generation")
