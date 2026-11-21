@@ -44,13 +44,17 @@ local function finish_guest_loading(state, phase)
     end
 end
 
-local function remove()
-    if current and valid(current.widget) then current.widget:RemoveFromParent() end
+local function remove(cover)
+    if not cover then return end
+    local widget = cover.widget
+    cover.widget, cover.shown = nil, false
+    if valid(widget) then pcall(function() widget:RemoveFromParent() end) end
 end
 
 function loading.clear()
-    remove()
+    local previous = current
     current = nil
+    remove(previous)
 end
 
 function loading.sync(state, phase)
@@ -62,8 +66,8 @@ function loading.sync(state, phase)
     end
     if not valid(state.world) or not valid(state.controller) then return end
     local address = state.world:GetAddress()
-    if current.world == address and valid(current.widget) and current.widget:IsInViewport() then return end
-    remove()
+    if current.world == address and current.shown then return end
+    remove(current)
     local api, class = StaticFindObject(widgets), StaticFindObject(fade_class)
     if not valid(class) then
         LoadAsset(fade_class)
@@ -78,6 +82,7 @@ function loading.sync(state, phase)
     widget:SetVisibility(3)
     widget:SetRenderOpacity(1)
     widget.Image_0:SetRenderOpacity(1)
+    current.shown = true
 end
 
 function loading.begin(state, destination)
@@ -87,7 +92,7 @@ function loading.begin(state, destination)
 end
 
 function loading.rows(row)
-    if current and valid(current.widget) and current.widget:IsInViewport() then
+    if current and current.shown then
         return {row("native-zone-loading-cover", current.destination)}
     end
     return {}
