@@ -12,6 +12,8 @@ from .native_gold import valid_guid
 
 CRATE = LEGACY_CRATE
 STATE_KEY = "native_loot_rolls"
+RETIRED = "native_loot_retired_rolls"
+REPLENISHED = "native_replenished_crates"
 PLACEMENT = "native-loot-placement"
 PLACEMENT_KEY = "native_loot_placement"
 FORCED_ROLL_STATUS = "opened_fixture_seeded"
@@ -49,8 +51,42 @@ def _rolls_in_area(rolls: dict, area: str) -> dict:
             and (roll := rolls.get(crate)) and (roll.get("crate"), roll.get("map")) == (crate, area)}
 
 
-def published(rolls: dict, area: str) -> dict:
-    return {crate: public_roll(roll) for crate, roll in _rolls_in_area(rolls, area).items()}
+def published(rolls: dict, area: str, *, game=None) -> dict:
+    replenished = _replenished(game, rolls) if game is not None else {}
+    return {crate: public_roll(roll) for crate, roll in _rolls_in_area(rolls, area).items()
+            if crate not in replenished}
+
+
+def _replenished(game, rolls):
+    if game.get("state") != "hosting":
+        return {}
+    area = game.get("map")
+    pawn = game.get("pawns", {}).get("local", {}).get("name")
+    observed = game.get(REPLENISHED, {})
+    stock = game.get("native_loot_crates", {})
+    return {crate: roll for crate, roll in _rolls_in_area(rolls, area).items()
+            if pawn and observed.get(crate) == dict(map=area, crate=crate, pawn=pawn)
+            and stock.get(crate, {}).get("state") == "ready"}
+
+
+async def retire_replenished(host, bridge):
+    if host.stopping or host.transitioning or host.native_checkpoint_unsafe or host.party.get("wipe"):
+        return
+    expired = _replenished(host.last_game, host.party.get(STATE_KEY, {}))
+    if not expired:
+        return
+    candidate = party.load_party(host.party)
+    retired = candidate.setdefault(RETIRED, {})
+    for crate, roll in expired.items():
+        if (not isinstance(roll.get("id"), str) or not party.REQUEST_ID.fullmatch(roll["id"])
+                or roll["id"] in retired):
+            raise RuntimeError("A replenished crate has an invalid or repeated roll identity")
+        retired[roll["id"]] = crate
+        del candidate[STATE_KEY][crate]
+    revision = await host.checkpoint_native(bridge, candidate)
+    host.party = candidate
+    for crate, roll in expired.items():
+        host.control.event("native_loot_roll_replenished", crate=crate, roll_id=roll["id"], revision=revision)
 
 
 async def restore_legacy_placement(host, bridge) -> None:
@@ -105,7 +141,10 @@ def fixture_selection(target: str | None, area: str) -> tuple[str, str | None]:
 async def project_opened(bridge, game: dict, rolls: dict) -> dict:
     """Project saved open crates in this map without replaying stock rolls."""
     area = game.get("map")
+    replenished = _replenished(game, rolls or {})
     for crate in _rolls_in_area(rolls or {}, area):
+        if crate in replenished:
+            continue
         scope = game.get("native_loot_crates", {}).get(crate, {})
         if (scope.get("map"), scope.get("crate"), scope.get("state")) != (area, crate, "ready"):
             continue
@@ -274,8 +313,16 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             crate, = matches
     if not isinstance(crate, str) or crate not in CRATES or CRATES[crate] != area:
         raise party.RuleError("native_loot_requires_exact_crate_and_operation")
+    retired = host.party.get(RETIRED, {})
+    if action == "open" and operation_id in retired:
+        raise party.RuleError("native_loot_roll_replenished" if retired[operation_id] == crate else "operation_id_conflict")
+    if action == "open" and any(key != crate and roll.get("id") == operation_id
+                                for key, roll in host.party.get(STATE_KEY, {}).items()):
+        raise party.RuleError("operation_id_conflict")
     saved = rolls.get(crate)
     if saved and action in ("open", "inspect"):
+        if crate in _replenished(host.last_game, rolls):
+            raise party.RuleError("native_loot_replenishment_pending")
         return {"native_loot_roll": public_roll(saved)}
     if host.party["players"][character]["downed"] or host.party["wipe"] or character in host.party["pending_spawns"]:
         raise party.RuleError("native_loot_opener_unavailable")
@@ -289,7 +336,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
         item = next((row for row in saved.get("items", ()) if row.get("guid") == guid), None) if saved else None
-        if not item or not saved.get("escrow"):
+        if not item or not saved.get("escrow") or crate in _replenished(host.last_game, rolls):
             raise party.RuleError("native_loot_item_unavailable")
         if item.get("claimed_by"):
             raise party.RuleError("native_loot_already_claimed")

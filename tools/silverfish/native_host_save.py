@@ -183,6 +183,11 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
     rolls = party.get("native_loot_rolls", {})
     if type(rolls) is not dict or any(type(roll) is not dict for roll in rolls.values()):
         raise CampaignFormatError("The campaign's native loot records are invalid")
+    retired = party.get("native_loot_retired_rolls", {})
+    if (type(retired) is not dict or any(not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{32}", key)
+            or not isinstance(crate, str) or crate not in CRATES for key, crate in retired.items())
+            or any(isinstance(roll.get("id"), str) and roll["id"] in retired for roll in rolls.values())):
+        raise CampaignFormatError("The campaign's retired crate roll identities are invalid")
     enemy_rolls = party.get("native_enemy_loot_rolls", {})
     if type(enemy_rolls) is not dict:
         raise CampaignFormatError("The campaign's stock enemy drops are invalid")

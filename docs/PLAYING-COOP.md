@@ -129,6 +129,8 @@ The current stage has qualified stock paths for selected rest points, exits, tra
 
 At a qualified stock container, press Interact to open it. Look at an item inside and press Interact to take it. The same item disappears for everyone when the host commits the pickup. Supported player drops appear on the ground and use the same Interact control. Nearby physical pickups appear in `game.native_world_loot_items`. When the host visits a container from an older co-op save, the mod restores its item positions from the container's stock spawn points and keeps the original roll.
 
+When the host enables stock loot replenishment, the game can expire temporary container records during its daily update. A container can refill after the party returns to the level. The mod clears the previous roll and captures one new shared roll the next time someone opens it. Permanent containers keep their saved state.
+
 At a supported merchant, use Up and Down to select an offer and Page Up or Page Down to browse stock. Enter confirms and Backspace cancels or closes the shop.
 
 At the Observatory workbench, equip your Hazard Suit and bring a Computer Board. Use Interact to review the supported recipe and Interact again to exchange the Board for one Electron Scrap.

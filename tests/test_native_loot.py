@@ -118,6 +118,31 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         host.checkpoint_native.assert_awaited_once_with(bridge, host.party)
         await native_loot.restore_legacy_placement(host, bridge)
         bridge.command.assert_awaited_once()
+
+    async def test_only_authority_replenishment_retires_the_exact_saved_roll(self):
+        expired = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
+        untouched = self.roll(CROSSROADS, LEGACY_CRATE, "2" * 32)
+        host = self.host(CROSSROADS, {OTHER_CRATE: expired, LEGACY_CRATE: untouched})
+        ready = dict(map=CROSSROADS, crate=OTHER_CRATE, state="ready")
+        host.last_game["native_loot_crates"] = {OTHER_CRATE: ready}
+        bridge = SimpleNamespace(command=AsyncMock())
+        await native_loot.retire_replenished(host, bridge)
+        host.checkpoint_native.assert_not_awaited()
+        host.last_game[native_loot.REPLENISHED] = {OTHER_CRATE: dict(map=CROSSROADS, crate=OTHER_CRATE, pawn="guest")}
+        await native_loot.retire_replenished(host, bridge)
+        host.checkpoint_native.assert_not_awaited()
+        host.last_game[native_loot.REPLENISHED][OTHER_CRATE]["pawn"] = PAWN
+        self.assertEqual(set(native_loot.published(host.party[native_loot.STATE_KEY], CROSSROADS,
+                                                  game=host.last_game)), {LEGACY_CRATE})
+        self.assertIs(await native_loot.project_opened(bridge, host.last_game, host.party[native_loot.STATE_KEY]), host.last_game)
+        bridge.command.assert_not_awaited()
+        await native_loot.retire_replenished(host, bridge)
+        self.assertEqual(host.party[native_loot.STATE_KEY], {LEGACY_CRATE: untouched})
+        self.assertEqual(host.party[native_loot.RETIRED], {"1" * 32: OTHER_CRATE})
+        host.checkpoint_native.assert_awaited_once_with(bridge, host.party)
+        with self.assertRaisesRegex(party.RuleError, "roll_replenished"):
+            await native_loot.perform(host, bridge, "host", "open", OTHER_CRATE, expired["id"])
+        bridge.command.assert_not_awaited()
         self.assertEqual(native_loot.default_crate(CROSSROADS), LEGACY_CRATE)
         self.assertEqual(native_loot.default_crate(DEAD_BRIDGE), BRIDGE_CRATE)
         self.assertEqual(native_loot.fixture_selection("host", CROSSROADS), ("host", LEGACY_CRATE))

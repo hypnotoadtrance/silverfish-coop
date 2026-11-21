@@ -775,7 +775,7 @@ class Host:
                 and world_view.get("actor") == WORLD_VIEW_ACTORS.get(area)):
             view["host_world"]["native_world_view"] = world_view
         view["native_quests"] = self.party.get("native_quests", {})
-        if rolls := native_loot.published(self.party.get(native_loot.STATE_KEY, {}), area):
+        if rolls := native_loot.published(self.party.get(native_loot.STATE_KEY, {}), area, game=self.last_game):
             view[native_loot.STATE_KEY] = rolls
         if rolls := self.party.get(native_enemy_loot.STATE_KEY):
             view[native_enemy_loot.STATE_KEY] = native_enemy_loot.published(rolls)
@@ -2722,6 +2722,16 @@ class Host:
                     self.last_game = await bridge.command(action, crate, timeout=5)
                     self.last_seen = time.monotonic()
                     result = {"native_loot_crate_interaction": self.last_game.get("native_loot_crate_interaction", {})}
+                elif action == "native-loot-replenishment-fixture" and self.native_loot_input and self.fixtures:
+                    area, crate = self.last_game.get("map"), request.get("target")
+                    if not crate or native_loot.CRATES.get(crate) != area:
+                        raise ValueError("Select an exact authored crate on the current map")
+                    snapshot = await bridge.command(action, crate, timeout=5)
+                    proof = snapshot.get("native_loot_replenishment_fixture", {})
+                    if (proof.get("map"), proof.get("crate")) != (area, crate):
+                        raise RuntimeError("Stock daily loot update did not verify")
+                    self.last_game, self.last_seen = snapshot, time.monotonic()
+                    result = {"native_loot_replenishment_fixture": proof}
                 elif action in ("native-quest-catalog", "native-quest-list"):
                     catalog = await self.read_quest_catalog(bridge)
                     result = {"native_quest_catalog": catalog} if action == "native-quest-catalog" else {
@@ -3473,6 +3483,11 @@ class Host:
                 await self.service_native_zones(bridge, transport, now)
                 if not self.stopping:
                     await self.advance_dream(bridge, transport)
+            if self.native_loot_input:
+                try:
+                    await native_loot.retire_replenished(self, bridge)
+                except (OSError, ValueError, RuntimeError) as error:
+                    self.control.event("native_loot_replenishment_unavailable", reason=str(error))
             if not self.stopping and not self.native_checkpoint_unsafe:
                 await self.service_guest_native_requests(bridge)
             if self.host_camera_input and not self.stopping and not self.native_checkpoint_unsafe:
@@ -3513,7 +3528,8 @@ class Host:
                         if self.crate_placement_error != str(error):
                             self.crate_placement_error = str(error)
                             self.control.event("native_loot_legacy_placement_unavailable", reason=str(error))
-                rolls = self.party.get(native_loot.STATE_KEY, {})
+                rolls = native_loot.published(self.party.get(native_loot.STATE_KEY, {}), self.last_game.get("map"),
+                                              game=self.last_game)
                 try:
                     snapshot = await self.world_loot.sync(
                         bridge, self.last_game, rolls, self.control.generation, self.zone_epoch,

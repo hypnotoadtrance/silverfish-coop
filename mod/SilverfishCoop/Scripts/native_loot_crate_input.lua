@@ -290,6 +290,12 @@ function input.rows(state, phase, status_row)
         if info.qualified then
             rows[#rows + 1] = status_row("native-loot-crate-input", profile.map, profile.name,
                 exhausted(current.crate, info.door, info.box, info.second) and "exhausted" or "ready")
+            if current.host and info.looted == false and info.box and (info.collision == 1 or info.collision == 3) then
+                local verified, active = pcall(loot.temporary_activation, current.crate, current.pawn)
+                if verified and active == false then
+                    rows[#rows + 1] = status_row("native-loot-crate-replenished", profile.map, profile.name, current.name)
+                end
+            end
         end
         if active and sequence > latest then
             latest = sequence

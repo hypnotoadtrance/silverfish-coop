@@ -1814,6 +1814,14 @@ class Bridge:
                     data.setdefault("native_loot_crate_diagnostics", {})[fields[2]] = row
                     if fields[2] == LEGACY_CRATE:
                         data["native_loot_crate_diagnostic"] = row
+                elif (fields[0] == "native-loot-crate-replenished" and len(fields) == 4
+                        and AUTHORED_CRATES.get(fields[2]) == fields[1] and data.get("state") == "hosting"):
+                    row = {"map": fields[1], "crate": fields[2], "pawn": fields[3]}
+                    data.setdefault("native_replenished_crates", {})[fields[2]] = row
+                elif (fields[0] == "native-loot-replenishment-fixture" and len(fields) == 4
+                        and AUTHORED_CRATES.get(fields[2]) == fields[1] and data.get("state") == "hosting"
+                        and 1 <= (days := int(fields[3])) <= 12):
+                    data["native_loot_replenishment_fixture"] = dict(map=fields[1], crate=fields[2], days=days)
                 elif fields[0] == "native-loot-crate-interaction" and len(fields) == 6:
                     data["native_loot_crate_interaction"] = {"map": fields[1], "crate": fields[2], "pawn": fields[3],
                                                             "sequence": int(fields[4]), "entry": fields[5]}

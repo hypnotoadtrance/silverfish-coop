@@ -8,6 +8,8 @@ local desk_class = "/Game/Classes/Actors/Lootables/LootCabinet_Desk_BP.LootCabin
 local spawner_class = "/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C"
 local box_class = "/Script/Engine.BoxComponent"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
+local code_library = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C"
+local replenish_rule = "ReplenishLoot_5_0542042A4D8D98E206019BA9B5A3E23F"
 local instance_class = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"
 local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
@@ -54,6 +56,20 @@ end
 
 local function authority(actor, world)
     return valid(actor) and same(actor:GetWorld(), world) and actor:HasAuthority() and not actor:IsActorBeingDestroyed()
+end
+
+function loot.temporary_activation(crate, pawn)
+    if not valid(crate) or crate.Replenish_Mode ~= 1 or not valid(pawn)
+        or not pawn:HasAuthority() or not same(crate:GetWorld(), pawn:GetWorld()) then return end
+    local instance = crate["As Game Instance FP"]
+    local save = exact(instance, StaticFindObject(instance_class)) and instance.SaveSlot_Ref
+    if not exact(save, StaticFindObject(save_class)) or not same(pawn.Save, save) or not save.GameRules
+        or save.GameRules[replenish_rule] ~= true then return end
+    local library = StaticFindObject(code_library)
+    if not valid(library) then return end
+    local result = {}
+    library:Find_ActorOnTempActivations(crate, crate, result)
+    if type(result.Found) == "boolean" then return result.Found, save, library end
 end
 
 local function finite(value)
@@ -361,6 +377,43 @@ function loot.placement(state, phase, requested_crate)
         positions[index] = position
     end
     return positions
+end
+
+function loot.replenish_fixture(state, phase, requested_crate)
+    local profile = loot.profile(state.map, requested_crate)
+    local host, world, instance = host_context(state, phase, profile)
+    local crate = find_crate(world, profile)
+    local active, save, library = loot.temporary_activation(crate, host)
+    local day_profile = require("authored_world_view")[state.map]
+    local day_path = day_profile and day_profile.day:match("^%S+ (/Game/%S+)$")
+    local day = day_path and StaticFindObject(day_path)
+    local day_class = StaticFindObject("/Game/Classes/Actors/DayCycle_SunControler_BP.DayCycle_SunControler_BP_C")
+    if active ~= true or crate.Looted ~= true or not exact(day, day_class)
+        or not authority(day, world) or not same(day["Game Instance"], instance) then
+        error("native_loot_temporary_activation_fixture_unavailable", 0)
+    end
+    local function fill_minimum()
+        for _, other in ipairs(loot.profiles(state.map)) do
+            if save.TempActivations:GetArrayNum() >= 3 then return end
+            local actor = StaticFindObject(other.path)
+            if authority(actor, world) and actor:GetFullName() == other.name and actor.Replenish_Mode == 1 then
+                library:AddActor_ToTempActivations(actor, actor, {})
+            end
+        end
+        if save.TempActivations:GetArrayNum() < 3 then error("native_loot_replenishment_fixture_too_few_activations", 0) end
+    end
+    for days = 1, 12 do
+        fill_minimum()
+        local before = save.TempActivations:GetArrayNum()
+        day:Daily_Update()
+        if not same(instance.SaveSlot_Ref, save) or save.TempActivations:GetArrayNum() >= before then
+            error("native_loot_replenishment_fixture_daily_update_unverified", 0)
+        end
+        if loot.temporary_activation(crate, host) == false and crate.Looted == true then
+            return days
+        end
+    end
+    error("native_loot_replenishment_fixture_activation_still_present", 0)
 end
 
 -- Each address comes from an exact owned child's stock SpawnLoot out parameter.

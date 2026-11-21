@@ -3,7 +3,7 @@ local loot = require("native_loot")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
-local observation, placement
+local observation, placement, daily_update
 local statics = "/Script/Engine.Default__GameplayStatics"
 local save = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 
@@ -61,6 +61,14 @@ local function capture(scope, slot, outputs, items)
 end
 
 function actions.command(fields, state, phase)
+    if fields[2] == "native-loot-replenishment-fixture" then
+        if not enabled or not fixtures or os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1"
+            or #fields ~= 3 or phase ~= "hosting" or not loot.profile(state.map, fields[3]) then
+            error("native_loot_replenishment_fixture_unavailable", 0)
+        end
+        daily_update = {map = state.map, crate = fields[3], days = loot.replenish_fixture(state, phase, fields[3])}
+        return "stock daily update expired the temporary activation"
+    end
     local action = fields[2]:match("^native%-loot%-(%l+)$")
     if action == "placement" then
         local crate = fields[3]
@@ -184,13 +192,17 @@ function actions.command(fields, state, phase)
 end
 
 function actions.reset()
-    observation, placement = nil, nil
+    observation, placement, daily_update = nil, nil, nil
 end
 
 function actions.rows(state, phase, status_row)
     local row = observation
     local records = {}
     if phase ~= "hosting" then return records end
+    if daily_update and daily_update.map == state.map then
+        records[#records + 1] = status_row("native-loot-replenishment-fixture", daily_update.map,
+            daily_update.crate, daily_update.days)
+    end
     if placement and placement.map == state.map then
         for index, position in ipairs(placement.positions) do
             records[#records + 1] = status_row("native-loot-placement", placement.map, placement.crate,
