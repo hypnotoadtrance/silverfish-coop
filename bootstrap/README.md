@@ -2,13 +2,17 @@
 
 ## Installed resident title
 
-The embedded runtime can start Host and Direct IP Join from the installed game process. Use a matched checkout and a supported game layout with the verified content manifest, the active UE4SS gameplay modules, and the pinned embedded runtime already installed. Disable the older `SilverfishCoopBootstrap` entry for this configuration.
+Extract the resident trial ZIP and run `Install.cmd` while Project Silverfish is closed. Setup detects the Steam installation. Use `Install.cmd -Game "C:\path\to\Project Silverfish"` to choose it explicitly. Setup checks the exact game build and the loader files, adds the co-op modules, and disables the legacy co-op bootstrap in the UE4SS Mods list when present. It rejects conflicting installed files. Co-op campaigns and local profiles use `%LOCALAPPDATA%\SilverfishCoop\Resident` by default.
+
+Launch the game through Steam after setup. From the title, press F7 for Host or F8 for Direct IP Join. On the Host form, F10 opens the stock character creator for a new campaign. F7 starts or loads the named campaign. Build the resident trial ZIP with `python -m bootstrap.resident_release --help` for the required matched artifacts. Setup and direct cold starts have passed on stock-layout replicas. Steam launch against the original installation and two-PC play remain pending. [Resident packager](resident_release.py) · [Installed cold-start test](../tests/live_installed_title_smoke.py)
+
+If you already installed the matching gameplay modules and pinned embedded runtime, configure their native startup directly. Disable the older `SilverfishCoopBootstrap` entry in the UE4SS Mods list before configuring.
 
 ```powershell
 python -m bootstrap.resident_boot_config --game $game --work $workspace
 ```
 
-The helper verifies the stock executable and packages, checks the installed runtime, and writes the native startup descriptor. The workspace holds the co-op session records and must be separate from the game. The default mode retains the normal Windows player profile. The `--isolated` option is for headless replicas with a dedicated Unreal user directory. The installed path has passed direct cold starts in stock-layout replicas. The trial ZIP below still uses the older coordinator, and the new startup has yet to be tested through Steam on the original installation. [Installed cold-start test](../tests/live_installed_title_smoke.py)
+The helper verifies the stock executable and packages, checks the installed runtime, and writes the native startup descriptor. The workspace holds the co-op session records and must be separate from the game. The default mode retains the normal Windows player profile. The `--isolated` option is for headless replicas with a dedicated Unreal user directory.
 
 ## Legacy coordinator
 
@@ -16,7 +20,7 @@ This opt-in UE4SS Lua mod presents **Open Co-op** on the stock Project Silverfis
 
 The bootstrap only reads the title and adds its own passive text widget. The coordinator will own isolated game startup and the handoff.
 
-## Package
+### Legacy package
 
 From a checkout, run `python bootstrap/package.py <new-archive.zip>` to assemble the standalone mod. The archive includes the bootstrap entry and the same stock title qualification and display code used by the staged game. Its three Lua files load through UE4SS's absolute per-mod script search path.
 
@@ -26,7 +30,7 @@ Build the test coordinator with a matching Windows x64 Python environment, the r
 
 Build the [native title bridge](native/README.md) with the coordinator's SHA-256 pin. Run `python bootstrap/package.py <new-archive.zip> --native-dll <main.dll> --coordinator <SilverfishCoopCoordinator.exe>` to package the matching pair beside the three Lua scripts. The same opt-in UE4SS mod entry loads the complete bootstrap.
 
-## Install from a trial ZIP
+### Install from a legacy trial ZIP
 
 Close Project Silverfish, extract the matched Windows trial ZIP, and double-click `Install.cmd`. It finds the Steam game and stages the co-op profile under `%LOCALAPPDATA%\SilverfishCoop\Trials`. It asks for the game folder if Steam's library list does not lead to the installation. The pinned UE4SS v4.0.0 loader, license, and Project Silverfish signature are included.
 
