@@ -1,4 +1,5 @@
 #include "guest_drop_projection.hpp"
+#include "guest_drop_items.hpp"
 #include "guest_drop_maps.hpp"
 #include "interaction_input.hpp"
 
@@ -32,18 +33,16 @@ namespace
     namespace U = RC::Unreal;
     namespace Hooks = U::Hook;
     namespace input = silverfish::native_interaction_input;
+    namespace items = silverfish::native_guest_drop_items;
     using Lua = RC::LuaMadeSimple::Lua;
     using Iteration = Hooks::TCallbackIterationData<void>;
     using Clock = std::chrono::steady_clock;
     using Position = std::array<double, 3>;
 
-    constexpr auto ammo_path = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
     constexpr auto ammo_base_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C");
-    constexpr auto pistol_path = STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C");
     constexpr auto weapon_base_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
     constexpr auto equipment_base_path = STR("/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
-    constexpr auto ammo_mesh_path = STR("/Game/Assets/StaticMeshes/Mesh_Props/PropActor_Meshes/SM_Ammo_Pistol.SM_Ammo_Pistol");
     constexpr auto interaction_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C:SendInteractionToActor");
     constexpr auto ammo_begin_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C:ReceiveBeginPlay");
     constexpr auto weapon_begin_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:ReceiveBeginPlay");
@@ -57,8 +56,6 @@ namespace
     constexpr double range = 250.0;
     constexpr std::size_t component_limit = 24;
 
-    enum class Display { ammo, pistol };
-
     struct Actor
     {
         U::FWeakObjectPtr object, box, display_type, display_base, equipment_base, item_base;
@@ -70,7 +67,7 @@ namespace
     {
         U::FWeakObjectPtr pawn, world, driver, connection;
         bool host{};
-        Display display{Display::ammo};
+        const items::AmmoDisplay* ammo{};
         std::string epoch, id;
         Position source{};
         double visual_z{};
@@ -611,8 +608,8 @@ namespace
 
     const char* spawn_projection()
     {
-        const bool stock_ammo = lease.display == Display::ammo;
-        auto* type = find<U::UClass>(stock_ammo ? ammo_path : pistol_path);
+        const bool stock_ammo = lease.ammo != nullptr;
+        auto* type = find<U::UClass>(stock_ammo ? lease.ammo->stock->item : items::pistol);
         auto* base = find<U::UClass>(stock_ammo ? ammo_base_path : weapon_base_path);
         auto* defaults = type ? type->GetClassDefaultObject().Get() : nullptr;
         auto* const world = U::Cast<U::UWorld>(lease.world.Get());
@@ -655,7 +652,7 @@ namespace
         if (stock_ammo)
         {
             auto* mesh = object(actor, STR("SM_Ammo_HevRifle"));
-            auto* asset = find<U::UObject>(ammo_mesh_path);
+            auto* asset = find<U::UObject>(lease.ammo->mesh);
             if (!owned_component(actor, mesh, find<U::UClass>(STR("/Script/Engine.StaticMeshComponent"))) ||
                 !asset || object(mesh, STR("StaticMesh")) != asset)
                 return "stock_drop_projection_components_unverified";
@@ -689,11 +686,15 @@ namespace
         Position source{};
         for (auto& axis : source) axis = lua.get_number();
         const double visual = lua.get_number();
-        const auto class_path = arguments == 8 ? lua.get_string() : "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C";
-        Display display;
-        if (class_path == "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C") display = Display::ammo;
-        else if (class_path == "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C") display = Display::pistol;
-        else
+        const auto class_path = arguments == 8 ? lua.get_string() : std::string_view{};
+        if (class_path.size() > 192)
+        {
+            clear();
+            return report(lua, false, "stock_drop_projection_class_unqualified");
+        }
+        const auto path = RC::to_wstring(class_path);
+        const auto* ammo = arguments == 7 ? &items::ammo.front() : items::find_ammo(path);
+        if (!ammo && path != items::pistol)
         {
             clear();
             return report(lua, false, "stock_drop_projection_class_unqualified");
@@ -714,7 +715,7 @@ namespace
         auto* existing = static_cast<U::AActor*>(projection.object.Get());
         if (Clock::now() < lease.expiry + hidden_retention && lease.epoch == epoch && lease.id == id &&
             lease.pawn.Get() == pawn && lease.world.Get() == world && lease.driver.Get() == driver &&
-            lease.host == (connection == nullptr) && lease.connection.Get() == connection && lease.display == display &&
+            lease.host == (connection == nullptr) && lease.connection.Get() == connection && lease.ammo == ammo &&
             lease.source == source && mutable_actor(existing) &&
             existing->GetClassPrivate() == projection.display_type.Get() && live(projection.box.Get()) &&
             object(existing, STR("Box")) == projection.box.Get())
@@ -731,7 +732,7 @@ namespace
         lease.driver = driver;
         lease.connection = connection;
         lease.host = connection == nullptr;
-        lease.display = display;
+        lease.ammo = ammo;
         lease.epoch = epoch;
         lease.id = id;
         lease.source = source;

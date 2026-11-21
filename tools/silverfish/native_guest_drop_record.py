@@ -3,10 +3,11 @@
 import math
 import re
 
-from .guest_weapon_profiles import NINE_MM_BALL
+from .authored_routes import MAPS as NORMAL_CAMPAIGN_MAPS
+from .guest_weapon_profiles import NINE_MM_BALL, STOCK_AMMO
 from .native_gold import valid_guid
 from .party import REQUEST_ID
-from .travel import CROSSROADS, OBSERVATORY
+from .travel import AUTHORED_MAPS, CROSSROADS, OBSERVATORY
 
 
 STATE = "native_guest_stack_drops"
@@ -16,8 +17,8 @@ VIEW_ROW = "native-guest-inventory-drop-view"
 VIEW_RESULT = "native-inventory-view-drop-result"
 ITEM = NINE_MM_BALL.item_path
 LIGHT_PISTOL = "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"
-STACKABLE = {ITEM: True, LIGHT_PISTOL: False}
-MAPS = {OBSERVATORY: "Observitory_P", CROSSROADS: "CrossRoads_P"}
+STACKABLE = {**dict.fromkeys((ammo.item_path for ammo in STOCK_AMMO), True), LIGHT_PISTOL: False}
+MAPS = {area: area.rsplit("/", 1)[1] for area in NORMAL_CAMPAIGN_MAPS | AUTHORED_MAPS}
 MAX_DROPS = 128
 MAX_ACTIVE = 4
 MAX_QUANTITY = 200

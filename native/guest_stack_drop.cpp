@@ -1,4 +1,5 @@
 #include "guest_stack_drop.hpp"
+#include "guest_drop_items.hpp"
 #include "guest_drop_maps.hpp"
 #include "guest_regen.hpp"
 #include "interaction_input.hpp"
@@ -40,8 +41,6 @@ namespace
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto game_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
-    constexpr auto ammo_path = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
-    constexpr auto pistol_path = STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C");
     constexpr auto weapon_base_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
     constexpr auto equipment_base_path = STR("/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C");
     constexpr auto weapon_begin_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:ReceiveBeginPlay");
@@ -510,23 +509,26 @@ namespace
         const auto owner = owners(pawn, save, frozen, inventory);
         if (!owner.pawn) return reply(lua, false, "native_guest_stack_drop_exact_owner_unavailable");
         const auto* row = inventory.exact_row(owner.frozen, id);
-        auto* ammo = find<U::UClass>(ammo_path);
-        auto* pistol = find<U::UClass>(pistol_path);
+        namespace items = silverfish::native_guest_drop_items;
         auto* candidate = object_value(inventory.klass, row);
-        const bool stack = ammo && candidate == ammo;
-        auto* type = stack ? ammo : candidate == pistol ? pistol : nullptr;
-        if (!type || !inventory.same_row(row, inventory.exact_row(owner.live_save, id)) ||
+        const auto* ammo = candidate ? items::find_ammo(candidate->GetPathName()) : nullptr;
+        auto* type = find<U::UClass>(ammo ? ammo->stock->item : items::pistol);
+        const bool stack = ammo != nullptr;
+        const bool nine_mm = stack && ammo->stock == &silverfish::guest_weapon_profiles::nine_mm_ball;
+        if (!type || candidate != type || !inventory.same_row(row, inventory.exact_row(owner.live_save, id)) ||
             inventory.never_drop->GetPropertyValueInContainer(row))
             return reply(lua, false, "native_guest_stack_drop_stock_item_row_unqualified");
         auto* defaults = type->GetClassDefaultObject().Get();
         if (!defaults || defaults->GetClassPrivate() != type ||
             !defaults->HasAnyFlags(U::RF_ClassDefaultObject) || !boolean(defaults, STR("Stacks"), stack) ||
             !boolean(defaults, STR("DespawnIfPlayerOwns"), false) || !boolean(defaults, STR("bReplicates"), false))
-            return reply(lua, false, stack ? "native_guest_stack_drop_stock_9mm_default_flags_unqualified" :
+            return reply(lua, false, stack ? (nine_mm ? "native_guest_stack_drop_stock_9mm_default_flags_unqualified" :
+                "native_guest_stack_drop_stock_ammo_default_flags_unqualified") :
                 "native_guest_stack_drop_stock_pistol_default_flags_unqualified");
         const auto stored = inventory.quantity->GetPropertyValueInContainer(row);
         if (stack && stored != count)
-            return reply(lua, false, "native_guest_stack_drop_stock_9mm_row_unqualified");
+            return reply(lua, false, nine_mm ? "native_guest_stack_drop_stock_9mm_row_unqualified" :
+                "native_guest_stack_drop_stock_ammo_row_unqualified");
         U::UFunction* weapon_tick{};
         if (!stack)
         {

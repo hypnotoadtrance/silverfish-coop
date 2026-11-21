@@ -211,7 +211,7 @@ local function show()
     if row.pending_offset then
         lines[#lines + 1] = "Loading inventory page. End closes."
     elseif row.drop_state == "confirming" then
-        local description = selected.class == drop_items.ammo
+        local description = drop_items.profiles[selected.class].stackable
             and string.format("all %d rounds of %s", selected.quantity, selected.name) or selected.name
         lines[#lines + 1] = "Drop " .. description .. "? Home confirms. End cancels."
     elseif row.drop_state == "dropping" then

@@ -1,4 +1,7 @@
-return {
-    ["/Game/Classes/Maps/Maps_OverWorld/Observitory_P"] = "Observitory_P",
-    ["/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"] = "CrossRoads_P",
-}
+local maps = {}
+for package in pairs(require("zone_maps")) do
+    if not package:match("^/Game/Classes/Maps/PlaytestMap_") then
+        maps[package] = package:match("[^/]+$")
+    end
+end
+return maps

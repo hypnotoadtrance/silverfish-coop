@@ -89,7 +89,9 @@ class GuestStackDropTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report[drop.KEY]["actor"], actor)
         self.assertIsNone(snapshot([drop.ACTION, *row[1:]]))
         self.assertIsNone(snapshot([*row[:8], ACTOR, NEW_GUID]))
-        self.assertIsNone(snapshot([*row[:8], actor.replace("Ammo_Pistol_BP", "Ammo_Magnum_BP"), NEW_GUID]))
+        magnum = snapshot([*row[:8], actor.replace("Ammo_Pistol_BP", "Ammo_Magnum_BP"), NEW_GUID])
+        self.assertEqual(magnum[drop.KEY]["class_path"], "/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C")
+        self.assertIsNone(snapshot([*row[:8], actor.replace("Ammo_Pistol_BP", "Ammo_9mm_AP_BP"), NEW_GUID]))
 
     def make_host(self):
         profile = Path(self.enterContext(TemporaryDirectory()))

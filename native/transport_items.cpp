@@ -1,5 +1,6 @@
 #include "transport_items.hpp"
 #include "guest_drop_maps.hpp"
+#include "guest_drop_items.hpp"
 
 #include <algorithm>
 #include <array>
@@ -44,8 +45,6 @@ namespace
     constexpr auto panel_path = STR("/Game/Classes/GUI/New/Components/InventoryPanel.InventoryPanel_C");
     constexpr auto context_menu_path = STR("/Game/Classes/GUI/New/Components/ItemContextMenu.ItemContextMenu_C");
     constexpr auto inventory_screen_path = STR("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C");
-    constexpr auto pistol_ammo_path = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
-    constexpr auto light_pistol_path = STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto consumable_path = STR("/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
@@ -907,8 +906,8 @@ namespace
         auto* item_class = object_value(field<Unreal::FClassProperty>(candidate.structure, item_class_name), candidate.value);
         if (candidate.panel != panel || !item_class) return;
         const auto class_path = item_class->GetPathName();
-        const bool stack = class_path == pistol_ammo_path;
-        if (!stack && class_path != light_pistol_path) return;
+        const bool stack = silverfish::native_guest_drop_items::find_ammo(class_path) != nullptr;
+        if (!stack && class_path != silverfish::native_guest_drop_items::pistol) return;
 
         // Suppress stock TakeCard even when the selected row is stale or a request is already pending.
         iteration.PreventOriginalFunctionCall();
