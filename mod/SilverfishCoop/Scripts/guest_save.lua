@@ -409,6 +409,9 @@ local function bind(state, phase, name, raw_health, slot, proof)
     if managed_save(detached) then error("The detached native save is already in use", 0) end
     if proof and proof.appearance then
         require("native_avatar_character_view").install(detached.Character, proof.appearance)
+        if proof.profile then
+            require("native_guest_creator").install(detached, proof.profile, proof.name, guest.pawn)
+        end
     end
     if slot and not finite(detached.PlayerHealth) then error("The native guest save generation has invalid health", 0) end
     if not override then health = slot and math.min(maximum, detached.PlayerHealth) or maximum end
@@ -494,13 +497,14 @@ function guest_save.command(fields, state, phase)
         return capture(state, phase, fields[3], fields[4])
     end
     if command == "native-guest-bind-exact" then
-        if #fields < 7 or (#fields > 8 and (#fields ~= 18 or fields[8] ~= "-")) then
+        if #fields < 7 or (#fields > 8 and ((#fields ~= 18 and #fields ~= 20) or fields[8] ~= "-")) then
             error("Expected exact guest identity, health, and optional slot or stock appearance", 0)
         end
-        local appearance = #fields == 18 and table.concat(fields, "|", 9, 18) or nil
+        local appearance = #fields >= 18 and table.concat(fields, "|", 9, 18) or nil
         local slot = fields[8] ~= "-" and fields[8] or nil
         return bind(state, phase, fields[3], fields[7], slot,
-            {controller = fields[4], connection = fields[5], character = fields[6], appearance = appearance})
+            {controller = fields[4], connection = fields[5], character = fields[6], appearance = appearance,
+                profile = fields[19], name = fields[20]})
     end
     if #fields < 3 or #fields > 5 then
         error("Expected the exact guest pawn name with optional saved health and generation slot", 0)

@@ -17,6 +17,7 @@ from . import direct_ip, link
 from .embedded_engine import _assert_no_reparse, _exact_existing
 from .embedded_startup import INVITE_LIMIT, _read_file
 from .native_player_avatar import character_appearance
+from .native_guest_creator import valid_profile
 from .title_handoff import TOKEN
 
 
@@ -55,10 +56,11 @@ class _Request:
     payload: bytes = field(repr=False)
     name: str | None = None
     appearance: str | None = None
+    profile: str | None = None
 
     @property
-    def fingerprint(self) -> tuple[str, str, str | None, str | None]:
-        return self.action, sha256(self.payload).hexdigest(), self.name, self.appearance
+    def fingerprint(self) -> tuple[str, str, str | None, str | None, str | None]:
+        return self.action, sha256(self.payload).hexdigest(), self.name, self.appearance, self.profile
 
 
 def _parse(operation_id: str, fields: bytes) -> _Request:
@@ -82,13 +84,14 @@ def _parse(operation_id: str, fields: bytes) -> _Request:
         try:
             text = raw_name.decode("utf-8")
             import_id = identifier.decode("ascii")
-            appearance = body.decode("ascii") if body else None
+            appearance, newline, profile = body.decode("ascii").partition("\n")
         except UnicodeError:
             raise _DraftError("invalid_request") from None
         name = text.strip()
         if (separator and _token(import_id) and len(raw_name) <= 256 and 1 <= len(name) <= 64 and text.isprintable()
-                and (appearance is None or character_appearance(appearance))):
-            return _Request(operation_id, "create", identifier, name, appearance)
+                and (not appearance or character_appearance(appearance))
+                and (not newline or appearance and valid_profile(profile))):
+            return _Request(operation_id, "create", identifier, name, appearance or None, profile or None)
     raise _DraftError("invalid_request")
 
 
@@ -165,7 +168,7 @@ class _Direct:
 
 @dataclass
 class _Operation:
-    fingerprint: tuple[str, str, str | None, str | None]
+    fingerprint: tuple[str, str, str | None, str | None, str | None]
     result: bytes | None = None
     import_id: str | None = None
 
@@ -277,7 +280,7 @@ class TitleJoinSettings:
     def _error(self, operation_id, code):
         self._outbox = f"1\t{self._generation}\t{operation_id}\terror\t{code}\t0\n".encode("ascii")
 
-    async def _fetch(self, draft, name, operation_id, appearance=None):
+    async def _fetch(self, draft, name, operation_id, appearance=None, profile=None):
         async def request(name, operation_id, refusal, **creation):
             draft.verify()
             try:
@@ -299,6 +302,8 @@ class TitleJoinSettings:
             created = None
             if name is not None:
                 creation = {"appearance": appearance} if appearance is not None else {}
+                if profile is not None:
+                    creation["profile"] = profile
                 reply = await request(name, operation_id, "create_refused", **creation)
                 created = _character(reply.get("character"))
                 if created[1] != name:
@@ -317,7 +322,9 @@ class TitleJoinSettings:
         async with asyncio.timeout(self._timeout):
             try:
                 draft.connection = await direct_ip.connect(self._direct_profile, address, port, password, build, PROTOCOL,
-                                                           verified_fingerprint=fingerprint)
+                                                           verified_fingerprint=fingerprint, require_trust=True)
+            except direct_ip.HostTrustRequired:
+                raise
             except direct_ip.Refused as error:
                 raise _DraftError(error.reason) from None
             except link.LinkError:
@@ -391,7 +398,7 @@ class TitleJoinSettings:
                 return self._error(operation_id, "unknown_import")
             if len(draft.characters) >= MAX_CHARACTERS:
                 return self._error(operation_id, "create_refused")
-        task = asyncio.create_task(self._fetch(draft, request.name, operation_id, request.appearance))
+        task = asyncio.create_task(self._fetch(draft, request.name, operation_id, request.appearance, request.profile))
         self._pending = _Pending(task, operation_id, draft, created_file)
 
     def _complete(self):
@@ -405,6 +412,12 @@ class TitleJoinSettings:
             payload = (header + "".join(f"{character}\t{name}\n" for character, name in roster)).encode("utf-8")
             if len(payload) > _RESPONSE_LIMIT:
                 raise _DraftError("catalog_invalid")
+        except direct_ip.HostTrustRequired as request:
+            reason = "changed" if request.changed else "new"
+            self._outbox = (
+                f"1\t{self._generation}\t{operation_id}\ttrust\t{reason}\t1\n{request.fingerprint}\n"
+            ).encode("ascii")
+            return
         except (asyncio.CancelledError, OSError, RuntimeError, ValueError) as error:
             self._error(operation_id, str(error) if isinstance(error, _DraftError) else "catalog_unavailable")
             if pending.created_file:

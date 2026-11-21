@@ -450,7 +450,7 @@ class CampaignStore:
                 if character["guest_id"] == guest_id
             ]
 
-    def create_linked_character(self, guest_id, name, operation_id, *, appearance=None):
+    def create_linked_character(self, guest_id, name, operation_id, *, appearance=None, profile=None):
         """Create once for the owner of an authenticated application session."""
         if not isinstance(operation_id, str) or not re.fullmatch(r"[0-9a-f]{32}", operation_id):
             raise CharacterError("Invalid character creation operation ID.")
@@ -459,6 +459,11 @@ class CampaignStore:
 
             if not character_appearance(appearance):
                 raise CharacterError("Invalid stock character appearance.")
+        if profile is not None:
+            from .native_guest_creator import valid_profile
+
+            if appearance is None or not valid_profile(profile):
+                raise CharacterError("Invalid stock character profile.")
         with self._mutex:
             self._require_open()
             if guest_id not in self._data["guests"]:
@@ -468,11 +473,14 @@ class CampaignStore:
             existing = self._data["characters"].get(character_id)
             if existing is not None:
                 if (existing["guest_id"] != guest_id or existing["name"] != name
-                        or existing["state"].get("creator_appearance") != appearance):
+                        or existing["state"].get("creator_appearance") != appearance
+                        or existing["state"].get("creator_profile") != profile):
                     raise CharacterError("Character creation operation ID is already in use.")
             else:
                 candidate = copy.deepcopy(self._data)
                 state = {"creator_appearance": appearance} if appearance is not None else {}
+                if profile is not None:
+                    state["creator_profile"] = profile
                 self._add_character(candidate, guest_id, name, state, character_id)
                 self._commit(candidate, verify_content=False)
             return {"character_id": character_id, "name": name}
@@ -586,10 +594,10 @@ class CampaignStore:
 
     @staticmethod
     def _update_character_state(character, state):
-        appearance = character["state"].get("creator_appearance")
+        selections = {key: value for key, value in character["state"].items()
+                      if key in {"creator_appearance", "creator_profile"}}
         character["state"] = copy.deepcopy(state)
-        if appearance is not None:
-            character["state"]["creator_appearance"] = appearance
+        character["state"].update(selections)
 
     def checkpoint(self, world, character_states, *, unleased_states=None):
         """Save a campaign and its exact character snapshots in one revision."""

@@ -41,6 +41,13 @@ class Refused(link.LinkError):
         super().__init__(_REFUSALS.get(reason, "The host declined Direct IP enrollment"))
 
 
+class HostTrustRequired(link.LinkError):
+    def __init__(self, fingerprint: str, *, changed: bool):
+        self.fingerprint = fingerprint
+        self.changed = changed
+        super().__init__("The host identity needs confirmation")
+
+
 def _uuid(value):
     if type(value) is not str:
         return False
@@ -203,7 +210,7 @@ class Connection:
 
 
 async def connect(profile: Path, host: str, port: int, password: str, game_build: str, protocol: int, *,
-                  verified_fingerprint: str | None = None) -> Connection:
+                  verified_fingerprint: str | None = None, require_trust: bool = False) -> Connection:
     """Discover the host, then enroll over a second TLS connection pinned to that certificate."""
     if type(host) is not str or "%" in host or type(port) is not int or not 1 <= port <= 65535:
         raise ValueError("Enter a numeric host address and a UDP port from 1 to 65535")
@@ -230,9 +237,26 @@ async def connect(profile: Path, host: str, port: int, password: str, game_build
     saved_pin = {"schema": 1, "certificate_sha256": pin}
     remembered = _record(host_record)
     changing_pin = remembered is not None and remembered != saved_pin
+    if require_trust and remembered != saved_pin and verified_fingerprint is None:
+        raise HostTrustRequired(pin, changed=changing_pin)
     if changing_pin and verified_fingerprint is None:
         raise Refused("direct_host_identity_changed")
+
+    def remember_host():
+        if changing_pin:
+            if _record(host_record) != remembered:
+                raise Refused("direct_host_identity_changed")
+            write_json(host_record, saved_pin)
+        if _record(host_record, saved_pin) != saved_pin:
+            raise Refused("direct_host_identity_changed")
+
     if discovery["password_required"] and not password:
+        if verified_fingerprint is not None and remembered != saved_pin:
+            # Verify the approved key without spending a password attempt.
+            confirmed = _accepted(await link.direct_request(host, port, {"direct": "discover"}, certificate=certificate))
+            if confirmed.get("certificate") != certificate or confirmed.get("campaign") != campaign:
+                raise Refused("direct_identity_verification_failed")
+            remember_host()
         raise Refused("direct_password_required")
     participant = _record(root / f"guest-{pin}-{uuid.UUID(campaign).hex}.json", {
         "schema": 1, "guest_id": str(uuid.uuid4()), "credential": secrets.token_urlsafe(32),
@@ -246,17 +270,15 @@ async def connect(profile: Path, host: str, port: int, password: str, game_build
         "direct": "enroll", "campaign": campaign, **credentials, "password": password,
         "game_build": game_build, "protocol_version": protocol,
     }, certificate=certificate)
-    if changing_pin:
-        if _record(host_record) != remembered:
-            raise Refused("direct_host_identity_changed")
-        write_json(host_record, saved_pin)
+    if verified_fingerprint is not None:
+        remember_host()
     reply = _accepted(reply)
     features = reply.get("features")
     if (type(features) is not dict
             or any((not key.startswith("native_") and key != "expanded_zones") or type(value) is not bool
                    for key, value in features.items())):
         raise link.LinkError("The host returned invalid Direct IP game features")
-    if _record(host_record, saved_pin) != saved_pin:
-        raise Refused("direct_host_identity_changed")
+    if verified_fingerprint is None:
+        remember_host()
     return Connection(dict(features, schema=1, host=host, port=port, certificate=certificate,
                            game_build=game_build, protocol_version=protocol, **credentials))

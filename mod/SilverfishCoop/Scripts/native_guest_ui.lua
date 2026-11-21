@@ -1,6 +1,8 @@
 local guest_ui = {}
 local guest_save = require("guest_save")
 local scope = require("native_save_scope")
+local creator = require("native_guest_creator")
+local appearance = require("native_avatar_character_view")
 local statics = "/Script/Engine.Default__GameplayStatics"
 local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local item_class = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
@@ -112,6 +114,14 @@ local function capture(state, phase, pawn_name, path)
         error("The co-op view requires an authenticated guest save and host Journal", 0)
     end
     local rows = {table.concat({state.map, character}, "\t")}
+    local checked, character_row = pcall(function()
+        local character = save.Character
+        local name = character[creator.name_field]:ToString()
+        if name ~= "" then
+            return table.concat({"character", encode(name), appearance.observe(character), creator.observe(character)}, "\t")
+        end
+    end)
+    if checked and character_row then rows[#rows + 1] = character_row end
     for _, key in ipairs({"backpack", "equipment", "armor", "helmet"}) do
         local source = save[slots[key]]
         local array = key == "backpack" or key == "equipment"
@@ -191,6 +201,10 @@ local function project(state, phase, character, path)
         for field in (line .. "\t"):gmatch("([^\t]*)\t") do row[#row+1] = field end
         if processed == 1 then
             if #row ~= 2 or row[1] ~= state.map or row[2] ~= character then error("The co-op view is stale", 0) end
+        elseif row[1] == "character" and #row == 4 then
+            local name = decode(row[2]):ToString()
+            creator.install(view, row[4], name)
+            if row[3] ~= "-" then appearance.install(view.Character, row[3]) end
         elseif row[1] == "item" then
             local entry = item_row(row)
             local name = slots[row[2]]
@@ -239,6 +253,7 @@ local function project(state, phase, character, path)
         error("The stock co-op Journal view failed readback", 0)
     end
     for _, name in pairs(slots) do old[name] = view[name] end
+    if view.Character[creator.name_field]:ToString() ~= "" then old.Character = view.Character end
     old.JournalEntries = view.JournalEntries
     old.ActiveQuests = view.ActiveQuests
     if count(old.JournalEntries) ~= note_count or #old.ActiveQuests ~= quest_count then

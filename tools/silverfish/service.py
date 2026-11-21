@@ -11,7 +11,6 @@ import time
 import uuid
 from dataclasses import dataclass
 from functools import partial
-from hashlib import sha256
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
@@ -403,7 +402,7 @@ class Host:
             return {"accepted": False, "reason": "guest_or_character_unavailable"}
         saved = active["character"]["state"]
         if request["character_id"] in self.expired_characters:
-            saved = {key: saved[key] for key in ("health", "native_guest_save", "creator_appearance")
+            saved = {key: saved[key] for key in ("health", "native_guest_save", "creator_appearance", "creator_profile")
                      if key in saved} if self.native_guest else {}
         self.guest = {
             "guest_id": request["guest_id"], "lease_id": active["lease_id"],
@@ -1704,10 +1703,11 @@ class Host:
         if request == {"action": "characters"}:
             return {"ok": True, "characters": self.store.linked_character_catalog(guest_id)}
         if request.get("action") == "create-character" and set(request) in (
-                {"action", "name", "operation_id"}, {"action", "name", "operation_id", "appearance"}):
+                {"action", "name", "operation_id"}, {"action", "name", "operation_id", "appearance"},
+                {"action", "name", "operation_id", "appearance", "profile"}):
             try:
                 created = self.store.create_linked_character(guest_id, request["name"], request["operation_id"],
-                                                             appearance=request.get("appearance"))
+                                                             appearance=request.get("appearance"), profile=request.get("profile"))
             except CampaignError as error:
                 return {"ok": False, "error": str(error)}
             return {"ok": True, "character": created}
@@ -2326,6 +2326,9 @@ class Host:
                     raise RuntimeError("The authenticated native guest save scope is unavailable")
                 if not frame and (appearance := self.guest["restore"].get("creator_appearance")):
                     arguments = ("-", *appearance.split("|"))
+                    if profile := self.guest["restore"].get("creator_profile"):
+                        name = self.store.character_names({binding.character_id})[binding.character_id]
+                        arguments += (profile, name)
                 snapshot = await bridge.command("native-guest-bind-exact", binding.pawn, binding.controller,
                                                 binding.connection, binding.character_id, health, *arguments, timeout=7)
             else:
@@ -4311,9 +4314,6 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                                               on_request=controller.guest_request, max_game_guests=max_guests,
                                               **({"enroll": enrollment} if enrollment is not None else {}))
             controller.port = transport.address[1]
-            if resident_engine is not None and direct_password is not None:
-                write_text(work / "host-fingerprint.txt",
-                           sha256(identity.certificate_pem.encode("ascii")).hexdigest() + "\n")
             control.event("listening", address=bind, port=controller.port)
             await controller.run(bridge, transport)
         except (Exception, asyncio.CancelledError) as error:
@@ -4426,9 +4426,10 @@ async def open_admission(transport, invite: dict, request: dict, *, timeout: flo
 
 
 async def character_catalog(work: Path, invitation: Path, name: str | None,
-                            operation_id: str | None, *, appearance: str | None = None) -> dict:
+                            operation_id: str | None, *, appearance: str | None = None,
+                            profile: str | None = None) -> dict:
     invite = load_invite(invitation, staged_build(work))
-    return await _character_catalog(invite, name, operation_id, appearance=appearance)
+    return await _character_catalog(invite, name, operation_id, appearance=appearance, profile=profile)
 
 
 async def direct_catalog(work: Path, profile: Path, host: str, port: int, password: str,
@@ -4440,7 +4441,7 @@ async def direct_catalog(work: Path, profile: Path, host: str, port: int, passwo
 
 
 async def _character_catalog(invite: dict, name: str | None, operation_id: str | None, *,
-                             appearance: str | None = None) -> dict:
+                             appearance: str | None = None, profile: str | None = None) -> dict:
     admission = {key: invite[key] for key in ("guest_id", "credential", "character_id", "game_build") if key in invite}
     admission.update({"protocol_version": PROTOCOL, "catalog": True})
     client = await link.start_client(catalog_only=True)
@@ -4453,6 +4454,8 @@ async def _character_catalog(invite: dict, name: str | None, operation_id: str |
         request = {"action": "create-character", "name": name, "operation_id": operation_id or uuid.uuid4().hex}
         if appearance is not None:
             request["appearance"] = appearance
+        if profile is not None:
+            request["profile"] = profile
         return await client.request(request)
     finally:
         await client.close()

@@ -46,9 +46,8 @@ must be able to reach the host's chosen UDP port (7777 by default).
 
 Each campaign has its own guest characters. The host's identity belongs to
 the co-op installation and stays the same when the host changes campaigns.
-If the guest sees Verify host identity, the host can share the fingerprint
-from %LOCALAPPDATA%\SilverfishCoop\Resident\host-fingerprint.txt while hosting.
-Paste that fingerprint in the guest's verification screen.
+The game asks guests to confirm that they trust a new host or a host whose
+identity has changed. The connection remains encrypted after confirmation.
 """
 _FULL_INSTALL = ("Use this ZIP for a first install or an update. It includes the pinned\n"
                  "UE4SS v4.0.0 loader and Project Silverfish signature. Updating with this\n"

@@ -63,6 +63,8 @@ async def start_pair(host, guest, character_name, *, on_join=None):
     await join("address", "127.0.0.1")
     await join("port", str(host.port))
     await join("no_password")
+    await screen("trust_host")
+    await guest.bridge.command("native-title-button-fixture", "trust")
     await screen("catalog;count=0")
     await join("create", character_name)
     await screen("catalog;count=1")

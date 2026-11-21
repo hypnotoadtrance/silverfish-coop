@@ -2,6 +2,7 @@ local creator = {}
 local title = require("native_title_entry")
 local save_scope = require("native_save_scope")
 local appearance = require("native_avatar_character_view")
+local guest_profile = require("native_guest_creator")
 
 local main_menu = "/Game/Classes/Maps/MainMenu_P"
 local editor_map = "/Game/Classes/Maps/CharacterSelect_Map_P"
@@ -10,6 +11,7 @@ local game_instance_path = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP
 local save_path = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
+local editor_class = "/Game/Classes/GUI/Character_Editor_Widget.Character_Editor_Widget_C"
 local record, hooked
 
 local function valid(object) return object and object:IsValid() end
@@ -55,18 +57,68 @@ local function clean_guest(record)
         and statics:DoesSaveGameExist(record.slot, 0) == false
 end
 
+local function observe_guest_editor(state)
+    local controller = state.controller
+    local stack = valid(controller) and controller.MenuStack
+    local count = stack and stack:GetArrayNum()
+    if not count or count < 1 or count > 32 then return end
+    local menu = stack[count]
+    if not exact(menu, editor_class) or not same(menu:GetOwningPlayer(), controller) then return end
+    if not same(record.editor, menu) then
+        record.editor = menu
+        for _, field in ipairs({"Setting_Selector_Faction", "Setting_Selector_StartMap", "Selector_QP_Rep",
+            "Selector_QP_Quest", "Setting_Selector_Widget", "CheckBox_BarterOnly", "CheckBox_BoneBag",
+            "CheckBox_CombineStash", "CheckBox_FailContracts", "CheckBox_ItemsLostPerDeath", "CheckBox_LockSaves",
+            "CheckBox_LootReplenish", "CheckBox_PermaDeath", "CheckBox_SaveLvlTrans", "CheckBox_Shops",
+            "CheckBox_XP", "Setting_Selector_RespawnMode"}) do
+            local control = menu[field]
+            if valid(control) then
+                control:SetIsEnabled(false)
+                control:SetToolTipText(FText("Controlled by the co-op host"))
+            end
+        end
+    end
+    local page = menu.WidgetSwitcher_0:GetActiveWidgetIndex()
+    if page == 1 then
+        if record.name and not record.named then
+            record.named = true
+            menu.EditableTextBox_Name:SetText(FText(record.name))
+        end
+        record.route = "custom"
+    elseif page == 4 then
+        record.route = "preset"
+    end
+end
+
+local function captured_profile(record)
+    local menu, character = record.editor, record.save.Character
+    if not valid(menu) or not record.route then error("Guest character choices are unavailable", 0) end
+    local recipe
+    if record.route == "preset" then
+        local selected = menu.PlayerClasses[menu.Selected_Class_Index + 1]
+        recipe = "preset_" .. text(selected.RowName)
+    else
+        recipe = "kit" .. tostring(menu.Setting_Selector_Kit.IndexOutput)
+    end
+    return appearance.observe(character), guest_profile.observe(character, recipe), text(character[guest_profile.name_field])
+end
+
 local function guest_departure(target, absolute, options)
     if record.state == "returning" then return end
-    record.result, record.model = "failed", nil
+    record.result, record.model, record.profile = "failed", nil, nil
     if save_scope.selected() == record.scope then
         if leaf(target) == leaf(main_menu) then
             record.result = "cancelled"
         elseif absolute == true and options == "" and authorizes(record) and leaf(target) == text(record.save.Level) then
             local statics = StaticFindObject(statics_path)
             if valid(statics) and statics:DoesSaveGameExist(record.slot, 0) == true then
-                local ok, model = pcall(appearance.observe, record.save.Character)
+                local ok, model, profile, name = pcall(captured_profile, record)
                 if ok and model ~= "-" and appearance.decode(model) then
-                    record.result, record.model = "captured", model
+                    record.result, record.model, record.profile = "captured", model, profile
+                    name = name and name:match("^%s*(.-)%s*$")
+                    if name and utf8.len(name) and utf8.len(name) > 0 and utf8.len(name) <= 64 and not name:find("%c") then
+                        record.name = name
+                    end
                 end
             end
         end
@@ -155,11 +207,11 @@ function creator.begin(state, phase, slot, port, resolve, on_departure)
     return open_editor(state, phase, slot, {port = port, resolve = resolve, on_departure = on_departure})
 end
 
-function creator.begin_guest(state, phase, attempt)
+function creator.begin_guest(state, phase, attempt, name)
     if type(attempt) ~= "string" or #attempt ~= 32 or not attempt:match("^[0-9a-f]+$") then
         error("guest_stock_creator_attempt_invalid", 0)
     end
-    return open_editor(state, phase, "SFCoopGuestCreator_" .. attempt, {attempt = attempt})
+    return open_editor(state, phase, "SFCoopGuestCreator_" .. attempt, {attempt = attempt, name = name})
 end
 
 function creator.clear_guest(state, phase, attempt)
@@ -185,7 +237,8 @@ end
 
 function creator.guest_result(attempt)
     if record and record.attempt == attempt then
-        return record.state, record.state == "captured" and record.model or nil
+        if record.state == "captured" then return record.state, record.model, record.profile, record.name end
+        return record.state
     end
 end
 
@@ -201,8 +254,9 @@ function creator.rows(state, phase, row)
             record.state = checked and clean and result or "failed"
             if record.state ~= "captured" then record.model = nil end
         end
+        if record.state == "creating" and world_is(state.world, editor_map) then observe_guest_editor(state) end
         return {row("native-guest-stock-creator", record.state, record.attempt,
-            record.state == "captured" and record.model or "-")}
+            record.state == "captured" and record.model or "-", record.state == "captured" and record.profile or "-")}
     end
     if record.state == "opening" and world_is(state.world, editor_map) then
         record.state = "creating"

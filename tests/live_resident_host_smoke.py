@@ -174,6 +174,8 @@ async def verify(work: Path, original: Path, *, direct: bool = False, title_prof
         if direct:
             await open_direct()
             await form("no_password")
+            await form_state("trust_host")
+            await guest_bridge.command("native-title-button-fixture", "trust")
             await form_state("password;error=direct_password_required")
             await form("wrong_password")
             await form_state("password;error=direct_wrong_password")
@@ -266,6 +268,8 @@ async def verify(work: Path, original: Path, *, direct: bool = False, title_prof
         if direct:
             await open_direct(edited_port)
             await form("no_password")
+            await form_state("trust_host")
+            await guest_bridge.command("native-title-button-fixture", "trust")
             await form_state("catalog;count=1")
             await form("select", character)
             await form("submit")

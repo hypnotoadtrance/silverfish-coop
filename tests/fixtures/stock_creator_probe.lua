@@ -167,14 +167,28 @@ function actions.gueststyle(menu, switch, page)
     local prior = selected[head_field]
     pick(head, (head.IndexOutput + 1) % head.Settings:GetArrayNum())
     pick(hair, (hair.IndexOutput + 1) % hair.Settings:GetArrayNum())
+    assert(menu.Setting_Selector_Faction:GetIsEnabled() == false
+        and menu.Setting_Selector_StartMap:GetIsEnabled() == false, "campaign_choices_enabled_for_guest")
+    pick(menu.Setting_Selector_Kit, 2)
+    local personality = menu.Selector_Vox_Type
+    pick(personality, (personality.IndexOutput + 1) % personality.Settings:GetArrayNum())
+    local stance = menu.Setting_Selector_Stance
+    pick(stance, (stance.IndexOutput + 1) % stance.Settings:GetArrayNum())
+    pick(menu.Setting_Selector_Passives, 2)
+    menu.Passive_Selector.SelectedPassives = {FName("WeirdLuck")}
     selected = menu.Selected_ClassStruct
     assert(valid(selected[head_field]) and not same(selected[head_field], prior), "guest_stock_creator_head_did_not_change")
     local head_name = selected[head_field]:GetFullName():match("^StaticMesh (.+)$")
     local hair_name = valid(selected[hair_field]) and selected[hair_field]:GetFullName():match("^StaticMesh (.+)$") or "-"
     assert(head_name and hair_name, "guest_stock_creator_stock_option_unavailable")
+    return head_name .. "|" .. hair_name
+end
+
+function actions.guestnext(menu, switch)
+    page_is(switch, 1)
     menu:BndEvt__Character_Editor_Widget_Button_Confirm_1_K2Node_ComponentBoundEvent_35_Pressed__DelegateSignature()
     page_is(switch, 3)
-    return head_name .. "|" .. hair_name
+    return "page=3"
 end
 
 function actions.cancel(menu, switch, page)

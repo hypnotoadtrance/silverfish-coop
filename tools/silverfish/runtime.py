@@ -31,6 +31,7 @@ from . import native_loose_pickup
 from . import native_stock_enemy_drops
 from . import native_stock_door
 from . import native_player_avatar
+from .native_guest_creator import valid_profile
 from . import native_host_stack_drop
 from . import native_black_box
 from . import native_spratt
@@ -1565,15 +1566,18 @@ class Bridge:
                     }
                 elif fields[0] == "native-network-timeout" and len(fields) == 2:
                     data["native_network_timeout"] = _finite(fields[1])
-                elif fields[0] == "native-guest-stock-creator" and len(fields) == 4:
-                    creator_state, attempt, appearance = fields[1:]
+                elif fields[0] == "native-guest-stock-creator" and len(fields) in (4, 5):
+                    creator_state, attempt, appearance = fields[1:4]
+                    profile = fields[4] if len(fields) == 5 else "-"
                     if (creator_state not in {"opening", "creating", "returning", "captured", "cancelled", "failed"}
                             or not re.fullmatch(r"[a-f0-9]{32}", attempt)
                             or (creator_state == "captured" and not native_player_avatar.character_appearance(appearance))
-                            or (creator_state != "captured" and appearance != "-")):
+                            or (creator_state == "captured" and profile != "-" and not valid_profile(profile))
+                            or (creator_state != "captured" and (appearance, profile) != ("-", "-"))):
                         raise ValueError("Invalid guest character creator receipt")
                     data["native_guest_stock_creator"] = {"state": creator_state, "attempt": attempt,
-                                                          "appearance": None if appearance == "-" else appearance}
+                                                          "appearance": None if appearance == "-" else appearance,
+                                                          "profile": None if profile == "-" else profile}
                 elif fields[0] == "native-stock-creator" and len(fields) == 4:
                     creator_state, area, slot = fields[1:]
                     if (creator_state not in {"opening", "creating", "cancelled", "failed", "travelling", "verified"}

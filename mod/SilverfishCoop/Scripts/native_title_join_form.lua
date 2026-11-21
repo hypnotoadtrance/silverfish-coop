@@ -15,8 +15,8 @@ local messages = {
     direct_enrollment_required = "Connect to the host again.",
     direct_campaign_changed = "The host changed campaigns. Connect again.",
     direct_host_unreachable = "Could not connect to the host at this IP and UDP port.",
-    direct_host_identity_changed = "Ask your host for their new fingerprint, then paste it here.",
-    direct_identity_verification_failed = "That fingerprint did not match. Check it with your host.",
+    direct_host_identity_changed = "The host changed. Connect again to review it.",
+    direct_identity_verification_failed = "The server changed before it could connect. Try again.",
     direct_refused = "The host declined the connection.",
     incompatible_game_or_protocol = "The host and guest builds are incompatible.",
     invite_refused = "The host refused this invitation.",
@@ -65,6 +65,12 @@ local function read_response(draft)
     if generation ~= draft.generation or id ~= draft.pending.id then return end
     if status == "error" and messages[value] and text_count == "0" and body == "" then
         return {error = value}
+    end
+    if status == "trust" and draft.pending.kind == "direct" and text_count == "1"
+        and (value == "new" or value == "changed") then
+        local fingerprint = body:match("^([0-9a-f]+)\n$")
+        if fingerprint and #fingerprint == 64 then return {fingerprint = fingerprint, changed = value == "changed"} end
+        return
     end
     local count = text_count and #text_count <= 2 and tonumber(text_count)
     if status ~= "ok" or not token(value) or not count or count > max_characters
@@ -134,14 +140,11 @@ local function render_surface(draft, screen, hint, initial)
             field("password", "Password", "", 512, nil, true),
             {button("connect", "Connect"), back},
         }
-    elseif screen == "verify_host" then
-        title = "Verify host identity"
-        rows = {
-            field("fingerprint", "Host fingerprint", "64 hexadecimal characters", 64),
-            {toggle = {key = "use_password", label = "Use password", target = "password", checked = draft.use_password}},
-            field("password", "Password", "", 512, nil, true),
-            {button("verify", "Verify and connect"), back},
-        }
+    elseif screen == "trust_host" then
+        title = draft.host_trust.changed and "Host identity changed" or "Trust this host?"
+        local endpoint = draft.address .. " · UDP " .. draft.port
+        note = endpoint .. "\nOnly continue if you expect this host. A fake server could collect your lobby password."
+        rows = {{button("trust", "Trust and connect"), back}}
     elseif screen == "invite" then
         rows = {field("invite", "Invitation", "Paste the host's invitation", max_invite, initial, true),
             {button("connect", "Load invitation"), back}}
@@ -251,6 +254,7 @@ local function queue(draft, state, phase, kind, value, detail)
         draft.retry = {name = value, import = draft.import, id = id, appearance = detail}
     end
     draft.pending = {kind = kind, id = id, expires = os.time() + 20}
+    if kind == "direct" then draft.pending.password = value end
     draft.failure = nil
     render(draft, state, phase, "waiting")
     return true
@@ -267,6 +271,11 @@ function form.poll(draft, state, phase)
     local result = read_response(draft)
     if not result and os.time() <= pending.expires then return end
     draft.pending = nil
+    if result and result.fingerprint then
+        draft.host_trust = {fingerprint = result.fingerprint, changed = result.changed, password = pending.password}
+        render(draft, state, phase, "trust_host")
+        return
+    end
     if result and result.characters then
         draft.import, draft.characters, draft.index, draft.page = result.import, result.characters, 1, 1
         draft.retry, draft.failure = nil, nil
@@ -280,11 +289,6 @@ function form.poll(draft, state, phase)
     else
         draft.import, draft.characters, draft.retry = nil, nil, nil
         if draft.direct then
-            if draft.surface and (draft.failure == "direct_host_identity_changed"
-                or draft.failure == "direct_identity_verification_failed") then
-                render(draft, state, phase, "verify_host", messages[draft.failure])
-                return
-            end
             if draft.failure == "direct_password_required" or draft.failure == "direct_wrong_password" then
                 draft.use_password = true
             end
@@ -328,19 +332,7 @@ local function connect(draft, state, phase)
         render(draft, state, phase, draft.screen, "Enter the host’s password or clear Use password.")
         return false, "title_join_form_password_required"
     end
-    return queue(draft, state, phase, "direct", password)
-end
-
-local function verify_host(draft, state, phase)
-    local value = draft.surface.read(draft.view, "fingerprint")
-    local fingerprint = value and value:match("^%s*([0-9A-Fa-f]+)%s*$")
-    draft.use_password = draft.surface.checked(draft.view, "use_password") == true
-    local password = draft.use_password and draft.surface.read(draft.view, "password") or ""
-    if not fingerprint or #fingerprint ~= 64 or not password or utf8.len(password) > 128 then
-        render(draft, state, phase, "verify_host", "Enter the host’s 64-character fingerprint and password if required.")
-        return false, "title_join_form_invalid_fingerprint"
-    end
-    return queue(draft, state, phase, "direct", password, fingerprint:lower())
+    return queue(draft, state, phase, "direct", draft.use_password and password or "")
 end
 
 function form.press(draft, action, state, phase)
@@ -350,7 +342,8 @@ function form.press(draft, action, state, phase)
             draft.import, draft.characters, draft.retry, draft.character, draft.character_name = nil, nil, nil, nil, nil
             render(draft, state, phase, draft.direct and "address" or "invite")
             return true
-        elseif screen == "verify_host" then
+        elseif screen == "trust_host" then
+            draft.host_trust = nil
             render(draft, state, phase, "address")
             return true
         elseif screen == "name" or screen == "confirm" or screen == "profile" then
@@ -359,7 +352,12 @@ function form.press(draft, action, state, phase)
         end
         return false, "title_join_form_back_to_title"
     end
-    if action == "verify" and screen == "verify_host" then return verify_host(draft, state, phase) end
+    if action == "trust" and screen == "trust_host" then
+        local trust = draft.host_trust
+        local accepted, failure = queue(draft, state, phase, "direct", trust.password, trust.fingerprint)
+        if accepted then draft.host_trust = nil end
+        return accepted, failure
+    end
     if action == "connect" then
         if draft.view and draft.direct and endpoint_screens[screen] then return connect(draft, state, phase) end
         if screen ~= "invite" then return false, "title_join_form_selection_unavailable" end

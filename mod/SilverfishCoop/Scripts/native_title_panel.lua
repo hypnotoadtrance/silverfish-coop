@@ -388,7 +388,7 @@ local function handle_join_form(action, state, phase, context)
         local creator = require("native_stock_creator")
         local opened = pcall(function()
             scope.select(scope_id)
-            creator.begin_guest(state, phase, attempt)
+            creator.begin_guest(state, phase, attempt, name)
         end)
         if not opened then
             if scope.selected() == scope_id and not creator.guest_busy() then scope.release(scope_id) end
@@ -410,7 +410,7 @@ end
 local function resume_guest_creation(context, offer, state, phase)
     local trip = guest_creation
     local creator = require("native_stock_creator")
-    local result, appearance = creator.guest_result(trip.attempt)
+    local result, appearance, profile, name = creator.guest_result(trip.attempt)
     if result ~= "captured" and result ~= "cancelled" and result ~= "failed" then return end
     local scope = require("native_save_scope")
     if scope.selected() == trip.scope then
@@ -429,7 +429,8 @@ local function resume_guest_creation(context, offer, state, phase)
     draft.context, draft.generation = context, offer.generation
     draft.on_action = function(key) if session == owner then dispatch(key) end end
     local hint = result == "failed" and "Could not save the character. Try again." or nil
-    form.api.resume_creation(draft, state, phase, trip.name, appearance, hint)
+    local selection = profile and (appearance .. "\n" .. profile) or appearance
+    form.api.resume_creation(draft, state, phase, name or trip.name, selection, hint)
     report = {state = "ready", choices = offer.choices}
 end
 
