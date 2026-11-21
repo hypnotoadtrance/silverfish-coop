@@ -3,7 +3,7 @@ local loot = require("native_loot")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
-local observation
+local observation, placement
 local statics = "/Script/Engine.Default__GameplayStatics"
 local save = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 
@@ -62,6 +62,14 @@ end
 
 function actions.command(fields, state, phase)
     local action = fields[2]:match("^native%-loot%-(%l+)$")
+    if action == "placement" then
+        local crate = fields[3]
+        if not enabled or phase ~= "hosting" or #fields ~= 3 or not loot.profile(state.map, crate) then
+            error("native_loot_child_placement_unavailable", 0)
+        end
+        placement = { map = state.map, crate = crate, positions = loot.placement(state, phase, crate) }
+        return "stock crate child placements reported"
+    end
     if action ~= "inspect" and action ~= "open" and action ~= "approach" and action ~= "seed" and action ~= "claim" then
         return
     end
@@ -176,15 +184,23 @@ function actions.command(fields, state, phase)
 end
 
 function actions.reset()
-    observation = nil
+    observation, placement = nil, nil
 end
 
 function actions.rows(state, phase, status_row)
     local row = observation
-    if not row or phase ~= "hosting" or row.map ~= state.map then return {} end
-    local records = { status_row("native-loot", row.action, row.map, row.crate, row.pawn, row.ok and 1 or 0,
+    local records = {}
+    if phase ~= "hosting" then return records end
+    if placement and placement.map == state.map then
+        for index, position in ipairs(placement.positions) do
+            records[#records + 1] = status_row("native-loot-placement", placement.map, placement.crate,
+                index, table.unpack(position))
+        end
+    end
+    if not row or row.map ~= state.map then return records end
+    records[#records + 1] = status_row("native-loot", row.action, row.map, row.crate, row.pawn, row.ok and 1 or 0,
         row.status or "", row.looted and 1 or 0, row.lucky and 1 or 0, row.trait or "", row.calls,
-        row.distance or "-", #row.items, row.invoked and 1 or 0, row.escrow_slot or "-") }
+        row.distance or "-", #row.items, row.invoked and 1 or 0, row.escrow_slot or "-")
     if row.cash then
         local cash = row.cash
         records[#records + 1] = status_row("native-loot-cash", cash.guid, cash.amount, cash.before, cash.after)

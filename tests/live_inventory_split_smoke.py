@@ -269,7 +269,7 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
                 native_host_save.verify_checkpoint(campaign / "game-user", checkpoint)
                 tombstone = checkpoint["world"]["party"][drop_record.STATE][operation]
                 assert tombstone == {**{key: value for key, value in escrow.items() if key != "escrow"},
-                                     "claim_id": claim["operation_id"]}
+                                     "claim_id": claim["operation_id"], "claimed_by": character}
                 assert await page(guest, character) == rows and await page(host, "host") == host_before
                 evidence["crossroads_reclaim"] = claim
             evidence["verified"] = True

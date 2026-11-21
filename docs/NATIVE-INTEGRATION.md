@@ -406,6 +406,8 @@ The same inventory-drop test used a Canned Peaches pickup from City and a Brown 
 
 The common physical loot view also showed two separate 9mm stacks dropped by a single guest in the Observatory. Both game instances showed the two stock item actors simultaneously. The host checkpoint kept distinct item GUIDs and quantities of five and four, and the original single-player save hashes matched. [Multiple-drop trial](../tests/live_inventory_split_smoke.py)
 
+A CrossRoads inventory trial collected the guest's dropped 9mm stack through stock Interact. The physical actor retired, the exact GUID and quantity returned to the guest, and the claim recorded the guest in the host checkpoint. A separate CrossRoads save migration restored container positions from the two verified stock spawn components and preserved both item GUIDs, the recorded claim, and the original escrow. Both isolated tests preserved the original single-player files.
+
 Two guests collected separate authored ammunition stacks through stock Interact. The first carried 14 buckshot shells from Slums. The second collected 10 .45 Ball rounds in CrossRoads. The host refused a stale visit, a wrong-map source, an out-of-range claim, and a second claim on the same source. Each guest retained their own exact stack through Rail Yard travel, a same-port restart, and a revisit to Slums. The host inventory and original save hashes matched.
 
 A separate three-instance run collected the same .45 placement into a guest's existing 10-round backpack stack. The stock calculation increased it to 20 rounds under the original stack GUID. The pickup kept a distinct source receipt, other inventories matched, and the owner kept the 20-round stack after same-port restart.

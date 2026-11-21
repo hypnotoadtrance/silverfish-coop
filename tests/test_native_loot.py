@@ -100,6 +100,24 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
             BRIDGE_CRATE: self.roll(DEAD_BRIDGE, BRIDGE_CRATE, "3" * 32),
         }
         self.assertEqual(native_loot.published(records, CROSSROADS), {OTHER_CRATE: native_loot.public_roll(roll)})
+
+    async def test_legacy_crate_uses_the_unoccupied_stock_slot_without_rerolling(self):
+        claimed = {"position": [21., 20., 30.], "rotation": [0., 0., 0.], "scale": [1., 1., 1.]}
+        restored = dict(claimed, position=[40., 40., 30.])
+        roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
+        unclaimed = dict(ITEM, actor="another stock Bandage", guid="B" * 32)
+        roll["items"] = [dict(ITEM, transform=claimed, claimed_by="host"), unclaimed]
+        host = self.host(CROSSROADS, {OTHER_CRATE: roll})
+        slots = {1: restored, 2: dict(claimed, position=[20., 20., 30.])}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=self.game(CROSSROADS, native_loot_placement={
+            "map": CROSSROADS, "crate": OTHER_CRATE, "positions": slots})))
+        await native_loot.restore_legacy_placement(host, bridge)
+        expected = {**roll, "items": [roll["items"][0], dict(unclaimed, transform=restored)]}
+        self.assertEqual(host.party[native_loot.STATE_KEY][OTHER_CRATE], expected)
+        bridge.command.assert_awaited_once_with(native_loot.PLACEMENT, OTHER_CRATE, timeout=3)
+        host.checkpoint_native.assert_awaited_once_with(bridge, host.party)
+        await native_loot.restore_legacy_placement(host, bridge)
+        bridge.command.assert_awaited_once()
         self.assertEqual(native_loot.default_crate(CROSSROADS), LEGACY_CRATE)
         self.assertEqual(native_loot.default_crate(DEAD_BRIDGE), BRIDGE_CRATE)
         self.assertEqual(native_loot.fixture_selection("host", CROSSROADS), ("host", LEGACY_CRATE))

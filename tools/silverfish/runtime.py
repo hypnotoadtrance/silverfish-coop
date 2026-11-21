@@ -26,7 +26,7 @@ from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lif
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
-from . import native_world_loot
+from . import native_loot, native_world_loot
 from . import native_host_stack_drop
 from . import native_black_box
 from . import native_spratt
@@ -2010,6 +2010,18 @@ class Bridge:
                         "distance": _finite(fields[11]), "item_count": count, "invoked": fields[13] == "1",
                         "items": [], "escrow_slot": fields[14] if len(fields) == 15 else "-",
                     }
+                elif fields[0] == native_loot.PLACEMENT and len(fields) == 13:
+                    _, area, crate, index, *axes = fields
+                    transform = dict(zip(("position", "rotation", "scale"),
+                                         (list(map(_finite, axes[i:i+3])) for i in (0, 3, 6))))
+                    placement = data.setdefault(native_loot.PLACEMENT_KEY, dict(map=area, crate=crate, positions={}))
+                    slot = int(index)
+                    if (data.get("state") != "hosting" or area != data.get("map")
+                            or AUTHORED_CRATES.get(crate) != area or not 1 <= slot <= loot_capacity(crate)
+                            or (area, crate) != (placement["map"], placement["crate"])
+                            or slot in placement["positions"] or not valid_item_transform(transform)):
+                        raise ValueError("Invalid stock crate placement slot")
+                    placement["positions"][slot] = transform
                 elif fields[0] == "native-world-loot-capability" and len(fields) == 2 and fields[1] in {"1", "2"}:
                     data[native_world_loot.CAPABILITY] = int(fields[1])
                 elif fields[0] == native_world_loot.ROW:

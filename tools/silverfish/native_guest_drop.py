@@ -174,7 +174,7 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
 
 
 async def perform(host, bridge, character: str, action: str, target: str | None, operation: str) -> dict:
-    from .native_world_loot import CAPABILITY, PLAYER_DROPS_VERSION
+    from .native_world_loot import CAPABILITY, SHARED_PICKUPS_VERSION
 
     if action not in ACTIONS or not record.valid_id(operation):
         raise party.RuleError("invalid_operation_id")
@@ -227,7 +227,7 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     if operation in drops:
         raise party.RuleError("operation_id_conflict")
     active = [row for row in drops.values() if row["claim_id"] is None]
-    multiple = host.last_game.get(CAPABILITY) == PLAYER_DROPS_VERSION
+    multiple = host.last_game.get(CAPABILITY, 0) >= SHARED_PICKUPS_VERSION
     if (len(drops) >= record.MAX_DROPS or len(active) >= record.MAX_ACTIVE
             or any(row["guid"] == guid or (not multiple and row["owner"] == character) for row in active)):
         raise party.RuleError("native_guest_stack_drop_capacity")

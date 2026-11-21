@@ -343,6 +343,26 @@ function loot.claim_context(state, phase, pawn_name, requested_crate, point)
     return { pawn = pawn, save = pawn.Save, stock = stock, distance = distance, crate = crate, profile = profile }
 end
 
+function loot.placement(state, phase, requested_crate)
+    local profile = loot.profile(state.map, requested_crate)
+    local _, world, instance = host_context(state, phase, profile)
+    local crate = find_crate(world, profile)
+    if crate.Looted ~= true then error("native_loot_crate_not_open", 0) end
+    local origin, positions = crate:K2_GetActorLocation(), {}
+    for index, child in ipairs(child_spawners(crate, instance, profile)) do
+        local at, rotation = child:K2_GetComponentLocation(), child:K2_GetComponentRotation()
+        local position = {at.X, at.Y, at.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, 1, 1, 1}
+        for axis = 1, 9 do
+            if not finite(position[axis]) then error("native_loot_child_position_invalid", 0) end
+        end
+        if (at.X - origin.X)^2 + (at.Y - origin.Y)^2 + (at.Z - origin.Z)^2 > 250^2 then
+            error("native_loot_child_position_invalid", 0)
+        end
+        positions[index] = position
+    end
+    return positions
+end
+
 -- Each address comes from an exact owned child's stock SpawnLoot out parameter.
 function loot.results(state, phase, scope, item_addresses)
     local profile = type(scope) == "table" and scope.profile

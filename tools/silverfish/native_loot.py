@@ -1,16 +1,19 @@
 """Commit and share host-authoritative rolls for qualified stock crates."""
 
 import asyncio
+import math
 import time
 import uuid
 
 from . import native_host_save, party
-from .authored_loot import CRATES, GUARANTEED_CRATES, LEGACY_CRATE, loot_capacity
+from .authored_loot import CRATES, GUARANTEED_CRATES, LEGACY_CRATE, loot_capacity, valid_item_transform
 from .native_gold import valid_guid
 
 
 CRATE = LEGACY_CRATE
 STATE_KEY = "native_loot_rolls"
+PLACEMENT = "native-loot-placement"
+PLACEMENT_KEY = "native_loot_placement"
 FORCED_ROLL_STATUS = "opened_fixture_seeded"
 CASH_RANGES = {
     f"/Game/Classes/Items/Item_Money_{name}.Item_Money_{name}_C": limits
@@ -48,6 +51,39 @@ def _rolls_in_area(rolls: dict, area: str) -> dict:
 
 def published(rolls: dict, area: str) -> dict:
     return {crate: public_roll(roll) for crate, roll in _rolls_in_area(rolls, area).items()}
+
+
+async def restore_legacy_placement(host, bridge) -> None:
+    area = host.last_game.get("map")
+    rolls = _rolls_in_area(host.party.get(STATE_KEY, {}), area)
+    for crate, roll in rolls.items():
+        if not any(not row.get("claimed_by") and "transform" not in row for row in roll["items"]):
+            continue
+        snapshot = await bridge.command(PLACEMENT, crate, timeout=3)
+        report = snapshot.get(PLACEMENT_KEY, {})
+        positions = report.get("positions", {})
+        if ((snapshot.get("state"), snapshot.get("map"), report.get("map"), report.get("crate"))
+                != ("hosting", area, area, crate)
+                or set(positions) != set(range(1, loot_capacity(crate) + 1))
+                or not all(valid_item_transform(value) for value in positions.values())
+                or len({tuple(value["position"]) for value in positions.values()}) != len(positions)):
+            raise RuntimeError("The stock crate did not report distinct positions for its exact spawner slots")
+        candidate = party.load_party(host.party)
+        items = candidate[STATE_KEY][crate]["items"]
+        available = dict(sorted(positions.items()))
+        for row in items:
+            if "transform" in row:
+                nearest = min(available, key=lambda slot: math.dist(
+                    available[slot]["position"], row["transform"]["position"]))
+                del available[nearest]
+        for row in items:
+            if "transform" not in row:
+                row["transform"] = available.pop(min(available))
+        host.last_game, host.last_seen = snapshot, time.monotonic()
+        revision = await host.checkpoint_native(bridge, candidate)
+        host.party = candidate
+        host.control.event("native_loot_legacy_placement_restored", crate=crate, map=area, revision=revision)
+        return
 
 
 def default_crate(area: str) -> str | None:

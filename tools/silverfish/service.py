@@ -219,6 +219,8 @@ class Host:
         self.last_game = {}
         self.stopping = False
         self.next_save = 0.0
+        self.next_crate_placement = 0.0
+        self.crate_placement_error = None
         self.last_seen = 0.0
         self.fixtures = fixtures
         self.native_backend = native_backend
@@ -3440,7 +3442,7 @@ class Host:
             await native_enemy_loot.observe(self, bridge)
             world_version = self.last_game.get(native_world_loot.CAPABILITY, 0)
             world_items = world_version >= 1
-            player_drops = world_version >= native_world_loot.PLAYER_DROPS_VERSION
+            shared_pickups = world_version >= native_world_loot.SHARED_PICKUPS_VERSION
             if self.enemy_shell_view:
                 with contextlib.suppress(OSError, RuntimeError):
                     snapshot = await self.enemy_shell_view.sync(
@@ -3490,7 +3492,7 @@ class Host:
                     self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, crate=crate, reason=str(error))
             await self.stock_drop_input.poll(self, bridge)
             try:
-                if not player_drops:
+                if not shared_pickups:
                     await self.stack_drop_projection.sync_host(self, bridge)
             except (OSError, RuntimeError) as error:
                 reason = str(error)
@@ -3498,16 +3500,26 @@ class Host:
                     self.stack_drop_projection.last_error = reason
                     self.control.event("stock_drop_projection_unavailable", reason=reason)
             if self.native_loot_input or world_items:
+                can_project = not (self.stopping or self.transitioning or self.party.get("wipe")
+                                   or self.native_checkpoint_unsafe)
+                if shared_pickups and self.native_loot_input and can_project and now >= self.next_crate_placement:
+                    self.next_crate_placement = now + 3
+                    try:
+                        await native_loot.restore_legacy_placement(self, bridge)
+                        self.crate_placement_error = None
+                    except (OSError, RuntimeError, ValueError) as error:
+                        if self.crate_placement_error != str(error):
+                            self.crate_placement_error = str(error)
+                            self.control.event("native_loot_legacy_placement_unavailable", reason=str(error))
                 rolls = self.party.get(native_loot.STATE_KEY, {})
                 try:
                     snapshot = await self.world_loot.sync(
                         bridge, self.last_game, rolls, self.control.generation, self.zone_epoch,
-                        active=not (self.stopping or self.transitioning or self.party.get("wipe")
-                                    or self.native_checkpoint_unsafe),
+                        active=can_project,
                         enemy_frame=native_enemy_loot.shell_frame(self) if world_items else None,
                         enemy_rolls=self.party.get(native_enemy_loot.STATE_KEY),
                         player_drops=native_guest_drop.visible_drops(self.party, self.last_game.get("map"))
-                        if player_drops else None,
+                        if shared_pickups else None,
                     )
                     if snapshot is not self.last_game:
                         self.last_game, self.last_seen = snapshot, time.monotonic()
@@ -3574,7 +3586,7 @@ class Host:
                         self.last_game, self.last_seen = snapshot, time.monotonic()
                 await self.apply_pending_spawns(bridge)
                 await self.project_gameplay(bridge)
-                if loot_view and not self.stopping:
+                if loot_view and not self.stopping and not shared_pickups:
                     rolls = self.party.get(native_loot.STATE_KEY, {})
                     snapshot = await loot_view.sync(self.last_game, rolls, claim_crate)
                     if snapshot is not self.last_game:
@@ -5127,7 +5139,8 @@ class Client:
                 await self.mindcore_carry.poll(active)
             await self.service_primary_input(active)
             await self.service_crate_interaction(active)
-            if self.loot_view:
+            if (self.loot_view and self.last_game.get(native_world_loot.CAPABILITY, 0)
+                    < native_world_loot.SHARED_PICKUPS_VERSION):
                 rolls = (self.gameplay.get(native_loot.STATE_KEY, {})
                          if active and time.monotonic() - self.gameplay_seen < 2 else {})
                 self.last_game = await self.loot_view.sync(self.last_game, rolls, claim_crate)
@@ -5162,9 +5175,9 @@ class Client:
             await native_guest_drop.service_view(self, active)
             world_version = self.last_game.get(native_world_loot.CAPABILITY, 0)
             world_items = world_version >= 1
-            player_drops = world_version >= native_world_loot.PLAYER_DROPS_VERSION
+            shared_pickups = world_version >= native_world_loot.SHARED_PICKUPS_VERSION
             try:
-                if not player_drops:
+                if not shared_pickups:
                     await self.stack_drop_projection.sync(self, active)
             except (OSError, RuntimeError) as error:
                 reason = str(error)
@@ -5189,7 +5202,7 @@ class Client:
                         and time.monotonic() - self.gameplay_seen < 2,
                         enemy_frame=frame if world_items else None,
                         enemy_rolls=self.gameplay.get(native_enemy_loot.STATE_KEY),
-                        player_drops=self.gameplay.get(native_guest_drop_record.STATE) if player_drops else None,
+                        player_drops=self.gameplay.get(native_guest_drop_record.STATE) if shared_pickups else None,
                     )
                 except (OSError, RuntimeError) as error:
                     if self.world_loot.last_error != str(error):
