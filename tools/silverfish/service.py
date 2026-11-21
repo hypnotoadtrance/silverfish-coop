@@ -71,7 +71,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
                         *native_computer_board.PREFLIGHTS, *native_flood_jammer.PREFLIGHTS, native_meet_broker.PREFLIGHT,
                         native_subway_valve.PREFLIGHT, native_subway_valve.ACTIVATE,
-                        "native-inventory-list", native_inventory.SPLIT, native_inventory.SORT, native_stash.LIST,
+                        "native-inventory-list", native_inventory.SPLIT, native_inventory.SORT, native_stash.LIST, native_stash.MOVE,
                         "native-loot-inspect", "native-loot-open", "native-loot-claim",
                         *native_guest_drop.ACTIONS,
                         "native-wipe-items", "native-wipe-recover",
@@ -1771,6 +1771,9 @@ class Host:
                 result = await native_inventory.inspect(self, bridge, character, int(offset))
             elif action == native_stash.LIST:
                 result = await native_stash.inspect(self, bridge, character, target)
+            elif action == native_stash.MOVE:
+                async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
+                    result = await native_stash.move(self, bridge, character, target, request["operation_id"])
             elif action == native_inventory.SPLIT:
                 result = await native_inventory.split_stack(self, bridge, character, target, request["operation_id"])
             elif action in native_guest_drop.ACTIONS:
@@ -2646,6 +2649,10 @@ class Host:
                     result = await native_inventory.inspect(self, bridge, character, 0 if offset is None else offset)
                 elif action == native_stash.LIST:
                     result = await native_stash.inspect(self, bridge, "host", request.get("target"))
+                elif action == native_stash.MOVE:
+                    async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
+                        result = await native_stash.move(self, bridge, "host", request.get("target"),
+                                                        request.get("operation_id") or path.stem)
                 elif action in {"native-stash-approach-fixture", "native-stash-setting-fixture"} and self.fixtures:
                     target = request.get("target") or ""
                     if action == "native-stash-approach-fixture":

@@ -2099,6 +2099,15 @@ class Bridge:
                         raise ValueError("Invalid stash census")
                     data["native_stash_census"] = dict(map=fields[1], pawn=fields[2], slot=fields[3], site=fields[4],
                         combined=fields[5] == "1", total=int(fields[6]), offset=int(fields[7]), count=int(fields[8]), items=[])
+                elif fields[0] == native_stash.MOVE and len(fields) == 10 and data.get("state") == "hosting":
+                    if (fields[1] != data.get("map") or not SLOT.fullmatch(fields[3]) or not valid_guid(fields[4])
+                            or not valid_guid(fields[5]) or fields[6] not in {"deposit", "withdraw"}
+                            or fields[7] not in {"0", "1"} or not fields[8].startswith("/Game/")
+                            or not 1 <= int(fields[9]) < 2**31):
+                        raise ValueError("Invalid stash move receipt")
+                    data[native_stash.MOVED] = dict(map=fields[1], pawn=fields[2], slot=fields[3], site=fields[4],
+                        guid=fields[5], direction=fields[6], combined=fields[7] == "1", class_path=fields[8],
+                        quantity=int(fields[9]))
                 elif fields[0] in {"native-inventory-census-item", "native-stash-census-item"} and len(fields) in (9, 10):
                     key = fields[0].removesuffix("-item").replace("-", "_")
                     if key not in data:

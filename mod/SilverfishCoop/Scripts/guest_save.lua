@@ -465,6 +465,11 @@ local function capture(state, phase, name, slot)
     if verified.PlayerHealth ~= health or checked_backpack ~= backpack or checked_equipment ~= equipment then
         error("The co-op guest save summary did not survive stock serialization", 0)
     end
+    if type(SilverfishVerifyNativeStashSave) == "function"
+        and (detached.Stashes:GetArrayNum() > 0 or verified.Stashes:GetArrayNum() > 0)
+        and SilverfishVerifyNativeStashSave(detached:GetAddress(), verified:GetAddress()) ~= true then
+        error("The detached stash and backpack did not survive stock serialization", 0)
+    end
     binding.frame = { kind = "captured", slot = slot, backpack = checked_backpack, equipment = checked_equipment }
     return "detached stock guest save captured"
 end

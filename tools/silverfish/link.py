@@ -69,6 +69,7 @@ _CHECKPOINT_ACTION_TIMEOUTS = {
     "native-inventory-split": 20.0,
     "native-inventory-sort": 20.0,
     "native-guest-stack-drop": 36.0,
+    "native-stash-move": 36.0,
     "native-guest-stack-reclaim": 24.0,
     "native-subway-valve-activate": 24.0,
     "native-quest-interact": 15.0,

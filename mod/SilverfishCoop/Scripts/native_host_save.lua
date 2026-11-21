@@ -132,6 +132,11 @@ function host_save.capture(state, phase, slot)
         or not matches_extraction(verified, extraction) then
         error("The co-op save generation summary did not survive stock serialization", 0)
     end
+    if type(SilverfishVerifyNativeStashSave) == "function"
+        and (save.Stashes:GetArrayNum() > 0 or verified.Stashes:GetArrayNum() > 0)
+        and SilverfishVerifyNativeStashSave(save:GetAddress(), verified:GetAddress()) ~= true then
+        error("The canonical stash and backpack did not survive stock serialization", 0)
+    end
     receipt = { kind = "captured", slot = slot, map = state.map, pawn = pawn:GetFullName(),
         instance = instance:GetAddress(), save = save:GetAddress(), summary = readback, carry = eather_remainder(instance) }
     return "canonical stock host save captured"
