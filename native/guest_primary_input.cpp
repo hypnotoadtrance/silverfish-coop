@@ -74,6 +74,8 @@ namespace
     using Equipment = silverfish::guest_weapon_profiles::Profile;
     constexpr Equipment camera{"camera", camera_path, false, 0, 0, 0.0, false, nullptr, false};
     constexpr Equipment old_pipe{"old-pipe", old_pipe_path, false, 0, 0, 0.0, false, nullptr, false};
+    constexpr Equipment blowtorch{"blowtorch", STR("/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"),
+                                    false, 0, 0, 0.0, false, nullptr, false};
 
     template <typename T>
     T* find(const U::TCHAR* path)
@@ -829,6 +831,7 @@ namespace
             return result(lua, false, "native_guest_primary_exact_scope_required");
         if (kind == camera.kind) next.item = &camera;
         else if (kind == old_pipe.kind) next.item = &old_pipe;
+        else if (kind == blowtorch.kind) next.item = &blowtorch;
         else
             for (const auto& candidate : silverfish::guest_weapon_profiles::firearms)
                 if (candidate.kind == kind) next.item = &candidate;

@@ -11,12 +11,14 @@ GUID = re.compile(r"[0-9A-F]{32}\Z")
 READBACK_STATES = {"backpack", "equipped", "stored_equipment"}
 CAMERA_READBACK_STATES = {"camera_backpack", "camera_stored_equipment", "camera_equipped"}
 CAMERA_PATH = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
+BLOWTORCH_PATH = "/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"
+BLOWTORCH_STATES = {"blowtorch_backpack", "blowtorch_stored_equipment", "blowtorch_equipped"}
 OLD_PIPE = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
 OLD_PIPE_STATES = {"old_pipe_backpack", "old_pipe_stored_equipment", "old_pipe_equipped"}
 FIRE_CLASSES = {firearm.kind: firearm.path for firearm in guest_weapon_profiles.FIREARMS}
-CLASS_PATHS = {*FIRE_CLASSES.values(), CAMERA_PATH, OLD_PIPE}
-PRIMARY_KINDS = frozenset((*FIRE_CLASSES, "camera", native_guest_melee.KIND))
-SEED_KINDS = frozenset(firearm.kind for firearm in guest_weapon_profiles.FIREARMS if firearm.headless_seed)
+CLASS_PATHS = {*FIRE_CLASSES.values(), CAMERA_PATH, OLD_PIPE, BLOWTORCH_PATH}
+PRIMARY_KINDS = frozenset((*FIRE_CLASSES, "camera", "blowtorch", native_guest_melee.KIND))
+SEED_KINDS = frozenset(firearm.kind for firearm in guest_weapon_profiles.FIREARMS if firearm.headless_seed) | {"blowtorch"}
 PROJECTILES_PER_ROUND = {
     firearm.kind: firearm.magazine.ammo.projectile_count
     for firearm in guest_weapon_profiles.FIREARMS
@@ -105,6 +107,7 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
         actor, stored = proof.get("actor_ammo"), proof.get("stored_ammo")
         camera = proof.get("status") in CAMERA_READBACK_STATES
         old_pipe = proof.get("status") in OLD_PIPE_STATES
+        blowtorch = proof.get("status") in BLOWTORCH_STATES
         if camera:
             status = proof["status"]
             if ((operation != "inspect" and (operation != "equip" or status != "camera_equipped"))
@@ -116,6 +119,12 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
             if ((operation != "inspect" and (operation != "equip" or status != "old_pipe_equipped"))
                     or actor != -1 or stored != -1 or source not in native_guest_melee.BY_MAP):
                 raise RuntimeError("Native guest stock Old Pipe equipment did not verify")
+        elif blowtorch:
+            status = proof["status"]
+            if (operation not in {"inspect", "equip", "seed"} or operation == "equip" and status != "blowtorch_equipped"
+                    or operation == "seed" and seed_kind != "blowtorch" or type(stored) is not int or not 0 <= stored <= 3
+                    or type(actor) is not int or actor != (stored if status == "blowtorch_equipped" else -1)):
+                raise RuntimeError("Native guest stock blowtorch and fuel did not verify")
         elif operation == "seed-ammo":
             if proof.get("status") not in ("seeded", "present"):
                 raise RuntimeError("The stock guest reserve fixture did not verify the exact ammo GUID")
@@ -143,6 +152,8 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
         result = {"native_guest_weapon": dict(proof, kind="camera", class_path=CAMERA_PATH) if camera else proof}
         if old_pipe:
             result["native_guest_weapon"] = dict(proof, kind=native_guest_melee.KIND, class_path=OLD_PIPE)
+        if blowtorch:
+            result["native_guest_weapon"] = dict(proof, kind="blowtorch", class_path=BLOWTORCH_PATH)
         if bandit_fixture is not None:
             aim = snapshot.get("native_bandit_aim", {})
             if (aim.get("map"), aim.get("bandit"), aim.get("pawn")) != (source, bandit_fixture, pawn):

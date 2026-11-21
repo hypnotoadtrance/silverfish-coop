@@ -10,6 +10,8 @@ local open_rotation = { Pitch = 0, Yaw = 0, Roll = -95 }
 local cabinet_rotations = {{Pitch = 0, Yaw = 95, Roll = 0}, {Pitch = 0, Yaw = -95, Roll = 0}}
 local bindings, fixture_sequences = {}, {}
 local active_world
+local blowtorch_path = "/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"
+local tool_report
 
 local function valid(value)
     return value ~= nil and value ~= false and value:IsValid()
@@ -25,9 +27,73 @@ end
 
 function input.clear()
     bindings, fixture_sequences, active_world = {}, {}, nil
+    tool_report = nil
     if enabled and type(SilverfishClearNativeLootCrateInput) == "function" then
         SilverfishClearNativeLootCrateInput()
     end
+end
+
+local function ignite(current, state, phase, pawn_name, guid)
+    local scope = loot.qualify(state, phase, pawn_name, current.profile.name, true)
+    local pawn, crate, save = scope.pawn, scope.crate, scope.save
+    local torch = pawn.EquipedItem
+    local tool_type = StaticFindObject(blowtorch_path)
+    local inspect = SilverfishInspectNativeGuestWeapon
+    if same(save, scope.stock) or crate.Locked ~= true or not valid(torch) or not same(torch:GetClass(), tool_type)
+        or type(inspect) ~= "function" or type(SilverfishArmNativeGuestVehiclePry) ~= "function"
+        or type(SilverfishCancelNativeGuestVehiclePry) ~= "function" or pawn:Check_CanUseEquipment() ~= true
+        or #guid ~= 32 or not guid:match("^[0-9A-F]+$") then error("stock_blowtorch_scope_unavailable", 0) end
+    local ok, status, loaded, stored = inspect(pawn:GetAddress(), save:GetAddress(), guid)
+    if not ok or status ~= "blowtorch_equipped" or loaded ~= stored or math.type(loaded) ~= "integer"
+        or loaded < 1 or loaded > 3 or torch.Range ~= 600 then error("stock_blowtorch_exact_fuel_unavailable", 0) end
+
+    local camera = pawn.Camera
+    if not exact_component(camera, "/Script/Engine.CameraComponent", pawn) then error("stock_blowtorch_camera_unavailable", 0) end
+    local relative, start, point = camera.RelativeRotation, camera:K2_GetComponentLocation(), scope.box:K2_GetComponentLocation()
+    if not relative or not start or not point then error("stock_blowtorch_aim_unavailable", 0) end
+    local original = {Pitch = relative.Pitch, Yaw = relative.Yaw, Roll = relative.Roll}
+    local x, y, z = point.X - start.X, point.Y - start.Y, point.Z - start.Z
+    local length = math.sqrt(x*x + y*y + z*z)
+    if not (length >= 1 and length <= torch.Range) then error("stock_blowtorch_out_of_range", 0) end
+    local api = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    if not valid(api) then error("stock_blowtorch_trace_unavailable", 0) end
+    local point_at_range = {X = start.X + x * torch.Range / length, Y = start.Y + y * torch.Range / length,
+        Z = start.Z + z * torch.Range / length}
+    local hit, color = {}, {R = 0, G = 0, B = 0, A = 1}
+    local found = api:LineTraceSingle(torch, start, point_at_range, 2, true, {pawn, torch}, 0, hit, true, color, color, 0)
+    hit = hit.OutHit or hit
+    local surface = hit.Component and hit.Component:Get()
+    if found ~= true or not valid(surface) or not same(surface:GetOwner(), crate) then
+        error("stock_blowtorch_vehicle_obstructed", 0)
+    end
+    if not SilverfishArmNativeGuestVehiclePry(current.profile.index, pawn:GetAddress(), save:GetAddress()) then
+        error("stock_blowtorch_vehicle_busy", 0)
+    end
+
+    local applied = pcall(function()
+        camera:K2_SetWorldRotation({Pitch = math.deg(math.atan(z, math.sqrt(x*x + y*y))),
+            Yaw = math.deg(math.atan(y, x)), Roll = 0}, false, {}, true)
+        torch:Use_Item_Primary(true, 0)
+        torch:Use_Item_Primary(false, 0)
+    end)
+    local restored = pcall(camera.K2_SetRelativeRotation, camera, original, false, {}, true)
+    local readback = camera.RelativeRotation
+    for _, axis in ipairs({"Pitch", "Yaw", "Roll"}) do
+        restored = restored and readback and math.abs((readback[axis] - original[axis] + 180) % 360 - 180) < .05
+    end
+    local now, equipment, live_fuel, saved_fuel = inspect(pawn:GetAddress(), save:GetAddress(), guid)
+    if not applied or not restored or not now or equipment ~= "blowtorch_equipped" or saved_fuel ~= live_fuel then
+        error("mutation_unverified_stock_blowtorch_use", 0)
+    end
+    if live_fuel == loaded and crate.Locked == true and SilverfishCancelNativeGuestVehiclePry(current.profile.index, pawn:GetAddress()) then
+        error("stock_blowtorch_stock_action_busy", 0)
+    end
+    if live_fuel ~= loaded - 1 or crate.Locked ~= false then
+        error("mutation_unverified_stock_blowtorch_use", 0)
+    end
+    tool_report = {map = state.map, crate = current.profile.name, pawn = pawn_name, guid = guid,
+        before = loaded, after = saved_fuel}
+    return "stock blowtorch spent one charge and unlocked the vehicle"
 end
 
 function input.update(state, phase, profile)
@@ -252,7 +318,7 @@ local function project(current, angle)
     return "stock crate exhausted projection verified"
 end
 
-local function fixture_focus(pawn, box)
+local function fixture_focus(pawn, box, dispatch)
     local camera = pawn.Camera
     if not exact_component(camera, "/Script/Engine.CameraComponent", pawn) then
         error("native_loot_crate_stock_fixture_camera_unavailable", 0)
@@ -283,6 +349,7 @@ local function fixture_focus(pawn, box)
                 camera:K2_SetWorldRotation(aim, false, {}, true)
                 pawn:LookTrace()
                 if pawn.CanInteract == true and same(pawn.InteractionTarget_Component, box) then
+                    if dispatch then return dispatch() end
                     return SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
                 end
             end
@@ -302,6 +369,16 @@ local function fixture_focus(pawn, box)
     if not restored or not matches then error("mutation_unverified_native_loot_crate_stock_fixture_camera", 0) end
     if not invoked then error(consumed, 0) end
     return invoked, consumed, detail
+end
+
+function input.blowtorch_primary_fixture(state, phase, target, dispatch)
+    local profile = loot.profile(state.map, target)
+    local current = headless and client_fixtures and phase == "connected" and profile and profile.keyless_lock
+        and input.update(state, phase, profile)
+    local _, box
+    if current and current.crate.Locked == true then _, box = scene(current) end
+    if not box then error("stock_blowtorch_primary_fixture_unavailable", 0) end
+    fixture_focus(current.pawn, box, dispatch)
 end
 
 local function fixture(current)
@@ -336,6 +413,14 @@ end
 
 function input.command(fields, state, phase)
     local command = fields[2]
+    if command == "native-loot-guest-blowtorch-use" then
+        local profile = loot.profile(state.map, fields[3])
+        local current = #fields == 5 and phase == "hosting" and profile and profile.keyless_lock
+            and input.update(state, phase, profile)
+        if not current then error("stock_blowtorch_scope_unavailable", 0) end
+        tool_report = nil
+        return ignite(current, state, phase, fields[4], fields[5])
+    end
     if command == "native-loot-vehicle-pry-fixture" then
         local profile = loot.profile(state.map, fields[3])
         if not headless or not host_fixtures or #fields ~= 3 or phase ~= "hosting"
@@ -388,10 +473,10 @@ function input.rows(state, phase, status_row)
     local rows, latest, reported = {}, 0, nil
     for _, profile in ipairs(profiles) do
         local current, scope = input.update(state, phase, profile)
-        local active, sequence, pried, info = false, 0, false, {}
+        local active, sequence, pried, guest, info = false, 0, false, 0, {}
         if current then
             local box_state, box_address
-            active, sequence, box_state, box_address, pried = SilverfishReadNativeLootCrateInput(profile.index)
+            active, sequence, box_state, box_address, pried, guest = SilverfishReadNativeLootCrateInput(profile.index)
             scope = active and "active" or "scope_inactive"
             if active then info = observe_scene(current, box_state, box_address) end
         end
@@ -415,13 +500,25 @@ function input.rows(state, phase, status_row)
                 end
             end
         end
-        if active and sequence > latest then
+        if active and pried and guest and guest ~= 0 then
+            for _, detail in ipairs(state.guests or {}) do
+                if valid(detail.pawn) and detail.pawn:GetAddress() == guest then
+                    rows[#rows + 1] = status_row("native-loot-guest-pry", profile.map, profile.name, detail.name, sequence)
+                    break
+                end
+            end
+        elseif active and sequence > latest then
             latest = sequence
             reported = status_row("native-loot-crate-interaction", profile.map, profile.name,
                 current.name, sequence, pried and "pried" or sequence == fixture_sequences[profile.index] and "fixture" or "stock")
         end
     end
     if reported then rows[#rows + 1] = reported end
+    if tool_report and phase == "hosting" and tool_report.map == state.map then
+        local report = tool_report
+        rows[#rows + 1] = status_row("native-loot-guest-blowtorch-use", report.map, report.crate, report.pawn,
+            report.guid, report.before, report.after)
+    end
     return rows
 end
 

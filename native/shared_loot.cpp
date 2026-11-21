@@ -938,7 +938,7 @@ namespace
         Schema schema;
         if (!bind_schema(context, schema)) return result(lua, false, "stock_loot_blueprint_schema_unavailable");
         auto* opener = pried ? field<Unreal::FObjectProperty>(context.crate, STR("Player")) : nullptr;
-        if (pried && (!context.profile->stock_class->keyless_lock || context.save != context.stock ||
+        if (pried && (!context.profile->stock_class->keyless_lock ||
             !opener || opener->GetPropertyClass().Get() != context.pawn->GetClassPrivate() ||
             schema.script->GetParmsSize() != sizeof(std::int32_t) ||
             !argument<Unreal::FIntProperty>(schema.script, STR("EntryPoint"), false, 0) ||

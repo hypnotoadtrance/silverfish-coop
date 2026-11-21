@@ -1,4 +1,5 @@
 local primary = {}
+local loot = require("native_loot")
 local weapon_profiles = require("guest_weapon_registry")
 local cqc = require("native_enemy_loot_registry")
 
@@ -112,7 +113,13 @@ function primary.sync(state, phase)
     for _ = 1, 8 do
         local sequence, owner, guid, kind = SilverfishTakeNativeGuestPrimaryIntent(address)
         if not valid_sequence(sequence) or owner ~= address or guid ~= binding.guid or kind ~= binding.kind then break end
-        if not emit(event_path, {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind}) then break end
+        if kind == "blowtorch" then
+            local actor = current.pawn.ActorBeingLookedAt
+            local name = valid(actor) and actor:GetFullName()
+            local profile = name and loot.profile(current.map, name)
+            if not profile or not profile.keyless_lock or actor.Locked ~= true
+                or not emit(event_path, {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind, name}) then break end
+        elseif not emit(event_path, {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind}) then break end
         emitted = emitted + 1
     end
     return emitted, held_emitted, held_last
@@ -165,16 +172,24 @@ function primary.command(fields, state, phase)
         return "stock guest SMG " .. edge .. " verified"
     end
     if action == "native-guest-primary-input-fixture" then
-        if not fixtures or #fields ~= 3 or fields[3] ~= current.name or not same_context(current, binding)
+        if not fixtures or fields[3] ~= current.name or not same_context(current, binding)
+            or #fields ~= (binding.kind == "blowtorch" and 4 or 3)
             or type(SilverfishProbeNativeGuestPrimaryInput) ~= "function" then
             error("The stock primary input fixture requires the exact scoped headless client pawn", 0)
         end
-        local ok, status, sequence, wrappers = SilverfishProbeNativeGuestPrimaryInput(current.pawn:GetAddress())
-        if ok ~= true or status ~= "stock_pressed" or not valid_sequence(sequence) or wrappers ~= 2 then
-            error("The stock primary input fixture did not verify (" .. tostring(status) .. ")", 0)
+        local function probe()
+            local ok, status, sequence, wrappers = SilverfishProbeNativeGuestPrimaryInput(current.pawn:GetAddress())
+            if ok ~= true or status ~= "stock_pressed" or not valid_sequence(sequence) or wrappers ~= 2 then
+                error("The stock primary input fixture did not verify (" .. tostring(status) .. ")", 0)
+            end
+            if primary.sync(state, phase) ~= 1 then error("The stock primary fixture intent could not be published", 0) end
+            fixture_proof = {context = current, guid = binding.guid, sequence = sequence, wrappers = wrappers}
         end
-        if primary.sync(state, phase) ~= 1 then error("The stock primary fixture intent could not be published", 0) end
-        fixture_proof = {context = current, guid = binding.guid, sequence = sequence, wrappers = wrappers}
+        if binding.kind == "blowtorch" then
+            require("native_loot_crate_input").blowtorch_primary_fixture(state, phase, fields[4], probe)
+        else
+            probe()
+        end
         return "stock guest primary input verified"
     end
 
@@ -183,7 +198,7 @@ function primary.command(fields, state, phase)
     local old_pipe = kind == "old-pipe" and cqc[current.map] ~= nil
     if #fields ~= (camera and 7 or 6) or fields[3] ~= current.map or fields[4] ~= current.name or not valid_guid(guid)
         or (camera and (current.map ~= camera_map or quest ~= camera_quest))
-        or (not camera and not old_pipe and not weapon_profiles.paths[kind])
+        or (not camera and not old_pipe and kind ~= "blowtorch" and not weapon_profiles.paths[kind])
         or (held_enabled and kind == "smg-standard" and (type(SilverfishTakeNativeGuestHeldFireIntent) ~= "function"
             or type(SilverfishReadNativeGuestHeldFire) ~= "function"))
         or type(SilverfishSetNativeGuestPrimaryScope) ~= "function"

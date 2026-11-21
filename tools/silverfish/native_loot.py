@@ -16,6 +16,8 @@ STATE_KEY = "native_loot_rolls"
 RETIRED = "native_loot_retired_rolls"
 REPLENISHED = "native_replenished_crates"
 VEHICLE_LOCKS = "native_loot_vehicle_locks"
+TORCH_USE = "native-guest-vehicle-blowtorch"
+TORCH_RESULT = "native_guest_blowtorch"
 PLACEMENT = "native-loot-placement"
 PLACEMENT_KEY = "native_loot_placement"
 FORCED_ROLL_STATUS = "opened_fixture_seeded"
@@ -217,6 +219,54 @@ async def project_vehicle_locks(bridge, game, locks):
     return game
 
 
+async def use_vehicle_blowtorch(host, bridge, character, target, operation_id):
+    epoch, _, selection = target.partition("@") if isinstance(target, str) else ("", "", "")
+    guid, _, crate = selection.partition("@")
+    game = host.last_game
+    area, pawn = game.get("map"), _scope(host, character)
+    if (not host.native_loot_input or not pawn or character == "host" or not epoch or epoch != host.zone_epoch
+            or not valid_guid(guid) or not vehicle_lock(crate, area) or not party.REQUEST_ID.fullmatch(operation_id)
+            or game.get("state") != "hosting" or host.stopping or host.transitioning or host.native_checkpoint_unsafe
+            or host.party["wipe"] or character in host.party["pending_spawns"] or host.party["players"][character]["downed"]):
+        raise party.RuleError("stock_blowtorch_scope_unavailable")
+    fingerprint = [TORCH_USE, target, None]
+    for receipt in host.party["receipts"].get(character, []):
+        if receipt["id"] == operation_id:
+            if receipt["request"] != fingerprint:
+                raise party.RuleError("operation_id_conflict")
+            return receipt["result"]
+    if (game.get(VEHICLE_LOCKS, {}).get(crate) is not True or crate in host.party.get(STATE_KEY, {})
+            or host.smg_holds is not None and host.smg_holds.strokes):
+        raise party.RuleError("stock_blowtorch_vehicle_not_locked")
+    before_sequence = game.get("native_loot_guest_pries", {}).get(crate, {}).get("sequence", 0)
+    host.native_checkpoint_unsafe = True
+    try:
+        try:
+            snapshot = await bridge.command("native-loot-guest-blowtorch-use", crate, pawn, guid, timeout=4)
+        except RuntimeError as error:
+            if str(error).startswith("stock_blowtorch_"):
+                host.native_checkpoint_unsafe = False
+                raise party.RuleError(str(error)) from error
+            raise
+        proof = snapshot.get(TORCH_RESULT, {})
+        if ((snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("crate"), proof.get("pawn"), proof.get("guid"))
+                != ("hosting", area, area, crate, pawn, guid) or snapshot.get(VEHICLE_LOCKS, {}).get(crate) is not False):
+            raise RuntimeError("The stock blowtorch did not report the authenticated tool and unlocked vehicle")
+
+        def ready(frame):
+            row = frame.get("native_loot_guest_pries", {}).get(crate, {})
+            return ((frame.get("state"), frame.get("map"), row.get("map"), row.get("pawn")) == ("hosting", area, area, pawn)
+                    and row.get("sequence", 0) > before_sequence)
+
+        host.last_game = snapshot if ready(snapshot) else await bridge.wait_for(ready, timeout=4)
+        host.last_seen = time.monotonic()
+        return await perform(host, bridge, character, "open", crate, operation_id, pried=True,
+                             tool_receipt=(fingerprint, proof))
+    finally:
+        if host.native_checkpoint_unsafe:
+            host.stopping = True
+
+
 class LootView:
     def __init__(self, bridge, control):
         self.bridge = bridge
@@ -337,10 +387,10 @@ def _verified_cash_credit(proof: dict, item: dict, balance: int | None) -> dict:
 
 
 async def perform(host, bridge, character: str, action: str, target: str, operation_id: str, *,
-                  fixture_nonempty: bool = False, pried: bool = False) -> dict:
+                  fixture_nonempty: bool = False, pried: bool = False, tool_receipt=None) -> dict:
     area = host.last_game.get("map")
     if (not host.native_zones or not (host.fixtures or host.native_loot_input) or host.native_profile is None
-            or host.stopping or host.transitioning or host.native_checkpoint_unsafe
+            or host.stopping or host.transitioning or (host.native_checkpoint_unsafe and tool_receipt is None)
             or host.last_game.get("state") != "hosting" or area not in CRATES.values()
             or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_loot_scope_unavailable")
@@ -373,7 +423,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             crate, = matches
     if not isinstance(crate, str) or crate not in CRATES or CRATES[crate] != area:
         raise party.RuleError("native_loot_requires_exact_crate_and_operation")
-    if pried and (action != "open" or character != "host" or fixture_nonempty or not vehicle_lock(crate, area)):
+    if pried and (action != "open" or (character != "host" and tool_receipt is None) or fixture_nonempty or not vehicle_lock(crate, area)):
         raise party.RuleError("native_loot_pry_receipt_unavailable")
     retired = host.party.get(RETIRED, {})
     if action == "open" and operation_id in retired:
@@ -428,7 +478,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
         if not proof["ok"]:
             if mutates and proof["invoked"]:
                 raise RuntimeError(proof["status"] or "mutation_unverified_native_loot")
-            if mutates:
+            if mutates and tool_receipt is None:
                 host.native_checkpoint_unsafe = False
             raise party.RuleError(proof["status"] or "native_loot_refused")
         host.last_game, host.last_seen = snapshot, time.monotonic()
@@ -456,11 +506,18 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 host.last_game, host.last_seen = settled, time.monotonic()
             candidate = party.load_party(host.party)
             candidate.setdefault(STATE_KEY, {})[crate] = roll
-            revision = await host.checkpoint_native(bridge, candidate)
+            result = {"native_loot_roll": public_roll(roll)}
+            if tool_receipt:
+                request, tool = tool_receipt
+                result[TORCH_RESULT] = tool
+                receipts = candidate["receipts"].setdefault(character, [])
+                receipts.append({"id": operation_id, "request": request, "result": result})
+                del receipts[:-party.RECENT_ACTIONS]
+            revision = (await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+                        if tool_receipt else await host.checkpoint_native(bridge, candidate))
             host.party = candidate
             host.native_checkpoint_unsafe = False
             host.control.event("native_loot_roll_committed", revision=revision, **public_roll(roll))
-            result = {"native_loot_roll": public_roll(roll)}
             if fixture_nonempty:
                 result["native_loot_fixture"] = proof
             return result

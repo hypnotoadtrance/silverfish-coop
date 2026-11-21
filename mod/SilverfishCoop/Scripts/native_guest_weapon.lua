@@ -10,6 +10,7 @@ local flayer_fixture = fixtures and headless and os.getenv("SILVERFISH_COOP_NATI
     and require("native_campaign_npc")
 local spratt_fixture = fixtures and headless and require("native_spratt_fixture")
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
+local blowtorch_path = "/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"
 local old_pipe_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local observation
@@ -42,11 +43,14 @@ local function equipped_guid(pawn, save, world, area)
     end
     local guid = string.format("%08X%08X%08X%08X", table.unpack(words))
     local class_name = held_class:GetFullName():match("^%S+ (%S+)$")
-    if world and ((class_name == camera_path and area == camera_map) or (class_name == old_pipe_path and cqc[area] ~= nil))
+    if world and (class_name == blowtorch_path or (class_name == camera_path and area == camera_map)
+        or (class_name == old_pipe_path and cqc[area] ~= nil))
         and held:HasAuthority() and not held:IsActorBeingDestroyed()
         and same(held:GetWorld(), world) and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
         and same(held.User, pawn) and held.HeldByPlayer == true and pawn.IsWeaponBlocked == false then
         if class_name == camera_path then return guid:find("[^0]") and guid or nil, "camera" end
+        if class_name == blowtorch_path and math.type(held.Ammo) == "integer" and 0 <= held.Ammo and held.Ammo <= 3
+            and held.Ammo == row[ammo_field] then return guid:find("[^0]") and guid or nil, "blowtorch" end
         if row[ammo_field] == -1 and held.Ammo == -1 then return guid:find("[^0]") and guid or nil, "old-pipe" end
     end
     return guid:find("[^0]") and guid or nil, weapon_profiles.kinds[class_name]
@@ -67,7 +71,8 @@ function guest_weapon.command(fields, state, phase)
     local inspect = operations.inspect
     local name, guid = fields[3], fields[4]
     local fixture = action == "seed" or action == "seed-ammo"
-    local seed_profile = action == "seed" and #fields == 5 and fixtures and headless and weapon_profiles.seeds[fields[5]]
+    local seed_profile = action == "seed" and #fields == 5 and fixtures and headless
+        and (fields[5] == "blowtorch" and blowtorch_path or weapon_profiles.seeds[fields[5]])
     local equipped_target = action == "reload" and guid == "equipped"
     observation = nil
     if not enabled or (#fields ~= 4 and not seed_profile) or phase ~= "hosting"

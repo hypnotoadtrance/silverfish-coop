@@ -741,7 +741,7 @@ class Bridge:
             events.append((sequence, event, area, pawn, offset))
         return events
 
-    def native_primary_input_requests(self) -> list[tuple[int, str, str, str, str]]:
+    def native_primary_input_requests(self) -> list[tuple[int, str, str, str, str] | tuple[int, str, str, str, str, str]]:
         try:
             with (self.directory / "native-guest-primary-events").open("rb") as stream:
                 stream.seek(self.primary_input_offset)
@@ -753,11 +753,17 @@ class Bridge:
         events = []
         for line in batch[:end].splitlines():
             fields = line.decode("utf-8", errors="replace").split("\t")
-            if (len(fields) != 6 or fields[0] != "native-guest-primary-intent"
+            if (len(fields) not in (6, 7) or fields[0] != "native-guest-primary-intent"
                     or not fields[1].isascii() or not fields[1].isdigit() or len(fields[1]) > 16
                     or not 0 < (sequence := int(fields[1])) < 2**53
                     or not valid_guid(fields[4]) or fields[5] not in PRIMARY_KINDS
                     or len(fields[2]) > 256 or len(fields[3]) > 512):
+                continue
+            target = fields[6] if len(fields) == 7 else None
+            if fields[5] == "blowtorch":
+                if not target or not vehicle_lock(target, fields[2]):
+                    continue
+            elif target is not None:
                 continue
             events.append((sequence, *fields[2:]))
         return events
@@ -1814,6 +1820,14 @@ class Bridge:
                 elif (fields[0] == "native-loot-vehicle-lock" and len(fields) == 4
                       and vehicle_lock(fields[2], fields[1]) and fields[3] in {"0", "1"}):
                     data.setdefault("native_loot_vehicle_locks", {})[fields[2]] = fields[3] == "1"
+                elif (fields[0] == "native-loot-guest-pry" and len(fields) == 5 and data.get("state") == "hosting"
+                      and vehicle_lock(fields[2], fields[1]) and 1 <= (sequence := int(fields[4])) < 2**53):
+                    data.setdefault("native_loot_guest_pries", {})[fields[2]] = dict(map=fields[1], pawn=fields[3], sequence=sequence)
+                elif (fields[0] == "native-loot-guest-blowtorch-use" and len(fields) == 7 and data.get("state") == "hosting"
+                      and vehicle_lock(fields[2], fields[1]) and valid_guid(fields[4])
+                      and 1 <= (before := int(fields[5])) <= 3 and int(fields[6]) == before - 1):
+                    data["native_guest_blowtorch"] = dict(map=fields[1], crate=fields[2], pawn=fields[3], guid=fields[4],
+                                                          before=before, after=before - 1)
                 elif (fields[0] == "native-loot-crate-diagnostic" and len(fields) == 10
                       and AUTHORED_CRATES.get(fields[2]) == fields[1]):
                     row = {"map": fields[1], "crate": fields[2], "phase": fields[3],

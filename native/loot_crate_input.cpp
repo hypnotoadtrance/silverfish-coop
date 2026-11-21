@@ -239,6 +239,8 @@ namespace
         Clock::time_point expires{}, receipt{};
         std::uint64_t observed{};
         bool pried{};
+        U::FWeakObjectPtr pry_guest{};
+        Clock::time_point tool_deadline{};
     };
     std::array<Scope, profiles.size()> scopes;
     std::uint64_t sequence{};
@@ -307,6 +309,11 @@ namespace
                     active->observed = ++sequence;
                     active->receipt = now + receipt_lifetime;
                     active->pried = true;
+                    if (now >= active->tool_deadline)
+                    {
+                        active->pry_guest = U::FWeakObjectPtr{};
+                        active->tool_deadline = {};
+                    }
                 }
             }
             else if (point == profile->stock_class->input_entry) call.PreventOriginalFunctionCall();
@@ -398,7 +405,69 @@ namespace
         lua.set_string(box.state);
         lua.set_integer(reinterpret_cast<std::intptr_t>(box.box));
         lua.set_bool(observed && scope->pried);
-        return 5;
+        const bool guest_pry = observed && scope->pried && scope->tool_deadline != Clock::time_point{};
+        auto* guest = guest_pry ? scope->pry_guest.Get() : nullptr;
+        lua.set_integer(guest ? reinterpret_cast<std::intptr_t>(guest) : guest_pry ? -1 : 0);
+        return 6;
+    }
+
+    int arm_guest_pry(const Lua& lua)
+    {
+        if (!ready() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3))
+        {
+            lua.set_bool(false);
+            return 1;
+        }
+        const auto index = lua.get_integer();
+        const auto pawn = static_cast<std::uintptr_t>(lua.get_integer());
+        const auto save = static_cast<std::uintptr_t>(lua.get_integer());
+        bool armed = false;
+        if (index > 0 && index <= static_cast<std::int64_t>(scopes.size()))
+        {
+            auto& scope = scopes[static_cast<std::size_t>(index - 1)];
+            auto* crate = scope.crate.Get();
+            auto* world = silverfish::shared_loot::authored_crate_world(crate);
+            const auto* profile = silverfish::shared_loot::authored_profile(crate);
+            auto* instance = object(world, STR("OwningGameInstance"));
+            auto* stock = object(instance, STR("SaveSlot_Ref"));
+            const auto now = Clock::now();
+            silverfish::shared_loot::EscrowOwner owner{};
+            if (world && profile && profile->stock_class->keyless_lock && scope.host && !scope.pried &&
+                now < scope.expires && now >= scope.tool_deadline && same_scope(scope, crate, local_owner(world)) &&
+                boolean(crate, STR("Locked"), true) && boolean(crate, STR("Looted"), false) &&
+                silverfish::shared_loot::qualify_escrow_owner_in_world(world, pawn, save,
+                    reinterpret_cast<std::uintptr_t>(stock), owner) && owner.save != owner.stock)
+            {
+                scope.pry_guest = owner.pawn;
+                scope.tool_deadline = now + std::chrono::seconds(6);
+                armed = true;
+            }
+        }
+        lua.set_bool(armed);
+        return 1;
+    }
+
+    int cancel_guest_pry(const Lua& lua)
+    {
+        bool cancelled = false;
+        if (ready() && lua.get_stack_size() == 2 && lua.is_integer(1) && lua.is_integer(2))
+        {
+            const auto index = lua.get_integer();
+            const auto pawn = lua.get_integer();
+            if (index > 0 && index <= static_cast<std::int64_t>(scopes.size()))
+            {
+                auto& scope = scopes[static_cast<std::size_t>(index - 1)];
+                if (scope.host && !scope.pried && pawn > 0 && reinterpret_cast<std::intptr_t>(scope.pry_guest.Get()) == pawn &&
+                    boolean(scope.crate.Get(), STR("Locked"), true))
+                {
+                    scope.pry_guest = U::FWeakObjectPtr{};
+                    scope.tool_deadline = {};
+                    cancelled = true;
+                }
+            }
+        }
+        lua.set_bool(cancelled);
+        return 1;
     }
 
     int clear(const Lua&)
@@ -415,12 +484,15 @@ namespace silverfish::native_loot_crate_input
         if (!ready()) return false;
         const auto now = Clock::now();
         const auto scope = std::ranges::find_if(scopes, [&](const Scope& candidate) {
-            return candidate.crate.Get() == crate && candidate.pawn.Get() == pawn && candidate.host &&
+            auto* opener = candidate.tool_deadline != Clock::time_point{} ? candidate.pry_guest.Get() : candidate.pawn.Get();
+            return candidate.crate.Get() == crate && opener == pawn && candidate.host &&
                 candidate.pried && candidate.observed && now < candidate.receipt && now < candidate.expires;
         });
         if (scope == scopes.end()) return false;
         scope->observed = 0;
         scope->pried = false;
+        scope->pry_guest = U::FWeakObjectPtr{};
+        scope->tool_deadline = {};
         return true;
     }
     void install_hooks()
@@ -459,6 +531,8 @@ namespace silverfish::native_loot_crate_input
         lua.register_function("SilverfishSetNativeLootCrateInputScope", set_scope);
         lua.register_function("SilverfishReadNativeLootCrateInput", status);
         lua.register_function("SilverfishClearNativeLootCrateInput", clear);
+        lua.register_function("SilverfishArmNativeGuestVehiclePry", arm_guest_pry);
+        lua.register_function("SilverfishCancelNativeGuestVehiclePry", cancel_guest_pry);
     }
 
     void clear_scope()
