@@ -18,7 +18,7 @@ function display.remove(widget)
     if valid(widget) then widget:RemoveFromParent() end
 end
 
-function display.mount(context, text)
+function display.mount(context, text, layout_options)
     local class = StaticFindObject(widget_path)
     if not valid(class) then
         LoadAsset(widget_path)
@@ -42,8 +42,12 @@ function display.mount(context, text)
         if not width or width < 1 or width > 16384 or type(scale) ~= "number" or not (scale >= 0.25 and scale <= 8) then
             error("title_panel_viewport_size_unavailable", 0)
         end
-        widget:SetDesiredSizeInViewport({X = 344, Y = 148})
-        widget:SetPositionInViewport({X = math.max(20, width / scale - 364), Y = 62}, false)
+        local options = layout_options or {}
+        local panel_width, panel_height = options.width or 344, options.height or 148
+        local x = options.center and (width / scale - panel_width) / 2 or width / scale - panel_width - 20
+        local y = options.center and (tonumber(size.Y) / scale - panel_height) / 2 or 62
+        widget:SetDesiredSizeInViewport({X = panel_width, Y = panel_height})
+        widget:SetPositionInViewport({X = math.max(12, x), Y = math.max(12, y)}, false)
         display.text(widget, text)
     end)
     if not ok then

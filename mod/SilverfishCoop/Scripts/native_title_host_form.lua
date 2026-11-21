@@ -1,10 +1,14 @@
 local form = {}
-local editor = require("native_title_settings_widget")
+local surface = require("native_title_surface")
 local fields = {
-    {key = "campaign", label = "Campaign", hint = "Use letters, numbers, underscores or hyphens."},
-    {key = "port", label = "UDP port", hint = "Enter a UDP port from 1 to 65535."},
-    {key = "bind", label = "Listening IP", hint = "Enter a numeric IPv4 or IPv6 address."},
-    {key = "password", label = "Password", hint = "Enter up to 128 characters.", default = "Blank lets anyone with the address join."},
+    {key = "campaign", label = "Campaign name", hint = "Default campaign", limit = 64,
+        error = "Use letters, numbers, underscores or hyphens for the campaign name."},
+    {key = "port", label = "UDP port", hint = "Default port", limit = 5,
+        error = "Enter a UDP port from 1 to 65535."},
+    {key = "bind", label = "Listening IP", hint = "Default listening address", limit = 45,
+        error = "Enter a numeric IPv4 or IPv6 listening address."},
+    {key = "password", label = "Password", hint = "Optional", limit = 512, secret = true,
+        error = "Enter a password of up to 128 characters."},
 }
 
 local function ipv4(text)
@@ -52,65 +56,26 @@ local function valid(field, value)
     return #value <= 45 and numeric_address(value)
 end
 
-function form.remove(draft)
-    if not draft.handle then return true end
-    local handle = draft.handle
-    draft.handle = nil
-    return editor.remove(handle)
-end
-
-local function render(draft, state, phase, hint, text)
-    local field = fields[draft.index]
-    if not form.remove(draft) then error("title_host_form_editor_unavailable", 0) end
-    local controls = draft.count == #fields and "\nF7 Start/Load   F10 New Game\nF8 Next field   F9 Back"
-        or "\nF8 Next field   F7 Start   F9 Back"
-    local caption = "Host co-op / " .. field.label .. "\n" .. (hint or field.default or "Blank keeps the configured value.") .. controls
-    local handle = editor.mount(state, phase, field.key, caption, text or draft.values[field.key])
-    draft.handle = handle
-    editor.focus(handle, state, phase)
-end
-
-function form.open(state, phase, direct)
-    local draft = {index = 1, count = direct and #fields or #fields - 1,
-        values = {campaign = "", port = "", bind = "", password = direct and "" or nil}}
-    local ok, failure = pcall(render, draft, state, phase)
-    if not ok then
-        form.remove(draft)
-        error(failure, 0)
+function form.rows(draft, direct, saved_name)
+    local rows = {}
+    for index = saved_name and 2 or 1, direct and #fields or #fields - 1 do
+        local field = fields[index]
+        rows[#rows + 1] = {field = {key = field.key, label = field.label, hint = field.hint,
+            limit = field.limit, secret = field.secret, value = draft[field.key]}}
     end
-    return draft
+    return rows
 end
 
-local function capture(draft, state, phase)
-    local field = fields[draft.index]
-    local ok, text = pcall(editor.read, draft.handle, state, phase)
-    if not ok and text ~= "title_settings_invalid_text" then return false, "title_host_form_editor_unavailable" end
-    if not ok or not valid(field.key, text) then
-        render(draft, state, phase, field.hint, ok and text or nil)
-        return false, "title_host_form_invalid_" .. field.key
+function form.selection(view, draft, direct, saved_name)
+    local invalid
+    for index = saved_name and 2 or 1, direct and #fields or #fields - 1 do
+        local field = fields[index]
+        local value = surface.read(view, field.key)
+        if value then draft[field.key] = value end
+        if not invalid and (not value or not valid(field.key, value)) then invalid = field end
     end
-    draft.values[field.key] = text
-    return true
-end
-
-function form.next(draft, state, phase)
-    local captured, reason = capture(draft, state, phase)
-    if not captured then return false, reason end
-    draft.index = draft.index % draft.count + 1
-    render(draft, state, phase)
-    return true
-end
-
-function form.selection(draft, state, phase)
-    local captured, reason = capture(draft, state, phase)
-    if not captured then return nil, reason end
-    local values = draft.values
-    return {values.campaign, values.bind, values.port, values.password}
-end
-
-function form.fixture_write(draft, state, phase, field, value)
-    if fields[draft.index].key ~= field then return false end
-    return editor.write(draft.handle, state, phase, value) == value
+    if invalid then return nil, "title_host_form_invalid_" .. invalid.key, invalid.error end
+    return {saved_name or draft.campaign, draft.bind, draft.port, direct and draft.password or nil}
 end
 
 return form

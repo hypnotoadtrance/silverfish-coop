@@ -1,18 +1,16 @@
 local panel = {}
 local title = require("native_title_entry")
-local display = require("native_title_display")
+local surface = require("native_title_surface")
+local controls = require("native_menu_controls")
 local resident = os.getenv("SILVERFISH_COOP_RESIDENT_TITLE") == "1"
 local direct_join = os.getenv("SILVERFISH_COOP_TITLE_DIRECT_JOIN") == "1"
 
-local keys = {host = "F7", join = "F8", hide = "F9", creator = "F10"}
 local actions = {
     ["host"] = {host = true}, ["join"] = {join = true}, ["host,join"] = {host = true, join = true},
 }
 local bridge_path, session_path, request_path, loop, current, session, report
 local dismissed, submitted
-local input_keys = {}
-local key_order = {"hide", "host", "join", "creator"}
-local queued_keys, bound_keys = {}, false
+local dispatch
 local settings_fixture, credits_fixture
 local credits_path = "/Game/Classes/GUI/Credits_MainMenu_Widget.Credits_MainMenu_Widget_C"
 local initial_port, edited_port = "7777", "28181"
@@ -45,10 +43,50 @@ local function read_offer()
     return {generation = generation, choices = choices, expires = expires}
 end
 
+local function read_campaigns(generation)
+    local file = io.open(bridge_path .. "/title-host-campaigns.tsv", "rb")
+    if not file then return end
+    local data = file:read(4226)
+    file:close()
+    if not data or #data > 4225 then return end
+    local offered, size, start = data:match("^1\t([0-9a-f]+)\t([0-9][0-9]?)\r?\n()")
+    if offered ~= generation then return end
+    local count = tonumber(size)
+    if not count or count > 64 then return end
+    local campaigns, seen = {}, {}
+    for _ = 1, count do
+        local first, last, name = data:find("([A-Za-z0-9][A-Za-z0-9_-]*)\r?\n", start)
+        if first ~= start or #name > 64 or seen[name:lower()] then return end
+        seen[name:lower()] = true
+        campaigns[#campaigns + 1] = name
+        start = last + 1
+    end
+    if start == #data + 1 then return campaigns end
+end
+
 local function close_form(owner)
     local form = owner.form
     owner.form = nil
-    if form then form.api.remove(form.draft) end
+    if form and form.role == "join" then form.api.remove(form.draft) end
+end
+
+local function stock_campaign_controls(owner, enabled)
+    if enabled then
+        for _, record in ipairs(owner.stock or {}) do
+            if valid(record.widget) then record.widget:SetIsEnabled(record.enabled) end
+        end
+        owner.stock = nil
+    elseif not owner.stock then
+        local menu = owner.context.menu
+        owner.stock = {}
+        for _, name in ipairs({"Button_NewGame", "Button_Load_1", "Button_Load_2", "Button_TestMap"}) do
+            local widget = menu[name]
+            if valid(widget) then
+                owner.stock[#owner.stock + 1] = {widget = widget, enabled = widget:GetIsEnabled()}
+                widget:SetIsEnabled(false)
+            end
+        end
+    end
 end
 
 local function remove_display()
@@ -56,27 +94,48 @@ local function remove_display()
     session = nil
     if old then
         close_form(old)
-        display.remove(old.widget)
+        surface.remove(old.view)
+        for _, button in pairs(old.modes) do controls.remove(button) end
+        stock_campaign_controls(old, true)
     end
 end
 
-local function message(text)
-    display.text(session.widget, text)
+local function present(spec)
+    local owner = session
+    surface.remove(owner.view)
+    owner.view = nil
+    if spec then
+        owner.view = surface.mount(owner.context, spec, function(action)
+            if session == owner then dispatch(action) end
+        end)
+    end
 end
 
-local function menu_text(offer)
-    local lines = {"Direct IP co-op"}
-    if actions[offer.choices].host then lines[#lines + 1] = "F7   Host a campaign" end
-    if actions[offer.choices].join then
-        lines[#lines + 1] = direct_join and "F8   Join by Direct IP" or "F8   Join with an invite"
-    end
-    lines[#lines + 1] = "F9   Hide"
-    return table.concat(lines, "\n")
+local function button(key, label)
+    return {key = key, label = label}
+end
+
+local function multiplayer(offer)
+    stock_campaign_controls(session, false)
+    local choices, rows = actions[offer.choices], {}
+    if choices.host then rows[#rows + 1] = {button("host", "Host")} end
+    if choices.join then rows[#rows + 1] = {button("join", direct_join and "Join by Direct IP" or "Join")} end
+    rows[#rows + 1] = {button("singleplayer", "Back to title")}
+    present({title = "Multiplayer", rows = rows})
 end
 
 local function mount(context, offer)
-    local widget = display.mount(context, menu_text(offer))
-    session = {context = context, offer = offer, widget = widget, held = {}}
+    local menu = context.menu
+    local parent = valid(menu.Button_NewGame) and menu.Button_NewGame:GetParent()
+    if not valid(parent) or not same(menu.Button_SETTINGS:GetParent(), parent)
+        or not same(menu.Button_QUIT:GetParent(), parent) then error("title_panel_stock_menu_unavailable", 0) end
+    local owner = {context = context, offer = offer, modes = {}, parent = parent}
+    session = owner
+    for _, mode in ipairs({button("singleplayer", "Singleplayer"), button("multiplayer", "Multiplayer")}) do
+        owner.modes[mode.key] = controls.create(context, parent, mode.label, function()
+            if session == owner then dispatch(mode.key) end
+        end)
+    end
 end
 
 local function request_id()
@@ -104,7 +163,10 @@ local function write_request(generation, action, form_values)
     local temporary = request_path .. "." .. id .. ".tmp"
     local file = io.open(temporary, "wb")
     if not file then return false end
-    local version = action == "host" and form_values and ({[4] = "3", [5] = "4"})[#form_values] or "2"
+    local version = "2"
+    if action == "host" and form_values then
+        version = ({creator = "4", resume = "5"})[form_values[5]] or (#form_values == 4 and "3" or "2")
+    end
     local row = form_values and {version, generation, id, action, table.unpack(form_values)}
         or {"1", generation, id, action}
     local written = file:write(table.concat(row, "\t"), "\n")
@@ -117,7 +179,8 @@ end
 
 local function can_choose(context)
     return session and same_title(context, session.context) and os.time() <= session.offer.expires
-        and valid(session.widget) and session.widget:IsInViewport()
+        and session.modes.multiplayer and valid(session.modes.multiplayer.widget)
+        and same(session.modes.multiplayer.widget:GetParent(), session.parent)
 end
 
 local function active_offer(action, context)
@@ -147,40 +210,111 @@ local function choose(action, context, form_values)
         submitted = latest.generation
         close_form(session)
         report = {state = "pending", choices = latest.choices}
-        message("Direct IP co-op\nStarting " .. (action == "host" and "host" or "join") .. "...\nF9   Hide")
+        present({title = "Multiplayer", note = action == "host" and "Starting the campaign…" or "Joining the host…",
+            rows = {}})
         return true
     end
     close_form(session)
     report = {state = "unavailable", choices = latest.choices, reason = "title_request_write_failed"}
-    message("Could not start co-op. Try again or press F9 to hide.")
+    present({title = "Multiplayer", note = "Could not start co-op. Return to the title and try again.",
+        rows = {{button("singleplayer", "Back to title")}}})
     return false, report.reason
 end
 
-local function handle_host_form(action, state, phase, context)
+local function host_menu()
+    session.form.screen = "menu"
+    present({title = "Host a campaign", rows = {
+        {button("new", "New Game"), button("browse", "Load Game")},
+        {button("back", "Back")},
+    }})
+end
+
+local function host_settings(form, note)
+    form.screen = "settings"
+    local rows = form.api.rows(form.values, resident, form.saved_name)
+    local label = form.saved_name and "Load Game" or "Start Campaign"
+    rows[#rows + 1] = {button("submit", label), button("back", "Back")}
+    present({title = form.saved_name or "New co-op campaign", note = note, rows = rows})
+end
+
+local function show_saved(form)
+    form.screen = "saved"
+    local saved, rows, note = form.saved, {}, nil
+    if not saved then
+        note = "The campaign list is unavailable."
+        rows[1] = {button("browse", "Retry")}
+    elseif #saved == 0 then
+        note = "No saved co-op campaigns"
+    else
+        local first = form.first or 1
+        for index = first, math.min(first + 3, #saved) do
+            rows[#rows + 1] = {button("load:" .. saved[index], saved[index])}
+        end
+        local pages = {}
+        if first > 1 then pages[#pages + 1] = button("previous", "Previous") end
+        if first + 3 < #saved then pages[#pages + 1] = button("next", "Next") end
+        if #pages > 0 then rows[#rows + 1] = pages end
+    end
+    rows[#rows + 1] = {button("back", "Back")}
+    present({title = "Load co-op campaign", note = note, rows = rows})
+end
+
+local function handle_host_form(action, context)
     local offer, reason = active_offer("host", context)
     if not offer then return false, reason end
     local form = session.form
     if not form then
-        if action ~= "host" then return false, "title_host_form_unavailable" end
-        local api = require("native_title_host_form")
-        session.form = {role = "host", api = api, draft = api.open(state, phase, resident)}
-        message("")
+        if action ~= "host" and action ~= "fixture" then return false, "title_host_form_unavailable" end
+        form = {role = "host", api = require("native_title_host_form"), values = {}, fixture = action == "fixture"}
+        session.form = form
+        if resident and not form.fixture then host_menu() else host_settings(form) end
         report = {state = "ready", choices = offer.choices}
         return true
     end
-    if action == "hide" then
-        close_form(session)
-        message(menu_text(offer))
+    if action == "back" then
+        if form.fixture and form.screen == "saved" then host_settings(form)
+        elseif form.fixture or form.screen == "menu" or not resident then
+            close_form(session)
+            multiplayer(offer)
+        elseif form.screen == "settings" and form.saved_name then show_saved(form)
+        else host_menu() end
         return true
     end
-    if action == "join" then return form.api.next(form.draft, state, phase) end
-    local values, failure = form.api.selection(form.draft, state, phase)
-    if not values then return false, failure end
-    if action == "creator" then
-        if not resident then return false, "title_stock_creator_unavailable" end
-        values[5] = "creator"
+    if action == "new" and form.screen == "menu" then
+        form.saved_name = nil
+        host_settings(form)
+        return true
     end
-    return choose("host", title.probe(state, phase), values)
+    if action == "browse" and resident then
+        form.saved, form.first, form.index = read_campaigns(offer.generation), 1, 1
+        show_saved(form)
+        return true
+    end
+    if form.screen == "saved" and form.saved then
+        local name = action:match("^load:(.+)$")
+        if name and session.view.buttons[action] then
+            form.saved_name = name
+            host_settings(form)
+            return true
+        end
+        if action == "next" or action == "previous" then
+            local first = form.first + (action == "next" and 4 or -4)
+            if first >= 1 and first <= #form.saved then form.first = first end
+            show_saved(form)
+            return true
+        end
+    end
+    if form.screen ~= "settings" or action ~= "submit" and action ~= "creator" then
+        return false, "title_host_form_unavailable"
+    end
+    local values, failure, hint = form.api.selection(session.view, form.values, resident, form.saved_name)
+    if not values then
+        host_settings(form, hint)
+        return false, failure
+    end
+    if form.saved_name then values[5] = "resume"
+    elseif resident and (action == "creator" or not form.fixture) then values[5] = "creator" end
+    return choose("host", context, values)
 end
 
 local function handle_join_form(action, state, phase, context)
@@ -190,20 +324,22 @@ local function handle_join_form(action, state, phase, context)
     if not form then
         if action ~= "join" then return false, "title_join_form_unavailable" end
         local api = require("native_title_join_form")
-        local draft = api.open(state, phase, context, bridge_path, offer.generation, request_id, direct_join)
+        present(nil)
+        local owner = session
+        local draft = api.open(state, phase, context, bridge_path, offer.generation, request_id, direct_join,
+            function(key) if session == owner then dispatch(key) end end)
         session.form = {role = "join", api = api, draft = draft}
-        message("")
         report = {state = "ready", choices = offer.choices}
         return true
     end
     if form.role ~= "join" then return false, "title_join_form_unavailable" end
-    if action == "hide" then
-        close_form(session)
-        message(menu_text(offer))
-        return true
-    end
     local accepted, failure, values = form.api.press(form.draft, action, state, phase)
     if values then return choose("join", title.probe(state, phase), values) end
+    if failure == "title_join_form_back_to_title" then
+        close_form(session)
+        multiplayer(offer)
+        return true
+    end
     return accepted, failure
 end
 
@@ -253,45 +389,58 @@ local function host_form_fixture_command(fields, state, phase)
     if not offer then error(reason, 0) end
     if operation == "open" then
         if session.form or settings_fixture or credits_fixture then error("title_host_form_already_open", 0) end
-        local accepted, failure = handle_host_form("host", state, phase, context)
+        local accepted, failure = handle_host_form("fixture", context)
         if not accepted then error(failure, 0) end
         return "title_host_form_open"
     end
     local form = session.form
     if not form or form.role ~= "host" then error("title_host_form_unavailable", 0) end
+    if operation == "saved-state" then
+        if form.screen ~= "saved" then error("title_host_saved_campaign_unavailable", 0) end
+        if not form.saved then return "title_host_saved=unavailable" end
+        if #form.saved == 0 then return "title_host_saved=empty" end
+        return string.format("title_host_saved=%d:%s", #form.saved, form.saved[form.index])
+    end
     if operation == "campaign" then
         local suffix = value:match("^title%-host%-settings%-([0-9a-f]+)$")
-        if not suffix or #suffix ~= 8 or not form.api.fixture_write(form.draft, state, phase, "campaign", value) then
+        if not suffix or #suffix ~= 8 or not surface.write(session.view, "campaign", value) then
             error("title_host_form_fixture_arguments", 0)
         end
-        local accepted, failure = handle_host_form("join", state, phase, context)
-        if not accepted then error(failure, 0) end
+        form.values.campaign = value
         return "title_host_form_campaign_entered"
     end
     if operation == "port" then
         if #value > 5 or not value:match("^[0-9]+$") or tonumber(value) > 65535
             or (value ~= "0" and value:sub(1, 1) == "0")
-            or not form.api.fixture_write(form.draft, state, phase, "port", value) then
+            or not surface.write(session.view, "port", value) then
             error("title_host_form_fixture_arguments", 0)
         end
         return "title_host_form_port_entered"
     end
     if operation == "password" then
-        if not form.api.fixture_write(form.draft, state, phase, "password", "Fixture co-op pass") then
+        if not surface.write(session.view, "password", "Fixture co-op pass") then
             error("title_host_form_fixture_arguments", 0)
         end
         return "title_host_form_password_entered"
     end
     if operation == "next" then
-        local accepted, failure = handle_host_form("join", state, phase, context)
-        if not accepted then error(failure, 0) end
+        if form.screen == "saved" and form.saved and #form.saved > 0 then
+            form.index = form.index % #form.saved + 1
+            form.first = math.floor((form.index - 1) / 4) * 4 + 1
+            show_saved(form)
+        end
         return "title_host_form_next"
     end
-    local action = operation == "submit" and "host" or operation == "cancel" and "hide"
-        or operation == "creator" and "creator"
+    local action = ({submit = "submit", cancel = "back", creator = "creator", browse = "browse"})[operation]
+    if operation == "choose-saved" then
+        local name = form.screen == "saved" and form.saved and form.saved[form.index]
+        if not name then error("title_host_saved_campaign_unavailable", 0) end
+        action = "load:" .. name
+    end
     if not action then error("title_host_form_fixture_arguments", 0) end
-    local accepted, failure = handle_host_form(action, state, phase, context)
+    local accepted, failure = handle_host_form(action, context)
     if not accepted then error(failure, 0) end
+    if operation == "browse" or operation == "choose-saved" then return "title_host_form_" .. operation end
     return operation == "cancel" and "title_host_form_cancelled" or "title_host_form_submitted"
 end
 
@@ -316,7 +465,7 @@ local function join_form_fixture_command(fields, state, phase)
         if operation == "submit" and form.draft.screen ~= "profile" and form.draft.screen ~= "confirm" then
             error("title_join_form_selection_unavailable", 0)
         end
-        local accepted, failure = handle_join_form(operation == "submit" and "host" or "hide", state, phase, context)
+        local accepted, failure = handle_join_form(operation == "submit" and "host" or "back", state, phase, context)
         if not accepted then error(failure, 0) end
         return operation == "submit" and "title_join_form_submitted" or "title_join_form_cancelled"
     end
@@ -425,9 +574,7 @@ local function settings_fixture_command(fields, state, phase)
     error("title_settings_fixture_arguments", 0)
 end
 
-local function poll()
-    local events = queued_keys
-    queued_keys = {}
+local function update_title()
     if not session then return end
     local context = current and title.probe(current.state, current.phase)
     if not can_choose(context) then
@@ -435,41 +582,37 @@ local function poll()
         report = nil
         return
     end
-    local pending = submitted == session.offer.generation
     local form = session.form
     if form and form.role == "join" and form.draft.pending then
         if not active_offer("join", context) then return end
         form.api.poll(form.draft, current.state, current.phase)
     end
-    local selected, rises = nil, 0
-    local focused = bound_keys and next(events) and SilverfishNativeGameWindowFocused() == true
-    for _, action in ipairs(key_order) do
-        local allows_creator = action == "creator" and resident and session.form and session.form.role == "host"
-        if allows_creator or action ~= "creator" and (session.form or action == "hide"
-            or not pending and actions[session.offer.choices][action]) then
-            local pressed = focused and events[action] == session
-            if not bound_keys then
-                if not input_keys[action] then
-                    local key = FName(keys[action], EFindName.FNAME_Find)
-                    if key:GetComparisonIndex() == 0 then error("title_panel_key_unavailable", 0) end
-                    input_keys[action] = {KeyName = key}
-                end
-                local down = context.controller:IsInputKeyDown(input_keys[action])
-                if type(down) ~= "boolean" then error("title_panel_key_unqualified", 0) end
-                pressed = down and session.held[action] == false
-                session.held[action] = down
-            end
-            if pressed then selected, rises = action, rises + 1 end
+end
+
+local function unavailable()
+    local choices = session and session.offer.choices
+    remove_display()
+    report = choices and {state = "unavailable", choices = choices, reason = "title_panel_input_unavailable"} or nil
+end
+
+dispatch = function(action)
+    local ok = pcall(function()
+        local context = current and title.probe(current.state, current.phase)
+        if not can_choose(context) or submitted == session.offer.generation then return end
+        if action == "singleplayer" then
+            close_form(session)
+            present(nil)
+            stock_campaign_controls(session, true)
+        elseif action == "multiplayer" then
+            close_form(session)
+            multiplayer(session.offer)
+        elseif session.form and session.form.role == "join" or not session.form and action == "join" then
+            handle_join_form(action, current.state, current.phase, context)
+        elseif session.form or action == "host" then
+            handle_host_form(action, context)
         end
-    end
-    if rises ~= 1 then return end
-    if form and form.role == "join" or not form and selected == "join" then
-        handle_join_form(selected, current.state, current.phase, context)
-    elseif form or selected == "host" then
-        handle_host_form(selected, current.state, current.phase, context)
-    else
-        choose(selected, context)
-    end
+    end)
+    if not ok then unavailable() end
 end
 
 function panel.sync(state, phase)
@@ -504,18 +647,33 @@ function panel.command(fields, state, phase)
     if fields[2] == "native-title-settings-widget-fixture" then return settings_fixture_command(fields, state, phase) end
     if fields[2] == "native-title-host-form-fixture" then return host_form_fixture_command(fields, state, phase) end
     if fields[2] == "native-title-join-form-fixture" then return join_form_fixture_command(fields, state, phase) end
+    if fields[2] == "native-title-button-fixture" then
+        if not fixture_enabled() or #fields ~= 3 or not can_choose(title.probe(state, phase)) then
+            error("title_panel_fixture_unavailable", 0)
+        end
+        local key, form = fields[3], session.form
+        local anchored = session.modes[key]
+        local pressed = anchored and controls.press_fixture(anchored)
+            or form and form.role == "join" and form.api.click_fixture(form.draft, key)
+            or surface.press_fixture(session.view, key)
+        if not pressed then error("title_panel_fixture_button_unavailable", 0) end
+        return "title_button_queued"
+    end
     if fields[2] ~= "native-title-panel-press-fixture" then return end
     if not fixture_enabled() then error("title_panel_fixture_unavailable", 0) end
     local action = fields[3]
-    if #fields ~= 3 or not keys[action] or action == "creator" then error("title_panel_fixture_arguments", 0) end
+    if #fields ~= 3 or action ~= "hide" and action ~= "host" and action ~= "join" then
+        error("title_panel_fixture_arguments", 0)
+    end
     local accepted, reason = choose(action, title.probe(state, phase))
     if not accepted then error(reason, 0) end
     return "qualified staged title control dispatched"
 end
 
 function panel.rows(state, phase, status_row)
-    if not report or not title.probe(state, phase) then return {} end
-    local mounted = session and valid(session.widget) and session.widget:IsInViewport() or false
+    local context = title.probe(state, phase)
+    if not report or not context then return {} end
+    local mounted = can_choose(context)
     return {status_row("native-title-panel", state.map, report.state, report.choices, mounted and 1 or 0, report.reason or "-")}
 end
 
@@ -524,25 +682,8 @@ function panel.start(bridge)
     bridge_path = bridge
     session_path = bridge .. "/title-handoff-session.tsv"
     request_path = bridge .. "/title-handoff-request.tsv"
-    if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" and type(RegisterKeyBind) == "function"
-        and type(SilverfishNativeGameWindowFocused) == "function" and Key and Key.F7 and Key.F8 and Key.F9 then
-        bound_keys = true
-        for _, action in ipairs(key_order) do
-            local key = Key[keys[action]]
-            if key then
-                RegisterKeyBind(key, function()
-                    -- UE4SS reports a down edge. Qualify Unreal objects on the game thread only.
-                    if session and current then queued_keys[action] = session end
-                end)
-            end
-        end
-    end
     loop = LoopInGameThreadWithDelay(16, function()
-        if not pcall(poll) then
-            local choices = session and session.offer.choices
-            remove_display()
-            report = choices and {state = "unavailable", choices = choices, reason = "title_panel_input_unavailable"} or nil
-        end
+        if not pcall(update_title) then unavailable() end
     end)
 end
 
