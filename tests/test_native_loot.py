@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, call
 
 from tools.silverfish import native_host_save, native_loot, party, runtime
 from tools.silverfish.authored_loot import (CRATES, LEGACY_CRATE, OFFICE_DESK, PLACEMENTS, OVERRIDDEN_PLACEMENTS,
-                                           SMALL_CABINET, full_name, loot_capacity)
+                                           SMALL_CABINET, full_name, loot_capacity, random_lid_pitch_range)
 from tools.silverfish.campaign import CampaignFormatError
 from tools.silverfish.generate_authored_loot_registry import outputs, survey
 from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, OBSERVATORY, RAIL_YARD
@@ -429,18 +429,27 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         game = self.game(CROSSROADS, native_loot_crates=states)
         rolls = {crate: self.roll(area, crate, f"{index:032x}")
                  for index, (crate, area) in enumerate(native_loot.CRATES.items(), start=1)}
+        lids = {crate: sum(limits) / 2 for crate in rolls if (limits := random_lid_pitch_range(crate))}
+        for crate, pitch in lids.items():
+            rolls[crate]["lid_pitch"] = pitch
+            states[crate].update(state="exhausted", lid_pitch=pitch + 1)
 
-        async def project(_verb, status, crate, *, timeout):
+        async def project(_verb, status, crate, *pose, timeout):
             states[crate] = dict(states[crate], state=status)
+            if pose:
+                states[crate]["lid_pitch"] = float(pose[0])
             return self.game(CROSSROADS, native_loot_crates=dict(states))
 
         bridge = SimpleNamespace(command=AsyncMock(side_effect=project))
         final = await native_loot.project_opened(bridge, game, rolls)
         local_crates = [crate for crate, area in native_loot.CRATES.items() if area == CROSSROADS]
         self.assertEqual(bridge.command.await_args_list, [
-            call("native-loot-crate-project", "exhausted", crate, timeout=4) for crate in local_crates
+            call("native-loot-crate-project", "exhausted", crate, *((str(lids[crate]),) if crate in lids else ()), timeout=4)
+            for crate in local_crates
         ])
         self.assertTrue(all(final["native_loot_crates"][crate]["state"] == "exhausted" for crate in local_crates))
+        self.assertTrue(all(final["native_loot_crates"][crate]["lid_pitch"] == lids[crate]
+                            for crate in local_crates if crate in lids))
         self.assertEqual(final["native_loot_crates"][BRIDGE_CRATE]["state"], "ready")
 
     async def test_view_claim_follows_rendered_crate_even_when_another_is_nearer(self):

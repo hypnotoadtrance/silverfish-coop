@@ -6,7 +6,8 @@ import time
 import uuid
 
 from . import native_host_save, party
-from .authored_loot import CRATES, LEGACY_CRATE, loot_capacity, valid_item_transform, valid_loot_trait_calls
+from .authored_loot import (CRATES, LEGACY_CRATE, loot_capacity, random_lid_pitch_range, valid_item_transform,
+                            valid_lid_pitch, valid_loot_trait_calls)
 from .native_gold import valid_guid
 
 
@@ -142,19 +143,57 @@ async def project_opened(bridge, game: dict, rolls: dict) -> dict:
     """Project saved open crates in this map without replaying stock rolls."""
     area = game.get("map")
     replenished = _replenished(game, rolls or {})
-    for crate in _rolls_in_area(rolls or {}, area):
+    for crate, roll in _rolls_in_area(rolls or {}, area).items():
         if crate in replenished:
             continue
         scope = game.get("native_loot_crates", {}).get(crate, {})
-        if (scope.get("map"), scope.get("crate"), scope.get("state")) != (area, crate, "ready"):
+        if (scope.get("map"), scope.get("crate")) != (area, crate) or scope.get("state") not in {"ready", "exhausted"}:
             continue
-        snapshot = await bridge.command("native-loot-crate-project", "exhausted", crate, timeout=4)
+        pitch = roll.get("lid_pitch")
+        if not valid_lid_pitch(crate, pitch):
+            raise RuntimeError("The committed stock lid pose is invalid")
+        if scope.get("state") == "exhausted" and (pitch is None or _same_lid_pitch(crate, scope.get("lid_pitch"), pitch)):
+            continue
+        arguments = (str(pitch),) if pitch is not None else ()
+        snapshot = await bridge.command("native-loot-crate-project", "exhausted", crate, *arguments, timeout=4)
         proof = snapshot.get("native_loot_crates", {}).get(crate, {})
-        if snapshot.get("map") != area or (proof.get("map"), proof.get("crate"), proof.get("state")) != (
-                area, crate, "exhausted"):
+        if (snapshot.get("map") != area or (proof.get("map"), proof.get("crate"), proof.get("state")) !=
+                (area, crate, "exhausted") or (pitch is not None and not _same_lid_pitch(crate, proof.get("lid_pitch"), pitch))):
             raise RuntimeError("The exact stock crate did not reflect its committed roll")
         game = snapshot
     return game
+
+
+def _same_lid_pitch(crate, observed, expected):
+    return observed is not None and valid_lid_pitch(crate, observed) and abs(observed - expected) < .05
+
+
+async def _settled_native_lid(bridge, opening, crate):
+    area, sequence = opening["map"], opening["sequence"]
+    owner = opening.get("pawns", {}).get("local", {}).get("name")
+    stable_pitch, stable_since = None, 0.0
+
+    def settled(snapshot):
+        nonlocal sequence, stable_pitch, stable_since
+        if (snapshot.get("state"), snapshot.get("map"), snapshot.get("pawns", {}).get("local", {}).get("name")) != (
+                "hosting", area, owner) or snapshot.get("sequence", 0) <= sequence:
+            return False
+        sequence = snapshot["sequence"]
+        row = snapshot.get("native_loot_crates", {}).get(crate, {})
+        pitch = row.get("lid_pitch")
+        if ((row.get("map"), row.get("crate"), row.get("state")) != (area, crate, "exhausted")
+                or not valid_lid_pitch(crate, pitch)):
+            stable_pitch = None
+            return False
+        now = time.monotonic()
+        if stable_pitch is None or abs(stable_pitch - pitch) >= .002:
+            stable_pitch, stable_since = pitch, now
+            return False
+        return now - stable_since >= .25
+
+    # The original MoveComponentTo action keeps ticking on the host game thread.
+    # Wait for new status frames showing its settled lid before committing the roll.
+    return await bridge.wait_for(settled, timeout=4)
 
 
 class LootView:
@@ -384,6 +423,10 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             roll = {"id": operation_id, "map": area, "crate": crate, "opener": character,
                     "lucky_looter": proof["lucky_looter"], "trait_source": proof["trait_source"],
                     "trait_calls": proof["trait_calls"], "items": items, "escrow": frame}
+            if random_lid_pitch_range(crate):
+                settled = await _settled_native_lid(bridge, snapshot, crate)
+                roll["lid_pitch"] = settled["native_loot_crates"][crate]["lid_pitch"]
+                host.last_game, host.last_seen = settled, time.monotonic()
             candidate = party.load_party(host.party)
             candidate.setdefault(STATE_KEY, {})[crate] = roll
             revision = await host.checkpoint_native(bridge, candidate)

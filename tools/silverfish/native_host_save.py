@@ -10,7 +10,7 @@ import stat
 import uuid
 
 from .campaign import CampaignFormatError
-from .authored_loot import CRATES, loot_capacity, valid_item_transform, valid_loot_trait_calls
+from .authored_loot import CRATES, loot_capacity, valid_item_transform, valid_lid_pitch, valid_loot_trait_calls
 from .enemy_loot_profiles import BY_MAP as ENEMY_LOOT_ZONES, SHELLS, for_roll as enemy_loot_profile
 from .native_gold import valid_guid
 from .native_guest_drop_record import active_frames as stack_drop_frames
@@ -200,6 +200,8 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
         if isinstance(items, list) and any(type(item) is dict and "transform" in item
                                            and not valid_item_transform(item["transform"]) for item in items):
             raise CampaignFormatError("The stock loot actor transform is invalid")
+        if not valid_lid_pitch(container, roll.get("lid_pitch")):
+            raise CampaignFormatError("The stock loot lid pose is invalid")
         if capacity == 2:
             continue
         calls = roll.get("trait_calls")

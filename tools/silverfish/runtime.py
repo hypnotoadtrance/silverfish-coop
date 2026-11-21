@@ -48,7 +48,7 @@ from . import native_host_dig, native_host_dig_live, native_package_handoff_jour
 from . import native_title_entry
 from .native_host_landmine import parse as parse_host_landmine
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
-from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE, loot_capacity, valid_item_transform
+from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE, loot_capacity, valid_item_transform, valid_lid_pitch
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
 from .native_quest_catalog import parse as parse_quest_catalog
 from .native_roster import Assignment
@@ -1799,9 +1799,14 @@ class Bridge:
                                                 "owner": fields[5], "deadline": int(fields[6]), "offset": int(fields[7]),
                                                 "total": int(fields[8]), "guid": fields[9], "selected": int(fields[10]),
                                                 "limit": int(fields[11]), "sequence": int(fields[12])}
-                elif (fields[0] == "native-loot-crate-input" and len(fields) == 4
+                elif (fields[0] == "native-loot-crate-input" and len(fields) in (4, 5)
                       and AUTHORED_CRATES.get(fields[2]) == fields[1] and fields[3] in ("ready", "exhausted")):
                     row = {"map": fields[1], "crate": fields[2], "state": fields[3]}
+                    if len(fields) == 5:
+                        pitch = _finite(fields[4])
+                        if fields[3] != "exhausted" or pitch is None or not valid_lid_pitch(fields[2], pitch):
+                            raise ValueError("Invalid stock lid pose")
+                        row["lid_pitch"] = pitch
                     data.setdefault("native_loot_crates", {})[fields[2]] = row
                     if fields[2] == LEGACY_CRATE:
                         data["native_loot_crate_input"] = row

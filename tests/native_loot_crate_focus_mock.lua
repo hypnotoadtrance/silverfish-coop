@@ -103,3 +103,25 @@ assert(input.command(project, state, "connected") == "stock crate exhausted proj
 assert(door.RelativeLocation.X == -49 and second_door.RelativeLocation.X == 49)
 assert(door.RelativeLocation.Y == 23 and second_door.RelativeLocation.Y == 23 and sequence == 1)
 print("A cabinet with fixed door locations projects the full stock pose")
+
+profile.small_cabinet, profile.door_locations = nil, nil
+profile.random_pitch, profile.lid_ignores_channel = {95, 105}, 5
+crate.Looted, query_collision = false, 1
+door.RelativeRotation = {Pitch = 0, Yaw = 0, Roll = 0}
+local response = 2
+door.GetCollisionResponseToChannel = function(_, channel) assert(channel == 5); return response end
+door.SetCollisionResponseToChannel = function(_, channel, value) assert(channel == 5); response = value end
+door.K2_SetRelativeRotation = function(self, angle)
+    self.RelativeRotation = {Pitch = 180 - angle.Pitch, Yaw = 180, Roll = 180}
+end
+assert(not pcall(input.command, project, state, "connected"))
+project[5] = "106"
+assert(not pcall(input.command, project, state, "connected"))
+assert(response == 2 and query_collision == 1 and not crate.Looted)
+project[5] = "99"
+assert(input.command(project, state, "connected") == "stock crate exhausted projection verified")
+assert(response == 0 and query_collision == 0 and crate.Looted and door.RelativeRotation.Pitch == 81)
+package.loaded.native_loot.profiles = function() return {profile} end
+local rows = input.rows(state, "connected", function(...) return {...} end)
+assert(rows[2][1] == "native-loot-crate-input" and rows[2][4] == "exhausted" and rows[2][5] == 99)
+print("An authored random lid pose keeps the stock collision response and equivalent rotation")

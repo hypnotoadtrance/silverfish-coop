@@ -21,7 +21,7 @@ from tools.silverfish import native_host_save, native_loot
 from tools.silverfish.authored_container_placements import CONTAINER_PLACEMENTS
 from tools.silverfish.authored_loot import (CRATES, GUARANTEED_CRATES, GUARANTEED_REPLENISHMENT, OFFICE_DESK,
                                            OFFICE_DESK_PROFILE, SMALL_CABINET, SMALL_CABINET_PROFILE, full_name,
-                                           loot_capacity, valid_loot_trait_calls)
+                                           loot_capacity, random_lid_pitch_range, valid_lid_pitch, valid_loot_trait_calls)
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.travel import BLACK_MARKET, CISTERN, CITY, CROSSROADS, LAB_E206, OBSERVATORY, RAIL_YARD
 
@@ -78,9 +78,11 @@ FAMILY_SCENES = {
     "stock-cult-large-crate": ("/Game/Classes/Maps/Maps_OverWorld/Gorge_01_P", "LootCrate_Cult_Large_BP_C", "LootCrate_Cult_Large_BP_C_1"),
     "stock-guaranteed-cult-large-crate": ("/Game/Classes/Maps/Maps_OverWorld/Gorge_01_P", "LootCrate_Cult_Large_BP_C", "LootCrate_Cult_Large_BP_C_31"),
     "stock-weapon-crate": (BLACK_MARKET, "LootCrate_Weapon_BP_C", "LootCrate_Weapon_BP_C_1"),
+    "stock-artifact-chest": ("/Game/Classes/Maps/Maps_Dungeons/Anex_01_P", "Loot_ArtifactChest_01_C", "Loot_ArtifactChest_01_C_2"),
+    "stock-dumpster": (CROSSROADS, "Loot_Dumpster_BP_C", "Loot_Dumpster_BP_C_1"),
 }
 PERMANENT_FAMILY_CRATES = {full_name(area, actor, family) for family, area, actor, _, _, _, replenish in CONTAINER_PLACEMENTS
-                           if replenish == 2 or family in {"Loot_Stash_Small_BP_C", "LootCrate_Weapon_BP_C"}}
+                           if replenish == 2 or family in {"Loot_Stash_Small_BP_C", "LootCrate_Weapon_BP_C", "Loot_ArtifactChest_01_C"}}
 SCENES.update({name: (area, (actor,)) for name, (area, _, actor) in FAMILY_SCENES.items()})
 FISH_CANNERY_ITEMS = {
     "/Game/Classes/Items/Item_CannedTuna.Item_CannedTuna_C",
@@ -145,6 +147,8 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     family = FAMILY_SCENES[name][1] if name in FAMILY_SCENES else None
     targets = [full_name(area, actor, family) for actor in actors]
     permanent = name in GUARANTEED_SCENES or cabinet or desk or all(crate in PERMANENT_FAMILY_CRATES for crate in targets)
+    random_lids = {crate for crate in targets if random_lid_pitch_range(crate)}
+    verify_restore = permanent or bool(random_lids)
     assert all(CRATES.get(crate) == area for crate in targets)
     if name in GUARANTEED_SCENES:
         assert all(GUARANTEED_REPLENISHMENT.get((area, actor)) == 2 for actor in actors)
@@ -199,6 +203,11 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
 
     def public_roll(status, crate):
         return status.get("gameplay", {}).get(native_loot.STATE_KEY, {}).get(crate)
+
+    def lid_matches(status, crate, pitch):
+        row = status.get("game", {}).get("native_loot_crates", {}).get(crate, {})
+        actual = row.get("lid_pitch")
+        return row.get("state") == "exhausted" and valid_lid_pitch(crate, actual) and abs(actual - pitch) < .05
 
     def saved_checkpoint():
         saved = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
@@ -335,6 +344,9 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             replicated = await wait(guest_run, lambda state: public_roll(state, crate) and status_of(state, crate) == "exhausted")
             roll = public_roll(committed, crate)
             assert public_roll(replicated, crate) == roll and roll["opener"] == character, roll
+            if crate in random_lids:
+                await wait(run, lambda state: lid_matches(state, crate, roll["lid_pitch"]))
+                await wait(guest_run, lambda state: lid_matches(state, crate, roll["lid_pitch"]))
             assert roll["lucky_looter"], roll
             if desk:
                 assert roll["trait_calls"] == 0 and len(roll["items"]) <= 4, roll
@@ -399,7 +411,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                     await wait(guest_run, lambda state: state.get("gameplay", {}).get("shared_wallet") == credit["after"])
                     cash_requests.append((request, claim))
                     selected["wallet_credit"] = credit
-                elif force_stock_roll or permanent:
+                elif force_stock_roll or verify_restore:
                     item = await typed_inventory_item(character, claim["guid"])
                     assert item and (item["source"], item["class_path"]) == ("backpack", claim["class_path"]), item
                 denied = await command("action", *host, "native-loot-claim", "--target", target, expected=False)
@@ -411,7 +423,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             durable = saved["world"]["party"][native_loot.STATE_KEY][crate]
             assert native_loot.public_roll(durable) == roll, durable
             entry = {"receipt": pressed, "roll": roll, "claim": claim}
-            if force_stock_roll or permanent:
+            if force_stock_roll or verify_restore:
                 entry["typed_guest_item"] = item
             if permanent:
                 actual_flags = permanent_flags(saved)
@@ -425,7 +437,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
         if permanent:
             guids = [item["guid"] for entry in rolls for item in entry["roll"]["items"]]
             assert len(set(guids)) == len(guids), guids
-        if require_cash or permanent:
+        if require_cash or verify_restore:
             if require_cash:
                 assert cash_requests, "The stock crate rolls produced no cash in this campaign"
                 expected = cash_requests[-1][1]["wallet_credit"]["after"]
@@ -439,27 +451,32 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             resumed = await wait(run, lambda state: state.get("state") == "hosting"
                                  and state.get("generation") != opening["generation"] and state["endpoint"]["port"] == port
                                  and (not require_cash or state.get("game", {}).get("native_wallet") == expected)
-                                 and (not permanent or all(status_of(state, crate) == "exhausted" for crate in targets)))
+                                 and (not verify_restore or all(status_of(state, crate) == "exhausted" for crate in targets)))
             fresh = await command("action", *host, "refresh-invite", "--target", invitation["guest_id"])
             await start("guest-restart", guest, "join", *guest, "--headless", *join_zones, "--invite", fresh["invite_file"])
             peer = await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("link_connected")
                               and state.get("generation") != ready["generation"] and state.get("character_id") == character
                               and state.get("host_session") == resumed["generation"] and state.get("zone_epoch") == resumed["zone_epoch"]
                               and (not require_cash or state.get("gameplay", {}).get("shared_wallet") == expected)
-                              and (not permanent or all(status_of(state, crate) == "exhausted" for crate in targets)))
+                              and (not verify_restore or all(status_of(state, crate) == "exhausted" for crate in targets)))
             for request, claim in cash_requests:
                 assert (await command(*request))["native_loot_claim"] == claim
                 assert await typed_inventory_item(character, claim["guid"]) is None
             if require_cash:
                 evidence["wallet_restart"] = {"balance": expected, "same_port": True, "receipt_count": len(cash_requests)}
-            if permanent:
+            if verify_restore:
                 for crate, entry in zip(targets, rolls):
                     assert public_roll(resumed, crate) == public_roll(peer, crate) == entry["roll"], entry
+                    if crate in random_lids:
+                        pitch = entry["roll"]["lid_pitch"]
+                        assert lid_matches(resumed, crate, pitch) and lid_matches(peer, crate, pitch)
+                        evidence["saved_lid_pitch_restart"] = pitch
                     item = entry["typed_guest_item"]
                     if item:
                         restored = await typed_inventory_item(character, item["guid"])
                         fields = ("guid", "class_path", "source", "quantity")
                         assert restored and tuple(restored[key] for key in fields) == tuple(item[key] for key in fields), restored
+            if permanent:
                 await command("action", *host, "checkpoint")
                 persisted = permanent_flags(saved_checkpoint())
                 assert persisted == dict.fromkeys(exhaustion_flags.values(), 1), persisted

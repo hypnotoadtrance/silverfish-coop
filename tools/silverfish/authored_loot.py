@@ -2,7 +2,8 @@
 
 import math
 
-from .authored_container_placements import CLASS_CAPACITIES, CONTAINER_PLACEMENTS, MIXED_GUARANTEE_CLASSES
+from .authored_container_placements import (CLASS_CAPACITIES, CONTAINER_PLACEMENTS, MIXED_GUARANTEE_CLASSES,
+                                            RANDOM_LID_PITCH_CLASSES)
 from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, RAIL_YARD
 
 
@@ -531,6 +532,17 @@ def valid_loot_trait_calls(container: str, calls: object) -> bool:
         # the container guarantees its fallback items.
         return 0 <= calls <= int(container.partition(" ")[0] in MIXED_GUARANTEE_CLASSES)
     return 1 <= calls <= 1 + loot_capacity(container)
+
+
+def random_lid_pitch_range(container: str) -> tuple[int, int] | None:
+    return RANDOM_LID_PITCH_CLASSES.get(container.partition(" ")[0])
+
+
+def valid_lid_pitch(container: str, pitch: object) -> bool:
+    limits = random_lid_pitch_range(container)
+    if limits is None:
+        return pitch is None
+    return type(pitch) in (int, float) and limits[0] <= pitch <= limits[1]
 
 
 def valid_item_transform(transform: object) -> bool:

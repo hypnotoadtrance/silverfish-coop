@@ -119,13 +119,39 @@ end
 
 local function matches_rotation(door, expected)
     local rotation = door.RelativeRotation
-    return rotation and close_angle(rotation.Pitch, expected.Pitch)
-        and close_angle(rotation.Yaw, expected.Yaw) and close_angle(rotation.Roll, expected.Roll)
+    if not rotation then return false end
+    return (close_angle(rotation.Pitch, expected.Pitch) and close_angle(rotation.Yaw, expected.Yaw)
+        and close_angle(rotation.Roll, expected.Roll))
+        or (close_angle(rotation.Pitch, 180 - expected.Pitch) and close_angle(rotation.Yaw, expected.Yaw + 180)
+        and close_angle(rotation.Roll, expected.Roll + 180))
 end
 
-local function open_poses(profile, second)
+local function valid_pitch(profile, pitch)
+    local limits = profile.random_pitch
+    return limits and type(pitch) == "number" and pitch >= limits[1] and pitch <= limits[2]
+end
+
+local function observe_pitch(profile, door)
+    if not profile.random_pitch then return end
+    local angle = door.RelativeRotation
+    if not angle or type(angle.Pitch) ~= "number" then return end
+    local pitch = angle.Pitch % 360
+    if close_angle(angle.Yaw, 180) and close_angle(angle.Roll, 180) then
+        -- Unreal can express a pitch past vertical using the other Euler representation.
+        pitch = (180 - pitch) % 360
+    elseif not close_angle(angle.Yaw, 0) or not close_angle(angle.Roll, 0) then
+        return
+    end
+    if valid_pitch(profile, pitch) then return pitch end
+end
+
+local function open_poses(profile, second, pitch)
     if second then return cabinet_rotations end
-    if profile.open_roll then return {{Pitch = 0, Yaw = profile.open_yaw or 0, Roll = profile.open_roll}} end
+    if profile.random_pitch then
+        if valid_pitch(profile, pitch) then return {{Pitch = pitch, Yaw = 0, Roll = 0}} end
+        return
+    end
+    if profile.open_roll then return {{Pitch = profile.open_pitch or 0, Yaw = profile.open_yaw or 0, Roll = profile.open_roll}} end
     return {open_rotation}
 end
 
@@ -148,17 +174,21 @@ local function set_pose(door, rotation, location)
     end
 end
 
-local function exhausted(crate, door, box, second, opened, locations)
-    if crate.Looted ~= true or not door or box and box:GetCollisionEnabled() ~= 0 then return false end
+local function exhausted(crate, door, box, second, opened, locations, ignored_channel)
+    if crate.Looted ~= true or not opened or not door or (box and box:GetCollisionEnabled() ~= 0)
+        or (ignored_channel and door:GetCollisionResponseToChannel(ignored_channel) ~= 0) then return false end
     return matches_pose(door, opened[1], locations[1]) and (not second or matches_pose(second, opened[2], locations[2]))
 end
 
-local function project(current)
+local function project(current, pitch)
     local crate = current.crate
+    local profile = current.profile
     local door, box, second = scene(current)
-    local opened = open_poses(current.profile, second)
-    local locations = current.profile.door_locations or {}
-    if exhausted(crate, door, box, second, opened, locations) then return "stock crate exhausted projection verified" end
+    local opened = open_poses(profile, second, pitch)
+    if not opened or (not profile.random_pitch and pitch ~= nil) then error("native_loot_crate_open_pose_unavailable", 0) end
+    local locations = profile.door_locations or {}
+    local ignored_channel = profile.lid_ignores_channel
+    if exhausted(crate, door, box, second, opened, locations, ignored_channel) then return "stock crate exhausted projection verified" end
     local original_looted = crate.Looted
     if not door or type(original_looted) ~= "boolean" or not box and not original_looted then
         error("native_loot_crate_exact_scene_unavailable", 0)
@@ -177,23 +207,30 @@ local function project(current)
         end
     end
     local collision = box and box:GetCollisionEnabled()
+    local door_response = ignored_channel and door:GetCollisionResponseToChannel(ignored_channel)
     if box and collision ~= 0 and collision ~= 1 and collision ~= 3 then
         error("native_loot_crate_box_collision_unavailable", 0)
+    end
+    if ignored_channel and door_response ~= 0 and door_response ~= 1 and door_response ~= 2 then
+        error("native_loot_crate_lid_collision_unavailable", 0)
     end
 
     -- Replicate only the spent door pose and disable the query Box.
     local invoked, verified = pcall(function()
         if box then box:SetCollisionEnabled(0) end
+        if ignored_channel then door:SetCollisionResponseToChannel(ignored_channel, 0) end
         for index, component in ipairs(doors) do set_pose(component, opened[index], locations[index]) end
         crate.Looted = true
-        return exhausted(crate, door, box, second, opened, locations)
+        return exhausted(crate, door, box, second, opened, locations, ignored_channel)
     end)
     if not invoked or not verified then
         local restored, matches = pcall(function()
             crate.Looted = original_looted
             for index, component in ipairs(doors) do set_pose(component, original[index], original_locations[index]) end
             if box then box:SetCollisionEnabled(collision) end
-            if crate.Looted ~= original_looted or box and box:GetCollisionEnabled() ~= collision then return false end
+            if ignored_channel then door:SetCollisionResponseToChannel(ignored_channel, door_response) end
+            if crate.Looted ~= original_looted or (box and box:GetCollisionEnabled() ~= collision)
+                or (ignored_channel and door:GetCollisionResponseToChannel(ignored_channel) ~= door_response) then return false end
             for index, component in ipairs(doors) do
                 if not matches_pose(component, original[index], original_locations[index]) then return false end
             end
@@ -294,8 +331,9 @@ function input.command(fields, state, phase)
     local current = input.update(state, phase, loot.profile(state.map, target))
     if not current then error("native_loot_crate_input_scope_unavailable", 0) end
     if command == "native-loot-crate-fixture" and (#fields == 2 or #fields == 3) then return fixture(current) end
-    if command == "native-loot-crate-project" and (#fields == 3 or #fields == 4) and fields[3] == "exhausted" then
-        return project(current)
+    if command == "native-loot-crate-project" and fields[3] == "exhausted" then
+        if current.profile.random_pitch and #fields == 5 then return project(current, tonumber(fields[5])) end
+        if not current.profile.random_pitch and (#fields == 3 or #fields == 4) then return project(current) end
     end
     error("native_loot_crate_input_arguments", 0)
 end
@@ -320,10 +358,12 @@ function input.rows(state, phase, status_row)
             scope or "-", info.door_state or "-", info.box_state or "-",
             info.looted == nil and "-" or (info.looted and 1 or 0), info.collision or "-", info.roll or "-")
         if info.qualified then
-            rows[#rows + 1] = status_row("native-loot-crate-input", profile.map, profile.name,
-                exhausted(current.crate, info.door, info.box, info.second, open_poses(current.profile, info.second),
-                    current.profile.door_locations or {})
-                    and "exhausted" or "ready")
+            local pitch = observe_pitch(profile, info.door)
+            local spent = exhausted(current.crate, info.door, info.box, info.second, open_poses(profile, info.second, pitch),
+                profile.door_locations or {}, profile.lid_ignores_channel)
+            local status = spent and "exhausted" or "ready"
+            local args = spent and pitch and {pitch} or {}
+            rows[#rows + 1] = status_row("native-loot-crate-input", profile.map, profile.name, status, table.unpack(args))
             if current.host and info.looted == false and info.box and (info.collision == 1 or info.collision == 3) then
                 local verified, active = pcall(loot.temporary_activation, current.crate, current.pawn)
                 if verified and active == false then

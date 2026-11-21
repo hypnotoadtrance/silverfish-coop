@@ -56,23 +56,27 @@ class ContainerFamily:
     replenish: str | None = None
     paired_doors: bool = False
     open_roll: int = -95
+    open_pitch: int = 0
     open_yaw: int = 0
     door_locations: tuple[tuple[float, float, float], ...] = ()
     prop_components: tuple[str, ...] = ()
     named_spawners: tuple[str, ...] = ()
     rolls: tuple[str, ...] = (STOCK_ROLL,)
     weapon_first: bool = False
+    random_pitch: tuple[int, int] | None = None
+    lid_ignores_channel: int | None = None
 
     def spawner_names(self):
         return self.named_spawners or ("Loot_Spawner", *(f"Loot_Spawner{i}" for i in range(1, self.slots)))
 
     def door_calls(self):
-        angles = ((0, 0, 95), (0, 0, -95)) if self.paired_doors else ((self.open_roll, 0, self.open_yaw),)
+        angles = ((0, 0, 95), (0, 0, -95)) if self.paired_doors else ((self.open_roll, self.open_pitch, self.open_yaw),)
         calls = []
         for index, rotation in enumerate(angles):
             name = f"SM_Prop_Cabinet_Small_Door_0{index + 1}"
             location = self.door_locations[index] if self.door_locations else f"{name}.RelativeLocation"
-            calls.append(f"MoveComponentTo({name},{location},{rotation},")
+            target = "CallFunc_MakeRotator_ReturnValue" if self.random_pitch else rotation
+            calls.append(f"MoveComponentTo({name},{location},{target},")
         return calls
 
 
@@ -119,6 +123,11 @@ CONTAINER_FAMILIES = {
         named_spawners=CRATE_WEAPON_SPAWNERS, weapon_first=True, rolls=(
             "Loot_SpawnerGun.SpawnLoot(Loot Table_Weapons,1,0,GuaranteeSpawn,Seeded,False,False,True,False,CallFunc_SpawnLoot_Object)",
             CRATE_AMMO_ROLL)),
+    "Loot_ArtifactChest_01_C": ContainerFamily("artifact_chest", 0x36C, slots=1, guaranteed=True,
+        replenish=PERMANENT_REPLENISHMENT, open_roll=0, open_pitch=100, named_spawners=("Loot_Spawner1",),
+        rolls=("CallFunc_Array_Get_Item.SpawnLoot(Loot Table_Items,1,0,GuaranteeSpawn,Seeded,False,True,True,False,CallFunc_SpawnLoot_Object)",)),
+    "Loot_Dumpster_BP_C": ContainerFamily("dumpster", 0x450, slots=6, random_pitch=(95, 105), lid_ignores_channel=5,
+        prop_components=("DFX_Flies", "SM_Prop_TrashSkip_01"), rolls=(STOCK_ROLL.replace("0.5,", "1,"),)),
 }
 
 
@@ -197,6 +206,12 @@ def family_placements(audit):
             if (observed != {", ".join(slots) for slots in slot_loops}
                     or "DynamicCast(ClassPtr=Weapon_Master_BP_C, Target=CallFunc_SpawnLoot_Object, RawValue=-)" not in calls):
                 raise ValueError(f"Cooked weapon and fallback spawners changed: {family}")
+        if spec.random_pitch and ("RandomFloatInRange(" + ",".join(map(str, spec.random_pitch)) + ")" not in calls
+                                  or "MakeRotator(0,CallFunc_MakeRotator_Pitch_ImplicitCast,0)" not in calls):
+            raise ValueError(f"Cooked random lid rotation changed: {family}")
+        if (spec.lid_ignores_channel is not None and
+                f"SM_Prop_Cabinet_Small_Door_01.SetCollisionResponseToChannel(Byte({spec.lid_ignores_channel}),Byte(0))" not in calls):
+            raise ValueError(f"Cooked lid collision response changed: {family}")
 
     profiles, seen = [], set()
     pinned = {SMALL_CABINET_PROFILE[:2], OFFICE_DESK_PROFILE[:2]}
@@ -253,7 +268,11 @@ def family_catalog(profiles):
     for family, spec in CONTAINER_FAMILIES.items():
         if spec.weapon_first and CRATE_FALLBACK_ROLL in spec.rolls:
             lines.append(f"    {family!r},")
-    lines.extend(("})", "", "CONTAINER_PLACEMENTS = ("))
+    lines.extend(("})", "", "RANDOM_LID_PITCH_CLASSES = {"))
+    for family, spec in CONTAINER_FAMILIES.items():
+        if spec.random_pitch:
+            lines.append(f"    {family!r}: {spec.random_pitch},")
+    lines.extend(("}", "", "CONTAINER_PLACEMENTS = ("))
     for row in profiles:
         lines.append(f"    {row!r},")
     return "\n".join((*lines, ")", ""))
@@ -375,8 +394,14 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
         lua_flags = (", guarantee_spawn = true" if guaranteed else "") + (f", replenish_mode = {mode}" if mode else "")
         if spec.paired_doors:
             lua_flags += ", paired_doors = true"
-        elif spec.open_roll != -95 or spec.open_yaw:
+        elif spec.random_pitch:
+            lua_flags += f", random_pitch = {{{spec.random_pitch[0]}, {spec.random_pitch[1]}}}"
+        elif spec.open_roll != -95 or spec.open_pitch or spec.open_yaw:
             lua_flags += f", open_roll = {spec.open_roll}, open_yaw = {spec.open_yaw}"
+            if spec.open_pitch:
+                lua_flags += f", open_pitch = {spec.open_pitch}"
+        if spec.lid_ignores_channel is not None:
+            lua_flags += f", lid_ignores_channel = {spec.lid_ignores_channel}"
         lua_flags += lua_door_locations(spec)
         if spec.named_spawners:
             names = ", ".join(f'"{name}"' for name in spec.named_spawners)
