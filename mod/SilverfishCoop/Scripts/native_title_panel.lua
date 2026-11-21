@@ -277,7 +277,7 @@ local function show_saved(form)
         local first = form.first or 1
         for index = first, math.min(first + 3, #saved) do
             local row = saved[index]
-            local area = row.timestamp and #row.area > 23 and row.area:sub(1, 23) .. "…" or row.area
+            local area = row.timestamp and #row.area > 19 and row.area:sub(1, 18):gsub(" +$", "") .. "…" or row.area
             rows[#rows + 1] = {button("load:" .. row.name, area, row.timestamp)}
         end
         local pages = {}

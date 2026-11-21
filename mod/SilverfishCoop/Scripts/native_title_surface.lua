@@ -194,8 +194,8 @@ function surface.mount(context, spec, on_action)
                     place(button.slot, x, y, w, control_height, 1)
                     if action.detail then
                         button.widget.TextBlock_0:SetRenderOpacity(0)
-                        text(view, action.label, 19, rgba(0.91, 0.93, 0.92), x + 14, y + 8, w - 211, 28, false, 2)
-                        text(view, action.detail, 16, rgba(0.78, 0.82, 0.80), x + w - 190, y + 10, 176, 26, false, 2, 2)
+                        text(view, action.label, 18, rgba(0.91, 0.93, 0.92), x + 14, y + 8, w - 251, 28, false, 2)
+                        text(view, action.detail, 16, rgba(0.78, 0.82, 0.80), x + w - 234, y + 10, 220, 26, false, 2, 2)
                     end
                 end
             end
