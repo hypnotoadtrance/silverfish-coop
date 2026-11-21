@@ -44,8 +44,9 @@ Co-op saves live under %LOCALAPPDATA%\SilverfishCoop\Resident by default.
 On the same network, use the host's LAN IP. Across networks the guest
 must be able to reach the host's chosen UDP port (7777 by default).
 """
-_FIRST_TIME = ("Use this archive for a game without UE4SS. It includes the pinned UE4SS\n"
-               "v4.0.0 loader and Project Silverfish signature.")
+_FULL_INSTALL = ("Use this ZIP for a first install or an update. It includes the pinned\n"
+                 "UE4SS v4.0.0 loader and Project Silverfish signature. Updating with this\n"
+                 "ZIP replaces bundled UE4SS files, including UE4SS-settings.ini.")
 _UPDATE = ("This archive is for a game with the supported UE4SS v4.0.0 loader and\n"
            "Project Silverfish signature already in place. If you need those\n"
            "files, use the matching archive that includes UE4SS.")
@@ -141,7 +142,7 @@ def assemble(output: Path, *, version: str, revision: str, shipping: Path, cpp_a
         _BINARIES / runtime.CPP_ADDON_DLL: gameplay,
         _EMBEDDED / "dlls" / "main.dll": embedded,
         _STAGE: _json(stage),
-        _README: _START.format(version=version, variant=_FIRST_TIME if include_loader else _UPDATE).encode("ascii"),
+        _README: _START.format(version=version, variant=_FULL_INSTALL if include_loader else _UPDATE).encode("ascii"),
     })
     for module in ("SilverfishCoop", runtime.CPP_MOD_NAME, install_stage.MOD):
         payload[_MODS / module / "enabled.txt"] = b""

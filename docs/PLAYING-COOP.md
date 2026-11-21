@@ -4,7 +4,7 @@ Use Direct IP on Windows. The resident trial opens co-op from the same game proc
 
 ## Install and open the Windows trial
 
-Close the game on both PCs. In Steam, choose **Manage → Browse local files** and extract the co-op ZIP into the folder containing `SilverFish.exe`. Use the release that includes UE4SS for a first install without the loader. Use the mod-only ZIP to update an existing co-op install. Merge folders and replace the mod files if asked. Start Project Silverfish through Steam and choose **Multiplayer**. [Resident trial setup](../bootstrap/README.md#installed-resident-title)
+Close the game on both PCs. In Steam, choose **Manage → Browse local files** and extract the co-op ZIP into the folder containing `SilverFish.exe`. Use the same ZIP for a first install or an update. Merge its `SilverFish` folder and replace files if asked. The ZIP includes the pinned UE4SS loader and replaces its settings INI during an update. Start Project Silverfish through Steam and choose **Multiplayer**. [Resident trial setup](../bootstrap/README.md#installed-resident-title)
 
 Trial setup defaults to listening on all IPv4 interfaces on UDP port 7777. The host can select an interface address and port in **Host** settings. For LAN play, use the host PC's LAN address and allow inbound UDP on the chosen port. Across networks, use an address the guest can reach on that port. Use `127.0.0.1` when both players run on the same PC.
 
