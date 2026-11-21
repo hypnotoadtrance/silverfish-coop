@@ -31,8 +31,8 @@ MOD = "SilverfishStockCreatorProbe"
 
 
 @contextmanager
-def installed_probe(work: Path):
-    mods = work / "stage" / runtime.SHIPPING.parent / "ue4ss" / "Mods"
+def installed_probe(game: Path):
+    mods = game / runtime.SHIPPING.parent / "ue4ss" / "Mods"
     if mods.resolve(strict=True) != mods:
         raise ValueError("Use a private mod directory with its own path")
     directory = mods / MOD
@@ -468,7 +468,7 @@ async def verify(work: Path, original: Path) -> None:
     proof = {"verified": False}
 
     try:
-        with installed_probe(work):
+        with installed_probe(work / "stage"):
             seats = []
             try:
                 profiles = []

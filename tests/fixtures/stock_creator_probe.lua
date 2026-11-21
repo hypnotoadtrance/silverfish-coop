@@ -3,7 +3,8 @@ local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not mailbox
     or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") ~= "1" then return end
 local seat, nonce = mailbox:match("[/\\]titles[/\\]title%-host%-settings%-(%x+)[/\\]run[/\\]game%-bridge[/\\](%x+)$")
-if not seat or #seat ~= 8 or #nonce ~= 32 then return end
+if not seat then seat, nonce = mailbox:match("[/\\]titles[/\\](local)[/\\]run[/\\]game%-bridge[/\\](%x+)$") end
+if not seat or (seat ~= "local" and #seat ~= 8) or #nonce ~= 32 then return end
 
 local command = mailbox .. "/stock-creator-probe-command.tsv"
 local reply = mailbox .. "/stock-creator-probe-reply.tsv"
@@ -150,7 +151,7 @@ function actions.finish(menu, switch, page)
     return "stock_finish_invoked"
 end
 
-function actions.gueststyle(menu, switch, page)
+local function guest_style(menu, switch, page, kit)
     page_is(switch, 0)
     click(menu, page, "Button_Class_1", "BndEvt__Character_Editor_Widget_Button_Class_1_K2Node_ComponentBoundEvent_45_Pressed__DelegateSignature")
     page_is(switch, 1)
@@ -169,7 +170,7 @@ function actions.gueststyle(menu, switch, page)
     pick(hair, (hair.IndexOutput + 1) % hair.Settings:GetArrayNum())
     assert(menu.Setting_Selector_Faction:GetIsEnabled() == false
         and menu.Setting_Selector_StartMap:GetIsEnabled() == false, "campaign_choices_enabled_for_guest")
-    pick(menu.Setting_Selector_Kit, 2)
+    pick(menu.Setting_Selector_Kit, kit)
     local personality = menu.Selector_Vox_Type
     local choice
     for index = 1, personality.Settings:GetArrayNum() do
@@ -186,6 +187,14 @@ function actions.gueststyle(menu, switch, page)
     local hair_name = valid(selected[hair_field]) and selected[hair_field]:GetFullName():match("^StaticMesh (.+)$") or "-"
     assert(head_name and hair_name, "guest_stock_creator_stock_option_unavailable")
     return head_name .. "|" .. hair_name
+end
+
+function actions.gueststyle(menu, switch, page)
+    return guest_style(menu, switch, page, 2)
+end
+
+function actions.guestkit(menu, switch, page)
+    return guest_style(menu, switch, page, 1)
 end
 
 function actions.guestnext(menu, switch)

@@ -38,7 +38,7 @@ async def offered(seat):
                                       and game[native_title_entry.PANEL_KEY]["actions"] == ["host", "join"])
 
 
-async def start_pair(host, guest, character_name, *, on_join=None):
+async def start_pair(host, guest, character_name, *, on_join=None, create_character=None):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_pid, guest_pid = host.bridge.process.pid, guest.bridge.process.pid
     host_form = "native-title-host-form-fixture"
@@ -66,7 +66,10 @@ async def start_pair(host, guest, character_name, *, on_join=None):
     await screen("trust_host")
     await guest.bridge.command("native-title-button-fixture", "trust")
     await screen("catalog;count=0")
-    await join("create", character_name)
+    if create_character is None:
+        await join("create", character_name)
+    else:
+        await create_character(guest, join, character_name)
     await screen("catalog;count=1")
     checkpoint = CampaignStore.read_existing(host.campaign / "save", verify_world=service.verify_travel_checkpoint)
     character, = checkpoint["characters"]

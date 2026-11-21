@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from contextlib import ExitStack
 from dataclasses import dataclass
 from itertools import combinations
 import json
@@ -24,6 +25,7 @@ from live_ai_smoke import wait
 from live_multi_smoke import saved_hashes
 from live_resident_host_smoke import stock_profile, stock_save_hashes
 from live_same_process_listener_smoke import choose_ports
+from live_stock_creator_smoke import creator_action, installed_probe
 from live_unified_title_smoke import Seat, offered, start_pair
 
 
@@ -152,8 +154,9 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
     if stock_drop:
         contents = await submit(guest_run, "native-inventory-list")
         assert contents["ok"], contents
-        selected = next(row for row in contents["native_inventory"]["items"]
-                        if native_guest_drop.droppable(row, generic=True))
+        selected = next((row for row in contents["native_inventory"]["items"]
+                         if native_guest_drop.droppable(row, generic=True)), None)
+        assert selected is not None, contents
         dropped = await submit(guest_run, native_guest_drop.STOCK_DROP_FIXTURE, target=selected["guid"])
         assert dropped["ok"], dropped
         stock_drop_proof = dropped[native_guest_drop.RESULT]
@@ -177,6 +180,15 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
             "guest_regeneration_and_sickness_bound": True, "guest_shop_heartbeat": True,
             "guest_inventory_action_verified": True, "guest_inventory_projection_verified": True,
             **({"guest_stock_menu_drop": stock_drop_proof} if stock_drop_proof else {})}
+
+
+async def create_stock_drop_character(guest, join, name):
+    await join("create-editor", name)
+    await guest.bridge.wait_for(lambda frame: frame.get("native_guest_stock_creator", {}).get("state") == "creating")
+    await creator_action(guest, "guestkit")
+    assert await creator_action(guest, "guestnext") == "page=3"
+    await creator_action(guest, "finish")
+    await offered(guest)
 
 
 async def verify(work: Path, first_game: Path, second_game: Path, original: Path,
@@ -206,8 +218,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     games = first_game, second_game
     proof = {"verified": False, "native_bridges": [], "sessions": []}
     processes, seats, baselines = [], [], []
+    probes = ExitStack()
 
     try:
+        if stock_drop:
+            for game in games:
+                probes.enter_context(installed_probe(game))
         for game, workspace, release, port in zip(games, workspaces, qualified, choose_ports(), strict=True):
             title = workspace / release.title_directory
             profile, mailbox_root = title / "game-user", title / "run/game-bridge"
@@ -245,8 +261,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         first, second = seats
         async def check_gameplay(host, guest, pawn):
             return await verify_gameplay(host, guest, pawn, stock_drop=stock_drop)
-        proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay))
-        proof["sessions"].append(await start_pair(second, first, "First portable scout", on_join=check_gameplay))
+        create = create_stock_drop_character if stock_drop else None
+        proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
+                                                  create_character=create))
+        proof["sessions"].append(await start_pair(second, first, "First portable scout", on_join=check_gameplay,
+                                                  create_character=create))
         assert proof["sessions"][0]["host_pid"] == proof["sessions"][1]["guest_pid"]
         assert proof["sessions"][0]["guest_pid"] == proof["sessions"][1]["host_pid"]
         assert len({leg["campaign_id"] for leg in proof["sessions"]}) == 2
@@ -267,6 +286,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         for _, process in reversed(processes):
             if process.poll() is None:
                 await runtime.stop_game(process)
+        probes.close()
         proof["original_saves_verified"] = saved_hashes(original) == before
         proof["portable_files_and_existing_activation_preserved"] = all(
             fingerprint(path) == digest for release in qualified for path, digest in release.activation.items()
