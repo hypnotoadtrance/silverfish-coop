@@ -3856,7 +3856,9 @@ class Host:
                 except (OSError, RuntimeError) as error:
                     self.control.event("native_host_checkpoint_error", reason=str(error))
             self.publish_host_status(transport)
-            await bridge.wait_for_interaction(.25)
+            await bridge.wait_for_interaction(
+                .25, wake_if=lambda: not self.native_checkpoint_unsafe and not self.native_requests.empty(),
+            )
 
     def publish_host_status(self, transport):
         self.control.status(active=not self.stopping, role="host", state="hosting", game=self.last_game,
@@ -4505,6 +4507,7 @@ class Client:
         self.loot_tracking = None
         self.pickup_playback = native_pickup_audio.Playback()
         self.voice_playback = native_voice.Playback()
+        self.snapshot_request: asyncio.Task | None = None
         self.next_snapshot = 0.0
         self.next_projection = 0.0
         self.gameplay_seen = 0.0
@@ -4553,6 +4556,7 @@ class Client:
         self.session_stop_reason: str | None = None
 
     async def connect(self, timeout: float = 6, *, queue: bool = False) -> dict:
+        await self.cancel_gameplay_snapshot()
         request = {key: self.invite[key] for key in ("guest_id", "credential", "character_id", "game_build")}
         request["protocol_version"] = PROTOCOL
         if isinstance(self.transport.runtime_id, str):
@@ -4771,15 +4775,18 @@ class Client:
             if (action == "native-loot-open" and isinstance(roll, dict)
                     and (roll.get("map"), roll.get("crate")) == (area, target)
                     and native_loot.CRATES.get(target) == area):
+                await self.cancel_gameplay_snapshot()
                 self.gameplay.setdefault(native_loot.STATE_KEY, {})[target] = roll
             claimed = reply.get(native_loose_pickup.PROOF)
             if action == native_loose_pickup.CLAIM and isinstance(claimed, dict):
                 path = native_loose_pickup.target_path(target.partition("@")[0]) if target else None
                 if path and (claimed.get("map"), claimed.get("actor"), claimed.get("epoch")) == (area, path, epoch):
+                    await self.cancel_gameplay_snapshot()
                     hidden = self.gameplay.setdefault(native_loose_pickup.STATE, [])
                     if path not in hidden:
                         hidden.append(path)
             if target and (action == native_stock_door.ACTION or action in native_stock_door.PRY_ACTIONS.values()):
+                await self.cancel_gameplay_snapshot()
                 native_stock_door.accept_delta(self.gameplay, reply.get(native_stock_door.DELTA),
                                                area, epoch, target.rsplit("@", 1)[-1])
         cue = reply.pop(native_pickup_audio.KEY, None)
@@ -5093,18 +5100,31 @@ class Client:
                 and native_mindcore_view.qualified_stage(self.gameplay, stage)
                 and (stage == 1 or self.gameplay.get("host_world", {}).get(native_mosby_station_view.DOWNLOAD_READY) is True))
 
-    async def refresh_gameplay(self, *, project: bool = True) -> None:
+    def gameplay_snapshot_ready(self) -> bool:
+        return self.snapshot_request is not None and self.snapshot_request.done()
+
+    async def cancel_gameplay_snapshot(self) -> None:
+        if self.snapshot_request is not None:
+            pending, self.snapshot_request = self.snapshot_request, None
+            pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError, OSError, RuntimeError):
+                await pending
+
+    async def refresh_gameplay(self, *, project: bool = True, wait: bool = True) -> None:
         if self.check_host_end():
             return
         now = time.monotonic()
-        if now >= self.next_snapshot:
+        if self.snapshot_request is None and now >= self.next_snapshot:
             self.next_snapshot = now + 0.5
+            request = {"action": "snapshot"}
+            if not self.needs_travel and not self.server_transitioning and self.zone_epoch:
+                if events := native_voice.client_events(self.last_game):
+                    request.update(voice_events=events, zone_epoch=self.zone_epoch)
+            self.snapshot_request = asyncio.create_task(self.transport.request(request, timeout=2))
+        if self.snapshot_request is not None and (wait or self.snapshot_request.done()):
+            pending, self.snapshot_request = self.snapshot_request, None
             try:
-                request = {"action": "snapshot"}
-                if not self.needs_travel and not self.server_transitioning and self.zone_epoch:
-                    if events := native_voice.client_events(self.last_game):
-                        request.update(voice_events=events, zone_epoch=self.zone_epoch)
-                reply = await self.transport.request(request, timeout=2)
+                reply = await pending
                 if reply.get("ok"):
                     self.gameplay = reply["gameplay"]
                     viewer = reply.get("viewer_role")
@@ -5123,9 +5143,6 @@ class Client:
                         self.control.event("zone_rejoin_requested", zone_epoch=epoch)
                     self.zone_epoch = epoch
                     self.expected_zone = reply["zone"]
-                    if not self.needs_travel and not self.server_transitioning and self.last_game.get("state") == "connected":
-                        self.last_game = await self.voice_playback.sync(
-                            self.bridge, self.control, self.last_game, self.gameplay.get(native_voice.KEY), epoch)
             except (OSError, RuntimeError) as error:
                 self.control.event("gameplay_snapshot_unavailable", error_type=type(error).__name__)
         if project:
@@ -5147,6 +5164,8 @@ class Client:
                 await self.downed_markers.sync(self)
                 await native_dead_drop.project_client(self)
                 if time.monotonic() - self.gameplay_seen < 3:
+                    self.last_game = await self.voice_playback.sync(
+                        self.bridge, self.control, self.last_game, self.gameplay.get(native_voice.KEY), self.zone_epoch)
                     self.last_game = await self.pickup_playback.sync(
                         self.bridge, self.control, self.last_game, self.gameplay.get(native_pickup_audio.KEY),
                         self.zone_epoch, self.host_session)
@@ -5229,6 +5248,7 @@ class Client:
             try:
                 if action == "drop-link":
                     self.suspended = True
+                    await self.cancel_gameplay_snapshot()
                     await self.transport.disconnect()
                     result = {"link_connected": False}
                 elif action == "reconnect":
@@ -5477,6 +5497,7 @@ class Client:
         try:
             await self.run_session(pause_exit=pause_exit)
         finally:
+            await self.cancel_gameplay_snapshot()
             await self.guest_ui.close()
             if pause_exit is not None:
                 pause_exit.close()
@@ -5507,7 +5528,9 @@ class Client:
             if self.stopping or self.check_host_end():
                 break
             if self.transport.connected:
-                await self.refresh_gameplay(project=False)
+                await self.refresh_gameplay(project=False, wait=False)
+            else:
+                await self.cancel_gameplay_snapshot()
             if self.stopping:
                 break
             repair_needed = (not self.transport.connected or self.needs_travel
@@ -5651,7 +5674,7 @@ class Client:
                                 game=self.last_game, gameplay=self.gameplay,
                                 gameplay_fresh=active and time.monotonic() - self.gameplay_seen < 3,
                                 zone_epoch=self.zone_epoch)
-            await self.bridge.wait_for_interaction(.25)
+            await self.bridge.wait_for_interaction(.25, wake_if=self.gameplay_snapshot_ready)
 
 
 def guest_engine_options(work: Path, invite: dict, *, native_zones: bool = False,

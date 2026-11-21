@@ -693,11 +693,13 @@ class Bridge:
         self._status_text = ""
         self._status_snapshot: dict | None = None
 
-    async def wait_for_interaction(self, timeout: float) -> None:
-        """Wake the session promptly for input without increasing idle snapshot traffic."""
+    async def wait_for_interaction(self, timeout: float, *, wake_if=None) -> None:
+        """Wake for local input or pending network work between idle ticks."""
         deadline = time.monotonic() + timeout
         path = self.directory / "input.tsv"
         while (remaining := deadline - time.monotonic()) > 0:
+            if wake_if is not None and wake_if():
+                return
             await asyncio.sleep(min(.025, remaining))
             try:
                 if path.stat().st_size > self.input_offset:

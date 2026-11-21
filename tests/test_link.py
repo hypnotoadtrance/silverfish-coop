@@ -21,7 +21,7 @@ from tools.silverfish.link import (
     start_client,
     start_host,
 )
-from tools.silverfish.runtime import MAP
+from tools.silverfish.runtime import Bridge, MAP
 from tools.silverfish.service import Client, Host
 from tools.silverfish.udp_ownership import verify_loopback_socket
 
@@ -835,10 +835,9 @@ class ClientReconnectTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(predicate(snapshot))
             return snapshot
 
-        bridge = SimpleNamespace(
-            process=SimpleNamespace(poll=lambda: None), snapshot=lambda: dict(game), command=command, wait_for=wait_for,
-            interactions=tuple, native_inventory_view_requests=tuple, native_inventory_equip_requests=tuple,
-        )
+        bridge = Bridge(directory, SimpleNamespace(poll=lambda: None))
+        bridge.snapshot = lambda: dict(game)
+        bridge.command, bridge.wait_for = command, wait_for
         client = Client(client_control, transport, invite, bridge, auto_delay=0.05)
 
         async def exchange(payload, host_endpoint, local_endpoint):
