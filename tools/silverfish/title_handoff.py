@@ -19,12 +19,14 @@ ACTIONS = ("host", "join")
 LEASE_SECONDS = 10
 TOKEN = re.compile(r"[0-9a-f]{32}")
 _REQUEST = re.compile(rb"1\t([0-9a-f]{32})\t([0-9a-f]{32})\t(host|join)\r?\n")
-_HOST_REQUEST = re.compile(rb"2\t([0-9a-f]{32})\t([0-9a-f]{32})\thost\t([A-Za-z0-9_-]{0,64})"
-                           rb"\t([A-Za-z0-9.:%_-]{0,64})\t([0-9]{0,5})\r?\n")
+_HOST_FIELDS = (rb"\t([0-9a-f]{32})\t([0-9a-f]{32})\thost\t([A-Za-z0-9_-]{0,64})"
+                rb"\t([A-Za-z0-9.:%_-]{0,64})\t([0-9]{0,5})")
+_HOST_REQUEST = re.compile(rb"2" + _HOST_FIELDS + rb"\r?\n")
+_DIRECT_HOST_REQUEST = re.compile(rb"3" + _HOST_FIELDS + rb"\t([^\x00-\x1f\x7f]{0,512})\r?\n")
 _CHARACTER_UUID = rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _JOIN_REQUEST = re.compile(rb"2\t([0-9a-f]{32})\t([0-9a-f]{32})\tjoin\t([0-9a-f]{32})"
                            rb"\t([A-Za-z0-9_-]{0,64})\t(" + _CHARACTER_UUID + rb")\r?\n")
-_MAX_REQUEST_BYTES = len(b"2\t" + b"0" * 32 + b"\t" + b"0" * 32 + b"\thost\t\t\t\r\n") + max(64 + 64 + 5, 32 + 64 + 36)
+_MAX_REQUEST_BYTES = 768
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,7 @@ class Claim:
     binding: object = field(repr=False)
     host_settings: tuple[str, str, str] | None = field(default=None, repr=False)
     join_settings: tuple[str, str, str] | None = field(default=None, repr=False)
+    direct_password: str | None = field(default=None, repr=False)
 
 
 def _stock_title(snapshot):
@@ -220,12 +223,22 @@ class TitleHandoff:
         except (FileNotFoundError, PermissionError):
             return None
 
-        host_settings = join_settings = None
+        host_settings = join_settings = direct_password = None
         choice = _REQUEST.fullmatch(data)
         if choice:
             generation, request_id, action = (field.decode("ascii") for field in choice.groups())
         elif choice := _HOST_REQUEST.fullmatch(data):
             generation, request_id, campaign, bind, port = (field.decode("ascii") for field in choice.groups())
+            action, host_settings = "host", (campaign, bind, port)
+        elif choice := _DIRECT_HOST_REQUEST.fullmatch(data):
+            *fields, password = choice.groups()
+            generation, request_id, campaign, bind, port = (field.decode("ascii") for field in fields)
+            try:
+                direct_password = password.decode("utf-8")
+            except UnicodeDecodeError:
+                return self._refuse("malformed_request")
+            if len(direct_password) > 128:
+                return self._refuse("malformed_request")
             action, host_settings = "host", (campaign, bind, port)
         elif choice := _JOIN_REQUEST.fullmatch(data):
             generation, request_id, invite, profile, character = (field.decode("ascii") for field in choice.groups())
@@ -249,7 +262,8 @@ class TitleHandoff:
 
         if not _unlink(self.request_path):
             return None
-        claim = Claim(action, request_id, generation, self._bindings[action], host_settings, join_settings)
+        claim = Claim(action, request_id, generation, self._bindings[action], host_settings, join_settings,
+                      direct_password)
         self._claim = claim
         self.last_refusal = None
         self.close()

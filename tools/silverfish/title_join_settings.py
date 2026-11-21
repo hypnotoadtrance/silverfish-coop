@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from hashlib import sha256
+from ipaddress import ip_address
 import json
 import math
 from pathlib import Path
@@ -12,6 +13,7 @@ import secrets
 from tempfile import NamedTemporaryFile
 from uuid import UUID
 
+from . import direct_ip
 from .embedded_engine import _assert_no_reparse, _exact_existing
 from .embedded_startup import INVITE_LIMIT, _read_file
 from .title_handoff import TOKEN
@@ -70,6 +72,9 @@ def _parse(operation_id: str, fields: bytes) -> _Request:
         if type(invite) is not dict:
             raise _DraftError("invalid_invite")
         return _Request(operation_id, "import", body)
+    if action == b"direct" and not body:
+        _endpoint(tail)
+        return _Request(operation_id, "direct", tail)
     if action == b"create" and not body:
         identifier, separator, raw_name = tail.partition(b"\t")
         try:
@@ -81,6 +86,19 @@ def _parse(operation_id: str, fields: bytes) -> _Request:
         if separator and _token(import_id) and len(raw_name) <= 256 and 1 <= len(name) <= 64 and text.isprintable():
             return _Request(operation_id, "create", identifier, name)
     raise _DraftError("invalid_request")
+
+
+def _endpoint(payload: bytes) -> tuple[str, int, str]:
+    try:
+        address, port, password = payload.decode("utf-8").split("\t")
+        if len(address) > 45 or "%" in address or not re.fullmatch(r"[1-9][0-9]{0,4}", port):
+            raise ValueError
+        if int(port) > 65535:
+            raise ValueError
+        direct_ip._password_bytes(password)
+        return str(ip_address(address)), int(port), password
+    except ValueError:
+        raise _DraftError("invalid_endpoint") from None
 
 
 def _character(value) -> tuple[str, str]:
@@ -128,6 +146,18 @@ class _Import:
 
 
 @dataclass
+class _Direct:
+    identity: str
+    connection: direct_ip.Connection | None = field(default=None, repr=False)
+    characters: Roster = ()
+    path = None
+
+    def verify(self):
+        if self.connection is None:
+            raise _DraftError("unknown_import")
+
+
+@dataclass
 class _Operation:
     fingerprint: tuple[str, str, str | None]
     result: bytes | None = None
@@ -138,7 +168,7 @@ class _Operation:
 class _Pending:
     task: asyncio.Task
     operation_id: str
-    draft: _Import
+    draft: _Import | _Direct
     created_file: bool
 
 
@@ -150,7 +180,8 @@ class TitleJoinSettings:
     launch. A new offer after owned launch cleanup can discard older invitations.
     """
 
-    def __init__(self, work: Path, bridge: Path, *, catalog: Catalog | None = None, timeout: float = 25):
+    def __init__(self, work: Path, bridge: Path, *, catalog: Catalog | None = None, timeout: float = 25,
+                 direct_profile: Path | None = None, qualify_connection: Callable[[dict], None] | None = None):
         self._work, self._bridge = _exact_existing(work), _exact_existing(bridge)
         if bridge == work or not bridge.is_relative_to(work):
             raise ValueError("The title Join mailbox must be inside the private co-op workspace")
@@ -164,6 +195,7 @@ class TitleJoinSettings:
         if not callable(catalog):
             raise ValueError("Expected a title Join catalog service")
         self._catalog, self._timeout = catalog, timeout
+        self._direct_profile, self._qualify_connection = direct_profile, qualify_connection
         self.request_path, self.response_path = bridge / REQUEST_FILE, bridge / RESPONSE_FILE
         self._storage = bridge / "title-join-imports"
         self._generation = self._resolved = None
@@ -221,7 +253,11 @@ class TitleJoinSettings:
         async def request(name, operation_id, refusal):
             draft.verify()
             try:
-                reply = await self._catalog(self._work, draft.path, name, operation_id)
+                if isinstance(draft, _Direct):
+                    from .service import _character_catalog
+                    reply = await _character_catalog(draft.connection.session(), name, operation_id)
+                else:
+                    reply = await self._catalog(self._work, draft.path, name, operation_id)
             except ValueError:
                 raise _DraftError("invalid_invite") from None
             draft.verify()
@@ -244,8 +280,29 @@ class TitleJoinSettings:
                 raise _DraftError("catalog_invalid")
             return characters
 
+    async def _connect(self, draft: _Direct, payload: bytes):
+        from .service import PROTOCOL, staged_build, validate_invite
+
+        address, port, password = _endpoint(payload)
+        build = staged_build(self._work)
+        async with asyncio.timeout(self._timeout):
+            try:
+                draft.connection = await direct_ip.connect(self._direct_profile, address, port, password, build, PROTOCOL)
+            except direct_ip.Refused as error:
+                raise _DraftError(error.reason) from None
+            try:
+                invite = validate_invite(draft.connection.session(), build, catalog=True)
+                if self._qualify_connection is not None:
+                    self._qualify_connection(invite)
+            except ValueError:
+                raise _DraftError("incompatible_game_or_protocol") from None
+            return await self._fetch(draft, None, None)
+
     def _queue(self, request):
         operation_id, fingerprint = request.operation_id, request.fingerprint
+        if (request.action == "direct" and self._direct_profile is None
+                or request.action == "import" and self._direct_profile is not None):
+            return self._error(operation_id, "invalid_request")
         operation = self._operations.get(operation_id)
         if operation is not None and operation.fingerprint != fingerprint:
             return self._error(operation_id, "operation_conflict")
@@ -266,6 +323,13 @@ class TitleJoinSettings:
             self._operations[operation_id] = _Operation(fingerprint)
 
         created_file = False
+        if request.action == "direct":
+            if len(self._imports) >= MAX_IMPORTS:
+                return self._error(operation_id, "import_limit")
+            draft = _Direct(secrets.token_hex(16))
+            task = asyncio.create_task(self._connect(draft, request.payload))
+            self._pending = _Pending(task, operation_id, draft, False)
+            return
         if request.action == "import":
             digest = fingerprint[1]
             draft = next((item for item in self._imports.values() if item.digest == digest), None)
@@ -362,8 +426,8 @@ class TitleJoinSettings:
         if self._outbox is not None:
             self._write_response()
 
-    def resolve(self, generation: str, import_id: str, character_uuid: str) -> Path:
-        """Return the unchanged imported invitation for an authenticated exact character."""
+    def resolve(self, generation: str, import_id: str, character_uuid: str) -> Path | direct_ip.Connection:
+        """Resolve an authenticated exact character to its invitation or connection."""
         if self._closed or generation != self._generation or not _token(generation):
             raise ValueError("title_join_stale_generation")
         draft = self._imports.get(import_id) if _token(import_id) else None
@@ -376,7 +440,7 @@ class TitleJoinSettings:
         except _DraftError:
             raise ValueError("title_join_invite_changed") from None
         self._resolved = draft
-        return draft.path
+        return draft.connection if isinstance(draft, _Direct) else draft.path
 
     async def close(self) -> None:
         """Disarm the mailbox and discard private invitation files after the role ends."""

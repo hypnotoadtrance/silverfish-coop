@@ -316,7 +316,8 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
            native_dead_bridge_enemy_loot: bool = False, guest_melee_canary: bool = False, native_mindcore_view: bool = False,
            host_dig_live: bool = False, host_dig_live_fixture: bool = False, title_fixture: bool = False,
            embedded_engine: bool = False, inspect_title_profile: bool = False, pause_fixture: bool = False,
-           embedded_startup: str | None = None, resident_title: bool = False) -> dict[str, str]:
+           embedded_startup: str | None = None, resident_title: bool = False,
+           resident_direct_join: bool = False) -> dict[str, str]:
     """Derive the same validated native options for launched and embedded sessions."""
     env = dict(os.environ)
     env.pop("SILVERFISH_COOP_NATIVE_DEATH", None)
@@ -335,6 +336,7 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
     env.pop("SILVERFISH_COOP_EMBEDDED_ENGINE", None)
     env.pop("SILVERFISH_COOP_EMBEDDED_STARTUP", None)
     env.pop("SILVERFISH_COOP_RESIDENT_TITLE", None)
+    env.pop("SILVERFISH_COOP_TITLE_DIRECT_JOIN", None)
     env.pop("SILVERFISH_COOP_PAUSE_FIXTURES", None)
     env.pop("SILVERFISH_COOP_INSPECT_TITLE_PROFILE", None)
     env.pop("SILVERFISH_COOP_NATIVE_LOOT", None)
@@ -383,6 +385,10 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
         if embedded_startup is None or port is not None or (host_role and not native_guest):
             raise ValueError("The resident title requires a packaged role with no startup port")
         env["SILVERFISH_COOP_RESIDENT_TITLE"] = "1"
+    if resident_direct_join:
+        if not resident_title or host_role:
+            raise ValueError("Direct Join requires a packaged resident guest title")
+        env["SILVERFISH_COOP_TITLE_DIRECT_JOIN"] = "1"
     if pause_fixture:
         if not (headless and embedded_startup is not None):
             raise ValueError("The Pause fixture requires a headless packaged role")

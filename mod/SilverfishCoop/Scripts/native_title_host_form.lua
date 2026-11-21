@@ -5,6 +5,7 @@ local fields = {
     {key = "campaign", label = "Campaign", hint = "Use letters, numbers, underscores or hyphens."},
     {key = "port", label = "UDP port", hint = "Enter a UDP port from 1 to 65535."},
     {key = "bind", label = "Listening IP", hint = "Enter a numeric IPv4 or IPv6 address."},
+    {key = "password", label = "Password", hint = "Enter up to 128 characters.", default = "Blank lets anyone with the address join."},
 }
 
 local function ipv4(text)
@@ -48,6 +49,7 @@ local function valid(field, value)
     if field == "port" then
         return #value <= 5 and value:match("^[1-9][0-9]*$") ~= nil and tonumber(value) <= 65535
     end
+    if field == "password" then return utf8.len(value) <= 128 end
     return #value <= 45 and numeric_address(value)
 end
 
@@ -61,14 +63,15 @@ end
 local function render(draft, state, phase, hint, text)
     local field = fields[draft.index]
     if not form.remove(draft) then error("title_host_form_editor_unavailable", 0) end
-    local caption = "Host co-op / " .. field.label .. "\n" .. (hint or "Blank keeps the configured value.") .. controls
+    local caption = "Host co-op / " .. field.label .. "\n" .. (hint or field.default or "Blank keeps the configured value.") .. controls
     local handle = editor.mount(state, phase, field.key, caption, text or draft.values[field.key])
     draft.handle = handle
     editor.focus(handle, state, phase)
 end
 
-function form.open(state, phase)
-    local draft = {index = 1, values = {campaign = "", port = "", bind = ""}}
+function form.open(state, phase, direct)
+    local draft = {index = 1, count = direct and #fields or #fields - 1,
+        values = {campaign = "", port = "", bind = "", password = direct and "" or nil}}
     local ok, failure = pcall(render, draft, state, phase)
     if not ok then
         form.remove(draft)
@@ -92,7 +95,7 @@ end
 function form.next(draft, state, phase)
     local captured, reason = capture(draft, state, phase)
     if not captured then return false, reason end
-    draft.index = draft.index % #fields + 1
+    draft.index = draft.index % draft.count + 1
     render(draft, state, phase)
     return true
 end
@@ -101,7 +104,7 @@ function form.selection(draft, state, phase)
     local captured, reason = capture(draft, state, phase)
     if not captured then return nil, reason end
     local values = draft.values
-    return {values.campaign, values.bind, values.port}
+    return {values.campaign, values.bind, values.port, values.password}
 end
 
 function form.fixture_write(draft, state, phase, field, value)

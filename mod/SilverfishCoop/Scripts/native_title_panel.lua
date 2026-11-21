@@ -1,6 +1,8 @@
 local panel = {}
 local title = require("native_title_entry")
 local display = require("native_title_display")
+local resident = os.getenv("SILVERFISH_COOP_RESIDENT_TITLE") == "1"
+local direct_join = os.getenv("SILVERFISH_COOP_TITLE_DIRECT_JOIN") == "1"
 
 local keys = {host = "F7", join = "F8", hide = "F9"}
 local actions = {
@@ -65,7 +67,9 @@ end
 local function menu_text(offer)
     local lines = {"Direct IP co-op"}
     if actions[offer.choices].host then lines[#lines + 1] = "F7   Host a campaign" end
-    if actions[offer.choices].join then lines[#lines + 1] = "F8   Join with an invite" end
+    if actions[offer.choices].join then
+        lines[#lines + 1] = direct_join and "F8   Join by Direct IP" or "F8   Join with an invite"
+    end
     lines[#lines + 1] = "F9   Hide"
     return table.concat(lines, "\n")
 end
@@ -100,7 +104,8 @@ local function write_request(generation, action, form_values)
     local temporary = request_path .. "." .. id .. ".tmp"
     local file = io.open(temporary, "wb")
     if not file then return false end
-    local row = form_values and {"2", generation, id, action, table.unpack(form_values)}
+    local version = action == "host" and form_values and #form_values == 4 and "3" or "2"
+    local row = form_values and {version, generation, id, action, table.unpack(form_values)}
         or {"1", generation, id, action}
     local written = file:write(table.concat(row, "\t"), "\n")
     local closed = file:close()
@@ -158,7 +163,7 @@ local function handle_host_form(action, state, phase, context)
     if not form then
         if action ~= "host" then return false, "title_host_form_unavailable" end
         local api = require("native_title_host_form")
-        session.form = {role = "host", api = api, draft = api.open(state, phase)}
+        session.form = {role = "host", api = api, draft = api.open(state, phase, resident)}
         message("")
         report = {state = "ready", choices = offer.choices}
         return true
@@ -181,7 +186,7 @@ local function handle_join_form(action, state, phase, context)
     if not form then
         if action ~= "join" then return false, "title_join_form_unavailable" end
         local api = require("native_title_join_form")
-        local draft = api.open(state, phase, context, bridge_path, offer.generation, request_id)
+        local draft = api.open(state, phase, context, bridge_path, offer.generation, request_id, direct_join)
         session.form = {role = "join", api = api, draft = draft}
         message("")
         report = {state = "ready", choices = offer.choices}
@@ -235,6 +240,17 @@ local function host_form_fixture_command(fields, state, phase)
         end
         return "title_host_form_port_entered"
     end
+    if operation == "password" then
+        if not form.api.fixture_write(form.draft, state, phase, "password", "Fixture co-op pass") then
+            error("title_host_form_fixture_arguments", 0)
+        end
+        return "title_host_form_password_entered"
+    end
+    if operation == "next" then
+        local accepted, failure = handle_host_form("join", state, phase, context)
+        if not accepted then error(failure, 0) end
+        return "title_host_form_next"
+    end
     local action = operation == "submit" and "host" or operation == "cancel" and "hide"
     if not action then error("title_host_form_fixture_arguments", 0) end
     local accepted, failure = handle_host_form(action, state, phase, context)
@@ -246,6 +262,7 @@ local function join_form_fixture_command(fields, state, phase)
     if not fixture_enabled() then error("title_join_form_fixture_unavailable", 0) end
     local operation, value = fields[3], fields[4]
     local has_value = operation == "select" or operation == "create" or operation == "profile"
+        or operation == "address" or operation == "port"
     if #fields ~= (has_value and 4 or 3) then error("title_join_form_fixture_arguments", 0) end
     local context = title.probe(state, phase)
     local offer, reason = active_offer("join", context)
@@ -259,7 +276,9 @@ local function join_form_fixture_command(fields, state, phase)
     local form = session.form
     if not form or form.role ~= "join" then error("title_join_form_unavailable", 0) end
     if operation == "submit" or operation == "cancel" then
-        if operation == "submit" and form.draft.screen ~= "profile" then error("title_join_form_selection_unavailable", 0) end
+        if operation == "submit" and form.draft.screen ~= "profile" and form.draft.screen ~= "confirm" then
+            error("title_join_form_selection_unavailable", 0)
+        end
         local accepted, failure = handle_join_form(operation == "submit" and "host" or "hide", state, phase, context)
         if not accepted then error(failure, 0) end
         return operation == "submit" and "title_join_form_submitted" or "title_join_form_cancelled"

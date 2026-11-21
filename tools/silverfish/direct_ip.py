@@ -30,6 +30,12 @@ _REFUSALS = {
 }
 
 
+class Refused(link.LinkError):
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(_REFUSALS.get(reason, "The host declined Direct IP enrollment"))
+
+
 def _uuid(value):
     if type(value) is not str:
         return False
@@ -105,8 +111,7 @@ class Enrollment:
 def _accepted(reply: dict) -> dict:
     if reply["accepted"] is not True:
         reason = reply.get("reason")
-        message = _REFUSALS.get(reason) if type(reason) is str else None
-        raise link.LinkError(message or "The host declined Direct IP enrollment")
+        raise Refused(reason if type(reason) is str and reason in _REFUSALS else "direct_refused")
     return reply
 
 
@@ -176,7 +181,7 @@ async def connect(profile: Path, host: str, port: int, password: str, game_build
     if remembered is not None and remembered != saved_pin:
         raise link.LinkError("This address now presents a different host identity")
     if discovery["password_required"] and not password:
-        raise link.LinkError(_REFUSALS["direct_password_required"])
+        raise Refused("direct_password_required")
     participant = _record(root / f"guest-{pin}-{uuid.UUID(campaign).hex}.json", {
         "schema": 1, "guest_id": str(uuid.uuid4()), "credential": secrets.token_urlsafe(32),
     })

@@ -5,6 +5,15 @@ local max_invite, max_reply, max_characters = 32768, 20480, 64
 local messages = {
     invalid_request = "The Join request was invalid.",
     invalid_invite = "This invitation is invalid for this build.",
+    invalid_endpoint = "Enter a numeric host IP and a valid UDP port.",
+    direct_join_disabled = "The host has disabled Direct IP.",
+    direct_wrong_password = "Incorrect password.",
+    direct_password_required = "Enter the host's password.",
+    direct_password_rate_limited = "Too many attempts. Try again shortly.",
+    direct_enrollment_required = "Connect to the host again.",
+    direct_campaign_changed = "The host changed campaigns. Connect again.",
+    direct_refused = "The host declined the connection.",
+    incompatible_game_or_protocol = "The host and guest builds are incompatible.",
     invite_refused = "The host refused this invitation.",
     catalog_unavailable = "Could not reach the character catalog.",
     catalog_invalid = "The character catalog could not be verified.",
@@ -97,6 +106,18 @@ local function render(draft, state, phase, next_screen, hint, initial)
     if next_screen == "invite" then
         title_text = "Join co-op\n" .. (hint or "Paste the host's invitation text.") .. "\nF7 Load   F9 Back"
         editor_field = "invite"
+    elseif next_screen == "address" then
+        title_text = "Join co-op / Host IP\n" .. (hint or "Enter the host's IPv4 or IPv6 address.") .. "\nF7 Next   F9 Back"
+        editor_field = "address"
+    elseif next_screen == "port" then
+        title_text = "Join co-op / UDP port\n" .. (hint or "Enter the host's UDP port.") .. "\nF7 Next   F8 Edit IP   F9 Back"
+        editor_field = "port"
+    elseif next_screen == "password" then
+        title_text = "Join co-op / Password\n" .. (hint or "Leave blank if the host has no password.")
+            .. "\nF7 Connect   F8 Edit IP   F9 Back"
+        editor_field = "password"
+    elseif next_screen == "confirm" then
+        title_text = "Join co-op\nF7 Join   F8 Choose another character   F9 Back"
     elseif next_screen == "name" then
         title_text = "Create a character\n" .. (hint or "Enter a character name.") .. "\nF7 Create   F9 Back"
         editor_field = "character"
@@ -114,11 +135,11 @@ local function render(draft, state, phase, next_screen, hint, initial)
     end
 end
 
-function form.open(state, phase, context, bridge, generation, new_id)
-    local draft = {context = context, generation = generation, new_id = new_id,
+function form.open(state, phase, context, bridge, generation, new_id, direct)
+    local draft = {context = context, generation = generation, new_id = new_id, direct = direct,
         request = bridge .. "/title-join-request.tsv", response = bridge .. "/title-join-response.tsv",
         fixture = bridge .. "/title-join-fixture.invite.json"}
-    local ok, failure = pcall(render, draft, state, phase, "invite")
+    local ok, failure = pcall(render, draft, state, phase, direct and "address" or "invite")
     if not ok then
         form.remove(draft)
         error(failure, 0)
@@ -143,9 +164,16 @@ local function queue(draft, state, phase, kind, value)
     local retried = kind == "create" and draft.retry and draft.retry.name == value and draft.retry.import == draft.import
     local id = retried and draft.retry.id or draft.new_id()
     if not token(id) then return false, "title_join_form_request_id_unavailable" end
-    local payload = kind == "import" and (tostring(#value) .. "\n" .. value) or (draft.import .. "\t" .. value .. "\n")
+    local payload
+    if kind == "import" then
+        payload = tostring(#value) .. "\n" .. value
+    elseif kind == "direct" then
+        payload = table.concat({draft.address, draft.port, value}, "\t") .. "\n"
+    else
+        payload = draft.import .. "\t" .. value .. "\n"
+    end
     if not publish(draft, id, kind, payload) then
-        render(draft, state, phase, draft.screen, "Could not send. Press F7 to retry.", value)
+        render(draft, state, phase, draft.screen, "Could not send. Press F7 to retry.", kind ~= "direct" and value or nil)
         return false, "title_join_form_request_unavailable"
     end
     if kind == "create" then draft.retry = {name = value, import = draft.import, id = id} end
@@ -173,13 +201,27 @@ function form.poll(draft, state, phase)
         render(draft, state, phase, "name", messages[draft.failure], draft.retry.name)
     else
         draft.import, draft.characters, draft.retry = nil, nil, nil
-        render(draft, state, phase, "invite", messages[draft.failure])
+        if draft.direct then
+            local edit_endpoint = pending.kind ~= "direct" or draft.failure == "invalid_endpoint"
+            render(draft, state, phase, edit_endpoint and "address" or "password", messages[draft.failure],
+                edit_endpoint and draft.address or nil)
+        else
+            render(draft, state, phase, "invite", messages[draft.failure])
+        end
     end
 end
 
 function form.press(draft, action, state, phase)
     local screen = draft.screen
     if action == "join" then
+        if screen == "port" or screen == "password" then
+            render(draft, state, phase, "address", nil, draft.address)
+            return true
+        end
+        if screen == "confirm" then
+            render(draft, state, phase, "catalog")
+            return true
+        end
         if screen ~= "catalog" then return false, "title_join_form_not_in_catalog" end
         draft.index = draft.index % (#draft.characters + 1) + 1
         display.text(draft.widget, catalog_text(draft))
@@ -189,12 +231,29 @@ function form.press(draft, action, state, phase)
     if screen == "catalog" then
         local choice = draft.characters[draft.index]
         draft.character = choice and choice.id
-        render(draft, state, phase, choice and "profile" or "name")
+        render(draft, state, phase, choice and (draft.direct and "confirm" or "profile") or "name")
         return true
+    end
+    if screen == "confirm" then
+        if not token(draft.import) or not character_id(draft.character) then return false, "title_join_form_selection_unavailable" end
+        return true, nil, {draft.import, "", draft.character}
     end
     local ok, value = pcall(editor.read, draft.handle, state, phase)
     if not ok and value ~= "title_settings_invalid_text" then return false, "title_join_form_editor_unavailable" end
     if screen == "invite" and ok and #value > 0 then return queue(draft, state, phase, "import", value) end
+    if screen == "address" and ok and #value <= 45 and value:match("^[0-9a-fA-F.:]+$") then
+        draft.address = value
+        render(draft, state, phase, "port", nil, draft.port)
+        return true
+    end
+    if screen == "port" and ok and value:match("^[1-9][0-9]*$") and tonumber(value) <= 65535 then
+        draft.port = value
+        render(draft, state, phase, "password")
+        return true
+    end
+    if screen == "password" and ok and utf8.len(value) <= 128 then
+        return queue(draft, state, phase, "direct", value)
+    end
     if screen == "name" and ok then
         value = value:match("^ *(.-) *$")
         if #value > 0 and utf8.len(value) <= 64 then return queue(draft, state, phase, "create", value) end
@@ -204,6 +263,9 @@ function form.press(draft, action, state, phase)
         return true, nil, {draft.import, value, draft.character}
     end
     local hint = screen == "invite" and "Enter a one-line invitation."
+        or screen == "address" and messages.invalid_endpoint
+        or screen == "port" and "Enter a UDP port from 1 to 65535."
+        or screen == "password" and "Enter up to 128 characters."
         or screen == "name" and "Enter a name of up to 64 characters."
         or "Use letters, numbers, _ or -."
     render(draft, state, phase, screen, hint, ok and value or nil)
@@ -222,6 +284,17 @@ function form.fixture(draft, operation, value, state, phase)
         if not single_line(text, max_invite) or text == "" then return false, "title_join_form_fixture_invite_unavailable" end
         editor.write(draft.handle, state, phase, text)
         return form.press(draft, "host", state, phase)
+    end
+    if draft.direct and (operation == "address" or operation == "port") and draft.screen == operation then
+        editor.write(draft.handle, state, phase, value)
+        return form.press(draft, "host", state, phase)
+    end
+    if draft.direct and draft.screen == "password" then
+        local passwords = {password = "Fixture co-op pass", wrong_password = "Wrong fixture", no_password = ""}
+        if passwords[operation] then
+            editor.write(draft.handle, state, phase, passwords[operation])
+            return form.press(draft, "host", state, phase)
+        end
     end
     if operation == "select" and draft.screen == "catalog" and character_id(value) then
         for index, choice in ipairs(draft.characters) do

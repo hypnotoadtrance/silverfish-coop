@@ -24,6 +24,7 @@ from .embedded_engine import (
 
 STARTUP_ENV = "SILVERFISH_COOP_EMBEDDED_STARTUP"
 RESIDENT_ENV = "SILVERFISH_COOP_RESIDENT_TITLE"
+DIRECT_JOIN_ENV = "SILVERFISH_COOP_TITLE_DIRECT_JOIN"
 RESIDENT_FILE = "resident-host.json"
 RESIDENT_JOIN_FILE = "resident-join.json"
 _RESIDENT_FEATURES = ("SILVERFISH_COOP_NATIVE_EVENTS", "SILVERFISH_COOP_NATIVE_GUEST_SAVE", "SILVERFISH_COOP_NATIVE_ZONE")
@@ -381,7 +382,7 @@ async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path,
     def status():
         return runtime.read_json(campaign / "run" / "status.json")
 
-    def host_plan(bind, port):
+    def host_plan(bind, port, password=""):
         mode, area = service.menu_host_start(campaign)
 
         async def start():
@@ -394,6 +395,7 @@ async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path,
             await engine.observe_title()
             await service.host_game(
                 work, campaign, bind, port, headless, resident_engine=engine,
+                direct_password=password,
                 max_guests=service.MENU_HOST_GUEST_LIMIT, **service.MENU_HOST_OPTIONS,
                 **({"start_preset": mode} if mode == "wanderer" else {}),
             )
@@ -409,7 +411,7 @@ async def _resident_host(work: Path, campaign: Path, mailbox: Path, saved: Path,
         if name and name != campaign.name:
             raise ValueError("The resident title has a different campaign profile")
         bind, port = endpoint(address or default_bind, int(port_text) if port_text else default_port)
-        return host_plan(bind, port)
+        return host_plan(bind, port, claim.direct_password or "")
 
     plan = replace(host_plan(default_bind, default_port), resolve_claim=resolve)
     await _resident_title(mailbox, saved, {"host": plan})
@@ -420,6 +422,13 @@ async def _resident_join(work: Path, directory: Path, mailbox: Path, saved: Path
     from .title_session import SessionPlan
 
     settings = _decode(_read_file(mailbox / RESIDENT_JOIN_FILE, REQUEST_LIMIT))
+    direct_enabled = _current_startup((DIRECT_JOIN_ENV,)).environment.get(DIRECT_JOIN_ENV) == "1"
+    if direct_enabled:
+        if set(settings) != {"schema", "direct"} or type(settings["schema"]) is not int \
+                or settings["schema"] != 1 or settings["direct"] is not True:
+            raise ValueError("Invalid resident Direct Join configuration")
+        await _resident_direct_join(work, directory, mailbox, saved, headless)
+        return
     if set(settings) != {"schema", "selection"} or type(settings["schema"]) is not int or settings["schema"] != 1:
         raise ValueError("Invalid resident Join configuration")
     selection = _join(settings["selection"])
@@ -448,12 +457,58 @@ async def _resident_join(work: Path, directory: Path, mailbox: Path, saved: Path
     await _resident_title(mailbox, saved, {"join": plan})
 
 
-async def _resident_title(mailbox, saved, plans):
+async def _resident_direct_join(work: Path, directory: Path, mailbox: Path, saved: Path, headless: bool) -> None:
+    from . import direct_ip, service
+    from .title_join_settings import TitleJoinSettings
+    from .title_session import SessionPlan
+
+    def qualify(invite):
+        if invite.get("native_zones") is not True:
+            raise ValueError("The host does not offer native co-op")
+        options = service.guest_engine_options(work, invite)
+        required = service._embedded_features(work, headless, None, options, resident=True)
+        if _current_startup(tuple(required)).environment != required:
+            raise ValueError("The resident guest lacks the host's staged game features")
+
+    def status():
+        return runtime.read_json(directory / "run" / "status.json")
+
+    settings = TitleJoinSettings(work, mailbox, direct_profile=directory, qualify_connection=qualify, timeout=18)
+
+    def resolve(claim):
+        if claim.join_settings is None:
+            raise ValueError("Enter a host address and choose a character first")
+        draft, profile, character = claim.join_settings
+        if profile and profile != directory.name:
+            raise ValueError("The resident title has a different guest profile")
+        connection = settings.resolve(claim.generation, draft, character)
+        if not isinstance(connection, direct_ip.Connection):
+            raise ValueError("Expected an authenticated Direct IP connection")
+
+        async def start():
+            engine = EmbeddedEngine(os.getpid(), mailbox, saved, None)
+            await engine.observe_title()
+            await service.join_game(work, directory, connection, headless, character, resident_engine=engine)
+
+        return SessionPlan(start, status, lambda frame: frame.get("character_id") == character
+                           and frame.get("gameplay_fresh") is True)
+
+    async def no_selection():
+        raise ValueError("A Direct IP character selection is required")
+
+    plan = SessionPlan(no_selection, status, lambda _: False, resolve_claim=resolve)
+    try:
+        await _resident_title(mailbox, saved, {"join": plan}, join_settings=settings)
+    finally:
+        await settings.close()
+
+
+async def _resident_title(mailbox, saved, plans, *, join_settings=None):
     from .title_session import TitleSession
 
     title = EmbeddedEngine(os.getpid(), mailbox, saved, None)
     await TitleSession(title.bridge, plans, resident=True, title_saved_directory=saved,
-                       on_title_ready=lambda: None).run()
+                       on_title_ready=lambda: None, join_settings=join_settings).run()
 
 
 def run() -> None:

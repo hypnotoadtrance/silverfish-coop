@@ -8,6 +8,7 @@ local fields = {
     port = {limit = 5, hint = "UDP port"},
     profile = {limit = 64, hint = "Local profile"},
     invite = {limit = 32768, hint = "Paste a one-line co-op invitation", secret = true},
+    password = {limit = 512, hint = "Optional password", secret = true},
     character = {limit = 256, hint = "Character name"},
     participant = {limit = 256, hint = "Participant name"},
     starter = {limit = 256, hint = "Starter character name"},

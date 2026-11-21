@@ -25,7 +25,7 @@ from live_same_process_listener_smoke import choose_ports
 from live_stock_pause_exit_smoke import paired_checkpoint, stock_pause
 
 
-async def verify(work: Path, original: Path) -> None:
+async def verify(work: Path, original: Path, *, direct: bool = False) -> None:
     originals = saved_hashes(original)
     if ("steamapps" in {part.casefold() for part in work.parts} or work.is_relative_to(original)
             or original.is_relative_to(work) or not originals or not embedded_title_plan.installed(work)):
@@ -49,7 +49,7 @@ async def verify(work: Path, original: Path) -> None:
                              title_fixture=True, pause_fixture=True, resident_title=True, **options)
     bridge = runtime.Bridge(mailbox, process)
     guest_process = None
-    evidence = {"verified": False, "title_pid": process.pid, "sessions": []}
+    evidence = {"verified": False, "title_pid": process.pid, "direct_ip": direct, "sessions": []}
 
     async def offer(game_bridge, game_profile, action):
         frame = await game_bridge.wait_for(lambda game: _isolated_stock_title(game, game_profile / "Saved")
@@ -87,30 +87,83 @@ async def verify(work: Path, original: Path) -> None:
 
     try:
         await offer(bridge, profile, "host")
-        await bridge.command("native-title-panel-press-fixture", "host")
+        if direct:
+            for operation in ("open", "next", "next", "next", "password", "submit"):
+                await bridge.command("native-title-host-form-fixture", operation)
+        else:
+            await bridge.command("native-title-panel-press-fixture", "host")
         first, first_attempt = await hosting(default_port)
         scope = first["game"]["save_scope"]
         assert scope == uuid.UUID(first["campaign"]["campaign_id"]).hex
-        invitation = await submit(host_run, "invite", name="Local guest", character="Resident Scout")
-        character = invitation["character_id"]
-        source = Path(invitation["invite_file"])
-        invite = load_invite(source, runtime.staged_build(work))
-        guest_options = guest_engine_options(work, invite)
         guest_nonce = uuid.uuid4().hex
         guest_mailbox = guest_run / "game-bridge" / guest_nonce
         guest_profile = guest / "game-user"
         guest_mailbox.mkdir(parents=True)
-        raw_invitation = source.read_bytes()
-        (guest_mailbox / embedded_startup.INVITE_FILE).write_bytes(raw_invitation)
-        runtime.write_json(guest_mailbox / embedded_startup.RESIDENT_JOIN_FILE, {
-            "schema": 1, "selection": {"invite_sha256": sha256(raw_invitation).hexdigest(), "character_id": character},
-        })
+        if direct:
+            # Start with the standard full native stage before the operator knows
+            # the host address. The resident worker checks the authenticated host.
+            guest_options = guest_engine_options(work, {
+                "native_zones": True, "native_zone_walls": True, "expanded_zones": True,
+                "native_guest_controls": True, "native_wipe_view": True, "native_loot_input": True,
+                "native_broker_input": True, "native_mosby_station": True, "native_mindcore_view": True,
+            })
+            startup = {"schema": 1, "direct": True}
+        else:
+            invitation = await submit(host_run, "invite", name="Local guest", character="Resident Scout")
+            character = invitation["character_id"]
+            source = Path(invitation["invite_file"])
+            guest_options = guest_engine_options(work, load_invite(source, runtime.staged_build(work)))
+            raw_invitation = source.read_bytes()
+            (guest_mailbox / embedded_startup.INVITE_FILE).write_bytes(raw_invitation)
+            startup = {"schema": 1, "selection": {
+                "invite_sha256": sha256(raw_invitation).hexdigest(), "character_id": character}}
+        runtime.write_json(guest_mailbox / embedded_startup.RESIDENT_JOIN_FILE, startup)
         guest_process = runtime.launch(work, guest_profile, guest_mailbox, True, embedded_engine=True,
                                        embedded_startup=guest_nonce, resident_title=True, title_fixture=True,
-                                       pause_fixture=True, **guest_options)
+                                       pause_fixture=True, resident_direct_join=direct, **guest_options)
         guest_bridge = runtime.Bridge(guest_mailbox, guest_process)
+
+        async def form(operation, *args):
+            return await guest_bridge.command("native-title-join-form-fixture", operation, *args)
+
+        async def form_state(expected):
+            async with asyncio.timeout(22):
+                while True:
+                    frame = await form("observe")
+                    if frame["ack"]["message"] == "title_join_form_state=" + expected:
+                        return
+                    await asyncio.sleep(.1)
+
+        async def open_direct():
+            await form("open")
+            await form("address", "127.0.0.1")
+            await form("port", str(default_port))
+
         await offer(guest_bridge, guest_profile, "join")
-        await guest_bridge.command("native-title-panel-press-fixture", "join")
+        if direct:
+            await open_direct()
+            await form("no_password")
+            await form_state("password;error=direct_password_required")
+            await form("wrong_password")
+            await form_state("password;error=direct_wrong_password")
+            await form("password")
+            await form_state("catalog;count=0")
+            await form("create", "Resident Scout")
+            await form_state("catalog;count=1")
+            current = CampaignStore.read_existing(campaign / "save", verify_world=verify_travel_checkpoint)
+            character, = current["characters"]
+            await form("select", character)
+            await form_state("confirm")
+            await form("submit")
+            assert not (guest_mailbox / embedded_startup.INVITE_FILE).exists()
+            assert not (guest_mailbox / "title-join-imports").exists()
+            assert not tuple((host_run / "invites").glob("*.invite.json"))
+            assert not (guest_mailbox / "title-join-request.tsv").exists()
+            assert not (mailbox / "title-handoff-request.tsv").exists()
+            evidence["direct_title"] = {"required_password_refused": True, "wrong_password_refused": True,
+                                        "created_owned_character": character, "used_invitation": False}
+        else:
+            await guest_bridge.command("native-title-panel-press-fixture", "join")
         joined = await wait(guest_run, lambda value: value.get("state") == "connected")
         guest_scope = uuid.UUID(character).hex
         assert joined["pid"] == guest_process.pid and joined["game"]["save_scope"] == guest_scope
@@ -132,7 +185,14 @@ async def verify(work: Path, original: Path) -> None:
         await offer(guest_bridge, guest_profile, "join")
         await wait(host_run, lambda value: value.get("state") == "hosting" and not value["campaign"]["leases"])
         detached = paired_checkpoint(campaign, character)["guest_save"]["slot"]
-        await guest_bridge.command("native-title-panel-press-fixture", "join")
+        if direct:
+            await open_direct()
+            await form("password")
+            await form_state("catalog;count=1")
+            await form("select", character)
+            await form("submit")
+        else:
+            await guest_bridge.command("native-title-panel-press-fixture", "join")
         joined_again = await wait(guest_run, lambda value: value.get("state") == "connected"
                                   and value.get("generation") != joined["generation"])
         assert joined_again["pid"] == guest_process.pid and joined_again["game"]["save_scope"] == guest_scope
@@ -183,5 +243,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--direct", action="store_true")
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(strict=True), args.vanilla_saved.resolve(strict=True)))
+    asyncio.run(verify(args.work.resolve(strict=True), args.vanilla_saved.resolve(strict=True), direct=args.direct))
