@@ -12,7 +12,7 @@ local save_path = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local editor_class = "/Game/Classes/GUI/Character_Editor_Widget.Character_Editor_Widget_C"
-local record, hooked
+local record, hooked, guest_buttons_hooked
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -57,6 +57,13 @@ local function clean_guest(record)
         and statics:DoesSaveGameExist(record.slot, 0) == false
 end
 
+local function remember_route(route)
+    return function(context)
+        local menu = context:get()
+        if record and record.attempt and same(menu, record.editor) then record.route = route end
+    end
+end
+
 local function observe_guest_editor(state)
     local controller = state.controller
     local stack = valid(controller) and controller.MenuStack
@@ -66,6 +73,15 @@ local function observe_guest_editor(state)
     if not exact(menu, editor_class) or not same(menu:GetOwningPlayer(), controller) then return end
     if not same(record.editor, menu) then
         record.editor = menu
+        if not guest_buttons_hooked then
+            RegisterHook(editor_class ..
+                ":BndEvt__Character_Editor_Widget_Button_Confirm_1_K2Node_ComponentBoundEvent_35_Pressed__DelegateSignature",
+                remember_route("custom"))
+            RegisterHook(editor_class ..
+                ":BndEvt__Character_Editor_Widget_Button_Next_1_K2Node_ComponentBoundEvent_49_Pressed__DelegateSignature",
+                remember_route("preset"))
+            guest_buttons_hooked = true
+        end
         for _, field in ipairs({"Setting_Selector_Faction", "Setting_Selector_StartMap", "Selector_QP_Rep",
             "Selector_QP_Quest", "Setting_Selector_Widget", "CheckBox_BarterOnly", "CheckBox_BoneBag",
             "CheckBox_CombineStash", "CheckBox_FailContracts", "CheckBox_ItemsLostPerDeath", "CheckBox_LockSaves",
