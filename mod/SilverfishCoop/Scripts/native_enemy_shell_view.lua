@@ -102,22 +102,31 @@ local function camera_pose(pawn)
     end
 end
 
-local function unobstructed(pawn, eye, target)
+local function trace_visibility(pawn, eye, target, physical)
     local library = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     if not valid(library) then return false end
     local ignore, held = { pawn }, pawn.EquipedItem
     if valid(held) and held.HeldByPlayer == true and same(held:GetOwner(), pawn) then
         ignore[#ignore + 1] = held
     end
-    return library:LineTraceSingle(pawn, eye, target, 0, false, ignore, 0, {}, true, trace_color, trace_color, 0) == false
+    local hit = {}
+    local obstructed = library:LineTraceSingle(pawn, eye, target, physical and 1 or 0, physical == true,
+        ignore, 0, hit, true, trace_color, trace_color, 0)
+    if obstructed == false then return true end
+    local impact = (hit.OutHit or hit).ImpactPoint
+    return physical == true and obstructed == true and vector(impact) and distance_squared(target, impact) <= 4
+end
+
+local function unobstructed(pawn, eye, target)
+    return trace_visibility(pawn, eye, target, false)
 end
 
 -- The remote guest's camera direction is local. Authority checks its own pawn's
 -- range and line from the actual eye to the same world point independently.
-function view.clear_line(pawn, point)
+function view.clear_line(pawn, point, physical)
     if not in_reach(pawn, point) then return false end
     local _, eye = camera_pose(pawn)
-    return eye ~= nil and unobstructed(pawn, eye, aim_point(point))
+    return eye ~= nil and trace_visibility(pawn, eye, physical and point or aim_point(point), physical)
 end
 
 local function asset(path)
@@ -244,7 +253,8 @@ function view.command(fields, state, phase)
         view.clear()
         return "local shell cues cleared"
     end
-    if action ~= "native-enemy-shell-frame" then return end
+    local present = action == "native-enemy-shell-frame"
+    if not present and (action ~= "native-enemy-shell-authority-frame" or phase ~= "hosting") then return end
     local pawn = viewer(state, phase)
     local epoch = fields[3]
     if not pawn or fields[4] ~= pawn:GetFullName() or not identifier(epoch, "[^0-9a-f]") or #fields < 5 or #fields > 6 then
@@ -268,7 +278,7 @@ function view.command(fields, state, phase)
         end
     end
     frame = { epoch = epoch, pawn = pawn, world = state.world, map = state.map, rows = rows, order = order, visible = {}, eligible = {},
-        expires = now(pawn) + frame_lifetime }
+        expires = now(pawn) + frame_lifetime, present = present }
     return "local shell frame accepted"
 end
 
@@ -286,12 +296,14 @@ function view.sync(state, phase)
             remove_marker(row)
         else
             frame.eligible[#frame.eligible + 1] = guid
-            if not marker_visible(row) then
+            if not frame.present then
+                remove_marker(row)
+            elseif not marker_visible(row) then
                 remove_marker(row)
                 local ok, visible = pcall(create_marker, row)
                 if not ok or not visible then remove_marker(row) end
             end
-            if marker_visible(row) then frame.visible[#frame.visible + 1] = guid end
+            if frame.present and marker_visible(row) then frame.visible[#frame.visible + 1] = guid end
         end
     end
     local focus = closest_focus(pawn, controller)

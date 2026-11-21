@@ -12,6 +12,7 @@ KEY = "native_enemy_shell_view"
 FRAME_KEY = "native_enemy_shell_frame"
 AUTHORITY_KEY = "native_enemy_shell_authority"
 FRAME = "native-enemy-shell-frame"
+AUTHORITY_FRAME = "native-enemy-shell-authority-frame"
 CLEAR = "native-enemy-shell-clear"
 FIXTURE = "native-enemy-shell-input-fixture"
 PREFIX = "enemy-shell:"
@@ -82,22 +83,24 @@ class ShellView:
         self.binding = None
         self.next_update = 0.0
 
-    async def sync(self, bridge, game, phase, epoch, frame):
+    async def sync(self, bridge, game, phase, epoch, frame, *, present=True):
         pawn = game.get("pawns", {}).get("local", {}).get("name")
         version = game.get("native_enemy_shell_view_version")
         profile = BY_MAP.get(game.get("map"))
         current = (game.get("state") == phase and profile
                    and version in ((2,) if phase == "hosting" else (1, 2)) and pawn and valid_epoch(epoch))
-        fields = _fields(frame, profile, epoch, hosting=phase == "hosting") if current else ()
+        hosting = phase == "hosting"
+        fields = _fields(frame, profile, epoch, hosting=hosting) if current and (hosting or present) else ()
         if not fields:
             old, self.binding = self.binding, None
             if old and current:
                 return await bridge.command(CLEAR, timeout=2)
             return game
-        binding = (profile.id, epoch, pawn, fields)
+        command = FRAME if present else AUTHORITY_FRAME
+        binding = (command, profile.id, epoch, pawn, fields)
         now = time.monotonic()
         if binding == self.binding and now < self.next_update:
             return game
         self.next_update = now + .8
         self.binding = binding
-        return await bridge.command(FRAME, epoch, pawn, *fields, timeout=2)
+        return await bridge.command(command, epoch, pawn, *fields, timeout=2)

@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-from tools.silverfish import native_enemy_loot, native_enemy_shells, native_host_save, party
+from tools.silverfish import native_enemy_loot, native_enemy_shells, native_host_save, native_world_loot, party
 from tools.silverfish.campaign import CampaignFormatError, CampaignStore
 from tools.silverfish.enemy_loot_profiles import BY_MAP as ENCOUNTERS
 from tools.silverfish.generate_enemy_loot_registry import outputs as enemy_registry_outputs
@@ -17,6 +17,24 @@ from tools.silverfish.travel import DEAD_BRIDGE, REFINERY
 
 
 class DeadBridgeEnemyLootTests(unittest.TestCase):
+    def test_physical_enemy_drop_requires_current_authority_frame(self):
+        zone, guid = "b" * 32, "A" * 32
+        pawn = f"Player_FP_C {DEAD_BRIDGE}.DeadBridge_P:PersistentLevel.Player_FP_C_1234"
+        game = {"map": DEAD_BRIDGE, "pawns": {"local": {"name": pawn, "location": [1, 2, 3]}}}
+        drop = dict(map=DEAD_BRIDGE, guid=guid, class_path=native_enemy_loot.SHELLS,
+                    position=[1, 2, 3], quantity=8, claimed_by=None)
+        frame = dict(map=DEAD_BRIDGE, epoch=zone, shells={guid: [8, 1, 2, 3]})
+        items = native_world_loot.nearby(game, {}, zone, enemy_frame=frame, enemy_rolls={guid: drop})
+        item, = items.values()
+        self.assertEqual(item.claim_target, f"enemy-shell:{zone}:{guid}")
+        self.assertEqual(item.class_path, drop["class_path"])
+        for unqualified in (None, dict(frame, epoch="c" * 32), dict(frame, shells={guid: [8, 1, 2, 99]})):
+            with self.subTest(frame=unqualified):
+                self.assertEqual(native_world_loot.nearby(
+                    game, {}, zone, enemy_frame=unqualified, enemy_rolls={guid: drop}), {})
+        self.assertEqual(native_world_loot.nearby(
+            game, {}, zone, enemy_frame=frame, enemy_rolls={guid: dict(drop, claimed_by="host")}), {})
+
     def test_refinery_profiles_bind_exact_stock_source_and_map_independently(self):
         refinery, bridge = ENCOUNTERS[REFINERY], ENCOUNTERS[DEAD_BRIDGE]
         self.assertEqual([actor.rsplit("_", 1)[1] for actor in refinery.actors], ["1", "3"])
@@ -325,6 +343,9 @@ class OrdinaryDeadBridgeLootTests(unittest.IsolatedAsyncioTestCase):
         await view.sync(bridge, self.host.last_game, "hosting", self.host.zone_epoch, private)
         bridge.command.assert_awaited_once_with(native_enemy_shells.FRAME, self.host.zone_epoch,
                                                self.host_pawn, f"{self.guid}|8|1|2|3|{self.ammo}", timeout=2)
+        await view.sync(bridge, self.host.last_game, "hosting", self.host.zone_epoch, private, present=False)
+        bridge.command.assert_awaited_with(native_enemy_shells.AUTHORITY_FRAME, self.host.zone_epoch,
+                                          self.host_pawn, f"{self.guid}|8|1|2|3|{self.ammo}", timeout=2)
         await view.sync(bridge, self.host.last_game, "hosting", self.host.zone_epoch, None)
         bridge.command.assert_awaited_with(native_enemy_shells.CLEAR, timeout=2)
         bridge.command.reset_mock()
@@ -342,11 +363,16 @@ class OrdinaryDeadBridgeLootTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.host.native_checkpoint_unsafe or self.host.stopping)
             self.assertEqual(native_enemy_loot.shell_frame(self.host), current)
             bridge.command.side_effect = None
+            self.host.last_game[native_world_loot.CAPABILITY] = 1
             bridge.command.return_value = dict(
                 self.host.last_game, native_enemy_loot_escrow=dict(self.captured, state="claimed", pawn=self.first_pawn),
             )
             claimed = await native_enemy_loot.claim(self.host, bridge, self.first, selected, "b" * 32)
             replay = await native_enemy_loot.claim(self.host, bridge, self.first, selected, "b" * 32)
+        bridge.command.assert_awaited_with(
+            native_enemy_loot.CLAIM, self.first_pawn, self.slot, self.guid, "1", "2", "3", "stock-world-focus", self.ammo,
+            timeout=7,
+        )
         self.assertEqual(claimed, replay)
         self.assertEqual(claimed["native_enemy_loot_claim"]["claimed_by"], self.first)
         self.assertIsNone(native_enemy_loot.shell_frame(self.host))

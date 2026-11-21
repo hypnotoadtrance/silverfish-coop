@@ -5,7 +5,7 @@ import math
 import os
 import time
 
-from . import native_enemy_shells, native_host_save, native_loot, party
+from . import native_enemy_shells, native_host_save, native_loot, native_world_loot, party
 from .enemy_loot_profiles import BY_ACTOR, BY_MAP, SHELLS, for_roll
 from .native_downed_markers import location
 from .native_gold import valid_guid
@@ -378,7 +378,10 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
     host.native_checkpoint_unsafe = True
     try:
         try:
-            check = (("stock-focus" if focus else "stock-exact"), roll["actor"]) if _ordinary(host, area) else ()
+            mode = "stock-exact"
+            if focus:
+                mode = "stock-world-focus" if host.last_game.get(native_world_loot.CAPABILITY) == 1 else "stock-focus"
+            check = (mode, roll["actor"]) if _ordinary(host, area) else ()
             snapshot = await bridge.command(CLAIM, pawn, frame["slot"], guid,
                                             *(str(axis) for axis in roll["position"]), *check, timeout=7)
         except RuntimeError as error:

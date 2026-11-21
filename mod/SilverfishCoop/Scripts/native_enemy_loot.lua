@@ -339,7 +339,9 @@ local function claim(state, phase, fields)
     if not cqc then host, guest = participants(state, phase) end
     local name, slot, guid = fields[3], fields[4], fields[5]
     local x, y, z = tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8])
-    local guarded = cqc and #fields == 10 and (fields[9] == "stock-focus" or fields[9] == "stock-exact")
+    local physical = fields[9] == "stock-world-focus"
+    local focused = physical or fields[9] == "stock-focus"
+    local guarded = cqc and #fields == 10 and (focused or fields[9] == "stock-exact")
     if (not guarded and (#fields ~= 8 or cqc)) or not is_slot(slot) or not is_guid(guid)
         or not finite(x) or not finite(y) or not finite(z)
         or not valid(host) or type(SilverfishClaimNativeEnemyLootEscrow) ~= "function" then
@@ -356,8 +358,8 @@ local function claim(state, phase, fields)
     if guarded and not shell_view.raw_retired(state.world, fields[10]) then
         error("native_enemy_loot_raw_actor_present", 0)
     end
-    if guarded and fields[9] == "stock-focus" then
-        local checked, visible = pcall(shell_view.clear_line, pawn, { X = x, Y = y, Z = z })
+    if guarded and focused then
+        local checked, visible = pcall(shell_view.clear_line, pawn, { X = x, Y = y, Z = z }, physical)
         if not checked or visible ~= true then error("native_enemy_loot_focus_obstructed", 0) end
     end
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")

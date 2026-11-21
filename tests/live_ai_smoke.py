@@ -458,17 +458,24 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     run, "native-enemy-loot-approach", f"{winner}|{guid}"))
                 selection, operation = guid, uuid.uuid4().hex
                 if stock_shell_input:
-                    def marked(state):
-                        marker = state.get("game", {}).get("native_enemy_shell_view", {})
-                        return (marker.get("map"), marker.get("epoch")) == (area, interaction_epoch) and guid in marker.get("markers", ())
+                    observer = "host" if winner == "guest" else "guest"
+                    accepted("bring the observer into the same loot area", await combat_action(
+                        run, "native-enemy-loot-approach", f"{observer}|{guid}"))
+                    identity = uuid.uuid5(uuid.NAMESPACE_OID, f"enemy-loot:{guid}").hex
+
+                    def projected_item(state):
+                        return state.get("game", {}).get("native_world_loot_items", {}).get(identity, {})
 
                     for local_run in (run, guest_run):
-                        await wait(local_run, marked, timeout=10)
+                        visible = await wait(local_run, lambda state: projected_item(state).get("class_path") == SHELLS, timeout=10)
+                        assert not visible["game"].get("native_enemy_shell_view"), visible["game"].get("native_enemy_shell_view")
                     selection = f"enemy-shell:{interaction_epoch}:{guid}"
+                    accepted("place the claimant in sight of the stock actor", await combat_action(
+                        run, "native-world-loot-approach", f"{winner}@{identity}"))
                     press = accepted("exercise the claimant's stock Interact", await combat_action(
-                        winner_run, "native-enemy-shell-input-fixture", selection,
-                    ))["native_enemy_shell_fixture"]
-                    assert press == {"map": area, "epoch": interaction_epoch, "guid": guid}, press
+                        winner_run, "native-world-loot-fixture", identity,
+                    ))["native_world_loot_items"][identity]
+                    assert press["map"] == area and press["sequence"] > 0, press
                     settled = await wait(run, lambda state: state.get("gameplay", {}).get(
                         "native_enemy_loot_rolls", {}).get(guid, {}).get("claimed_by") == recipient, timeout=12)
                     claimed = settled["gameplay"]["native_enemy_loot_rolls"][guid]
@@ -478,8 +485,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     )]
                     operation = event["operation_id"]
                     for local_run in (run, guest_run):
-                        await wait(local_run, lambda state: state.get("active") and not marked(state), timeout=10)
-                    proof_log["stock_shell_input"] = {"press": press, "commit": event, "both_cues_cleared": True}
+                        await wait(local_run, lambda state: state.get("active") and not projected_item(state), timeout=10)
+                    proof_log["stock_shell_input"] = {"press": press, "commit": event, "both_actors_cleared": True}
                 else:
                     claimed = accepted("claim the stock shells for the host", await combat_action(
                         run, "native-enemy-loot-claim", guid, operation_id=operation))["native_enemy_loot_claim"]

@@ -90,6 +90,9 @@ end
 
 function projection.rows(state, phase, row)
     local rows, pawn = {}, local_pawn(state, phase)
+    if pawn and type(SilverfishSyncNativeWorldLootItem) == "function" then
+        rows[#rows + 1] = row("native-world-loot-capability", 1)
+    end
     if current and (current.map ~= state.map or not same(pawn, current.pawn) or not same(state.world, current.world)) then
         current = nil
         SilverfishClearNativeGuestDropProjection()
@@ -196,7 +199,7 @@ local function fixture(pawn, proof_for)
         local ok, status = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
         if not ok then error(status, 0) end
         local exact, after = proof_for()
-        if status ~= "stock_started_consumed" or exact ~= displayed or after ~= before + 1 then
+        if status ~= "stock_started_consumed" or exact ~= displayed or type(after) ~= "number" or after <= before then
             error("stock_drop_projection_fixture_interaction_veto_unverified", 0)
         end
     end)

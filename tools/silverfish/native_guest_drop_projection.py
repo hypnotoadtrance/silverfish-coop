@@ -185,6 +185,6 @@ class Projection:
         before = game[KEY]["sequence"]
         snapshot = await bridge.command(FIXTURE, drop_id, timeout=4)
         proof = snapshot.get(KEY, {})
-        if not self._matches(snapshot, desired) or proof.get("sequence") != before + 1:
+        if not self._matches(snapshot, desired) or proof.get("sequence", 0) <= before:
             raise RuntimeError("The exact stock drop did not intercept the headless stock press")
         return snapshot

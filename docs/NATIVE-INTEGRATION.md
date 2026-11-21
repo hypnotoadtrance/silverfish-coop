@@ -186,6 +186,8 @@ A same-port restart test left one of the two Dead Bridge shell stacks unclaimed.
 
 In Refinery, the guest defeated both placed CQC troopers with the stock SG 71-A. The host claimed the separate seven- and nine-shell rolls through stock Interact. Each claim removed the cue from both views and refused a competing claim. Both defeated-enemy projections restored after reconnect, and all nine original save hashes matched.
 
+The same encounters now use the shared physical loot renderer. At Dead Bridge the host collected both stock shell stacks through Interact, one after a same-port restart. At Refinery the guest collected both stacks through Interact. In each run, both games showed the stock shell actor before pickup and removed it after the host committed the claim. The receiving inventory kept the exact stack GUID and quantity. Replays returned the original receipts, competing claims were refused, and all 15 original save hashes matched. [Physical enemy loot trial](../tests/live_ai_smoke.py)
+
 A natural CrossRoads refresh spawned five SwarmLarge Husks at the authored squad marker. After the pair moved into range, the guest saw five simulated replicas and had zero local Husk authority or AI initialization across 270 observed frames. The replicas stayed visible through a brief Direct IP reconnect. The guard also covers early client spawn calls for the three qualified Husk squads. That run recorded no local attempt to generate one of those squads.
 
 In a separate opt-in run, stock CrossRoads Antfarm spawned two host-controlled Flayers in one authored squad. The guest received two simulated replicas and the guard stopped one local saved-squad spawn. Neither replica initialized a local AI controller. Both stayed visible after reconnect.
