@@ -21,7 +21,7 @@ from tools.silverfish import native_host_save, native_loot
 from tools.silverfish.authored_container_placements import CONTAINER_PLACEMENTS
 from tools.silverfish.authored_loot import (CRATES, GUARANTEED_CRATES, GUARANTEED_REPLENISHMENT, OFFICE_DESK,
                                            OFFICE_DESK_PROFILE, SMALL_CABINET, SMALL_CABINET_PROFILE, full_name,
-                                           loot_capacity, random_lid_pitch_range, valid_lid_pitch, valid_loot_trait_calls)
+                                           loot_capacity, random_lid, valid_lid_angle, valid_loot_trait_calls, vehicle_lock)
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.travel import BLACK_MARKET, CISTERN, CITY, CROSSROADS, LAB_E206, OBSERVATORY, RAIL_YARD
 
@@ -80,6 +80,8 @@ FAMILY_SCENES = {
     "stock-weapon-crate": (BLACK_MARKET, "LootCrate_Weapon_BP_C", "LootCrate_Weapon_BP_C_1"),
     "stock-artifact-chest": ("/Game/Classes/Maps/Maps_Dungeons/Anex_01_P", "Loot_ArtifactChest_01_C", "Loot_ArtifactChest_01_C_2"),
     "stock-dumpster": (CROSSROADS, "Loot_Dumpster_BP_C", "Loot_Dumpster_BP_C_1"),
+    "stock-car-trunk": (CROSSROADS, "Loot_Car_01_BP_C", "StaticMeshActor_488"),
+    "stock-van-trunk": (CROSSROADS, "Loot_Car_02_BP_C", "StaticMeshActor_1937"),
 }
 PERMANENT_FAMILY_CRATES = {full_name(area, actor, family) for family, area, actor, _, _, _, replenish in CONTAINER_PLACEMENTS
                            if replenish == 2 or family in {"Loot_Stash_Small_BP_C", "LootCrate_Weapon_BP_C", "Loot_ArtifactChest_01_C"}}
@@ -147,7 +149,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     family = FAMILY_SCENES[name][1] if name in FAMILY_SCENES else None
     targets = [full_name(area, actor, family) for actor in actors]
     permanent = name in GUARANTEED_SCENES or cabinet or desk or all(crate in PERMANENT_FAMILY_CRATES for crate in targets)
-    random_lids = {crate for crate in targets if random_lid_pitch_range(crate)}
+    random_lids = {crate: lid for crate in targets if (lid := random_lid(crate))}
     verify_restore = permanent or bool(random_lids)
     assert all(CRATES.get(crate) == area for crate in targets)
     if name in GUARANTEED_SCENES:
@@ -204,10 +206,14 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     def public_roll(status, crate):
         return status.get("gameplay", {}).get(native_loot.STATE_KEY, {}).get(crate)
 
-    def lid_matches(status, crate, pitch):
+    def lid_matches(status, crate, angle):
         row = status.get("game", {}).get("native_loot_crates", {}).get(crate, {})
-        actual = row.get("lid_pitch")
-        return row.get("state") == "exhausted" and valid_lid_pitch(crate, actual) and abs(actual - pitch) < .05
+        lid = random_lids[crate]
+        actual = row.get(lid[0])
+        return row.get("state") == "exhausted" and valid_lid_angle(lid, actual) and abs(actual - angle) < .05
+
+    def lock_status(state, crate):
+        return state.get("game", {}).get(native_loot.VEHICLE_LOCKS, {}).get(crate)
 
     def saved_checkpoint():
         saved = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
@@ -318,9 +324,26 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             evidence["stock_persistent_flags_before"] = initial
 
         for position, crate in enumerate(targets):
+            pried = False
             await command("action", *host, "native-loot-approach", "--target", crate)
             if family:
                 await command("action", *host, "native-loot-approach", "--target", f"host@{crate}")
+            if vehicle_lock(crate, area):
+                lock = lock_status(bound, crate)
+                assert type(lock) is bool, bound["game"].get(native_loot.VEHICLE_LOCKS)
+                await wait(guest_run, lambda state: lock_status(state, crate) is lock)
+                evidence["stock_vehicle_initial_locked"] = lock
+                if lock:
+                    press = (await command("action", *guest, "native-loot-crate-fixture", "--target", crate))["native_loot_crate_interaction"]
+                    await wait(guest_run, lambda _: stock_input_result(guest_run, crate, press["sequence"]) is not None)
+                    denied = stock_input_result(guest_run, crate, press["sequence"])
+                    assert denied["event"] == "native_stock_crate_interaction_rejected" and denied["reason"] == "stock_vehicle_locked", denied
+                    assert not public_roll(await wait(run, lambda state: lock_status(state, crate) is True), crate)
+                    await command("action", *host, "native-loot-vehicle-pry-fixture", "--target", crate)
+                    for directory in (run, guest_run):
+                        await wait(directory, lambda state: lock_status(state, crate) is False)
+                    evidence["stock_vehicle_pry_unlock"] = {"locked_press": denied["reason"], "both_unlocked": True}
+                    pried = True
             forced = None
             if force_stock_roll:
                 operation = uuid.uuid4().hex
@@ -332,6 +355,8 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                     area, crate, authority_pawn, "open", native_loot.FORCED_ROLL_STATUS), pressed
                 assert (pressed["item_count"], pressed["trait_calls"], pressed["invoked"], pressed["looted"],
                         pressed["ok"]) == (len(forced["items"]), 3, True, True, True), pressed
+            elif pried:
+                pressed = {"entry": "pried", "pawn": opening["game"]["pawns"]["local"]["name"], "crate": crate, "map": area}
             else:
                 pressed = (await command("action", *guest, "native-loot-crate-fixture", "--target", crate))["native_loot_crate_interaction"]
                 assert (pressed["map"], pressed["crate"], pressed["entry"], pressed["pawn"]) == (area, crate, "fixture", pawn), pressed
@@ -343,11 +368,17 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             committed = await wait(run, lambda state: public_roll(state, crate) and status_of(state, crate) == "exhausted")
             replicated = await wait(guest_run, lambda state: public_roll(state, crate) and status_of(state, crate) == "exhausted")
             roll = public_roll(committed, crate)
-            assert public_roll(replicated, crate) == roll and roll["opener"] == character, roll
+            assert public_roll(replicated, crate) == roll and roll["opener"] == ("host" if pried else character), roll
+            if pried:
+                host_events = [json.loads(line) for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+                assert any(event.get("event") == "native_stock_crate_interaction" and event.get("entry") == "pried"
+                           and event.get("operation_id") == roll["id"] for event in host_events)
             if crate in random_lids:
-                await wait(run, lambda state: lid_matches(state, crate, roll["lid_pitch"]))
-                await wait(guest_run, lambda state: lid_matches(state, crate, roll["lid_pitch"]))
-            assert roll["lucky_looter"], roll
+                angle = roll[random_lids[crate][0]]
+                await wait(run, lambda state: lid_matches(state, crate, angle))
+                await wait(guest_run, lambda state: lid_matches(state, crate, angle))
+            if not pried:
+                assert roll["lucky_looter"], roll
             if desk:
                 assert roll["trait_calls"] == 0 and len(roll["items"]) <= 4, roll
                 assert all(status_of(committed, sibling) != "exhausted" and status_of(replicated, sibling) != "exhausted"
@@ -468,9 +499,12 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                 for crate, entry in zip(targets, rolls):
                     assert public_roll(resumed, crate) == public_roll(peer, crate) == entry["roll"], entry
                     if crate in random_lids:
-                        pitch = entry["roll"]["lid_pitch"]
-                        assert lid_matches(resumed, crate, pitch) and lid_matches(peer, crate, pitch)
-                        evidence["saved_lid_pitch_restart"] = pitch
+                        field = random_lids[crate][0]
+                        angle = entry["roll"][field]
+                        assert lid_matches(resumed, crate, angle) and lid_matches(peer, crate, angle)
+                        evidence[f"saved_{field}_restart"] = angle
+                    if vehicle_lock(crate, area):
+                        assert lock_status(resumed, crate) is False and lock_status(peer, crate) is False
                     item = entry["typed_guest_item"]
                     if item:
                         restored = await typed_inventory_item(character, item["guid"])

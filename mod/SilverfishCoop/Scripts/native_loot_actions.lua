@@ -83,7 +83,8 @@ function actions.command(fields, state, phase)
     end
     local pawn, crate = fields[3], fields[4]
     local fixture_nonempty = action == "open" and fields[6] == "fixture-nonempty"
-    local count = action == "open" and (fixture_nonempty and 6 or 5) or action == "claim" and 6 or 4
+    local pried = action == "open" and fields[6] == "stock-vehicle-pried"
+    local count = action == "open" and ((fixture_nonempty or pried) and 6 or 5) or action == "claim" and 6 or 4
     local positioned_claim = action == "claim" and #fields == 9
     if positioned_claim then count = 9 end
     if not enabled or phase ~= "hosting" or #fields ~= count or not crate or not loot.profile(state.map, crate) then
@@ -127,7 +128,7 @@ function actions.command(fields, state, phase)
         return "stock loot claim reported"
     end
     local inspect = action == "approach" and loot.approach_fixture or loot.qualify
-    local qualified, scope = pcall(inspect, state, phase, pawn, crate, action == "inspect" or action == "seed")
+    local qualified, scope = pcall(inspect, state, phase, pawn, crate, action == "inspect" or action == "seed" or pried)
     if not qualified then
         result.status = tostring(scope)
         return "stock loot unavailable"
@@ -160,10 +161,10 @@ function actions.command(fields, state, phase)
         result.status = "native_loot_crate_hook_unavailable"
         return "stock loot hook unavailable"
     end
-    local fixture_args = fixture_nonempty and { true } or {}
+    local open_args = pried and {false, true} or fixture_nonempty and {true} or {}
     local reply = table.pack(SilverfishOpenNativeLootCrate(
         scope.crate:GetAddress(), scope.pawn:GetAddress(), scope.box:GetAddress(),
-        scope.save:GetAddress(), scope.stock:GetAddress(), scope.lucky_looter, table.unpack(fixture_args)))
+        scope.save:GetAddress(), scope.stock:GetAddress(), scope.lucky_looter, table.unpack(open_args)))
     result.ok, result.status, result.looted, result.calls, result.invoked = reply[1], reply[2], reply[3], reply[6], reply[7]
     if result.ok then
         local outputs = {}

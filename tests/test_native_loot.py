@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, call
 
 from tools.silverfish import native_host_save, native_loot, party, runtime
 from tools.silverfish.authored_loot import (CRATES, LEGACY_CRATE, OFFICE_DESK, PLACEMENTS, OVERRIDDEN_PLACEMENTS,
-                                           SMALL_CABINET, full_name, loot_capacity, random_lid_pitch_range)
+                                           SMALL_CABINET, full_name, loot_capacity, random_lid)
 from tools.silverfish.campaign import CampaignFormatError
 from tools.silverfish.generate_authored_loot_registry import outputs, survey
 from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, OBSERVATORY, RAIL_YARD
@@ -429,28 +429,44 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         game = self.game(CROSSROADS, native_loot_crates=states)
         rolls = {crate: self.roll(area, crate, f"{index:032x}")
                  for index, (crate, area) in enumerate(native_loot.CRATES.items(), start=1)}
-        lids = {crate: sum(limits) / 2 for crate in rolls if (limits := random_lid_pitch_range(crate))}
-        for crate, pitch in lids.items():
-            rolls[crate]["lid_pitch"] = pitch
-            states[crate].update(state="exhausted", lid_pitch=pitch + 1)
+        lids = {crate: (lid[0], (lid[1] + lid[2]) / 2) for crate in rolls if (lid := random_lid(crate))}
+        for crate, (field, angle) in lids.items():
+            rolls[crate][field] = angle
+            states[crate].update(state="exhausted", **{field: angle + 1})
 
         async def project(_verb, status, crate, *pose, timeout):
             states[crate] = dict(states[crate], state=status)
             if pose:
-                states[crate]["lid_pitch"] = float(pose[0])
+                states[crate][lids[crate][0]] = float(pose[0])
             return self.game(CROSSROADS, native_loot_crates=dict(states))
 
         bridge = SimpleNamespace(command=AsyncMock(side_effect=project))
         final = await native_loot.project_opened(bridge, game, rolls)
         local_crates = [crate for crate, area in native_loot.CRATES.items() if area == CROSSROADS]
         self.assertEqual(bridge.command.await_args_list, [
-            call("native-loot-crate-project", "exhausted", crate, *((str(lids[crate]),) if crate in lids else ()), timeout=4)
+            call("native-loot-crate-project", "exhausted", crate, *((str(lids[crate][1]),) if crate in lids else ()), timeout=4)
             for crate in local_crates
         ])
         self.assertTrue(all(final["native_loot_crates"][crate]["state"] == "exhausted" for crate in local_crates))
-        self.assertTrue(all(final["native_loot_crates"][crate]["lid_pitch"] == lids[crate]
+        self.assertTrue(all(final["native_loot_crates"][crate][lids[crate][0]] == lids[crate][1]
                             for crate in local_crates if crate in lids))
         self.assertEqual(final["native_loot_crates"][BRIDGE_CRATE]["state"], "ready")
+
+    async def test_vehicle_lock_projection_applies_host_state_to_the_exact_active_vehicle(self):
+        car = full_name(CROSSROADS, "StaticMeshActor_488", "Loot_Car_01_BP_C")
+        van = full_name(CROSSROADS, "StaticMeshActor_1937", "Loot_Car_02_BP_C")
+        key = native_loot.VEHICLE_LOCKS
+        observed = {car: True, van: False, OTHER_CRATE: False}
+        game = {"state": "connected", "map": CROSSROADS, key: observed}
+        projected = {**game, key: {**observed, car: False}}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=projected))
+        host = {car: False, van: False, OTHER_CRATE: True}
+
+        self.assertEqual(await native_loot.project_vehicle_locks(bridge, game, host), projected)
+        bridge.command.assert_awaited_once_with("native-loot-vehicle-locks", CROSSROADS, car, "0", timeout=4)
+        bridge.command.return_value = game
+        with self.assertRaisesRegex(RuntimeError, "vehicle locks did not match"):
+            await native_loot.project_vehicle_locks(bridge, game, host)
 
     async def test_view_claim_follows_rendered_crate_even_when_another_is_nearer(self):
         rolls = {crate: self.roll(CROSSROADS, crate, str(index) * 32)

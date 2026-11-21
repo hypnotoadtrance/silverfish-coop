@@ -48,7 +48,8 @@ from . import native_host_dig, native_host_dig_live, native_package_handoff_jour
 from . import native_title_entry
 from .native_host_landmine import parse as parse_host_landmine
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
-from .authored_loot import CRATES as AUTHORED_CRATES, LEGACY_CRATE, loot_capacity, valid_item_transform, valid_lid_pitch
+from .authored_loot import (CRATES as AUTHORED_CRATES, LEGACY_CRATE, loot_capacity, random_lid,
+                            valid_item_transform, valid_lid_angle, vehicle_lock)
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
 from .native_quest_catalog import parse as parse_quest_catalog
 from .native_roster import Assignment
@@ -1803,13 +1804,16 @@ class Bridge:
                       and AUTHORED_CRATES.get(fields[2]) == fields[1] and fields[3] in ("ready", "exhausted")):
                     row = {"map": fields[1], "crate": fields[2], "state": fields[3]}
                     if len(fields) == 5:
-                        pitch = _finite(fields[4])
-                        if fields[3] != "exhausted" or pitch is None or not valid_lid_pitch(fields[2], pitch):
+                        angle, lid = _finite(fields[4]), random_lid(fields[2])
+                        if fields[3] != "exhausted" or not lid or not valid_lid_angle(lid, angle):
                             raise ValueError("Invalid stock lid pose")
-                        row["lid_pitch"] = pitch
+                        row[lid[0]] = angle
                     data.setdefault("native_loot_crates", {})[fields[2]] = row
                     if fields[2] == LEGACY_CRATE:
                         data["native_loot_crate_input"] = row
+                elif (fields[0] == "native-loot-vehicle-lock" and len(fields) == 4
+                      and vehicle_lock(fields[2], fields[1]) and fields[3] in {"0", "1"}):
+                    data.setdefault("native_loot_vehicle_locks", {})[fields[2]] = fields[3] == "1"
                 elif (fields[0] == "native-loot-crate-diagnostic" and len(fields) == 10
                       and AUTHORED_CRATES.get(fields[2]) == fields[1]):
                     row = {"map": fields[1], "crate": fields[2], "phase": fields[3],

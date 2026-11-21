@@ -6,8 +6,8 @@ import time
 import uuid
 
 from . import native_host_save, party
-from .authored_loot import (CRATES, LEGACY_CRATE, loot_capacity, random_lid_pitch_range, valid_item_transform,
-                            valid_lid_pitch, valid_loot_trait_calls)
+from .authored_loot import (CRATES, LEGACY_CRATE, loot_capacity, random_lid, valid_item_transform,
+                            valid_lid_angle, valid_loot_trait_calls, vehicle_lock)
 from .native_gold import valid_guid
 
 
@@ -15,6 +15,7 @@ CRATE = LEGACY_CRATE
 STATE_KEY = "native_loot_rolls"
 RETIRED = "native_loot_retired_rolls"
 REPLENISHED = "native_replenished_crates"
+VEHICLE_LOCKS = "native_loot_vehicle_locks"
 PLACEMENT = "native-loot-placement"
 PLACEMENT_KEY = "native_loot_placement"
 FORCED_ROLL_STATUS = "opened_fixture_seeded"
@@ -43,7 +44,8 @@ def interaction(game: dict, last_sequence: int) -> tuple[int, str] | None:
     if (isinstance(crate, str) and crate in CRATES and CRATES[crate] == area and pawn
             and type(sequence) is int and last_sequence < sequence < 2**53
             and (proof.get("map"), proof.get("pawn")) == (area, pawn)
-            and proof.get("entry") in ("stock", "fixture")):
+            and (proof.get("entry") in ("stock", "fixture") or (proof.get("entry") == "pried"
+                 and game.get("state") == "hosting" and vehicle_lock(crate, area)))):
         return sequence, crate
 
 
@@ -149,51 +151,70 @@ async def project_opened(bridge, game: dict, rolls: dict) -> dict:
         scope = game.get("native_loot_crates", {}).get(crate, {})
         if (scope.get("map"), scope.get("crate")) != (area, crate) or scope.get("state") not in {"ready", "exhausted"}:
             continue
-        pitch = roll.get("lid_pitch")
-        if not valid_lid_pitch(crate, pitch):
+        lid = random_lid(crate)
+        angle = roll.get(lid[0]) if lid else None
+        if lid and not valid_lid_angle(lid, angle):
             raise RuntimeError("The committed stock lid pose is invalid")
-        if scope.get("state") == "exhausted" and (pitch is None or _same_lid_pitch(crate, scope.get("lid_pitch"), pitch)):
+        if scope.get("state") == "exhausted" and (not lid or _same_lid_angle(lid, scope, angle)):
             continue
-        arguments = (str(pitch),) if pitch is not None else ()
+        arguments = (str(angle),) if lid else ()
         snapshot = await bridge.command("native-loot-crate-project", "exhausted", crate, *arguments, timeout=4)
         proof = snapshot.get("native_loot_crates", {}).get(crate, {})
         if (snapshot.get("map") != area or (proof.get("map"), proof.get("crate"), proof.get("state")) !=
-                (area, crate, "exhausted") or (pitch is not None and not _same_lid_pitch(crate, proof.get("lid_pitch"), pitch))):
+                (area, crate, "exhausted") or (lid and not _same_lid_angle(lid, proof, angle))):
             raise RuntimeError("The exact stock crate did not reflect its committed roll")
         game = snapshot
     return game
 
 
-def _same_lid_pitch(crate, observed, expected):
-    return observed is not None and valid_lid_pitch(crate, observed) and abs(observed - expected) < .05
+def _same_lid_angle(lid, row, expected):
+    observed = row.get(lid[0])
+    return valid_lid_angle(lid, observed) and abs(observed - expected) < .05
 
 
-async def _settled_native_lid(bridge, opening, crate):
+async def _settled_native_lid(bridge, opening, crate, lid):
     area, sequence = opening["map"], opening["sequence"]
     owner = opening.get("pawns", {}).get("local", {}).get("name")
-    stable_pitch, stable_since = None, 0.0
+    stable_angle, stable_since = None, 0.0
 
     def settled(snapshot):
-        nonlocal sequence, stable_pitch, stable_since
+        nonlocal sequence, stable_angle, stable_since
         if (snapshot.get("state"), snapshot.get("map"), snapshot.get("pawns", {}).get("local", {}).get("name")) != (
                 "hosting", area, owner) or snapshot.get("sequence", 0) <= sequence:
             return False
         sequence = snapshot["sequence"]
         row = snapshot.get("native_loot_crates", {}).get(crate, {})
-        pitch = row.get("lid_pitch")
+        angle = row.get(lid[0])
         if ((row.get("map"), row.get("crate"), row.get("state")) != (area, crate, "exhausted")
-                or not valid_lid_pitch(crate, pitch)):
-            stable_pitch = None
+                or not valid_lid_angle(lid, angle)):
+            stable_angle = None
             return False
         now = time.monotonic()
-        if stable_pitch is None or abs(stable_pitch - pitch) >= .002:
-            stable_pitch, stable_since = pitch, now
+        if stable_angle is None or abs(stable_angle - angle) >= .002:
+            stable_angle, stable_since = angle, now
             return False
         return now - stable_since >= .25
 
     # The original MoveComponentTo action keeps ticking on the host game thread.
     # Wait for new status frames showing its settled lid before committing the roll.
     return await bridge.wait_for(settled, timeout=4)
+
+
+async def project_vehicle_locks(bridge, game, locks):
+    area = game.get("map")
+    observed = game.get(VEHICLE_LOCKS, {})
+    if not isinstance(locks, dict) or game.get("state") != "connected":
+        return game
+    missing = [(crate, value) for crate, value in locks.items() if crate in observed and vehicle_lock(crate, area)
+               and type(value) is bool and value != observed[crate]]
+    for offset in range(0, len(missing), 32):
+        batch = missing[offset:offset + 32]
+        args = tuple(part for crate, value in batch for part in (crate, str(int(value))))
+        game = await bridge.command("native-loot-vehicle-locks", area, *args, timeout=4)
+        readback = game.get(VEHICLE_LOCKS, {})
+        if (game.get("state"), game.get("map")) != ("connected", area) or any(readback.get(key) is not value for key, value in batch):
+            raise RuntimeError("The guest vehicle locks did not match the host")
+    return game
 
 
 class LootView:
@@ -316,7 +337,7 @@ def _verified_cash_credit(proof: dict, item: dict, balance: int | None) -> dict:
 
 
 async def perform(host, bridge, character: str, action: str, target: str, operation_id: str, *,
-                  fixture_nonempty: bool = False) -> dict:
+                  fixture_nonempty: bool = False, pried: bool = False) -> dict:
     area = host.last_game.get("map")
     if (not host.native_zones or not (host.fixtures or host.native_loot_input) or host.native_profile is None
             or host.stopping or host.transitioning or host.native_checkpoint_unsafe
@@ -352,6 +373,8 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             crate, = matches
     if not isinstance(crate, str) or crate not in CRATES or CRATES[crate] != area:
         raise party.RuleError("native_loot_requires_exact_crate_and_operation")
+    if pried and (action != "open" or character != "host" or fixture_nonempty or not vehicle_lock(crate, area)):
+        raise party.RuleError("native_loot_pry_receipt_unavailable")
     retired = host.party.get(RETIRED, {})
     if action == "open" and operation_id in retired:
         raise party.RuleError("native_loot_roll_replenished" if retired[operation_id] == crate else "operation_id_conflict")
@@ -387,7 +410,11 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
         if (transform := item.get("transform")) is not None:
             arguments += tuple(str(axis) for axis in transform["position"])
     elif action == "open":
-        arguments = (native_host_save.new_slot(), *(("fixture-nonempty",) if fixture_nonempty else ()))
+        arguments = (native_host_save.new_slot(),)
+        if fixture_nonempty:
+            arguments += ("fixture-nonempty",)
+        elif pried:
+            arguments += ("stock-vehicle-pried",)
     mutates = action in ("open", "seed", "claim")
     if mutates:
         host.native_checkpoint_unsafe = True
@@ -423,9 +450,9 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             roll = {"id": operation_id, "map": area, "crate": crate, "opener": character,
                     "lucky_looter": proof["lucky_looter"], "trait_source": proof["trait_source"],
                     "trait_calls": proof["trait_calls"], "items": items, "escrow": frame}
-            if random_lid_pitch_range(crate):
-                settled = await _settled_native_lid(bridge, snapshot, crate)
-                roll["lid_pitch"] = settled["native_loot_crates"][crate]["lid_pitch"]
+            if lid := random_lid(crate):
+                settled = await _settled_native_lid(bridge, snapshot, crate, lid)
+                roll[lid[0]] = settled["native_loot_crates"][crate][lid[0]]
                 host.last_game, host.last_seen = settled, time.monotonic()
             candidate = party.load_party(host.party)
             candidate.setdefault(STATE_KEY, {})[crate] = roll

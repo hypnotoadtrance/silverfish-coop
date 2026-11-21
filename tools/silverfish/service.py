@@ -781,6 +781,8 @@ class Host:
         view["native_quests"] = self.party.get("native_quests", {})
         if rolls := native_loot.published(self.party.get(native_loot.STATE_KEY, {}), area, game=self.last_game):
             view[native_loot.STATE_KEY] = rolls
+        if locks := self.last_game.get(native_loot.VEHICLE_LOCKS):
+            view[native_loot.VEHICLE_LOCKS] = locks
         if rolls := self.party.get(native_enemy_loot.STATE_KEY):
             view[native_enemy_loot.STATE_KEY] = native_enemy_loot.published(rolls)
             if frame := native_enemy_loot.shell_frame(self):
@@ -2763,6 +2765,15 @@ class Host:
                         raise RuntimeError("Stock daily loot update did not verify")
                     self.last_game, self.last_seen = snapshot, time.monotonic()
                     result = {"native_loot_replenishment_fixture": proof}
+                elif action == "native-loot-vehicle-pry-fixture" and self.native_loot_input and self.fixtures:
+                    crate = request.get("target")
+                    if not isinstance(crate, str) or self.last_game.get(native_loot.VEHICLE_LOCKS, {}).get(crate) is not True:
+                        raise party.RuleError("Select a locked stock vehicle on the current map")
+                    snapshot = await bridge.command(action, crate, timeout=5)
+                    if snapshot.get(native_loot.VEHICLE_LOCKS, {}).get(crate) is not False:
+                        raise RuntimeError("The stock vehicle pry did not unlock the exact trunk")
+                    self.last_game, self.last_seen = snapshot, time.monotonic()
+                    result = {native_loot.VEHICLE_LOCKS: {crate: False}}
                 elif action in ("native-quest-catalog", "native-quest-list"):
                     catalog = await self.read_quest_catalog(bridge)
                     result = {"native_quest_catalog": catalog} if action == "native-quest-catalog" else {
@@ -3533,9 +3544,10 @@ class Host:
                 sequence, crate = intent
                 self.last_crate_intent = sequence
                 operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.control.generation}:{self.zone_epoch}:host-crate:{sequence}:{crate}").hex
+                entry = self.last_game["native_loot_crate_interaction"]["entry"]
                 try:
-                    await native_loot.perform(self, bridge, "host", "open", crate, operation)
-                    self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, crate=crate)
+                    await native_loot.perform(self, bridge, "host", "open", crate, operation, pried=entry == "pried")
+                    self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, crate=crate, entry=entry)
                 except (OSError, ValueError, RuntimeError) as error:
                     self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, crate=crate, reason=str(error))
             await self.stock_drop_input.poll(self, bridge)
@@ -4870,6 +4882,8 @@ class Client:
                     await native_subway_valve.project_client(self)
                     await native_enemy_loot.project_client(self)
                     if self.invite.get("native_loot_input"):
+                        self.last_game = await native_loot.project_vehicle_locks(
+                            self.bridge, self.last_game, self.gameplay.get(native_loot.VEHICLE_LOCKS))
                         self.last_game = await native_loot.project_opened(
                             self.bridge, self.last_game, self.gameplay.get(native_loot.STATE_KEY, {}))
                 await self.project_world_view()

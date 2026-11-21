@@ -238,6 +238,7 @@ namespace
         bool host{};
         Clock::time_point expires{}, receipt{};
         std::uint64_t observed{};
+        bool pried{};
     };
     std::array<Scope, profiles.size()> scopes;
     std::uint64_t sequence{};
@@ -292,9 +293,23 @@ namespace
         if (script)
         {
             auto* entry = parameter<U::FIntProperty>(method, STR("EntryPoint"), 0);
-            if (stock_function(crate, method, 1, sizeof(std::int32_t)) && entry &&
-                entry->GetPropertyValueInContainer(args) == profile->stock_class->input_entry &&
-                !silverfish::shared_loot::permits_stock_script(crate, method)) call.PreventOriginalFunctionCall();
+            if (!stock_function(crate, method, 1, sizeof(std::int32_t)) || !entry ||
+                silverfish::shared_loot::permits_stock_script(crate, method)) return;
+            const auto point = entry->GetPropertyValueInContainer(args);
+            if (profile->stock_class->keyless_lock && point == silverfish::authored_loot::vehicle_pry_entry)
+            {
+                // The stock pry delay ends in this independent roll entry.
+                // Capture it for the host before any stock items can spawn.
+                call.PreventOriginalFunctionCall();
+                if (call.OriginalFunctionCallPrevented() && scoped && local.host && sequence < max_sequence &&
+                    boolean(crate, STR("Locked"), false) && boolean(crate, STR("Looted"), false))
+                {
+                    active->observed = ++sequence;
+                    active->receipt = now + receipt_lifetime;
+                    active->pried = true;
+                }
+            }
+            else if (point == profile->stock_class->input_entry) call.PreventOriginalFunctionCall();
             return;
         }
         auto* player = parameter<U::FObjectProperty>(method, STR("Player"), 0);
@@ -315,6 +330,9 @@ namespace
             !in_reach(pawn, hit)) return;
         active->observed = ++sequence;
         active->receipt = now + receipt_lifetime;
+        active->pried = false;
+        if (!local.host && profile->stock_class->keyless_lock)
+            silverfish::shared_loot::jiggle_vehicle_lock(crate);
     }
 
     int set_scope(const Lua& lua)
@@ -375,10 +393,12 @@ namespace
         const bool active = world && now < scope->expires && same_scope(*scope, crate, local_owner(world));
         const auto box = active ? presentation_box(crate) : PresentationBox{};
         lua.set_bool(active);
-        lua.set_integer(active && now < scope->receipt ? static_cast<std::int64_t>(scope->observed) : 0);
+        const bool observed = active && now < scope->receipt && scope->observed;
+        lua.set_integer(observed ? static_cast<std::int64_t>(scope->observed) : 0);
         lua.set_string(box.state);
         lua.set_integer(reinterpret_cast<std::intptr_t>(box.box));
-        return 4;
+        lua.set_bool(observed && scope->pried);
+        return 5;
     }
 
     int clear(const Lua&)
@@ -390,6 +410,19 @@ namespace
 
 namespace silverfish::native_loot_crate_input
 {
+    bool consume_vehicle_pry(U::UObject* crate, U::UObject* pawn)
+    {
+        if (!ready()) return false;
+        const auto now = Clock::now();
+        const auto scope = std::ranges::find_if(scopes, [&](const Scope& candidate) {
+            return candidate.crate.Get() == crate && candidate.pawn.Get() == pawn && candidate.host &&
+                candidate.pried && candidate.observed && now < candidate.receipt && now < candidate.expires;
+        });
+        if (scope == scopes.end()) return false;
+        scope->observed = 0;
+        scope->pried = false;
+        return true;
+    }
     void install_hooks()
     {
         if (!enabled() || installed.load(std::memory_order_acquire)) return;

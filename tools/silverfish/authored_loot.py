@@ -2,8 +2,8 @@
 
 import math
 
-from .authored_container_placements import (CLASS_CAPACITIES, CONTAINER_PLACEMENTS, MIXED_GUARANTEE_CLASSES,
-                                            RANDOM_LID_PITCH_CLASSES)
+from .authored_container_placements import (CLASS_CAPACITIES, CONTAINER_PLACEMENTS, KEYLESS_LOCK_CLASSES,
+                                            MIXED_GUARANTEE_CLASSES, RANDOM_LID_CLASSES)
 from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, RAIL_YARD
 
 
@@ -534,15 +534,16 @@ def valid_loot_trait_calls(container: str, calls: object) -> bool:
     return 1 <= calls <= 1 + loot_capacity(container)
 
 
-def random_lid_pitch_range(container: str) -> tuple[int, int] | None:
-    return RANDOM_LID_PITCH_CLASSES.get(container.partition(" ")[0])
+def random_lid(container: str) -> tuple[str, int, int] | None:
+    return RANDOM_LID_CLASSES.get(container.partition(" ")[0])
 
 
-def valid_lid_pitch(container: str, pitch: object) -> bool:
-    limits = random_lid_pitch_range(container)
-    if limits is None:
-        return pitch is None
-    return type(pitch) in (int, float) and limits[0] <= pitch <= limits[1]
+def valid_lid_angle(lid: tuple[str, int, int], angle: object) -> bool:
+    return type(angle) in (int, float) and lid[1] <= angle <= lid[2]
+
+
+def vehicle_lock(container: str, area: str | None) -> bool:
+    return area is not None and CRATES.get(container) == area and container.partition(" ")[0] in KEYLESS_LOCK_CLASSES
 
 
 def valid_item_transform(transform: object) -> bool:

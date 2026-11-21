@@ -105,7 +105,7 @@ assert(door.RelativeLocation.Y == 23 and second_door.RelativeLocation.Y == 23 an
 print("A cabinet with fixed door locations projects the full stock pose")
 
 profile.small_cabinet, profile.door_locations = nil, nil
-profile.random_pitch, profile.lid_ignores_channel = {95, 105}, 5
+profile.random_lid, profile.lid_ignores_channel = {"Pitch", 95, 105}, 5
 crate.Looted, query_collision = false, 1
 door.RelativeRotation = {Pitch = 0, Yaw = 0, Roll = 0}
 local response = 2

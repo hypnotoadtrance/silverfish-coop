@@ -63,8 +63,9 @@ class ContainerFamily:
     named_spawners: tuple[str, ...] = ()
     rolls: tuple[str, ...] = (STOCK_ROLL,)
     weapon_first: bool = False
-    random_pitch: tuple[int, int] | None = None
+    random_lid: tuple[str, int, int] | None = None
     lid_ignores_channel: int | None = None
+    keyless_lock: bool = False
 
     def spawner_names(self):
         return self.named_spawners or ("Loot_Spawner", *(f"Loot_Spawner{i}" for i in range(1, self.slots)))
@@ -75,7 +76,7 @@ class ContainerFamily:
         for index, rotation in enumerate(angles):
             name = f"SM_Prop_Cabinet_Small_Door_0{index + 1}"
             location = self.door_locations[index] if self.door_locations else f"{name}.RelativeLocation"
-            target = "CallFunc_MakeRotator_ReturnValue" if self.random_pitch else rotation
+            target = "CallFunc_MakeRotator_ReturnValue" if self.random_lid else rotation
             calls.append(f"MoveComponentTo({name},{location},{target},")
         return calls
 
@@ -126,8 +127,12 @@ CONTAINER_FAMILIES = {
     "Loot_ArtifactChest_01_C": ContainerFamily("artifact_chest", 0x36C, slots=1, guaranteed=True,
         replenish=PERMANENT_REPLENISHMENT, open_roll=0, open_pitch=100, named_spawners=("Loot_Spawner1",),
         rolls=("CallFunc_Array_Get_Item.SpawnLoot(Loot Table_Items,1,0,GuaranteeSpawn,Seeded,False,True,True,False,CallFunc_SpawnLoot_Object)",)),
-    "Loot_Dumpster_BP_C": ContainerFamily("dumpster", 0x450, slots=6, random_pitch=(95, 105), lid_ignores_channel=5,
+    "Loot_Dumpster_BP_C": ContainerFamily("dumpster", 0x450, slots=6, random_lid=("Pitch", 95, 105), lid_ignores_channel=5,
         prop_components=("DFX_Flies", "SM_Prop_TrashSkip_01"), rolls=(STOCK_ROLL.replace("0.5,", "1,"),)),
+    "Loot_Car_01_BP_C": ContainerFamily("car_01", 0x8CC, slots=2, random_lid=("Roll", 85, 93), keyless_lock=True,
+        prop_components=("Arrow_Latch", "Timeline"), named_spawners=("Loot_Spawner", "Loot_Spawner2")),
+    "Loot_Car_02_BP_C": ContainerFamily("car_02", 0x8DE, slots=3, random_lid=("Roll", 85, 91), keyless_lock=True,
+        prop_components=("Arrow_Latch", "Timeline"), named_spawners=("Loot_Spawner3", "Loot_Spawner1", "Loot_Spawner2")),
 }
 
 
@@ -206,9 +211,16 @@ def family_placements(audit):
             if (observed != {", ".join(slots) for slots in slot_loops}
                     or "DynamicCast(ClassPtr=Weapon_Master_BP_C, Target=CallFunc_SpawnLoot_Object, RawValue=-)" not in calls):
                 raise ValueError(f"Cooked weapon and fallback spawners changed: {family}")
-        if spec.random_pitch and ("RandomFloatInRange(" + ",".join(map(str, spec.random_pitch)) + ")" not in calls
-                                  or "MakeRotator(0,CallFunc_MakeRotator_Pitch_ImplicitCast,0)" not in calls):
-            raise ValueError(f"Cooked random lid rotation changed: {family}")
+        if spec.random_lid:
+            axis, low, high = spec.random_lid
+            target = f"CallFunc_MakeRotator_{axis}_ImplicitCast"
+            rotation = f"{target},0,0" if axis == "Roll" else f"0,{target},0"
+            if f"RandomFloatInRange({low},{high})" not in calls or f"MakeRotator({rotation})" not in calls:
+                raise ValueError(f"Cooked random lid rotation changed: {family}")
+        if spec.keyless_lock and (actor.get("KeyItem") not in (None, "-") or "Jiggle_Locked()" not in calls or not any(
+                call.startswith("Delay(Self,0.8,StructConst(Struct=LatentActionInfo, StructSize=32, RawValue=[SkipOffsetConst(RawValue=0xF),")
+                for call in calls)):
+            raise ValueError(f"Cooked stock vehicle lock or pry continuation changed: {family}")
         if (spec.lid_ignores_channel is not None and
                 f"SM_Prop_Cabinet_Small_Door_01.SetCollisionResponseToChannel(Byte({spec.lid_ignores_channel}),Byte(0))" not in calls):
             raise ValueError(f"Cooked lid collision response changed: {family}")
@@ -232,7 +244,8 @@ def family_placements(audit):
             required["SM_Prop_Cabinet_Small_Door_02"] = "SM_Prop_Cabinet_Small_Door_02"
         if any(fields.get(key) != value for key, value in required.items()):
             continue
-        tunable = {"ContainerExpectedValue", "Seeded"} if spec.weapon_first else set()
+        tunable = ({"ContainerExpectedValue", "Seeded"} if spec.weapon_first else
+                   {"Material"} if spec.keyless_lock else set())
         if fields.keys() - required.keys() - SAVE_FIELDS - BOX_GEOMETRY_FIELDS - tunable:
             continue
         if spec.weapon_first and (not re.fullmatch(r"[0-9]{1,9}", fields.get("ContainerExpectedValue", "0"))
@@ -268,11 +281,16 @@ def family_catalog(profiles):
     for family, spec in CONTAINER_FAMILIES.items():
         if spec.weapon_first and CRATE_FALLBACK_ROLL in spec.rolls:
             lines.append(f"    {family!r},")
-    lines.extend(("})", "", "RANDOM_LID_PITCH_CLASSES = {"))
+    lines.extend(("})", "", "RANDOM_LID_CLASSES = {"))
     for family, spec in CONTAINER_FAMILIES.items():
-        if spec.random_pitch:
-            lines.append(f"    {family!r}: {spec.random_pitch},")
-    lines.extend(("}", "", "CONTAINER_PLACEMENTS = ("))
+        if spec.random_lid:
+            axis, low, high = spec.random_lid
+            lines.append(f"    {family!r}: {('lid_' + axis.lower(), low, high)!r},")
+    lines.extend(("}", "", "KEYLESS_LOCK_CLASSES = frozenset({"))
+    for family, spec in CONTAINER_FAMILIES.items():
+        if spec.keyless_lock:
+            lines.append(f"    {family!r},")
+    lines.extend(("})", "", "CONTAINER_PLACEMENTS = ("))
     for row in profiles:
         lines.append(f"    {row!r},")
     return "\n".join((*lines, ")", ""))
@@ -299,11 +317,13 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
         "// Generated by python -m tools.silverfish.generate_authored_loot_registry", "",
         "#include <array>", "#include <cstdint>", "#include <span>", "#include <String/StringType.hpp>", "",
         "namespace silverfish::authored_loot", "{",
+        "    inline constexpr std::int32_t vehicle_pry_entry = 0xF;", "",
         "    struct StockClass", "    {",
         "        const RC::CharType* actor_class;", "        const RC::CharType* input;",
         "        const RC::CharType* script;", "        std::int32_t input_entry;", "        std::uint8_t slots;",
         "        bool stock_ping{};", "        bool paired_doors{};",
-        "        std::span<const RC::CharType* const> spawner_names{};", "        bool weapon_first{};", "    };", "",
+        "        std::span<const RC::CharType* const> spawner_names{};", "        bool weapon_first{};",
+        "        bool keyless_lock{};", "    };", "",
         '    inline constexpr StockClass small_crate{',
         '        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C"),',
         '        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C:SendInteractionToActor"),',
@@ -320,6 +340,8 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
             flags += f", {spec.symbol}_spawners"
         if spec.weapon_first:
             flags += ", true"
+        if spec.keyless_lock:
+            flags += ", false, true"
         header.extend((f"    inline constexpr StockClass {spec.symbol}{{",
                        f'        STR("{path}"),',
                        f'        STR("{path}:SendInteractionToActor"),',
@@ -394,9 +416,12 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
         lua_flags = (", guarantee_spawn = true" if guaranteed else "") + (f", replenish_mode = {mode}" if mode else "")
         if spec.paired_doors:
             lua_flags += ", paired_doors = true"
-        elif spec.random_pitch:
-            lua_flags += f", random_pitch = {{{spec.random_pitch[0]}, {spec.random_pitch[1]}}}"
-        elif spec.open_roll != -95 or spec.open_pitch or spec.open_yaw:
+        elif spec.random_lid:
+            axis, low, high = spec.random_lid
+            lua_flags += f', random_lid = {{"{axis}", {low}, {high}}}'
+        if spec.keyless_lock:
+            lua_flags += ", keyless_lock = true"
+        if not (spec.paired_doors or spec.random_lid) and (spec.open_roll != -95 or spec.open_pitch or spec.open_yaw):
             lua_flags += f", open_roll = {spec.open_roll}, open_yaw = {spec.open_yaw}"
             if spec.open_pitch:
                 lua_flags += f", open_pitch = {spec.open_pitch}"

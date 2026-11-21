@@ -1,5 +1,6 @@
 #include "shared_loot.hpp"
 #include "authored_loot_registry.hpp"
+#include "loot_crate_input.hpp"
 
 #include <algorithm>
 #include <array>
@@ -309,7 +310,7 @@ namespace
         return false;
     }
 
-    std::string_view qualify(Address crate, Address pawn, Address box, Address save, Address stock, Context& context)
+    std::string_view qualify(Address crate, Address pawn, Address box, Address save, Address stock, Context& context, bool pried)
     {
         context.crate = live_object_at(crate);
         context.profile = silverfish::shared_loot::authored_profile(context.crate);
@@ -332,7 +333,9 @@ namespace
         if (!silverfish::shared_loot::read_spawners(context.crate, context.instance, context.spawners))
             return "stock_crate_child_spawner_unavailable";
         if (!query_collision_enabled(context.box)) return "stock_crate_box_not_interactable";
-        return qualified_reach(context) ? std::string_view{} : "stock_crate_out_of_reach";
+        // A pry continuation still needs its native receipt. The original tool
+        // already qualified its target before scheduling the delayed roll.
+        return pried || qualified_reach(context) ? std::string_view{} : "stock_crate_out_of_reach";
     }
 
     struct OpenParams
@@ -910,21 +913,37 @@ namespace
         if (!Unreal::IsInGameThreadRaw() || !installed.load(std::memory_order_acquire) || opening)
             return result(lua, false, "native_loot_scope_unavailable");
         const auto argc = lua.get_stack_size();
-        if ((argc != 6 && argc != 7) || !lua.is_bool(6) || (argc == 7 && !lua.is_bool(7)))
+        if (argc < 6 || argc > 8 || !lua.is_bool(6) || (argc >= 7 && !lua.is_bool(7)) || (argc == 8 && !lua.is_bool(8)))
             return result(lua, false, "native_loot_exact_open_arguments_required");
         std::array<Address, 5> addresses{};
         if (!read_addresses(lua, addresses)) return result(lua, false, "native_loot_exact_open_arguments_required");
         latest_roll = {};
         Context context;
         context.lucky = lua.get_bool();
-        const bool force_nonempty = argc == 7 && lua.get_bool();
+        const bool force_nonempty = argc >= 7 && lua.get_bool();
+        const bool pried = argc == 8 && lua.get_bool();
+        if (force_nonempty && pried) return result(lua, false, "stock_loot_pry_fixture_scope_unavailable");
         if (force_nonempty && !seeded_fixture_enabled())
             return result(lua, false, "stock_loot_fixture_seed_unavailable");
-        if (const auto failure = qualify(addresses[0], addresses[1], addresses[2], addresses[3], addresses[4], context);
+        if (const auto failure = qualify(addresses[0], addresses[1], addresses[2], addresses[3], addresses[4], context, pried);
             !failure.empty()) return result(lua, false, failure);
+        if (context.profile->stock_class->keyless_lock && read_bool(context.crate, STR("Locked"), true))
+        {
+            // These vehicles carry no authored key. The ordinary stock locked
+            // interaction only jiggles the trunk. Skip the global backpack search.
+            const bool played = silverfish::shared_loot::jiggle_vehicle_lock(context.crate);
+            return result(lua, false, played ? "stock_vehicle_locked" : "stock_vehicle_lock_unavailable");
+        }
 
         Schema schema;
         if (!bind_schema(context, schema)) return result(lua, false, "stock_loot_blueprint_schema_unavailable");
+        auto* opener = pried ? field<Unreal::FObjectProperty>(context.crate, STR("Player")) : nullptr;
+        if (pried && (!context.profile->stock_class->keyless_lock || context.save != context.stock ||
+            !opener || opener->GetPropertyClass().Get() != context.pawn->GetClassPrivate() ||
+            schema.script->GetParmsSize() != sizeof(std::int32_t) ||
+            !argument<Unreal::FIntProperty>(schema.script, STR("EntryPoint"), false, 0) ||
+            !silverfish::native_loot_crate_input::consume_vehicle_pry(context.crate, context.pawn)))
+            return result(lua, false, "stock_loot_pry_receipt_unavailable");
         SeedFixture fixture;
         if (force_nonempty)
         {
@@ -939,7 +958,14 @@ namespace
         bool restored = true;
         {
             ActiveOpen guard(scope);
-            context.crate->ProcessEvent(schema.open, &input);
+            if (pried)
+            {
+                // The delayed entry does not assign the opener the way Interact does.
+                opener->SetObjectPropertyValue(opener->ContainerPtrToValuePtr<void>(context.crate), context.pawn);
+                auto point = silverfish::authored_loot::vehicle_pry_entry;
+                context.crate->ProcessEvent(schema.script, &point);
+            }
+            else context.crate->ProcessEvent(schema.open, &input);
             if (force_nonempty) restored = fixture.restore();
         }
 
@@ -1268,6 +1294,9 @@ namespace silverfish::shared_loot
         if (!profile) return refuse("crate_settings_profile");
         if (!read_bool(crate, STR("GuaranteeSpawn"), profile->guarantee_spawn)) return refuse("crate_settings_guarantee");
         if (!read_bool(crate, STR("IgnoreKarma"), false)) return refuse("crate_settings_ignore_karma");
+        if (profile->stock_class->keyless_lock && (!field<Unreal::FBoolProperty>(crate, STR("Locked")) ||
+            !field<Unreal::FClassProperty>(crate, STR("KeyItem")) || object_field(crate, STR("KeyItem"))))
+            return refuse("stock_vehicle_keyless_lock_unqualified");
         // Keep the previously live-qualified stock route on its existing guards.
         if (profile == &authored_loot::profiles.front()) return true;
         auto* defaults = crate->GetClassPrivate()->GetClassDefaultObject().Get();
@@ -1337,6 +1366,17 @@ namespace silverfish::shared_loot
         if ((assigned && assigned != stock_table) ||
             row->GetPropertyValueInContainer(live_handle).ToString() != profile->loot_override)
             return refuse("crate_settings_loot_override_row");
+        return true;
+    }
+
+    bool jiggle_vehicle_lock(Unreal::UObject* crate)
+    {
+        const auto* profile = authored_profile(crate);
+        if (!profile || !profile->stock_class->keyless_lock || !read_bool(crate, STR("Locked"), true) ||
+            !read_bool(crate, STR("Looted"), false)) return false;
+        auto* jiggle = crate->GetFunctionByNameInChain(Unreal::FName{STR("Jiggle_Locked")});
+        if (!blueprint(jiggle, crate->GetClassPrivate(), 0) || jiggle->GetParmsSize() != 0) return false;
+        crate->ProcessEvent(jiggle, nullptr);
         return true;
     }
 
