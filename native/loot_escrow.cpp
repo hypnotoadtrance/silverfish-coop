@@ -352,8 +352,10 @@ namespace
         std::array<Address, 2> arguments{};
         ContainerAddresses addresses{};
         const auto argc = lua.get_stack_size();
-        const auto slots = !enemy && argc == 2 + max_container_slots ? max_container_slots : max_escrow;
-        if (!enabled() || !Unreal::IsInGameThreadRaw() || argc != 2 + slots || !read_addresses(lua, arguments, 2) ||
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || argc < 3 || argc > 2 + max_container_slots ||
+            (enemy && argc != 2 + max_escrow)) return result(lua, false, "native_loot_escrow_capture_unavailable");
+        const auto slots = static_cast<std::size_t>(argc - 2);
+        if (!read_addresses(lua, arguments, 2) ||
             !read_addresses(lua, std::span{addresses}.first(slots), 0))
             return result(lua, false, "native_loot_escrow_capture_unavailable");
         Owner owner;
@@ -424,10 +426,10 @@ namespace
         int capacity = max_escrow;
         if (argc == 3)
         {
-            std::array<Address, 1> cabinet{};
-            if (!read_addresses(lua, cabinet, 1) || !silverfish::shared_loot::qualified_cabinet_escrow(cabinet[0]))
-                return result(lua, false, "native_loot_escrow_cabinet_source_unqualified");
-            capacity = static_cast<int>(max_container_slots);
+            std::array<Address, 1> container{};
+            if (read_addresses(lua, container, 1)) capacity = silverfish::shared_loot::qualified_container_capacity(container[0]);
+            else capacity = 0;
+            if (!capacity) return result(lua, false, "native_loot_escrow_container_source_unqualified");
         }
         Inventory inventory;
         if (!inventory.bind()) return result(lua, false, "native_loot_inventory_schema_unavailable");
@@ -530,10 +532,10 @@ namespace
         int capacity = max_escrow;
         if (argc == 6)
         {
-            std::array<Address, 1> cabinet{};
-            if (!read_addresses(lua, cabinet, 1) || !silverfish::shared_loot::qualified_cabinet_escrow(cabinet[0], owner.world))
-                return result(lua, false, "native_loot_escrow_cabinet_source_unqualified");
-            capacity = static_cast<int>(max_container_slots);
+            std::array<Address, 1> container{};
+            if (read_addresses(lua, container, 1)) capacity = silverfish::shared_loot::qualified_container_capacity(container[0], owner.world);
+            else capacity = 0;
+            if (!capacity) return result(lua, false, "native_loot_escrow_container_source_unqualified");
         }
         Inventory inventory;
         if (!inventory.bind()) return result(lua, false, "native_loot_inventory_schema_unavailable");

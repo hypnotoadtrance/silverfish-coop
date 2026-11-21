@@ -18,8 +18,9 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_host_save, native_loot
-from tools.silverfish.authored_loot import (CRATES, GUARANTEED_REPLENISHMENT, OFFICE_DESK, OFFICE_DESK_PROFILE,
-                                           SMALL_CABINET, SMALL_CABINET_PROFILE, full_name)
+from tools.silverfish.authored_container_placements import CONTAINER_PLACEMENTS
+from tools.silverfish.authored_loot import (CRATES, GUARANTEED_CRATES, GUARANTEED_REPLENISHMENT, OFFICE_DESK,
+                                           OFFICE_DESK_PROFILE, SMALL_CABINET, SMALL_CABINET_PROFILE, full_name, loot_capacity)
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.travel import CISTERN, CITY, CROSSROADS, LAB_E206, OBSERVATORY, RAIL_YARD
 
@@ -56,7 +57,14 @@ FAMILY_SCENES = {
     "stock-trunk": (CITY, "Loot_Trunk_BP_C", "LootCrate_Large_BP_C_1"),
     "stock-cult-crate": ("/Game/Classes/Maps/Maps_OverWorld/Gorge_01_P", "LootCrate_Cult_Small_BP_C", "LootCrate_Cult_Small_BP_C_1"),
     "stock-loot-stash": (CROSSROADS, "Loot_Stash_Small_BP_C", "Loot_Stash_Small_BP_C_1"),
+    "stock-toolbox": (CROSSROADS, "Loot_ToolBox_BP_C", "Loot_ToolBox_BP_C_1"),
+    "stock-cargo-crate": ("/Game/Classes/Maps/Maps_OverWorld/Docks_01_P", "LootCrate_Cargo_BP_C", "LootCrate_Cargo_BP_C_2"),
+    "stock-industrial-cargo": (CROSSROADS, "LootCrate_Cargo_BP_C", "LootCrate_Cargo_BP_C_3"),
+    "stock-large-cabinet": (CROSSROADS, "LootCabnet_Large_BP_C", "LootCabnet_Large_BP_C_6"),
+    "stock-industrial-cabinet": (CROSSROADS, "LootCabnet_Large_BP_C", "LootCabnet_Large_BP_C_1"),
 }
+PERMANENT_FAMILY_CRATES = {full_name(area, actor, family) for family, area, actor, _, _, _, replenish in CONTAINER_PLACEMENTS
+                           if replenish == 2 or family == "Loot_Stash_Small_BP_C"}
 SCENES.update({name: (area, (actor,)) for name, (area, _, actor) in FAMILY_SCENES.items()})
 FISH_CANNERY_ITEMS = {
     "/Game/Classes/Items/Item_CannedTuna.Item_CannedTuna_C",
@@ -116,12 +124,11 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     if natural_lab_roll and (name != CABINET_SCENE or baseline or force_stock_roll):
         raise ValueError("The seeded Lab roll needs its fresh Wanderer route")
     area, actors = SCENES[name]
-    guaranteed = name in GUARANTEED_SCENES or name == "stock-loot-stash"
     cabinet = name == CABINET_SCENE
     desk = name == DESK_SCENE
-    permanent = guaranteed or cabinet or desk
     family = FAMILY_SCENES[name][1] if name in FAMILY_SCENES else None
     targets = [full_name(area, actor, family) for actor in actors]
+    permanent = name in GUARANTEED_SCENES or cabinet or desk or all(crate in PERMANENT_FAMILY_CRATES for crate in targets)
     assert all(CRATES.get(crate) == area for crate in targets)
     if name in GUARANTEED_SCENES:
         assert all(GUARANTEED_REPLENISHMENT.get((area, actor)) == 2 for actor in actors)
@@ -316,15 +323,15 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             if desk:
                 assert roll["trait_calls"] == 0 and len(roll["items"]) <= 4, roll
                 assert sibling_names.isdisjoint(scene(committed)) and sibling_names.isdisjoint(scene(replicated))
-            elif guaranteed:
-                assert roll["trait_calls"] == 0 and 1 <= len(roll["items"]) <= 2, roll
+            elif crate in GUARANTEED_CRATES:
+                assert roll["trait_calls"] == 0 and 1 <= len(roll["items"]) <= loot_capacity(crate), roll
             elif cabinet:
                 assert roll["trait_calls"] == 5 and len(roll["items"]) <= 4, roll
                 if natural_lab_roll and not roll["items"]:
                     evidence["unexpected_empty_stock_roll"] = {"receipt": pressed, "roll": roll}
                     raise AssertionError("The seeded stock Lab cabinet returned an empty roll")
             else:
-                assert 1 <= roll["trait_calls"] <= 3, roll
+                assert 1 <= roll["trait_calls"] <= 1 + loot_capacity(crate), roll
             if name == "guaranteed-docks":
                 assert {item["class_path"] for item in roll["items"]} <= FISH_CANNERY_ITEMS, roll
             if forced:
@@ -336,7 +343,8 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             claim = None
             item = None
             if roll["items"]:
-                guid = roll["items"][0]["guid"]
+                selected = roll["items"][-1 if loot_capacity(crate) > 4 else 0]
+                guid = selected["guid"]
                 target = f"{guid}@{crate}"
                 operation = uuid.uuid4().hex
                 if family:
@@ -347,7 +355,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
 
                     for directory in (run, guest_run):
                         present = await wait(directory, world_item)
-                        assert world_item(present)["class_path"] == roll["items"][0]["class_path"]
+                        assert world_item(present)["class_path"] == selected["class_path"]
                         assert not present["game"].get("native_loot_view")
                     await command("action", *host, "native-world-loot-approach", "--target", f"guest@{identity}")
                     press = await command("action", *guest, "native-world-loot-fixture", "--target", identity)
@@ -360,7 +368,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                     operation = accepted["operation_id"]
                 request = ("action", *guest, "native-loot-claim", "--target", target, "--operation-id", operation)
                 claim = (await command(*request))["native_loot_claim"]
-                assert claim["claimed_by"] == character and claim["guid"] == roll["items"][0]["guid"], claim
+                assert claim["claimed_by"] == character and claim["guid"] == guid, claim
                 assert (await command(*request))["native_loot_claim"] == claim
                 cash = claim["class_path"] in native_loot.CASH_RANGES
                 if cash:
@@ -373,13 +381,13 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                     await wait(run, lambda state: state.get("game", {}).get("native_wallet") == credit["after"])
                     await wait(guest_run, lambda state: state.get("gameplay", {}).get("shared_wallet") == credit["after"])
                     cash_requests.append((request, claim))
-                    roll["items"][0]["wallet_credit"] = credit
+                    selected["wallet_credit"] = credit
                 elif force_stock_roll or permanent:
                     item = await typed_inventory_item(character, claim["guid"])
                     assert item and (item["source"], item["class_path"]) == ("backpack", claim["class_path"]), item
                 denied = await command("action", *host, "native-loot-claim", "--target", target, expected=False)
                 assert denied["error"] == "native_loot_already_claimed", denied
-                roll["items"][0]["claimed_by"] = character
+                selected["claimed_by"] = character
             replay = (await command("action", *host, "native-loot-open", "--target", crate))["native_loot_roll"]
             assert replay == roll, replay
             saved = saved_checkpoint()
@@ -482,7 +490,7 @@ if __name__ == "__main__":
     arguments = parser.parse_args()
     if arguments.require_cash and (not arguments.vanilla_saved or not arguments.area or len(arguments.area) != 1):
         parser.error("--require-cash requires one --area and --vanilla-saved")
-    if any(area in GUARANTEED_SCENES or area in (CABINET_SCENE, DESK_SCENE, "stock-loot-stash")
+    if any(area in GUARANTEED_SCENES or area in (CABINET_SCENE, DESK_SCENE) or area in FAMILY_SCENES
            for area in arguments.area or ()) and not arguments.vanilla_saved:
         parser.error("Permanent stock loot scenes require --vanilla-saved")
     if arguments.force_stock_roll:

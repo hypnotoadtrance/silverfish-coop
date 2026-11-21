@@ -92,7 +92,7 @@ local function observe_scene(current, box_state, box_address)
     local box_qualified = report.box
         or report.looted == true and (report.box_state == "retired" or report.box_state == "missing")
     report.qualified = report.door ~= nil and box_qualified
-    if report.qualified and (current.profile.small_cabinet or current.profile.office_desk) then
+    if report.qualified and (current.profile.paired_doors or current.profile.small_cabinet or current.profile.office_desk) then
         local frame, second = crate.SM_Prop_Cabinet_Small_02, crate.SM_Prop_Cabinet_Small_Door_02
         if not exact_component(frame, "/Script/Engine.StaticMeshComponent", crate)
             or not exact_component(second, "/Script/Engine.StaticMeshComponent", crate) or same(door, second)
@@ -123,16 +123,22 @@ local function matches_rotation(door, expected)
         and close_angle(rotation.Yaw, expected.Yaw) and close_angle(rotation.Roll, expected.Roll)
 end
 
-local function exhausted(crate, door, box, second)
+local function open_poses(profile, second)
+    if second then return cabinet_rotations end
+    if profile.open_roll then return {{Pitch = 0, Yaw = 0, Roll = profile.open_roll}} end
+    return {open_rotation}
+end
+
+local function exhausted(crate, door, box, second, opened)
     if crate.Looted ~= true or not door or box and box:GetCollisionEnabled() ~= 0 then return false end
-    if second then return matches_rotation(door, cabinet_rotations[1]) and matches_rotation(second, cabinet_rotations[2]) end
-    return matches_rotation(door, open_rotation)
+    return matches_rotation(door, opened[1]) and (not second or matches_rotation(second, opened[2]))
 end
 
 local function project(current)
     local crate = current.crate
     local door, box, second = scene(current)
-    if exhausted(crate, door, box, second) then return "stock crate exhausted projection verified" end
+    local opened = open_poses(current.profile, second)
+    if exhausted(crate, door, box, second, opened) then return "stock crate exhausted projection verified" end
     local original_looted = crate.Looted
     if not door or type(original_looted) ~= "boolean" or not box and not original_looted then
         error("native_loot_crate_exact_scene_unavailable", 0)
@@ -143,7 +149,6 @@ local function project(current)
         if not rotation or not matches_rotation(component, rotation) then error("native_loot_crate_door_rotation_unavailable", 0) end
         original[index] = {Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll}
     end
-    local opened = second and cabinet_rotations or {open_rotation}
     local collision = box and box:GetCollisionEnabled()
     if box and collision ~= 0 and collision ~= 1 and collision ~= 3 then
         error("native_loot_crate_box_collision_unavailable", 0)
@@ -154,7 +159,7 @@ local function project(current)
         if box then box:SetCollisionEnabled(0) end
         for index, component in ipairs(doors) do component:K2_SetRelativeRotation(opened[index], false, {}, false) end
         crate.Looted = true
-        return exhausted(crate, door, box, second)
+        return exhausted(crate, door, box, second, opened)
     end)
     if not invoked or not verified then
         local restored, matches = pcall(function()
@@ -289,7 +294,8 @@ function input.rows(state, phase, status_row)
             info.looted == nil and "-" or (info.looted and 1 or 0), info.collision or "-", info.roll or "-")
         if info.qualified then
             rows[#rows + 1] = status_row("native-loot-crate-input", profile.map, profile.name,
-                exhausted(current.crate, info.door, info.box, info.second) and "exhausted" or "ready")
+                exhausted(current.crate, info.door, info.box, info.second, open_poses(current.profile, info.second))
+                    and "exhausted" or "ready")
             if current.host and info.looted == false and info.box and (info.collision == 1 or info.collision == 3) then
                 local verified, active = pcall(loot.temporary_activation, current.crate, current.pawn)
                 if verified and active == false then

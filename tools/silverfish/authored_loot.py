@@ -2,7 +2,7 @@
 
 import math
 
-from .authored_container_placements import TWO_SLOT_PLACEMENTS
+from .authored_container_placements import CLASS_CAPACITIES, CONTAINER_PLACEMENTS
 from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, RAIL_YARD
 
 
@@ -507,20 +507,20 @@ SMALL_CABINET = full_name(*SMALL_CABINET_PROFILE[:2])
 OFFICE_DESK_PROFILE = (LAKE, "LootCabinet_Desk_BP_C_3", -205206528)
 OFFICE_DESK_CHILD_SALTS = (-7851936, -32237128, -43421604, -7392800)
 OFFICE_DESK = full_name(*OFFICE_DESK_PROFILE[:2])
-FOUR_SLOT_CONTAINERS = frozenset({SMALL_CABINET, OFFICE_DESK})
 CRATES = {full_name(area, actor): area for area, actor, _, _ in CRATE_PROFILES}
 CRATES.update({SMALL_CABINET: LAB_E206, OFFICE_DESK: LAKE})
-CRATES.update({full_name(area, actor, family): area for family, area, actor, *_ in TWO_SLOT_PLACEMENTS})
+CRATES.update({full_name(area, actor, family): area for family, area, actor, *_ in CONTAINER_PLACEMENTS})
+CONTAINER_CAPACITIES = {full_name(area, actor, family): CLASS_CAPACITIES[family]
+                        for family, area, actor, *_ in CONTAINER_PLACEMENTS}
+CONTAINER_CAPACITIES.update({SMALL_CABINET: 4, OFFICE_DESK: 4})
 GUARANTEED_CRATES = frozenset(full_name(area, actor) for area, actor, *_ in GUARANTEED_PLACEMENTS) | {OFFICE_DESK}
-GUARANTEED_CRATES |= {full_name(area, actor, family) for family, area, actor, _, _, guaranteed, _ in TWO_SLOT_PLACEMENTS
+GUARANTEED_CRATES |= {full_name(area, actor, family) for family, area, actor, _, _, guaranteed, _ in CONTAINER_PLACEMENTS
                       if guaranteed}
 LEGACY_CRATE = full_name(*PLACEMENTS[0][:2])
 
 
 def loot_capacity(container: str) -> int:
-    if container in FOUR_SLOT_CONTAINERS:
-        return 4
-    return 2 if container in CRATES else 0
+    return CONTAINER_CAPACITIES.get(container, 2 if container in CRATES else 0)
 
 
 def valid_item_transform(transform: object) -> bool:

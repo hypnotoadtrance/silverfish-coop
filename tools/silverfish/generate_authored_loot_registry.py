@@ -1,11 +1,12 @@
 """Regenerate native and Lua stock container profiles from the cooked catalog."""
 
 import argparse
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
 
-from .authored_container_placements import TWO_SLOT_PLACEMENTS
+from .authored_container_placements import CONTAINER_PLACEMENTS
 from .authored_loot import (CRATE_PROFILES, GUARANTEED_REPLENISHMENT, OFFICE_DESK_CHILD_SALTS,
                             OFFICE_DESK_PROFILE, SMALL_CABINET_CHILD_SALTS, SMALL_CABINET_PROFILE, full_name)
 from .authored_routes import MAPS as EXPANDED_MAPS
@@ -20,18 +21,58 @@ PERMANENT_REPLENISHMENT = "RespawnSetting_Enum::NewEnumerator2"
 BASE_FIELDS = {"Loot_Spawner": "Loot_Spawner", "Loot_Spawner1": "Loot_Spawner1", "RootComponent": "DefaultSceneRoot"}
 SurveyProfile = tuple[int, str | None] | tuple[int, str | None, int | None]
 FAMILY_CATALOG = "tools/silverfish/authored_container_placements.py"
-TWO_SLOT_CLASSES = {
-    "LootCrate_Cult_Small_BP_C": ("cult_crate", 0x376, True, False, None),
-    "Loot_Stash_Small_BP_C": ("loot_stash", 0x376, False, True, PERMANENT_REPLENISHMENT),
-    "Loot_Trunk_BP_C": ("trunk", 0x376, False, False, None),
-    "Loot_SuitCase_BP_C": ("suitcase", 0x3A3, False, False, None),
-}
-TWO_SLOT_SOURCE_FIELDS = BASE_FIELDS | {"Box": "Box", "SM_Prop_Cabinet_Small_Door_01": "SM_Prop_Cabinet_Small_Door_01"}
-TWO_SLOT_SAVE_FIELDS = {"SpawnSalt", "Loot_Override", "GuaranteeSpawn", "Replenish_Mode"}
+SOURCE_FIELDS = {"RootComponent": "DefaultSceneRoot", "Box": "Box",
+                 "SM_Prop_Cabinet_Small_Door_01": "SM_Prop_Cabinet_Small_Door_01"}
+SAVE_FIELDS = {"SpawnSalt", "Loot_Override", "GuaranteeSpawn", "Replenish_Mode"}
 BOX_GEOMETRY_FIELDS = {"Arrow", "BlueprintCreatedComponents", "DefaultSceneRoot", "SM_Prop_Cabinet_Small_02", "StreamSeed"}
-OPEN_POSE = "MoveComponentTo(SM_Prop_Cabinet_Small_Door_01,SM_Prop_Cabinet_Small_Door_01.RelativeLocation,(-95, 0, 0),"
 STOCK_ROLL = ("CallFunc_Array_Get_Item.SpawnLoot(Loot Table_Items,SpawnChance_Item,0.5,GuaranteeSpawn,"
               "False,True,False,False,False,CallFunc_SpawnLoot_Object)")
+FAMILY_OVERRIDE_ROWS = GUARANTEED_OVERRIDE_ROWS | {"Office", "Garage", "Marine", "TownHouse", "LabSupplies", "Shop_Food",
+                                                   "Uncommon_Basic", "PoliceEquipment", "Uncommon_Special", "Weapon_Specialized"}
+
+
+@dataclass(frozen=True)
+class ContainerFamily:
+    symbol: str
+    entry: int
+    slots: int = 2
+    stock_ping: bool = False
+    guaranteed: bool = False
+    replenish: str | None = None
+    paired_doors: bool = False
+    open_roll: int = -95
+    named_spawners: tuple[str, ...] = ()
+    rolls: tuple[str, ...] = (STOCK_ROLL,)
+
+    def spawner_names(self):
+        return self.named_spawners or ("Loot_Spawner", *(f"Loot_Spawner{i}" for i in range(1, self.slots)))
+
+    def door_calls(self):
+        first = "SM_Prop_Cabinet_Small_Door_01"
+        second = "SM_Prop_Cabinet_Small_Door_02"
+        if self.paired_doors:
+            return (f"MoveComponentTo({first},{first}.RelativeLocation,(0, 0, 95),",
+                    f"MoveComponentTo({second},{second}.RelativeLocation,(0, 0, -95),")
+        return (f"MoveComponentTo({first},{first}.RelativeLocation,({self.open_roll}, 0, 0),",)
+
+
+CONTAINER_FAMILIES = {
+    "LootCrate_Cult_Small_BP_C": ContainerFamily("cult_crate", 0x376, stock_ping=True),
+    "Loot_Stash_Small_BP_C": ContainerFamily("loot_stash", 0x376, guaranteed=True, replenish=PERMANENT_REPLENISHMENT),
+    "Loot_SuitCase_BP_C": ContainerFamily("suitcase", 0x3A3),
+    "Loot_Trunk_BP_C": ContainerFamily("trunk", 0x376),
+    "Loot_ToolBox_BP_C": ContainerFamily("toolbox", 0x1FE, slots=1, guaranteed=True,
+                                          rolls=(STOCK_ROLL.replace("CallFunc_Array_Get_Item.", "Loot_Spawner."),)),
+    "LootCrate_Cargo_BP_C": ContainerFamily("cargo_crate", 0x3E8, slots=4, open_roll=-85,
+                                            rolls=(STOCK_ROLL.replace("0.5,", "1,"),)),
+    "LootCabnet_Large_BP_C": ContainerFamily("large_cabinet", 0x83D, slots=6, paired_doors=True,
+        named_spawners=("Loot_Spawner", "Loot_Spawner1", "Loot_Spawner2", "Loot_Spawner3", "Loot_SpawnerGun", "Loot_SpawnerGun1"),
+        rolls=(STOCK_ROLL,
+              "CallFunc_Array_Get_Item_1.SpawnLoot(Loot Table_Weapons,SpawnChance_Weapons,0,GuaranteeSpawn,"
+              "False,False,False,False,False,CallFunc_SpawnLoot_Object_1)",
+              "CallFunc_Array_Get_Item_2.SpawnLoot(Loot Table_Items,SpawnChance_Item,0,GuaranteeSpawn,"
+              "False,False,False,False,False,CallFunc_SpawnLoot_Object_2)")),
+}
 
 
 def survey(report: str) -> tuple[set[str], set[tuple[str, str]], dict[tuple[str, str], SurveyProfile]]:
@@ -84,27 +125,30 @@ def family_placements(audit):
     visited = {"/Game/Classes/" + path.removesuffix(".umap") for path in audit["visited"]}
     if missing := sorted(QUALIFIED_MAPS - visited):
         raise ValueError("Cooked container audit is missing campaign maps: " + ", ".join(missing))
-    for family, (_, entry, ping, guaranteed, mode) in TWO_SLOT_CLASSES.items():
+    for family, spec in CONTAINER_FAMILIES.items():
         stock = audit["families"][family]
         defaults = {export["name"]: export["fields"] for export in stock["defaults"]}
         actor = defaults[f"Default__{family}"]
         script = f"ExecuteUbergraph_{family[:-2]}"
         functions = {function["name"]: function["calls"] for function in stock["functions"]}
         calls = [call.split(" ", 1)[1] for call in functions[script]]
-        if (functions["SendInteractionToActor"] != [f"24 {script}({entry})"]
-                or sum(call == STOCK_ROLL for call in calls) != 1
-                or sum(call.startswith(OPEN_POSE) for call in calls) != 1
+        if (functions["SendInteractionToActor"] != [f"24 {script}({spec.entry})"]
+                or [call for call in calls if ".SpawnLoot(" in call] != list(spec.rolls)
+                or any(sum(call.startswith(pose) for call in calls) != 1 for pose in spec.door_calls())
                 or "Box.K2_DestroyComponent(Self)" not in calls
                 or {name for name in defaults if name.startswith("Loot_Spawner")} !=
-                {"Loot_Spawner_GEN_VARIABLE", "Loot_Spawner1_GEN_VARIABLE"}
-                or actor.get("Ping_IfOpened", "False") != str(ping)
-                or actor.get("GuaranteeSpawn", "False") != str(guaranteed) or actor.get("Replenish_Mode") != mode):
-            raise ValueError(f"Cooked container family does not match the stock two-slot interaction: {family}")
+                {f"{name}_GEN_VARIABLE" for name in spec.spawner_names()}
+                or actor.get("Ping_IfOpened", "False") != str(spec.stock_ping)
+                or actor.get("GuaranteeSpawn", "False") != str(spec.guaranteed)
+                or actor.get("Replenish_Mode") != spec.replenish):
+            raise ValueError(f"Cooked container family does not match its stock interaction: {family}")
 
     profiles, seen = [], set()
+    order = {family: index for index, family in enumerate(CONTAINER_FAMILIES)}
     for row in audit["placements"]:
         family, package, actor = row["type"], row["area"], row["name"]
-        if family not in TWO_SLOT_CLASSES:
+        spec = CONTAINER_FAMILIES.get(family)
+        if not spec:
             continue
         if not re.fullmatch(r"Maps/(?:[A-Za-z0-9_]+/)*[A-Za-z0-9_]+\.umap", package):
             raise ValueError(f"Invalid stock container package {package}")
@@ -112,15 +156,17 @@ def family_placements(audit):
         if area not in QUALIFIED_MAPS:
             continue
         fields = row["fields"]
-        if any(fields.get(key) != value for key, value in TWO_SLOT_SOURCE_FIELDS.items()):
+        required = {**SOURCE_FIELDS, **{name: name for name in spec.spawner_names()}}
+        if spec.paired_doors:
+            required["SM_Prop_Cabinet_Small_Door_02"] = "SM_Prop_Cabinet_Small_Door_02"
+        if any(fields.get(key) != value for key, value in required.items()):
             continue
-        if fields.keys() - TWO_SLOT_SOURCE_FIELDS.keys() - TWO_SLOT_SAVE_FIELDS - BOX_GEOMETRY_FIELDS:
+        if fields.keys() - required.keys() - SAVE_FIELDS - BOX_GEOMETRY_FIELDS:
             continue
         if (area, actor) in seen or not re.fullmatch(r"[A-Za-z0-9_]+_C_[0-9]+", actor):
             raise ValueError(f"Invalid or duplicate stock container {area} {actor}")
         seen.add((area, actor))
-        default_guarantee = TWO_SLOT_CLASSES[family][3]
-        guarantee = fields.get("GuaranteeSpawn", str(default_guarantee))
+        guarantee = fields.get("GuaranteeSpawn", str(spec.guaranteed))
         mode = fields.get("Replenish_Mode")
         if guarantee not in {"True", "False"} or mode not in {None, PERMANENT_REPLENISHMENT}:
             continue
@@ -128,25 +174,28 @@ def family_placements(audit):
         override = None
         if handle is not None:
             match = re.fullmatch(r"DataTableRowHandle\(([A-Za-z0-9_]+)\)", handle)
-            if not match or match[1] not in GUARANTEED_OVERRIDE_ROWS:
+            if not match or match[1] not in FAMILY_OVERRIDE_ROWS:
                 continue
             override = match[1]
         salt = int(fields["SpawnSalt"])
         if not -2**31 <= salt < 2**31:
             raise ValueError(f"Invalid stock container salt {area} {actor}")
         profiles.append((family, area, actor, salt, override, guarantee == "True", 2 if mode else None))
-    return tuple(sorted(profiles))
+    return tuple(sorted(profiles, key=lambda row: (order[row[0]], row[1], row[2])))
 
 
 def family_catalog(profiles):
     lines = ["# Generated by tools.silverfish.generate_authored_loot_registry from the cooked container audit.",
-             "TWO_SLOT_PLACEMENTS = ("]
+             "CLASS_CAPACITIES = {"]
+    for family, spec in CONTAINER_FAMILIES.items():
+        lines.append(f"    {family!r}: {spec.slots},")
+    lines.extend(("}", "", "CONTAINER_PLACEMENTS = ("))
     for row in profiles:
         lines.append(f"    {row!r},")
     return "\n".join((*lines, ")", ""))
 
 
-def outputs(families=TWO_SLOT_PLACEMENTS) -> dict[str, str]:
+def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
     if (not CRATE_PROFILES or len(CRATE_PROFILES) != len({(area, actor) for area, actor, *_ in CRATE_PROFILES})
             or any(mode not in (None, 2) for mode in GUARANTEED_REPLENISHMENT.values())):
         raise ValueError("Invalid authored crate placements")
@@ -158,12 +207,13 @@ def outputs(families=TWO_SLOT_PLACEMENTS) -> dict[str, str]:
     header = [
         "#pragma once", "",
         "// Generated by python -m tools.silverfish.generate_authored_loot_registry", "",
-        "#include <array>", "#include <cstdint>", "#include <String/StringType.hpp>", "",
+        "#include <array>", "#include <cstdint>", "#include <span>", "#include <String/StringType.hpp>", "",
         "namespace silverfish::authored_loot", "{",
         "    struct StockClass", "    {",
         "        const RC::CharType* actor_class;", "        const RC::CharType* input;",
         "        const RC::CharType* script;", "        std::int32_t input_entry;", "        std::uint8_t slots;",
-        "        bool stock_ping{};", "    };", "",
+        "        bool stock_ping{};", "        bool paired_doors{};",
+        "        std::span<const RC::CharType* const> spawner_names{};", "    };", "",
         '    inline constexpr StockClass small_crate{',
         '        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C"),',
         '        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C:SendInteractionToActor"),',
@@ -173,23 +223,27 @@ def outputs(families=TWO_SLOT_PLACEMENTS) -> dict[str, str]:
         '        STR("/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C"),',
         '        STR("/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C:SendInteractionToActor"),',
         '        STR("/Game/Classes/Actors/Lootables/LootCabnet_Small_BP.LootCabnet_Small_BP_C:ExecuteUbergraph_LootCabnet_Small_BP"),',
-        '        0x438, 4};',
+        '        0x438, 4, false, true};',
         '    inline constexpr StockClass office_desk{',
         '        STR("/Game/Classes/Actors/Lootables/LootCabinet_Desk_BP.LootCabinet_Desk_BP_C"),',
         '        STR("/Game/Classes/Actors/Lootables/LootCabinet_Desk_BP.LootCabinet_Desk_BP_C:SendInteractionToActor"),',
         '        STR("/Game/Classes/Actors/Lootables/LootCabinet_Desk_BP.LootCabinet_Desk_BP_C:ExecuteUbergraph_LootCabinet_Desk_BP"),',
-        '        0x449, 4};', "",
+        '        0x449, 4, false, true};', "",
     ]
-    for family, (symbol, entry, ping, _, _) in TWO_SLOT_CLASSES.items():
+    for family, spec in CONTAINER_FAMILIES.items():
         stem = family[:-2]
         path = f"/Game/Classes/Actors/Lootables/{stem}.{family}"
-        flags = ", true" if ping else ""
-        header.extend((f"    inline constexpr StockClass {symbol}{{",
+        flags = f", {str(spec.stock_ping).lower()}, {str(spec.paired_doors).lower()}"
+        if spec.named_spawners:
+            names = ", ".join(f'STR("{name}")' for name in spec.named_spawners)
+            header.append(f"    inline constexpr std::array {spec.symbol}_spawners{{{names}}};")
+            flags += f", {spec.symbol}_spawners"
+        header.extend((f"    inline constexpr StockClass {spec.symbol}{{",
                        f'        STR("{path}"),',
                        f'        STR("{path}:SendInteractionToActor"),',
                        f'        STR("{path}:ExecuteUbergraph_{stem}"),',
-                       f"        0x{entry:X}, 2{flags}}};"))
-    names = ["small_crate", "small_cabinet", "office_desk", *(row[0] for row in TWO_SLOT_CLASSES.values())]
+                       f"        0x{spec.entry:X}, {spec.slots}{flags}}};"))
+    names = ["small_crate", "small_cabinet", "office_desk", *(spec.symbol for spec in CONTAINER_FAMILIES.values())]
     header.extend(("    inline constexpr std::array stock_classes{" + ", ".join("&" + name for name in names) + "};", "",
                    "    struct Profile", "    {",
                    "        const RC::CharType* world;",
@@ -237,9 +291,10 @@ def outputs(families=TWO_SLOT_PLACEMENTS) -> dict[str, str]:
                     f'      path = "{path}", salt = {salt}, replenish_mode = 2, {family} = true{lua_guarantee} }},'))
     registered = {(area, actor) for area, actor, *_ in (*CRATE_PROFILES, SMALL_CABINET_PROFILE, OFFICE_DESK_PROFILE)}
     for index, (family, area, actor, salt, row, guaranteed, mode) in enumerate(families, len(CRATE_PROFILES) + 3):
-        if ((family not in TWO_SLOT_CLASSES or area not in QUALIFIED_MAPS or type(salt) is not int
+        spec = CONTAINER_FAMILIES.get(family)
+        if ((not spec or area not in QUALIFIED_MAPS or type(salt) is not int
              or not -2**31 <= salt < 2**31 or type(guaranteed) is not bool or mode not in {None, 2}
-             or row is not None and row not in GUARANTEED_OVERRIDE_ROWS)
+             or row is not None and row not in FAMILY_OVERRIDE_ROWS)
                 or (area, actor) in registered or not re.fullmatch(r"[A-Za-z0-9_]+_C_[0-9]+", actor)):
             raise ValueError(f"Invalid cooked stock container placement {area} {actor}")
         registered.add((area, actor))
@@ -249,13 +304,19 @@ def outputs(families=TWO_SLOT_PLACEMENTS) -> dict[str, str]:
         path = name.split(" ", 1)[1]
         table = f'STR("{row}")' if row else "nullptr"
         guarantee = str(guaranteed).lower()
-        symbol = TWO_SLOT_CLASSES[family][0]
         header.extend((f'        Profile{{STR("{world}"),',
-                       f'                STR("{path}"), {salt}, {table}, {guarantee}, {mode or 0}, &{symbol}}},'))
+                       f'                STR("{path}"), {salt}, {table}, {guarantee}, {mode or 0}, &{spec.symbol}}},'))
         lua_flags = (", guarantee_spawn = true" if guaranteed else "") + (f", replenish_mode = {mode}" if mode else "")
+        if spec.paired_doors:
+            lua_flags += ", paired_doors = true"
+        elif spec.open_roll != -95:
+            lua_flags += f", open_roll = {spec.open_roll}"
+        if spec.named_spawners:
+            names = ", ".join(f'"{name}"' for name in spec.named_spawners)
+            lua_flags += f", spawner_names = {{{names}}}"
         lua.extend((f'    {{ index = {index}, map = "{area}",',
                     f'      name = "{name}",',
-                    f'      path = "{path}", salt = {salt}{lua_flags},',
+                    f'      path = "{path}", salt = {salt}, capacity = {spec.slots}{lua_flags},',
                     f'      actor_class = "/Game/Classes/Actors/Lootables/{stem}.{family}" }},'))
     header.extend(("    };", "}", ""))
     lua.extend(("}", ""))
@@ -286,7 +347,7 @@ def main() -> None:
             parser.exit(1, "Crates failed the cooked placement audit\n" + "\n".join(errors) + "\n")
         print(f"{len(maps)} maps surveyed, {len(placed)} placed small crates, {len(stock)} stock candidates "
               f"on {len({area for area, _ in stock})} qualified maps, {len(CRATE_PROFILES)} registered")
-    profiles = TWO_SLOT_PLACEMENTS
+    profiles = CONTAINER_PLACEMENTS
     if arguments.family_audit:
         audit = json.loads(arguments.family_audit.read_text(encoding="utf-8-sig"))
         profiles = family_placements(audit)
@@ -296,7 +357,7 @@ def main() -> None:
                 parser.exit(1, f"{FAMILY_CATALOG} needs regeneration\n")
         else:
             catalog.write_text(family_catalog(profiles), encoding="utf-8", newline="\n")
-        print(f"{len(profiles)} placements of {len(TWO_SLOT_CLASSES)} additional two-slot stock classes")
+        print(f"{len(profiles)} placements of {len(CONTAINER_FAMILIES)} additional stock container classes")
     for relative, expected in outputs(profiles).items():
         path = repo / relative
         if arguments.check:

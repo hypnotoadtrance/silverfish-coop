@@ -45,7 +45,7 @@ local function capture(scope, slot, outputs, items)
     if index - 1 ~= #items then error("native_loot_escrow_item_identity_count_unverified", 0) end
     if not api:SaveGameToSlot(pool, slot, 0) then error("native_loot_escrow_write_failed", 0) end
     local restored = api:LoadGameFromSlot(slot, 0)
-    local source = scope.profile.capacity == 4 and {scope.crate:GetAddress()} or {}
+    local source = scope.profile.capacity ~= 2 and {scope.crate:GetAddress()} or {}
     if not valid_object(restored) or not SilverfishVerifyNativeLootEscrow(
         pool:GetAddress(), restored:GetAddress(), table.unpack(source)) then
         error("native_loot_escrow_typed_roundtrip_unverified", 0)
@@ -116,7 +116,7 @@ function actions.command(fields, state, phase)
             return "stock loot escrow missing"
         end
         result.distance, result.escrow_slot = scope.distance, slot
-        local source = scope.profile.capacity == 4 and {scope.crate:GetAddress()} or {}
+        local source = scope.profile.capacity ~= 2 and {scope.crate:GetAddress()} or {}
         local ok, status, amount, before, after = SilverfishClaimNativeLootEscrow(scope.pawn:GetAddress(),
             scope.save:GetAddress(), scope.stock:GetAddress(), pool:GetAddress(), guid, table.unpack(source))
         result.ok, result.status = ok, status
@@ -161,22 +161,26 @@ function actions.command(fields, state, phase)
         return "stock loot hook unavailable"
     end
     local fixture_args = fixture_nonempty and { true } or {}
-    local ok, status, looted, first, second, calls, invoked, third, fourth = SilverfishOpenNativeLootCrate(
+    local reply = table.pack(SilverfishOpenNativeLootCrate(
         scope.crate:GetAddress(), scope.pawn:GetAddress(), scope.box:GetAddress(),
-        scope.save:GetAddress(), scope.stock:GetAddress(), scope.lucky_looter, table.unpack(fixture_args))
-    result.ok, result.status, result.looted, result.calls, result.invoked = ok, status, looted, calls, invoked
-    if ok then
-        local outputs = { first, second, third, fourth }
+        scope.save:GetAddress(), scope.stock:GetAddress(), scope.lucky_looter, table.unpack(fixture_args)))
+    result.ok, result.status, result.looted, result.calls, result.invoked = reply[1], reply[2], reply[3], reply[6], reply[7]
+    if result.ok then
+        local outputs = {}
         local verified, items = pcall(function()
+            local capacity = scope.profile.capacity
+            if reply.n ~= 7 + math.max(0, capacity - 2) or capacity == 1 and reply[5] ~= 0 then
+                error("native_loot_unexpected_child_output", 0)
+            end
             local addresses = {}
-            for index = 1, scope.profile.capacity do
-                local address = outputs[index]
+            for index = 1, capacity do
+                local address = reply[index <= 2 and index + 3 or index + 5]
                 if math.type(address) ~= "integer" or address < 0 then
                     error("native_loot_unverified_child_output", 0)
                 end
+                outputs[index] = address
                 if address > 0 then addresses[#addresses + 1] = address end
             end
-            if #outputs ~= scope.profile.capacity then error("native_loot_unexpected_child_output", 0) end
             return loot.results(state, phase, scope, addresses)
         end)
         local saved, problem = false, items

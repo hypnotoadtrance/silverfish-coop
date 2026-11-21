@@ -1,4 +1,4 @@
--- Verify the cabinet's four-slot native bridge preserves nil-free output positions.
+-- Verify stock escrow preserves sparse output positions at different capacities.
 os.getenv = function() return "1" end
 
 local function object(address)
@@ -11,6 +11,7 @@ local scope = {profile = {small_cabinet = true, capacity = 4}, crate = object(1)
     box = object(3), save = object(4), stock = object(5), lucky_looter = true, lucky_source = "detached", distance = 105}
 local scratched, restored = object(6), object(7)
 local retired, writes, claims = {}, 0, 0
+local expected_outputs, expected_items = {11, 0, 33, 44}, "11,33,44"
 local api, class = object(8), object(9)
 api.DoesSaveGameExist = function(_, expected) assert(expected == slot); return false end
 api.CreateSaveGameObject = function(_, expected) assert(expected == class); return scratched end
@@ -26,7 +27,7 @@ StaticFindObject = function(path)
 end
 
 local function results(_, _, expected, addresses)
-    assert(expected == scope and table.concat(addresses, ",") == "11,33,44")
+    assert(expected == scope and table.concat(addresses, ",") == expected_items)
     local items = {}
     for _, address in ipairs(addresses) do
         local actor = object(address)
@@ -34,7 +35,8 @@ local function results(_, _, expected, addresses)
         actor.SetActorEnableCollision = function(self, collision) self.collides = collision end
         actor.GetActorEnableCollision = function(self) return self.collides end
         actor.K2_DestroyActor = function() retired[#retired + 1] = address end
-        items[#items + 1] = {object = actor, actor = "stock item " .. address, class_path = "/Game/Stock.Stock_C"}
+        items[#items + 1] = {object = actor, actor = "stock item " .. address, class_path = "/Game/Stock.Stock_C",
+            transform = {address, 0, 0, 0, 0, 0, 1, 1, 1}}
     end
     return items
 end
@@ -46,16 +48,20 @@ package.loaded.native_loot = {
     results = results,
 }
 
-local ids = {("A"):rep(32), "", ("C"):rep(32), ("D"):rep(32)}
+local ids = {("A"):rep(32), "", ("C"):rep(32), ("D"):rep(32), "", ("F"):rep(32)}
 local full_width = true
 SilverfishOpenNativeLootCrate = function(crate, pawn, box, save, stock, trait)
     assert(crate == 1 and pawn == 2 and box == 3 and save == 4 and stock == 5 and trait == true)
-    if full_width then return true, "opened", true, 11, 0, 5, true, 33, 44 end
+    if full_width then
+        return true, "opened", true, expected_outputs[1], expected_outputs[2] or 0, 5, true, table.unpack(expected_outputs, 3)
+    end
     return true, "opened", true, 11, 0, 5, true
 end
 SilverfishCaptureNativeLootEscrow = function(...)
-    assert(table.concat({...}, ",") == "1,6,11,0,33,44")
-    return true, "captured", 3, table.unpack(ids)
+    assert(table.concat({...}, ",") == "1,6," .. table.concat(expected_outputs, ","))
+    local count = 0
+    for _, address in ipairs(expected_outputs) do if address > 0 then count = count + 1 end end
+    return true, "captured", count, table.unpack(ids, 1, scope.profile.capacity)
 end
 SilverfishVerifyNativeLootEscrow = function(...)
     assert(table.concat({...}, ",") == "6,7,1" and #retired == 0)
@@ -86,6 +92,22 @@ assert(rows()[1][7] == "claimed" and claims == 1)
 full_width = false
 actions.command({"id", "native-loot-open", pawn_name, name, slot}, state, "hosting")
 report = rows()
-assert(report[1][6] == 0 and report[1][7] == "mutation_unverified_native_loot_unverified_child_output" and report[1][14] == 1)
+assert(report[1][6] == 0 and report[1][7] == "mutation_unverified_native_loot_unexpected_child_output" and report[1][14] == 1)
 assert(writes == 1 and #retired == 3)
-print("Exact cabinet escrow preserves all slot positions and refuses a truncated native reply")
+
+full_width, retired = true, {}
+scope.profile.capacity = 6
+expected_outputs, expected_items = {11, 0, 33, 44, 0, 66}, "11,33,44,66"
+actions.command({"id", "native-loot-open", pawn_name, name, slot}, state, "hosting")
+report = rows()
+assert(report[1][6] == 1 and report[1][13] == 4 and report[5][4] == ids[6])
+assert(writes == 2 and table.concat(retired, ",") == expected_items)
+
+retired = {}
+scope.profile.capacity = 1
+expected_outputs, expected_items = {11}, "11"
+actions.command({"id", "native-loot-open", pawn_name, name, slot}, state, "hosting")
+report = rows()
+assert(report[1][6] == 1 and report[1][13] == 1 and report[2][4] == ids[1])
+assert(writes == 3 and table.concat(retired, ",") == expected_items)
+print("Stock escrow preserves one, four, and six slots and refuses a truncated native reply")

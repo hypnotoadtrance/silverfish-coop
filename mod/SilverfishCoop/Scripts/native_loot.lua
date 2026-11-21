@@ -30,7 +30,7 @@ for _, profile in ipairs(registry) do
     table.insert(maps[profile.map], profile)
     names[profile.name] = profile
     profile.world = profile.path:match("^(.-):PersistentLevel%.")
-    profile.capacity = (profile.small_cabinet or profile.office_desk) and 4 or 2
+    profile.capacity = profile.capacity or ((profile.small_cabinet or profile.office_desk) and 4 or 2)
 end
 
 function loot.profiles(map)
@@ -211,12 +211,11 @@ end
 
 local function child_spawners(crate, instance, profile)
     local class = StaticFindObject(spawner_class)
-    local spawners = { crate.Loot_Spawner, crate.Loot_Spawner1 }
-    if profile.capacity == 4 then
-        spawners[3], spawners[4] = crate.Loot_Spawner2, crate.Loot_Spawner3
-    end
+    local spawners = {}
     for index = 1, profile.capacity do
-        local child = spawners[index]
+        local field = profile.spawner_names and profile.spawner_names[index]
+            or (index == 1 and "Loot_Spawner" or "Loot_Spawner" .. (index - 1))
+        local child = crate[field]
         if not exact(child, class) or not same(child:GetOwner(), crate) or not same(child.Container, crate)
             or not same(child["As Game Instance FP"], instance) then
             error("native_loot_exact_crate_spawners_unavailable", 0)
@@ -224,6 +223,7 @@ local function child_spawners(crate, instance, profile)
         for previous = 1, index - 1 do
             if same(spawners[previous], child) then error("native_loot_crate_spawners_ambiguous", 0) end
         end
+        spawners[index] = child
     end
     return spawners
 end
@@ -320,7 +320,7 @@ function loot.approach_fixture(state, phase, pawn_name, requested_crate)
     local scope = loot.qualify(state, phase, pawn_name, requested_crate, true)
     local pawn, point = scope.pawn, scope.position
     local rotation = pawn:K2_GetActorRotation()
-    if scope.profile.capacity == 4 or scope.profile.guarantee_spawn and scope.profile.map == docks_map then
+    if scope.profile.capacity >= 4 or scope.profile.guarantee_spawn and scope.profile.map == docks_map then
         local input = require("native_authored_pickup_input_fixture")
         input.approach_exact_container(state, phase, scope.profile, pawn, scope.crate, scope.box)
         return loot.qualify(state, phase, pawn_name, requested_crate)

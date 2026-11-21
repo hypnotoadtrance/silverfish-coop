@@ -53,7 +53,7 @@ class AuthoredCrateRegistryTests(unittest.TestCase):
         generated = outputs()
         native = generated["native/authored_loot_registry.hpp"]
         lua = generated["mod/SilverfishCoop/Scripts/authored_loot_registry.lua"]
-        self.assertIn("0x449, 4};", native)
+        self.assertIn("0x449, 4, false, true};", native)
         self.assertIn('-205206528, STR("Office"), true, 2, &office_desk, {-7851936, -32237128, -43421604, -7392800}', native)
         self.assertIn("salt = -205206528, replenish_mode = 2, office_desk = true, guarantee_spawn = true", lua)
 
@@ -218,7 +218,7 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
                     host.checkpoint_native.assert_not_awaited()
                     self.assertTrue(host.stopping)
 
-    async def test_only_pinned_cabinet_commits_four_rows_and_keeps_one_immutable_escrow(self):
+    async def test_cabinet_commit_preserves_four_rows_and_one_immutable_escrow(self):
         items = [dict(ITEM, actor=f"stock item {index}", guid=f"{index:032X}") for index in range(1, 5)]
         for area, container, accepted in ((LAB_E206, SMALL_CABINET, True), (CROSSROADS, OTHER_CRATE, False)):
             with self.subTest(container=container):
@@ -249,7 +249,7 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
                 saved = {"world": {"party": host.party}, "characters": {}}
                 self.assertEqual(native_host_save.references(saved), [host.party[native_loot.STATE_KEY][container]["escrow"]])
                 host.party[native_loot.STATE_KEY][container]["items"][-1] = dict(items[-1], guid=items[0]["guid"])
-                with self.assertRaisesRegex(CampaignFormatError, "small cabinet escrow has an invalid identity or item"):
+                with self.assertRaisesRegex(CampaignFormatError, "stock container escrow has an invalid identity or item"):
                     native_host_save.references(saved)
 
     async def test_office_desk_empty_and_nonempty_rolls_commit_once_without_stock_trait_queries(self):

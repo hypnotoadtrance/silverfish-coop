@@ -10,7 +10,7 @@ import stat
 import uuid
 
 from .campaign import CampaignFormatError
-from .authored_loot import CRATES, FOUR_SLOT_CONTAINERS, GUARANTEED_CRATES, loot_capacity, valid_item_transform
+from .authored_loot import CRATES, GUARANTEED_CRATES, loot_capacity, valid_item_transform
 from .enemy_loot_profiles import BY_MAP as ENEMY_LOOT_ZONES, SHELLS, for_roll as enemy_loot_profile
 from .native_gold import valid_guid
 from .native_guest_drop_record import active_frames as stack_drop_frames
@@ -194,18 +194,19 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
     members = {"host", *checkpoint["characters"]}
     for container, roll in rolls.items():
         items = roll.get("items")
-        if isinstance(items, list) and len(items) > (loot_capacity(container) or 2):
+        capacity = loot_capacity(container) or 2
+        if isinstance(items, list) and len(items) > capacity:
             raise CampaignFormatError("A stock container exceeds its exact escrow capacity")
         if isinstance(items, list) and any(type(item) is dict and "transform" in item
                                            and not valid_item_transform(item["transform"]) for item in items):
             raise CampaignFormatError("The stock loot actor transform is invalid")
-        if container not in FOUR_SLOT_CONTAINERS:
+        if capacity == 2:
             continue
         calls = roll.get("trait_calls")
         if (not isinstance(items, list) or (roll.get("crate"), roll.get("map")) != (container, CRATES[container])
                 or type(roll.get("escrow")) is not dict or roll["escrow"].get("map") != CRATES[container]
                 or not isinstance(roll.get("opener"), str) or roll["opener"] not in members
-                or type(calls) is not int or not (calls == 0 if container in GUARANTEED_CRATES else 1 <= calls <= 5)
+                or type(calls) is not int or not (calls == 0 if container in GUARANTEED_CRATES else 1 <= calls <= 1 + capacity)
                 or any(type(item) is not dict or not valid_guid(item.get("guid"))
                        or not isinstance(item.get("actor"), str) or not item["actor"]
                        or not isinstance(item.get("class_path"), str) or not item["class_path"].startswith("/Game/")
@@ -213,7 +214,7 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
                                                                   or item["claimed_by"] not in members) for item in items)
                 or len({item["guid"] for item in items}) != len(items)
                 or len({item["actor"] for item in items}) != len(items)):
-            raise CampaignFormatError("The stock small cabinet escrow has an invalid identity or item")
+            raise CampaignFormatError("The stock container escrow has an invalid identity or item")
     cqc_visits = set()
     cqc_drops = set()
     for guid, roll in enemy_rolls.items():

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <numeric>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -246,17 +247,26 @@ namespace
         return mode == 1 || mode == 3;
     }
 
+    Unreal::UObject* live_object_at(Address requested)
+    {
+        if (!requested) return nullptr;
+        Unreal::UObject* found{};
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* candidate, int, int) {
+            if (address(candidate) != requested) return RC::LoopAction::Continue;
+            if (live(candidate)) found = candidate;
+            return RC::LoopAction::Break;
+        });
+        return found;
+    }
+
     std::string_view qualify_opener(Address pawn, Address save, Address stock, Context& context)
     {
         auto* player_type = find<Unreal::UClass>(pawn_class);
         auto* save_type = find<Unreal::UClass>(save_class);
         if (!live(context.world) || !player_type || !save_type) return "stock_opener_world_or_class_unavailable";
-        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* candidate, int, int) {
-            if (address(candidate) != pawn) return RC::LoopAction::Continue;
-            if (live(candidate) && candidate->GetClassPrivate() == player_type) context.pawn = candidate;
-            return RC::LoopAction::Break;
-        });
-        if (!authority(context.pawn, context.world) || !read_bool(context.pawn, STR("Dead"), false))
+        context.pawn = live_object_at(pawn);
+        if (!context.pawn || context.pawn->GetClassPrivate() != player_type ||
+            !authority(context.pawn, context.world) || !read_bool(context.pawn, STR("Dead"), false))
             return "standing_stock_opener_unavailable";
         context.save = object_field(context.pawn, STR("Save"));
         context.instance = object_field(context.world, STR("OwningGameInstance"));
@@ -300,18 +310,10 @@ namespace
 
     std::string_view qualify(Address crate, Address pawn, Address box, Address save, Address stock, Context& context)
     {
-        for (const auto& profile : silverfish::authored_loot::profiles)
-        {
-            auto* candidate = find<Unreal::UObject>(profile.actor);
-            if (candidate && address(candidate) == crate)
-            {
-                context.crate = candidate;
-                context.profile = &profile;
-                break;
-            }
-        }
+        context.crate = live_object_at(crate);
+        context.profile = silverfish::shared_loot::authored_profile(context.crate);
         context.world = silverfish::shared_loot::authored_crate_world(context.crate);
-        if (!context.world ||
+        if (!context.profile || !context.world ||
             !authority(context.crate, context.world)) return "exact_stock_crate_unavailable";
         auto* value = field<Unreal::FIntProperty>(context.crate, STR("SpawnedValue"));
         if (!value || value->GetPropertyValueInContainer(context.crate) != 0 ||
@@ -781,7 +783,7 @@ namespace
 
     int result(const Lua& lua, bool ok, std::string_view detail, bool looted = false,
                Address item1 = 0, Address item2 = 0, int trait_calls = 0, bool invoked = false,
-               const ContainerActors* cabinet_items = nullptr)
+               std::span<Unreal::UObject* const> extra_items = {})
     {
         lua.set_bool(ok);
         lua.set_string(detail);
@@ -790,19 +792,13 @@ namespace
         lua.set_integer(static_cast<std::int64_t>(item2));
         lua.set_integer(trait_calls);
         lua.set_bool(invoked);
-        if (cabinet_items)
-        {
-            lua.set_integer(static_cast<std::int64_t>(address((*cabinet_items)[2])));
-            lua.set_integer(static_cast<std::int64_t>(address((*cabinet_items)[3])));
-            return 9;
-        }
-        return 7;
+        for (auto* item : extra_items) lua.set_integer(static_cast<std::int64_t>(address(item)));
+        return static_cast<int>(7 + extra_items.size());
     }
 
     std::string materialization_failure(const OpenScope& scope, const ContainerActors& actors)
     {
         constexpr auto prefix = "stock_loot_open_spawned_item_unverified:";
-        constexpr std::array slot_names{"first", "second", "third", "fourth"};
         for (std::size_t i = 0; i < actors.size(); ++i)
         {
             auto* actor = actors[i];
@@ -816,7 +812,7 @@ namespace
             else if (!live(actor)) cause = "destroyed_or_unreachable";
             else if (!read_bool(actor, STR("bActorIsBeingDestroyed"), false)) cause = "actor_being_destroyed";
             else if (static_cast<Unreal::AActor*>(actor)->GetWorld() != scope.context.world) cause = "world_changed";
-            return std::string(prefix) + slot_names[i] + ":" + cause + ":" + scope.item_classes[i];
+            return std::string(prefix) + std::to_string(i + 1) + ":" + cause + ":" + scope.item_classes[i];
         }
         return {};
     }
@@ -920,8 +916,9 @@ namespace
             latest_roll.expires = Clock::now() + std::chrono::seconds(2);
         }
         const std::string_view detail = force_nonempty ? "opened_fixture_seeded" : "opened";
-        return result(lua, ok, ok ? detail : scope.problem, looted, address(first), address(second), traits, true,
-                      slots == max_container_slots ? &items : nullptr);
+        const auto extra = slots > 2 ? std::span<Unreal::UObject* const>{items}.subspan(2, slots - 2) :
+                                      std::span<Unreal::UObject* const>{};
+        return result(lua, ok, ok ? detail : scope.problem, looted, address(first), address(second), traits, true, extra);
     }
 
     int seed_result(const Lua& lua, bool ok, std::string_view detail)
@@ -1209,7 +1206,7 @@ namespace silverfish::shared_loot
             if (opened->ContainerPtrToValuePtr<Unreal::FMulticastScriptDelegate>(crate)->IsBound())
                 return refuse("container_opened_delegate_bound");
         }
-        if (profile->stock_class->slots == max_container_slots)
+        if (profile->stock_class == &authored_loot::small_cabinet || profile->stock_class == &authored_loot::office_desk)
         {
             auto* items = field<Unreal::FMapProperty>(crate, STR("Loot Table_Items"));
             auto* rate = field<Unreal::FDoubleProperty>(crate, STR("SpawnChance_Item"));
@@ -1277,11 +1274,16 @@ namespace silverfish::shared_loot
         const auto* profile = authored_profile(crate);
         auto* type = find<Unreal::UClass>(child_class);
         if (!profile || !type || !instance) return refuse("crate_children_context");
-        constexpr std::array fields{STR("Loot_Spawner"), STR("Loot_Spawner1"), STR("Loot_Spawner2"), STR("Loot_Spawner3")};
-        constexpr std::array salt_reasons{"cabinet_child0_salt", "cabinet_child1_salt", "cabinet_child2_salt", "cabinet_child3_salt"};
-        const bool cabinet = profile->stock_class->slots == max_container_slots;
+        constexpr std::array regular{STR("Loot_Spawner"), STR("Loot_Spawner1"), STR("Loot_Spawner2"), STR("Loot_Spawner3"),
+                                     STR("Loot_Spawner4"), STR("Loot_Spawner5"), STR("Loot_Spawner6")};
+        const auto& stock = *profile->stock_class;
+        if (!stock.slots || stock.slots > regular.size()) return refuse("crate_children_capacity");
+        const auto fields = stock.spawner_names.empty() ? std::span<const Unreal::TCHAR* const>{regular}.first(stock.slots)
+                                                        : stock.spawner_names;
+        if (fields.size() != stock.slots || fields.size() > spawners.size()) return refuse("crate_children_fields");
+        const bool pinned = &stock == &authored_loot::small_cabinet || &stock == &authored_loot::office_desk;
         spawners = {};
-        for (std::size_t index = 0; index < profile->stock_class->slots; ++index)
+        for (std::size_t index = 0; index < fields.size(); ++index)
         {
             auto* child = object_field(crate, fields[index]);
             if (!live(child) || child->GetClassPrivate() != type) return refuse("crate_child_class");
@@ -1290,37 +1292,34 @@ namespace silverfish::shared_loot
             if (object_field(child, STR("As Game Instance FP")) != instance) return refuse("crate_child_instance");
             if (std::find(spawners.begin(), spawners.begin() + index, child) != spawners.begin() + index)
                 return refuse("crate_child_duplicate");
-            if (cabinet)
+            if (pinned)
             {
                 auto* salt = field<Unreal::FIntProperty>(child, STR("SpawnerSalt"));
                 if (!salt || salt->GetPropertyValueInContainer(child) != profile->child_salts[index])
-                    return refuse(salt_reasons[index]);
+                    return refuse("cabinet_child_salt");
             }
             spawners[index] = child;
         }
-        if (cabinet)
+        if (&stock != &authored_loot::small_crate)
         {
             const auto children = static_cast<Unreal::AActor*>(crate)->K2_GetComponentsByClass(type);
-            if (children.Num() != profile->stock_class->slots) return refuse("cabinet_children_count");
+            if (children.Num() != stock.slots) return refuse("crate_children_count");
             for (int index = 0; index < children.Num(); ++index)
-                if (std::ranges::find(spawners, children[index]) == spawners.end()) return refuse("cabinet_children_membership");
+                if (!children[index] || std::ranges::find(spawners, children[index]) == spawners.end())
+                    return refuse("crate_children_membership");
         }
         return true;
     }
 
-    bool qualified_cabinet_escrow(Address address_value, Unreal::UWorld* expected_world)
+    int qualified_container_capacity(Address address_value, Unreal::UWorld* expected_world)
     {
-        if (!address_value || !Unreal::IsInGameThreadRaw() || opening) return false;
-        for (const auto& profile : authored_loot::profiles)
-        {
-            if (profile.stock_class->slots != max_container_slots) continue;
-            auto* crate = find<Unreal::UObject>(profile.actor);
-            if (address(crate) != address_value) continue;
-            auto* world = authored_crate_world(crate);
-            return world && (!expected_world || expected_world == world) && authority(crate, world) &&
-                qualified_crate_settings(crate) && read_bool(crate, STR("Looted"), true);
-        }
-        return false;
+        if (!address_value || !Unreal::IsInGameThreadRaw() || opening) return 0;
+        auto* crate = live_object_at(address_value);
+        const auto* profile = authored_profile(crate);
+        auto* world = authored_crate_world(crate);
+        if (!profile || !world || (expected_world && expected_world != world) || !authority(crate, world) ||
+            !qualified_crate_settings(crate) || !read_bool(crate, STR("Looted"), true)) return 0;
+        return profile->stock_class->slots;
     }
 
     bool qualify_escrow_owner(Address pawn, Address save, Address stock, EscrowOwner& owner)

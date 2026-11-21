@@ -192,7 +192,7 @@ namespace
         auto* door = object(crate, STR("SM_Prop_Cabinet_Small_Door_01"));
         if (!exact(door, STR("/Script/Engine.StaticMeshComponent")) || door->GetOuterPrivate() != crate)
             return refuse("crate_first_door");
-        if (profile->stock_class->slots == silverfish::shared_loot::max_container_slots)
+        if (profile->stock_class->paired_doors)
         {
             auto* second = object(crate, STR("SM_Prop_Cabinet_Small_Door_02"));
             if (!exact(second, STR("/Script/Engine.StaticMeshComponent")) ||

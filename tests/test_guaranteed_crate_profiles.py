@@ -1,7 +1,7 @@
 from collections import Counter
 import unittest
 
-from tools.silverfish.authored_container_placements import TWO_SLOT_PLACEMENTS
+from tools.silverfish.authored_container_placements import CONTAINER_PLACEMENTS
 from tools.silverfish.authored_loot import (CRATES, CRATE_PROFILES, GUARANTEED_PLACEMENTS, OFFICE_DESK,
                                            OVERRIDDEN_PLACEMENTS, PLACEMENTS, SMALL_CABINET, full_name)
 from tools.silverfish.generate_authored_loot_registry import outputs, survey
@@ -18,7 +18,7 @@ class GuaranteedCrateProfilesTests(unittest.TestCase):
         existing = tuple((*placement, None) for placement in PLACEMENTS) + OVERRIDDEN_PLACEMENTS
         self.assertEqual(len(existing), 342)
         self.assertEqual(CRATE_PROFILES[:342], existing)
-        additional = {full_name(area, actor, family) for family, area, actor, *_ in TWO_SLOT_PLACEMENTS}
+        additional = {full_name(area, actor, family) for family, area, actor, *_ in CONTAINER_PLACEMENTS}
         self.assertEqual(set(CRATES) - {full_name(*row[:2]) for row in CRATE_PROFILES},
                          {SMALL_CABINET, OFFICE_DESK} | additional)
         self.assertEqual(Counter(row[4] for row in GUARANTEED_PLACEMENTS), {None: 2, 2: 34})

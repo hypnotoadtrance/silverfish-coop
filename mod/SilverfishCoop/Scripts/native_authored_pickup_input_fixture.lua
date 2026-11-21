@@ -387,11 +387,9 @@ end
 
 function input.approach_exact_container(state, phase, profile, pawn, actor, box)
     local docks_crate = profile.map == docks and profile.guarantee_spawn == true
-    local lab_cabinet = profile.small_cabinet == true and profile.map == "/Game/Classes/Maps/Maps_Dungeons/Lab_E206_P"
     local office_desk = profile.office_desk == true and profile.map == "/Game/Classes/Maps/Maps_OverWorld/Lake_01_P"
     local label = office_desk and "native_loot_desk_fixture" or docks_crate and "native_loot_docks_fixture" or "native_loot_cabinet_fixture"
-    if (not docks_crate and not lab_cabinet and not office_desk)
-        or require("authored_loot_registry")[profile.index] ~= profile
+    if require("authored_loot_registry")[profile.index] ~= profile
         or not approach_scope(state, phase, pawn, actor, profile.map) or not actor:HasAuthority()
         or not same(StaticFindObject(profile.path), actor) or actor:GetFullName() ~= profile.name
         or not same(actor.Box, box) or not owned(box, actor, "BoxComponent") then
