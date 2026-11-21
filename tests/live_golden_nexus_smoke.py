@@ -18,13 +18,16 @@ from live_multi_smoke import saved_hashes
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+from tools.silverfish import native_loose_pickup as loose
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
-from tools.silverfish.travel import CROSSROADS, GOLD_NEXUS
+from tools.silverfish.travel import CROSSROADS, GOLD_NEXUS, OBSERVATORY
 
 
 PADS = {route.actor: route for route in AUTHORED_ROUTES if route.source == GOLD_NEXUS}
 DEFAULT_PAD = "Level_Exit_BP_C_179"
 DUPLICATE_TAG = "Nexus_CrossRoads"
+MUSHROOM = f"{GOLD_NEXUS}.GoldNexus_P:PersistentLevel.Item_GoldMushroom_C_1"
+MUSHROOM_TARGET = f"loose:{MUSHROOM}"
 DIAGONAL = 1000 / math.sqrt(2)
 PAD_CENTERS = {
     "Level_Exit_BP_C_178": (0, -1000),
@@ -58,7 +61,7 @@ def crypt_approach(state, pad_actor):
     return coordinates
 
 
-async def exercise(work, vanilla_saved, pad):
+async def exercise(work, vanilla_saved, pad, temporary_loot=False):
     name = "gold-pad-" + uuid.uuid4().hex[:8]
     authority, visitor = ("--campaign", name), ("--profile", name)
     run = work / "campaigns" / name / "run"
@@ -153,22 +156,63 @@ async def exercise(work, vanilla_saved, pad):
     def gold_ledger(state):
         return state["campaign"]["world"]["party"].get("gold_transport")
 
+    def mushroom(state):
+        return state.get("game", {}).get(loose.KEY, {}).get(MUSHROOM, {})
+
+    async def approach_pad():
+        for role in ("host", "guest"):
+            placed = await command("action", *authority, "native-exit-position", "--target", role, "--exit-position", "near", *endpoint)
+            assert (placed["exit_actor"], placed["entrance"], placed["target"]) == (pad.actor, pad.entrance, role), placed
+        approach = await wait(run, lambda state: crypt_approach(state, pad.actor), timeout=8)
+        await wait(run, lambda state: (wall := state.get("game", {}).get("native_zone_wall", {})).get("host_open") is True
+                   and pad.actor + " (" not in wall.get("failure", ""), timeout=12)
+        return crypt_approach(approach, pad.actor)
+
+    async def enter_nexus(source, previous, character):
+        guid = uuid.uuid4().hex.upper()
+        await cube("seed", guid, source, "seeded")
+        await cube("action-probe", guid, source, "requested")
+        ingress = await event("native_gold_request", lambda row: row.get("guid") == guid)
+        assert (ingress["result"]["ok"], ingress["source"], ingress["result"]["map"]) == (True, source, GOLD_NEXUS)
+        return await enrolled(GOLD_NEXUS, character, previous)
+
+    async def take_mushroom(character, previous_operation=None):
+        for role in ("host", "guest"):
+            await command("action", *authority, loose.APPROACH, "--target", f"{role}@{MUSHROOM_TARGET}")
+        for directory in (run, guest_run):
+            state = await wait(directory, lambda state: mushroom(state).get("state") == "available", timeout=12)
+            assert mushroom(state)["mode"] == 1, mushroom(state)
+        await command("action", *visitor, loose.FIXTURE, "--target", MUSHROOM_TARGET)
+        transfer = await event("native_loose_pickup_claimed", lambda row: row.get("actor") == MUSHROOM
+                               and row.get("operation_id") != previous_operation)
+        assert transfer["mode"] == 1 and transfer["owner"] == character, transfer
+        for directory in (run, guest_run):
+            await wait(directory, lambda state: mushroom(state).get("state") == "claimed", timeout=12)
+        return transfer
+
+    async def replay_mushroom(operation):
+        response = await command("action", *visitor, loose.CLAIM, "--target", MUSHROOM_TARGET,
+                                 "--operation-id", operation)
+        return response[loose.PROOF]
+
     try:
+        origin = OBSERVATORY if temporary_loot else CROSSROADS
+        start_args = ("--native-start-preset", "wanderer") if temporary_loot else ("--start-zone", origin)
         await launch("host", authority, "--port", "0", "--headless", "--fixtures", "--native-events", "--native-guest",
-                     "--native-zones", "--native-expanded-zones", "--native-zone-walls", "--start-zone", CROSSROADS)
+                     "--native-zones", "--native-expanded-zones", "--native-zone-walls", *start_args)
         await wait(run, lambda state: state.get("state") == "hosting")
         invite = await command("invite", *authority, "--name", "Golden Nexus guest", "--character", "Nexus traveler")
         character = invite["character_id"]
         await launch("join", visitor, "--headless", "--native-zones", "--native-zone-walls", "--invite", invite["invite_file"])
-        start = await enrolled(CROSSROADS, character)
+        start = await enrolled(origin, character)
         await wait(run, lambda state: state.get("game", {}).get("native_transport", {}).get("state") == "ready")
         guid = uuid.uuid4().hex.upper()
-        seed = await cube("seed", guid, CROSSROADS, "seeded")
-        pressed = await cube("action-probe", guid, CROSSROADS, "requested")
+        seed = await cube("seed", guid, origin, "seeded")
+        pressed = await cube("action-probe", guid, origin, "requested")
         assert seed["pawn"] == pressed["pawn"] == start["game"]["pawns"]["local"]["name"], pressed
         ingress = await event("native_gold_request", lambda row: row.get("guid") == guid)
         evidence["stock_cube_ingress"] = ingress
-        assert (ingress["source"], ingress["entry"]) == (CROSSROADS, "action_use"), ingress
+        assert (ingress["source"], ingress["entry"]) == (origin, "action_use"), ingress
         assert tuple(ingress["result"][key] for key in ("ok", "map", "entrance")) == (True, GOLD_NEXUS, "PlayerStart_1"), ingress
         nexus = await enrolled(GOLD_NEXUS, character, start["zone_epoch"])
         assert nexus["generation"] == start["generation"] and nexus["zone_epoch"] == ingress["result"]["travel_epoch"], ingress
@@ -176,6 +220,8 @@ async def exercise(work, vanilla_saved, pad):
         assert gold_ledger(nexus) == spent, nexus
         assert math.dist(nexus["game"]["pawns"]["local"]["location"], (0, 1050, 150)) <= 350, nexus
         evidence["cube_after_ingress"] = await cube("inspect", guid, GOLD_NEXUS, "absent")
+        if temporary_loot:
+            evidence["first_temporary_pickup"] = await take_mushroom(character)
 
         # Refuse an ambiguous request at the PlayerStart before approaching any pad.
         for operation, extra in (("native-exit-position", ("--exit-position", "near")), ("native-exit-wall-probe", ())):
@@ -184,13 +230,7 @@ async def exercise(work, vanilla_saved, pad):
             assert "multiple stock exits" in rejected["error"] and "--exit-actor" in rejected["error"], rejected
             evidence.setdefault("duplicate_tag_refusals", {})[operation] = rejected["error"]
 
-        for role in ("host", "guest"):
-            placed = await command("action", *authority, "native-exit-position", "--target", role, "--exit-position", "near", *endpoint)
-            assert (placed["exit_actor"], placed["entrance"], placed["target"]) == (pad.actor, pad.entrance, role), placed
-        approach = await wait(run, lambda state: crypt_approach(state, pad.actor), timeout=8)
-        evidence["stock_crypt_approach"] = crypt_approach(approach, pad.actor)
-        await wait(run, lambda state: (wall := state.get("game", {}).get("native_zone_wall", {})).get("host_open") is True
-                   and pad.actor + " (" not in wall.get("failure", ""), timeout=12)
+        evidence["stock_crypt_approach"] = await approach_pad()
         evidence["guest_wall"] = await sweep("guest", "wall")
         assert evidence["guest_wall"]["slot"] == "guest", evidence["guest_wall"]
         arrival_receipt = asyncio.create_task(capture_arrival())
@@ -217,6 +257,31 @@ async def exercise(work, vanilla_saved, pad):
         assert egress["result"]["ok"] is True and egress["result"]["travel_epoch"] == arrived["zone_epoch"], egress
         assert gold_ledger(arrived) == spent and arrived["generation"] == start["generation"], arrived
         evidence["cube_after_egress"] = await cube("inspect", guid, pad.destination, "absent")
+        if temporary_loot:
+            first = evidence["first_temporary_pickup"]
+            suppressed = await enter_nexus(pad.destination, arrived["zone_epoch"], character)
+            for directory in (run, guest_run):
+                await wait(directory, lambda state: MUSHROOM in state.get("gameplay", {}).get(loose.STATE, ())
+                           and mushroom(state).get("state") != "available", timeout=12)
+            assert (await replay_mushroom(first["operation_id"]))["guid"] == first["guid"]
+            duplicate = await command("action", *visitor, loose.CLAIM, "--target", MUSHROOM_TARGET, expected=False)
+            assert duplicate["error"] == "loose_pickup_already_claimed", duplicate
+            evidence["suppressed_on_revisit"] = {"epoch": suppressed["zone_epoch"], "duplicate": duplicate["error"]}
+
+            await approach_pad()
+            await sweep("host", "clear")
+            mainland = await enrolled(pad.destination, character, suppressed["zone_epoch"])
+            evidence["stock_temporary_expiration"] = await command(
+                "action", *authority, loose.EXPIRE_FIXTURE, "--target", MUSHROOM_TARGET)
+            restored = await enter_nexus(pad.destination, mainland["zone_epoch"], character)
+            second = await take_mushroom(character, first["operation_id"])
+            assert second["guid"] != first["guid"] and second["epoch"] == restored["zone_epoch"]
+            assert (await replay_mushroom(first["operation_id"]))["guid"] == first["guid"]
+            assert (await replay_mushroom(second["operation_id"]))["guid"] == second["guid"]
+            inventory = (await command("action", *visitor, "native-inventory-list"))["native_inventory"]["items"]
+            rows = [row for row in inventory if row["guid"] in {first["guid"], second["guid"]}]
+            assert len(rows) == 2 and all(row["class_path"] == second["class_path"] for row in rows), rows
+            evidence["replenished_temporary_pickup"] = {"transfer": second, "owned": rows}
         evidence.update(character_id=character, verified=True)
     except BaseException as error:
         evidence.update(verified=False, failure=str(error))
@@ -242,7 +307,10 @@ if __name__ == "__main__":
     options.add_argument("--work", required=True, type=Path, help="prepared staged workspace")
     options.add_argument("--vanilla-saved", required=True, type=Path, help="original Saved directory to hash before and after")
     options.add_argument("--exit-actor", choices=sorted(PADS), default=DEFAULT_PAD, help="exact stock pad (default is NorthEast Rail)")
+    options.add_argument("--temporary-loot", action="store_true", help="verify the stock Gold Mushroom through replenishment")
     args = options.parse_args()
+    if args.temporary_loot and PADS[args.exit_actor].destination != CROSSROADS:
+        options.error("Temporary loot needs a CrossRoads pad for its stock day-cycle update")
     if not args.vanilla_saved.is_dir():
         options.error("--vanilla-saved must be an existing original Saved directory")
-    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved.resolve(), PADS[args.exit_actor]))
+    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved.resolve(), PADS[args.exit_actor], args.temporary_loot))

@@ -15,6 +15,7 @@ CAPABILITY = "native_loose_pickup_version"
 CLAIM = "native-loose-pickup-claim"
 PROOF = "native_loose_pickup_claim"
 FIXTURE = "native-loose-pickup-fixture"
+EXPIRE_FIXTURE = "native-loose-pickup-expire-fixture"
 APPROACH = "native-loose-pickup-approach"
 PROJECT = "native-loose-pickup-project"
 CHECK = "native-loose-pickup-check"
@@ -113,23 +114,46 @@ class Visibility:
 
     def hidden(self, host):
         area, epoch = host.last_game.get("map"), host.zone_epoch
+        replenished = self.replenished if self.epoch == epoch else ()
         return [path for path, row in host.party.get(STATE, {}).items()
                 if row["map"] == area and (row["epoch"] == epoch or row["mode"] == 2
-                                          or row["mode"] == 1 and path not in self.replenished)]
+                                          or row["mode"] == 1 and path not in replenished)]
 
 
 async def project(service, bridge, hidden):
     game = service.last_game
-    if game.get(CAPABILITY) != 1 or not isinstance(hidden, list):
+    area = game.get("map")
+    if (game.get(CAPABILITY) != 1 or game.get("state") != "connected" or not isinstance(hidden, list)
+            or any(actor_map(path) != area for path in hidden)):
         return
+    hidden_set = set(hidden)
     nearby = game.get(KEY, {})
-    paths = [path for path in hidden if isinstance(path, str) and nearby.get(path, {}).get("state") == "available"]
-    if not paths:
-        return
-    reply = await bridge.command(PROJECT, *paths[:64], timeout=4)
-    if (reply.get("map"), reply.get("state")) != (game.get("map"), game.get("state")):
-        raise RuntimeError("The loose pickup projection changed worlds")
-    service.last_game = reply
+    updates = [("hide", [path for path, row in nearby.items() if path in hidden_set and row["state"] == "available"]),
+               ("show", [path for path, row in nearby.items() if path not in hidden_set and row["state"] == "claimed"])]
+    for mode, paths in updates:
+        if not paths:
+            continue
+        reply = await bridge.command(PROJECT, mode, *paths, timeout=4)
+        if (reply.get("map"), reply.get("state")) != (area, "connected"):
+            raise RuntimeError("The loose pickup projection changed worlds")
+        service.last_game = reply
+
+
+async def expire_fixture(host, bridge, target):
+    path = target_path(target)
+    roll = host.party.get(STATE, {}).get(path, {})
+    game = host.last_game
+    if (not path or roll.get("mode") != 1 or game.get("state") != "hosting"
+            or host.native_checkpoint_unsafe or host.stopping or host.transitioning):
+        raise party.RuleError("loose_pickup_fixture_scope_unavailable")
+    snapshot = await bridge.command(EXPIRE_FIXTURE, path, timeout=7)
+    message = snapshot.get("ack", {}).get("message", "")
+    match = re.fullmatch(r"stock temporary loot expired after ([1-9]|1[0-2]) daily updates", message)
+    if not match or (snapshot.get("state"), snapshot.get("map")) != ("hosting", game.get("map")):
+        raise RuntimeError("Stock loose item expiration did not verify")
+    host.last_game, host.last_seen = snapshot, time.monotonic()
+    revision = await host.checkpoint_native(bridge)
+    return {"actor": path, "days": int(match[1]), "revision": revision}
 
 
 async def claim(host, bridge, character, requested, operation):

@@ -88,6 +88,24 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.command.await_args_list, [call(loose.CHECK, temporary, timeout=4)] * 2)
 
 
+    async def test_projection_restores_the_loaded_actor_after_the_host_releases_its_suppression(self):
+        loose = native_loose_pickup
+        path = f"{CROSSROADS}.CrossRoads_P:PersistentLevel.Item_Test_C_1"
+        game = {"state": "connected", "map": CROSSROADS, loose.CAPABILITY: 1}
+        shown = dict(game, **{loose.KEY: {path: {"state": "available"}}})
+        hidden = dict(game, **{loose.KEY: {path: {"state": "claimed"}}})
+        client = SimpleNamespace(last_game=shown)
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[hidden, shown]))
+        await loose.project(client, bridge, [path])
+        self.assertEqual(client.last_game, hidden)
+        await loose.project(client, bridge, None)
+        self.assertEqual(client.last_game, hidden)
+        await loose.project(client, bridge, [])
+        self.assertEqual(client.last_game, shown)
+        self.assertEqual(bridge.command.await_args_list,
+                         [call(loose.PROJECT, "hide", path, timeout=4), call(loose.PROJECT, "show", path, timeout=4)])
+
+
 class NativeLootTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))

@@ -422,6 +422,7 @@ namespace
         bool host{}, claimed{}, original_collision{}, original_hidden{};
         Observation observed{};
         Guid merged_source{};
+        std::optional<U::FVector> hidden_at;
     };
 
     std::array<Scope, profiles.size()> scopes{};
@@ -871,12 +872,28 @@ namespace
             boolean(actor, STR("bHidden"), false);
     }
 
+    bool restore_loose_location(Scope& scope, U::AActor* actor)
+    {
+        if (!scope.hidden_at) return true;
+        auto saved = *scope.hidden_at;
+        auto current = actor->K2_GetActorLocation();
+        const auto dx = current.GetX() - saved.GetX(), dy = current.GetY() - saved.GetY(), dz = current.GetZ() - saved.GetZ();
+        U::FHitResult ignored{};
+        if (dx * dx + dy * dy + dz * dz > 1.0 && !actor->K2_SetActorLocation(saved, false, ignored, true))
+            return false;
+        scope.hidden_at.reset();
+        return true;
+    }
+
     bool set_visibility(Scope& scope, bool claimed)
     {
         auto* actor = static_cast<U::AActor*>(scope.actor.Get());
         if (!local_scope(scope) || (scope.profile->dead_drop && (!scope.host || !claimed || !drop_gate(scope))) ||
             !exact_source(actor, scope.world.Get(), *scope.profile, !scope.claimed || !claimed))
             return false;
+        if (claimed && !scope.claimed && !scope.host && scope.profile->discovered)
+            scope.hidden_at = actor->K2_GetActorLocation();
+        if (!claimed && !restore_loose_location(scope, actor)) return false;
         const bool hidden = claimed || scope.original_hidden;
         const bool collision = !claimed && scope.original_collision;
         actor->SetActorHiddenInGame(hidden);
@@ -893,6 +910,7 @@ namespace
         if (scope.claimed && scope.profile && !scope.profile->dead_drop &&
             live(actor) && boolean(actor, STR("bActorIsBeingDestroyed"), false))
         {
+            restore_loose_location(scope, actor);
             actor->SetActorHiddenInGame(scope.original_hidden);
             actor->SetActorEnableCollision(scope.original_collision);
         }
@@ -1837,7 +1855,7 @@ namespace
         {
             auto* actor = loose.scope.actor.Get();
             if (!live(actor) || !loose_respawn_mode(actor)) continue;
-            auto at = static_cast<U::AActor*>(actor)->K2_GetActorLocation();
+            auto at = loose.scope.hidden_at ? *loose.scope.hidden_at : static_cast<U::AActor*>(actor)->K2_GetActorLocation();
             const auto dx = at.GetX() - center.GetX(), dy = at.GetY() - center.GetY(), dz = at.GetZ() - center.GetZ();
             const auto distance = dx * dx + dy * dy + dz * dz;
             if (std::isfinite(distance) && distance <= 1800.0 * 1800.0)
@@ -1849,7 +1867,7 @@ namespace
         {
             if (!scope->claimed && !available(*scope)) continue;
             auto* actor = scope->actor.Get();
-            auto at = static_cast<U::AActor*>(actor)->K2_GetActorLocation();
+            auto at = scope->hidden_at ? *scope->hidden_at : static_cast<U::AActor*>(actor)->K2_GetActorLocation();
             rows += std::format("{}|{}|{}|{}|{:.3f}|{:.3f}|{:.3f}\n", scope->profile->source,
                 RC::to_utf8_string(scope->profile->item_class), loose_respawn_mode(actor)->GetPropertyValueInContainer(actor),
                 scope->claimed ? "claimed" : "available", at.GetX(), at.GetY(), at.GetZ());

@@ -381,16 +381,12 @@ function loot.placement(state, phase, requested_crate)
     return positions
 end
 
-function loot.replenish_fixture(state, phase, requested_crate)
-    local profile = loot.profile(state.map, requested_crate)
-    local host, world, instance = host_context(state, phase, profile)
-    local crate = find_crate(world, profile)
-    local active, save, library = loot.temporary_activation(crate, host)
+local function daily_replenishment(state, world, instance, save, library, active)
     local day_profile = require("authored_world_view")[state.map]
     local day_path = day_profile and day_profile.day:match("^%S+ (/Game/%S+)$")
     local day = day_path and StaticFindObject(day_path)
     local day_class = StaticFindObject("/Game/Classes/Actors/DayCycle_SunControler_BP.DayCycle_SunControler_BP_C")
-    if active ~= true or crate.Looted ~= true or not exact(day, day_class)
+    if active() ~= true or not exact(day, day_class)
         or not authority(day, world) or not same(day["Game Instance"], instance) then
         error("native_loot_temporary_activation_fixture_unavailable", 0)
     end
@@ -411,11 +407,49 @@ function loot.replenish_fixture(state, phase, requested_crate)
         if not same(instance.SaveSlot_Ref, save) or save.TempActivations:GetArrayNum() >= before then
             error("native_loot_replenishment_fixture_daily_update_unverified", 0)
         end
-        if loot.temporary_activation(crate, host) == false and crate.Looted == true then
+        if active() == false then
             return days
         end
     end
     error("native_loot_replenishment_fixture_activation_still_present", 0)
+end
+
+function loot.replenish_fixture(state, phase, requested_crate)
+    local profile = loot.profile(state.map, requested_crate)
+    local host, world, instance = host_context(state, phase, profile)
+    local crate = find_crate(world, profile)
+    local active, save, library = loot.temporary_activation(crate, host)
+    if active ~= true or crate.Looted ~= true then error("native_loot_temporary_activation_fixture_unavailable", 0) end
+    return daily_replenishment(state, world, instance, save, library, function()
+        if crate.Looted == true then return loot.temporary_activation(crate, host) end
+    end)
+end
+
+function loot.expire_loose_fixture(state, phase, path)
+    local area = type(path) == "string" and path:match("^(/Game/Classes/Maps/[%w_/]+)%.[%w_]+:PersistentLevel%.[%w_]+$")
+    local actor = area and path:match(":PersistentLevel%.([%w_]+)$")
+    if not actor or os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1"
+        or os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" then error("native_loot_temporary_source_unavailable", 0) end
+    local id = actor .. "-" .. area:match("([^/]+)$") .. "-"
+    local profile = loot.profile(state.map)
+    local _, world, instance, save = host_context(state, phase, profile)
+    local library = StaticFindObject(code_library)
+    if not valid(library) or not save.GameRules or save.GameRules[replenish_rule] ~= true then
+        error("native_loot_temporary_activation_fixture_unavailable", 0)
+    end
+    local function active()
+        local entries = save.TempActivations
+        local count = entries and math.tointeger(entries:GetArrayNum())
+        if not count or count < 0 or count > 16384 then return end
+        for index = 1, count do
+            local value = entries[index]
+            if type(value) == "userdata" then value = value:ToString() end
+            if type(value) ~= "string" then return end
+            if value == id then return true end
+        end
+        return false
+    end
+    return daily_replenishment(state, world, instance, save, library, active)
 end
 
 -- Each address comes from an exact owned child's stock SpawnLoot out parameter.

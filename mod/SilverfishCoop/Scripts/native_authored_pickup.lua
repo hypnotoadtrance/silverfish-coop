@@ -338,15 +338,18 @@ local function loose_profile(path, state)
         cash_flag = leaf .. "-" .. area_name .. "-"}
 end
 
+local function temporary_mark(actor)
+    local library = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C")
+    if not valid(library) then return end
+    local result = {}
+    library:Find_ActorOnTempActivations(actor, actor, result)
+    if type(result.Found) == "boolean" then return result.Found end
+end
+
 local function verify_stock_mark(profile, actor)
     if profile.mode == 0 then return true end
-    local library = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C")
-    if not valid(library) then return false end
+    if profile.mode == 1 then return temporary_mark(actor) == true end
     local result = {}
-    if profile.mode == 1 then
-        library:Find_ActorOnTempActivations(actor, actor, result)
-        return result.Found == true
-    end
     local statics = StaticFindObject(statics_path)
     local instance = valid(statics) and statics:GetGameInstance(actor)
     if not valid(instance) then return false end
@@ -520,6 +523,13 @@ function pickup.command(fields, state, phase)
         if cleared ~= true then error(status, 0) end
         return "cleared local stock Dead Drop presentation"
     end
+    if action == "native-loose-pickup-expire-fixture" then
+        if phase ~= "hosting" or not (fixtures and host_fixtures) or #fields ~= 3 then
+            error("loose_pickup_fixture_scope_unavailable", 0)
+        end
+        local days = require("native_loot").expire_loose_fixture(state, phase, fields[3])
+        return "stock temporary loot expired after " .. tostring(days) .. " daily updates"
+    end
     if action == "native-loose-pickup-claim" then
         pickup.update(state, phase)
         local profile = #fields == 5 and loose_profile(fields[5], state)
@@ -534,16 +544,22 @@ function pickup.command(fields, state, phase)
         loose_check = {}
         for index = 3, #fields do
             local profile = loose_profile(fields[index], state)
-            loose_check[#loose_check + 1] = {fields[index], profile and not profile.claimed and 1 or 0}
+            local available = profile and profile.mode == 1 and not profile.claimed
+                and temporary_mark(StaticFindObject(profile.path)) == false
+            loose_check[#loose_check + 1] = {fields[index], available and 1 or 0}
         end
         return "stock loose pickup availability verified"
     end
     if action == "native-loose-pickup-project" then
         pickup.update(state, phase)
-        if #fields < 3 or #fields > 66 then error("loose_pickup_projection_arguments", 0) end
-        for index = 3, #fields do
+        local mode = fields[3]
+        if phase ~= "connected" or #fields < 4 or #fields > 67 or (mode ~= "hide" and mode ~= "show") then
+            error("loose_pickup_projection_arguments", 0)
+        end
+        local hidden = mode == "hide"
+        for index = 4, #fields do
             local profile = loose_profile(fields[index], state)
-            if profile and not profile.claimed and not SilverfishProjectNativeAuthoredPickup(true, profile.source) then
+            if profile and profile.claimed ~= hidden and not SilverfishProjectNativeAuthoredPickup(hidden, profile.source) then
                 error("loose_pickup_projection_unverified", 0)
             end
         end

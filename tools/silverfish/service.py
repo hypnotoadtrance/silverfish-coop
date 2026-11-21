@@ -773,8 +773,8 @@ class Host:
             if self.last_game.get(native_guest_drop_record.GENERIC_CAPABILITY) == 1:
                 view[native_guest_drop_record.GENERIC_CAPABILITY] = 1
         view[native_authored_pickup.STATE_KEY] = self.party.get(native_authored_pickup.STATE_KEY, {})
-        if hidden := self.loose_pickups.hidden(self):
-            view[native_loose_pickup.STATE] = hidden
+        if self.last_game.get(native_loose_pickup.CAPABILITY) == 1:
+            view[native_loose_pickup.STATE] = self.loose_pickups.hidden(self)
         if dead_drop := native_dead_drop.frame(self):
             view[native_dead_drop.FRAME] = dead_drop
         if cabinet := native_dust_cabinet.frame(self):
@@ -2417,6 +2417,8 @@ class Host:
                 elif action == native_loose_pickup.CLAIM:
                     result = await native_loose_pickup.claim(self, bridge, "host", request.get("target"),
                                                            request.get("operation_id") or path.stem)
+                elif action == native_loose_pickup.EXPIRE_FIXTURE and self.fixtures:
+                    result = await native_loose_pickup.expire_fixture(self, bridge, request.get("target"))
                 elif action == native_loose_pickup.APPROACH and self.fixtures:
                     role, _, selected = (request.get("target") or "").partition("@")
                     actor = native_loose_pickup.target_path(selected)
