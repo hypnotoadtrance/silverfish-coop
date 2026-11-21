@@ -114,8 +114,10 @@ def record(profile: Profile, slot: str, map_name: str, *, flush: bool = False,
                 os.fsync(stream.fileno())
             info = os.fstat(stream.fileno())
             size = info.st_size
-            if not stat.S_ISREG(info.st_mode) or (expected_size is not None and size != expected_size):
-                raise CampaignFormatError("The Unreal save generation has an unexpected file type or size")
+            if not stat.S_ISREG(info.st_mode):
+                raise CampaignFormatError("The Unreal save generation has an unexpected file type")
+            if expected_size is not None and size != expected_size:
+                raise CampaignFormatError("The Unreal save generation does not match its campaign checkpoint")
             if size < 16 or stream.read(4) != b"GVAS":
                 raise CampaignFormatError(f"The Unreal save generation {slot} has an invalid header")
             stream.seek(0)

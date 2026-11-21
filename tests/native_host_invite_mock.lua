@@ -64,47 +64,62 @@ local offer = "bridge/host-invite-offer.tsv"
 local request = "bridge/host-invite-request.tsv"
 local response = "bridge/host-invite-response.tsv"
 local generation, epoch = string.rep("a", 32), string.rep("b", 32)
-local files, hooks = {}, {}
-local game_tick, view, editing
+local files = {}
+local pending_button, view, editing
 local payload = '{"credential":"private only"}'
-local display = {}
-function display.mount(context, caption)
-    assert(context.menu == stack[#stack] and context.controller == controller and type(caption) == "string")
+local surface = {}
+function surface.mount(context, spec, callback)
+    assert(context.menu == stack[#stack] and context.controller == controller)
     view = object()
-    view.caption, view.visible = caption, true
+    view.widget = view
+    view.caption = spec.title .. (spec.note and "\n" .. spec.note or "")
+    view.visible, view.active, view.center = true, true, spec.center
+    view.callback, view.buttons = callback, {}
+    for _, row in ipairs(spec.rows) do
+        if row.field then
+            assert(not editing)
+            editing = {field = row.field.key, value = row.field.value or ""}
+        else
+            for _, button in ipairs(row) do view.buttons[button.key] = button.label end
+        end
+    end
     return view
 end
-function display.remove(widget) widget.visible = false end
 
-local editor = {}
-function editor.mount(frame, phase, field, _, initial, probe)
-    assert(not editing and probe(frame, phase).menu == stack[#stack])
-    editing = {field = field, value = initial or "", probe = probe}
-    return editing
+function surface.remove(mounted)
+    assert(mounted == view)
+    mounted.visible, mounted.active, editing = false, false, nil
 end
-function editor.focus(handle, frame, phase)
-    assert(handle == editing and handle.probe(frame, phase))
-    return false
+
+function surface.read(mounted, field)
+    assert(mounted == view and mounted.active and editing.field == field)
+    return editing.value
 end
-function editor.read(handle, frame, phase)
-    assert(handle == editing and handle.probe(frame, phase))
-    return handle.value
-end
-function editor.write(handle, frame, phase, value)
-    assert(handle == editing and handle.probe(frame, phase))
-    handle.value = value
-    return value
-end
-function editor.remove(handle)
-    assert(handle == editing)
-    editing = nil
+
+function surface.write(mounted, field, value)
+    assert(mounted == view and mounted.active and editing.field == field)
+    editing.value = value
     return true
+end
+
+local function click(key)
+    assert(view and view.buttons[key], key)
+    if not view.active or not view.visible then return end
+    local captured = view
+    pending_button = function()
+        if captured.active and captured.visible then captured.callback(key) end
+    end
+end
+
+local function dispatch_click()
+    local callback = pending_button
+    pending_button = nil
+    if callback then callback() end
 end
 
 local env = setmetatable({
     require = function(name)
-        if name == "native_title_display" then return display end
-        if name == "native_title_settings_widget" then return editor end
+        if name == "native_title_surface" then return surface end
         assert(name == "players")
         return {is_downed = function(who) assert(who == pawn); return downed end}
     end,
@@ -130,9 +145,7 @@ local env = setmetatable({
         assert(mode == "wb" and path:sub(1, #request) == request)
         return {write = function(_, ...) files[path] = table.concat({...}); return true end, close = function() return true end}
     end},
-    Key = {F7 = "F7", F8 = "F8", F9 = "F9"},
-    RegisterKeyBind = function(key, action) hooks[key] = action end,
-    LoopInGameThreadWithDelay = function(_, action) game_tick = action end,
+    RegisterKeyBind = function() error("The Journal must use clickable controls") end,
     SilverfishNativeGameWindowFocused = function() return focused end,
     SilverfishCopyHostInvitation = function(text, id)
         assert(focused and text == payload and #id == 32)
@@ -196,20 +209,20 @@ flags.SILVERFISH_COOP_HEADLESS = nil
 module = build()
 controller:OpenMenu(registered[journal_class], {})
 tick()
-local function press(key) hooks[key](); game_tick() end
-press("F7")
+local function press(action) click(action); dispatch_click() end
+press("confirm")
 assert(report() == "journal" and not editing)
 focused = true
-press("F7")
-assert(report() == "editing" and editing.field == "participant")
+press("confirm")
+assert(report() == "editing" and editing.field == "participant" and view.center == true)
 editing.value = "Bob Test"
-press("F8")
+press("next")
 editing.value = "Pip"
-press("F8")
+press("next")
 editing.value = "127.0.0.1"
-press("F8")
+press("next")
 assert(report() == "editing" and not files[request])
-press("F7")
+press("confirm")
 id = "00000001ffffffff0000003300000002"
 assert(files[request] == ("1\t%s\t%s\t%s\tBob Test\tPip\t127.0.0.1\n"):format(generation, epoch, id))
 files[request] = nil
@@ -218,13 +231,13 @@ files["bridge/host-invite-" .. id .. ".invite.json"] = payload .. "\n"
 tick()
 assert(report() == "exported" and copies == 0)
 focused = false
-press("F7")
+press("confirm")
 assert(copies == 0)
 focused = true
-press("F7")
+press("confirm")
 assert(copies == 1 and report() == "exported")
 files["bridge/host-invite-" .. id .. ".invite.json"] = '{"replaced":true}\n'
-press("F7")
+press("confirm")
 assert(copies == 1 and report() == "refused")
 world.NetDriver.ServerConnection = object()
 tick()
@@ -272,27 +285,27 @@ state.map = market
 controller:OpenMenu(registered[journal_class], {})
 tick()
 package_status("idle")
-assert(install_offer(first_offer) and view.caption:find("F8   Give", 1, true))
-press("F8")
+assert(install_offer(first_offer) and view.buttons.next == "Give the sealed package" and view.center == false)
+press("next")
 assert(view.caption:find(scout_label, 1, true))
-press("F8")
+press("next")
 assert(view.caption:find(courier_label, 1, true))
 assert(install_offer(first_offer) and view.caption:find(courier_label, 1, true))
 assert(not install_offer(first_offer, "Changed label"))
 package_status("choosing", first_offer)
-hooks.F7()
+click("confirm")
 assert(install_offer(second_offer))
-game_tick()
+dispatch_click()
 package_status("idle", second_offer)
-assert(view.caption:find("F8   Give", 1, true))
-press("F8")
-press("F8")
+assert(view.buttons.next == "Give the sealed package")
+press("next")
+press("next")
 assert(view.caption:find(courier_label, 1, true))
 view.visible = false
-press("F7")
+press("confirm")
 package_status("choosing", second_offer)
 view.visible = true
-press("F7")
+press("confirm")
 package_status("submitting", second_offer, courier)
 time = 109
 tick()
@@ -303,7 +316,7 @@ assert(handoff_command("result", second_offer, "transferred"))
 assert(handoff_command("result", second_offer, "transferred"))
 package_status("transferred")
 assert(view.caption:find("package given", 1, true))
-press("F9")
+press("back")
 package_status("idle")
 controller:CloseMenu({})
 tick()

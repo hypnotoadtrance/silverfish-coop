@@ -1,8 +1,9 @@
-"""Drive the authored stock new-game creator in an isolated co-op title."""
+"""Drive the stock creator and saved campaign picker in isolated co-op titles."""
 
 import argparse
 import asyncio
 from contextlib import contextmanager
+from dataclasses import replace
 import json
 from pathlib import Path
 import shutil
@@ -24,6 +25,7 @@ from live_unified_title_smoke import Seat, offered
 EDITOR = "/Game/Classes/Maps/CharacterSelect_Map_P"
 TUTORIAL = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
 FORM = "native-title-host-form-fixture"
+BUTTON_FIXTURE = "native-title-button-fixture"
 MOD = "SilverfishStockCreatorProbe"
 
 
@@ -94,9 +96,18 @@ async def creator_action(seat: Seat, operation: str) -> str:
     raise TimeoutError(f"Stock creator {operation} did not finish: {latest}")
 
 
+async def click(seat: Seat, *keys: str) -> None:
+    for key in keys:
+        queued = await seat.bridge.command(BUTTON_FIXTURE, key)
+        assert queued["ack"]["message"] == "title_button_queued", (key, queued["ack"])
+        await seat.bridge.wait_for(lambda frame: frame["sequence"] > queued["sequence"], timeout=8)
+
+
 async def enter_creator(seat: Seat, previous_generation=None) -> dict:
-    for args in (("open",), ("campaign", seat.campaign.name), ("port", str(seat.port)), ("creator",)):
-        await seat.bridge.command(FORM, *args)
+    await click(seat, "multiplayer", "host", "new")
+    await seat.bridge.command(FORM, "campaign", seat.campaign.name)
+    await seat.bridge.command(FORM, "port", str(seat.port))
+    await click(seat, "submit")
     state = await wait(
         seat.campaign / "run",
         lambda frame: frame.get("generation") != previous_generation and frame.get("state") == "character_creation"
@@ -118,16 +129,15 @@ async def join_created_campaign(host: Seat, guest: Seat) -> dict:
             while (await join("observe"))["ack"]["message"] != f"title_join_form_state=catalog;count={count}":
                 await asyncio.sleep(.1)
 
-    await join("open")
+    await click(guest, "multiplayer", "join")
     await join("address", "127.0.0.1")
     await join("port", str(host.port))
-    await join("no_password")
+    await click(guest, "connect")
     await catalog(0)
     await join("create", "Tutorial Scout")
     await catalog(1)
     character, = campaign(host)["characters"]
-    await join("select", character)
-    await join("submit")
+    await click(guest, "character:1", "confirm")
     joined = await wait(guest.client / "run", lambda frame: frame.get("state") == "connected"
                         and frame.get("gameplay_fresh") is True)
     assert joined["pid"] == guest.bridge.process.pid and joined["character_id"] == character
@@ -153,6 +163,79 @@ async def leave_tutorial(seat: Seat) -> dict:
     return stopped
 
 
+async def picker_state(seat: Seat, expected_count: int) -> str | None:
+    deadline = asyncio.get_running_loop().time() + 15
+    observed = None
+    while asyncio.get_running_loop().time() < deadline:
+        response = await seat.bridge.command(FORM, "saved-state")
+        observed = response["ack"]["message"]
+        state = observed.removeprefix("title_host_saved=")
+        if expected_count == 0 and state == "empty":
+            return None
+        count, _, highlighted = state.partition(":")
+        if expected_count > 0 and count == str(expected_count) and highlighted:
+            return highlighted
+        if state == "unavailable":
+            await click(seat, "browse")
+        await asyncio.sleep(.1)
+    raise RuntimeError(f"Saved campaign picker expected {expected_count} campaigns, observed {observed}")
+
+
+async def empty_picker(seat: Seat) -> None:
+    await click(seat, "multiplayer", "host", "browse")
+    assert await picker_state(seat, 0) is None
+    try:
+        await seat.bridge.command(BUTTON_FIXTURE, "load:" + seat.campaign.name)
+    except RuntimeError as exc:
+        assert str(exc) == "title_panel_fixture_button_unavailable"
+    else:
+        raise AssertionError("The empty campaign picker accepted a selection")
+    await click(seat, "back", "back", "singleplayer")
+    await offered(seat)
+
+
+async def finish_veteran(seat: Seat, attempt: dict) -> tuple[dict, dict]:
+    controls = {}
+    for operation, expected in (
+        ("preset", "page=4"),
+        ("veteran", "class=Veteran;starting_cash=350;starting_map=Observitory_P"),
+        ("next", "page=3"),
+        ("custom", "difficulty=Custom;replenish_loot=0"),
+        ("finish", "stock_finish_invoked"),
+    ):
+        observed = await creator_action(seat, operation)
+        assert observed == expected, (operation, observed)
+        controls[operation] = observed
+
+    hosted = await wait(seat.campaign / "run", lambda frame: frame.get("state") == "hosting", timeout=55)
+    receipt = hosted["game"]["native_stock_creator"]
+    assert hosted["generation"] == attempt["generation"] and hosted["pid"] == seat.bridge.process.pid
+    assert receipt == dict(attempt["game"]["native_stock_creator"], state="verified", map=TUTORIAL), receipt
+    assert hosted["game"]["map"] == TUTORIAL and hosted["game"]["save_scope"] == attempt["game"]["save_scope"]
+    assert hosted["game"]["native_rules"]["replenish_loot"] == 0 and hosted["game"]["native_wallet"] == 350
+    verify_loopback_socket(hosted["pid"], seat.port)
+    return hosted, controls
+
+
+async def choose_saved(seat: Seat, sibling: Seat) -> list[str]:
+    # The name typed into the form is a different valid campaign. Only the picker
+    # selection should determine which saved scope is opened.
+    await click(seat, "multiplayer", "host", "new")
+    await seat.bridge.command(FORM, "campaign", sibling.campaign.name)
+    await click(seat, "back", "browse")
+    first = await picker_state(seat, 2)
+    assert first in {seat.campaign.name, sibling.campaign.name}, first
+    await click(seat, "load:" + sibling.campaign.name)
+    await seat.bridge.command(FORM, "port", str(seat.port))
+    await click(seat, "back")
+    assert await picker_state(seat, 2) == first
+    await click(seat, "load:" + seat.campaign.name)
+    await seat.bridge.command(FORM, "port", str(seat.port))
+    await click(seat, "submit")
+    other = sibling.campaign.name if first == seat.campaign.name else seat.campaign.name
+    return [first, other]
+
+
 async def drive_creator(seat: Seat, guest: Seat, evidence: dict) -> None:
     run = seat.campaign / "run"
     before = await enter_creator(seat)
@@ -168,33 +251,20 @@ async def drive_creator(seat: Seat, guest: Seat, evidence: dict) -> None:
     evidence["cancelled_without_checkpoint"] = True
     print("Stock creator cancelled back to the same standalone title", flush=True)
 
+    await empty_picker(seat)
+    evidence["empty_picker_excluded_solo_and_cancelled_saves"] = True
+    print("Saved campaign picker excludes solo saves and the cancelled campaign", flush=True)
+
     attempt = await enter_creator(seat, cancelled["generation"])
     scope = attempt["game"]["save_scope"]
     assert attempt["game"]["native_stock_creator"]["working_slot"] != slot
-    for operation, expected in (
-        ("preset", "page=4"),
-        ("veteran", "class=Veteran;starting_cash=350;starting_map=Observitory_P"),
-        ("next", "page=3"),
-        ("custom", "difficulty=Custom;replenish_loot=0"),
-        ("finish", "stock_finish_invoked"),
-    ):
-        observed = await creator_action(seat, operation)
-        assert observed == expected, (operation, observed)
-        evidence.setdefault("creator_controls", {})[operation] = observed
-        print(observed, flush=True)
-
-    hosted = await wait(run, lambda frame: frame.get("state") == "hosting", timeout=55)
-    receipt = hosted["game"]["native_stock_creator"]
-    assert hosted["generation"] == attempt["generation"] and hosted["pid"] == seat.bridge.process.pid
-    assert receipt == dict(attempt["game"]["native_stock_creator"], state="verified", map=TUTORIAL), receipt
-    assert hosted["game"]["map"] == TUTORIAL and hosted["game"]["save_scope"] == scope
-    verify_loopback_socket(hosted["pid"], seat.port)
-    assert hosted["game"]["native_rules"]["replenish_loot"] == 0 and hosted["game"]["native_wallet"] == 350
+    hosted, controls = await finish_veteran(seat, attempt)
     checkpoint = campaign(seat)
     commit, = events(run, hosted["generation"], "native_stock_creator_committed")
     assert commit["map"] == TUTORIAL and 0 < commit["revision"] <= checkpoint["revision"]
     assert checkpoint["world"].get("native_observation", {}).get("native_rules", {}).get("replenish_loot") == 0
-    evidence.update(pid=hosted["pid"], map=TUTORIAL, native_creator=receipt, starting_wallet=350,
+    evidence.update(pid=hosted["pid"], map=TUTORIAL, native_creator=hosted["game"]["native_stock_creator"],
+                    creator_controls=controls, starting_wallet=350,
                     campaign_revision=checkpoint["revision"], live_replenish_loot=0, checkpoint_replenish_loot=0)
     print("Stock Veteran and Custom settings committed to the authoritative tutorial host", flush=True)
 
@@ -211,8 +281,19 @@ async def drive_creator(seat: Seat, guest: Seat, evidence: dict) -> None:
     assert saved["characters"][joined["character_id"]]["state"]["native_guest_save"]
     evidence["stock_pause_returned_both_titles"] = True
 
-    for args in (("open",), ("campaign", seat.campaign.name), ("port", str(seat.port)), ("submit",)):
-        await seat.bridge.command(FORM, *args)
+    sibling = replace(seat, campaign=seat.campaign.with_name("title-host-settings-" + uuid.uuid4().hex[:8]))
+    sibling_attempt = await enter_creator(sibling)
+    sibling_hosted, _ = await finish_veteran(sibling, sibling_attempt)
+    await leave_tutorial(sibling)
+    sibling_saved = campaign(sibling)
+    sibling_scope = sibling_hosted["game"]["save_scope"]
+    assert sibling_scope != scope and sibling_saved["campaign_id"] != saved["campaign_id"]
+    assert sibling_saved["world"]["native_host_save"]["slot"] != saved["world"]["native_host_save"]["slot"]
+    sibling_files = native_host_save.directory(native_host_save.SaveScope(seat.profile, sibling_scope))
+    sibling_before = (saved_hashes(sibling.campaign), saved_hashes(sibling_files))
+    assert all(sibling_before)
+
+    evidence["saved_campaign_picker_rows"] = await choose_saved(seat, sibling)
     resumed = await wait(run, lambda frame: frame.get("generation") != stopped["generation"]
                          and frame.get("state") == "hosting", timeout=55)
     assert resumed["pid"] == hosted["pid"] and resumed["game"]["save_scope"] == scope
@@ -223,7 +304,11 @@ async def drive_creator(seat: Seat, guest: Seat, evidence: dict) -> None:
     verify_loopback_socket(resumed["pid"], seat.port)
     assert campaign(seat)["campaign_id"] == saved["campaign_id"]
     await leave_tutorial(seat)
-    evidence["reopened_existing_campaign_and_restored_stock_character"] = True
+    assert (saved_hashes(sibling.campaign), saved_hashes(sibling_files)) == sibling_before
+    evidence.update(selected_saved_campaign=seat.campaign.name, sibling_campaign_unchanged=True,
+                    native_title_buttons_verified=True,
+                    reopened_existing_campaign_and_restored_stock_character=True)
+    print("Saved campaign picker restored the selected checkpoint without changing the sibling campaign", flush=True)
 
 
 async def start_seat(work: Path, port: int, stock_slots: list[Path], seats: list[Seat]):

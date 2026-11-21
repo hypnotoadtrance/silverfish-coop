@@ -1,6 +1,5 @@
 local invite = {}
-local display = require("native_title_display")
-local editor = require("native_title_settings_widget")
+local surface = require("native_title_surface")
 local players = require("players")
 
 local journal_class = "/Game/Classes/GUI/Menu_QuestLog_Widget.Menu_QuestLog_Widget_C"
@@ -10,6 +9,7 @@ local stats_path = "/Script/Engine.Default__GameplayStatics"
 local viewport_class = "/Script/Engine.GameViewportClient"
 local fields = {"participant", "starter", "address"}
 local labels = {participant = "Participant", starter = "Starter character", address = "Host address"}
+local limits = {participant = 256, starter = 256, address = 253}
 local errors = {
     invalid_request = "Check the invitation details.",
     invalid_address = "Enter a reachable host address.",
@@ -19,15 +19,14 @@ local errors = {
     operation_conflict = "This request was already used.",
     operation_limit = "Close the Journal and try again.",
 }
-local keys = {{"confirm", "F7"}, {"next", "F8"}, {"back", "F9"}}
 local handoff_maps = {
     ["/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"] = true,
     ["/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"] = true,
 }
 local handoff_screens = {package_choosing = "choosing", package_submitting = "submitting",
     package_transferred = "transferred", package_refused = "refused"}
-local bridge, offer_path, request_path, response_path, loop, current, session, fixture_menu
-local queued = {}
+local bridge, offer_path, request_path, response_path, current, session, fixture_menu
+local dispatch
 
 local function valid(object)
     return object and object:IsValid()
@@ -145,13 +144,9 @@ local function request_id()
 end
 
 local function clear_view(active)
-    if active.handle then
-        editor.remove(active.handle)
-        active.handle = nil
-    end
-    if active.widget then
-        display.remove(active.widget)
-        active.widget = nil
+    if active.view then
+        surface.remove(active.view)
+        active.view = nil
     end
 end
 
@@ -163,40 +158,58 @@ local function reset()
     previous.export = nil
 end
 
-local function render(active, state, phase, screen, hint, initial)
+local function button(key, label)
+    return {key = key, label = label}
+end
+
+local function render(active, screen, hint, initial)
     clear_view(active)
     active.screen = screen
+    local title, rows, note = "Co-op invitation", {}, hint
+    local back = button("back", "Back")
     if labels[screen] then
-        local note = hint or (screen == "address" and "Blank uses the configured address." or "Enter a name.")
-        local caption = labels[screen] .. "\n" .. note .. "\nF8 Next   F9 Back"
-        active.handle = editor.mount(state, phase, screen, caption, initial or active.values[screen], journal)
-        editor.focus(active.handle, state, phase)
-        return
-    end
-    if screen == "journal" then
-        local actions = {}
-        if active.offer then actions[#actions + 1] = "F7   Invite a co-op player" end
-        if active.package then actions[#actions + 1] = "F8   Give the sealed package" end
-        if #actions > 0 then active.widget = display.mount(active.context, table.concat(actions, "\n")) end
-        return
-    end
-    local captions = {
-        review = "Create this invitation?\nF7 Create   F9 Back",
-        pending = "Creating invitation…\nF9 Back",
-        exported = "Invitation ready\nF7 Copy   F9 Back",
-        refused = (hint or "Could not create invitation.") .. "\nF7 Try again   F9 Back",
-        package_submitting = "Giving the sealed package…",
-        package_transferred = "Sealed package given.\nF9 Back",
-        package_refused = "Could not give the sealed package.\nF9 Back",
-    }
-    if screen == "package_choosing" then
+        if screen == "address" and not note then note = "Leave blank to use the configured address." end
+        rows = {
+            {field = {key = screen, label = labels[screen], limit = limits[screen],
+                value = initial or active.values[screen]}},
+            {button("next", "Next"), back},
+        }
+    elseif screen == "journal" then
+        title = "Co-op"
+        if active.offer then rows[#rows + 1] = {button("confirm", "Invite a co-op player")} end
+        if active.package then rows[#rows + 1] = {button("next", "Give the sealed package")} end
+        if #rows == 0 then return end
+    elseif screen == "review" then
+        title = "Create this invitation?"
+        rows = {{button("confirm", "Create"), back}}
+    elseif screen == "pending" then
+        title = "Creating invitation…"
+        rows = {{back}}
+    elseif screen == "exported" then
+        title = "Invitation ready"
+        rows = {{button("confirm", "Copy invitation"), back}}
+    elseif screen == "refused" then
+        note = note or "Could not create invitation."
+        rows = {{button("confirm", "Try again"), back}}
+    elseif screen == "package_choosing" then
+        title = "Give the sealed package"
         local recipient = active.package.recipients[active.selected]
-        local next_recipient = #active.package.order > 1 and "   F8 Next" or ""
-        active.widget = display.mount(active.context,
-            "Give the sealed package to " .. recipient .. "?\nF7 Give" .. next_recipient .. "   F9 Back")
-        return
+        local end_at = utf8.offset(recipient, 49)
+        note = "Recipient: " .. (end_at and recipient:sub(1, end_at - 1) .. "…" or recipient)
+        local actions = {button("confirm", "Give package")}
+        if #active.package.order > 1 then actions[#actions + 1] = button("next", "Next recipient") end
+        actions[#actions + 1] = back
+        rows = {actions}
+    elseif screen == "package_submitting" then
+        title = "Giving the sealed package…"
+    else
+        title = screen == "package_transferred" and "Sealed package given." or "Could not give the sealed package."
+        rows = {{back}}
     end
-    active.widget = display.mount(active.context, hint and screen == "exported" and hint .. "\nF7 Copy   F9 Back" or captions[screen])
+    local view
+    view = surface.mount(active.context, {title = title, note = note, rows = rows, center = screen ~= "journal"},
+        function(action) dispatch(active, view, action) end)
+    active.view = view
 end
 
 local function scope(state, phase)
@@ -207,12 +220,12 @@ local function scope(state, phase)
     if not session or not same_journal(session.context, context) then
         reset()
         session = {context = context, offer = offer, values = {}}
-        render(session, state, phase, "journal")
+        render(session, "journal")
     elseif session.offer ~= offer and not same_offer(session.offer, offer) then
         session.offer = offer
         session.op, session.export, session.retry, session.failure, session.deadline = nil, nil, nil, nil, nil
         session.values = {}
-        if not handoff_screens[session.screen] then render(session, state, phase, "journal") end
+        if not handoff_screens[session.screen] then render(session, "journal") end
     end
     return session
 end
@@ -225,7 +238,7 @@ local function handoff_command(verb, arguments, state, phase)
         local had_offer = active.package ~= nil
         active.package, active.selected = nil, nil
         if active.screen == "package_choosing" or active.screen == "journal" and had_offer then
-            render(active, state, phase, "journal")
+            render(active, "journal")
         end
         return "package handoff offer cleared"
     end
@@ -243,7 +256,7 @@ local function handoff_command(verb, arguments, state, phase)
         end
         active.package, active.selected, active.intent = nil, nil, nil
         active.result = {offer = id, outcome = outcome}
-        render(active, state, phase, "package_" .. outcome)
+        render(active, "package_" .. outcome)
         return "package handoff result shown"
     end
     local guid = arguments[4]
@@ -275,7 +288,7 @@ local function handoff_command(verb, arguments, state, phase)
     end
     active.package, active.selected = offer, nil
     if active.screen == "journal" or active.screen == "package_choosing" then
-        render(active, state, phase, "journal")
+        render(active, "journal")
     end
     return "package handoff offer installed"
 end
@@ -286,20 +299,19 @@ local function valid_input(field, value)
     return count and count > 0 and count <= 64
 end
 
-local function advance(active, state, phase)
+local function advance(active)
     local field = active.screen
-    local ok, value = pcall(editor.read, active.handle, state, phase)
-    if not ok and value ~= "title_settings_invalid_text" then return false, "native_host_invite_editor_unavailable" end
-    if ok and field ~= "address" then value = value:match("^ *(.-) *$") end
-    if not ok or not valid_input(field, value) then
+    local value = surface.read(active.view, field)
+    if value and field ~= "address" then value = value:match("^ *(.-) *$") end
+    if not value or not valid_input(field, value) then
         local tip = field == "address" and "Enter a reachable address." or "Enter a name of up to 64 characters."
-        render(active, state, phase, field, tip, ok and value or nil)
+        render(active, field, tip, value)
         return false, "native_host_invite_invalid_" .. field
     end
     active.values[field] = value
     for index, name in ipairs(fields) do
         if name == field then
-            render(active, state, phase, fields[index + 1] or "review")
+            render(active, fields[index + 1] or "review")
             return true
         end
     end
@@ -313,7 +325,7 @@ local function exists(path)
     return true
 end
 
-local function publish(active, state, phase)
+local function publish(active)
     local values = active.values
     local body = table.concat({values.participant, values.starter, values.address}, "\t")
     local id = active.retry and active.retry.body == body and active.retry.id or request_id()
@@ -325,13 +337,13 @@ local function publish(active, state, phase)
     local closed = file:close()
     if not written or not closed or not os.rename(temporary, request_path) then
         os.remove(temporary)
-        render(active, state, phase, "refused", "Could not send the invitation request.")
+        render(active, "refused", "Could not send the invitation request.")
         return false, "native_host_invite_request_unavailable"
     end
     active.op, active.deadline = id, os.time() + 12
     active.retry = {id = id, body = body}
     active.failure = nil
-    render(active, state, phase, "pending")
+    render(active, "pending")
     return true
 end
 
@@ -354,14 +366,14 @@ local function read_export(id)
     return raw, text
 end
 
-local function progress(active, state, phase)
+local function progress(active)
     if active.screen ~= "pending" then return end
     local outcome, code = read_response(active)
     if outcome == "ok" then
         active.export = read_export(active.op)
         if active.export then
             active.retry = nil
-            render(active, state, phase, "exported")
+            render(active, "exported")
             return
         end
         code = "export_unverified"
@@ -369,7 +381,7 @@ local function progress(active, state, phase)
         return
     end
     active.failure = code or "invite_unavailable"
-    render(active, state, phase, "refused", errors[active.failure])
+    render(active, "refused", errors[active.failure])
 end
 
 local function foreground()
@@ -379,20 +391,20 @@ end
 
 local function copy(active, state, phase)
     if not foreground() or type(SilverfishCopyHostInvitation) ~= "function" or read_response(active) ~= "ok" then
-        render(active, state, phase, "exported", "Invitation ready\nCopy is unavailable.")
+        render(active, "exported", "Copy is unavailable.")
         return false, "native_host_invite_copy_unavailable"
     end
     local raw, text = read_export(active.op)
     if not raw or raw ~= active.export then
         active.export, active.failure = nil, "export_changed"
-        render(active, state, phase, "refused", errors.export_changed)
+        render(active, "refused", errors.export_changed)
         return false, "native_host_invite_export_changed"
     end
     if not foreground() or not same_journal(active.context, journal(state, phase)) or not same_offer(active.offer, read_offer())
         or SilverfishCopyHostInvitation(text, active.op) ~= true then
         return false, "native_host_invite_copy_unavailable"
     end
-    render(active, state, phase, "exported", "Invitation copied.")
+    render(active, "exported", "Invitation copied.")
     return true
 end
 
@@ -400,13 +412,13 @@ local function press(active, action, state, phase)
     local screen = active.screen
     if screen == "journal" and action == "next" and active.package then
         active.selected = active.package.order[1]
-        render(active, state, phase, "package_choosing")
+        render(active, "package_choosing")
         return true
     end
     if handoff_screens[screen] then
         if action == "back" and screen ~= "package_submitting" then
             active.selected, active.result = nil, nil
-            render(active, state, phase, "journal")
+            render(active, "journal")
             return true
         end
         if screen == "package_choosing" and action == "next" then
@@ -414,15 +426,16 @@ local function press(active, action, state, phase)
             for index, character in ipairs(order) do
                 if character == active.selected then
                     active.selected = order[index % #order + 1]
-                    render(active, state, phase, "package_choosing")
+                    render(active, "package_choosing")
                     return true
                 end
             end
         end
+        local widget = active.view and active.view.widget
         if screen == "package_choosing" and action == "confirm" and active.package.recipients[active.selected]
-            and valid(active.widget) and active.widget:IsInViewport() and active.widget:IsVisible() then
+            and valid(widget) and widget:IsInViewport() and widget:IsVisible() then
             active.intent = {offer = active.package.id, character = active.selected}
-            render(active, state, phase, "package_submitting")
+            render(active, "package_submitting")
             return true
         end
         return false, "stock_missing_contact_handoff_journal_action_unavailable"
@@ -431,16 +444,16 @@ local function press(active, action, state, phase)
     if action == "back" then
         active.op, active.export, active.retry, active.failure = nil, nil, nil, nil
         active.values = {}
-        render(active, state, phase, "journal")
+        render(active, "journal")
         return true
     end
-    if action == "next" and labels[screen] then return advance(active, state, phase) end
+    if action == "next" and labels[screen] then return advance(active) end
     if action ~= "confirm" then return false, "native_host_invite_action_unavailable" end
     if screen == "journal" or screen == "refused" then
-        render(active, state, phase, "participant")
+        render(active, "participant")
         return true
     end
-    if screen == "review" then return publish(active, state, phase) end
+    if screen == "review" then return publish(active) end
     if screen == "exported" then return copy(active, state, phase) end
     return false, "native_host_invite_action_unavailable"
 end
@@ -516,7 +529,7 @@ function invite.command(arguments, state, phase)
         return "native_host_invite_" .. operation .. "_accepted"
     end
     if operation == "observe" then
-        if active then progress(active, state, phase) end
+        if active then progress(active) end
         local output = "native_host_invite_phase=" .. report(active)
         if active and active.op then output = output .. ";op=" .. active.op end
         if active and active.failure then output = output .. ";error=" .. active.failure end
@@ -532,7 +545,9 @@ function invite.command(arguments, state, phase)
         elseif #value > 64 or not value:match("^[A-Za-z0-9][A-Za-z0-9 _-]*$") then
             error("native_host_invite_fixture_arguments", 0)
         end
-        editor.write(active.handle, state, phase, value or "")
+        if not surface.write(active.view, operation, value or "") then
+            error("native_host_invite_editor_unavailable", 0)
+        end
         action = "next"
     end
     if not action then error("native_host_invite_fixture_arguments", 0) end
@@ -562,28 +577,17 @@ function invite.sync(state, phase)
     if not bridge then return end
     current = {state = state, phase = phase}
     local active = scope(state, phase)
-    if active then progress(active, state, phase) end
+    if active then progress(active) end
 end
 
-local function poll()
-    local events = queued
-    queued = {}
-    if not current or not next(events) or not foreground() then return end
-    local state, phase = current.state, current.phase
-    local active = scope(state, phase)
-    if not active then return end
-    local action
-    for _, key in ipairs(keys) do
-        local event = events[key[1]]
-        local package_action = handoff_screens[active.screen] or active.screen == "journal" and key[1] == "next"
-        if event and event.session == active and event.screen == active.screen
-            and (package_action and event.package == active.package and event.selected == active.selected
-                or not package_action and event.offer == active.offer) then
-            if action then return end
-            action = key[1]
-        end
-    end
-    if action then press(active, action, state, phase) end
+dispatch = function(owner, view, action)
+    if not current or not foreground() or session ~= owner or owner.view ~= view then return end
+    local ok = pcall(function()
+        local state, phase = current.state, current.phase
+        local active = scope(state, phase)
+        if active == owner and active.view == view then press(active, action, state, phase) end
+    end)
+    if not ok then reset() end
 end
 
 function invite.start(path)
@@ -592,19 +596,6 @@ function invite.start(path)
     offer_path = path .. "/host-invite-offer.tsv"
     request_path = path .. "/host-invite-request.tsv"
     response_path = path .. "/host-invite-response.tsv"
-    if os.getenv("SILVERFISH_COOP_HEADLESS") == "1" or type(RegisterKeyBind) ~= "function" or not Key
-        or type(SilverfishNativeGameWindowFocused) ~= "function" or not (Key.F7 and Key.F8 and Key.F9) then return end
-    for _, key in ipairs(keys) do
-        RegisterKeyBind(Key[key[2]], function()
-            if session and current then
-                queued[key[1]] = {session = session, screen = session.screen, offer = session.offer,
-                    package = session.package, selected = session.selected}
-            end
-        end)
-    end
-    loop = LoopInGameThreadWithDelay(32, function()
-        if not pcall(poll) then reset() end
-    end)
 end
 
 return invite

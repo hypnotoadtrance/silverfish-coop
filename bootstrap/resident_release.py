@@ -66,10 +66,9 @@ _START = br"""Project Silverfish Co-op | Windows Direct IP trial
 1. Both players close Project Silverfish, extract this ZIP, and run Install.cmd.
    The setup looks for the game in your Steam libraries. To specify a folder,
    use Install.cmd -Game "C:\path\to\Project Silverfish".
-2. Launch Project Silverfish through Steam. At the game title, press F7 to host
-   or F8 to join. The host can choose a UDP port and an optional password.
-   On the Host form, use F10 New Game for the stock character creator or
-   choose Start/Load to resume a campaign. The guest enters the host IP,
+2. Launch Project Silverfish through Steam and choose Multiplayer.
+   Choose Host, then New Game or Load Game. Set the UDP port and an
+   optional password. Guests choose Join by Direct IP and enter the host IP,
    the same UDP port, and the password if set.
 3. On your home network use the host's LAN IP. Across networks the guest must
    be able to reach the host's chosen UDP port (7777 by default).

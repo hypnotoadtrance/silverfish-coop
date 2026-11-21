@@ -1,85 +1,108 @@
-local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 local descriptor, request = "bridge/title-handoff-session.tsv", "bridge/title-handoff-request.tsv"
 local join_request, join_response = "bridge/title-join-request.tsv", "bridge/title-join-response.tsv"
 local join_invite = "bridge/title-join-fixture.invite.json"
-local generation = string.rep("a", 32)
-local files, buttons, classes, flags = {}, {}, {}, {}
-local now, id, callback, display, writes = 100, 0, nil, nil, 0
+local host_catalog = "bridge/title-host-campaigns.tsv"
+local files, flags, modes, queued = {}, {}, {}, {}
+local now, id, tick, display, writes = 100, 0, nil, nil, 0
 local refuse_rename = false
-local function object(class)
+
+local function object(parent, enabled)
     id = id + 1
     local address = id
-    return {IsValid = function() return true end, GetAddress = function() return address end,
-        GetClass = function() return classes[class] end}
+    return {
+        parent = parent, enabled = enabled ~= false,
+        IsValid = function() return true end,
+        GetAddress = function() return address end,
+        GetParent = function(self) return self.parent end,
+        GetIsEnabled = function(self) return self.enabled end,
+        SetIsEnabled = function(self, value) self.enabled = value end,
+    }
 end
-classes[widget_path], classes["/Script/UMG.TextBlock"] = object(), object()
+
+local stock_parent = object()
 local context = {world = object(), viewport = object(), menu = object(), controller = object()}
-function context.controller:IsInputKeyDown(key) return buttons[key.KeyName] == true end
-local statics = object()
-function statics:Create(controller, class, owner)
-    assert(controller == context.controller and owner == controller and class == classes[widget_path])
-    local widget = object(widget_path)
-    local note = object("/Script/UMG.TextBlock")
-    widget.TextBlock_Notes = note
-    function note:SetText(value) self.text = value end
-    function note:GetText() return {ToString = function() return self.text end} end
-    function note:SetColorAndOpacity(color) assert(color.SpecifiedColor.B == 1) end
-    function widget:GetOwningPlayer() return owner end
-    function widget:SetVisibility(mode) assert(mode == 3) end
-    function widget:AddToPlayerScreen(z) assert(z == 110); self.mounted = true; return true end
-    function widget:IsInViewport() return self.mounted == true end
-    function widget:SetDesiredSizeInViewport() end
-    function widget:SetPositionInViewport() end
-    function widget:RemoveFromParent() self.mounted = false end
-    display = widget
-    return widget
+for _, name in ipairs({"Button_NewGame", "Button_Load_1", "Button_Load_2", "Button_TestMap",
+    "Button_SETTINGS", "Button_QUIT"}) do
+    context.menu[name] = object(stock_parent, name ~= "Button_Load_2")
 end
-local layout, guid = object(), object()
-layout.GetViewportSize = function() return {X = 1280, Y = 720} end
-layout.GetViewportScale = function() return 1 end
+
+local guid = object()
 local next_guid = 3
-guid.NewGuid = function() return {A = 1, B = -1, C = 2, D = next_guid} end
-classes["/Script/UMG.Default__WidgetBlueprintLibrary"] = statics
-classes["/Script/UMG.Default__WidgetLayoutLibrary"] = layout
-classes["/Script/Engine.Default__KismetGuidLibrary"] = guid
-local editing
-local field_labels = {campaign = "Campaign", port = "UDP port", bind = "Listening IP", invite = "Join co-op",
-    character = "Create a character", profile = "Local profile"}
-local editor = {
-    mount = function(frame, phase, field, caption, initial)
-        assert(not editing and frame.qualified and phase == "ready" and caption:find(field_labels[field], 1, true))
-        editing = {field = field, text = initial or ""}
-        return editing
-    end,
-    read = function(handle, frame, phase)
-        assert(handle == editing and frame.qualified and phase == "ready")
-        return handle.text
-    end,
-    write = function(handle, frame, phase, value)
-        assert(handle == editing and frame.qualified and phase == "ready")
-        handle.text = value
-        return value
-    end,
-    focus = function(handle) assert(handle == editing); return false end,
-    remove = function(handle) assert(handle == editing); editing = nil; return true end,
-}
+function guid:NewGuid() return {A = 1, B = -1, C = 2, D = next_guid} end
+local function operation_id() return ("00000001ffffffff00000002%08x"):format(next_guid) end
+local function generation(letter) return string.rep(letter, 32) end
+
+local controls = {}
+function controls.create(owner, parent, label, callback)
+    assert(owner == context and parent == stock_parent and (label == "Singleplayer" or label == "Multiplayer"))
+    local record = {widget = object(parent), callback = callback}
+    modes[label] = record
+    return record
+end
+
+function controls.remove(record) record.widget.parent = nil end
+function controls.press_fixture(record)
+    if not record or not record.widget.parent then return false end
+    queued[#queued + 1] = record.callback
+    return true
+end
+
+local surface = {}
+function surface.mount(owner, spec, dispatch)
+    assert(owner == context and not display)
+    local view = {title = spec.title, note = spec.note, fields = {}, buttons = {}}
+    for _, row in ipairs(spec.rows) do
+        if row.field then
+            local field = row.field
+            view.fields[field.key] = field.value or ""
+        else
+            for _, button in ipairs(row) do
+                assert(not view.buttons[button.key])
+                view.buttons[button.key] = {label = button.label, widget = object(view),
+                    callback = function() dispatch(button.key) end}
+            end
+        end
+    end
+    display = view
+    return view
+end
+
+function surface.remove(view)
+    if not view then return end
+    for _, record in pairs(view.buttons) do controls.remove(record) end
+    if display == view then display = nil end
+end
+
+function surface.read(view, key) return view == display and view.fields[key] or nil end
+function surface.write(view, key, value)
+    if surface.read(view, key) == nil then return false end
+    view.fields[key] = value
+    return true
+end
+
+function surface.press_fixture(view, key)
+    return view == display and view and controls.press_fixture(view.buttons[key]) or false
+end
+
 local env
+local modules = {
+    native_menu_controls = controls,
+    native_title_surface = surface,
+    native_title_display = {},
+    native_title_settings_widget = {},
+    native_title_entry = {probe = function(state, phase)
+        if state.qualified and phase == "ready" then return context end
+    end},
+}
 env = setmetatable({
     require = function(name)
-        if name == "native_title_display" then
-            return assert(loadfile("mod/SilverfishCoop/Scripts/native_title_display.lua", "t", env))()
+        assert(modules[name] or name == "native_title_host_form" or name == "native_title_join_form")
+        if not modules[name] then
+            modules[name] = assert(loadfile("mod/SilverfishCoop/Scripts/" .. name .. ".lua", "t", env))()
         end
-        if name == "native_title_host_form" then
-            return assert(loadfile("mod/SilverfishCoop/Scripts/native_title_host_form.lua", "t", env))()
-        end
-        if name == "native_title_join_form" then
-            return assert(loadfile("mod/SilverfishCoop/Scripts/native_title_join_form.lua", "t", env))()
-        end
-        if name == "native_title_settings_widget" then return editor end
-        assert(name == "native_title_entry")
-        return {probe = function(state, phase) if state.qualified and phase == "ready" then return context end end}
+        return modules[name]
     end,
-    StaticFindObject = function(path) return classes[path] end,
+    StaticFindObject = function(path) if path == "/Script/Engine.Default__KismetGuidLibrary" then return guid end end,
     io = {open = function(path, mode)
         if mode == "rb" then
             if not files[path] then return end
@@ -97,224 +120,197 @@ env = setmetatable({
             files[target], files[source] = files[source], nil
             return true
         end},
-    FName = function(name) return setmetatable({GetComparisonIndex = function() return 1 end}, {
-        __eq = function() return false end, __tostring = function() return name end}) end,
-    EFindName = {FNAME_Find = 0},
-    FText = function(text) return text end,
-    LoopInGameThreadWithDelay = function(_, tick) callback = tick; return 1 end,
+    LoopInGameThreadWithDelay = function(_, callback) tick = callback; return 1 end,
 }, {__index = _G})
-local old_input = context.controller.IsInputKeyDown
-context.controller.IsInputKeyDown = function(self, key) return old_input(self, {KeyName = tostring(key.KeyName)}) end
-local panel = assert(loadfile("mod/SilverfishCoop/Scripts/native_title_panel.lua", "t", env))()
-panel.start("bridge")
+
+local function start_panel()
+    local panel = assert(loadfile("mod/SilverfishCoop/Scripts/native_title_panel.lua", "t", env))()
+    panel.start("bridge")
+    return panel
+end
+
+local panel = start_panel()
 local state = {qualified = true, map = "/Game/Classes/Maps/MainMenu_P"}
 local function sync() panel.sync(state, "ready") end
 local function report() return panel.rows(state, "ready", table.pack)[1] end
-local function offer(choices, until_time, value)
-    files[descriptor] = ("1\t%s\t%s\t%d\n"):format(value or generation, choices, until_time)
+local function offer(choices, until_time, stamp)
+    files[descriptor] = ("1\t%s\t%s\t%d\n"):format(stamp, choices, until_time)
     sync()
 end
-local function press(key)
-    buttons[key] = false
-    callback()
-    buttons[key] = true
-    callback()
+
+local function fixture(name, action, value, phase)
+    return pcall(panel.command, {"test", name, action, value}, state, phase or "ready")
 end
-local function fixture(action, phase)
-    return pcall(panel.command, {"test", "native-title-panel-press-fixture", action}, state, phase or "ready")
+
+local function button(key, phase) return fixture("native-title-button-fixture", key, nil, phase) end
+local function host(action, value) return fixture("native-title-host-form-fixture", action, value) end
+local function join(action, value) return fixture("native-title-join-form-fixture", action, value) end
+local function rejected(reason, ok, observed) assert(not ok and observed == reason, tostring(observed)) end
+local function drain()
+    local callbacks = queued
+    queued = {}
+    for _, callback in ipairs(callbacks) do callback() end
+end
+
+local function click(key)
+    local ok, result = button(key)
+    assert(ok and result == "title_button_queued", tostring(result))
+    drain()
 end
 
 sync()
-assert(not display and not report())
-offer("host,join", 111)
-assert(not display)
-buttons.F7 = true
-offer("host", 108)
+assert(not modes.Multiplayer and not report())
+offer("host,join", 111, generation("a"))
+assert(not modes.Multiplayer)
+
+offer("host", 108, generation("a"))
 assert(report().n == 6 and report()[3] == "ready" and report()[4] == "host" and report()[5] == 1)
-assert(display.TextBlock_Notes.text:find("F7", 1, true) and not display.TextBlock_Notes.text:find("F8", 1, true))
-local allowed, reason = fixture("host")
-assert(not allowed and reason == "title_panel_fixture_unavailable")
+assert(modes.Multiplayer.widget.parent == stock_parent and modes.Singleplayer.widget.parent == stock_parent)
+rejected("title_panel_fixture_unavailable", button("multiplayer"))
 flags.SILVERFISH_COOP_HEADLESS = "1"
-allowed, reason = fixture("host")
-assert(not allowed and reason == "title_panel_fixture_unavailable")
+rejected("title_panel_fixture_unavailable", button("multiplayer"))
 flags.SILVERFISH_COOP_TITLE_FIXTURES = "1"
-allowed, reason = fixture("join")
-assert(not allowed and reason == "title_action_not_offered")
-allowed, reason = fixture("host", "opening")
-assert(not allowed and reason == "title_panel_not_ready")
-callback()
-assert(not files[request]) -- Held before mount.
-press("F8")
-assert(not files[request]) -- Unadvertised.
-press("F7")
-assert(not files[request] and editing.field == "campaign" and editing.text == "")
-callback()
-assert(not files[request]) -- A held F7 cannot start the new form.
-press("F9")
-assert(not files[request] and not editing and display.TextBlock_Notes.text:find("Host a campaign", 1, true))
-assert(fixture("host"))
-assert(files[request] == "1\t" .. generation .. "\t00000001ffffffff0000000200000003\thost\n")
-assert(report()[3] == "pending" and writes == 1)
-allowed, reason = fixture("host")
-assert(not allowed and reason == "title_request_already_pending")
-press("F7")
-assert(writes == 1)
+rejected("title_panel_fixture_unavailable", button("multiplayer", "opening"))
+click("multiplayer")
+assert(display.title == "Multiplayer" and display.buttons.host and not display.buttons.join)
+assert(not context.menu.Button_NewGame.enabled and not context.menu.Button_Load_1.enabled
+    and not context.menu.Button_Load_2.enabled and context.menu.Button_SETTINGS.enabled)
+rejected("title_panel_fixture_button_unavailable", button("join"))
+click("singleplayer")
+assert(not display and context.menu.Button_NewGame.enabled and context.menu.Button_Load_1.enabled
+    and not context.menu.Button_Load_2.enabled and not files[request])
 
-offer("join", 108, string.rep("b", 32))
-assert(not fixture("join"))
-assert(report()[3] == "unavailable" and writes == 1) -- Existing request was never overwritten.
-press("F9")
-assert(report()[3] == "hidden" and report()[5] == 0 and not display.mounted)
-sync()
-assert(report()[3] == "hidden" and not display.mounted)
-
-files[request] = nil
-offer("host,join", 101, string.rep("c", 32))
-callback()
-now = 102
-callback()
-assert(not display.mounted and not files[request])
+local old_mode = modes.Multiplayer
+assert(button("multiplayer"))
+offer("join", 108, generation("b"))
+drain()
+assert(not old_mode.widget.parent and not display and not files[request])
+now = 109
+rejected("title_panel_fixture_unavailable", button("multiplayer"))
+tick()
+assert(not modes.Multiplayer.widget.parent and not report())
 now = 100
-offer("join", 108, string.rep("d", 32))
-callback()
+offer("join", 108, generation("c"))
+assert(button("multiplayer"))
 state.qualified = false
-press("F8")
-assert(not display.mounted and not files[request] and not report())
+drain()
+tick()
+assert(not display and not modes.Multiplayer.widget.parent and not files[request] and not report())
 state.qualified = true
-offer("join", 108, string.rep("e", 32))
-assert(fixture("join") and report()[3] == "pending" and writes == 2)
-assert(files[request]:match("\tjoin\n$"))
+offer("host", 108, generation("d"))
+modes.Multiplayer.widget.parent = nil
+rejected("title_panel_fixture_unavailable", button("multiplayer"))
+offer("host", 108, generation("e"))
 
-local function form_fixture(operation, value)
-    return pcall(panel.command, {"test", "native-title-host-form-fixture", operation, value}, state, "ready")
-end
+assert(fixture("native-title-panel-press-fixture", "host"))
+local pending = "1\t" .. generation("e") .. "\t" .. operation_id() .. "\thost\n"
+assert(files[request] == pending and report()[3] == "pending" and writes == 1)
+rejected("title_request_already_pending", fixture("native-title-panel-press-fixture", "host"))
+offer("host", 108, generation("f"))
+click("multiplayer")
+click("host")
+click("submit")
+assert(files[request] == pending and writes == 1 and report()[3] == "unavailable"
+    and report()[6] == "title_request_write_failed")
+click("singleplayer")
+assert(not display and context.menu.Button_NewGame.enabled)
+files[request] = nil
+
+local edited = generation("1")
+offer("host", 108, edited)
+click("multiplayer")
+click("host")
+assert(display.title == "New co-op campaign" and not files[request])
+assert(host("campaign", "title-host-settings-1234abcd") and host("port", "0"))
+click("submit")
+assert(not files[request] and display.fields.port == "0" and display.note)
+assert(host("port", "28181"))
+assert(surface.write(display, "bind", "::ffff:500.0.0.1"))
+click("submit")
+assert(not files[request] and display.fields.bind == "::ffff:500.0.0.1" and display.note)
+assert(surface.write(display, "bind", "2001:db8::1"))
+click("submit")
+assert(files[request] == "2\t" .. edited .. "\t" .. operation_id()
+    .. "\thost\ttitle-host-settings-1234abcd\t2001:db8::1\t28181\n")
+assert(report()[3] == "pending")
 
 files[request] = nil
-local edited_generation = string.rep("f", 32)
-offer("host", 108, edited_generation)
-flags.SILVERFISH_COOP_TITLE_FIXTURES = nil
-allowed, reason = form_fixture("open")
-assert(not allowed and reason == "title_host_form_fixture_unavailable")
-flags.SILVERFISH_COOP_TITLE_FIXTURES = "1"
-assert(form_fixture("open"))
-assert(form_fixture("campaign", "title-host-settings-1234abcd"))
-assert(form_fixture("port", "0"))
-allowed, reason = form_fixture("submit")
-assert(not allowed and reason == "title_host_form_invalid_port" and editing.text == "0" and not files[request])
-assert(form_fixture("cancel") and not editing and not files[request])
-assert(form_fixture("open"))
-assert(form_fixture("campaign", "title-host-settings-1234abcd"))
-assert(form_fixture("port", "28181"))
-assert(form_fixture("submit") and not editing and report()[3] == "pending")
-assert(files[request] == "2\t" .. edited_generation
-    .. "\t00000001ffffffff0000000200000003\thost\ttitle-host-settings-1234abcd\t\t28181\n")
-
-files[request] = nil
-local physical_generation = string.rep("9", 32)
-offer("host", 108, physical_generation)
-press("F7")
-press("F8")
-assert(editing.field == "port" and editing.text == "")
-press("F8")
-assert(editing.field == "bind" and editing.text == "")
-editing.text = "::ffff:500.0.0.1"
-press("F7")
-assert(not files[request] and editing.text == "::ffff:500.0.0.1")
-editing.text = "2001:db8::1"
-press("F7")
-assert(files[request] == "2\t" .. physical_generation
-    .. "\t00000001ffffffff0000000200000003\thost\t\t2001:db8::1\t\n")
-
-files[request] = nil
-offer("host", 108, string.rep("8", 32))
-assert(form_fixture("open"))
+offer("host", 108, generation("2"))
+click("multiplayer")
+click("host")
 refuse_rename = true
-allowed, reason = form_fixture("submit")
-assert(not allowed and reason == "title_request_write_failed" and not editing and not files[request])
-assert(not files[request .. ".00000001ffffffff0000000200000003.tmp"])
+click("submit")
+assert(report()[6] == "title_request_write_failed" and not files[request]
+    and not files[request .. "." .. operation_id() .. ".tmp"])
 refuse_rename = false
-assert(form_fixture("open"))
-assert(form_fixture("cancel") and not files[request])
 
-local native_keys = {}
-env.Key = {F7 = "F7", F8 = "F8", F9 = "F9"}
-env.RegisterKeyBind = function(key, handler) native_keys[key] = handler end
-local focused = false
-env.SilverfishNativeGameWindowFocused = function() return focused end
-flags.SILVERFISH_COOP_HEADLESS = nil
-panel = assert(loadfile("mod/SilverfishCoop/Scripts/native_title_panel.lua", "t", env))()
-panel.start("bridge")
-local event_generation = string.rep("7", 32)
-offer("host", 108, event_generation)
-native_keys.F7()
-callback()
-assert(not editing and not files[request])
-focused = true
-native_keys.F7()
-callback()
-assert(editing.field == "campaign" and not files[request])
-callback()
-assert(not files[request])
-state.qualified = false
-native_keys.F7()
-callback()
-assert(not editing and not files[request])
-state.qualified = true
-offer("host", 108, event_generation)
-native_keys.F7()
-callback()
-native_keys.F7()
-callback()
-assert(files[request] == "2\t" .. event_generation .. "\t00000001ffffffff0000000200000003\thost\t\t\t\n")
-
-local function join_form_fixture(operation, value)
-    return pcall(panel.command, {"test", "native-title-join-form-fixture", operation, value}, state, "ready")
-end
-
-files[request] = nil
-local join_generation = string.rep("5", 32)
-local import_id = string.rep("a", 32)
+local join_generation, import_id = generation("3"), generation("a")
 local original_character = "b9f344d2-2ed6-4fbf-a237-3c014586ab31"
 local created_character = "4ac79601-2979-4bdf-8d7e-155650143df0"
-flags.SILVERFISH_COOP_HEADLESS = "1"
 offer("join", 108, join_generation)
-assert(join_form_fixture("open"))
-assert(editing.field == "invite" and not files[request] and not files[join_request])
+click("multiplayer")
+click("join")
+assert(display.fields.invite == "" and not files[request] and not files[join_request])
 local invite_payload = '{"credential":"private fixture token"}'
 files[join_invite] = invite_payload .. "\r\n"
 next_guid = 7
-local import_op = "00000001ffffffff0000000200000007"
-assert(join_form_fixture("import"))
-assert(not editing and not files[request])
-assert(files[join_request] == ("1\t%s\t%s\timport\t%d\n%s"):format(join_generation, import_op, #invite_payload, invite_payload))
-files[join_response] = ("1\t%s\t%s\tok\t%s\t1\n%s\tOld character\n"):format(join_generation, import_op, import_id, original_character)
-local ok, observed = join_form_fixture("observe")
-assert(ok and observed == "title_join_form_state=waiting") -- The worker has not taken the request.
-files[join_request] = nil
-local expected_catalog = files[join_response]
-files[join_response] = expected_catalog:gsub(join_generation, string.rep("6", 32), 1)
-ok, observed = join_form_fixture("observe")
-assert(ok and observed == "title_join_form_state=waiting") -- A previous generation cannot publish.
+assert(join("import"))
+assert(files[join_request] == ("1\t%s\t%s\timport\t%d\n%s"):format(
+    join_generation, operation_id(), #invite_payload, invite_payload))
+local expected_catalog = ("1\t%s\t%s\tok\t%s\t1\n%s\tOld character\n")
+    :format(join_generation, operation_id(), import_id, original_character)
+local function join_state(expected)
+    local ok, observed = join("observe")
+    assert(ok and observed == "title_join_form_state=" .. expected, tostring(observed))
+end
 files[join_response] = expected_catalog
-ok, observed = join_form_fixture("observe")
-assert(ok and observed == "title_join_form_state=catalog;count=1")
-assert(display.TextBlock_Notes.text:find("Old character", 1, true))
-allowed, reason = join_form_fixture("select", created_character)
-assert(not allowed and reason == "title_join_form_fixture_character_unavailable")
+join_state("waiting")
+files[join_request] = nil
+files[join_response] = expected_catalog:gsub(join_generation, generation("4"), 1)
+join_state("waiting")
+rejected("title_panel_fixture_button_unavailable", button("character:1"))
+files[join_response] = expected_catalog
+join_state("catalog;count=1")
+assert(display.buttons["character:1"].label == "Old character")
+rejected("title_panel_fixture_button_unavailable", button("character:2"))
 
 next_guid = 8
-local create_op = "00000001ffffffff0000000200000008"
-assert(join_form_fixture("create", "New character"))
-assert(files[join_request] == ("1\t%s\t%s\tcreate\t%s\tNew character\n"):format(join_generation, create_op, import_id))
+click("create")
+assert(surface.write(display, "character", "New character"))
+click("create")
+assert(files[join_request] == ("1\t%s\t%s\tcreate\t%s\tNew character\n"):format(
+    join_generation, operation_id(), import_id))
 assert(not files[request])
 files[join_request] = nil
 files[join_response] = ("1\t%s\t%s\tok\t%s\t2\n%s\tOld character\n%s\tNew character\n")
-    :format(join_generation, create_op, import_id, original_character, created_character)
-ok, observed = join_form_fixture("observe")
-assert(ok and observed == "title_join_form_state=catalog;count=2")
-assert(join_form_fixture("select", created_character) and editing.field == "profile")
-assert(join_form_fixture("profile", "my-guest-profile"))
+    :format(join_generation, operation_id(), import_id, original_character, created_character)
+join_state("catalog;count=2")
+click("character:2")
+assert(join("profile", "my-guest-profile"))
 next_guid = 9
-assert(join_form_fixture("submit") and not editing)
-assert(files[request] == ("2\t%s\t00000001ffffffff0000000200000009\tjoin\t%s\tmy-guest-profile\t%s\n")
-    :format(join_generation, import_id, created_character))
+click("confirm")
+assert(files[request] == ("2\t%s\t%s\tjoin\t%s\tmy-guest-profile\t%s\n"):format(
+    join_generation, operation_id(), import_id, created_character))
+
+files[request] = nil
+flags.SILVERFISH_COOP_RESIDENT_TITLE = "1"
+state.qualified = false
+sync()
+state.qualified = true
+panel = start_panel()
+local save_generation = generation("5")
+local catalog = ("1\t%s\t2\nFirst-Campaign\nSecond-Campaign\n"):format(save_generation)
+files[host_catalog] = catalog:gsub(save_generation, generation("4"), 1)
+offer("host", 108, save_generation)
+click("multiplayer")
+click("host")
+click("browse")
+rejected("title_panel_fixture_button_unavailable", button("load:Second-Campaign"))
+files[host_catalog] = catalog
+click("browse")
+assert(display.buttons["load:First-Campaign"] and display.buttons["load:Second-Campaign"])
+click("load:Second-Campaign")
+assert(display.title == "Second-Campaign" and host("port", "28181"))
+click("submit")
+assert(files[request] == ("5\t%s\t%s\thost\tSecond-Campaign\t\t28181\t\tresume\n")
+    :format(save_generation, operation_id()))

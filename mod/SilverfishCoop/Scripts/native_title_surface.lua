@@ -64,7 +64,7 @@ function surface.mount(context, spec, on_action)
     local height = first + #spec.rows * (control_height + gap) + padding
     local view = {buttons = {}, inputs = {}, active = false}
     local widget = display.mount(context, spec.title .. (spec.note and "\n" .. spec.note or ""),
-        {width = width, height = height, center = true})
+        {width = width, height = height, center = spec.center ~= false})
     view.widget = widget
     local ok, reason = pcall(function()
         local tree = widget.WidgetTree
@@ -73,6 +73,10 @@ function surface.mount(context, spec, on_action)
             error("title_surface_canvas_unavailable", 0)
         end
         view.tree, view.canvas = tree, canvas
+        local background = child(tree, "/Script/UMG.Border")
+        background:SetBrushColor({R = 0.026, G = 0.038, B = 0.042, A = 0.94})
+        background:SetVisibility(3)
+        place(cell(canvas, background), 0, 0, width, height, -1)
         for index, row in ipairs(spec.rows) do
             local y = first + (index - 1) * (control_height + gap)
             if row.field then

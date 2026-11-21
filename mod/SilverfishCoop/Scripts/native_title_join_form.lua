@@ -2,6 +2,8 @@ local form = {}
 local editor = require("native_title_settings_widget")
 local display = require("native_title_display")
 local max_invite, max_reply, max_characters = 32768, 20480, 64
+local page_size = 5
+local endpoint_screens = {address = true, port = true, password = true}
 local messages = {
     invalid_request = "The Join request was invalid.",
     invalid_invite = "This invitation is invalid for this build.",
@@ -81,6 +83,10 @@ local function read_response(draft)
 end
 
 function form.remove(draft)
+    if draft.view then
+        draft.surface.remove(draft.view)
+        draft.view = nil
+    end
     if draft.handle then
         editor.remove(draft.handle)
         draft.handle = nil
@@ -91,52 +97,104 @@ function form.remove(draft)
     end
 end
 
+local function short_name(name)
+    local end_at = utf8.offset(name, 33)
+    return end_at and name:sub(1, end_at - 1) .. "…" or name
+end
+
 local function catalog_text(draft)
     local choice = draft.characters[draft.index]
-    if not choice then return "Create a character\nF7 Create   F8 Next   F9 Back" end
-    local end_at = utf8.offset(choice.name, 32)
-    local name = end_at and choice.name:sub(1, end_at - 1) .. "…" or choice.name
-    return "Choose a character\n" .. name .. "\nF7 Select   F8 Next   F9 Back"
+    return choice and "Choose a character\n" .. short_name(choice.name) or "Create a character"
 end
+
+local function button(key, label)
+    return {key = key, label = label}
+end
+
+local function field(key, label, hint, limit, value, secret)
+    return {field = {key = key, label = label, hint = hint, limit = limit, value = value, secret = secret}}
+end
+
+local function page_count(draft)
+    return math.max(1, math.ceil(#draft.characters / page_size))
+end
+
+local function render_surface(draft, screen, hint, initial)
+    local title, rows = "Join co-op", {}
+    local note = hint
+    local back = button("back", "Back")
+    if endpoint_screens[screen] then
+        rows = {
+            field("address", "Host IP", "IPv4 or IPv6 address", 45, draft.address),
+            field("port", "UDP port", "7777", 5, draft.port),
+            field("password", "Password", "Optional", 512, nil, true),
+            {button("connect", "Connect"), back},
+        }
+    elseif screen == "invite" then
+        rows = {field("invite", "Invitation", "Paste the host's invitation", max_invite, initial, true),
+            {button("connect", "Load invitation"), back}}
+    elseif screen == "catalog" then
+        title = "Choose a character"
+        local last_page = page_count(draft)
+        draft.page = math.min(draft.page or 1, last_page)
+        local start = (draft.page - 1) * page_size + 1
+        for index = start, math.min(#draft.characters, start + page_size - 1) do
+            rows[#rows + 1] = {button("character:" .. index, short_name(draft.characters[index].name))}
+        end
+        if last_page > 1 then
+            local navigation = {}
+            if draft.page > 1 then navigation[#navigation + 1] = button("previous_page", "Previous page") end
+            if draft.page < last_page then navigation[#navigation + 1] = button("next_page", "Next page") end
+            rows[#rows + 1] = navigation
+            note = note or "Page " .. draft.page .. " of " .. last_page
+        end
+        rows[#rows + 1] = {button("create", "Create character"), back}
+    elseif screen == "name" then
+        title = "Create a character"
+        rows = {field("character", "Name", "Character name", 256, initial), {button("create", "Create"), back}}
+    elseif screen == "profile" then
+        title = "Join with " .. short_name(draft.character_name)
+        rows = {field("profile", "Local profile", "Default profile", 64, initial), {button("confirm", "Join"), back}}
+    elseif screen == "confirm" then
+        title = "Join with " .. short_name(draft.character_name)
+        rows = {{button("confirm", "Join"), back}}
+    else
+        note = note or "Waiting for the host…"
+        rows = {{back}}
+    end
+    draft.view = draft.surface.mount(draft.context, {title = title, note = note, rows = rows}, draft.on_action)
+end
+
+local fields = {
+    invite = "invite", address = "address", port = "port", password = "password", name = "character", profile = "profile",
+}
+local legacy_titles = {
+    address = "Host IP", port = "UDP port", password = "Password", name = "Create a character",
+    profile = "Local profile", waiting = "Waiting for the host…",
+}
 
 local function render(draft, state, phase, next_screen, hint, initial)
     form.remove(draft)
     draft.screen = next_screen
-    local title_text, editor_field
-    if next_screen == "invite" then
-        title_text = "Join co-op\n" .. (hint or "Paste the host's invitation text.") .. "\nF7 Load   F9 Back"
-        editor_field = "invite"
-    elseif next_screen == "address" then
-        title_text = "Join co-op / Host IP\n" .. (hint or "Enter the host's IPv4 or IPv6 address.") .. "\nF7 Next   F9 Back"
-        editor_field = "address"
-    elseif next_screen == "port" then
-        title_text = "Join co-op / UDP port\n" .. (hint or "Enter the host's UDP port.") .. "\nF7 Next   F8 Edit IP   F9 Back"
-        editor_field = "port"
-    elseif next_screen == "password" then
-        title_text = "Join co-op / Password\n" .. (hint or "Leave blank if the host has no password.")
-            .. "\nF7 Connect   F8 Edit IP   F9 Back"
-        editor_field = "password"
-    elseif next_screen == "confirm" then
-        title_text = "Join co-op\nF7 Join   F8 Choose another character   F9 Back"
-    elseif next_screen == "name" then
-        title_text = "Create a character\n" .. (hint or "Enter a character name.") .. "\nF7 Create   F9 Back"
-        editor_field = "character"
-    elseif next_screen == "profile" then
-        title_text = "Local profile\n" .. (hint or "Blank keeps your configured profile.") .. "\nF7 Join   F9 Back"
-        editor_field = "profile"
+    if draft.surface then
+        render_surface(draft, next_screen, hint, initial)
     else
-        title_text = next_screen == "catalog" and catalog_text(draft) or "Waiting for the host…\nF9 Back"
-    end
-    if editor_field then
-        draft.handle = editor.mount(state, phase, editor_field, title_text, initial)
-        editor.focus(draft.handle, state, phase)
-    else
-        draft.widget = display.mount(draft.context, title_text)
+        local label = next_screen == "catalog" and catalog_text(draft) or legacy_titles[next_screen] or "Join co-op"
+        if hint then label = label .. "\n" .. hint end
+        local key = fields[next_screen]
+        if key then
+            draft.handle = editor.mount(state, phase, key, label, initial)
+            editor.focus(draft.handle, state, phase)
+        else
+            draft.widget = display.mount(draft.context, label)
+        end
     end
 end
 
-function form.open(state, phase, context, bridge, generation, new_id, direct)
+function form.open(state, phase, context, bridge, generation, new_id, direct, on_action)
+    local surface = on_action and require("native_title_surface")
     local draft = {context = context, generation = generation, new_id = new_id, direct = direct,
+        surface = surface, on_action = on_action, port = surface and direct and "7777" or nil,
         request = bridge .. "/title-join-request.tsv", response = bridge .. "/title-join-response.tsv",
         fixture = bridge .. "/title-join-fixture.invite.json"}
     local ok, failure = pcall(render, draft, state, phase, direct and "address" or "invite")
@@ -173,7 +231,7 @@ local function queue(draft, state, phase, kind, value)
         payload = draft.import .. "\t" .. value .. "\n"
     end
     if not publish(draft, id, kind, payload) then
-        render(draft, state, phase, draft.screen, "Could not send. Press F7 to retry.", kind ~= "direct" and value or nil)
+        render(draft, state, phase, draft.screen, "Could not send. Try again.", kind ~= "direct" and value or nil)
         return false, "title_join_form_request_unavailable"
     end
     if kind == "create" then draft.retry = {name = value, import = draft.import, id = id} end
@@ -190,7 +248,7 @@ function form.poll(draft, state, phase)
     if not result and os.time() <= pending.expires then return end
     draft.pending = nil
     if result and result.characters then
-        draft.import, draft.characters, draft.index = result.import, result.characters, 1
+        draft.import, draft.characters, draft.index, draft.page = result.import, result.characters, 1, 1
         draft.retry, draft.failure = nil, nil
         render(draft, state, phase, "catalog")
         return
@@ -211,8 +269,78 @@ function form.poll(draft, state, phase)
     end
 end
 
+local function address_valid(value)
+    return value and #value <= 45 and value:match("^[0-9a-fA-F.:]+$") and value:find("[.:]")
+end
+
+local function port_valid(value)
+    return value and #value <= 5 and value:match("^[1-9][0-9]*$") and tonumber(value) <= 65535
+end
+
+local function write_field(draft, key, value, state, phase)
+    if draft.view then return draft.surface.write(draft.view, key, value) end
+    editor.write(draft.handle, state, phase, value)
+    return true
+end
+
+local function connect(draft, state, phase)
+    local address = draft.surface.read(draft.view, "address")
+    local port = draft.surface.read(draft.view, "port")
+    local password = draft.surface.read(draft.view, "password")
+    draft.address, draft.port = address or draft.address, port or draft.port
+    if not address_valid(address) or not port_valid(port) or not password or utf8.len(password) > 128 then
+        local hint = not address_valid(address) and "Enter a numeric IPv4 or IPv6 address."
+            or not port_valid(port) and "Enter a UDP port from 1 to 65535."
+            or "Enter a password of up to 128 characters."
+        render(draft, state, phase, draft.screen, hint)
+        return false, "title_join_form_invalid_endpoint"
+    end
+    return queue(draft, state, phase, "direct", password)
+end
+
 function form.press(draft, action, state, phase)
     local screen = draft.screen
+    if action == "back" then
+        if screen == "catalog" then
+            draft.import, draft.characters, draft.retry, draft.character, draft.character_name = nil, nil, nil, nil, nil
+            render(draft, state, phase, draft.direct and "address" or "invite")
+            return true
+        elseif screen == "name" or screen == "confirm" or screen == "profile" then
+            render(draft, state, phase, "catalog")
+            return true
+        end
+        return false, "title_join_form_back_to_title"
+    end
+    if action == "connect" then
+        if draft.view and draft.direct and endpoint_screens[screen] then return connect(draft, state, phase) end
+        if screen ~= "invite" then return false, "title_join_form_selection_unavailable" end
+        action = "host"
+    elseif action == "confirm" then
+        if screen ~= "confirm" and screen ~= "profile" then return false, "title_join_form_selection_unavailable" end
+        action = "host"
+    elseif action == "create" then
+        if screen == "catalog" then
+            draft.index = #draft.characters + 1
+        elseif screen ~= "name" then
+            return false, "title_join_form_not_in_catalog"
+        end
+        action = "host"
+    elseif action == "previous_page" or action == "next_page" then
+        if screen ~= "catalog" then return false, "title_join_form_not_in_catalog" end
+        local page = (draft.page or 1) + (action == "next_page" and 1 or -1)
+        if page < 1 or page > page_count(draft) then return false, "title_join_form_selection_unavailable" end
+        draft.page = page
+        render(draft, state, phase, "catalog")
+        return true
+    elseif action ~= "host" and action ~= "join" then
+        local index = tonumber(action:match("^character:([0-9]+)$"))
+        if not index or screen ~= "catalog" or not draft.characters[index]
+            or math.ceil(index / page_size) ~= (draft.page or 1) then
+            return false, "title_join_form_selection_unavailable"
+        end
+        draft.index = index
+        action = "host"
+    end
     if action == "join" then
         if screen == "port" or screen == "password" then
             render(draft, state, phase, "address", nil, draft.address)
@@ -224,13 +352,18 @@ function form.press(draft, action, state, phase)
         end
         if screen ~= "catalog" then return false, "title_join_form_not_in_catalog" end
         draft.index = draft.index % (#draft.characters + 1) + 1
-        display.text(draft.widget, catalog_text(draft))
+        if draft.view then
+            draft.page = math.min(math.ceil(draft.index / page_size), page_count(draft))
+            render(draft, state, phase, "catalog")
+        else
+            display.text(draft.widget, catalog_text(draft))
+        end
         return true
     end
     if screen == "waiting" then return false, "title_join_form_operation_pending" end
     if screen == "catalog" then
         local choice = draft.characters[draft.index]
-        draft.character = choice and choice.id
+        draft.character, draft.character_name = choice and choice.id, choice and choice.name
         render(draft, state, phase, choice and (draft.direct and "confirm" or "profile") or "name")
         return true
     end
@@ -238,15 +371,21 @@ function form.press(draft, action, state, phase)
         if not token(draft.import) or not character_id(draft.character) then return false, "title_join_form_selection_unavailable" end
         return true, nil, {draft.import, "", draft.character}
     end
-    local ok, value = pcall(editor.read, draft.handle, state, phase)
-    if not ok and value ~= "title_settings_invalid_text" then return false, "title_join_form_editor_unavailable" end
+    local ok, value
+    if draft.view then
+        value = draft.surface.read(draft.view, fields[screen])
+        ok = value ~= nil
+    else
+        ok, value = pcall(editor.read, draft.handle, state, phase)
+        if not ok and value ~= "title_settings_invalid_text" then return false, "title_join_form_editor_unavailable" end
+    end
     if screen == "invite" and ok and #value > 0 then return queue(draft, state, phase, "import", value) end
-    if screen == "address" and ok and #value <= 45 and value:match("^[0-9a-fA-F.:]+$") then
+    if screen == "address" and ok and address_valid(value) then
         draft.address = value
         render(draft, state, phase, "port", nil, draft.port)
         return true
     end
-    if screen == "port" and ok and value:match("^[1-9][0-9]*$") and tonumber(value) <= 65535 then
+    if screen == "port" and ok and port_valid(value) then
         draft.port = value
         render(draft, state, phase, "password")
         return true
@@ -282,18 +421,18 @@ function form.fixture(draft, operation, value, state, phase)
         local data = read_file(draft.fixture, max_invite + 2)
         local text = data and data:gsub("\r?\n$", "")
         if not single_line(text, max_invite) or text == "" then return false, "title_join_form_fixture_invite_unavailable" end
-        editor.write(draft.handle, state, phase, text)
+        write_field(draft, "invite", text, state, phase)
         return form.press(draft, "host", state, phase)
     end
     if draft.direct and (operation == "address" or operation == "port") and draft.screen == operation then
-        editor.write(draft.handle, state, phase, value)
+        if not write_field(draft, operation, value, state, phase) then return false, "title_join_form_fixture_arguments" end
         return form.press(draft, "host", state, phase)
     end
     if draft.direct and draft.screen == "password" then
         local passwords = {password = "Fixture co-op pass", wrong_password = "Wrong fixture", no_password = ""}
         if passwords[operation] then
-            editor.write(draft.handle, state, phase, passwords[operation])
-            return form.press(draft, "host", state, phase)
+            write_field(draft, "password", passwords[operation], state, phase)
+            return form.press(draft, draft.view and "connect" or "host", state, phase)
         end
     end
     if operation == "select" and draft.screen == "catalog" and character_id(value) then
@@ -308,15 +447,18 @@ function form.fixture(draft, operation, value, state, phase)
     if operation == "create" and draft.screen == "catalog" and #value <= 64 and value:match("^[A-Za-z0-9][A-Za-z0-9 _-]*$") then
         draft.index = #draft.characters + 1
         form.press(draft, "host", state, phase)
-        editor.write(draft.handle, state, phase, value)
+        write_field(draft, "character", value, state, phase)
         return form.press(draft, "host", state, phase)
     end
     if operation == "profile" and draft.screen == "profile" and #value <= 64
         and value:match("^[A-Za-z0-9][A-Za-z0-9_-]*$") then
-        editor.write(draft.handle, state, phase, value)
-        return true
+        return write_field(draft, "profile", value, state, phase)
     end
     return false, "title_join_form_fixture_arguments"
+end
+
+function form.click_fixture(draft, key)
+    return draft.view and draft.surface.press_fixture(draft.view, key)
 end
 
 return form

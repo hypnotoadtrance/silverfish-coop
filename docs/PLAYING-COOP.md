@@ -4,7 +4,7 @@ Use Direct IP on Windows. The resident trial opens co-op from the same game proc
 
 ## Install and open the Windows trial
 
-Close the game on both PCs. Use the same Steam game build and the same resident trial ZIP. Extract it and run `Install.cmd` on each PC. Setup includes the matching UE4SS loader and Project Silverfish signature. Start Project Silverfish through Steam and press **F7** to host or **F8** to join from the title. [Resident trial setup](../bootstrap/README.md#installed-resident-title)
+Close the game on both PCs. Use the same Steam game build and the same resident trial ZIP. Extract it and run `Install.cmd` on each PC. Setup includes the matching UE4SS loader and Project Silverfish signature. Start Project Silverfish through Steam and choose **Multiplayer** on the title. [Resident trial setup](../bootstrap/README.md#installed-resident-title)
 
 Trial setup defaults to listening on all IPv4 interfaces on UDP port 7777. The host can select an interface address and port in **Host** settings. For LAN play, use the host PC's LAN address and allow inbound UDP on the chosen port. Across networks, use an address the guest can reach on that port. Use `127.0.0.1` when both players run on the same PC.
 
@@ -30,15 +30,15 @@ Set `$sfPython` and `$sfCli` again when opening a new terminal. The workspace pa
 
 ## Host from the co-op title
 
-At the title, press **F7** to open Host settings. Choose a campaign name, UDP port, numeric listening address, and optional password. Use **F8** to move between fields or **F9** to return to the title panel. Blank fields use the configured defaults. **F10** opens the stock character creator for a new campaign. **F7** resumes the named campaign or opens the creator if the name is unused. Up to four guests can join. The resident trial verified the controls through headless input. Foreground keyboard and focus still need a live check.
+Choose **Multiplayer** and **Host**. Select **New Game** and name the campaign, or use **Load Game** and choose an existing campaign. Set the UDP port, listening address, and optional password. Blank fields use the configured defaults. Starting a new campaign opens the stock character creator. Up to four guests can join.
 
 ## Create an invitation in the development build
 
-Open the stock **Journal** in the active co-op campaign with **J** or your configured key. Press **F7** to open the invite form. Enter the participant's name, their starter character's name, and the address they can reach. Use **F8** to advance through the fields. Leave the address blank to use the configured host address. On the review screen, press **F7** to create the invitation, then press **F7** again to copy it once it is ready. Share the invitation privately. It contains the guest credential. **F9** returns to the Journal. The host can also share the private invitation file from the campaign's `run\invites` directory.
+Open the stock **Journal** in the active co-op campaign with **J** or your configured key and choose **Invite a co-op player**. Enter the participant's name, their starter character's name, and the address they can reach. Leave the address blank to use the configured host address. Choose **Create**, then **Copy invitation** once it is ready. Share the invitation privately. It contains the guest credential.
 
 ## Join from the co-op title
 
-At the title, press **F8**. Enter the host's numeric IP and UDP port, pressing **F7** after each field. Enter the password if the host set one and press **F7** to connect. Use **F8** to cycle through your saved characters and the option to create one. Press **F7** to select or create a character, then **F7** to join. **F9** backs out of the current step.
+Choose **Multiplayer** and **Join by Direct IP**. Enter the host's numeric IP, UDP port, and password if set, then choose **Connect**. Select a saved character or choose **Create Character**. Confirm the selected character to join.
 
 ## Host and join from the development CLI
 
@@ -104,7 +104,7 @@ $sfCrossRoads = '/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P'
 
 Use the same invitation workflow and the campaign name `crossings`. The invitation carries the host's native travel, wall, and supported interaction settings. Keep the native feature flags for subsequent launches and omit the initial `--start-zone` when resuming after travel.
 
-On a matched C++ stage, `menu` opens a staged copy of the stock title with an in-game co-op panel. On the host, run `& $sfPython @sfCli menu --campaign expedition --port 7777` and press F7 to host. The host can also supply `--bind` for a LAN session. On a guest PC, run `& $sfPython @sfCli menu --profile scout --invite $sfInvite` and press F8 to join. F9 hides or restores the panel. The selected campaign or guest profile still comes from the command line in this trial build. [In-game integration](IN-GAME-INTEGRATION.md)
+On a matched C++ stage, `menu` opens a staged copy of the stock title. On the host, run `& $sfPython @sfCli menu --campaign expedition --port 7777` and choose **Multiplayer** and **Host**. The host can also supply `--bind` for a LAN session. On a guest PC, run `& $sfPython @sfCli menu --profile scout --invite $sfInvite` and choose **Multiplayer** and **Join**. The selected campaign or guest profile comes from the command line in this development path. [In-game integration](IN-GAME-INTEGRATION.md)
 
 Invitations from a current matched native stage also enable the guest's stock inventory, primary, and reload controls. For an older invitation, refresh it from the updated host or use the explicit guest flags below.
 
@@ -207,7 +207,7 @@ For a guest ammo split with an explicit count, use `native-inventory-split --tar
 
 At Borough's Copper Stop board, `native-wire-quest-preflight` reports the current step and checks for the interacting player's or host's exact Copper Wire. Use `native-quest-start --target Clt_Wire` and `native-quest-turnin --target Clt_Wire` within the board's stock interaction range. Eligible guests who are offline receive their queued personal rewards when they return to the campaign.
 
-For Missing Contact, accept the contract at the Black Market board and have the host dig up and collect the sealed package in CrossRoads. To give it to a guest, stand within three meters of them in CrossRoads or Black Market and open the host's Journal. Press F8 to open the recipient chooser and again to cycle through nearby guests. Press F7 to give the package to the displayed guest or F9 to cancel. The recipient redeems it with Interact at the Black Market board.
+For Missing Contact, accept the contract at the Black Market board and have the host dig up and collect the sealed package in CrossRoads. To give it to a guest, stand within three meters of them in CrossRoads or Black Market and open the host's Journal. Choose **Give the sealed package**, select the recipient, then choose **Give package**. The recipient redeems it with Interact at the Black Market board.
 
 For scripted handoff, use `native-missing-contact-handoff --target CHARACTER_ID` from the host's local controls. The guest can check custody with `native-missing-contact-preflight` and redeem with `native-quest-turnin --target Note_Farmhouse` at the Black Market board.
 
