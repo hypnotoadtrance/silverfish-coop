@@ -1,5 +1,6 @@
 """Pair an immutable, isolated Unreal save generation with a co-op checkpoint."""
 
+from dataclasses import dataclass
 from hashlib import file_digest
 import math
 import os
@@ -22,6 +23,7 @@ from .travel import BLACK_MARKET, BOROUGH, DEAD_BRIDGE, SCIENTIST_SHOP
 SLOT = re.compile(r"SFCoop_[0-9a-f]{32}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 STOCK_START_MODES = ("Mercy", "Respawn_WtPenalty", "Decimation")
+SCOPE_FIELD = "native_save_scope"
 CQC_DROP_SOURCES = ENEMY_LOOT_ZONES[DEAD_BRIDGE].actors
 CQC_DROP_SOURCE = CQC_DROP_SOURCES[0]
 CQC_SHELL_ACTOR = ENEMY_LOOT_ZONES[DEAD_BRIDGE].shell_prefix
@@ -50,15 +52,49 @@ def new_slot() -> str:
     return "SFCoop_" + uuid.uuid4().hex
 
 
-def directory(profile: Path) -> Path:
+@dataclass(frozen=True)
+class SaveScope:
+    profile: Path
+    id: str
+
+    def __post_init__(self):
+        if not isinstance(self.id, str) or not re.fullmatch(r"[a-f0-9]{32}", self.id) or self.id == "0" * 32:
+            raise CampaignFormatError("The co-op save scope ID is invalid")
+
+
+Profile = Path | SaveScope
+
+
+def checkpoint_profile(profile: Path, checkpoint: dict) -> Profile:
+    world = checkpoint["world"]
+    if SCOPE_FIELD not in world:
+        return profile
+    campaign_id = checkpoint.get("campaign_id")
+    try:
+        expected = uuid.UUID(campaign_id).hex if isinstance(campaign_id, str) else None
+    except ValueError:
+        expected = None
+    if expected is None or world[SCOPE_FIELD] != expected:
+        raise CampaignFormatError("The save scope does not belong to this campaign")
+    return SaveScope(profile, expected)
+
+
+def directory(profile: Profile) -> Path:
+    scope = profile if isinstance(profile, SaveScope) else None
+    if scope:
+        profile = scope.profile
     root = profile.resolve()
-    saves = (root / "Saved" / "SaveGames").resolve()
+    base = root / "Saved" / "SaveGames"
+    requested = base / "SilverfishCoop" / scope.id if scope else base
+    saves = requested.resolve()
+    if scope and (profile.absolute() != root or saves != requested):
+        raise CampaignFormatError("The co-op save scope points outside its generation directory")
     if not saves.is_relative_to(root):
         raise CampaignFormatError("The staged native save directory escapes its game profile")
     return saves
 
 
-def slot_path(profile: Path, slot: str) -> Path:
+def slot_path(profile: Profile, slot: str) -> Path:
     if not isinstance(slot, str) or not SLOT.fullmatch(slot):
         raise CampaignFormatError("Invalid co-op Unreal save slot")
     saves = directory(profile)
@@ -68,7 +104,7 @@ def slot_path(profile: Path, slot: str) -> Path:
     return path
 
 
-def record(profile: Path, slot: str, map_name: str, *, flush: bool = False) -> dict:
+def record(profile: Profile, slot: str, map_name: str, *, flush: bool = False) -> dict:
     path = slot_path(profile, slot)
     try:
         with path.open("r+b" if flush else "rb") as stream:
@@ -84,7 +120,7 @@ def record(profile: Path, slot: str, map_name: str, *, flush: bool = False) -> d
     return {"slot": slot, "map": map_name, "size": size, "sha256": digest}
 
 
-def verify(profile: Path, world: dict) -> dict | None:
+def verify(profile: Profile, world: dict) -> dict | None:
     saved = world.get("native_host_save")
     if saved is None:
         return None
@@ -94,7 +130,7 @@ def verify(profile: Path, world: dict) -> dict | None:
     return saved
 
 
-def verify_record(profile: Path, saved: dict) -> None:
+def verify_record(profile: Profile, saved: dict) -> None:
     core_keys = {"slot", "map", "size", "sha256"}
     if (type(saved) is not dict or set(saved) - {"eather_remainder"} != core_keys
             or not isinstance(saved["map"], str) or not saved["map"].startswith("/Game/Classes/Maps/")
@@ -109,7 +145,7 @@ def verify_record(profile: Path, saved: dict) -> None:
         raise CampaignFormatError("The Unreal save generation does not match its campaign checkpoint")
 
 
-def guest_record(profile: Path, saved: dict, character_id: str) -> dict:
+def guest_record(profile: Profile, saved: dict, character_id: str) -> dict:
     if type(saved) is not dict or saved.get("character_id") != character_id:
         raise CampaignFormatError("The Unreal save generation does not belong to this character")
     frame = {key: value for key, value in saved.items() if key != "character_id"}
@@ -282,6 +318,7 @@ def _escrow_frames(checkpoint: dict) -> list[dict]:
 
 
 def verify_checkpoint(profile: Path, checkpoint: dict) -> None:
+    profile = checkpoint_profile(profile, checkpoint)
     host = verify(profile, checkpoint["world"])
     slots = {host["slot"]} if host else set()
     for character_id, character in checkpoint["characters"].items():
@@ -306,7 +343,7 @@ def verify_checkpoint(profile: Path, checkpoint: dict) -> None:
             raise CampaignFormatError("The stock wipe generation has no campaign owner")
 
 
-def prune(profile: Path, keep: set[str]) -> None:
+def prune(profile: Profile, keep: set[str]) -> None:
     for path in directory(profile).glob("SFCoop_*.sav"):
         if SLOT.fullmatch(path.stem) and path.stem not in keep and path.resolve() == path:
             path.unlink(missing_ok=True)

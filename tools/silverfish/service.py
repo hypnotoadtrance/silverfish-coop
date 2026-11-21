@@ -26,7 +26,7 @@ from . import native_spratt, native_spratt_fixture
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS, AuthoredRoute
 from .authored_world_view import WORLD_VIEW_ACTORS
 from .control import Control
-from .embedded_engine import BRIDGE_ENV, OPT_IN_ENV, EmbeddedEngine
+from .embedded_engine import BRIDGE_ENV, OPT_IN_ENV, EmbeddedEngine, select_save_scope
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from . import native_guest_drop, native_guest_drop_projection, native_guest_drop_record
@@ -194,7 +194,8 @@ class Host:
     def __init__(self, store: CampaignStore, control: Control, game_build: str, identity,
                  bind: str, port: int, fixtures: bool, death_rules: dict | None, *,
                  native_backend: str | None, native_events: bool, native_guest: bool, native_zones: bool = False,
-                 authored_zones: bool = False, native_zone_walls: bool = False, native_profile: Path | None = None,
+                 authored_zones: bool = False, native_zone_walls: bool = False,
+                 native_profile: native_host_save.Profile | None = None,
                  verify_native_roster: bool = False, persist_native_guest: bool = False, matrix_supported: bool = False,
                  world_flush_supported: bool = False, expanded_zones: bool = False, exact_guest_binding: bool = False,
                  native_shop_view: bool = False, native_loot_input: bool = False, guest_regen: bool = False,
@@ -432,6 +433,8 @@ class Host:
         checkpoint_party = self.party if proposed_party is None else proposed_party
         status = self.store.status()
         world = {**status["world"], "map": current_map, "host": _pawn(self.last_game, "local"), "party": checkpoint_party}
+        if isinstance(self.native_profile, native_host_save.SaveScope):
+            world[native_host_save.SCOPE_FIELD] = self.native_profile.id
         verify_travel_checkpoint(world)
         if native_record is not None:
             if native_record["map"] != world["map"]:
@@ -3577,13 +3580,14 @@ def _host_stage_options(work: Path, native_guest: bool, native_zones: bool) -> d
                 host_camera_input=scoped and staged_script(work, "native_host_camera.lua"))
 
 
-def _host_save_options(work: Path, profile: Path, native_guest: bool, authored: bool) -> tuple[bool, Path | None]:
+def _host_save_options(work: Path, profile: native_host_save.Profile, native_guest: bool, authored: bool
+                       ) -> tuple[bool, native_host_save.Profile | None]:
     persist_guest = native_guest and staged_script(work, "guest_save.lua", "native-guest-save-frame")
     native_profile = profile if (authored or persist_guest) and staged_script(work, "native_host_save.lua") else None
     return persist_guest, native_profile
 
 
-def _host_dig_available(work: Path, authored: bool, persist_guest: bool, native_profile: Path | None) -> bool:
+def _host_dig_available(work: Path, authored: bool, persist_guest: bool, native_profile: native_host_save.Profile | None) -> bool:
     return bool(authored and persist_guest and native_profile and
                 staged_script(work, "native_host_dig_live.lua", "SilverfishRenewNativeHostDigScope"))
 
@@ -3674,7 +3678,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
         directory / "save", verify_world=verify_travel_checkpoint,
         verify_checkpoint=lambda checkpoint: native_host_save.verify_checkpoint(profile, checkpoint),
     ) as store:
-        old_world = store.status()["world"]
+        campaign = store.status()
+        old_world = campaign["world"]
         if start_zone and old_world.get("map") not in (None, start_zone):
             raise ValueError("An existing campaign resumes in its saved zone")
         if start_preset and old_world.get("map"):
@@ -3685,7 +3690,13 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             raise ValueError("Authored co-op routes require the qualified C++ stage and --native-zones")
         if not authored and entry_map not in PLAYTEST_MAPS:
             raise ValueError("The campaign is saved in an unqualified zone")
-        persist_guest, native_profile = _host_save_options(work, profile, native_guest, authored)
+        storage = native_host_save.checkpoint_profile(profile, campaign)
+        if embedded_port is not None and not old_world:
+            storage = native_host_save.SaveScope(profile, uuid.UUID(campaign["campaign_id"]).hex)
+        save_scope = storage if isinstance(storage, native_host_save.SaveScope) else None
+        persist_guest, native_profile = _host_save_options(work, storage, native_guest, authored)
+        if save_scope and (native_profile is None or not staged_script(work, "native_save_scope.lua")):
+            raise ValueError("Restage the co-op save scope bridge to open this campaign")
         if extraction is not None and (old_world.get("map") or not authored or not native_guest or not native_profile
                                        or not staged_script(work, "main.lua", "native-extraction-prepare")):
             raise ValueError("Stock extraction settings require a new authored native campaign with detached guest saves")
@@ -3737,6 +3748,11 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                                  runtime_listener=runtime_listener, **game_options)
                 bridge = Bridge(bridge_directory, process)
             ready = await bridge.wait_for(lambda state: state["state"] == "ready")
+            if save_scope:
+                if embedded is None:
+                    await select_save_scope(bridge, save_scope)
+                else:
+                    await embedded.select_save_scope(save_scope)
             if host_dig_live and not ready.get("native_host_dig_live_capability"):
                 raise RuntimeError("The staged native add-on is missing its live dig bridge")
             if native_dead_bridge_enemy_loot and ready.get("native_enemy_loot_cqc_version") != 3:
@@ -3782,7 +3798,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                                                      in ("verified", "changed"), timeout=8)
                 observed = initial_game["native_fresh_campaign"]
                 if (observed != dict(prepared_preset, state="verified", proof="authoritative_pawn_adopted_stock_save")
-                        or (native_host_save.directory(profile) / f"{working_slot}.sav").exists()):
+                        or (native_host_save.directory(storage) / f"{working_slot}.sav").exists()):
                     raise RuntimeError(f"The native start preset failed stock adoption ({observed.get('proof', 'unknown')})")
             await asyncio.to_thread(verify_loopback_socket, process.pid, internal_port)
             if native_record:
@@ -5080,6 +5096,8 @@ async def join_game(work: Path, directory: Path, invitation: Path, headless: boo
             if embedded_engine:
                 embedded = await _acquire_embedded_game(work, directory, "client", headless, None, game_options)
                 process, bridge = embedded, embedded.bridge
+                await embedded.select_save_scope(
+                    native_host_save.SaveScope(directory / "game-user", uuid.UUID(invite["character_id"]).hex))
                 transport = await link.start_client()
             else:
                 transport = await link.start_client()

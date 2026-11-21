@@ -11,7 +11,7 @@ import re
 import stat
 import threading
 
-from . import native_title_entry, runtime
+from . import native_host_save, native_title_entry, runtime
 from .control import NAME
 from .title_handoff import _isolated_stock_title
 
@@ -172,6 +172,16 @@ def _qualify(startup: _Startup, work: Path, directory: Path, role: str,
     return profile / "Saved", bridge
 
 
+async def select_save_scope(bridge: runtime.Bridge, scope: native_host_save.SaveScope) -> None:
+    directory = native_host_save.directory(scope)
+    directory.mkdir(parents=True, exist_ok=True)
+    if native_host_save.directory(scope) != directory:
+        raise ValueError("The private co-op save directory moved")
+    selected = await bridge.command("native-save-scope-select", scope.id)
+    if selected.get("save_scope") != scope.id:
+        raise RuntimeError("The game did not verify the selected co-op save scope")
+
+
 class EmbeddedEngine:
     """A single-use process view and bridge owned by the embedded service.
 
@@ -188,6 +198,7 @@ class EmbeddedEngine:
         self.returncode = None
         self.bridge = runtime.Bridge(mailbox, self)
         self._saved_directory = saved_directory
+        self._save_scope = None
         self._sequence = 0
         self._state = "acquiring"
 
@@ -234,6 +245,12 @@ class EmbeddedEngine:
         engine._state = "active"
         return engine
 
+    async def select_save_scope(self, scope: native_host_save.SaveScope) -> None:
+        if self._state != "active" or self._save_scope is not None or scope.profile != self._saved_directory.parent:
+            raise ValueError("The co-op save scope does not belong to the active engine lease")
+        self._save_scope = scope.id
+        await select_save_scope(self.bridge, scope)
+
     async def release(self, *, timeout: float = 12) -> dict:
         """Request stock leave on the game thread and verify a later isolated title."""
         if self._state != "active":
@@ -253,6 +270,11 @@ class EmbeddedEngine:
                     and snapshot["sequence"] > acknowledged,
                     timeout=timeout,
                 )
+                if self._save_scope is not None:
+                    if ready["save_scope"] == self._save_scope:
+                        ready = await self.bridge.command("native-save-scope-release", self._save_scope, timeout=timeout)
+                    if ready["save_scope"] is not None or not _isolated_stock_title(ready, self._saved_directory):
+                        raise RuntimeError("The game did not verify return to the solo save scope")
                 assert_private_saved_tree(self._saved_directory.parent)
         except BaseException:
             self.returncode = 1

@@ -86,10 +86,11 @@ async def title_choice(work, case, action, plan, processes, tasks, *, timeout=65
 
 
 async def verify(work: Path, original: Path, *, embedded: bool = False, abrupt_rejoin: bool = False,
-                 multiparty: bool = False, bind: str = "127.0.0.1", invite_address: str | None = None) -> None:
+                 multiparty: bool = False, resume_host: bool = False,
+                 bind: str = "127.0.0.1", invite_address: str | None = None) -> None:
     if os.name != "nt":
         raise OSError("The co-op title handoff requires a staged Windows game")
-    if (abrupt_rejoin or multiparty) and not embedded:
+    if (abrupt_rejoin or multiparty or resume_host) and not embedded:
         raise ValueError("The selected title scenario requires the matched embedded worker")
     if abrupt_rejoin and multiparty:
         raise ValueError("Select one embedded title scenario")
@@ -133,6 +134,17 @@ async def verify(work: Path, original: Path, *, embedded: bool = False, abrupt_r
             with patch.object(runtime, "launch", side_effect=track_guest):
                 return await title_choice(work, title_case, "join", plan, processes, tasks, **kwargs)
         return await title_choice(work, title_case, "join", plan, processes, tasks, **kwargs)
+
+    def verify_released(directory, handoff):
+        attempt = handoff["attempt"]
+        mailboxes = []
+        for claimed in (directory / "run" / "game-bridge").glob("*/" + embedded_startup.CLAIM_FILE):
+            request = embedded_startup.parse_request(claimed.read_bytes())
+            if (request.title_generation, request.title_request_id) == (attempt["generation"], attempt["request_id"]):
+                mailboxes.append(claimed.parent)
+        mailbox, = mailboxes
+        snapshot = runtime.Bridge(mailbox, None).snapshot()
+        assert snapshot["state"] == "ready" and snapshot["save_scope"] is None, snapshot
 
     def owned_guest(session, handoff, character, directory=profile):
         matches = [(process, mailbox) for process, mailbox in guest_games
@@ -349,6 +361,9 @@ async def verify(work: Path, original: Path, *, embedded: bool = False, abrupt_r
         if embedded:
             assert hosting["pid"] != os.getpid()
             evidence["host"]["worker_pid"] = hosting["pid"]
+            host_scope = uuid.UUID(hosting["campaign"]["campaign_id"]).hex
+            assert hosting["game"]["save_scope"] == host_scope
+            evidence["host"]["save_scope"] = host_scope
 
         invitation = await submit(host_run, "invite", name="Title guest", character="Title Scout", address=invite_address)
         assert invitation["ok"] is True
@@ -370,6 +385,9 @@ async def verify(work: Path, original: Path, *, embedded: bool = False, abrupt_r
         if embedded:
             assert joined["pid"] not in (os.getpid(), hosting["pid"])
             evidence["guest"]["worker_pid"] = joined["pid"]
+            guest_scope = uuid.UUID(joined["character_id"]).hex
+            assert joined["game"]["save_scope"] == guest_scope
+            evidence["guest"]["save_scope"] = guest_scope
         pawn = paired["game"]["native_guest_save"]["pawn"]
         seat = _member(paired, invitation["character_id"]) if abrupt_rejoin or multiparty else None
         dropped = await submit(guest_run, "drop-link")
@@ -406,6 +424,30 @@ async def verify(work: Path, original: Path, *, embedded: bool = False, abrupt_r
         await asyncio.wait_for(guest_task, 15)
         assert (await submit(host_run, "stop"))["ok"]
         await asyncio.wait_for(tasks[0], 15)
+        if embedded:
+            verify_released(campaign, evidence["host_title"])
+            if not abrupt_rejoin:
+                verify_released(profile, evidence["guest_title"])
+            checkpoint = CampaignStore.read_existing(
+                campaign / "save", verify_world=verify_travel_checkpoint,
+                verify_checkpoint=lambda data: native_host_save.verify_checkpoint(campaign / "game-user", data),
+            )
+            assert checkpoint["world"][native_host_save.SCOPE_FIELD] == host_scope
+            paired = checkpoint["characters"][joined["character_id"]]["state"]["native_guest_save"]
+            assert paired["slot"] != checkpoint["world"]["native_host_save"]["slot"]
+            evidence["scoped_checkpoint"] = checkpoint["revision"]
+        if resume_host:
+            restored_slot = checkpoint["world"]["native_host_save"]["slot"]
+            host = embedded_title_plan.host_plan(work, campaign, bind, port, "resume", OBSERVATORY, headless=True)
+            handoff = await title_choice(work, case / "resume", "host", host, processes, tasks)
+            resumed_host = host.read_status()
+            assert resumed_host["game"]["save_scope"] == host_scope and resumed_host["pid"] != hosting["pid"]
+            assert any(row["event"] == "native_host_save_restored" and row["slot"] == restored_slot
+                       and row["generation"] == resumed_host["generation"] for row in _events(host_run))
+            assert (await submit(host_run, "stop"))["ok"]
+            await asyncio.wait_for(tasks[-1], 15)
+            verify_released(campaign, handoff)
+            evidence["host_resume"] = {"slot": restored_slot, "save_scope": host_scope, "released": True}
         evidence["verified"] = True
     except BaseException as error:
         evidence["failure"] = str(error) or type(error).__name__
@@ -438,11 +480,13 @@ if __name__ == "__main__":
     scenario = parser.add_mutually_exclusive_group()
     scenario.add_argument("--abrupt-rejoin", action="store_true", help="kill and relaunch only the owned embedded guest")
     scenario.add_argument("--multiparty", action="store_true", help="join two embedded guests in a fresh Observatory campaign")
+    scenario.add_argument("--resume-host", action="store_true", help="resume the committed host save from the staged title")
     options = parser.parse_args()
-    if (options.abrupt_rejoin or options.multiparty) and not options.embedded:
-        parser.error("--abrupt-rejoin and --multiparty require --embedded")
+    if (options.abrupt_rejoin or options.multiparty or options.resume_host) and not options.embedded:
+        parser.error("the selected scenario requires --embedded")
     if options.bind.is_unspecified and options.invite_address is None:
         parser.error("use --invite-address for a wildcard host bind")
     asyncio.run(verify(options.work.resolve(strict=True), options.vanilla_saved.resolve(strict=True),
                        embedded=options.embedded, abrupt_rejoin=options.abrupt_rejoin, multiparty=options.multiparty,
+                       resume_host=options.resume_host,
                        bind=str(options.bind), invite_address=str(options.invite_address) if options.invite_address else None))

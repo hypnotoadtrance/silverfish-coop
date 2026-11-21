@@ -20,11 +20,13 @@ class StockBridge:
         self.events = events
         self.sequence = 0
         self.state = "ready"
+        self.save_scope = None
 
     def snapshot(self):
         self.sequence += 1
         if self.state == "ready":
             frame = ready(self.sequence)
+            frame["save_scope"] = self.save_scope
             frame[embedded.STARTUP_KEY] = {
                 "map": TITLE_MAP, "sequence": self.sequence, "saved_directory": str(self.profile / "Saved"),
             }
@@ -42,6 +44,11 @@ class StockBridge:
         self.events.append((action, *arguments))
         if action in ("host", "join", "leave"):
             self.state = {"host": "hosting", "join": "connected", "leave": "ready"}[action]
+        elif action == "native-save-scope-select":
+            self.save_scope, = arguments
+        elif action == "native-save-scope-release":
+            assert self.state == "ready" and arguments == (self.save_scope,)
+            self.save_scope = None
         return self.snapshot()
 
 
@@ -71,7 +78,7 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch.object(runtime, "native_death_backend", return_value="cpp"))
         self.enterContext(patch.object(service, "qualified_authored_routes", return_value=True))
         self.enterContext(patch.object(service, "staged_guest_controls", return_value=False))
-        scripts = ("guest_save.lua", "native_host_save.lua")
+        scripts = ("guest_save.lua", "native_host_save.lua", "native_save_scope.lua")
         self.enterContext(patch.object(service, "staged_script", side_effect=lambda work, name, *_: name in scripts))
         self.enterContext(patch.object(runtime, "staged_script", side_effect=lambda work, name, *_: name in scripts))
         self.enterContext(patch.object(service, "_identity", return_value=object()))
@@ -163,6 +170,7 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(connection, transport)
             self.assertEqual(bridge.directory, mailbox)
             self.assertEqual(controller.internal_port, self.raw_port)
+            self.assertEqual(controller.native_profile.id, self.bridge.save_scope)
             self.events.append(("run",))
 
         async def checkpoint(_controller, bridge):
@@ -175,13 +183,17 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
               patch.object(service.Host, "run", new=run),
               patch.object(service.Host, "checkpoint_native", new=checkpoint)):
             await self.host()
+        status = runtime.read_json(self.campaign / "run" / "status.json")
+        scope = uuid.UUID(status["campaign"]["campaign_id"]).hex
         self.assertEqual(self.events, [
+            ("native-save-scope-select", scope),
             ("host", OBSERVATORY, f"listener={self.raw_port}"), ("verify-raw", self.raw_port),
             ("quic", self.quic_port), ("run",),
             ("checkpoint",), ("native-guest-clear",), ("transport-closed", self.quic_port), ("leave",),
+            ("native-save-scope-release", scope),
         ])
         self.assertEqual(self.bridge.process.returncode, 0)
-        self.assertEqual(runtime.read_json(self.campaign / "run" / "status.json")["state"], "stopped")
+        self.assertEqual(status["state"], "stopped")
         self.assertEqual(self.observe_udp.call_count, 2)
         self.launch.assert_not_called()
         self.kill.assert_not_called()
@@ -210,8 +222,9 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
               patch.object(service.Client, "open_game_link", new=open_game_link),
               patch.object(service.Client, "run", new=run)):
             await self.join(chosen)
-        self.assertEqual(self.events, [("admit", chosen), ("join",), ("run",),
-                                       ("transport-closed", 28018), ("leave",)])
+        scope = uuid.UUID(chosen).hex
+        self.assertEqual(self.events, [("native-save-scope-select", scope), ("admit", chosen), ("join",), ("run",),
+                                       ("transport-closed", 28018), ("leave",), ("native-save-scope-release", scope)])
         self.assertEqual(self.bridge.process.returncode, 0)
         status = runtime.read_json(self.client / "run" / "status.json")
         self.assertEqual((status["state"], status["character_id"]), ("stopped", chosen))
@@ -240,7 +253,8 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "raw socket declined"):
                 await self.host()
         start.assert_not_called()
-        self.assertEqual(self.events[-1], ("leave",))
+        self.assertEqual(self.events[-2], ("leave",))
+        self.assertEqual(self.events[-1][0], "native-save-scope-release")
         self.assertEqual(self.bridge.process.returncode, 0)
         self.assertEqual(runtime.read_json(self.campaign / "run" / "status.json")["state"], "failed")
         self.launch.assert_not_called()
@@ -256,7 +270,8 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
               patch.object(service.Host, "checkpoint_native", new_callable=AsyncMock)):
             with self.assertRaisesRegex(OSError, "UDP owner table unavailable"):
                 await self.host()
-        self.assertEqual(self.events[-2:], [("transport-closed", self.quic_port), ("leave",)])
+        self.assertEqual(self.events[-3:-1], [("transport-closed", self.quic_port), ("leave",)])
+        self.assertEqual(self.events[-1][0], "native-save-scope-release")
         status = runtime.read_json(self.campaign / "run" / "status.json")
         self.assertEqual((status["state"], status["active"]), ("failed", False))
         self.observe_udp.assert_called_once_with(os.getpid(), self.raw_port)

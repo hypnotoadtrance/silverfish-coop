@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
+import uuid
 
 from tools.silverfish import native_host_save
 from tools.silverfish.campaign import (
@@ -179,6 +180,29 @@ class CampaignStoreTests(unittest.TestCase):
             self.assertEqual(store.status()["world"], dict(world, day=2))
             self.assertEqual(store.status()["revision"], revision + 1)
             self.assertFalse(store.recovered)
+
+    def test_scoped_checkpoint_reads_only_its_campaign_generation(self):
+        profile = self.root / "game-user"
+        native_host_save.directory(profile).mkdir(parents=True)
+        slot = native_host_save.new_slot()
+        legacy = native_host_save.slot_path(profile, slot)
+        legacy.write_bytes(b"GVAS" + bytes(64))
+        legacy_frame = native_host_save.record(profile, slot, CROSSROADS)
+        with self.open_store(verify_checkpoint=lambda data: native_host_save.verify_checkpoint(profile, data)) as store:
+            store.save_world({"map": CROSSROADS, "native_host_save": legacy_frame})
+            scope = native_host_save.SaveScope(profile, uuid.UUID(store.status()["campaign_id"]).hex)
+            native_host_save.directory(scope).mkdir(parents=True)
+            native_host_save.slot_path(scope, slot).write_bytes(b"GVAS" + bytes(range(64)))
+            world = {"map": CROSSROADS, native_host_save.SCOPE_FIELD: scope.id,
+                     "native_host_save": native_host_save.record(scope, slot, CROSSROADS)}
+            store.save_world(world)
+            self.assertEqual(native_host_save.record(profile, slot, CROSSROADS), legacy_frame)
+            with self.assertRaisesRegex(CampaignFormatError, "does not match"):
+                store.save_world(dict(world, native_host_save=legacy_frame))
+            with self.assertRaisesRegex(CampaignFormatError, "does not belong"):
+                store.save_world(dict(world, **{native_host_save.SCOPE_FIELD: uuid.uuid4().hex}))
+        with self.open_store(verify_checkpoint=lambda data: native_host_save.verify_checkpoint(profile, data)) as store:
+            self.assertEqual(store.status()["world"], world)
 
     def test_checks_world_and_character_state_but_skips_verifiers_for_identity_only_writes(self):
         verify_world = Mock()
