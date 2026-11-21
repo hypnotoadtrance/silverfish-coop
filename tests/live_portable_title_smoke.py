@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from dataclasses import dataclass
 from itertools import combinations
+import json
 import os
 from pathlib import Path
 import re
@@ -135,6 +136,15 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str) -> dict:
     assert 0 <= int(time.time()) - int(heartbeat.read_text(encoding="ascii")) <= 5
     await guest.bridge.wait_for(lambda frame: frame.get("native_inventory_view_binding") == "ready")
     guest_run = guest.client / "run"
+    async with asyncio.timeout(12):
+        while True:
+            try:
+                events = (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                if any(json.loads(line).get("event") == "native_guest_ui_projected" for line in events):
+                    break
+            except (FileNotFoundError, PermissionError, json.JSONDecodeError):
+                pass
+            await asyncio.sleep(.15)
     requested = await submit(guest_run, "native-inventory-view-fixture")
     assert requested["ok"], requested
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
@@ -143,7 +153,7 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str) -> dict:
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
     return {"placed_enemy_loot_bridge": game["native_enemy_loot_cqc_version"],
             "guest_regeneration_and_sickness_bound": True, "guest_shop_heartbeat": True,
-            "guest_inventory_action_verified": True}
+            "guest_inventory_action_verified": True, "guest_inventory_projection_verified": True}
 
 
 async def verify(work: Path, first_game: Path, second_game: Path, original: Path,
