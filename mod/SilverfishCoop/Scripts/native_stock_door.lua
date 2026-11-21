@@ -2,6 +2,7 @@ local doors = {}
 local guest_save = require("guest_save")
 
 local base_path = "/Game/Assets/StaticMeshes/Doors/BasicDoor_Master.BasicDoor_Master_C"
+local statics_path = "/Script/Engine.Default__GameplayStatics"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local guest_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
@@ -48,7 +49,12 @@ local function census(state, phase)
     local now = os.time()
     if not same(active_world, state.world) or scanned_at ~= now then
         active_world, scanned_at, actors, door_parts = state.world, now, {}, {}
-        for _, actor in ipairs(FindAllOf("BasicDoor_Master_C") or {}) do
+        local base, statics = StaticFindObject(base_path), StaticFindObject(statics_path)
+        if not valid(base) or not valid(statics) then return actors end
+        local found = {}
+        statics:GetAllActorsOfClass(state.world, base, found)
+        for _, actor in ipairs(found.OutActors or found) do
+            if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
             local name = identity(actor, state.world)
             if name and (phase ~= "hosting" or actor:HasAuthority()) then
                 local arrow, panel, knob = components(actor)

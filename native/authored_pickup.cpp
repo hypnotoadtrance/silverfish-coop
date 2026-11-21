@@ -34,6 +34,7 @@
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FFrame.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
+#include <Unreal/GameplayStatics.hpp>
 #include <Unreal/Hooks.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
@@ -1908,23 +1909,25 @@ namespace
             auto* base = find<U::UClass>(base_class);
             auto* level = object(world, STR("PersistentLevel"));
             if (!base || !level) return 0;
-            U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
-                if (!live(candidate) || candidate->GetOuterPrivate() != level || !candidate->IsA(base) ||
-                    !candidate->HasAnyFlags(U::RF_WasLoaded) || !boolean(candidate, STR("bActorIsBeingDestroyed"), false))
-                    return RC::LoopAction::Continue;
-                auto* actor = static_cast<U::AActor*>(candidate);
+            std::vector<U::AActor*> actors;
+            U::UGameplayStatics::GetAllActorsOfClass(world, base, actors);
+            for (auto* actor : actors)
+            {
+                if (!live(actor) || actor->GetOuterPrivate() != level || !actor->IsA(base) ||
+                    !actor->HasAnyFlags(U::RF_WasLoaded) || !boolean(actor, STR("bActorIsBeingDestroyed"), false))
+                    continue;
                 auto* box = source_box(actor);
                 if (!box || !actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false))
-                    return RC::LoopAction::Continue;
+                    continue;
                 const auto path = actor->GetPathName();
                 const auto class_path = actor->GetClassPrivate()->GetPathName();
                 if (authored_path(path) || !class_path.starts_with(STR("/Game/Classes/")))
-                    return RC::LoopAction::Continue;
+                    continue;
                 const bool cash = silverfish::stock_cash::is_family(actor->GetClassPrivate());
-                if (generic_payload_fault(actor, cash)) return RC::LoopAction::Continue;
+                if (generic_payload_fault(actor, cash)) continue;
                 auto [entry, inserted] = loose_sources.try_emplace(RC::to_utf8_string(path));
                 if (!inserted && entry->second.scope.actor.Get() == actor)
-                    return RC::LoopAction::Continue;
+                    continue;
                 auto& loose = entry->second;
                 loose.world = world_path;
                 loose.actor = path;
@@ -1933,8 +1936,7 @@ namespace
                     .item_class = loose.item_class.c_str(), .stock_cash = cash, .discovered = true};
                 loose.scope = {world, pawn, actor, box, seat.controller.Get(), seat.driver.Get(), &loose.profile,
                     host, false, true, false};
-                return RC::LoopAction::Continue;
-            });
+            }
         }
 
         lua.set_integer(static_cast<std::int64_t>(loose_sources.size()));
@@ -1983,26 +1985,35 @@ namespace
         auto* pawn = loose_pawn.Get();
         if (!ready() || !live(pawn) || lua.get_stack_size() != 0) return 0;
         auto center = static_cast<U::AActor*>(pawn)->K2_GetActorLocation();
-        std::vector<std::pair<double, const Scope*>> nearby;
+        struct Nearby
+        {
+            double distance;
+            const Scope* scope;
+            U::FVector position;
+        };
+        std::vector<Nearby> nearby;
         for (const auto& [_, loose] : loose_sources)
         {
             auto* actor = loose.scope.actor.Get();
-            if (!live(actor) || !loose_respawn_mode(actor)) continue;
+            if (!live(actor)) continue;
             auto at = loose.scope.hidden_at ? *loose.scope.hidden_at : static_cast<U::AActor*>(actor)->K2_GetActorLocation();
             const auto dx = at.GetX() - center.GetX(), dy = at.GetY() - center.GetY(), dz = at.GetZ() - center.GetZ();
             const auto distance = dx * dx + dy * dy + dz * dz;
             if (std::isfinite(distance) && distance <= 1800.0 * 1800.0)
-                nearby.emplace_back(distance, &loose.scope);
+                nearby.push_back({distance, &loose.scope, at});
         }
-        std::ranges::sort(nearby, {}, &std::pair<double, const Scope*>::first);
+        std::ranges::sort(nearby, {}, &Nearby::distance);
         std::string rows;
-        for (const auto& [_, scope] : nearby | std::views::take(48))
+        int remaining = 48;
+        for (auto& [_, scope, at] : nearby)
         {
-            if (!scope->claimed && !available(*scope)) continue;
             auto* actor = scope->actor.Get();
-            auto at = scope->hidden_at ? *scope->hidden_at : static_cast<U::AActor*>(actor)->K2_GetActorLocation();
+            auto* mode = loose_respawn_mode(actor);
+            if (!mode) continue;
+            if (remaining-- == 0) break;
+            if (!scope->claimed && !available(*scope)) continue;
             rows += std::format("{}|{}|{}|{}|{:.3f}|{:.3f}|{:.3f}\n", scope->profile->source,
-                RC::to_utf8_string(scope->profile->item_class), loose_respawn_mode(actor)->GetPropertyValueInContainer(actor),
+                RC::to_utf8_string(scope->profile->item_class), mode->GetPropertyValueInContainer(actor),
                 scope->claimed ? "claimed" : "available", at.GetX(), at.GetY(), at.GetZ());
         }
         lua.set_string(rows);

@@ -30,11 +30,15 @@ local function selected_sites(state, phase)
     local clock = os.clock()
     if not same(world, state.world) or clock - site_time >= 2 then
         local base = StaticFindObject(stash_class)
+        local statics = StaticFindObject(statics_path)
         local leaf = state.map:match("([^/]+)$")
         sites = {}
-        if valid(base) and leaf then
+        if valid(base) and valid(statics) and leaf then
             local prefix = state.map .. "." .. leaf .. ":PersistentLevel."
-            for _, actor in ipairs(FindAllOf("Stash_Master_BP_C") or {}) do
+            local found = {}
+            statics:GetAllActorsOfClass(state.world, base, found)
+            for _, actor in ipairs(found.OutActors or found) do
+                if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
                 if valid(actor) and actor:IsA(base) and same(actor:GetWorld(), state.world)
                     and actor:HasAuthority() and not actor:IsActorBeingDestroyed() and same(actor.GameInstanceFP, instance) then
                     local name = actor:GetFullName()
