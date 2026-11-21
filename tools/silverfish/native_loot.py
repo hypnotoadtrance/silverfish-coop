@@ -6,7 +6,7 @@ import time
 import uuid
 
 from . import native_host_save, party
-from .authored_loot import (CRATES, LEGACY_CRATE, lockable_container, loot_capacity, random_lid,
+from .authored_loot import (CRATES, LEGACY_CRATE, key_unlock_only, lockable_container, loot_capacity, random_lid,
                             valid_item_transform, valid_lid_angle, valid_loot_trait_calls)
 from .native_gold import valid_guid
 
@@ -16,6 +16,8 @@ STATE_KEY = "native_loot_rolls"
 RETIRED = "native_loot_retired_rolls"
 REPLENISHED = "native_replenished_crates"
 VEHICLE_LOCKS = "native_loot_vehicle_locks"
+KEY_UNLOCKS = "native_loot_key_unlocks"
+UNLOCK_RESULT = "native_loot_unlock"
 TORCH_USE = "native-guest-vehicle-blowtorch"
 TORCH_RESULT = "native_guest_blowtorch"
 CROWBAR_USE = "native-guest-vehicle-crowbar"
@@ -206,21 +208,41 @@ async def _settled_native_lid(bridge, opening, crate, lid):
     return await bridge.wait_for(settled, timeout=4)
 
 
-async def project_vehicle_locks(bridge, game, locks):
+async def project_vehicle_locks(bridge, game, locks, *, restore_keys=False):
     area = game.get("map")
     observed = game.get(VEHICLE_LOCKS, {})
-    if not isinstance(locks, dict) or game.get("state") != "connected":
+    phase = "hosting" if restore_keys else "connected"
+    if not isinstance(locks, dict) or game.get("state") != phase:
         return game
-    missing = [(crate, value) for crate, value in locks.items() if crate in observed and lockable_container(crate, area)
+    qualifies = key_unlock_only if restore_keys else lockable_container
+    missing = [(crate, value) for crate, value in locks.items() if crate in observed and qualifies(crate, area)
                and type(value) is bool and value != observed[crate]]
+    command = "native-loot-restore-key-unlocks" if restore_keys else "native-loot-vehicle-locks"
     for offset in range(0, len(missing), 32):
         batch = missing[offset:offset + 32]
         args = tuple(part for crate, value in batch for part in (crate, str(int(value))))
-        game = await bridge.command("native-loot-vehicle-locks", area, *args, timeout=4)
+        game = await bridge.command(command, area, *args, timeout=4)
         readback = game.get(VEHICLE_LOCKS, {})
-        if (game.get("state"), game.get("map")) != ("connected", area) or any(readback.get(key) is not value for key, value in batch):
-            raise RuntimeError("The guest container locks did not match the host")
+        if (game.get("state"), game.get("map")) != (phase, area) or any(readback.get(key) is not value for key, value in batch):
+            raise RuntimeError("The stock container locks did not match the co-op state")
     return game
+
+
+async def restore_key_unlocks(host, bridge):
+    if host.stopping or host.transitioning or host.native_checkpoint_unsafe or host.party.get("wipe"):
+        return
+    rows = host.party.get(KEY_UNLOCKS, {})
+    if not rows:
+        return
+    game = host.last_game
+    area = game.get("map")
+    visible = game.get("native_loot_crates", {})
+    locks = {crate: False for crate, row in rows.items() if key_unlock_only(crate, area)
+             and row["opener"] in host.party["players"] and party.REQUEST_ID.fullmatch(row["id"])
+             and visible.get(crate, {}).get("state") == "ready"}
+    snapshot = await project_vehicle_locks(bridge, game, locks, restore_keys=True)
+    if snapshot is not game:
+        host.last_game, host.last_seen = snapshot, time.monotonic()
 
 
 async def use_vehicle_pry_tool(host, bridge, character, target, operation_id, action):
@@ -439,6 +461,21 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
     if action == "open" and any(key != crate and roll.get("id") == operation_id
                                 for key, roll in host.party.get(STATE_KEY, {}).items()):
         raise party.RuleError("operation_id_conflict")
+    unlock_request = ["native-loot-open", crate, None]
+    if action == "open" and tool_receipt is None:
+        prior_unlock = next((entry for entry in host.party["receipts"].get(character, [])
+                             if entry["id"] == operation_id and UNLOCK_RESULT in entry["result"]), None)
+        if prior_unlock:
+            if prior_unlock["request"] != unlock_request:
+                raise party.RuleError("operation_id_conflict")
+            return prior_unlock["result"]
+        for unlocked, row in host.party.get(KEY_UNLOCKS, {}).items():
+            if row["id"] == operation_id:
+                if (unlocked, row["opener"]) != (crate, character):
+                    raise party.RuleError("operation_id_conflict")
+                return {UNLOCK_RESULT: {"map": area, "crate": crate, "opener": character, "locked": False}}
+        if crate in host.party.get(KEY_UNLOCKS, {}) and host.last_game.get(VEHICLE_LOCKS, {}).get(crate) is not False:
+            raise party.RuleError("native_loot_key_unlock_restoring")
     saved = rolls.get(crate)
     if saved and action in ("open", "inspect"):
         if crate in _replenished(host.last_game, rolls):
@@ -491,6 +528,23 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             raise party.RuleError(proof["status"] or "native_loot_refused")
         host.last_game, host.last_seen = snapshot, time.monotonic()
         if action == "open":
+            if proof.get("status") == "unlocked":
+                if (pried or fixture_nonempty or tool_receipt or not key_unlock_only(crate, area)
+                        or not proof["invoked"] or proof["looted"] or proof["trait_calls"] or proof["item_count"] or proof["items"]
+                        or proof["escrow_slot"] != "-" or snapshot.get(VEHICLE_LOCKS, {}).get(crate) is not False
+                        or snapshot.get("native_loot_crates", {}).get(crate, {}).get("state") != "ready"):
+                    raise RuntimeError("The stock key unlock did not verify")
+                candidate = party.load_party(host.party)
+                candidate.setdefault(KEY_UNLOCKS, {})[crate] = {"id": operation_id, "opener": character}
+                result = {UNLOCK_RESULT: {"map": area, "crate": crate, "opener": character, "locked": False}}
+                receipts = candidate["receipts"].setdefault(character, [])
+                receipts.append({"id": operation_id, "request": unlock_request, "result": result})
+                del receipts[:-party.RECENT_ACTIONS]
+                revision = await host.checkpoint_native(bridge, candidate)
+                host.party = candidate
+                host.native_checkpoint_unsafe = False
+                host.control.event("native_loot_key_unlocked", revision=revision, operation_id=operation_id, **result[UNLOCK_RESULT])
+                return result
             items = proof["items"]
             calls = proof["trait_calls"]
             capacity = loot_capacity(crate)
@@ -513,6 +567,8 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 roll[lid[0]] = settled["native_loot_crates"][crate][lid[0]]
                 host.last_game, host.last_seen = settled, time.monotonic()
             candidate = party.load_party(host.party)
+            if crate in candidate.get(KEY_UNLOCKS, {}):
+                del candidate[KEY_UNLOCKS][crate]
             candidate.setdefault(STATE_KEY, {})[crate] = roll
             result = {"native_loot_roll": public_roll(roll)}
             if tool_receipt:

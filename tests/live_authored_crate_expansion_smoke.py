@@ -24,7 +24,7 @@ from tools.silverfish.authored_loot import (CRATES, GUARANTEED_CRATES, GUARANTEE
                                            OFFICE_DESK_PROFILE, SMALL_CABINET, SMALL_CABINET_PROFILE, full_name,
                                            lockable_container, loot_capacity, random_lid, valid_lid_angle, valid_loot_trait_calls, vehicle_lock)
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
-from tools.silverfish.travel import BLACK_MARKET, CISTERN, CITY, CROSSROADS, FOREST, LAB_E206, OBSERVATORY, RAIL_YARD
+from tools.silverfish.travel import BLACK_MARKET, CISTERN, CITY, CROSSROADS, FOREST, LAB_E206, LAKE, OBSERVATORY, RAIL_YARD
 
 
 SCENES = {
@@ -89,12 +89,14 @@ FAMILY_SCENES = {
     "stock-small-locker-random": (CROSSROADS, "LootLocker_Small_BP_C", "LootLocker_Small_BP_C_2"),
     "stock-locker-blowtorch": (FOREST, "LootLocker_Small_BP_C", "LootLocker_Small_BP_C_1"),
     "stock-locker-key": (FOREST, "LootLocker_Small_BP_C", "LootLocker_Small_BP_C_1"),
+    "stock-secure-locker-blowtorch": (LAKE, "LootLocker_Secure_BP_C", "LootLocker_Secure_BP_C_3"),
 }
 PRY_TOOL_SCENES = {"stock-guest-blowtorch": "blowtorch", "stock-guest-crowbar": "crowbar",
-                   "stock-locker-blowtorch": "blowtorch"}
+                   "stock-locker-blowtorch": "blowtorch", "stock-secure-locker-blowtorch": "blowtorch"}
 SAWMILL_KEY_ACTOR = f"{FOREST}.Forest_01_P:PersistentLevel.Sawmill_Key_C_1"
 PERMANENT_FAMILY_CRATES = {full_name(area, actor, family) for family, area, actor, _, _, _, replenish, *_ in CONTAINER_PLACEMENTS
-                           if replenish == 2 or family in {"Loot_Stash_Small_BP_C", "LootCrate_Weapon_BP_C", "Loot_ArtifactChest_01_C"}}
+                           if replenish == 2 or family in {"Loot_Stash_Small_BP_C", "LootCrate_Weapon_BP_C",
+                                                            "Loot_ArtifactChest_01_C", "LootLocker_Secure_BP_C"}}
 SCENES.update({name: (area, (actor,)) for name, (area, _, actor) in FAMILY_SCENES.items()})
 FISH_CANNERY_ITEMS = {
     "/Game/Classes/Items/Item_CannedTuna.Item_CannedTuna_C",
@@ -234,14 +236,15 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
 
     def locked_container(state):
         locks = state.get("game", {}).get(native_loot.VEHICLE_LOCKS, {})
-        if family == "LootLocker_Small_BP_C":
+        locker = family in {"LootLocker_Small_BP_C", "LootLocker_Secure_BP_C"}
+        if locker:
             candidates = targets
         else:
             # Prefer the reference placements when the world rolls either one locked.
             candidates = (*targets, full_name(area, "StaticMeshActor_488", "Loot_Car_01_BP_C"), *sorted(locks))
         return next((crate for crate in candidates if locks.get(crate) is True
                      and status_of(state, crate) == "ready" and lockable_container(crate, area)
-                     and (family == "LootLocker_Small_BP_C" or vehicle_lock(crate, area))), None)
+                     and (locker or vehicle_lock(crate, area))), None)
 
     def scene_ready(state):
         if state.get("state") != "hosting":

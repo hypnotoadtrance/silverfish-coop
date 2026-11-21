@@ -40,6 +40,7 @@ CRATE_AMMO_ROLL = ("CallFunc_Array_Get_Item.SpawnLoot(K2Node_MakeMap_Map,0.8,0,"
 CRATE_FALLBACK_ROLL = ("CallFunc_Array_Get_Item_1.SpawnLoot(Loot Table_Items,SpawnChance_Item,0.5,"
                        "GuaranteeSpawn,Seeded,True,False,False,False,CallFunc_SpawnLoot_Object_2)")
 CRATE_WEAPON_SPAWNERS = ("Loot_Spawner", "Loot_Spawner1", "Loot_Spawner2", "Loot_Spawner3", "Loot_SpawnerGun")
+SECURE_LOCKER_KEYS = tuple(f"LockerKey_{number}_C" for number in ("002", "543", "4513", "230", "06", "04", "30"))
 FAMILY_OVERRIDE_ROWS = GUARANTEED_OVERRIDE_ROWS | {"Office", "Garage", "Marine", "TownHouse", "LabSupplies", "Shop_Food",
                                                    "Uncommon_Basic", "PoliceEquipment", "Uncommon_Special",
                                                    "Weapon_Specialized", "Rare", "Weapon_UltraRare", "Weapon_HighEnd",
@@ -67,6 +68,7 @@ class ContainerFamily:
     lid_ignores_channel: int | None = None
     pry_entry: int = 0
     keys: frozenset[str] = frozenset()
+    key_unlock_only: bool = False
 
     def spawner_names(self):
         return self.named_spawners or ("Loot_Spawner", *(f"Loot_Spawner{i}" for i in range(1, self.slots)))
@@ -140,6 +142,10 @@ CONTAINER_FAMILIES = {
         rolls=(STOCK_ROLL, "Loot_SpawnerArmor.SpawnLoot(Loot Table_Armor,SpawnChance_Armor,0,GuaranteeSpawn,"
                          "False,False,True,False,Ping_IfOpened,CallFunc_SpawnLoot_Object_1)"),
         pry_entry=0xF, keys=frozenset({"Sawmill_Key_C"})),
+    "LootLocker_Secure_BP_C": ContainerFamily("secure_locker", 0x8E6, slots=3, open_roll=0, open_yaw=95,
+        prop_components=("Arrow_Latch", "Sign", "Timeline"), named_spawners=("Loot_Spawner", "Loot_Spawner1", "Loot_Spawner2"),
+        guaranteed=True, replenish=PERMANENT_REPLENISHMENT, pry_entry=0x1B, keys=frozenset(SECURE_LOCKER_KEYS),
+        key_unlock_only=True),
 }
 
 
@@ -233,6 +239,8 @@ def family_placements(audit):
                                      "CallFunc_FindItem_InBackPack_ItemFound,CallFunc_FindItem_InBackPack_Index,"
                                      "CallFunc_FindItem_InBackPack_Struct,CallFunc_FindItem_InBackPack_Ammount)") != 1:
             raise ValueError(f"Cooked stock container key lookup changed: {family}")
+        if spec.key_unlock_only and actor.get("Keys") != ";".join(SECURE_LOCKER_KEYS):
+            raise ValueError(f"Cooked secure locker key table changed: {family}")
         if (spec.lid_ignores_channel is not None and
                 f"SM_Prop_Cabinet_Small_Door_01.SetCollisionResponseToChannel(Byte({spec.lid_ignores_channel}),Byte(0))" not in calls):
             raise ValueError(f"Cooked lid collision response changed: {family}")
@@ -262,6 +270,11 @@ def family_placements(audit):
         if spec.keys:
             tunable |= {"ContainerExpectedValue", "KeyItem"}
         key = fields.get("KeyItem")
+        if spec.key_unlock_only:
+            tunable.add("KeyType")
+            key_type = fields.get("KeyType")
+            if key not in spec.keys or key_type != str(SECURE_LOCKER_KEYS.index(key)):
+                continue
         ping = fields.get("Ping_IfOpened", str(spec.stock_ping))
         if ((key is not None and key not in spec.keys) or ping not in {"True", "False"} or (spec.stock_ping and ping == "False")
                 or fields.get("Locked", "False") not in {"True", "False"}):
@@ -316,6 +329,10 @@ def family_catalog(profiles):
     for family, spec in CONTAINER_FAMILIES.items():
         if spec.pry_entry and spec.keys:
             lines.append(f"    {family!r},")
+    lines.extend(("})", "", "KEY_UNLOCK_ONLY_CLASSES = frozenset({"))
+    for family, spec in CONTAINER_FAMILIES.items():
+        if spec.key_unlock_only:
+            lines.append(f"    {family!r},")
     lines.extend(("})", "", "CONTAINER_PLACEMENTS = ("))
     for row in profiles:
         lines.append(f"    {row!r},")
@@ -348,7 +365,7 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
         "        const RC::CharType* script;", "        std::int32_t input_entry;", "        std::uint8_t slots;",
         "        bool stock_ping{};", "        bool paired_doors{};",
         "        std::span<const RC::CharType* const> spawner_names{};", "        bool weapon_first{};",
-        "        std::int32_t pry_entry{};", "    };", "",
+        "        std::int32_t pry_entry{};", "        bool key_unlock_only{};", "    };", "",
         '    inline constexpr StockClass small_crate{',
         '        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C"),',
         '        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C:SendInteractionToActor"),',
@@ -367,6 +384,8 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
             flags += ", true"
         if spec.pry_entry:
             flags += f", false, 0x{spec.pry_entry:X}"
+        if spec.key_unlock_only:
+            flags += ", true"
         header.extend((f"    inline constexpr StockClass {spec.symbol}{{",
                        f'        STR("{path}"),',
                        f'        STR("{path}:SendInteractionToActor"),',
@@ -452,6 +471,8 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
             lua_flags += f', random_lid = {{"{axis}", {low}, {high}}}'
         if spec.pry_entry:
             lua_flags += ", lockable = true"
+        if spec.key_unlock_only:
+            lua_flags += ", key_unlock_only = true"
         if not (spec.paired_doors or spec.random_lid) and (spec.open_roll != -95 or spec.open_pitch or spec.open_yaw):
             lua_flags += f", open_roll = {spec.open_roll}, open_yaw = {spec.open_yaw}"
             if spec.open_pitch:

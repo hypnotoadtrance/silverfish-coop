@@ -510,7 +510,7 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await native_loot.project_vehicle_locks(bridge, game, host), projected)
         bridge.command.assert_awaited_once_with("native-loot-vehicle-locks", CROSSROADS, car, "0", timeout=4)
         bridge.command.return_value = game
-        with self.assertRaisesRegex(RuntimeError, "vehicle locks did not match"):
+        with self.assertRaisesRegex(RuntimeError, "container locks did not match"):
             await native_loot.project_vehicle_locks(bridge, game, host)
 
     async def test_view_claim_follows_rendered_crate_even_when_another_is_nearer(self):

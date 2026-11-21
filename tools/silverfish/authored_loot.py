@@ -2,8 +2,8 @@
 
 import math
 
-from .authored_container_placements import (CLASS_CAPACITIES, CONTAINER_PLACEMENTS, KEYED_LOCK_CLASSES, KEYLESS_LOCK_CLASSES,
-                                            MIXED_GUARANTEE_CLASSES, RANDOM_LID_CLASSES)
+from .authored_container_placements import (CLASS_CAPACITIES, CONTAINER_PLACEMENTS, KEY_UNLOCK_ONLY_CLASSES,
+                                            KEYED_LOCK_CLASSES, KEYLESS_LOCK_CLASSES, MIXED_GUARANTEE_CLASSES, RANDOM_LID_CLASSES)
 from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, RAIL_YARD
 
 
@@ -550,6 +550,10 @@ def vehicle_lock(container: str, area: str | None) -> bool:
 def lockable_container(container: str, area: str | None) -> bool:
     return (area is not None and CRATES.get(container) == area
             and container.partition(" ")[0] in LOCKABLE_CONTAINER_CLASSES)
+
+
+def key_unlock_only(container: str, area: str | None) -> bool:
+    return area is not None and CRATES.get(container) == area and container.partition(" ")[0] in KEY_UNLOCK_ONLY_CLASSES
 
 
 def valid_item_transform(transform: object) -> bool:

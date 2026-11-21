@@ -1087,6 +1087,9 @@ class Host:
                 candidate = native_dream.finished(self.party) if returning else native_dream.arrived(self.party, time.time())
             if matrix_plan:
                 candidate = native_matrix.arrive(self.party, matrix_plan["id"], destination)
+            if self.party.get(native_loot.KEY_UNLOCKS):
+                candidate = candidate if candidate is not None else party.load_party(self.party)
+                candidate.pop(native_loot.KEY_UNLOCKS, None)
             revision = await self.checkpoint_native(bridge, candidate)
             if candidate is not None:
                 self.party = candidate
@@ -3613,6 +3616,10 @@ class Host:
                     await native_loot.retire_replenished(self, bridge)
                 except (OSError, ValueError, RuntimeError) as error:
                     self.control.event("native_loot_replenishment_unavailable", reason=str(error))
+                try:
+                    await native_loot.restore_key_unlocks(self, bridge)
+                except (OSError, ValueError, RuntimeError) as error:
+                    self.control.event("native_loot_key_restore_unavailable", reason=str(error))
             if not self.stopping and not self.native_checkpoint_unsafe:
                 await self.service_guest_native_requests(bridge)
             if self.host_camera_input and not self.stopping and not self.native_checkpoint_unsafe:

@@ -496,8 +496,10 @@ function input.command(fields, state, phase)
         end
         return "stock vehicle pry unlocked the trunk"
     end
-    if command == "native-loot-vehicle-locks" then
-        if phase ~= "connected" or fields[3] ~= state.map or #fields < 5 or #fields > 403 or #fields % 2 ~= 1 then
+    if command == "native-loot-vehicle-locks" or command == "native-loot-restore-key-unlocks" then
+        local restore = command == "native-loot-restore-key-unlocks"
+        if phase ~= (restore and "hosting" or "connected") or fields[3] ~= state.map
+            or #fields < 5 or #fields > 403 or #fields % 2 ~= 1 then
             error("native_loot_vehicle_lock_scope_unavailable", 0)
         end
         local locks = {}
@@ -505,6 +507,7 @@ function input.command(fields, state, phase)
             local profile, flag = loot.profile(state.map, fields[index]), fields[index + 1]
             local current = profile and profile.lockable and input.update(state, phase, profile)
             if not current or locks[current.crate] ~= nil or type(current.crate.Locked) ~= "boolean"
+                or (restore and (not profile.key_unlock_only or current.crate.Looted ~= false or flag ~= "0"))
                 or (flag ~= "0" and flag ~= "1") then error("native_loot_vehicle_lock_scope_unavailable", 0) end
             locks[current.crate] = flag == "1"
         end
@@ -512,7 +515,7 @@ function input.command(fields, state, phase)
             crate.Locked = locked
             if crate.Locked ~= locked then error("native_loot_vehicle_lock_projection_unverified", 0) end
         end
-        return "stock vehicle locks synchronized"
+        return "stock container locks synchronized"
     end
     if command ~= "native-loot-crate-fixture" and command ~= "native-loot-crate-project" then return end
     local target = command == "native-loot-crate-fixture" and fields[3] or fields[4]

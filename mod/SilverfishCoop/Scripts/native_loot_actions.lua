@@ -166,6 +166,13 @@ function actions.command(fields, state, phase)
         scope.crate:GetAddress(), scope.pawn:GetAddress(), scope.box:GetAddress(),
         scope.save:GetAddress(), scope.stock:GetAddress(), scope.lucky_looter, table.unpack(open_args)))
     result.ok, result.status, result.looted, result.calls, result.invoked = reply[1], reply[2], reply[3], reply[6], reply[7]
+    if result.ok and result.status == "unlocked" then
+        if not scope.profile.key_unlock_only or reply.n ~= 7 or result.looted or not result.invoked
+            or reply[4] ~= 0 or reply[5] ~= 0 or result.calls ~= 0 or scope.crate.Locked ~= false or scope.crate.Looted ~= false then
+            result.ok, result.status = false, "mutation_unverified_stock_secure_locker_unlock"
+        end
+        return "stock key unlock reported"
+    end
     if result.ok then
         local outputs = {}
         local verified, items = pcall(function()

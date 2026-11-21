@@ -1026,6 +1026,22 @@ namespace
         }
 
         const bool looted = authority(context.crate, context.world) && read_bool(context.crate, STR("Looted"), true);
+        const bool opener_unchanged = object_field(context.crate, STR("Player")) == context.pawn;
+        const bool save_owner_unchanged = object_field(context.world, STR("OwningGameInstance")) == context.instance &&
+            object_field(context.instance, STR("SaveSlot_Ref")) == context.stock &&
+            object_field(context.pawn, STR("Save")) == context.save;
+        const int traits = std::accumulate(scope.rolls.begin(), scope.rolls.end(), scope.accounts);
+        if (key && context.profile->stock_class->key_unlock_only)
+        {
+            auto* spawned = field<Unreal::FIntProperty>(context.crate, STR("SpawnedValue"));
+            const bool unlocked = scope.problem.empty() && scope.key_checks == 1 && opener_unchanged && save_owner_unchanged &&
+                authority(context.crate, context.world) && read_bool(context.crate, STR("Locked"), false) &&
+                read_bool(context.crate, STR("Looted"), false) && spawned && spawned->GetPropertyValueInContainer(context.crate) == 0 &&
+                object_field(context.crate, STR("Box")) == context.box && query_collision_enabled(context.box) &&
+                traits == 0 && std::ranges::none_of(scope.spawns, [](const auto& spawn) { return spawn.output || spawn.finished; });
+            return result(lua, unlocked, unlocked ? "unlocked" : "stock_secure_locker_unlock_unverified",
+                          looted, 0, 0, traits, true);
+        }
         ContainerActors items{};
         for (std::size_t index = 0; index < items.size(); ++index) items[index] = scope.items[index].Get();
         auto* first = items[0];
@@ -1041,11 +1057,9 @@ namespace
                 scope.problem = "stock_loot_open_karma_query_unverified";
             else if (!verified_spawn_route(scope))
                 scope.problem = "stock_loot_open_roll_calls_unverified";
-            else if (object_field(context.crate, STR("Player")) != context.pawn)
+            else if (!opener_unchanged)
                 scope.problem = "stock_loot_open_opener_changed";
-            else if (object_field(context.world, STR("OwningGameInstance")) != context.instance ||
-                     object_field(context.instance, STR("SaveSlot_Ref")) != context.stock ||
-                     object_field(context.pawn, STR("Save")) != context.save)
+            else if (!save_owner_unchanged)
                 scope.problem = "stock_loot_open_save_owner_changed";
             else if (item_problem = materialization_failure(scope, items); !item_problem.empty())
                 scope.problem = item_problem;
@@ -1061,7 +1075,6 @@ namespace
                     scope.problem = "stock_loot_fixture_spawn_class_unverified";
             }
         }
-        const int traits = std::accumulate(scope.rolls.begin(), scope.rolls.end(), scope.accounts);
         const bool ok = scope.problem.empty();
         if (ok)
         {
