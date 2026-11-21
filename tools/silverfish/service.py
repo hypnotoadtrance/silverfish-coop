@@ -5324,9 +5324,9 @@ class Client:
                     result = {"native_inventory_view": self.last_game.get("native_inventory_view", {})}
                     if target:
                         result["stock_inventory_proof"] = self.last_game.get("ack", {}).get("message")
-                elif action in (native_guest_drop.STOCK_DROP_FIXTURE, native_guest_drop.STOCK_USE_FIXTURE):
+                elif action in native_guest_drop.STOCK_FIXTURES:
                     result = await native_guest_drop.stock_menu_fixture(
-                        self, request.get("target"), path.stem, use=action == native_guest_drop.STOCK_USE_FIXTURE,
+                        self, request.get("target"), path.stem, native_guest_drop.STOCK_FIXTURES[action],
                     )
                 elif action == "native-client-remote-damage-fixture":
                     if not self.last_game.get("native_client_damage"):

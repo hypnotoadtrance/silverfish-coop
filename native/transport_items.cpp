@@ -138,6 +138,7 @@ namespace
         Unreal::FName action_drop{STR("ActionDrop")};
         Unreal::FName insert_item{STR("InsertItem")};
         Unreal::FName action_use{STR("ActionUse")};
+        Unreal::FName sort_items{STR("SortItems")};
         Unreal::FName quick_move{STR("QuickMove")};
         Unreal::FName use_held{STR("UseHeldItem")};
         Unreal::FName confirm_use{STR("ConfirmUseItem")};
@@ -815,6 +816,17 @@ namespace
                same_widget_player(manager) && same_widget_player(screen) && same_widget_player(panel);
     }
 
+    [[nodiscard]] Unreal::UObject* top_stock_menu()
+    {
+        auto* controller = scope.controller.Get();
+        auto* menus = field<Unreal::FArrayProperty>(controller, STR("MenuStack"));
+        auto* element = menus ? Unreal::CastField<Unreal::FObjectProperty>(menus->GetInner()) : nullptr;
+        if (!element || element->GetArrayDim() != 1) return nullptr;
+        Unreal::FScriptArrayHelper stack(menus, menus->ContainerPtrToValuePtr<void>(controller));
+        return stack.Num() > 0 && stack.Num() <= inventory_limit ? object_value(element, stack.GetRawPtr(stack.Num() - 1))
+                                                               : nullptr;
+    }
+
     [[nodiscard]] bool qualified_drop_seat(bool host)
     {
         return (!host || host_drop_enabled()) && scope.host == host &&
@@ -1004,6 +1016,34 @@ namespace
         if (path == STR("/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C")) return "use-canned-beans";
         if (path == STR("/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C")) return "use-brown-mushroom";
         return {};
+    }
+
+    void intercept_backpack_sort(Iteration& iteration, Unreal::UObject* instance, Unreal::UFunction* function)
+    {
+        if (instance != scope.instance.Get() || !qualified_drop_seat(false) || !exact_class(instance, instance_path) ||
+            function->GetOuterPrivate() != instance->GetClassPrivate() || function->GetNumParms() != 1 ||
+            function->GetParmsSize() != 1 || function->GetReturnProperty() ||
+            function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
+        auto* kind = field<Unreal::FByteProperty>(function, STR("SortType"));
+        if (!kind || kind->GetOffset_Internal() != 0 || !kind->HasAnyPropertyFlags(Unreal::CPF_Parm) ||
+            kind->HasAnyPropertyFlags(Unreal::CPF_OutParm | Unreal::CPF_ReturnParm)) return;
+        auto* screen = top_stock_menu();
+        auto* manager = object_field(screen, STR("ItemManager"));
+        auto* panel = object_field(screen, STR("BackpackPanel"));
+        if (!exact_drop_screen(manager, screen, panel) || !host_drop_scope_matches(canonical_host_save())) return;
+
+        iteration.PreventOriginalFunctionCall();
+        const auto now = Clock::now();
+        auto* dead = field<Unreal::FBoolProperty>(scope.pawn.Get(), STR("Dead"));
+        const auto held = inventory_item(manager, STR("HeldItem"));
+        auto* held_class = field<Unreal::FClassProperty>(held.structure, item_class_name);
+        if (!iteration.OriginalFunctionCallPrevented() || now >= host_drop_scope.expires ||
+            (host_drop_request && now < host_drop_request->expires) || host_drop_sequence >= max_drop_sequence ||
+            !dead || dead->GetPropertyValueInContainer(scope.pawn.Get()) || !held_class ||
+            object_value(held_class, held.value)) return;
+        // The cooked GameInstance uses its category sort for every SortType.
+        host_drop_request = HostDropRequest{{}, 0, ++host_drop_sequence, false, now + request_lease,
+                                            manager, screen, panel, "sort"};
     }
 
     void intercept_backpack_action(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
@@ -1243,6 +1283,11 @@ namespace
         if (name == entries->drop_item || name == entries->action_drop)
         {
             intercept_backpack_action(iteration, context, function, name == entries->action_drop);
+            return;
+        }
+        if (name == entries->sort_items)
+        {
+            intercept_backpack_sort(iteration, context, function);
             return;
         }
         const bool manager = name == entries->action_use || name == entries->quick_move ||
@@ -1582,24 +1627,29 @@ namespace
             return probe_result(lua, false, "scope_changed");
 
         const auto completed = *host_drop_request;
-        host_drop_request.reset();
+        // FullRefresh can invoke automatic sorting. Keep the settled request
+        // occupied until the stock panel has finished rebuilding its cards.
+        const auto finish = [&](bool ok, std::string_view status) {
+            host_drop_request.reset();
+            return probe_result(lua, ok, status);
+        };
         auto* manager = completed.manager.Get();
         auto* panel = completed.panel.Get();
         if (!exact_drop_screen(manager, completed.screen.Get(), panel))
-            return probe_result(lua, true, "screen_closed");
+            return finish(true, "screen_closed");
         if (completed.entry == "context_menu" || completed.entry == "equipped_context_menu" ||
             completed.entry.starts_with("use-"))
         {
             const Unreal::FName close_name{STR("CloseContextMenu")};
             auto* close = stock_no_args(manager, close_name);
-            if (!close) return probe_result(lua, false, "refresh_unavailable");
+            if (!close) return finish(false, "refresh_unavailable");
             manager->ProcessEvent(close, nullptr);
             if (!exact_drop_screen(manager, completed.screen.Get(), panel))
-                return probe_result(lua, true, "screen_closed");
+                return finish(true, "screen_closed");
         }
         const Unreal::FName refresh_name{STR("FullRefresh")};
         auto* refresh = stock_no_args(panel, refresh_name);
-        if (!refresh) return probe_result(lua, false, "refresh_unavailable");
+        if (!refresh) return finish(false, "refresh_unavailable");
         panel->ProcessEvent(refresh, nullptr);
         // A co-op drop changes both the source panel and the stock floor list.
         // Rebuild the floor cards from the live actors instead of keeping their old entries.
@@ -1608,10 +1658,10 @@ namespace
         {
             auto* floor = object_field(screen, STR("FloorPanel"));
             auto* refresh_floor = stock_no_args(floor, refresh_name);
-            if (!refresh_floor) return probe_result(lua, false, "refresh_unavailable");
+            if (!refresh_floor) return finish(false, "refresh_unavailable");
             floor->ProcessEvent(refresh_floor, nullptr);
         }
-        return probe_result(lua, true, "refreshed");
+        return finish(true, "refreshed");
     }
 
     class RestoreItem

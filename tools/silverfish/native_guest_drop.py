@@ -21,6 +21,8 @@ ACTIONS = (DROP, RECLAIM)
 RESULT = "native_guest_stack_drop"
 STOCK_DROP_FIXTURE = "native-inventory-stock-drop-fixture"
 STOCK_USE_FIXTURE = "native-inventory-stock-use-fixture"
+STOCK_SORT_FIXTURE = "native-inventory-stock-sort-fixture"
+STOCK_FIXTURES = {STOCK_DROP_FIXTURE: "drop", STOCK_USE_FIXTURE: "use", STOCK_SORT_FIXTURE: "sort"}
 _SELECTION = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,2})\Z")
 
 
@@ -76,20 +78,23 @@ def view_identity(client, sequence: int, area: str, pawn: str) -> tuple:
     return client.host_session, client.zone_epoch, client.stack_drop_projection.admission, sequence, area, pawn
 
 
-async def stock_menu_fixture(client, guid, operation: str, *, use: bool = False) -> dict:
+async def stock_menu_fixture(client, guid, operation: str, mode: str) -> dict:
     game = client.last_game
     area, epoch = game.get("map"), client.zone_epoch
     pawn = game.get("pawns", {}).get("local", {}).get("name")
+    sorting = mode == "sort"
+    capability = native_inventory.SORT_CAPABILITY if sorting else record.CAPABILITY
+    selection = "-" if sorting else guid
+    valid_selection = guid is None if sorting else valid_guid(guid)
     if (game.get("state") != "connected" or not game.get("save_scope") or not pawn
             or not client.transport.game_access or client.needs_travel or client.server_transitioning
-            or client.gameplay.get(record.CAPABILITY) != 1 or not valid_guid(guid)
+            or client.gameplay.get(capability) != 1 or not valid_selection
             or not record.supported_map(area) or not record.valid_id(epoch)):
-        raise ValueError("Select an item in a connected guest's stock backpack")
-    mode = "stock-use" if use else "stock-drop"
-    snapshot = await client.bridge.command("native-inventory-view-fixture", mode, epoch, guid, timeout=5)
-    match = re.fullmatch(r"stock guest (context_menu|use-[a-z-]+) ([0-9A-F]{32}) ([1-9][0-9]{0,2}) ([1-9][0-9]{0,15})",
+        raise ValueError("The selected stock backpack action is unavailable")
+    snapshot = await client.bridge.command("native-inventory-view-fixture", f"stock-{mode}", epoch, selection, timeout=5)
+    match = re.fullmatch(r"stock guest (sort|context_menu|use-[a-z-]+) (-|[0-9A-F]{32}) (0|[1-9][0-9]{0,2}) ([1-9][0-9]{0,15})",
                          snapshot.get("ack", {}).get("message", ""))
-    if (not match or match[2] != guid or int(match[3]) > record.MAX_QUANTITY
+    if (not match or match[2] != selection or int(match[3]) > record.MAX_QUANTITY
             or (snapshot.get("state"), snapshot.get("map"), snapshot.get("pawns", {}).get("local", {}).get("name"))
             != ("connected", area, pawn) or client.zone_epoch != epoch):
         raise RuntimeError("The stock screen did not verify the selected backpack action")
@@ -99,7 +104,16 @@ async def stock_menu_fixture(client, guid, operation: str, *, use: bool = False)
     accepted = False
     finish = ("native-inventory-stock-drop-finish", epoch, sequence)
     try:
-        if use:
+        if sorting:
+            if entry != "sort" or quantity != 0:
+                raise ValueError("The native action did not request a backpack sort")
+            key = native_inventory.SORT_KEY
+            receipt = (await client.gameplay_action(native_inventory.SORT, operation, None)).get(key)
+            if (not isinstance(receipt, dict) or receipt.get("owner") != client.invite["character_id"]
+                    or receipt.get("map") != area or receipt.get("state") not in ("sorted", "already_sorted")
+                    or type(count := receipt.get("count")) is not int or not 0 <= count <= 4096):
+                raise RuntimeError("The host did not verify sorting the guest's stock backpack")
+        elif mode == "use":
             action = f"native-guest-{entry.removeprefix('use-')}"
             meal = native_guest_consumable.MEALS.get(action)
             if (not entry.startswith("use-") or quantity != 1 or action not in native_guest_consumable.RESULT
@@ -115,7 +129,7 @@ async def stock_menu_fixture(client, guid, operation: str, *, use: bool = False)
                     or meal is not None and receipt.get("class_path") != meal.class_path):
                 raise RuntimeError("The host did not verify consumption of the selected stock item")
         else:
-            if entry != "context_menu":
+            if entry != "context_menu" or quantity < 1:
                 raise ValueError("The native action did not select a backpack drop")
             key, remaining = RESULT, 0
             receipt = (await client.gameplay_action(DROP, operation, f"{guid}|{quantity}")).get(key)
@@ -133,7 +147,7 @@ async def stock_menu_fixture(client, guid, operation: str, *, use: bool = False)
         if not accepted:
             with suppress(OSError, RuntimeError, ValueError):
                 await client.bridge.command(*finish, "refused", timeout=3)
-    client.last_game = await client.bridge.command(*finish, str(remaining), timeout=5)
+    client.last_game = await client.bridge.command(*finish, "sorted" if sorting else str(remaining), timeout=5)
     return {key: receipt, "stock_inventory_proof": client.last_game.get("ack", {}).get("message")}
 
 

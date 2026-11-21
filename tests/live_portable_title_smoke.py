@@ -17,7 +17,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
-from tools.silverfish import embedded_startup, native_guest_consumable, native_guest_drop, native_world_loot, runtime
+from tools.silverfish import embedded_startup, native_guest_consumable, native_guest_drop, native_inventory, native_world_loot, runtime
 from tools.silverfish.control import NAME, submit
 from tools.silverfish.win_job import GameProcess
 from live_installed_title_smoke import boot_states, native_mailbox
@@ -150,12 +150,29 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
     preview = await submit(guest_run, "native-inventory-view-fixture", target="stock")
     assert preview["ok"] and re.fullmatch(r"verified stock guest inventory with \d+ backpack cards",
                                           preview.get("stock_inventory_proof", "")), preview
-    stock_drop_proof, stock_use_proofs = None, {}
+    stock_drop_proof, stock_sort_proof, stock_use_proofs = None, None, {}
     if stock_drop:
+        before = await submit(guest_run, "native-inventory-list")
+        host_run = host.campaign / "run"
+        host_before = await submit(host_run, "native-inventory-list")
+        assert before["ok"] and host_before["ok"], (before, host_before)
+        sorted_pack = await submit(guest_run, native_guest_drop.STOCK_SORT_FIXTURE)
+        assert sorted_pack["ok"], sorted_pack
+        stock_sort_proof = sorted_pack[native_inventory.SORT_KEY]
+        assert re.fullmatch(r"verified open stock backpack sort with \d+ cards",
+                            sorted_pack.get("stock_inventory_proof", "")), sorted_pack
         contents = await submit(guest_run, "native-inventory-list")
         assert contents["ok"], contents
-        selected = next((row for row in contents["native_inventory"]["items"]
-                         if native_guest_drop.droppable(row, generic=True)), None)
+        original_rows, sorted_rows = (part["native_inventory"]["items"] for part in (before, contents))
+        assert stock_sort_proof["count"] == sum(row["source"] == "backpack" for row in sorted_rows)
+        original_payload = {row["guid"]: {key: value for key, value in row.items() if key != "index"} for row in original_rows}
+        sorted_payload = {row["guid"]: {key: value for key, value in row.items() if key != "index"} for row in sorted_rows}
+        assert sorted_payload == original_payload
+        assert (original_rows != sorted_rows) == (stock_sort_proof["state"] == "sorted")
+        host_after = await submit(host_run, "native-inventory-list")
+        assert host_after["ok"] and host_before["native_inventory"] == host_after["native_inventory"], host_after
+        selected = next((row for row in sorted_rows if row["class_path"] not in native_guest_consumable.COMMANDS
+                         and native_guest_drop.droppable(row, generic=True)), None)
         assert selected is not None, contents
         dropped = await submit(guest_run, native_guest_drop.STOCK_DROP_FIXTURE, target=selected["guid"])
         assert dropped["ok"], dropped
@@ -199,7 +216,8 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
     return {"placed_enemy_loot_bridge": game["native_enemy_loot_cqc_version"],
             "guest_regeneration_and_sickness_bound": True, "guest_shop_heartbeat": True,
             "guest_inventory_action_verified": True, "guest_inventory_projection_verified": True,
-            **({"guest_stock_menu_drop": stock_drop_proof, "guest_stock_menu_use": stock_use_proofs}
+            **({"guest_stock_menu_drop": stock_drop_proof, "guest_stock_menu_use": stock_use_proofs,
+                "guest_stock_menu_sort": stock_sort_proof}
                if stock_drop_proof else {})}
 
 
@@ -324,7 +342,7 @@ if __name__ == "__main__":
     parser.add_argument("--first-game", type=Path, required=True, help="Clean replica with the release ZIP applied and no mods.txt")
     parser.add_argument("--second-game", type=Path, required=True, help="Separate replica with the same release ZIP applied")
     parser.add_argument("--vanilla-saved", type=Path, required=True)
-    parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Drop and Use actions")
+    parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Sort, Drop, and Use actions")
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()

@@ -429,12 +429,19 @@ local function stock_card_guid(card)
     return stock_item_guid(exact(card, card_path) and card.Item)
 end
 
-local function stock_cards(screen, save, guid, remaining)
+local function stock_cards(screen, save, guid, remaining, ordered)
     local expected, displayed = 0, 0
     local saved_count, card_count = 0, 0
+    local order = ordered and {} or nil
     for index = 1, save.PlayerBackpack:GetArrayNum() do
         local row = save.PlayerBackpack[index]
-        if valid(row[item_class]) then expected = expected + 1 end
+        if valid(row[item_class]) then
+            expected = expected + 1
+            if order then
+                order[expected] = stock_item_guid(row)
+                if not order[expected] then return end
+            end
+        end
         if guid and stock_item_guid(row) == guid then
             if saved_count > 0 or not valid(row[item_class]) then return end
             saved_count = math.max(1, row[item_ammo])
@@ -443,15 +450,35 @@ local function stock_cards(screen, save, guid, remaining)
     local cards = screen.BackpackPanel.Cards
     for index = 1, cards:GetArrayNum() do
         local card = widget_at(cards, index)
-        if valid(card) and valid(card.Item[item_class]) then displayed = displayed + 1 end
+        if valid(card) and valid(card.Item[item_class]) then
+            displayed = displayed + 1
+            if order and stock_card_guid(card) ~= order[displayed] then return end
+        end
         if guid and stock_card_guid(card) == guid then
             if card_count > 0 or not valid(card.Item[item_class]) then return end
             card_count = math.max(1, card.Item[item_ammo])
         end
     end
     if displayed == expected and (not guid or (saved_count == remaining and card_count == remaining)) then
-        return displayed
+        return displayed, order and table.concat(order, "|") or nil
     end
+end
+
+local function stock_sort_fixture(screen, current, save, epoch, pawn)
+    local before, order = stock_cards(screen, save, nil, nil, true)
+    if not before then error("The stock backpack order could not be verified", 0) end
+    local owner = current.world.OwningGameInstance
+    owner:SortItems(5)
+    owner:SortItems(5)
+    local sequence, guid, count, entry = SilverfishTakeNativeGuestDropRequest(pawn, epoch)
+    local after, after_order = stock_cards(screen, save, nil, nil, true)
+    if math.type(sequence) ~= "integer" or sequence < 1 or guid ~= string.rep("0", 32) or count ~= 0
+        or entry ~= "sort" or after ~= before or after_order ~= order
+        or SilverfishTakeNativeGuestDropRequest(pawn, epoch) ~= nil then
+        error("The stock guest sort did not produce one intent without reordering the local backpack", 0)
+    end
+    stock_drop = {context = current, screen = screen, save = save, epoch = epoch, sequence = sequence, sort = true}
+    return ("stock guest sort - 0 %d"):format(sequence)
 end
 
 local function stock_action_fixture(screen, current, save, epoch, item, use)
@@ -461,6 +488,11 @@ local function stock_action_fixture(screen, current, save, epoch, item, use)
         error("The native stock drop hooks are unavailable", 0)
     end
     local manager, panel = screen.ItemManager, screen.BackpackPanel
+    local pawn = current.pawn:GetAddress()
+    if not SilverfishSetNativeGuestDropScope(pawn, epoch, save:GetAddress()) then
+        error("The stock backpack action could not bind the exact guest", 0)
+    end
+    if item == "-" then return stock_sort_fixture(screen, current, save, epoch, pawn) end
     local card
     for index = 1, panel.Cards:GetArrayNum() do
         local candidate = widget_at(panel.Cards, index)
@@ -469,9 +501,7 @@ local function stock_action_fixture(screen, current, save, epoch, item, use)
             card = candidate
         end
     end
-    local pawn = current.pawn:GetAddress()
-    if not valid(card) or not same(card.ItemManager, manager) or not same(card.InventoryWidget, panel)
-        or not SilverfishSetNativeGuestDropScope(pawn, epoch, save:GetAddress()) then
+    if not valid(card) or not same(card.ItemManager, manager) or not same(card.InventoryWidget, panel) then
         error("The stock backpack drop could not bind its exact item and guest", 0)
     end
     if use then
@@ -548,9 +578,10 @@ end
 local function finish_stock_drop(fields, current, state, phase)
     local pending = stock_drop
     local remaining = integer(fields[5], 2147483647)
+    local sorted = pending and pending.sort and fields[5] == "sorted"
     if #fields ~= 5 or not pending or not same_context(current, pending.context)
         or fields[3] ~= pending.epoch or integer(fields[4], 9007199254740991) ~= pending.sequence
-        or (not remaining and fields[5] ~= "refused") then
+        or (not sorted and (not remaining or pending.sort) and fields[5] ~= "refused") then
         error("The stock inventory settlement belongs to another request", 0)
     end
     stock_drop = nil
@@ -562,8 +593,14 @@ local function finish_stock_drop(fields, current, state, phase)
         end
         local finished, status = SilverfishFinishNativeGuestDropRequest(pawn, pending.epoch, pending.sequence)
         local displayed = finished and status == "refreshed" and stock_cards(pending.screen, save,
-            remaining and pending.guid or nil, remaining)
+            remaining and pending.guid or nil, remaining, sorted)
         if not displayed then error("The open stock backpack did not reflect the settled action", 0) end
+        if sorted then
+            if SilverfishTakeNativeGuestDropRequest(pawn, pending.epoch) ~= nil then
+                error("Refreshing the stock backpack queued another sort", 0)
+            end
+            return ("verified open stock backpack sort with %d cards"):format(displayed)
+        end
         return ("verified open stock backpack refresh with %d cards"):format(displayed)
     end)
     local stack = current.controller.MenuStack
@@ -608,11 +645,16 @@ function inventory_view.command(fields, state, phase)
     if operation == "native-inventory-view-fixture" and (#fields == 2 or #fields == 3 and fields[3] == "stock") then
         return fixture(current, state, phase, fields[3] == "stock")
     end
-    if operation == "native-inventory-view-fixture" and #fields == 5 and (fields[3] == "stock-drop" or fields[3] == "stock-use")
+    if operation == "native-inventory-view-fixture" and #fields == 5
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
-        and #fields[4] == 32 and fields[4]:match("^[0-9a-f]+$") and #fields[5] == 32 and fields[5]:match("^[0-9A-F]+$")
-        and fields[5]:find("[^0]") then
-        return fixture(current, state, phase, true, fields[4], fields[5], fields[3] == "stock-use")
+        and #fields[4] == 32 and fields[4]:match("^[0-9a-f]+$") then
+        if fields[3] == "stock-sort" and fields[5] == "-" then
+            return fixture(current, state, phase, true, fields[4], fields[5])
+        end
+        if (fields[3] == "stock-drop" or fields[3] == "stock-use")
+            and #fields[5] == 32 and fields[5]:match("^[0-9A-F]+$") and fields[5]:find("[^0]") then
+            return fixture(current, state, phase, true, fields[4], fields[5], fields[3] == "stock-use")
+        end
     end
     local sequence = integer(fields[3], 9007199254740991)
     if not observation or not same_context(current, observation.context)
