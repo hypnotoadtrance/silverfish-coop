@@ -31,7 +31,8 @@ class ResidentDropTests(unittest.TestCase):
 
         self.ue4ss = self.root / "UE4SS"
         pins = install_stock.UE4SS_OFFICIAL.copy()
-        for relative, contents in ((runtime.CPP_RUNTIME_DLL, b"loader"), (install_stock.PROXY, b"proxy")):
+        for relative, contents in ((runtime.CPP_RUNTIME_DLL, b"loader"), (install_stock.PROXY, b"proxy"),
+                                   (install_stock.SETTINGS, b"settings")):
             self.write(self.ue4ss / relative, contents)
             pins[relative] = sha256(contents).hexdigest()
         self.enterContext(patch.object(install_stock, "UE4SS_OFFICIAL", pins))
@@ -94,7 +95,7 @@ class ResidentDropTests(unittest.TestCase):
             self.assertEqual(stage["lua_files"]["main.lua"], sha256(b"return true\n").hexdigest())
             self.assertEqual(stage["cpp_death_lab"]["addon"], sha256(self.gameplay.read_bytes()).hexdigest())
             descriptor = json.loads(archive.read((embedded / "resident-portable.json").as_posix()))
-            self.assertEqual(set(descriptor), {"schema", "shipping_sha256", "features"})
+            self.assertEqual(set(descriptor), {"schema", "shipping_sha256", "features", "isolated_features"})
             self.assertEqual(descriptor["shipping_sha256"], result["shipping_sha256"])
             features = descriptor["features"]
             self.assertEqual(features["SILVERFISH_COOP_UNIFIED_TITLE"], "1")
@@ -102,6 +103,9 @@ class ResidentDropTests(unittest.TestCase):
             self.assertNotIn("SILVERFISH_COOP_BRIDGE", features)
             self.assertNotIn("SILVERFISH_COOP_HEADLESS", features)
             self.assertNotIn("SILVERFISH_COOP_EMBEDDED_STARTUP", features)
+            self.assertEqual(descriptor["isolated_features"]["SILVERFISH_COOP_HEADLESS"], "1")
+            self.assertEqual(descriptor["isolated_features"]["SILVERFISH_COOP_TITLE_FIXTURES"], "1")
+            self.assertFalse(features.keys() & descriptor["isolated_features"].keys())
 
     def test_first_time_variant_adds_only_approved_loader_files(self):
         update = self.assemble("update.zip")
@@ -112,6 +116,7 @@ class ResidentDropTests(unittest.TestCase):
             self.assertEqual(added, {
                 (binary / runtime.CPP_RUNTIME_DLL).as_posix(),
                 (binary / install_stock.PROXY).as_posix(),
+                (binary / install_stock.SETTINGS).as_posix(),
                 (binary / "ue4ss/LICENSE").as_posix(),
                 (binary / "ue4ss" / install_stock.SIGNATURE).as_posix(),
             })

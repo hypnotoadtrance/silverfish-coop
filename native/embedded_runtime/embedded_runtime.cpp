@@ -329,12 +329,13 @@ namespace
         int schema{};
         std::string shipping_sha256;
         std::map<std::string, std::string> features;
+        std::map<std::string, std::string> isolated_features;
 
         struct glaze
         {
             static constexpr auto value = glz::object(
                 "schema", &PortableBoot::schema, "shipping_sha256", &PortableBoot::shipping_sha256,
-                "features", &PortableBoot::features);
+                "features", &PortableBoot::features, "isolated_features", &PortableBoot::isolated_features);
         };
     };
 
@@ -426,10 +427,14 @@ namespace
             const auto handle = exact_path(portable, false) ? open_pinned(portable) : Handle(nullptr);
             const auto bytes = handle ? read(handle.get(), 8192) : std::nullopt;
             PortableBoot defaults;
-            if (!bytes || glz::read_json(defaults, *bytes) || defaults.schema != 1 ||
-                defaults.features.contains("SILVERFISH_COOP_HEADLESS") ||
-                defaults.features.contains("SILVERFISH_COOP_TITLE_FIXTURES") ||
-                defaults.features.contains("SILVERFISH_COOP_PAUSE_FIXTURES")) return std::nullopt;
+            if (!bytes || glz::read_json(defaults, *bytes) || defaults.schema != 1) return std::nullopt;
+            const auto fixture = [](const std::string& name) {
+                return name == "SILVERFISH_COOP_HEADLESS" || name.ends_with("_FIXTURES");
+            };
+            for (const auto& [name, value] : defaults.features)
+                if (fixture(name)) return std::nullopt;
+            for (const auto& [name, value] : defaults.isolated_features)
+                if (!fixture(name) || value != "1") return std::nullopt;
             if (has_descriptor && config.shipping_sha256 != defaults.shipping_sha256) return std::nullopt;
             if (!has_descriptor)
             {
@@ -445,12 +450,7 @@ namespace
                 config.port = 7777;
             }
             config.features = std::move(defaults.features);
-            if (config.isolated)
-            {
-                config.features["SILVERFISH_COOP_HEADLESS"] = "1";
-                config.features["SILVERFISH_COOP_TITLE_FIXTURES"] = "1";
-                config.features["SILVERFISH_COOP_PAUSE_FIXTURES"] = "1";
-            }
+            if (config.isolated) config.features.merge(defaults.isolated_features);
         }
         return config.schema == 1 ? std::optional(std::move(config)) : std::nullopt;
     }

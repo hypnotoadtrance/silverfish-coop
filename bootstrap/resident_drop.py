@@ -63,7 +63,7 @@ def _shipping_hash(shipping: Path) -> str:
     return digest
 
 
-def _features(work: Path, stage: dict, payload: dict[Path, bytes], loader: bytes) -> dict[str, str]:
+def _features(work: Path, stage: dict, payload: dict[Path, bytes], loader: bytes) -> tuple[dict[str, str], dict[str, str]]:
     root = work / "stage"
     inputs = {
         _STAGE: _json(stage),
@@ -77,14 +77,22 @@ def _features(work: Path, stage: dict, payload: dict[Path, bytes], loader: bytes
         path.write_bytes(data)
     if not runtime.qualified_authored_routes(work):
         raise ValueError("The packaged native gameplay files do not qualify for resident co-op")
-    environment = runtime.game_environment(
-        work, headless=False, embedded_engine=True, embedded_startup="1" * 32,
-        resident_title=True, resident_direct_join=True, unified_title=True, base_env={},
-        **service.unified_title_options(work),
-    )
-    return {key: value for key, value in environment.items()
-            if key.startswith("SILVERFISH_COOP_") and key not in
-            {"SILVERFISH_COOP_EMBEDDED_STARTUP", "SILVERFISH_COOP_BRIDGE"}}
+    options = service.unified_title_options(work)
+
+    def environment(headless: bool) -> dict[str, str]:
+        configured = runtime.game_environment(
+            work, headless=headless, embedded_engine=True, embedded_startup="1" * 32,
+            resident_title=True, resident_direct_join=True, unified_title=True, base_env={},
+            title_fixture=headless, pause_fixture=headless, **options,
+        )
+        return {key: value for key, value in configured.items()
+                if key.startswith("SILVERFISH_COOP_") and key not in
+                {"SILVERFISH_COOP_EMBEDDED_STARTUP", "SILVERFISH_COOP_BRIDGE"}}
+
+    normal, headless = environment(False), environment(True)
+    if any(headless.get(key) != value for key, value in normal.items()):
+        raise ValueError("Isolated testing must keep the release gameplay features")
+    return normal, {key: value for key, value in headless.items() if key not in normal}
 
 
 def assemble(output: Path, *, version: str, revision: str, shipping: Path, cpp_addon: Path,
@@ -138,9 +146,11 @@ def assemble(output: Path, *, version: str, revision: str, shipping: Path, cpp_a
         payload[_MODS / module / "enabled.txt"] = b""
     if include_loader:
         proxy, signature, license_name = install_stock.PROXY, install_stock.SIGNATURE, Path("ue4ss/LICENSE")
+        settings = install_stock.SETTINGS
         payload.update({
             _BINARIES / runtime.CPP_RUNTIME_DLL: loader,
             _BINARIES / proxy: install_stock._pinned(ue4ss / proxy, install_stock.UE4SS_OFFICIAL[proxy]),
+            _BINARIES / settings: install_stock._pinned(ue4ss / settings, install_stock.UE4SS_OFFICIAL[settings]),
             _BINARIES / license_name: release_bundle._read(ue4ss / license_name, 32 * 1024),
             _BINARIES / "ue4ss" / signature: install_stock._pinned(absolute(signatures) / signature.name,
                                                                   install_stock.SIGNATURE_SHA256),
@@ -148,8 +158,9 @@ def assemble(output: Path, *, version: str, revision: str, shipping: Path, cpp_a
 
     with TemporaryDirectory(prefix=".resident-drop-", dir=output.parent) as temporary:
         scratch = Path(temporary)
-        features = _features(scratch, stage, payload, loader)
-        payload[_EMBEDDED / _PORTABLE] = _json({"schema": 1, "shipping_sha256": shipping_sha, "features": features})
+        features, isolated = _features(scratch, stage, payload, loader)
+        payload[_EMBEDDED / _PORTABLE] = _json({"schema": 1, "shipping_sha256": shipping_sha,
+                                                "features": features, "isolated_features": isolated})
         archive = scratch / "release.zip"
         resident_release._archive(archive, {path.as_posix(): data for path, data in payload.items()})
         with archive.open("rb") as stream:
