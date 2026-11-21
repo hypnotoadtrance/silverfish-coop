@@ -1,6 +1,7 @@
 #include "shared_loot.hpp"
 #include "authored_loot_registry.hpp"
 #include "loot_crate_input.hpp"
+#include "loot_escrow.hpp"
 
 #include <algorithm>
 #include <array>
@@ -57,6 +58,8 @@ namespace
     constexpr auto decide_path = STR("/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C:DecideObject");
     constexpr auto table_path = STR("/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C:RollTable");
     constexpr auto passive_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:FindPassiveEffect");
+    constexpr auto items_library = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Items.Default__FL_Items_C");
+    constexpr auto find_key_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Items.FL_Items_C:FindItem_InBackPack");
     constexpr auto box_location_path = STR("/Script/Engine.SceneComponent:K2_GetComponentLocation");
     constexpr auto box_collision_path = STR("/Script/Engine.PrimitiveComponent:GetCollisionEnabled");
     constexpr auto character_type_path =
@@ -354,6 +357,13 @@ namespace
         Unreal::UFunction* karma{};
         Unreal::UFunction* spawn{};
         Unreal::UFunction* passive{};
+        Unreal::UFunction* find_key{};
+        Unreal::UObject* key_library{};
+        Unreal::UClass* key{};
+        Unreal::FClassProperty* wanted_key{};
+        Unreal::FObjectProperty* key_context{};
+        Unreal::FObjectProperty* key_world{};
+        Unreal::FBoolProperty* key_found{};
         Unreal::FObjectProperty* hit_component{};
         Unreal::FObjectProperty* opener{};
         Unreal::FObjectProperty* item{};
@@ -412,6 +422,20 @@ namespace
                schema.item && schema.item->GetPropertyClass().Get() == schema.actor_type &&
                schema.guaranteed && (!context.profile->stock_class->weapon_first || schema.weapon_type) &&
                schema.effect && schema.count && schema.active && schema.instances;
+    }
+
+    bool bind_key_lookup(Unreal::UClass* key, Schema& schema)
+    {
+        schema.key = key;
+        schema.key_library = find<Unreal::UObject>(items_library);
+        schema.find_key = find<Unreal::UFunction>(find_key_path);
+        if (!schema.key_library || !blueprint(schema.find_key, schema.key_library->GetClassPrivate(), 7)) return false;
+        schema.wanted_key = argument<Unreal::FClassProperty>(schema.find_key, STR("Item"), false, 0);
+        schema.key_context = argument<Unreal::FObjectProperty>(schema.find_key, STR("WorldContextObject"), false, sizeof(void*));
+        schema.key_world = argument<Unreal::FObjectProperty>(schema.find_key, STR("__WorldContext"), false, 2 * sizeof(void*));
+        schema.key_found = argument<Unreal::FBoolProperty>(schema.find_key, STR("ItemFound"), true, 3 * sizeof(void*));
+        return schema.wanted_key && schema.wanted_key->GetMetaClass().Get() == schema.item_type &&
+               schema.key_context && schema.key_world && schema.key_found;
     }
 
     // Its first UE FRandomStream fraction is exactly zero. Check this on a
@@ -612,6 +636,7 @@ namespace
         std::array<SpawnObservation, max_container_slots> spawns{};
         std::array<int, max_container_slots> rolls{};
         int accounts{};
+        int key_checks{};
         std::string_view problem{};
         SeedFixture* fixture{};
         std::array<int, 2> table_draws{};
@@ -859,6 +884,29 @@ namespace
         {
             capture_item(*opening, iteration, object, frame);
         }
+        else if (opening->schema.find_key && frame.Node() == opening->schema.find_key)
+        {
+            auto& scope = *opening;
+            const auto& schema = scope.schema;
+            auto* caller = frame.PreviousFrame();
+            const auto* locals = frame.Locals();
+            auto* found = find_output(frame, schema.key_found);
+            if (!caller || caller->Node() != schema.script || caller->Object() != scope.context.crate ||
+                object != schema.key_library || frame.Object() != object || !locals || !found ||
+                schema.wanted_key->GetObjectPropertyValue(schema.wanted_key->ContainerPtrToValuePtr<void>(locals)) != schema.key ||
+                schema.key_context->GetObjectPropertyValue(schema.key_context->ContainerPtrToValuePtr<void>(locals)) != scope.context.crate ||
+                schema.key_world->GetObjectPropertyValue(schema.key_world->ContainerPtrToValuePtr<void>(locals)) != scope.context.crate ||
+                ++scope.key_checks != 1 || iteration.OriginalFunctionCallPrevented())
+            {
+                scope.problem = "stock_container_key_lookup_unverified";
+                return;
+            }
+            // This stock branch only consumes ItemFound. Resolve it against
+            // the opener's verified backpack without rebinding the world save.
+            iteration.PreventOriginalFunctionCall();
+            if (iteration.OriginalFunctionCallPrevented()) schema.key_found->SetPropertyValue(found, true);
+            else scope.problem = "stock_container_key_lookup_unverified";
+        }
     }
 
     int result(const Lua& lua, bool ok, std::string_view detail, bool looted = false,
@@ -929,18 +977,24 @@ namespace
             return result(lua, false, "stock_loot_fixture_seed_unavailable");
         if (const auto failure = qualify(addresses[0], addresses[1], addresses[2], addresses[3], addresses[4], context, pried);
             !failure.empty()) return result(lua, false, failure);
-        if (context.profile->stock_class->keyless_lock && read_bool(context.crate, STR("Locked"), true))
+        Unreal::UClass* key{};
+        if (context.profile->stock_class->pry_entry && read_bool(context.crate, STR("Locked"), true))
         {
-            // These vehicles carry no authored key. The ordinary stock locked
-            // interaction only jiggles the trunk. Skip the global backpack search.
-            const bool played = silverfish::shared_loot::jiggle_vehicle_lock(context.crate);
-            return result(lua, false, played ? "stock_vehicle_locked" : "stock_vehicle_lock_unavailable");
+            auto* key_field = field<Unreal::FClassProperty>(context.crate, STR("KeyItem"));
+            if (key_field) key = static_cast<Unreal::UClass*>(
+                key_field->GetObjectPropertyValue(key_field->ContainerPtrToValuePtr<void>(context.crate)));
+            if (!key || !silverfish::loot_escrow::backpack_has_class(context.save, key))
+            {
+                const bool played = silverfish::shared_loot::jiggle_container_lock(context.crate);
+                return result(lua, false, played ? "stock_vehicle_locked" : "stock_vehicle_lock_unavailable");
+            }
         }
 
         Schema schema;
         if (!bind_schema(context, schema)) return result(lua, false, "stock_loot_blueprint_schema_unavailable");
+        if (key && !bind_key_lookup(key, schema)) return result(lua, false, "stock_container_key_schema_unavailable");
         auto* opener = pried ? field<Unreal::FObjectProperty>(context.crate, STR("Player")) : nullptr;
-        if (pried && (!context.profile->stock_class->keyless_lock ||
+        if (pried && (!context.profile->stock_class->pry_entry ||
             !opener || opener->GetPropertyClass().Get() != context.pawn->GetClassPrivate() ||
             schema.script->GetParmsSize() != sizeof(std::int32_t) ||
             !argument<Unreal::FIntProperty>(schema.script, STR("EntryPoint"), false, 0) ||
@@ -964,7 +1018,7 @@ namespace
             {
                 // The delayed entry does not assign the opener the way Interact does.
                 opener->SetObjectPropertyValue(opener->ContainerPtrToValuePtr<void>(context.crate), context.pawn);
-                auto point = silverfish::authored_loot::vehicle_pry_entry;
+                auto point = context.profile->stock_class->pry_entry;
                 context.crate->ProcessEvent(schema.script, &point);
             }
             else context.crate->ProcessEvent(schema.open, &input);
@@ -981,6 +1035,7 @@ namespace
         if (scope.problem.empty())
         {
             if (!restored) scope.problem = "stock_loot_fixture_original_stream_unverified";
+            else if (key && scope.key_checks != 1) scope.problem = "stock_container_key_lookup_missing";
             else if (!looted) scope.problem = "stock_loot_open_not_marked_looted";
             else if (!context.guarantee_spawn && scope.accounts != 1)
                 scope.problem = "stock_loot_open_karma_query_unverified";
@@ -1296,14 +1351,23 @@ namespace silverfish::shared_loot
         if (!profile) return refuse("crate_settings_profile");
         if (!read_bool(crate, STR("GuaranteeSpawn"), profile->guarantee_spawn)) return refuse("crate_settings_guarantee");
         if (!read_bool(crate, STR("IgnoreKarma"), false)) return refuse("crate_settings_ignore_karma");
-        if (profile->stock_class->keyless_lock && (!field<Unreal::FBoolProperty>(crate, STR("Locked")) ||
-            !field<Unreal::FClassProperty>(crate, STR("KeyItem")) || object_field(crate, STR("KeyItem"))))
-            return refuse("stock_vehicle_keyless_lock_unqualified");
+        if (profile->stock_class->pry_entry)
+        {
+            auto* key_field = field<Unreal::FClassProperty>(crate, STR("KeyItem"));
+            if (!field<Unreal::FBoolProperty>(crate, STR("Locked")) || !key_field)
+                return refuse("stock_container_lock_schema_unqualified");
+            auto* key = static_cast<Unreal::UClass*>(key_field->GetObjectPropertyValue(key_field->ContainerPtrToValuePtr<void>(crate)));
+            auto* base = find<Unreal::UClass>(item_class);
+            if (profile->key_class_name ? !live(key) || !base || !key->IsChildOf(base) ||
+                key->GetName() != profile->key_class_name : key != nullptr)
+                return refuse("stock_container_key_unqualified");
+        }
         // Keep the previously live-qualified stock route on its existing guards.
         if (profile == &authored_loot::profiles.front()) return true;
         auto* defaults = crate->GetClassPrivate()->GetClassDefaultObject().Get();
         if (!defaults || defaults->GetClassPrivate() != crate->GetClassPrivate()) return refuse("crate_settings_defaults");
-        if (!read_bool(crate, STR("Ping_IfOpened"), profile->stock_class->stock_ping)) return refuse("crate_settings_ping");
+        if (!read_bool(crate, STR("Ping_IfOpened"), profile->stock_class->stock_ping || profile->extra_open_ping))
+            return refuse("crate_settings_ping");
         if (profile->stock_class != &authored_loot::small_crate)
         {
             auto* opened = field<Unreal::FMulticastInlineDelegateProperty>(crate, STR("On_Opened"));
@@ -1371,10 +1435,10 @@ namespace silverfish::shared_loot
         return true;
     }
 
-    bool jiggle_vehicle_lock(Unreal::UObject* crate)
+    bool jiggle_container_lock(Unreal::UObject* crate)
     {
         const auto* profile = authored_profile(crate);
-        if (!profile || !profile->stock_class->keyless_lock || !read_bool(crate, STR("Locked"), true) ||
+        if (!profile || !profile->stock_class->pry_entry || !read_bool(crate, STR("Locked"), true) ||
             !read_bool(crate, STR("Looted"), false)) return false;
         auto* jiggle = crate->GetFunctionByNameInChain(Unreal::FName{STR("Jiggle_Locked")});
         if (!blueprint(jiggle, crate->GetClassPrivate(), 0) || jiggle->GetParmsSize() != 0) return false;

@@ -255,7 +255,7 @@ end
 local function exhausted(crate, door, box, second, opened, locations, profile)
     local ignored_channel = profile.lid_ignores_channel
     if crate.Looted ~= true or not opened or not door or (box and box:GetCollisionEnabled() ~= 0)
-        or (profile.keyless_lock and crate.Locked ~= false)
+        or (profile.lockable and crate.Locked ~= false)
         or (ignored_channel and door:GetCollisionResponseToChannel(ignored_channel) ~= 0) then return false end
     return matches_pose(door, opened[1], locations[1]) and (not second or matches_pose(second, opened[2], locations[2]))
 end
@@ -270,8 +270,8 @@ local function project(current, angle)
     local ignored_channel = profile.lid_ignores_channel
     if exhausted(crate, door, box, second, opened, locations, profile) then return "stock crate exhausted projection verified" end
     local original_looted = crate.Looted
-    local original_locked = profile.keyless_lock and crate.Locked
-    if not door or type(original_looted) ~= "boolean" or (profile.keyless_lock and type(original_locked) ~= "boolean")
+    local original_locked = profile.lockable and crate.Locked
+    if not door or type(original_looted) ~= "boolean" or (profile.lockable and type(original_locked) ~= "boolean")
         or (not box and not original_looted) then
         error("native_loot_crate_exact_scene_unavailable", 0)
     end
@@ -302,19 +302,19 @@ local function project(current, angle)
         if box then box:SetCollisionEnabled(0) end
         if ignored_channel then door:SetCollisionResponseToChannel(ignored_channel, 0) end
         for index, component in ipairs(doors) do set_pose(component, opened[index], locations[index]) end
-        if profile.keyless_lock then crate.Locked = false end
+        if profile.lockable then crate.Locked = false end
         crate.Looted = true
         return exhausted(crate, door, box, second, opened, locations, profile)
     end)
     if not invoked or not verified then
         local restored, matches = pcall(function()
             crate.Looted = original_looted
-            if profile.keyless_lock then crate.Locked = original_locked end
+            if profile.lockable then crate.Locked = original_locked end
             for index, component in ipairs(doors) do set_pose(component, original[index], original_locations[index]) end
             if box then box:SetCollisionEnabled(collision) end
             if ignored_channel then door:SetCollisionResponseToChannel(ignored_channel, door_response) end
             if crate.Looted ~= original_looted or (box and box:GetCollisionEnabled() ~= collision)
-                or (profile.keyless_lock and crate.Locked ~= original_locked)
+                or (profile.lockable and crate.Locked ~= original_locked)
                 or (ignored_channel and door:GetCollisionResponseToChannel(ignored_channel) ~= door_response) then return false end
             for index, component in ipairs(doors) do
                 if not matches_pose(component, original[index], original_locations[index]) then return false end
@@ -433,7 +433,7 @@ end
 
 function input.pry_tool_input_fixture(state, phase, target, dispatch)
     local profile = loot.profile(state.map, target)
-    local current = headless and client_fixtures and phase == "connected" and profile and profile.keyless_lock
+    local current = headless and client_fixtures and phase == "connected" and profile and profile.lockable
         and input.update(state, phase, profile)
     local _, box
     if current and current.crate.Locked == true then _, box = scene(current) end
@@ -476,7 +476,7 @@ function input.command(fields, state, phase)
     if command == "native-loot-guest-blowtorch-use" or command == "native-loot-guest-crowbar-use" then
         local crowbar = command == "native-loot-guest-crowbar-use"
         local profile = loot.profile(state.map, fields[3])
-        local current = #fields == 5 and phase == "hosting" and profile and profile.keyless_lock
+        local current = #fields == 5 and phase == "hosting" and profile and profile.lockable
             and input.update(state, phase, profile)
         if not current then error(crowbar and "stock_crowbar_scope_unavailable" or "stock_blowtorch_scope_unavailable", 0) end
         tool_report = nil
@@ -486,7 +486,7 @@ function input.command(fields, state, phase)
     if command == "native-loot-vehicle-pry-fixture" then
         local profile = loot.profile(state.map, fields[3])
         if not headless or not host_fixtures or #fields ~= 3 or phase ~= "hosting"
-            or not profile or not profile.keyless_lock then error("native_loot_vehicle_pry_fixture_unavailable", 0) end
+            or not profile or not profile.lockable then error("native_loot_vehicle_pry_fixture_unavailable", 0) end
         local current = input.update(state, phase, profile)
         if not current or current.crate.Locked ~= true then error("native_loot_vehicle_pry_fixture_unavailable", 0) end
         local scope = loot.qualify(state, phase, current.name, profile.name)
@@ -503,7 +503,7 @@ function input.command(fields, state, phase)
         local locks = {}
         for index = 4, #fields, 2 do
             local profile, flag = loot.profile(state.map, fields[index]), fields[index + 1]
-            local current = profile and profile.keyless_lock and input.update(state, phase, profile)
+            local current = profile and profile.lockable and input.update(state, phase, profile)
             if not current or locks[current.crate] ~= nil or type(current.crate.Locked) ~= "boolean"
                 or (flag ~= "0" and flag ~= "1") then error("native_loot_vehicle_lock_scope_unavailable", 0) end
             locks[current.crate] = flag == "1"
@@ -552,7 +552,7 @@ function input.rows(state, phase, status_row)
             local status = spent and "exhausted" or "ready"
             local args = spent and angle and {angle} or {}
             rows[#rows + 1] = status_row("native-loot-crate-input", profile.map, profile.name, status, table.unpack(args))
-            if profile.keyless_lock and type(current.crate.Locked) == "boolean" then
+            if profile.lockable and type(current.crate.Locked) == "boolean" then
                 rows[#rows + 1] = status_row("native-loot-vehicle-lock", profile.map, profile.name, current.crate.Locked and 1 or 0)
             end
             if current.host and info.looted == false and info.box and (info.collision == 1 or info.collision == 3) then

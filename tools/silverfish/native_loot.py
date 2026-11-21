@@ -6,8 +6,8 @@ import time
 import uuid
 
 from . import native_host_save, party
-from .authored_loot import (CRATES, LEGACY_CRATE, loot_capacity, random_lid, valid_item_transform,
-                            valid_lid_angle, valid_loot_trait_calls, vehicle_lock)
+from .authored_loot import (CRATES, LEGACY_CRATE, lockable_container, loot_capacity, random_lid,
+                            valid_item_transform, valid_lid_angle, valid_loot_trait_calls)
 from .native_gold import valid_guid
 
 
@@ -51,7 +51,7 @@ def interaction(game: dict, last_sequence: int) -> tuple[int, str] | None:
             and type(sequence) is int and last_sequence < sequence < 2**53
             and (proof.get("map"), proof.get("pawn")) == (area, pawn)
             and (proof.get("entry") in ("stock", "fixture") or (proof.get("entry") == "pried"
-                 and game.get("state") == "hosting" and vehicle_lock(crate, area)))):
+                 and game.get("state") == "hosting" and lockable_container(crate, area)))):
         return sequence, crate
 
 
@@ -211,7 +211,7 @@ async def project_vehicle_locks(bridge, game, locks):
     observed = game.get(VEHICLE_LOCKS, {})
     if not isinstance(locks, dict) or game.get("state") != "connected":
         return game
-    missing = [(crate, value) for crate, value in locks.items() if crate in observed and vehicle_lock(crate, area)
+    missing = [(crate, value) for crate, value in locks.items() if crate in observed and lockable_container(crate, area)
                and type(value) is bool and value != observed[crate]]
     for offset in range(0, len(missing), 32):
         batch = missing[offset:offset + 32]
@@ -219,7 +219,7 @@ async def project_vehicle_locks(bridge, game, locks):
         game = await bridge.command("native-loot-vehicle-locks", area, *args, timeout=4)
         readback = game.get(VEHICLE_LOCKS, {})
         if (game.get("state"), game.get("map")) != ("connected", area) or any(readback.get(key) is not value for key, value in batch):
-            raise RuntimeError("The guest vehicle locks did not match the host")
+            raise RuntimeError("The guest container locks did not match the host")
     return game
 
 
@@ -233,7 +233,7 @@ async def use_vehicle_pry_tool(host, bridge, character, target, operation_id, ac
     game = host.last_game
     area, pawn = game.get("map"), _scope(host, character)
     if (not host.native_loot_input or not pawn or character == "host" or not epoch or epoch != host.zone_epoch
-            or not valid_guid(guid) or not vehicle_lock(crate, area) or not party.REQUEST_ID.fullmatch(operation_id)
+            or not valid_guid(guid) or not lockable_container(crate, area) or not party.REQUEST_ID.fullmatch(operation_id)
             or game.get("state") != "hosting" or host.stopping or host.transitioning or host.native_checkpoint_unsafe
             or host.party["wipe"] or character in host.party["pending_spawns"] or host.party["players"][character]["downed"]):
         raise party.RuleError(f"stock_{kind}_scope_unavailable")
@@ -259,7 +259,7 @@ async def use_vehicle_pry_tool(host, bridge, character, target, operation_id, ac
         proof = snapshot.get(result_key, {})
         if ((snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("crate"), proof.get("pawn"), proof.get("guid"))
                 != ("hosting", area, area, crate, pawn, guid) or snapshot.get(VEHICLE_LOCKS, {}).get(crate) is not False):
-            raise RuntimeError(f"The stock {kind} did not report the authenticated tool and unlocked vehicle")
+            raise RuntimeError(f"The stock {kind} did not report the authenticated tool and unlocked container")
 
         def ready(frame):
             row = frame.get("native_loot_guest_pries", {}).get(crate, {})
@@ -431,7 +431,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             crate, = matches
     if not isinstance(crate, str) or crate not in CRATES or CRATES[crate] != area:
         raise party.RuleError("native_loot_requires_exact_crate_and_operation")
-    if pried and (action != "open" or (character != "host" and tool_receipt is None) or fixture_nonempty or not vehicle_lock(crate, area)):
+    if pried and (action != "open" or (character != "host" and tool_receipt is None) or fixture_nonempty or not lockable_container(crate, area)):
         raise party.RuleError("native_loot_pry_receipt_unavailable")
     retired = host.party.get(RETIRED, {})
     if action == "open" and operation_id in retired:

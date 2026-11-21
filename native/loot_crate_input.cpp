@@ -298,7 +298,7 @@ namespace
             if (!stock_function(crate, method, 1, sizeof(std::int32_t)) || !entry ||
                 silverfish::shared_loot::permits_stock_script(crate, method)) return;
             const auto point = entry->GetPropertyValueInContainer(args);
-            if (profile->stock_class->keyless_lock && point == silverfish::authored_loot::vehicle_pry_entry)
+            if (profile->stock_class->pry_entry && point == profile->stock_class->pry_entry)
             {
                 // The stock pry delay ends in this independent roll entry.
                 // Capture it for the host before any stock items can spawn.
@@ -338,8 +338,8 @@ namespace
         active->observed = ++sequence;
         active->receipt = now + receipt_lifetime;
         active->pried = false;
-        if (!local.host && profile->stock_class->keyless_lock)
-            silverfish::shared_loot::jiggle_vehicle_lock(crate);
+        if (!local.host && profile->stock_class->pry_entry)
+            silverfish::shared_loot::jiggle_container_lock(crate);
     }
 
     int set_scope(const Lua& lua)
@@ -432,7 +432,7 @@ namespace
             auto* stock = object(instance, STR("SaveSlot_Ref"));
             const auto now = Clock::now();
             silverfish::shared_loot::EscrowOwner owner{};
-            if (world && profile && profile->stock_class->keyless_lock && scope.host && !scope.pried &&
+            if (world && profile && profile->stock_class->pry_entry && scope.host && !scope.pried &&
                 now < scope.expires && now >= scope.tool_deadline && same_scope(scope, crate, local_owner(world)) &&
                 boolean(crate, STR("Locked"), true) && boolean(crate, STR("Looted"), false) &&
                 silverfish::shared_loot::qualify_escrow_owner_in_world(world, pawn, save,

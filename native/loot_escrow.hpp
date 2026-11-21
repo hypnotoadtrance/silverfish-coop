@@ -4,7 +4,7 @@
 #include <string>
 #include <string_view>
 
-namespace RC::Unreal { class UObject; }
+namespace RC::Unreal { class UObject; class UClass; }
 
 namespace RC::LuaMadeSimple
 {
@@ -13,6 +13,7 @@ namespace RC::LuaMadeSimple
 
 namespace silverfish::loot_escrow
 {
+    bool backpack_has_class(RC::Unreal::UObject* save, RC::Unreal::UClass* item_class);
     bool stock_spade_guid(RC::Unreal::UObject* save, std::string& guid);
     bool sealed_package_guid(RC::Unreal::UObject* save, std::string& guid);
     bool capture_sealed_package(RC::Unreal::UObject* pawn, RC::Unreal::UObject* package, std::uintptr_t scratch,

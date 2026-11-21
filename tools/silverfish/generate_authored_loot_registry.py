@@ -10,7 +10,7 @@ from .authored_container_placements import CONTAINER_PLACEMENTS
 from .authored_loot import (CRATE_PROFILES, GUARANTEED_REPLENISHMENT, OFFICE_DESK_CHILD_SALTS,
                             OFFICE_DESK_PROFILE, SMALL_CABINET_CHILD_SALTS, SMALL_CABINET_PROFILE, full_name)
 from .authored_routes import MAPS as EXPANDED_MAPS
-from .travel import AUTHORED_MAPS
+from .travel import AUTHORED_MAPS, CISTERN
 
 
 QUALIFIED_MAPS = AUTHORED_MAPS | EXPANDED_MAPS
@@ -24,7 +24,7 @@ SurveyProfile = tuple[int, str | None] | tuple[int, str | None, int | None]
 FAMILY_CATALOG = "tools/silverfish/authored_container_placements.py"
 SOURCE_FIELDS = {"RootComponent": "DefaultSceneRoot", "Box": "Box",
                  "SM_Prop_Cabinet_Small_Door_01": "SM_Prop_Cabinet_Small_Door_01"}
-SAVE_FIELDS = {"SpawnSalt", "Loot_Override", "GuaranteeSpawn", "Replenish_Mode"}
+SAVE_FIELDS = {"SpawnSalt", "Loot_Override", "GuaranteeSpawn", "Replenish_Mode", "Ping_IfOpened"}
 BOX_GEOMETRY_FIELDS = {"Arrow", "BlueprintCreatedComponents", "DefaultSceneRoot", "SM_Prop_Cabinet_Small_02", "StreamSeed"}
 STOCK_ROLL = ("CallFunc_Array_Get_Item.SpawnLoot(Loot Table_Items,SpawnChance_Item,0.5,GuaranteeSpawn,"
               "False,True,False,False,False,CallFunc_SpawnLoot_Object)")
@@ -65,7 +65,8 @@ class ContainerFamily:
     weapon_first: bool = False
     random_lid: tuple[str, int, int] | None = None
     lid_ignores_channel: int | None = None
-    keyless_lock: bool = False
+    pry_entry: int = 0
+    keys: frozenset[str] = frozenset()
 
     def spawner_names(self):
         return self.named_spawners or ("Loot_Spawner", *(f"Loot_Spawner{i}" for i in range(1, self.slots)))
@@ -129,10 +130,16 @@ CONTAINER_FAMILIES = {
         rolls=("CallFunc_Array_Get_Item.SpawnLoot(Loot Table_Items,1,0,GuaranteeSpawn,Seeded,False,True,True,False,CallFunc_SpawnLoot_Object)",)),
     "Loot_Dumpster_BP_C": ContainerFamily("dumpster", 0x450, slots=6, random_lid=("Pitch", 95, 105), lid_ignores_channel=5,
         prop_components=("DFX_Flies", "SM_Prop_TrashSkip_01"), rolls=(STOCK_ROLL.replace("0.5,", "1,"),)),
-    "Loot_Car_01_BP_C": ContainerFamily("car_01", 0x8CC, slots=2, random_lid=("Roll", 85, 93), keyless_lock=True,
+    "Loot_Car_01_BP_C": ContainerFamily("car_01", 0x8CC, slots=2, random_lid=("Roll", 85, 93), pry_entry=0xF,
         prop_components=("Arrow_Latch", "Timeline"), named_spawners=("Loot_Spawner", "Loot_Spawner2")),
-    "Loot_Car_02_BP_C": ContainerFamily("car_02", 0x8DE, slots=3, random_lid=("Roll", 85, 91), keyless_lock=True,
+    "Loot_Car_02_BP_C": ContainerFamily("car_02", 0x8DE, slots=3, random_lid=("Roll", 85, 91), pry_entry=0xF,
         prop_components=("Arrow_Latch", "Timeline"), named_spawners=("Loot_Spawner3", "Loot_Spawner1", "Loot_Spawner2")),
+    "LootLocker_Small_BP_C": ContainerFamily("small_locker", 0x937, slots=4, open_roll=0, open_yaw=95,
+        door_locations=((-28.5, 35, 115),), prop_components=("Arrow_Latch", "Timeline"),
+        named_spawners=("Loot_Spawner", "Loot_Spawner1", "Loot_Spawner2", "Loot_SpawnerArmor"),
+        rolls=(STOCK_ROLL, "Loot_SpawnerArmor.SpawnLoot(Loot Table_Armor,SpawnChance_Armor,0,GuaranteeSpawn,"
+                         "False,False,True,False,Ping_IfOpened,CallFunc_SpawnLoot_Object_1)"),
+        pry_entry=0xF, keys=frozenset({"Sawmill_Key_C"})),
 }
 
 
@@ -217,16 +224,21 @@ def family_placements(audit):
             rotation = f"{target},0,0" if axis == "Roll" else f"0,{target},0"
             if f"RandomFloatInRange({low},{high})" not in calls or f"MakeRotator({rotation})" not in calls:
                 raise ValueError(f"Cooked random lid rotation changed: {family}")
-        if spec.keyless_lock and (actor.get("KeyItem") not in (None, "-") or "Jiggle_Locked()" not in calls or not any(
-                call.startswith("Delay(Self,0.8,StructConst(Struct=LatentActionInfo, StructSize=32, RawValue=[SkipOffsetConst(RawValue=0xF),")
+        if spec.pry_entry and (actor.get("KeyItem") not in (None, "-") or "Jiggle_Locked()" not in calls or not any(
+                call.startswith("Delay(Self,0.8,StructConst(Struct=LatentActionInfo, StructSize=32, "
+                                f"RawValue=[SkipOffsetConst(RawValue=0x{spec.pry_entry:X}),")
                 for call in calls)):
-            raise ValueError(f"Cooked stock vehicle lock or pry continuation changed: {family}")
+            raise ValueError(f"Cooked stock container lock or pry continuation changed: {family}")
+        if spec.keys and calls.count("Default__FL_Items_C.FindItem_InBackPack(KeyItem,Self,Self,"
+                                     "CallFunc_FindItem_InBackPack_ItemFound,CallFunc_FindItem_InBackPack_Index,"
+                                     "CallFunc_FindItem_InBackPack_Struct,CallFunc_FindItem_InBackPack_Ammount)") != 1:
+            raise ValueError(f"Cooked stock container key lookup changed: {family}")
         if (spec.lid_ignores_channel is not None and
                 f"SM_Prop_Cabinet_Small_Door_01.SetCollisionResponseToChannel(Byte({spec.lid_ignores_channel}),Byte(0))" not in calls):
             raise ValueError(f"Cooked lid collision response changed: {family}")
 
     profiles, seen = [], set()
-    pinned = {SMALL_CABINET_PROFILE[:2], OFFICE_DESK_PROFILE[:2]}
+    pinned = {SMALL_CABINET_PROFILE[:2], OFFICE_DESK_PROFILE[:2], (CISTERN, "LootLocker_Small_BP_C_6")}
     order = {family: index for index, family in enumerate(CONTAINER_FAMILIES)}
     for row in audit["placements"]:
         family, package, actor = row["type"], row["area"], row["name"]
@@ -244,8 +256,16 @@ def family_placements(audit):
             required["SM_Prop_Cabinet_Small_Door_02"] = "SM_Prop_Cabinet_Small_Door_02"
         if any(fields.get(key) != value for key, value in required.items()):
             continue
-        tunable = ({"ContainerExpectedValue", "Seeded"} if spec.weapon_first else
-                   {"Material"} if spec.keyless_lock else set())
+        tunable = ({"ContainerExpectedValue", "Seeded"} if spec.weapon_first else set())
+        if spec.pry_entry:
+            tunable |= {"Material", "Locked"}
+        if spec.keys:
+            tunable |= {"ContainerExpectedValue", "KeyItem"}
+        key = fields.get("KeyItem")
+        ping = fields.get("Ping_IfOpened", str(spec.stock_ping))
+        if ((key is not None and key not in spec.keys) or ping not in {"True", "False"} or (spec.stock_ping and ping == "False")
+                or fields.get("Locked", "False") not in {"True", "False"}):
+            continue
         if fields.keys() - required.keys() - SAVE_FIELDS - BOX_GEOMETRY_FIELDS - tunable:
             continue
         if spec.weapon_first and (not re.fullmatch(r"[0-9]{1,9}", fields.get("ContainerExpectedValue", "0"))
@@ -268,8 +288,10 @@ def family_placements(audit):
         salt = int(fields["SpawnSalt"])
         if not -2**31 <= salt < 2**31:
             raise ValueError(f"Invalid stock container salt {area} {actor}")
-        profiles.append((family, area, actor, salt, override, guarantee == "True", 2 if mode else None))
-    return tuple(sorted(profiles, key=lambda row: (order[row[0]], row[1], row[2])))
+        profile = (family, area, actor, salt, override, guarantee == "True", 2 if mode else None)
+        profiles.append((*profile, key, ping == "True") if key or ping != str(spec.stock_ping) else profile)
+    # Keep older profiles' matching C++ and Lua indices when admitting authored variants.
+    return tuple(sorted(profiles, key=lambda row: (len(row) > 7, order[row[0]], row[1], row[2])))
 
 
 def family_catalog(profiles):
@@ -288,7 +310,11 @@ def family_catalog(profiles):
             lines.append(f"    {family!r}: {('lid_' + axis.lower(), low, high)!r},")
     lines.extend(("}", "", "KEYLESS_LOCK_CLASSES = frozenset({"))
     for family, spec in CONTAINER_FAMILIES.items():
-        if spec.keyless_lock:
+        if spec.pry_entry and not spec.keys:
+            lines.append(f"    {family!r},")
+    lines.extend(("})", "", "KEYED_LOCK_CLASSES = frozenset({"))
+    for family, spec in CONTAINER_FAMILIES.items():
+        if spec.pry_entry and spec.keys:
             lines.append(f"    {family!r},")
     lines.extend(("})", "", "CONTAINER_PLACEMENTS = ("))
     for row in profiles:
@@ -317,13 +343,12 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
         "// Generated by python -m tools.silverfish.generate_authored_loot_registry", "",
         "#include <array>", "#include <cstdint>", "#include <span>", "#include <String/StringType.hpp>", "",
         "namespace silverfish::authored_loot", "{",
-        "    inline constexpr std::int32_t vehicle_pry_entry = 0xF;", "",
         "    struct StockClass", "    {",
         "        const RC::CharType* actor_class;", "        const RC::CharType* input;",
         "        const RC::CharType* script;", "        std::int32_t input_entry;", "        std::uint8_t slots;",
         "        bool stock_ping{};", "        bool paired_doors{};",
         "        std::span<const RC::CharType* const> spawner_names{};", "        bool weapon_first{};",
-        "        bool keyless_lock{};", "    };", "",
+        "        std::int32_t pry_entry{};", "    };", "",
         '    inline constexpr StockClass small_crate{',
         '        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C"),',
         '        STR("/Game/Classes/Actors/Lootables/LootCrate_Small_BP.LootCrate_Small_BP_C:SendInteractionToActor"),',
@@ -340,8 +365,8 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
             flags += f", {spec.symbol}_spawners"
         if spec.weapon_first:
             flags += ", true"
-        if spec.keyless_lock:
-            flags += ", false, true"
+        if spec.pry_entry:
+            flags += f", false, 0x{spec.pry_entry:X}"
         header.extend((f"    inline constexpr StockClass {spec.symbol}{{",
                        f'        STR("{path}"),',
                        f'        STR("{path}:SendInteractionToActor"),',
@@ -357,6 +382,8 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
                    "        const StockClass* stock_class{&small_crate};",
                    "        std::array<std::int32_t, 4> child_salts{};",
                    "        bool pinned_furniture{};",
+                   "        const RC::CharType* key_class_name{};",
+                   "        bool extra_open_ping{};",
                    "    };", "", "    inline constexpr std::array worlds{"))
     for area in dict.fromkeys((*[area for area, _, _, _ in CRATE_PROFILES], SMALL_CABINET_PROFILE[0], OFFICE_DESK_PROFILE[0],
                                *(area for _, area, *_ in families))):
@@ -397,11 +424,13 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
                     f'      path = "{path}", salt = {salt}, replenish_mode = 2, {family} = true{lua_guarantee}'
                     f'{lua_door_locations(spec)} }},'))
     registered = {(area, actor) for area, actor, *_ in (*CRATE_PROFILES, SMALL_CABINET_PROFILE, OFFICE_DESK_PROFILE)}
-    for index, (family, area, actor, salt, row, guaranteed, mode) in enumerate(families, len(CRATE_PROFILES) + 3):
+    for index, (family, area, actor, salt, row, guaranteed, mode, *lock_settings) in enumerate(families, len(CRATE_PROFILES) + 3):
         spec = CONTAINER_FAMILIES.get(family)
+        key, ping = lock_settings or (None, False)
         if ((not spec or area not in QUALIFIED_MAPS or type(salt) is not int
              or not -2**31 <= salt < 2**31 or type(guaranteed) is not bool or mode not in {None, 2}
-             or row is not None and row not in FAMILY_OVERRIDE_ROWS)
+             or row is not None and row not in FAMILY_OVERRIDE_ROWS or key is not None and key not in spec.keys
+             or type(ping) is not bool)
                 or (area, actor) in registered or not FAMILY_ACTOR.fullmatch(actor)):
             raise ValueError(f"Invalid cooked stock container placement {area} {actor}")
         registered.add((area, actor))
@@ -411,16 +440,18 @@ def outputs(families=CONTAINER_PLACEMENTS) -> dict[str, str]:
         path = name.split(" ", 1)[1]
         table = f'STR("{row}")' if row else "nullptr"
         guarantee = str(guaranteed).lower()
+        key_name = f'STR("{key}")' if key else "nullptr"
+        native_flags = f", {{}}, false, {key_name}, {str(ping).lower()}" if key or ping else ""
         header.extend((f'        Profile{{STR("{world}"),',
-                       f'                STR("{path}"), {salt}, {table}, {guarantee}, {mode or 0}, &{spec.symbol}}},'))
+                       f'                STR("{path}"), {salt}, {table}, {guarantee}, {mode or 0}, &{spec.symbol}{native_flags}}},'))
         lua_flags = (", guarantee_spawn = true" if guaranteed else "") + (f", replenish_mode = {mode}" if mode else "")
         if spec.paired_doors:
             lua_flags += ", paired_doors = true"
         elif spec.random_lid:
             axis, low, high = spec.random_lid
             lua_flags += f', random_lid = {{"{axis}", {low}, {high}}}'
-        if spec.keyless_lock:
-            lua_flags += ", keyless_lock = true"
+        if spec.pry_entry:
+            lua_flags += ", lockable = true"
         if not (spec.paired_doors or spec.random_lid) and (spec.open_roll != -95 or spec.open_pitch or spec.open_yaw):
             lua_flags += f", open_roll = {spec.open_roll}, open_yaw = {spec.open_yaw}"
             if spec.open_pitch:

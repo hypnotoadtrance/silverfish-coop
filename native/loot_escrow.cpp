@@ -695,6 +695,25 @@ namespace
 
 namespace silverfish::loot_escrow
 {
+    bool backpack_has_class(Unreal::UObject* save, Unreal::UClass* item_class)
+    {
+        Inventory inventory;
+        if (!Unreal::IsInGameThreadRaw() || !live(save) || save->GetClassPrivate() != inventory.save_class ||
+            !inventory.bind() || !live(item_class) || !item_class->IsChildOf(inventory.item_base)) return false;
+        Unreal::FScriptArrayHelper rows(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(save));
+        if (rows.Num() < 0 || rows.Num() > max_inventory) return false;
+        for (int index = 0; index < rows.Num(); ++index)
+        {
+            const auto* row = rows.GetRawPtr(index);
+            if (inventory.klass(row) != item_class) continue;
+            const auto id = inventory.identity(row);
+            Match identity;
+            if (id != Guid{} && inspect_owner(inventory, save, id, identity) && identity.count == 1 && identity.row == row)
+                return true;
+        }
+        return false;
+    }
+
     bool stock_spade_guid(Unreal::UObject* save, std::string& guid)
     {
         Inventory inventory;

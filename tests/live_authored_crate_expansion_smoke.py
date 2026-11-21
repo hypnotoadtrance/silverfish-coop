@@ -19,11 +19,12 @@ if str(REPO) not in sys.path:
 
 from tools.silverfish import native_host_save, native_loot
 from tools.silverfish.authored_container_placements import CONTAINER_PLACEMENTS
+from tools.silverfish import native_loose_pickup as loose
 from tools.silverfish.authored_loot import (CRATES, GUARANTEED_CRATES, GUARANTEED_REPLENISHMENT, OFFICE_DESK,
                                            OFFICE_DESK_PROFILE, SMALL_CABINET, SMALL_CABINET_PROFILE, full_name,
-                                           loot_capacity, random_lid, valid_lid_angle, valid_loot_trait_calls, vehicle_lock)
+                                           lockable_container, loot_capacity, random_lid, valid_lid_angle, valid_loot_trait_calls, vehicle_lock)
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
-from tools.silverfish.travel import BLACK_MARKET, CISTERN, CITY, CROSSROADS, LAB_E206, OBSERVATORY, RAIL_YARD
+from tools.silverfish.travel import BLACK_MARKET, CISTERN, CITY, CROSSROADS, FOREST, LAB_E206, OBSERVATORY, RAIL_YARD
 
 
 SCENES = {
@@ -84,9 +85,15 @@ FAMILY_SCENES = {
     "stock-van-trunk": (CROSSROADS, "Loot_Car_02_BP_C", "StaticMeshActor_1937"),
     "stock-guest-blowtorch": (CROSSROADS, "Loot_Car_02_BP_C", "StaticMeshActor_1937"),
     "stock-guest-crowbar": (CROSSROADS, "Loot_Car_02_BP_C", "StaticMeshActor_1937"),
+    "stock-small-locker": (CROSSROADS, "LootLocker_Small_BP_C", "LootLocker_Small_BP_C_1"),
+    "stock-small-locker-random": (CROSSROADS, "LootLocker_Small_BP_C", "LootLocker_Small_BP_C_2"),
+    "stock-locker-blowtorch": (FOREST, "LootLocker_Small_BP_C", "LootLocker_Small_BP_C_1"),
+    "stock-locker-key": (FOREST, "LootLocker_Small_BP_C", "LootLocker_Small_BP_C_1"),
 }
-PRY_TOOL_SCENES = {"stock-guest-blowtorch": "blowtorch", "stock-guest-crowbar": "crowbar"}
-PERMANENT_FAMILY_CRATES = {full_name(area, actor, family) for family, area, actor, _, _, _, replenish in CONTAINER_PLACEMENTS
+PRY_TOOL_SCENES = {"stock-guest-blowtorch": "blowtorch", "stock-guest-crowbar": "crowbar",
+                   "stock-locker-blowtorch": "blowtorch"}
+SAWMILL_KEY_ACTOR = f"{FOREST}.Forest_01_P:PersistentLevel.Sawmill_Key_C_1"
+PERMANENT_FAMILY_CRATES = {full_name(area, actor, family) for family, area, actor, _, _, _, replenish, *_ in CONTAINER_PLACEMENTS
                            if replenish == 2 or family in {"Loot_Stash_Small_BP_C", "LootCrate_Weapon_BP_C", "Loot_ArtifactChest_01_C"}}
 SCENES.update({name: (area, (actor,)) for name, (area, _, actor) in FAMILY_SCENES.items()})
 FISH_CANNERY_ITEMS = {
@@ -155,11 +162,12 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     desk = name == DESK_SCENE
     family = FAMILY_SCENES[name][1] if name in FAMILY_SCENES else None
     pry_tool = PRY_TOOL_SCENES.get(name)
+    key_scene = name == "stock-locker-key"
     tool_before, tool_after = (3, 2) if pry_tool == "blowtorch" else (-1, -1)
     targets = [full_name(area, actor, family) for actor in actors]
     permanent = name in GUARANTEED_SCENES or cabinet or desk or all(crate in PERMANENT_FAMILY_CRATES for crate in targets)
     random_lids = {crate: lid for crate in targets if (lid := random_lid(crate))}
-    verify_restore = permanent or bool(random_lids)
+    verify_restore = permanent or bool(random_lids) or key_scene
     assert all(CRATES.get(crate) == area for crate in targets)
     if name in GUARANTEED_SCENES:
         assert all(GUARANTEED_REPLENISHMENT.get((area, actor)) == 2 for actor in actors)
@@ -224,20 +232,24 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     def lock_status(state, crate):
         return state.get("game", {}).get(native_loot.VEHICLE_LOCKS, {}).get(crate)
 
-    def locked_vehicle(state):
+    def locked_container(state):
         locks = state.get("game", {}).get(native_loot.VEHICLE_LOCKS, {})
-        # Prefer the two reference placements when the world rolls either one locked.
-        candidates = (*targets, full_name(area, "StaticMeshActor_488", "Loot_Car_01_BP_C"), *sorted(locks))
+        if family == "LootLocker_Small_BP_C":
+            candidates = targets
+        else:
+            # Prefer the reference placements when the world rolls either one locked.
+            candidates = (*targets, full_name(area, "StaticMeshActor_488", "Loot_Car_01_BP_C"), *sorted(locks))
         return next((crate for crate in candidates if locks.get(crate) is True
-                     and status_of(state, crate) == "ready" and vehicle_lock(crate, area)), None)
+                     and status_of(state, crate) == "ready" and lockable_container(crate, area)
+                     and (family == "LootLocker_Small_BP_C" or vehicle_lock(crate, area))), None)
 
     def scene_ready(state):
         if state.get("state") != "hosting":
             return False
         if natural_lab_roll:
             return state.get("game", {}).get("native_fresh_campaign", {}).get("state") == "verified"
-        if pry_tool:
-            return locked_vehicle(state) is not None
+        if pry_tool or key_scene:
+            return locked_container(state) is not None
         return all(status_of(state, crate) == "ready" for crate in targets)
 
     def saved_checkpoint():
@@ -325,12 +337,12 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                     "--native-guest", "--native-zones", "--native-expanded-zones", *start_zone)
         opening = await wait(run, scene_ready)
         if pry_tool:
-            vehicle = locked_vehicle(opening)
-            targets = [vehicle]
-            random_lids = {vehicle: random_lid(vehicle)}
-            permanent = vehicle in PERMANENT_FAMILY_CRATES
+            locked = locked_container(opening)
+            targets = [locked]
+            random_lids = {locked: lid} if (lid := random_lid(locked)) else {}
+            permanent = locked in PERMANENT_FAMILY_CRATES
             verify_restore = True
-            exhaustion_flags = ({vehicle: f"{vehicle.rsplit('.', 1)[1]}-{area.rsplit('/', 1)[1]}-"} if permanent else {})
+            exhaustion_flags = ({locked: f"{locked.rsplit('.', 1)[1]}-{area.rsplit('/', 1)[1]}-"} if permanent else {})
         if baseline:
             live_seed = opening["game"]["native_scene"]["instance_seed"]
             assert live_seed == seed, (seed, live_seed)
@@ -384,7 +396,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             await command("action", *host, "native-loot-approach", "--target", crate)
             if family:
                 await command("action", *host, "native-loot-approach", "--target", f"host@{crate}")
-            if vehicle_lock(crate, area):
+            if lockable_container(crate, area):
                 lock = lock_status(bound, crate)
                 assert type(lock) is bool, bound["game"].get(native_loot.VEHICLE_LOCKS)
                 await wait(guest_run, lambda state: lock_status(state, crate) is lock)
@@ -397,7 +409,26 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                     denied = stock_input_result(guest_run, crate, press["sequence"])
                     assert denied["event"] == "native_stock_crate_interaction_rejected" and denied["reason"] == "stock_vehicle_locked", denied
                     assert not public_roll(await wait(run, lambda state: lock_status(state, crate) is True), crate)
-                    if pry_tool:
+                    if key_scene:
+                        target = f"loose:{SAWMILL_KEY_ACTOR}"
+                        cabinet = full_name(FOREST, "LootCabnet_Small_BP_C_1")
+                        await command("action", *host, "native-loot-approach", "--target", cabinet)
+                        await command("action", *guest, "native-loot-crate-fixture", "--target", cabinet)
+                        for directory in (run, guest_run):
+                            await wait(directory, lambda state: status_of(state, cabinet) == "exhausted")
+                        await command("action", *host, loose.APPROACH, "--target", f"guest@{target}")
+                        await wait(guest_run, lambda state: state.get("game", {}).get(loose.KEY, {})
+                                   .get(SAWMILL_KEY_ACTOR, {}).get("state") == "available")
+                        await command("action", *guest, loose.FIXTURE, "--target", target)
+                        picked_up = await wait(run, lambda state: SAWMILL_KEY_ACTOR in state.get("gameplay", {}).get(loose.STATE, ()))
+                        assert lock_status(picked_up, crate) is True
+                        key_record = saved_checkpoint()["world"]["party"][loose.STATE][SAWMILL_KEY_ACTOR]
+                        assert key_record["owner"] == character
+                        key_item = await typed_inventory_item(character, key_record["guid"])
+                        assert key_item["class_path"] == key_record["class_path"]
+                        evidence["stock_sawmill_key"] = key_item
+                        await command("action", *host, "native-loot-approach", "--target", crate)
+                    elif pry_tool:
                         await wait(guest_run, lambda state: state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == tool_guid)
                         fixture = await command("action", *guest, "native-guest-primary-input-fixture", "--target", crate)
                         sequence = fixture["native_guest_primary_fixture"]["sequence"]
@@ -420,10 +451,11 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                         evidence[f"stock_{pry_tool}_primary_input"] = fixture["native_guest_primary_fixture"]
                     else:
                         await command("action", *host, "native-loot-vehicle-pry-fixture", "--target", crate)
-                    for directory in (run, guest_run):
-                        await wait(directory, lambda state: lock_status(state, crate) is False)
-                    evidence["stock_vehicle_pry_unlock"] = {"locked_press": denied["reason"], "both_unlocked": True}
-                    pried = True
+                    if not key_scene:
+                        for directory in (run, guest_run):
+                            await wait(directory, lambda state: lock_status(state, crate) is False)
+                        evidence["stock_vehicle_pry_unlock"] = {"locked_press": denied["reason"], "both_unlocked": True}
+                        pried = True
             forced = None
             if force_stock_roll:
                 operation = uuid.uuid4().hex
@@ -584,7 +616,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                         angle = entry["roll"][field]
                         assert lid_matches(resumed, crate, angle) and lid_matches(peer, crate, angle)
                         evidence[f"saved_{field}_restart"] = angle
-                    if vehicle_lock(crate, area):
+                    if lockable_container(crate, area):
                         assert lock_status(resumed, crate) is False and lock_status(peer, crate) is False
                     if pry_tool:
                         tool = (await command("action", *guest, "native-guest-weapon-inspect", "--target", tool_guid))["native_guest_weapon"]
@@ -595,6 +627,9 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                         restored = await typed_inventory_item(character, item["guid"])
                         fields = ("guid", "class_path", "source", "quantity")
                         assert restored and tuple(restored[key] for key in fields) == tuple(item[key] for key in fields), restored
+                if key_scene:
+                    original_key = evidence["stock_sawmill_key"]
+                    assert await typed_inventory_item(character, original_key["guid"]) == original_key
             if permanent:
                 await command("action", *host, "checkpoint")
                 persisted = permanent_flags(saved_checkpoint())

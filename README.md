@@ -73,7 +73,7 @@ The host's `game.native_stock_enemy_drops` status reports recent item actors fro
 
 Pass `--native-guest-inventory-view` on `join` to open the guest's first inventory page with the stock inventory key. Use Page Up or Page Down to select a row, Home twice to equip a supported weapon, and End to cancel or close. Pass `--native-guest-primary-input` and `--native-guest-reload-input` to route a stock primary press or short reload press to the host for the qualified guest SMG and Light Pistol.
 
-At a locked vehicle trunk, equip a blowtorch and press primary fire, or equip a crowbar and tap Mode Toggle. For local automation, `native-guest-vehicle-blowtorch` and `native-guest-vehicle-crowbar` accept `--target "TOOL_GUID@VEHICLE_FULL_NAME"`. The response includes the tool result and the authoritative loot roll. The blowtorch uses one fuel charge per successful pry.
+At a supported locked trunk or small locker, equip a blowtorch and press primary fire, or equip a crowbar and tap Mode Toggle. For local automation, `native-guest-vehicle-blowtorch` and `native-guest-vehicle-crowbar` accept `--target "TOOL_GUID@CONTAINER_FULL_NAME"`. The response includes the tool result and the authoritative loot roll. The blowtorch uses one fuel charge per successful pry. At a keyed small locker, carry the matching key in your backpack and press Interact.
 
 The native campaign status reports qualified hinged doors under `game.native_stock_doors`. Guests use the stock Interact action on an unlocked door, or submit `native-stock-door-interact --target "DOOR_FULL_NAME"` when within stock reach. The result reports whether the host opened or closed the door.
 

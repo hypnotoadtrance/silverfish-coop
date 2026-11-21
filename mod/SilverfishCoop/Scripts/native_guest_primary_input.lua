@@ -118,7 +118,7 @@ function primary.sync(state, phase)
             local actor = current.pawn.ActorBeingLookedAt
             local name = valid(actor) and actor:GetFullName()
             local profile = name and loot.profile(current.map, name)
-            if not profile or not profile.keyless_lock then
+            if not profile or not profile.lockable then
                 name = native_stock_door.pry_target(current.pawn, kind)
             end
             if not name or actor.Locked ~= true or (kind == "crowbar" and current.pawn.CanInteract ~= true)
@@ -194,7 +194,7 @@ function primary.command(fields, state, phase)
         if pry_tool then
             local target = fields[4]
             local profile = loot.profile(current.map, target)
-            if profile and profile.keyless_lock then
+            if profile and profile.lockable then
                 require("native_loot_crate_input").pry_tool_input_fixture(state, phase, target, probe)
             else
                 native_stock_door.input_fixture(state, phase, target, current.pawn, probe)

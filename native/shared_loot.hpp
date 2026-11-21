@@ -39,7 +39,7 @@ namespace silverfish::shared_loot
     const authored_loot::Profile* authored_profile(RC::Unreal::UObject* crate);
     RC::Unreal::UWorld* authored_crate_world(RC::Unreal::UObject* crate, std::string_view* reason = nullptr);
     bool qualified_crate_settings(RC::Unreal::UObject* crate, std::string_view* reason = nullptr);
-    bool jiggle_vehicle_lock(RC::Unreal::UObject* crate);
+    bool jiggle_container_lock(RC::Unreal::UObject* crate);
     bool read_spawners(RC::Unreal::UObject* crate, RC::Unreal::UObject* instance, ContainerActors& spawners,
                        std::string_view* reason = nullptr);
     int qualified_container_capacity(std::uintptr_t crate, RC::Unreal::UWorld* world = nullptr);

@@ -52,7 +52,7 @@ from . import native_title_entry
 from .native_host_landmine import parse as parse_host_landmine
 from .authored_routes import AUTHORED_ROUTES, AuthoredRoute
 from .authored_loot import (CRATES as AUTHORED_CRATES, LEGACY_CRATE, loot_capacity, random_lid,
-                            valid_item_transform, valid_lid_angle, vehicle_lock)
+                            valid_item_transform, valid_lid_angle, lockable_container)
 from .native_matrix import MatrixRequest, parse_report as parse_matrix_report, parse_request as parse_matrix_request
 from .native_quest_catalog import parse as parse_quest_catalog
 from .native_roster import Assignment
@@ -765,7 +765,7 @@ class Bridge:
                 continue
             target = fields[6] if len(fields) == 7 else None
             if fields[5] in native_loot.PRY_TOOL_ACTIONS:
-                if not target or not (vehicle_lock(target, fields[2]) or native_stock_door.actor_map(target) == fields[2]):
+                if not target or not (lockable_container(target, fields[2]) or native_stock_door.actor_map(target) == fields[2]):
                     continue
             elif target is not None:
                 continue
@@ -1846,18 +1846,18 @@ class Bridge:
                     if fields[2] == LEGACY_CRATE:
                         data["native_loot_crate_input"] = row
                 elif (fields[0] == "native-loot-vehicle-lock" and len(fields) == 4
-                      and vehicle_lock(fields[2], fields[1]) and fields[3] in {"0", "1"}):
+                      and lockable_container(fields[2], fields[1]) and fields[3] in {"0", "1"}):
                     data.setdefault("native_loot_vehicle_locks", {})[fields[2]] = fields[3] == "1"
                 elif (fields[0] == "native-loot-guest-pry" and len(fields) == 5 and data.get("state") == "hosting"
-                      and vehicle_lock(fields[2], fields[1]) and 1 <= (sequence := int(fields[4])) < 2**53):
+                      and lockable_container(fields[2], fields[1]) and 1 <= (sequence := int(fields[4])) < 2**53):
                     data.setdefault("native_loot_guest_pries", {})[fields[2]] = dict(map=fields[1], pawn=fields[3], sequence=sequence)
                 elif (fields[0] == "native-loot-guest-blowtorch-use" and len(fields) == 7 and data.get("state") == "hosting"
-                      and vehicle_lock(fields[2], fields[1]) and valid_guid(fields[4])
+                      and lockable_container(fields[2], fields[1]) and valid_guid(fields[4])
                       and 1 <= (before := int(fields[5])) <= 3 and int(fields[6]) == before - 1):
                     data[native_loot.TORCH_RESULT] = dict(map=fields[1], crate=fields[2], pawn=fields[3], guid=fields[4],
                                                          before=before, after=before - 1)
                 elif (fields[0] == "native-loot-guest-crowbar-use" and len(fields) == 7 and data.get("state") == "hosting"
-                      and vehicle_lock(fields[2], fields[1]) and valid_guid(fields[4]) and fields[5:] == ["-1", "-1"]):
+                      and lockable_container(fields[2], fields[1]) and valid_guid(fields[4]) and fields[5:] == ["-1", "-1"]):
                     data[native_loot.CROWBAR_RESULT] = dict(map=fields[1], crate=fields[2], pawn=fields[3], guid=fields[4],
                                                            before=-1, after=-1)
                 elif (fields[0] == "native-loot-crate-diagnostic" and len(fields) == 10

@@ -2,7 +2,7 @@
 
 import math
 
-from .authored_container_placements import (CLASS_CAPACITIES, CONTAINER_PLACEMENTS, KEYLESS_LOCK_CLASSES,
+from .authored_container_placements import (CLASS_CAPACITIES, CONTAINER_PLACEMENTS, KEYED_LOCK_CLASSES, KEYLESS_LOCK_CLASSES,
                                             MIXED_GUARANTEE_CLASSES, RANDOM_LID_CLASSES)
 from .travel import CITY, CISTERN, CROSSROADS, DEAD_BRIDGE, LAB_E206, LAKE, RAIL_YARD
 
@@ -515,9 +515,10 @@ CONTAINER_CAPACITIES = {full_name(area, actor, family): CLASS_CAPACITIES[family]
                         for family, area, actor, *_ in CONTAINER_PLACEMENTS}
 CONTAINER_CAPACITIES.update({SMALL_CABINET: 4, OFFICE_DESK: 4})
 GUARANTEED_CRATES = frozenset(full_name(area, actor) for area, actor, *_ in GUARANTEED_PLACEMENTS) | {OFFICE_DESK}
-GUARANTEED_CRATES |= {full_name(area, actor, family) for family, area, actor, _, _, guaranteed, _ in CONTAINER_PLACEMENTS
+GUARANTEED_CRATES |= {full_name(area, actor, family) for family, area, actor, _, _, guaranteed, *_ in CONTAINER_PLACEMENTS
                       if guaranteed}
 LEGACY_CRATE = full_name(*PLACEMENTS[0][:2])
+LOCKABLE_CONTAINER_CLASSES = KEYLESS_LOCK_CLASSES | KEYED_LOCK_CLASSES
 
 
 def loot_capacity(container: str) -> int:
@@ -544,6 +545,11 @@ def valid_lid_angle(lid: tuple[str, int, int], angle: object) -> bool:
 
 def vehicle_lock(container: str, area: str | None) -> bool:
     return area is not None and CRATES.get(container) == area and container.partition(" ")[0] in KEYLESS_LOCK_CLASSES
+
+
+def lockable_container(container: str, area: str | None) -> bool:
+    return (area is not None and CRATES.get(container) == area
+            and container.partition(" ")[0] in LOCKABLE_CONTAINER_CLASSES)
 
 
 def valid_item_transform(transform: object) -> bool:

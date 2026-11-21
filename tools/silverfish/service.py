@@ -4692,10 +4692,10 @@ class Client:
             elif event_kind in native_loot.PRY_TOOL_ACTIONS:
                 if not extra:
                     continue
-                vehicle = native_loot.vehicle_lock(extra[0], event_area)
-                actions = native_loot.PRY_TOOL_ACTIONS if vehicle else native_stock_door.PRY_ACTIONS
+                container = native_loot.lockable_container(extra[0], event_area)
+                actions = native_loot.PRY_TOOL_ACTIONS if container else native_stock_door.PRY_ACTIONS
                 action = actions[event_kind]
-                event = f"native_guest_{event_kind}_input" if vehicle else f"native_guest_door_{event_kind}_input"
+                event = f"native_guest_{event_kind}_input" if container else f"native_guest_door_{event_kind}_input"
             else:
                 action, event = "native-guest-weapon-fire", "native_guest_primary_input"
             try:
@@ -5078,9 +5078,9 @@ class Client:
                     fixture_arguments = ()
                     if self.primary_scope[3] in native_loot.PRY_TOOL_ACTIONS:
                         crate = request.get("target")
-                        if not isinstance(crate, str) or not (native_loot.vehicle_lock(crate, self.last_game.get("map"))
+                        if not isinstance(crate, str) or not (native_loot.lockable_container(crate, self.last_game.get("map"))
                                 or crate in self.last_game.get(native_stock_door.KEY, {})):
-                            raise ValueError("The pry tool input fixture needs a stock vehicle or hinged door on the current map")
+                            raise ValueError("The pry tool input fixture needs a stock locked container or hinged door on the current map")
                         fixture_arguments = (crate,)
                     self.last_game = await self.bridge.command(action, self.primary_scope[1], *fixture_arguments, timeout=5)
                     result = {"native_guest_primary_fixture": self.last_game.get("native_guest_primary_fixture", {})}
