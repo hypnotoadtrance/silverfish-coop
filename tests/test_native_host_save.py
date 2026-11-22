@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import native_host_save
 from tools.silverfish.campaign import CampaignFormatError, CampaignStore
@@ -117,3 +117,29 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(CampaignFormatError, "Cannot read the isolated Unreal save"):
             await self.host.checkpoint_native(self.bridge)
         self.host.commit_checkpoint.assert_not_awaited()
+
+    async def test_checkpoint_pruning_preserves_both_revisions_and_failure_is_deferred(self):
+        profile = self.host.native_profile
+
+        def generation():
+            slot = native_host_save.new_slot()
+            path = native_host_save.slot_path(profile, slot)
+            path.write_bytes(b"GVAS" + bytes(32))
+            return path, native_host_save.record(profile, slot, CROSSROADS)
+
+        prior_path, prior = generation()
+        next_path, next_frame = generation()
+        orphan, _ = generation()
+        store = self.enterContext(CampaignStore(self.host.store.path.parent / "campaign"))
+        store.checkpoint({"native_host_save": prior}, {})
+        self.host.store = store
+        self.host.checkpoint_contents = Mock(return_value=({"native_host_save": next_frame}, {}))
+        self.assertEqual(await Host.commit_checkpoint(self.host, None, native_record=next_frame), 2)
+        self.assertTrue(prior_path.is_file())
+        self.assertTrue(next_path.is_file())
+        self.assertFalse(orphan.exists())
+
+        with patch.object(native_host_save, "prune", side_effect=PermissionError("busy")):
+            self.assertEqual(await Host.commit_checkpoint(self.host, None, native_record=next_frame), 3)
+        self.assertEqual(store.status()["revision"], 3)
+        self.host.control.event.assert_called_once_with("native_host_save_prune_deferred", reason="busy")

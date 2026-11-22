@@ -8,6 +8,7 @@ import uuid
 from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import runtime, service
+from tools.silverfish.control import Control
 
 
 class BridgeWalkTests(unittest.IsolatedAsyncioTestCase):
@@ -78,6 +79,17 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
                 await bridge.command("leave")
             bridge.local_bridge.command.assert_awaited_once()
             self.assertEqual(list(bridge.directory.iterdir()), [])
+
+
+class GameplayStatusTests(unittest.TestCase):
+    def test_repeated_diagnostics_yield_to_gameplay_and_link_changes_publish_immediately(self):
+        with TemporaryDirectory() as temporary, Control(Path(temporary)) as control:
+            with patch("tools.silverfish.control.time.monotonic", side_effect=(1, 1.01, 1.02, 1.03, 1.30)):
+                self.assertTrue(control.gameplay_status_due("connected", "zone-a"))
+                self.assertFalse(control.gameplay_status_due("connected", "zone-a"))
+                self.assertTrue(control.gameplay_status_due("reconnecting", "zone-a"))
+                self.assertFalse(control.gameplay_status_due("reconnecting", "zone-a"))
+                self.assertTrue(control.gameplay_status_due("reconnecting", "zone-a"))
 
 
 class StageBackendTests(unittest.TestCase):

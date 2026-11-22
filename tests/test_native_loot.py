@@ -3,7 +3,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, call
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from tools.silverfish import native_host_save, native_loose_pickup, native_loot, party, runtime
 from tools.silverfish.authored_loot import (CRATES, LEGACY_CRATE, OFFICE_DESK, PLACEMENTS, OVERRIDDEN_PLACEMENTS,
@@ -62,6 +62,31 @@ class AuthoredCrateRegistryTests(unittest.TestCase):
 
 
 class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transient_award_requires_typed_checkpoint_without_escrow_io(self):
+        loose = native_loose_pickup
+        path = f"{OBSERVATORY}.Observitory_P:PersistentLevel.Item_Bandage_C_1"
+        slot, epoch = "SFCoop_" + "b" * 32, "d" * 32
+        scene = {"state": "hosting", "map": OBSERVATORY, loose.CAPABILITY: 1,
+                 "pawns": {"local": {"name": PAWN}}}
+        record = [loose.CLAIM, OBSERVATORY, path, ITEM["class_path"], "2", PAWN, slot, "claimed", "1", "1",
+                  ITEM["guid"], "0", "0", "0"]
+        for mode in ([], ["memory"]):
+            with self.subTest(mode=mode):
+                proof = loose.parse_claim([*record, *mode], "hosting", OBSERVATORY)
+                bridge = SimpleNamespace(command=AsyncMock(return_value={**scene, loose.PROOF: proof}))
+                state = party.new_party()
+                state["players"]["host"] = {"downed": False}
+                host = SimpleNamespace(last_game=scene, zone_epoch=epoch, native_profile=Path("fixture"),
+                                       stopping=False, transitioning=False, native_checkpoint_unsafe=False,
+                                       party=state, control=Mock(), checkpoint_native=AsyncMock(return_value=2),
+                                       loose_pickups=loose.Visibility())
+                with patch.object(native_host_save, "new_slot", return_value=slot), patch.object(native_host_save, "record") as saved:
+                    result = await loose.claim(host, bridge, "host", f"loose:{path}", OPERATION)
+                self.assertEqual(result[loose.PROOF]["guid"], ITEM["guid"])
+                self.assertEqual(host.checkpoint_native.await_args.kwargs["typed_inventory"], bool(mode))
+                self.assertEqual(saved.call_count, int(not mode))
+                self.assertFalse(host.native_checkpoint_unsafe)
+
     async def test_temporary_item_reappears_only_after_stock_item_returns(self):
         loose = native_loose_pickup
         old_epoch, new_epoch = "a" * 32, "b" * 32

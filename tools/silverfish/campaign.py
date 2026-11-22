@@ -648,22 +648,28 @@ class CampaignStore:
 
     def checkpoint(self, world, character_states, *, unleased_states=None):
         """Save a campaign and its exact character snapshots in one revision."""
+        return self._write_checkpoint(world, character_states, unleased_states)
+
+    def _write_checkpoint(self, world, character_states, unleased_states, after_commit=None):
         with self._writer:
             candidate = self._checkpoint_candidate(world, character_states, unleased_states)
-            return self._commit(candidate)
+            revision = self._commit(candidate)
+            if after_commit is not None:
+                after_commit()
+            return revision
 
     async def wait_for_checkpoint(self) -> None:
         """Allow a relay callback to wait without occupying its event loop."""
         while not self._checkpoint_idle.is_set():
             await self._checkpoint_idle.wait()
 
-    async def checkpoint_async(self, world, character_states, *, unleased_states=None):
-        """Commit on a worker without leaving an orphaned writer on cancellation."""
+    async def checkpoint_async(self, world, character_states, *, unleased_states=None, after_commit=None):
+        """Commit on a worker and run optional cleanup before releasing the writer."""
         await self.wait_for_checkpoint()
         self._checkpoint_idle.clear()
         try:
             writer = asyncio.create_task(asyncio.to_thread(
-                self.checkpoint, world, character_states, unleased_states=unleased_states,
+                self._write_checkpoint, world, character_states, unleased_states, after_commit,
             ))
             try:
                 return await asyncio.shield(writer)

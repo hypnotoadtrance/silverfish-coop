@@ -60,9 +60,11 @@ def parse(fields, phase, area):
 
 
 def parse_claim(fields, phase, area):
-    if len(fields) != 14 or fields[1] != area or phase != "hosting":
+    if len(fields) not in (14, 15) or fields[1] != area or phase != "hosting":
         raise ValueError("Invalid loose stock item transfer")
-    _, _, actor, class_path, mode, pawn, slot, status, ok, applied, guid, amount, before, after = fields
+    _, _, actor, class_path, mode, pawn, slot, status, ok, applied, guid, amount, before, after, *method = fields
+    if method and (method[0] not in ("disk", "memory") or method[0] == "memory" and class_path in native_loot.CASH_RANGES):
+        raise ValueError("Invalid loose stock item transfer method")
     if (not _stock_source(area, actor, class_path, int(mode)) or not _SLOT.fullmatch(slot)
             or ok not in ("0", "1") or applied not in ("0", "1") or (guid != "-" and not valid_guid(guid))
             or len(status) > 256 or not all(value.isascii() and value.isdecimal() and len(value) < 11
@@ -70,7 +72,7 @@ def parse_claim(fields, phase, area):
         raise ValueError("Invalid loose stock item transfer receipt")
     return dict(map=area, actor=actor, class_path=class_path, mode=int(mode), pawn=pawn, slot=slot,
                 status=status, ok=ok == "1", applied=applied == "1", guid=guid,
-                amount=int(amount), before=int(before), after=int(after))
+                amount=int(amount), before=int(before), after=int(after), memory=method == ["memory"])
 
 
 def validate_records(data, members):
@@ -224,18 +226,21 @@ async def claim(host, bridge, character, requested, operation, *, local_input=Fa
             if proof["status"] != "claimed" or not valid_guid(proof["guid"]):
                 raise RuntimeError("The placed stock item did not transfer")
             row["guid"] = proof["guid"]
-            await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True)
+            if not proof.get("memory"):
+                await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True)
         candidate.setdefault(STATE, {})[path] = row
         result = {PROOF: row}
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
         host.last_game, host.last_seen = snapshot, time.monotonic()
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}),
+                                                typed_inventory=proof.get("memory", False))
         host.party = candidate
         host.loose_pickups.replenished.discard(path)
         host.native_checkpoint_unsafe = False
-        host.control.event("native_loose_pickup_claimed", revision=revision, operation_id=operation, **row)
+        host.control.event("native_loose_pickup_claimed", revision=revision, operation_id=operation,
+                           escrow="memory" if proof.get("memory") else "disk", **row)
         native_pickup_audio.committed(host, pawn, operation, row["class_path"])
         return result
     finally:

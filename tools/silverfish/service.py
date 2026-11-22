@@ -458,13 +458,33 @@ class Host:
         world, changes = self.checkpoint_contents(proposed_party, native_record=native_record,
                                                   guest_records=guest_records, unleased_states=unleased_states,
                                                   require_guest_frames=require_guest_frames)
+        cleanup = None
+        cleanup_error = None
+        profile = self.native_profile
+        if native_record is not None and profile is not None:
+            paths = (self.store.path, self.store.previous_path)
+
+            def prune_generations():
+                nonlocal cleanup_error
+                try:
+                    keep = {entry["slot"] for path in paths for entry in native_host_save.references(read_json(path))}
+                    native_host_save.prune(profile, keep)
+                except (OSError, KeyError, TypeError, ValueError, CampaignError) as error:
+                    cleanup_error = str(error)
+
+            cleanup = prune_generations
         try:
-            return await self.store.checkpoint_async(world, changes, unleased_states=unleased_states)
+            revision = await self.store.checkpoint_async(world, changes, unleased_states=unleased_states,
+                                                         after_commit=cleanup)
         except asyncio.CancelledError:
             # The disk commit may have completed without its caller applying the
             # proposed party in memory. Shutdown must not overwrite that commit.
             self.native_checkpoint_unsafe = True
             raise
+        if cleanup_error is not None:
+            with contextlib.suppress(OSError):
+                self.control.event("native_host_save_prune_deferred", reason=cleanup_error)
+        return revision
 
     def checkpoint_contents(self, proposed_party, *, native_record, guest_records,
                             unleased_states, require_guest_frames) -> tuple[dict, dict]:
@@ -619,8 +639,10 @@ class Host:
     async def checkpoint_native(self, bridge: Bridge, proposed_party: dict | None = None, *,
                                 unleased_states: dict | None = None,
                                 require_guest_frames: frozenset[str] = frozenset(),
-                                dig_token: str | None = None) -> int:
+                                dig_token: str | None = None, typed_inventory: bool = False) -> int:
         if self.native_profile is None:
+            if typed_inventory:
+                raise RuntimeError("The typed inventory requires a stock campaign checkpoint")
             return await self.commit_checkpoint(proposed_party, unleased_states=unleased_states,
                                                 require_guest_frames=require_guest_frames)
         source = self.last_game.get("map")
@@ -632,6 +654,8 @@ class Host:
         if self.last_game.get("native_paired_save_capture") is True:
             guests = {character: (target, native_host_save.new_slot())
                       for character, target in self.guest_capture_targets().items()}
+        elif typed_inventory:
+            raise RuntimeError("The paired typed inventory checkpoint is unavailable")
         arguments = [slot]
         if guests:
             arguments.append(dig_token or "-")
@@ -639,7 +663,8 @@ class Host:
                 arguments.extend((target, generation))
         elif dig_token:
             arguments.append(dig_token)
-        snapshot = await bridge.command("native-host-save-capture", *arguments, timeout=7)
+        capture = "native-host-save-capture-typed" if typed_inventory else "native-host-save-capture"
+        snapshot = await bridge.command(capture, *arguments, timeout=7)
         observed = snapshot.get("native_host_save", {})
         if (observed.get("state") != "captured" or observed.get("slot") != slot or observed.get("map") != source
                 or observed.get("pawn") != pawn or snapshot.get("map") != source or snapshot.get("state") != "hosting"):
@@ -664,15 +689,8 @@ class Host:
         self.last_seen = time.monotonic()
         if not guests:
             guest_records = await self.capture_guest_records(bridge)
-        revision = await self.commit_checkpoint(proposed_party, native_record=record, guest_records=guest_records,
-                                                unleased_states=unleased_states, require_guest_frames=require_guest_frames)
-        try:
-            keep = {entry["slot"] for path in (self.store.path, self.store.previous_path)
-                    for entry in native_host_save.references(read_json(path))}
-            native_host_save.prune(self.native_profile, keep)
-        except (OSError, KeyError, ValueError) as error:
-            self.control.event("native_host_save_prune_deferred", reason=str(error))
-        return revision
+        return await self.commit_checkpoint(proposed_party, native_record=record, guest_records=guest_records,
+                                            unleased_states=unleased_states, require_guest_frames=require_guest_frames)
 
     async def end_session(self, bridge: Bridge, transport) -> dict:
         """End this host generation only after its final paired checkpoint."""
@@ -3982,11 +4000,15 @@ class Host:
             )
 
     def publish_host_status(self, transport, bridge):
+        linked = self.game_link_connected(transport)
+        if not self.control.gameplay_status_due(self.stopping, linked, self.zone_epoch, self.awaiting_zone_guest,
+                                                self.last_game.get("map"), self.last_game.get("state")):
+            return
         self.control.status(active=not self.stopping, role="host", state="hosting", game=self.last_game,
                             endpoint={"address": self.bind, "port": self.port},
                             campaign=self.store.status(), gameplay=self.public_gameplay(),
                             zone_epoch=self.zone_epoch, awaiting_zone_guest=self.awaiting_zone_guest,
-                            link_connected=self.game_link_connected(transport),
+                            link_connected=linked,
                             transport=transport.statistics() if isinstance(transport, link.HostLink) else {},
                             local_bridge="memory" if bridge.local_bridge is not None else "file")
 
@@ -5862,18 +5884,25 @@ class Client:
                     self.bag_projection_key = None
             if self.transport.connected and not self.stopping:
                 await self.project_gameplay()
-            self.control.status(active=not self.stopping, role="client",
-                                state="connected" if active else "reconnecting",
-                                link_connected=self.transport.connected, reconnect_suspended=self.suspended,
-                                unreal_local_port=self.transport.unreal_local_port,
-                                transport=self.transport.statistics() if isinstance(self.transport, link.ClientLink) else {},
-                                local_bridge="memory" if self.bridge.local_bridge is not None else "file",
-                                character_id=self.invite["character_id"], host_session=self.host_session,
-                                game=self.last_game, gameplay=self.gameplay,
-                                gameplay_fresh=active and time.monotonic() - self.gameplay_seen < 3,
-                                zone_epoch=self.zone_epoch)
+            self.publish_gameplay_status(active)
             await self.bridge.wait_for_interaction(
                 .25, wake_if=lambda: self.gameplay_snapshot_ready() or self.transport.weapon_shots_ready(), guest=True)
+
+    def publish_gameplay_status(self, active: bool) -> None:
+        fresh = active and time.monotonic() - self.gameplay_seen < 3
+        linked = self.transport.connected
+        if not self.control.gameplay_status_due(self.stopping, active, fresh, linked, self.suspended,
+                                                self.host_session, self.zone_epoch, self.last_game.get("map")):
+            return
+        self.control.status(active=not self.stopping, role="client",
+                            state="connected" if active else "reconnecting",
+                            link_connected=linked, reconnect_suspended=self.suspended,
+                            unreal_local_port=self.transport.unreal_local_port,
+                            transport=self.transport.statistics() if isinstance(self.transport, link.ClientLink) else {},
+                            local_bridge="memory" if self.bridge.local_bridge is not None else "file",
+                            character_id=self.invite["character_id"], host_session=self.host_session,
+                            game=self.last_game, gameplay=self.gameplay, gameplay_fresh=fresh,
+                            zone_epoch=self.zone_epoch)
 
 
 def guest_engine_options(work: Path, invite: dict, *, native_zones: bool = False,

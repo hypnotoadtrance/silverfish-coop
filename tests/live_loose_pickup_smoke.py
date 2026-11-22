@@ -23,7 +23,7 @@ from tools.silverfish.travel import OBSERVATORY
 DEFAULT_ACTOR = f"{OBSERVATORY}.Observitory_P:PersistentLevel.Eqp_Bolt_C_1"
 
 
-async def verify(work, original, actor, restart=False, held_pistol=False, nearby=False):
+async def verify(work, original, actor, restart=False, held_pistol=False, nearby=False, memory_escrow=False):
     area = loose.actor_map(actor)
     assert area and all(actor != row[1].partition(" ")[2] for row in native_authored_pickup.SOURCES.values())
     target = f"loose:{actor}"
@@ -107,6 +107,8 @@ async def verify(work, original, actor, restart=False, held_pistol=False, nearby
         events = [json.loads(line) for line in (hrun / "events.jsonl").read_text().splitlines()]
         applied, = [event for event in events if event["event"] == "native_loose_pickup_claimed" and event["actor"] == actor]
         assert applied["owner"] == owner
+        if memory_escrow:
+            assert applied.get("escrow") == "memory", applied.get("escrow")
         replay = await action(claimant, loose.CLAIM, target=target, operation_id=applied["operation_id"])
         assert replay[loose.PROOF]["guid"] == applied["guid"]
         second = await submit(other, loose.CLAIM, target=target)
@@ -121,7 +123,7 @@ async def verify(work, original, actor, restart=False, held_pistol=False, nearby
         assert saved_hashes(original) == originals
         proof = dict(visible=visible, ownership=replay[loose.PROOF], duplicate=second["error"], backpack=row,
                      original_files_verified=len(originals), out_of_reach=out_of_reach, held_pistol=held_pistol,
-                     nearby=nearby)
+                     nearby=nearby, escrow=applied.get("escrow"))
         if restart:
             assert applied["mode"] in (1, 2)
             old = status(hrun)
@@ -158,10 +160,12 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--actor", default=DEFAULT_ACTOR)
     parser.add_argument("--restart", action="store_true")
+    parser.add_argument("--memory-escrow", action="store_true", help="require an in-memory transfer and durable stock readback")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--held-pistol", action="store_true", help="claim the loose item while holding a stock pistol")
     modes.add_argument("--nearby", action="store_true", help="claim the item through the host's stock Nearby Items menu")
     args = parser.parse_args()
     if args.nearby and args.restart:
         parser.error("The restart check follows the guest claim")
-    asyncio.run(verify(args.work.resolve(), args.vanilla_saved, args.actor, args.restart, args.held_pistol, args.nearby))
+    asyncio.run(verify(args.work.resolve(), args.vanilla_saved, args.actor, args.restart, args.held_pistol, args.nearby,
+                       args.memory_escrow))

@@ -432,7 +432,8 @@ local function claim(fields, state, phase, profile)
     if type(SilverfishCaptureNativeAuthoredPickup) ~= "function" or type(SilverfishVerifyNativeAuthoredPickup) ~= "function"
         or type(SilverfishRecoverNativeInventoryBag) ~= "function" then error("authored_pickup_claim_arguments", 0) end
     local save_class = StaticFindObject(save_path)
-    if not valid(pawn) or not valid(save_class) or statics:DoesSaveGameExist(slot, 0) then
+    local memory = profile.loose and type(SilverfishVerifyNativeStashSave) == "function"
+    if not valid(pawn) or not valid(save_class) or not memory and statics:DoesSaveGameExist(slot, 0) then
         report.status = "authored_pickup_claimant_or_slot_unavailable"
         return "authored loose pickup reported"
     end
@@ -477,19 +478,23 @@ local function claim(fields, state, phase, profile)
         report.status = tostring(reason)
         return "authored loose pickup reported"
     end
-    if not statics:SaveGameToSlot(scratch, slot, 0) then
-        report.status = "authored_pickup_escrow_write_failed"
-        return "authored loose pickup reported"
-    end
-    local restored = statics:LoadGameFromSlot(slot, 0)
-    if not valid(restored) or not SilverfishVerifyNativeAuthoredPickup(scratch:GetAddress(), restored:GetAddress(), profile.source) then
-        report.status = "authored_pickup_escrow_roundtrip_failed"
-        return "authored loose pickup reported"
+    local source = scratch
+    if not memory then
+        if not statics:SaveGameToSlot(scratch, slot, 0) then
+            report.status = "authored_pickup_escrow_write_failed"
+            return "authored loose pickup reported"
+        end
+        source = statics:LoadGameFromSlot(slot, 0)
+        if not valid(source) or not SilverfishVerifyNativeAuthoredPickup(scratch:GetAddress(), source:GetAddress(), profile.source) then
+            report.status = "authored_pickup_escrow_roundtrip_failed"
+            return "authored loose pickup reported"
+        end
     end
     report.guid = item
+    report.memory = memory == true
     if profile.stock_supply then
         local accepted, reason, stack, before, after = SilverfishMergeNativeAuthoredSupply(
-            pawn:GetAddress(), save:GetAddress(), restored:GetAddress(), profile.source, item)
+            pawn:GetAddress(), save:GetAddress(), source:GetAddress(), profile.source, item)
         if accepted == true and reason == "merged" then
             report.applied = true
             report.ok = guid(stack) and stack ~= item and math.type(before) == "integer" and before > 0
@@ -505,7 +510,7 @@ local function claim(fields, state, phase, profile)
             return "authored loose pickup reported"
         end
     end
-    local applied, status, count = SilverfishRecoverNativeInventoryBag(restored:GetAddress(), save:GetAddress(), pawn:GetAddress())
+    local applied, status, count = SilverfishRecoverNativeInventoryBag(source:GetAddress(), save:GetAddress(), pawn:GetAddress())
     report.applied = applied == true or tostring(status):match("^mutation_unverified_") ~= nil
     report.ok = applied == true and status == "recovered" and count == 1
     report.status = report.ok and "claimed" or (applied and "mutation_unverified_authored_pickup_count" or tostring(status))
@@ -864,7 +869,8 @@ function pickup.rows(state, phase, status_row)
         local profile, cash = report.loose, report.cash
         rows[#rows + 1] = status_row("native-loose-pickup-claim", state.map, profile.source, profile.class,
             profile.mode, report.pawn, report.slot, report.status, report.ok and 1 or 0, report.applied and 1 or 0,
-            report.guid or "-", cash and cash.amount or 0, cash and cash.before or 0, cash and cash.after or 0)
+            report.guid or "-", cash and cash.amount or 0, cash and cash.before or 0, cash and cash.after or 0,
+            report.memory and "memory" or "disk")
     elseif report and phase == "hosting" then
         rows[#rows + 1] = status_row("native-authored-pickup-claim", report.source, state.map, report.pawn,
             report.ok and 1 or 0, report.applied and 1 or 0, report.status, report.guid or "-", report.slot)

@@ -442,7 +442,7 @@ local function bind(state, phase, name, raw_health, slot, proof)
     return "native guest save bound"
 end
 
-function guest_save.capture(state, phase, name, slot)
+function guest_save.capture(state, phase, name, slot, typed_inventory)
     if not enabled then error("Native guest saves are disabled", 0) end
     if not generation_slot(slot) then error("An exact co-op guest save generation is required", 0) end
     local _, guest = exact_guest(state, phase, name)
@@ -473,9 +473,10 @@ function guest_save.capture(state, phase, name, slot)
     if verified.PlayerHealth ~= health or checked_backpack ~= backpack or checked_equipment ~= equipment then
         error("The co-op guest save summary did not survive stock serialization", 0)
     end
-    if type(SilverfishVerifyNativeStashSave) == "function"
-        and (detached.Stashes:GetArrayNum() > 0 or verified.Stashes:GetArrayNum() > 0)
-        and SilverfishVerifyNativeStashSave(detached:GetAddress(), verified:GetAddress()) ~= true then
+    local verify = SilverfishVerifyNativeStashSave
+    if typed_inventory and type(verify) ~= "function"
+        or type(verify) == "function" and (typed_inventory or detached.Stashes:GetArrayNum() > 0 or verified.Stashes:GetArrayNum() > 0)
+        and verify(detached:GetAddress(), verified:GetAddress()) ~= true then
         error("The detached stash and backpack did not survive stock serialization", 0)
     end
     binding.frame = { kind = "captured", slot = slot, backpack = checked_backpack, equipment = checked_equipment }

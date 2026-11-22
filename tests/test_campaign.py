@@ -325,6 +325,30 @@ class AsyncCampaignCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.status()["world"], {"visit": 2})
         self.assertEqual(json.loads(self.store.previous_path.read_bytes())["world"], {"visit": 1})
 
+    async def test_post_commit_cleanup_runs_with_the_same_ordered_writer(self):
+        self.resume.set()
+        started = threading.Event()
+        finish = threading.Event()
+
+        def cleanup():
+            self.assertEqual(self.store.status()["revision"], 1)
+            started.set()
+            if not finish.wait(5):
+                raise TimeoutError("test did not release the checkpoint cleanup")
+
+        first = asyncio.create_task(self.store.checkpoint_async({"visit": 1}, {}, after_commit=cleanup))
+        try:
+            self.assertTrue(await asyncio.to_thread(started.wait, 3))
+            second = asyncio.create_task(self.store.checkpoint_async({"visit": 2}, {}))
+            await asyncio.sleep(0)
+            self.assertFalse(first.done())
+            self.assertFalse(second.done())
+            self.assertEqual(self.store.status()["world"], {"visit": 1})
+        finally:
+            finish.set()
+        self.assertEqual(await first, 1)
+        self.assertEqual(await second, 2)
+
     async def test_cancellation_drains_commit_before_allowing_another_write(self):
         first = asyncio.create_task(self.store.checkpoint_async({"visit": 1}, {}))
         try:

@@ -31,6 +31,8 @@ class Control:
         self.run = run
         self.generation = uuid.uuid4().hex
         self.started = time.time()
+        self._gameplay_status_key = None
+        self._next_gameplay_status = 0.0
         run.mkdir(parents=True, exist_ok=True)
         self._lock = (run / "control.lock").open("a+b")
         try:
@@ -49,6 +51,15 @@ class Control:
 
     def __exit__(self, *_):
         self._lock.close()
+
+    def gameplay_status_due(self, *key) -> bool:
+        """Coalesce ordinary diagnostic frames and publish lifecycle changes immediately."""
+        now = time.monotonic()
+        if key == self._gameplay_status_key and now < self._next_gameplay_status:
+            return False
+        self._gameplay_status_key = key
+        self._next_gameplay_status = now + .25
+        return True
 
     def status(self, **fields) -> None:
         write_json(self.run / "status.json", {

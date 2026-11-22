@@ -111,7 +111,7 @@ function host_save.prepare_extraction(state, phase, keep_text, drops_text, shrin
     return "canonical stock extraction settings prepared before travel"
 end
 
-function host_save.capture(state, phase, slot)
+function host_save.capture(state, phase, slot, typed_inventory)
     if not generation_slot(slot) then error("An exact co-op save generation slot is required", 0) end
     local instance, pawn, statics = host_save.canonical_host(state, phase)
     if not instance then error("The authoritative host does not have a canonical stock save", 0) end
@@ -132,9 +132,10 @@ function host_save.capture(state, phase, slot)
         or not matches_extraction(verified, extraction) then
         error("The co-op save generation summary did not survive stock serialization", 0)
     end
-    if type(SilverfishVerifyNativeStashSave) == "function"
-        and (save.Stashes:GetArrayNum() > 0 or verified.Stashes:GetArrayNum() > 0)
-        and SilverfishVerifyNativeStashSave(save:GetAddress(), verified:GetAddress()) ~= true then
+    local verify = SilverfishVerifyNativeStashSave
+    if typed_inventory and type(verify) ~= "function"
+        or type(verify) == "function" and (typed_inventory or save.Stashes:GetArrayNum() > 0 or verified.Stashes:GetArrayNum() > 0)
+        and verify(save:GetAddress(), verified:GetAddress()) ~= true then
         error("The canonical stash and backpack did not survive stock serialization", 0)
     end
     receipt = { kind = "captured", slot = slot, map = state.map, pawn = pawn:GetFullName(),

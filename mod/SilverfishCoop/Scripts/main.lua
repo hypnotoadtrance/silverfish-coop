@@ -140,6 +140,7 @@ local stock_save_probes = {
 local gameplay_statics_path = "/Script/Engine.Default__GameplayStatics"
 local command_path = bridge .. "/command.tsv"
 local status_path = bridge .. "/status.tsv"
+local next_file_status = 0
 -- A quiet Direct IP link can take up to 12 seconds to declare a disconnect.
 local connection_timeout_seconds = 110
 local restore_position_tolerance = 0.25
@@ -537,7 +538,8 @@ local function run_command(fields, state, current_phase)
         return "native_enemy_loot_roll_pending"
     end
     if (command == "travel" or command == "native-world-flush" or command == "native-host-save-capture"
-        or command == "native-guest-save-capture") and native_kill_volume.capture_blocked(state, current_phase) then
+        or command == "native-host-save-capture-typed" or command == "native-guest-save-capture")
+        and native_kill_volume.capture_blocked(state, current_phase) then
         error("stock_kill_volume_recovery_in_progress", 0)
     end
     if role == "host" and (command == "travel" or command == "native-world-flush" or command == "native-rest")
@@ -859,7 +861,8 @@ local function run_command(fields, state, current_phase)
         local result = action.invoke(state, current_phase, argument, fields[4], fields[5])
         last_broker_quest = { world = state.world, operation = command, target = argument, result = result }
         return "stock Broker quest state verified"
-    elseif command == "native-host-save-capture" then
+    elseif command == "native-host-save-capture" or command == "native-host-save-capture-typed" then
+        local typed_inventory = command == "native-host-save-capture-typed"
         local paired = #fields >= 6 and #fields <= 12 and #fields % 2 == 0
         if (#fields ~= 3 and #fields ~= 4 and not paired) or role ~= "host" then
             error("Expected isolated co-op save generations", 0)
@@ -877,9 +880,9 @@ local function run_command(fields, state, current_phase)
                 slots[slot], pawns[pawn] = true, true
             end
         end
-        local receipt = native_host_save.capture(state, current_phase, argument)
+        local receipt = native_host_save.capture(state, current_phase, argument, typed_inventory)
         for index = 5, #fields, 2 do
-            guest_save.capture(state, current_phase, fields[index], fields[index + 1])
+            guest_save.capture(state, current_phase, fields[index], fields[index + 1], typed_inventory)
         end
         return receipt
     elseif command == "native-guest-quest-xp" then
@@ -1405,6 +1408,12 @@ local function write_status(state, current_phase, failure, fields, pending)
     if pending and pending.dispatched and acknowledged_id == pending.fields[1] then
         SilverfishPublishLocalBridgeReply(pending.ticket, frame)
     end
+
+    -- Keep status.tsv fresh for diagnostics and acknowledge legacy file commands immediately.
+    local now = os.clock()
+    local file_command = fields and not pending
+    if not file_command and now < next_file_status then return end
+    next_file_status = now + 0.25
     local temporary = status_path .. ".tmp"
     local file = io.open(temporary, "wb")
     if not file then return end
@@ -1616,7 +1625,7 @@ LoopInGameThreadWithDelay(25, function()
     if not leaving then pcall(native_player_avatar.animate_recoil, current_world) end
     if not leaving then pcall(native_player_avatar.animate_cycle, current_world) end
     local now = os.clock()
-    local periodic = now >= next_snapshot
+    local periodic = now >= next_snapshot or now >= next_file_status
     local fields, pending = read_command(periodic)
     if not fields and not periodic then return end
     next_snapshot = now + 0.25

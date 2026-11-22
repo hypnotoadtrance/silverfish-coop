@@ -42,6 +42,13 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 
 18. **Coordinated zone travel.** The host validates the 15-meter check against the active roster before travel. Downed characters and characters within reconnect grace count. Show which characters block the transition. Stardust, the green, blue, red, and golden cubes, and similar transport items or events are host-only in co-op. An approved use transports the whole party to the event's destination and uses its arrival rules. A destination in the current map moves the party together without reconnecting. A rejected use leaves the item, charges, and travel state intact. Queue incoming joins during travel or a wipe, then admit new arrivals at a safe spot near the host once the party can accept them.
 
+## Responsiveness
+
+- Keep local movement, camera, input feedback, and presentation running while a co-op action is pending. Use Unreal prediction and smoothing for movement and keep socket I/O and durable disk work on background workers.
+- Apply gameplay changes on the game thread when their inputs and current world are ready. Use exact, bounded requests and budget bulk discovery and projection across frames.
+- Send player actions and lasting outcomes reliably. Settle competing claims at the host in accepted order, using one result per operation ID. Apply a confirmed inventory transfer, trade, revive, or quest change to the relevant players. Use a current baseline on late join, travel, or reconnect.
+- Give gameplay traffic and action receipts priority over bulky snapshots and diagnostics. Use short-lived messages for replaceable visual and audio effects. Keep the host's saved state and per-character ownership authoritative through a delay or disconnect.
+
 ## Implementation milestones
 
 ### Physical world loot
