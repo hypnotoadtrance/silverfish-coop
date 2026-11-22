@@ -2731,6 +2731,16 @@ class Bridge:
                             and movement is not None and 0 <= movement <= 500):
                         data.setdefault("native_avatar_melee", {})[pawn] = {
                             "serial": int(serial), "clip": clip, "weapon_hand_motion_cm": movement, "active": active == "1"}
+                elif fields[0] == "native-avatar-recoil" and len(fields) == 9:
+                    pawn, weapon, serial, count, peak, angle, active, restored = fields[1:]
+                    peak, angle = _finite(peak), _finite(angle)
+                    if (pawn.startswith("Player_FP_C ") and native_weapon_fire_view.stock_weapon_class(weapon)
+                            and re.fullmatch(r"[1-9][0-9]{0,14}", serial) and re.fullmatch(r"[1-9][0-9]{0,14}", count)
+                            and peak is not None and 0 <= peak <= 53 and angle is not None and 0 <= angle <= 45.1
+                            and active in ("0", "1") and restored in ("0", "1")):
+                        data.setdefault("native_avatar_recoil", {})[pawn] = {
+                            "serial": int(serial), "weapon": weapon, "count": int(count), "kick_cm": peak,
+                            "rotation_degrees": angle, "active": active == "1", "restored": restored == "1"}
                 elif fields[0] == native_player_avatar.TAG:
                     player_id, outfit = native_player_avatar.parse(fields, data.get("state"), data.get("map"))
                     outfits = data.setdefault(native_player_avatar.KEY, {})

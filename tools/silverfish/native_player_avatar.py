@@ -6,6 +6,7 @@ import re
 import time
 
 from .native_stock_door import actor_map
+from .native_weapon_fire_view import stock_weapon_class
 from .party import REQUEST_ID
 
 
@@ -25,7 +26,7 @@ _NPC = "/Game/Classes/NPCs/NPC_Assets/"
 _HELMET_MESHES = "/Game/Classes/Player/PlayerAssets/HelmetMeshes/"
 _APPEARANCE = ("face", "plumage", "body", "tail_static", "tail_skeletal", "scale_pattern", "skin_color",
                "plumage_color", "eye_color", "eye_style")
-_OUTFIT = ("body", "head", "weapon", "appearance", "aim")
+_OUTFIT = ("body", "head", "weapon", "appearance", "aim", "firearm")
 _AIM = ("-", "pistol", "rifle")
 
 
@@ -101,20 +102,22 @@ def character_appearance(model):
 
 
 def parse(fields, phase, area):
-    if len(fields) not in (5, 6, 7, 8, 9) or phase != "hosting":
+    if len(fields) not in (5, 6, 7, 8, 9, 10) or phase != "hosting":
         raise ValueError("Invalid authoritative outfit row")
     _, player_id, pawn, body, head = fields[:5]
     weapon = fields[5] if len(fields) >= 6 else "-"
     appearance = fields[6] if len(fields) >= 7 else "-"
     aim = fields[7] if len(fields) >= 8 else "-"
-    gun = fields[8] if len(fields) == 9 else aim
+    gun = fields[8] if len(fields) >= 9 else aim
+    firearm = fields[9] if len(fields) == 10 else "-"
     if (not valid_id(player_id) or not pawn.startswith("Player_FP_C ") or actor_map(pawn) != area
             or not all(map(valid_path, (body, head))) or weapon_meshes(weapon) is None
             or character_appearance(appearance) is None or aim not in ("-", gun)
-            or gun not in _AIM or gun != "-" and weapon == "-"):
+            or gun not in _AIM or gun != "-" and weapon == "-"
+            or firearm != "-" and (weapon == "-" or not stock_weapon_class(firearm))):
         raise ValueError("Invalid authoritative outfit identity")
     return player_id, {"pawn": pawn, "body": body, "head": head, "weapon": weapon, "appearance": appearance,
-                       "aim": aim, "gun": gun}
+                       "aim": aim, "gun": gun, "firearm": firearm}
 
 
 def guest_aim(host, character, member, pressed):
@@ -178,6 +181,7 @@ async def project(bridge, game, incoming, epoch):
             or not all(map(valid_path, (row["body"], row["head"]))) or weapon_meshes(row["weapon"]) is None
             or character_appearance(row["appearance"]) is None or row["aim"] not in _AIM
             or row["aim"] != "-" and row["weapon"] == "-"
+            or row["firearm"] != "-" and (row["weapon"] == "-" or not stock_weapon_class(row["firearm"]))
             for key, row in outfits.items())):
         return game
     receipt = hashlib.sha256(json.dumps([area, epoch, outfits], sort_keys=True).encode()).hexdigest()[:32]

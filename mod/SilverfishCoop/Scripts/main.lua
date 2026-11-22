@@ -1586,6 +1586,7 @@ local next_snapshot = 0
 LoopInGameThreadWithDelay(25, function()
     if role == "host" and not leaving then pcall(native_weapon_fire_view.flush, current_world) end
     if not leaving then pcall(native_player_avatar.animate_melee, current_world) end
+    if not leaving then pcall(native_player_avatar.animate_recoil, current_world) end
     local fields = read_command()
     local now = os.clock()
     if not fields and now < next_snapshot then return end

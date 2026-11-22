@@ -113,7 +113,7 @@ Keep a local, versioned JSON interface alongside the menu. It should expose sess
 - Replicate entity death and the transition to the stock corpse or ragdoll on peers. Cover the boar and other enemy types killed by the host.
 - Play the player-hit screen effect only for the struck player. When a target is downed, hostile NPCs should disengage and acquire an eligible standing player.
 - Extend anomaly synchronization to more field and map-placed hazard types, including their active effects. Drive health, downing, and game-over from the host so a guest-side anomaly cannot kill a remote player or trigger a party wipe.
-- Replicate third-person firearm recoil and verify melee variants beyond the bat and Old Pipe. Extend coverage to fires spawned by fixed explosive props.
+- Verify weapon cycling and melee variants beyond the bat and Old Pipe. Extend coverage to fires spawned by fixed explosive props.
 - Replicate a thrown flare's lit world actor after it leaves the equipped hand. Check the throw and light on both peers through expiry.
 - Compare frame times and network traffic at the Observatory and Crossroads. Measure the client projection and host discovery work separately from packet arrival before changing update pacing.
 
@@ -152,6 +152,8 @@ Stock propane canisters use host-authoritative physics, ignition, rupture, and d
 Fixed explosive props project the host's destroyed flag and the matching stock mesh by actor path. The guest plays the host's qualified blast cue separately from the state update. In the muted Dry Dock test, four stock pistol rounds destroyed a power box. The watching guest saw one blast and the broken mesh while keeping full health. A new guest received the broken mesh after joining the running campaign. [Fixed explosive test](../tests/live_fixed_explosives_smoke.py)
 
 Stock firearm shots send the host's muzzle transform and weapon class as short-lived datagrams on the encrypted Direct IP connection. Guests play the weapon's muzzle flash and spatial firing sound locally. The Dry Dock test verified one flash per host pistol round and one flash for a guest shotgun round that produced nine pellets on the host. It also checked stock sound selection and that a later join did not replay the shots. Host fixture submission to guest playback took 158–292 ms on loopback, down from 592–1,059 ms with snapshot delivery. Both measurements include the local fixture command. Shot effects may be skipped during packet loss or a slow frame. Audio output was muted, so the audible mix still needs a foreground playtest. [Firearm effects test](../tests/live_fixed_explosives_smoke.py)
+
+Firearm recoil uses the stock shot's weapon-mesh offset, rotation, and recovery time. The observing peer applies those values to the held weapon's attachment at the avatar's hand. Dry Dock loopback tests confirmed four pistol recoil movements on the guest, one shotgun recoil movement on the host, and a return to the resting transform on both peers. In Observatory, a guest's two SMG holds fired ten rounds total. The host recorded all ten recoil events and the weapon returned to rest after each hold. [Dry Dock test](../tests/live_fixed_explosives_smoke.py) · [SMG hold test](../tests/live_smg_hold_smoke.py)
 
 Stock door interactions now apply the exact host receipt on the initiating guest as soon as it arrives. The normal world snapshot still reconciles doors on both peers. Stock stash discovery caches site positions for status reporting between censuses. Transfers still check the participant's current distance from the live stash.
 

@@ -17,16 +17,30 @@ MELEE_CLIPS = {"slash": "Standing_Melee_Attack_Horizontal", "backhand": "Standin
                "overhead": "Standing_Melee_Attack_Downward"}
 
 
+def stock_weapon_class(path):
+    return type(path) is str and len(path) <= 160 and _STOCK_CLASS.fullmatch(path)
+
+
 def valid_shot(cue):
-    if type(cue) is not list or len(cue) != 11:
+    if type(cue) is not list or len(cue) not in (11, 19):
         return False
-    serial, path, *pose = cue
+    serial, path = cue[:2]
+    pose = cue[2:11]
     return (type(serial) is int and 0 < serial < 10**15
-            and type(path) is str and len(path) <= 160 and _STOCK_CLASS.fullmatch(path)
+            and stock_weapon_class(path)
             and valid_position(pose[:3])
             and all(type(angle) in (int, float) and -180 <= angle <= 180 for angle in pose[3:6])
             and all(type(value) in (int, float) and low <= value <= high
-                    for value, (low, high) in zip(pose[6:], ((0, 10), (0, 10), (-26, 24)), strict=True)))
+                    for value, (low, high) in zip(pose[6:], ((0, 10), (0, 10), (-26, 24)), strict=True))
+            and (len(cue) == 11 or valid_recoil(cue[11:])))
+
+
+def valid_recoil(recoil):
+    player, *target, recovery = recoil
+    return (type(player) is int and 0 <= player <= 2147483647
+            and all(type(value) in (int, float) and abs(value) <= limit
+                    for value, limit in zip(target, (30, 30, 30, 45, 45, 45), strict=True))
+            and type(recovery) in (int, float) and .02 <= recovery <= 1.5)
 
 
 def valid_melee(cue):
@@ -55,11 +69,12 @@ def _captured(data):
             if valid_melee(cue):
                 cues.append(cue)
             continue
-        if len(fields) != 11:
+        if len(fields) not in (11, 19):
             continue
-        serial, path, *pose = fields
         try:
-            cue = [int(serial), path, *map(float, pose)]
+            cue = [int(fields[0]), fields[1], *map(float, fields[2:11])]
+            if len(fields) == 19:
+                cue.extend([int(fields[11]), *map(float, fields[12:])])
         except ValueError:
             continue
         if valid_shot(cue):
@@ -146,8 +161,9 @@ class Playback:
             if hit and (source := selected.get(int(hit[1]))) and source[0] == "melee" and MELEE_CLIPS[source[2]] == hit[2]:
                 control.event("native_avatar_melee_played", serial=int(hit[1]), player_id=source[1], clip=hit[2])
                 continue
-            match = re.fullmatch(r"([0-9]{1,15}):([01]):([01]):([01])", receipt)
+            match = re.fullmatch(r"([0-9]{1,15}):([01]):([01]):([01]):([01])", receipt)
             if match and (serial := int(match[1])) in selected and selected[serial][0] != "melee":
                 control.event("native_weapon_shot_played", serial=serial, weapon=selected[serial][0],
-                              muzzle_flash=match[2] == "1", audio_component=match[3] == "1", stock_sound=match[4] == "1")
+                              muzzle_flash=match[2] == "1", audio_component=match[3] == "1", stock_sound=match[4] == "1",
+                              recoil=match[5] == "1")
         return result

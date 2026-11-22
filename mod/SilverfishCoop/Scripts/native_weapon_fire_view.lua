@@ -7,10 +7,12 @@ local melee_clip_root = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/Mele
 local attack_animation = "Animation_2_C8CAEADF40C9F2C76A885BA8E5E9AA27"
 local attack_rate = "SwingRate_17_17DEA9B2431C48BC143445BD3516142E"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
+local math_path = "/Script/Engine.Default__KismetMathLibrary"
+local stock_rest_inverse = {Pitch = 0, Yaw = 90, Roll = 0}
 local attenuation_path = "/Game/Assets/Sounds/SoundClasses/Weapon_Attenuation.Weapon_Attenuation"
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 local maximum, range = 36, 30000
-local current, hooked, melee_hooked, visit, last_played
+local current, hooked, melee_hooked, recoil_hooked, visit, last_played, last_round
 local serial, published, pending = 0, 0, {}
 
 local function valid(object) return object and object:IsValid() end
@@ -64,8 +66,38 @@ local function capture(context)
     local scale, volume, pitch = weapon.MuzzleFlash_Scale, weapon.Fire_Volume, weapon.Fire_PitchShift
     if not bounded(scale, 0, 10) or not bounded(volume, 0, 10) or not bounded(pitch, -24, 24) then return end
     serial = serial + 1
-    record({serial, path, position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw,
-        rotation.Roll, scale, volume, pitch - 2, expires = current.statics:GetRealTimeSeconds(pawn) + .25})
+    local now = current.statics:GetRealTimeSeconds(pawn)
+    local row = {serial, path, position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw,
+        rotation.Roll, scale, volume, pitch - 2, expires = now + .25}
+    last_round = {row = row, weapon = weapon, at = now}
+    record(row)
+end
+
+local function valid_recoil(player, values)
+    return player and player >= 0 and player <= 2147483647
+        and bounded(values[1], -30, 30) and bounded(values[2], -30, 30) and bounded(values[3], -30, 30)
+        and bounded(values[4], -45, 45) and bounded(values[5], -45, 45) and bounded(values[6], -45, 45)
+        and bounded(values[7], .02, 1.5)
+end
+
+local function capture_recoil(context, target, orientation)
+    local weapon, pawn = equipped_player(context)
+    if not weapon or not last_round or not same(last_round.weapon, weapon) or #last_round.row ~= 11
+        or current.statics:GetRealTimeSeconds(pawn) - last_round.at > .06 then return end
+    local offset, rotation = target:get(), orientation:get()
+    local math_api = StaticFindObject(math_path)
+    if not valid(math_api) then return end
+    -- The parts retain their stock rest transforms. Apply the delta from the
+    -- stock mesh's -90 degree yaw in the parent frame.
+    local delta = math_api:ComposeRotators(stock_rest_inverse, rotation)
+    local values = {offset.X, offset.Y, offset.Z, delta.Pitch, delta.Yaw, delta.Roll, weapon.Anim_Recoil_RecoveryTime}
+    local avatar = current.avatar
+    local player = avatar.player_id({pawn = pawn, controller_object = pawn.Controller})
+    if not valid_recoil(player, values) then return end
+    local row = last_round.row
+    row[12] = player
+    for index, value in ipairs(values) do row[12 + index] = value end
+    if not pawn:IsLocallyControlled() then avatar.play_recoil(current.world, player, row[2], row[1], values) end
 end
 
 local function capture_melee(context)
@@ -100,12 +132,17 @@ end
 
 function view.sync(state, phase, avatar)
     if phase ~= "hosting" or not valid(state.world) then
-        current, pending = nil, {}
+        current, pending, last_round = nil, {}, nil
         return
     end
     if not current or not same(current.world, state.world) then
         current = {world = state.world, map = state.map, statics = StaticFindObject(statics_path), avatar = avatar}
-        pending = {}
+        pending, last_round = {}, nil
+    end
+    local recoil = weapon_base .. ":ApplyRecoil"
+    if not recoil_hooked and valid(StaticFindObject(recoil)) then
+        RegisterHook(recoil, function(context, target, orientation) pcall(capture_recoil, context, target, orientation) end)
+        recoil_hooked = true
     end
     local path = weapon_base .. ":SpawnProjectile"
     if not hooked and valid(StaticFindObject(path)) then
@@ -197,7 +234,7 @@ function view.command(args, state, phase, avatar)
         x, y, z = tonumber(x), tonumber(y), tonumber(z)
         pitch_angle, yaw, roll = tonumber(pitch_angle), tonumber(yaw), tonumber(roll)
         scale, volume, pitch = tonumber(scale), tonumber(volume), tonumber(pitch)
-        if #values == 11 and id and id > last_played and stock_weapon(path)
+        if (#values == 11 or #values == 19) and id and id > last_played and stock_weapon(path)
             and bounded(x, -1e7, 1e7) and bounded(y, -1e7, 1e7) and bounded(z, -1e7, 1e7)
             and bounded(pitch_angle, -180, 180) and bounded(yaw, -180, 180) and bounded(roll, -180, 180)
             and bounded(scale, 0, 10) and bounded(volume, 0, 10) and bounded(pitch, -26, 24) then
@@ -206,9 +243,19 @@ function view.command(args, state, phase, avatar)
             if distance <= range then
                 local ok, particles, audio, stock_sound = pcall(play, pawn, path, {X = x, Y = y, Z = z},
                     {Pitch = pitch_angle, Yaw = yaw, Roll = roll}, scale, volume, pitch, distance)
+                local recoil = false
+                if #values == 19 then
+                    local source = math.tointeger(tonumber(values[12]))
+                    local kick = {}
+                    for index = 1, 7 do kick[index] = tonumber(values[12 + index]) end
+                    if valid_recoil(source, kick) then
+                        local applied, moved = pcall(avatar.play_recoil, state.world, source, path, id, kick)
+                        recoil = applied and moved
+                    end
+                end
                 if ok then
-                    receipts[#receipts + 1] = string.format("%d:%d:%d:%d", id,
-                        particles and 1 or 0, audio and 1 or 0, stock_sound and 1 or 0)
+                    receipts[#receipts + 1] = string.format("%d:%d:%d:%d:%d", id,
+                        particles and 1 or 0, audio and 1 or 0, stock_sound and 1 or 0, recoil and 1 or 0)
                 end
             end
         end

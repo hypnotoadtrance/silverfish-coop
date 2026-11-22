@@ -48,10 +48,19 @@ async def verify(work, vanilla):
         value = prop(frame)
         return value.get("destroyed") and value.get("damaged_mesh") and value.get("mesh") == BROKEN
 
+    def visible_weapon(frame):
+        return any(row.get("weapon_meshes") and not row.get("diagnostic")
+                   for row in frame.get("game", {}).get("native_player_avatars", {}).values())
+
+    def recoil(frame, weapon, count):
+        matched = [row for row in frame.get("game", {}).get("native_avatar_recoil", {}).values()
+                   if (row["weapon"], row["count"], row["restored"]) == (weapon, count, True)
+                   and max(row["kick_cm"], row["rotation_degrees"]) > .1]
+        return matched[0] if len(matched) == 1 else None
+
     async def launch(run, role, *args):
         env = dict(os.environ)
-        if role != "host":
-            env["SILVERFISH_COOP_RENDER_CAPTURE"] = "guest"
+        env["SILVERFISH_COOP_RENDER_CAPTURE"] = "host" if role == "host" else "guest"
         with (host / f"{role}.log").open("wb") as log:
             process = await asyncio.create_subprocess_exec(*cli, *args, "--headless", "--native-zones",
                                                            stdout=log, stderr=log, env=env, cwd=REPO,
@@ -90,6 +99,7 @@ async def verify(work, vanilla):
         bound = await wait(host, lambda frame: frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
         guest_health = bound["game"]["pawns"]["guest"]["health"]
         await action(host, "native-fixed-explosive-prepare-fixture", target=TARGET)
+        await wait(guest, visible_weapon)
         shot_times = []
         for _ in range(7):
             shot_times.append(time.time())
@@ -103,7 +113,11 @@ async def verify(work, vanilla):
         await wait(guest, lambda _: len(events(guest, SHOT)) >= proof["rounds_fired"], timeout=8)
         shots = events(guest, SHOT)
         assert len(shots) == len({shot["serial"] for shot in shots}) == proof["rounds_fired"], shots
-        assert all(shot["weapon"] == PISTOL and shot["muzzle_flash"] and shot["stock_sound"] for shot in shots), shots
+        assert all(shot["weapon"] == PISTOL and shot["muzzle_flash"] and shot["stock_sound"] and shot["recoil"]
+                   for shot in shots), shots
+        count = proof["rounds_fired"]
+        rendered = await wait(guest, lambda frame: recoil(frame, PISTOL, count), timeout=8)
+        proof["pistol_recoil"] = recoil(rendered, PISTOL, count)
         cue, = events(guest, CUE)
         assert cue["cue"] == "powerbox" and cue["particles"], cue
         assert destroyed["game"]["native_fixed_explosive_capture"] == 1
@@ -118,12 +132,15 @@ async def verify(work, vanilla):
         await action(host, "native-guest-weapon-seed", target="guest", kind=weapon.kind, item_guid=guid)
         await action(guest, "native-guest-weapon-equip", target=guid)
         await wait(guest, lambda frame: frame.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
+        await wait(host, visible_weapon)
         trigger = (await action(guest, "native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
         executed = await wait_event(guest, "native_guest_primary_input", lambda row: row["sequence"] == trigger["sequence"])
         spent = executed["native_guest_weapon"]
         assert spent["before"] - spent["after"] == 1 and spent["projectiles"] == TWELVE_GAUGE_BUCK.projectile_count, spent
         observed = await wait_event(guest, SHOT, lambda row: row["weapon"] == weapon.path)
-        assert observed["muzzle_flash"] and observed["stock_sound"], observed
+        assert observed["muzzle_flash"] and observed["stock_sound"] and not observed["recoil"], observed
+        rendered = await wait(host, lambda frame: recoil(frame, weapon.path, 1), timeout=8)
+        proof["shotgun_recoil"] = recoil(rendered, weapon.path, 1)
         proof["guest_shot"] = {"stock": spent, "effect": observed}
         assert len(events(guest, SHOT)) == proof["rounds_fired"] + 1
 

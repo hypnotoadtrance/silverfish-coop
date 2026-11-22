@@ -13,6 +13,7 @@ from live_multi_smoke import saved_hashes
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from tools.silverfish.guest_weapon_profiles import FIREARMS
 from tools.silverfish.native_smg_hold import FIXTURE, KEY
 from tools.silverfish.travel import OBSERVATORY
 
@@ -73,6 +74,19 @@ async def verify(work, vanilla_saved):
         assert seeded["native_guest_weapon"]["stored_ammo"] == 7, seeded
         equipped = await call("action", *client, "native-guest-weapon-equip", "--target", guid)
         assert equipped["native_guest_weapon"]["actor_ammo"] == 7, equipped
+        pawn = equipped["native_guest_weapon"]["pawn"]
+        smg = next(profile.path for profile in FIREARMS if profile.kind == "smg-standard")
+        await wait(run, lambda state: state.get("game", {}).get("native_player_avatars", {}).get(pawn, {}).get("weapon_meshes"))
+
+        async def recoil_after(rounds):
+            def settled(state):
+                row = state.get("game", {}).get("native_avatar_recoil", {}).get(pawn, {})
+                return (row.get("weapon"), row.get("count"), row.get("restored")) == (smg, rounds, True)
+            state = await wait(run, settled, timeout=8)
+            row = state["game"]["native_avatar_recoil"][pawn]
+            assert not row["active"] and max(row["kick_cm"], row["rotation_degrees"]) > .1, row
+            return row
+
         for loaded in (16, 25):
             reserve = uuid.uuid4().hex.upper()
             await call("action", *host, "native-guest-weapon-seed-ammo", "--item-guid", reserve)
@@ -90,12 +104,14 @@ async def verify(work, vanilla_saved):
         assert (release["guid"], release["status"], release["before"]) == (guid, "released", 25), release
         assert release["rounds"] == release["projectiles"] == 25 - release["after"] >= 2, release
         proof["release"] = release
+        proof["release_recoil"] = await recoil_after(release["rounds"])
         expiry = (await call("action", *host, FIXTURE, "--target", "guest", "--item-guid", guid,
                              "--milliseconds", "650"))[KEY]
         assert (expiry["guid"], expiry["status"], expiry["before"]) == (guid, "expired", release["after"]), expiry
         assert expiry["rounds"] == expiry["projectiles"] == release["after"] - expiry["after"] >= 2, expiry
         assert expiry["serial"] != release["serial"] and expiry["pawn"] == release["pawn"], expiry
         proof["expiry"] = expiry
+        proof["expiry_recoil"] = await recoil_after(release["rounds"] + expiry["rounds"])
 
         await stop(host, authority)
         await stop(client, guest)

@@ -73,6 +73,11 @@ local function aim_kind(equipped)
     return weapon.ItemType == 3 and "pistol" or "rifle"
 end
 
+local function firearm_path(path)
+    local package, class = path:match("^(/Game/Classes/Weapons/[%w_/%-]+)%.([%w_%-]+)_C$")
+    return path == "-" or #path <= 160 and package and package:match("([%w_%-]+)$") == class
+end
+
 local function sync_local_aim(state, phase)
     local pawn = phase == "connected" and state.local_pawn and state.local_pawn.pawn or nil
     holding_aim = nil
@@ -112,8 +117,11 @@ local function observe(state, phase)
                     local read_appearance, appearance = pcall(character_view.observe, save.Character)
                     if read_weapon then weapons[address] = cached end
                     local gun = aim_kind(read_weapon and cached)
+                    local firearm = gun ~= "-" and cached.actor:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
+                    if not firearm or not firearm_path(firearm) then firearm = "-" end
                     observations[id] = { pawn = details.name, body = body, head = head, weapon = read_weapon and weapon or "-",
-                        appearance = read_appearance and appearance or "-", gun = gun, aim = pawn.Aiming and gun or "-" }
+                        appearance = read_appearance and appearance or "-", gun = gun, aim = pawn.Aiming and gun or "-",
+                        firearm = firearm }
                 end
             end
         end
@@ -283,6 +291,19 @@ function avatar.animate_melee(get_world)
     end
 end
 
+function avatar.play_recoil(world, id, path, serial, values)
+    for _, entry in pairs(avatars) do
+        if entry.id == id and valid(entry.pawn) and entry.pawn:GetWorld():GetAddress() == world:GetAddress() then
+            return weapon_view.recoil(entry, world, path, serial, values)
+        end
+    end
+    return false
+end
+
+function avatar.animate_recoil(get_world)
+    weapon_view.animate_recoil(get_world)
+end
+
 local function aim_head(entry)
     local rotation = entry.pawn:GetBaseAimRotation()
     local pitch = (rotation.Pitch + 180) % 360 - 180
@@ -431,7 +452,7 @@ function avatar.sync(state, phase)
                             apply_locomotion(entry, aim)
                             aim_head(entry)
                         end
-                        weapon_view.apply(entry, outfit and outfit.weapon or "-")
+                        weapon_view.apply(entry, outfit and outfit.weapon or "-", outfit and outfit.firearm or "-")
                         if entry.weapon_parts and #entry.weapon_parts > 0 then
                             local socket = entry.body:GetSocketTransform(FName("Weapon_Socket01", EFindName.FNAME_Find), 2)
                             entry.weapon_socket_height = socket.Translation.Z
@@ -473,20 +494,21 @@ function avatar.command(fields, state, phase)
     if fields[2] ~= "native-avatar-outfits" then return end
     local receipt = fields[4]
     if phase ~= "connected" or fields[3] ~= state.map or not receipt or #receipt ~= 32
-        or not receipt:match("^[0-9a-f]+$") or (#fields - 4) % 6 ~= 0 or #fields > 34 then
+        or not receipt:match("^[0-9a-f]+$") or (#fields - 4) % 7 ~= 0 or #fields > 39 then
         error("Invalid remote avatar outfit scope")
     end
     local outfits = {}
-    for index = 5, #fields, 6 do
+    for index = 5, #fields, 7 do
         local id = math.tointeger(tonumber(fields[index]))
         local body, head, weapon, appearance = fields[index + 1], fields[index + 2], fields[index + 3], fields[index + 4]
-        local aim = fields[index + 5]
+        local aim, firearm = fields[index + 5], fields[index + 6]
         if not id or id < 0 or id > 2147483647 or outfits[id] or not outfit_path(body) or not outfit_path(head)
             or not weapon_view.decode(weapon) or not character_view.decode(appearance)
+            or not firearm_path(firearm) or weapon == "-" and firearm ~= "-"
             or aim ~= "-" and (weapon == "-" or not aimed[aim]) then
             error("Invalid remote avatar outfit")
         end
-        outfits[id] = { body = body, head = head, weapon = weapon, appearance = appearance, aim = aim }
+        outfits[id] = { body = body, head = head, weapon = weapon, appearance = appearance, aim = aim, firearm = firearm }
     end
     client_world, client_map, client_outfits, client_receipt = state.world:GetAddress(), state.map, outfits, receipt
     return "Remote avatar outfits received"
@@ -504,10 +526,12 @@ function avatar.rows(row)
             rows[#rows + 1] = row("native-avatar-melee", entry.name, swing.serial, swing.clip, swing.peak,
                 swings[entry] and 1 or 0)
         end
+        local recoil = weapon_view.recoil_row(entry, row)
+        if recoil then rows[#rows + 1] = recoil end
     end
     for id, outfit in pairs(observations) do
         rows[#rows + 1] = row("native-avatar-outfit", id, outfit.pawn, outfit.body, outfit.head, outfit.weapon,
-            outfit.appearance, outfit.aim, outfit.gun)
+            outfit.appearance, outfit.aim, outfit.gun, outfit.firearm)
     end
     if client_receipt then rows[#rows + 1] = row("native-avatar-outfits-receipt", client_receipt) end
     if host_aim_receipt then rows[#rows + 1] = row("native-avatar-host-aim-receipt", host_aim_receipt) end
