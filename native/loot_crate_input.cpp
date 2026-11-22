@@ -275,12 +275,11 @@ namespace
         if (!world) return;
         const auto local = local_owner(world);
         if (!local.pawn) return;
-        const auto active = std::ranges::find_if(scopes, [&](const Scope& candidate) {
-            return same_scope(candidate, crate, local);
-        });
+        const auto index = static_cast<std::size_t>(profile - profiles.data());
+        auto& active = scopes[index];
         const auto now = Clock::now();
-        const bool legacy = profile == &profiles.front();
-        const bool scoped = active != scopes.end() && now < active->expires;
+        const bool legacy = index == 0;
+        const bool scoped = same_scope(active, crate, local) && now < active.expires;
         // The original exact crate keeps its existing live co-op guard. A new
         // profile cannot suppress stock callbacks unless its actual scene armed.
         if (!legacy && (!scoped || !ready_profile(crate, world))) return;
@@ -308,8 +307,8 @@ namespace
                 }
             }
             if (stock.pry_start_entry && point == stock.pry_start_entry && scoped && local.host &&
-                now < active->tool_deadline && active->pry_guest.Get() && boolean(crate, STR("Locked"), true))
-                active->pry_started = true;
+                now < active.tool_deadline && active.pry_guest.Get() && boolean(crate, STR("Locked"), true))
+                active.pry_started = true;
             if (stock.pry_entry && point == stock.pry_entry)
             {
                 // The stock pry delay ends in this independent roll entry.
@@ -318,13 +317,13 @@ namespace
                 if (call.OriginalFunctionCallPrevented() && scoped && local.host && sequence < max_sequence &&
                     boolean(crate, STR("Locked"), stock.pry_start_entry != 0) && boolean(crate, STR("Looted"), false))
                 {
-                    active->observed = ++sequence;
-                    active->receipt = now + receipt_lifetime;
-                    active->pried = true;
-                    if (now >= active->tool_deadline)
+                    active.observed = ++sequence;
+                    active.receipt = now + receipt_lifetime;
+                    active.pried = true;
+                    if (now >= active.tool_deadline)
                     {
-                        active->pry_guest = U::FWeakObjectPtr{};
-                        active->tool_deadline = {};
+                        active.pry_guest = U::FWeakObjectPtr{};
+                        active.tool_deadline = {};
                     }
                 }
             }
@@ -345,9 +344,9 @@ namespace
             !boolean(crate, STR("Looted"), false) || !boolean(pawn, STR("Holding_Interact"), true) ||
             !hit || hit != stock_box(crate) || object(pawn, STR("InteractionTarget_Component")) != hit ||
             !silverfish::native_interaction_input::consume_current_press(pawn)) return;
-        active->observed = ++sequence;
-        active->receipt = now + receipt_lifetime;
-        active->pried = false;
+        active.observed = ++sequence;
+        active.receipt = now + receipt_lifetime;
+        active.pried = false;
         if (!local.host && profile->stock_class->pry_entry)
             silverfish::shared_loot::jiggle_container_lock(crate);
     }
@@ -547,17 +546,18 @@ namespace silverfish::native_loot_crate_input
     bool consume_vehicle_pry(U::UObject* crate, U::UObject* pawn)
     {
         if (!ready()) return false;
+        const auto* profile = silverfish::shared_loot::authored_profile(crate);
+        if (!profile) return false;
+        auto& scope = scopes[static_cast<std::size_t>(profile - profiles.data())];
         const auto now = Clock::now();
-        const auto scope = std::ranges::find_if(scopes, [&](const Scope& candidate) {
-            auto* opener = candidate.tool_deadline != Clock::time_point{} ? candidate.pry_guest.Get() : candidate.pawn.Get();
-            return candidate.crate.Get() == crate && opener == pawn && candidate.host &&
-                candidate.pried && candidate.observed && now < candidate.receipt && now < candidate.expires;
-        });
-        if (scope == scopes.end()) return false;
-        scope->observed = 0;
-        scope->pried = false;
-        scope->pry_guest = U::FWeakObjectPtr{};
-        scope->tool_deadline = {};
+        auto* opener = scope.tool_deadline != Clock::time_point{} ? scope.pry_guest.Get() : scope.pawn.Get();
+        if (scope.crate.Get() != crate || opener != pawn || !scope.host || !scope.pried || !scope.observed ||
+            now >= scope.receipt || now >= scope.expires) return false;
+
+        scope.observed = 0;
+        scope.pried = false;
+        scope.pry_guest = U::FWeakObjectPtr{};
+        scope.tool_deadline = {};
         return true;
     }
     void install_hooks()

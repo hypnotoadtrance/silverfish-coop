@@ -23,8 +23,15 @@ local function same(a, b)
     return valid(a) and valid(b) and a:GetAddress() == b:GetAddress()
 end
 
+local component_classes = {}
 local function exact_component(value, path, owner)
-    return valid(value) and same(value:GetClass(), StaticFindObject(path)) and same(value:GetOwner(), owner)
+    if not valid(value) then return false end
+    local class = component_classes[path]
+    if not valid(class) then
+        class = StaticFindObject(path)
+        component_classes[path] = class
+    end
+    return same(value:GetClass(), class) and same(value:GetOwner(), owner)
 end
 
 local function power_box_audio(crate)

@@ -124,9 +124,12 @@ local modules = {
     native_title_surface = surface,
     native_title_display = {},
     native_title_settings_widget = {},
-    native_title_entry = {probe = function(state, phase)
-        if state.qualified and phase == "ready" then return context end
-    end},
+    native_title_entry = {
+        probe = function(state, phase)
+            if state.qualified and phase == "ready" then return context end
+        end,
+        refresh_singleplayer = function(owner) assert(owner == context) end,
+    },
 }
 env = setmetatable({
     require = function(name)

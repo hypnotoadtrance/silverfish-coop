@@ -7,14 +7,20 @@ local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local guest_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
 local active_world, active_phase, scanned_at, actors, door_parts
-local sampler
+local sampler, pending_census, periodic_sampling
 local trace_report
 local tool_report
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
+local stock_classes = {}
+local function stock_class(path)
+    if not valid(stock_classes[path]) then stock_classes[path] = StaticFindObject(path) end
+    return stock_classes[path]
+end
+
 local function exact(object, path)
-    return valid(object) and same(object:GetClass(), StaticFindObject(path))
+    return valid(object) and same(object:GetClass(), stock_class(path))
 end
 local function available()
     return type(SilverfishStockDoorGuardAvailable) == "function" and SilverfishStockDoorGuardAvailable() == true
@@ -24,7 +30,7 @@ local function finite(value, limit)
 end
 
 local function identity(actor, world)
-    local base = StaticFindObject(base_path)
+    local base = stock_class(base_path)
     if not valid(base) or not valid(actor) or not actor:IsA(base)
         or actor:IsActorBeingDestroyed() or not same(actor:GetWorld(), world)
         or not same(actor:GetOuter(), world.PersistentLevel) then return end
@@ -44,32 +50,74 @@ local function components(actor)
     return arrow, panel, knob
 end
 
+local function census_slice(scan, deadline)
+    for _ = 1, 16 do
+        local candidate = scan.candidates[scan.next]
+        if not candidate then break end
+        scan.next = scan.next + 1
+        local actor = candidate
+        if type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+        local name = identity(actor, scan.world)
+        if name and (scan.phase ~= "hosting" or actor:HasAuthority()) then
+            local arrow, panel, knob = components(actor)
+            if arrow then
+                scan.actors[name] = scan.actors[name] == nil and actor or false
+                scan.parts[name] = scan.actors[name] and {arrow, panel, knob} or nil
+            end
+        end
+        if os.clock() >= deadline then break end
+    end
+    if not scan.candidates[scan.next] then
+        actors, door_parts, pending_census = scan.actors, scan.parts, nil
+    end
+end
+
 local function census(state, phase)
     if (phase ~= "hosting" and phase ~= "connected") or not state.listening or not valid(state.world)
         or state.server ~= (phase == "connected") or not available() then
-        active_world, active_phase, scanned_at, actors, door_parts, sampler = nil, nil, nil, nil, nil, nil
+        active_world, active_phase, scanned_at, actors, door_parts, sampler, pending_census = nil, nil, nil, nil, nil, nil, nil
         return {}
     end
+    if not same(active_world, state.world) or active_phase ~= phase then
+        active_world, active_phase, scanned_at = state.world, phase, nil
+        actors, door_parts, sampler, pending_census = {}, {}, nil, nil
+    end
     local now = os.time()
-    if not same(active_world, state.world) or active_phase ~= phase or scanned_at ~= now then
-        active_world, active_phase, scanned_at, actors, door_parts = state.world, phase, now, {}, {}
-        local base, statics = StaticFindObject(base_path), StaticFindObject(statics_path)
+    if not pending_census and scanned_at ~= now then
+        scanned_at = now
+        local base, statics = stock_class(base_path), stock_class(statics_path)
         if not valid(base) or not valid(statics) then return actors end
         local found = {}
         statics:GetAllActorsOfClass(state.world, base, found)
-        for _, actor in ipairs(found.OutActors or found) do
-            if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
-            local name = identity(actor, state.world)
-            if name and (phase ~= "hosting" or actor:HasAuthority()) then
-                local arrow, panel, knob = components(actor)
-                if arrow then
-                    actors[name] = actors[name] == nil and actor or false
-                    door_parts[name] = actors[name] and {arrow, panel, knob} or nil
-                end
-            end
+        local candidates = found.OutActors or found
+        local scan = {candidates = candidates, next = 1, world = state.world, phase = phase, actors = {}, parts = {}}
+        pending_census = scan
+        if not periodic_sampling or #candidates <= 12 then
+            while pending_census do census_slice(scan, math.huge) end
         end
     end
     return actors
+end
+
+local function target_door(state, phase, name, known)
+    known = known or census(state, phase)
+    local actor = known[name]
+    if actor ~= nil then
+        if valid(actor) and not actor:IsActorBeingDestroyed() and same(actor:GetWorld(), state.world) then return actor end
+        return
+    end
+    if not pending_census or type(name) ~= "string" or #name > 384 then return end
+    -- Exact commands can still resolve a door while the background census is in progress.
+    local path = name:match("^[%w_]+ (/Game/[%w_/]+%.[%w_]+:PersistentLevel%.[%w_]+)$")
+    actor = path and StaticFindObject(path)
+    if identity(actor, state.world) ~= name or (phase == "hosting" and not actor:HasAuthority()) then return end
+    local arrow, panel, knob = components(actor)
+    if not arrow then return end
+    known[name], door_parts[name] = actor, {arrow, panel, knob}
+    if sampler and sampler.actors == known and #sampler.names < 240 then
+        sampler.names[#sampler.names + 1] = name
+    end
+    return actor
 end
 
 local function pose(actor, arrow)
@@ -104,7 +152,7 @@ local function project(fields, state, phase)
     for index = 4, #fields do
         local name, locked, broken, open, pitch, yaw, roll, x, y, z =
             fields[index]:match("^([^|]+)|([01])|([01])|([01])|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
-        local actor = known[name]
+        local actor = target_door(state, phase, name, known)
         local arrow = valid(actor) and components(actor)
         pitch, yaw, roll = tonumber(pitch), tonumber(yaw), tonumber(roll)
         x, y, z = tonumber(x), tonumber(y), tonumber(z)
@@ -150,23 +198,25 @@ local function sample_door(scan, name)
     end
 end
 
-local function sample_slice(scan)
-    local started = os.clock()
+local function sample_slice(scan, deadline)
     for _ = 1, math.ceil(#scan.names / 12) do
         local name = scan.names[scan.next]
         scan.readings[name] = sample_door(scan, name)
         scan.next = scan.next % #scan.names + 1
-        if os.clock() - started >= .002 then break end
+        if os.clock() >= deadline then break end
     end
 end
 
 function doors.start()
     if type(SilverfishStockDoorGuardAvailable) ~= "function" then return end
     LoopInGameThreadWithDelay(16, function()
+        local deadline = os.clock() + .002
+        if pending_census and not pcall(census_slice, pending_census, deadline) then pending_census = nil end
         local scan = sampler
-        if scan and #scan.names > 12 and scan.actors == actors and same(scan.world, active_world)
-            and not pcall(sample_slice, scan) then sampler = nil end
+        if os.clock() < deadline and scan and #scan.names > 12 and scan.actors == actors
+            and same(scan.world, active_world) and not pcall(sample_slice, scan, deadline) then sampler = nil end
     end)
+    periodic_sampling = true
 end
 
 local function sample_command(scan, fields)
@@ -242,7 +292,7 @@ function doors.pry_target(pawn, kind)
 end
 
 function doors.input_fixture(state, phase, target, pawn, dispatch)
-    local actor = census(state, phase)[target]
+    local actor = target_door(state, phase, target)
     if not guest_fixture or phase ~= "connected" or not valid(actor) or not components(actor) then
         error("stock_door_guest_input_fixture_unavailable", 0)
     end
@@ -255,7 +305,7 @@ end
 
 local function fixture(fields, state, phase)
     local mode = fields[3]
-    local actor = census(state, phase)[fields[4]]
+    local actor = target_door(state, phase, fields[4])
     if #fields ~= 4 or not valid(actor) or not components(actor) then error("stock_door_fixture_scope_unavailable", 0) end
     if mode == "pry" and phase == "hosting" and host_fixture and actor.Locked == true then
         actor:PriedOpen_Lock()
@@ -268,7 +318,7 @@ local function fixture(fields, state, phase)
 end
 
 local function interact(fields, state, phase)
-    local actor = census(state, phase)[fields[3]]
+    local actor = target_door(state, phase, fields[3])
     if #fields ~= 4 or phase ~= "hosting" or not valid(actor) or not components(actor)
         or actor.Locked ~= false then error("stock_door_guest_locked_or_unavailable", 0) end
     local qualified, pawn = pcall(guest_save.exact_item_context, state, phase, fields[4])
@@ -286,7 +336,7 @@ end
 local function tool_pry(fields, state, phase)
     tool_report = nil
     local target, name, guid, kind = fields[3], fields[4], fields[5], fields[6]
-    local actor = census(state, phase)[target]
+    local actor = target_door(state, phase, target)
     local knob = valid(actor) and select(3, components(actor))
     if #fields ~= 6 or phase ~= "hosting" or not knob or (kind ~= "blowtorch" and kind ~= "crowbar")
         or actor.Locked ~= true or actor.LockBroken ~= false or not guid:match("^[0-9A-F]+$") or #guid ~= 32
@@ -330,7 +380,7 @@ end
 
 local function trace(fields, state, phase)
     local permitted = (phase == "hosting" and host_fixture) or (phase == "connected" and guest_fixture)
-    local actor = permitted and census(state, phase)[fields[3]]
+    local actor = permitted and target_door(state, phase, fields[3])
     local _, panel
     if valid(actor) then _, panel = components(actor) end
     local api = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")

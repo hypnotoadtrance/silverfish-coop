@@ -76,7 +76,7 @@ local function stage(action)
     end
 end
 key("drop")
-assert(stage("drop") == "confirming" and text:ToString():find("Drop all 9 rounds"))
+assert(stage("drop") == "confirming" and text:ToString():find("Drop 9 × 9mm Ball?", 1, true))
 key("back")
 assert(stage("drop") == nil)
 key("confirm")
