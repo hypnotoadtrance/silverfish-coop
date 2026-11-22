@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from contextlib import nullcontext
 import hashlib
 from ipaddress import IPv4Address
 import json
@@ -14,6 +15,7 @@ import time
 import uuid
 
 from live_multi_smoke import campaign_save_hashes
+from stock_acid_fixture import exercise_acid, stage_acid_probe
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -39,6 +41,7 @@ options.add_argument("--native-wipe-inventory", action="store_true", help="stage
 options.add_argument("--native-guest", action="store_true", help="exercise persistent scoped native guest damage and revive")
 options.add_argument("--native-pair", action="store_true", help="also down and revive the native host")
 options.add_argument("--native-hazard", action="store_true", help="exercise a real stock poison gas hazard")
+options.add_argument("--native-acid", action="store_true", help="enter the placed stock acid sludge on each seat")
 options.add_argument("--native-fall", action="store_true", help="exercise the stock authoritative guest landing path")
 options.add_argument("--native-zones", action="store_true", help="exercise a stock overlap at the staged exit")
 options.add_argument("--native-walls", action="store_true", help="verify swept physical exit collision")
@@ -135,6 +138,8 @@ if args.native_interact_input and not (args.native_guest and args.native_zones):
     options.error("--native-interact-input requires scoped native host and guest gameplay")
 if args.native_hazard and not args.native_pair:
     options.error("--native-hazard requires --native-pair")
+if args.native_acid and not args.native_pair:
+    options.error("--native-acid requires --native-pair on the default PlaytestMap")
 if args.native_fall and not args.native_pair:
     options.error("--native-fall requires --native-pair")
 if args.native_pickup and not args.native_guest:
@@ -227,8 +232,12 @@ if args.native_weather_view and not args.native_world_view:
     options.error("--native-weather-view requires --native-world-view")
 if args.native_guest_save and not (args.native_guest and args.native_pickup):
     options.error("--native-guest-save uses the native guest stock pickup fixture")
+authored_route = any((args.authored_zone, args.native_door, args.native_gold, args.native_blue, random_cube,
+                      args.native_stardust, args.observatory_zone, args.native_matrix, args.native_weapon_use))
+if args.native_acid and (authored_route or broker_map):
+    options.error("--native-acid requires the default PlaytestMap start")
 work = args.work.resolve()
-profile = "validation-" + uuid.uuid4().hex[:8]
+profile = ("acid-proof-" if args.native_acid else "validation-") + uuid.uuid4().hex[:8]
 campaign = profile
 run = work / "campaigns" / campaign / "run"
 client_run = work / "clients" / profile / "run"
@@ -1329,9 +1338,6 @@ async def smoke():
             fixtures += ["--native-zone-walls"]
         if args.wipe or args.native_wipe:
             fixtures += ["--fixture-keep-slots", "1", "--fixture-backpacks"]
-        authored_route = any((args.authored_zone, args.native_door, args.native_gold,
-                              args.native_blue, random_cube, args.native_stardust, args.observatory_zone,
-                              args.native_matrix, args.native_weapon_use))
         initial_zone = ["--start-zone", black_market if broker_map else crossroads] if authored_route or broker_map else []
         bind = str(args.bind)
         host = await start("host", "--campaign", campaign, "--bind", bind, "--port", str(args.port),
@@ -2015,6 +2021,8 @@ async def smoke():
                 assert replay["guid"] == bought["guid"] and replay["wallet"] == bought["wallet"]
                 expected_wallet = bought["wallet"]
                 note("stock_merchant_checkout_uses_shared_wallet", bought)
+        if args.native_acid:
+            await exercise_acid(command, wait, note, run, client_run, campaign, profile, chosen)
         winner = await gameplay_slice(host_status, chosen) if args.gameplay else None
         dropped = await command("action", "--profile", profile, "drop-link")
         assert dropped["link_connected"] is False
@@ -2520,4 +2528,5 @@ async def smoke():
         (run / "live-verification.json").write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
         print(run, flush=True)
 
-asyncio.run(smoke())
+with stage_acid_probe(work) if args.native_acid else nullcontext():
+    asyncio.run(smoke())
