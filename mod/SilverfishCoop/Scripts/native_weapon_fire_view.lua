@@ -4,6 +4,8 @@ local weapon_base = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
 local melee_base = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C"
 local melee_clips = {Melee_Slash_01 = "slash", Melee_Slash_Combo01 = "backhand", Melee_Charged_Smash_01 = "overhead"}
 local melee_clip_root = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/MeleWep_Anim/"
+local cycle_clip_root = "/Game/Classes/Weapons/Wep_Assets/Wep_Anim/"
+local play_animation = "/Script/Engine.SkeletalMeshComponent:PlayAnimation"
 local attack_animation = "Animation_2_C8CAEADF40C9F2C76A885BA8E5E9AA27"
 local attack_rate = "SwingRate_17_17DEA9B2431C48BC143445BD3516142E"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -12,7 +14,7 @@ local stock_rest_inverse = {Pitch = 0, Yaw = 90, Roll = 0}
 local attenuation_path = "/Game/Assets/Sounds/SoundClasses/Weapon_Attenuation.Weapon_Attenuation"
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 local maximum, range = 36, 30000
-local current, hooked, melee_hooked, recoil_hooked, visit, last_played, last_round
+local current, hooked, melee_hooked, recoil_hooked, cycle_hooked, visit, last_played, last_round
 local serial, published, pending = 0, 0, {}
 
 local function valid(object) return object and object:IsValid() end
@@ -39,9 +41,14 @@ local function bounded(n, minimum, maximum)
     return type(n) == "number" and n >= minimum and n <= maximum
 end
 
-local function equipped_player(context)
+local function stock_cycle(path)
+    if type(path) ~= "string" or #path > 192 or path:sub(1, #cycle_clip_root) ~= cycle_clip_root then return false end
+    local package, object = path:sub(#cycle_clip_root + 1):match("^([%w_%-]+)%.([%w_%-]+)$")
+    return package and package == object
+end
+
+local function equipped_player(weapon)
     if not current then return end
-    local weapon = context:get()
     if not valid(weapon) or not weapon:HasAuthority() or not same(weapon:GetWorld(), current.world) then return end
     local pawn = weapon.User
     local pawn_class = StaticFindObject("/Game/Classes/Player/Player_FP.Player_FP_C")
@@ -56,7 +63,7 @@ local function record(row)
 end
 
 local function capture(context)
-    local weapon, pawn = equipped_player(context)
+    local weapon, pawn = equipped_player(context:get())
     if not weapon then return end
     local muzzle = weapon.Arrow_Muzzle
     if not valid(muzzle) or not same(muzzle:GetOwner(), weapon) then return end
@@ -81,7 +88,7 @@ local function valid_recoil(player, values)
 end
 
 local function capture_recoil(context, target, orientation)
-    local weapon, pawn = equipped_player(context)
+    local weapon, pawn = equipped_player(context:get())
     if not weapon or not last_round or not same(last_round.weapon, weapon) or #last_round.row ~= 11
         or current.statics:GetRealTimeSeconds(pawn) - last_round.at > .06 then return end
     local offset, rotation = target:get(), orientation:get()
@@ -101,7 +108,7 @@ local function capture_recoil(context, target, orientation)
 end
 
 local function capture_melee(context)
-    local weapon, pawn = equipped_player(context)
+    local weapon, pawn = equipped_player(context:get())
     if not weapon then return end
     local animator, mesh = weapon["As Melee Wep Anim BP"], weapon.Wep_Skeli
     if not valid(animator) or not valid(mesh) or not same(mesh:GetAnimInstance(), animator)
@@ -130,6 +137,23 @@ local function capture_melee(context)
     if not pawn:IsLocallyControlled() then avatar.play_melee(current.world, id, kind, serial, duration, fraction) end
 end
 
+local function capture_cycle(context, clip, looping)
+    if not current or looping:get() then return end
+    local rig, animation = context:get(), clip:get()
+    if not valid(rig) or not valid(animation) then return end
+    local weapon, pawn = equipped_player(rig:GetOwner())
+    if not weapon or not same(weapon.Wep_Skeli, rig) or not same(weapon.Anim_Primary, animation) then return end
+    local weapon_path = weapon:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
+    local clip_path = animation:GetFullName():match("^AnimSequence (.+)$")
+    if not stock_weapon(weapon_path) or not stock_cycle(clip_path) then return end
+    local avatar = current.avatar
+    local id = avatar.player_id({pawn = pawn, controller_object = pawn.Controller})
+    if not id then return end
+    serial = serial + 1
+    record({serial, "cycle", id, weapon_path, clip_path, expires = current.statics:GetRealTimeSeconds(pawn) + .25})
+    if not pawn:IsLocallyControlled() then avatar.play_cycle(current.world, id, weapon_path, serial, clip_path) end
+end
+
 function view.sync(state, phase, avatar)
     if phase ~= "hosting" or not valid(state.world) then
         current, pending, last_round = nil, {}, nil
@@ -154,6 +178,10 @@ function view.sync(state, phase, avatar)
     if not melee_hooked and valid(StaticFindObject(swing)) then
         RegisterHook(swing, function(context) pcall(capture_melee, context) end)
         melee_hooked = true
+    end
+    if not cycle_hooked and valid(StaticFindObject(play_animation)) then
+        RegisterHook(play_animation, function(context, clip, looping) pcall(capture_cycle, context, clip, looping) end)
+        cycle_hooked = true
     end
 end
 
@@ -219,6 +247,15 @@ function view.command(args, state, phase, avatar)
         local values = {}
         for field in (args[index] .. "|"):gmatch("([^|]*)|") do values[#values + 1] = field end
         local id, path = math.tointeger(tonumber(values[1])), values[2]
+        if #values == 5 and id and id > last_played and path == "cycle" then
+            local player = math.tointeger(tonumber(values[3]))
+            if player and player >= 0 and player <= 2147483647 and stock_weapon(values[4]) and stock_cycle(values[5]) then
+                last_played = id
+                local ok, played = pcall(avatar.play_cycle, state.world, player, values[4], id, values[5])
+                if ok and played then receipts[#receipts + 1] = ("%d:cycle"):format(id) end
+            end
+            goto next_cue
+        end
         if #values == 6 and id and id > last_played and path == "melee" then
             local player = math.tointeger(tonumber(values[3]))
             local duration, fraction = tonumber(values[5]), tonumber(values[6])

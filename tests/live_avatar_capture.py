@@ -189,6 +189,16 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             raise RuntimeError("The isolated guest did not write a screenshot")
         evidence["screenshot"] = str(screenshot)
         if equipment:
+            await avatar_probe(host_run, "cycle")
+            def slide_cycle(frame):
+                return next((row for row in frame.get("game", {}).get("native_avatar_cycle", {}).values()
+                             if row["weapon"].endswith(".Wep_Pistol_C") and row["count"] == 1
+                             and not row["active"] and row["travel_cm"] > .1), None)
+            rendered = await wait(guest_run, slide_cycle, timeout=10)
+            proof = slide_cycle(rendered)
+            cue, = events(guest_run, "native_avatar_cycle_played")
+            assert (cue["weapon"], cue["clip"], cue["serial"]) == (proof["weapon"], proof["clip"], proof["serial"])
+            evidence["pistol_cycle"] = proof
             await avatar_probe(host_run, "holster")
             def unarmed_host(state):
                 rows = projections(state)

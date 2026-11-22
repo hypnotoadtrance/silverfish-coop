@@ -81,11 +81,14 @@ async def verify(work, vanilla_saved):
         async def recoil_after(rounds):
             def settled(state):
                 row = state.get("game", {}).get("native_avatar_recoil", {}).get(pawn, {})
-                return (row.get("weapon"), row.get("count"), row.get("restored")) == (smg, rounds, True)
+                cycle = state.get("game", {}).get("native_avatar_cycle", {}).get(pawn, {})
+                return ((row.get("weapon"), row.get("count"), row.get("restored")) == (smg, rounds, True)
+                        and (cycle.get("weapon"), cycle.get("count"), cycle.get("active")) == (smg, rounds, False)
+                        and cycle.get("travel_cm", 0) > .1)
             state = await wait(run, settled, timeout=8)
             row = state["game"]["native_avatar_recoil"][pawn]
             assert not row["active"] and max(row["kick_cm"], row["rotation_degrees"]) > .1, row
-            return row
+            return row, state["game"]["native_avatar_cycle"][pawn]
 
         for loaded in (16, 25):
             reserve = uuid.uuid4().hex.upper()
@@ -104,14 +107,14 @@ async def verify(work, vanilla_saved):
         assert (release["guid"], release["status"], release["before"]) == (guid, "released", 25), release
         assert release["rounds"] == release["projectiles"] == 25 - release["after"] >= 2, release
         proof["release"] = release
-        proof["release_recoil"] = await recoil_after(release["rounds"])
+        proof["release_recoil"], proof["release_cycle"] = await recoil_after(release["rounds"])
         expiry = (await call("action", *host, FIXTURE, "--target", "guest", "--item-guid", guid,
                              "--milliseconds", "650"))[KEY]
         assert (expiry["guid"], expiry["status"], expiry["before"]) == (guid, "expired", release["after"]), expiry
         assert expiry["rounds"] == expiry["projectiles"] == release["after"] - expiry["after"] >= 2, expiry
         assert expiry["serial"] != release["serial"] and expiry["pawn"] == release["pawn"], expiry
         proof["expiry"] = expiry
-        proof["expiry_recoil"] = await recoil_after(release["rounds"] + expiry["rounds"])
+        proof["expiry_recoil"], proof["expiry_cycle"] = await recoil_after(release["rounds"] + expiry["rounds"])
 
         await stop(host, authority)
         await stop(client, guest)

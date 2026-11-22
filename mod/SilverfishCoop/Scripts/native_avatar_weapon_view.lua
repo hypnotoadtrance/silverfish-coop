@@ -1,6 +1,7 @@
 local view = {}
 
 local equipment_type = "/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C"
+local firearm_type = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local static_type = "/Script/Engine.StaticMeshComponent"
 local skeletal_type = "/Script/Engine.SkeletalMeshComponent"
@@ -13,6 +14,8 @@ local bat_mesh = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/MeleeWep_Mo
 local bat_grip = {X = 0, Y = 0, Z = 12}
 local kinds = { s = {static_type, "StaticMesh", "/Script/Engine.StaticMesh"},
     k = {skeletal_type, "SkinnedAsset", "/Script/Engine.SkeletalMesh"} }
+local rigs = {r = true, h = true}
+local active_cycle = {}
 local maximum_parts = 12
 local active_recoil = {}
 local kick_time = .05
@@ -36,6 +39,10 @@ local function stock_asset(path)
     return (root == "Classes" or root == "Assets") and leaf == name
 end
 
+local function socket_name(socket)
+    return type(socket) == "string" and #socket <= 64 and socket:match("^[%w_]+$")
+end
+
 local function valid_pose(values)
     for index = 1, 9 do
         local value = values[index]
@@ -50,13 +57,18 @@ end
 function view.decode(model)
     if model == "-" then return {} end
     if type(model) ~= "string" or #model > 4096 or model == "" then return end
-    local parts = {}
+    local parts, has_rig, needs_rig = {}, false, false
     for encoded in (model .. "|"):gmatch("([^|]*)|") do
         local fields = {}
         for field in (encoded .. "@"):gmatch("([^@]*)@") do fields[#fields + 1] = field end
-        if #parts >= maximum_parts or #fields ~= 11 or not kinds[fields[1]] or not stock_asset(fields[2]) then
+        local kind, socket = fields[1], fields[12]
+        if #parts >= maximum_parts or (#fields ~= 11 and #fields ~= 12) or not (kinds[kind] or rigs[kind])
+            or not stock_asset(fields[2])
+            or socket and (rigs[kind] or not socket_name(socket))
+            or rigs[kind] and has_rig then
             return
         end
+        has_rig, needs_rig = has_rig or rigs[kind] == true, needs_rig or socket ~= nil
         local pose = {}
         for index = 1, 9 do
             local number = fields[index + 2]
@@ -64,19 +76,37 @@ function view.decode(model)
             pose[index] = tonumber(number)
         end
         if not valid_pose(pose) then return end
-        parts[#parts + 1] = { kind = fields[1], path = fields[2], pose = pose }
+        parts[#parts + 1] = {kind = kind, path = fields[2], pose = pose, socket = socket}
     end
+    if needs_rig and not has_rig then return end
     return parts
 end
 
-local function encode_pose(component, math_api, root_transform)
-    local transform = math_api:MakeRelativeTransform(component:K2_GetComponentToWorld(), root_transform)
-    local rotation = math_api:Quat_Rotator(transform.Rotation)
-    local location, scale = transform.Translation, transform.Scale3D
+local function encode_pose(location, rotation, scale)
     local values = { location.X, location.Y, location.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, scale.X, scale.Y, scale.Z }
     if not valid_pose(values) then return end
     for index, value in ipairs(values) do values[index] = string.format("%.2f", value) end
     return table.concat(values, "@")
+end
+
+local function root_pose(component, math_api, root_transform)
+    local transform = math_api:MakeRelativeTransform(component:K2_GetComponentToWorld(), root_transform)
+    return encode_pose(transform.Translation, math_api:Quat_Rotator(transform.Rotation), transform.Scale3D)
+end
+
+local function cycle_rig(equipment, root)
+    local base = StaticFindObject(firearm_type)
+    if not valid(base) or not equipment:IsA(base) then return end
+    local rig = equipment.Wep_Skeli
+    if not valid(rig) or not same(rig:GetOwner(), equipment) or not same(rig:GetAttachParent(), root) then return end
+    local mesh = rig.SkinnedAsset
+    local path = valid(mesh) and mesh:GetFullName():match("^%S+ (%S+)$")
+    if not stock_asset(path) then return end
+    -- The stock firearm returns its skeleton to this transform after recoil.
+    local pose = encode_pose({X = 0, Y = 0, Z = 0}, {Pitch = 0, Yaw = -90, Roll = 0}, rig.RelativeScale3D)
+    if not pose then return end
+    local kind = rig:IsVisible() and not rig.bHiddenInGame and "r" or "h"
+    return rig, table.concat({kind, path, pose}, "@")
 end
 
 function view.observe(pawn, save, cached)
@@ -93,6 +123,8 @@ function view.observe(pawn, save, cached)
     local root, math_api = equipment.RootComponent, StaticFindObject(math_library)
     if not valid(class) or not equipment:IsA(class) or not valid(root) or not valid(math_api) then return "-", nil end
     local root_transform, parts = root:K2_GetComponentToWorld(), {}
+    local rig, rig_description = cycle_rig(equipment, root)
+    if rig then parts[1] = rig_description end
     for _, kind in ipairs({"s", "k"}) do
         local profile = kinds[kind]
         local class = StaticFindObject(profile[1])
@@ -103,16 +135,25 @@ function view.observe(pawn, save, cached)
             if type(component) == "userdata" and type(component.type) == "function" and component:type() == "RemoteUnrealParam" then
                 component = component:get()
             end
-            if valid(component) and same(component:GetOwner(), equipment) and component:IsVisible()
+            if valid(component) and not same(component, rig) and same(component:GetOwner(), equipment) and component:IsVisible()
                 and component.bHiddenInGame == false then
                 local asset = component[profile[2]]
                 local path = valid(asset) and asset:GetFullName():match("^%S+ (%S+)$")
-                local pose = path and stock_asset(path) and encode_pose(component, math_api, root_transform)
-                if pose and #parts < maximum_parts then parts[#parts + 1] = table.concat({kind, path, pose}, "@") end
+                if path and stock_asset(path) and #parts < maximum_parts then
+                    local socket
+                    if rig and same(component:GetAttachParent(), rig) then
+                        local attachment = component:GetAttachSocketName()
+                        local name = attachment:ToString()
+                        if socket_name(name) and (name == "None" or rig:DoesSocketExist(attachment)) then socket = name end
+                    end
+                    local pose = socket and encode_pose(component.RelativeLocation, component.RelativeRotation, component.RelativeScale3D)
+                        or root_pose(component, math_api, root_transform)
+                    if pose then parts[#parts + 1] = table.concat({kind, path, pose, socket}, "@") end
+                end
             end
         end
     end
-    if #parts == 0 then return "-", nil end
+    if #parts == 0 or #parts == 1 and rig_description and rig_description:sub(1, 1) == "h" then return "-", nil end
     table.sort(parts)
     local model = table.concat(parts, "|")
     return model, { actor = equipment, model = model }
@@ -120,11 +161,13 @@ end
 
 function view.clear(entry)
     active_recoil[entry] = nil
+    active_cycle[entry] = nil
     for _, component in ipairs(entry.weapon_parts or {}) do
         if valid(component) and valid(entry.pawn) then component:K2_DestroyComponent(entry.pawn) end
     end
     if valid(entry.weapon_anchor) and valid(entry.pawn) then entry.weapon_anchor:K2_DestroyComponent(entry.pawn) end
-    entry.weapon_parts, entry.weapon_model, entry.weapon_anchor = nil, nil, nil
+    entry.weapon_parts, entry.weapon_model, entry.weapon_anchor, entry.weapon_rig = nil, nil, nil, nil
+    entry.weapon_slide = nil
 end
 
 local function align_bat_grip(component, body, socket)
@@ -156,8 +199,9 @@ local function attach(entry, parts)
         end
         parent = anchor
     end
-    for _, part in ipairs(parts) do
-        local profile = kinds[part.kind]
+    local function attach_part(part)
+        local is_rig = rigs[part.kind]
+        local profile = is_rig and kinds.k or kinds[part.kind]
         local asset = StaticFindObject(part.path)
         if not valid(asset) then
             LoadAsset(part.path)
@@ -173,7 +217,10 @@ local function attach(entry, parts)
         component:SetGenerateOverlapEvents(false)
         component:SetMobility(2)
         entry.pawn:FinishAddComponent(component, true, identity)
-        if not component:K2_AttachToComponent(parent, parent == entry.body and socket or none, 2, 2, 0, false) then
+        local target = part.socket and entry.weapon_rig or parent
+        local attachment = part.socket and FName(part.socket, EFindName.FNAME_Find) or parent == entry.body and socket or none
+        if not valid(target) or part.socket and part.socket ~= "None" and not target:DoesSocketExist(attachment)
+            or not component:K2_AttachToComponent(target, attachment, 2, 2, 0, false) then
             error("Held weapon component could not attach to the stock hand socket")
         end
         local p = part.pose
@@ -182,11 +229,23 @@ local function attach(entry, parts)
         component:SetRelativeScale3D({X = p[7], Y = p[8], Z = p[9]})
         if part.kind == "s" then component:SetStaticMesh(asset) else component:SetSkeletalMeshAsset(asset) end
         if part.path == bat_mesh and part.kind == "s" then align_bat_grip(component, entry.body, socket) end
-        component:SetHiddenInGame(false, false)
-        component:SetVisibility(true, false)
-        if not same(component[profile[2]], asset) or not component:IsVisible() then
+        local visible = part.kind ~= "h"
+        component:SetHiddenInGame(not visible, false)
+        component:SetVisibility(visible, false)
+        if not same(component[profile[2]], asset) or component:IsVisible() ~= visible then
             error("Held weapon component did not pass mesh readback")
         end
+        if is_rig then
+            entry.weapon_rig = component
+        elseif part.socket == "Wep_SlideSocket" then
+            entry.weapon_slide = component
+        end
+    end
+    for _, part in ipairs(parts) do
+        if rigs[part.kind] then attach_part(part) end
+    end
+    for _, part in ipairs(parts) do
+        if not rigs[part.kind] then attach_part(part) end
     end
 end
 
@@ -257,6 +316,91 @@ function view.recoil_row(entry, row)
     if not recoil then return end
     return row("native-avatar-recoil", entry.name, recoil.weapon, recoil.serial, recoil.count,
         recoil.peak, recoil.angle, active_recoil[entry] and 1 or 0, recoil.restored and 1 or 0)
+end
+
+local function moving_bone(rig)
+    local slide = FName("Wep_SlideSocket", EFindName.FNAME_Find)
+    if rig:DoesSocketExist(slide) then return slide end
+    for index = 0, math.min(48, rig:GetNumBones()) - 1 do
+        local bone = rig:GetBoneName(index)
+        local name = bone:ToString():lower()
+        if name:find("bolt", 1, true) or name:find("slide", 1, true) or name:find("pump", 1, true) then
+            return bone
+        end
+    end
+end
+
+local function mechanism_position(rig, slide, bone)
+    if valid(slide) then
+        local math_api = StaticFindObject(math_library)
+        if valid(math_api) then
+            return math_api:InverseTransformLocation(rig:K2_GetComponentToWorld(), slide:K2_GetComponentLocation())
+        end
+    end
+    if bone then return rig:GetSocketTransform(bone, 2).Translation end
+end
+
+function view.cycle(entry, world, weapon, serial, path)
+    local rig = entry.weapon_rig
+    if entry.firearm_class ~= weapon or not valid(rig) then return false end
+    local clip = StaticFindObject(path)
+    if not valid(clip) then
+        LoadAsset(path)
+        clip = StaticFindObject(path)
+    end
+    local mesh = rig.SkinnedAsset
+    if not valid(clip) or not clip:IsA(StaticFindObject("/Script/Engine.AnimSequence"))
+        or not valid(mesh) or not same(clip.Skeleton, mesh.Skeleton) then return false end
+    local clock, length = StaticFindObject(statics_type), clip:GetPlayLength()
+    if not valid(clock) or length <= 0 or length > 5 then return false end
+    local previous = active_cycle[entry]
+    local bone = previous and previous.bone or moving_bone(rig)
+    local rest = previous and previous.rest or mechanism_position(rig, entry.weapon_slide, bone)
+    rig.VisibilityBasedAnimTickOption = 0
+    rig:SetAnimationMode(1, false)
+    rig:SetAnimation(clip)
+    rig:Stop()
+    rig:SetPosition(0, false)
+    local prior = entry.last_cycle
+    local cycle = {world = world:GetAddress(), start = clock:GetRealTimeSeconds(world), duration = length,
+        clip = path, weapon = weapon, serial = serial, count = prior and prior.count + 1 or 1, peak = 0,
+        bone = bone, rest = rest}
+    active_cycle[entry], entry.last_cycle = cycle, cycle
+    return true
+end
+
+function view.animate_cycle(get_world)
+    if not next(active_cycle) then return end
+    local world, clock = get_world(), StaticFindObject(statics_type)
+    if not valid(world) or not valid(clock) then return end
+    local now, scope = clock:GetRealTimeSeconds(world), world:GetAddress()
+    for entry, cycle in pairs(active_cycle) do
+        local rig = entry.weapon_rig
+        if not valid(rig) or scope ~= cycle.world then
+            active_cycle[entry] = nil
+        elseif cycle.finished then
+            rig.VisibilityBasedAnimTickOption = 4
+            active_cycle[entry] = nil
+        else
+            if cycle.rest then
+                local point = mechanism_position(rig, entry.weapon_slide, cycle.bone)
+                if point then
+                    cycle.peak = math.max(cycle.peak,
+                        math.sqrt((point.X - cycle.rest.X)^2 + (point.Y - cycle.rest.Y)^2 + (point.Z - cycle.rest.Z)^2))
+                end
+            end
+            local elapsed = math.max(0, now - cycle.start)
+            rig:SetPosition(math.min(elapsed, cycle.duration), false)
+            cycle.finished = elapsed >= cycle.duration
+        end
+    end
+end
+
+function view.cycle_row(entry, row)
+    local cycle = entry.last_cycle
+    if not cycle then return end
+    return row("native-avatar-cycle", entry.name, cycle.weapon, cycle.clip, cycle.serial, cycle.count,
+        cycle.peak, active_cycle[entry] and 1 or 0)
 end
 
 return view

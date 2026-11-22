@@ -2741,6 +2741,16 @@ class Bridge:
                         data.setdefault("native_avatar_recoil", {})[pawn] = {
                             "serial": int(serial), "weapon": weapon, "count": int(count), "kick_cm": peak,
                             "rotation_degrees": angle, "active": active == "1", "restored": restored == "1"}
+                elif fields[0] == "native-avatar-cycle" and len(fields) == 8:
+                    pawn, weapon, clip, serial, count, motion, active = fields[1:]
+                    motion = _finite(motion)
+                    if (pawn.startswith("Player_FP_C ") and native_weapon_fire_view.stock_weapon_class(weapon)
+                            and native_weapon_fire_view.stock_cycle_clip(clip)
+                            and re.fullmatch(r"[1-9][0-9]{0,14}", serial) and re.fullmatch(r"[1-9][0-9]{0,14}", count)
+                            and motion is not None and 0 <= motion <= 100 and active in ("0", "1")):
+                        data.setdefault("native_avatar_cycle", {})[pawn] = {
+                            "serial": int(serial), "weapon": weapon, "clip": clip, "count": int(count),
+                            "travel_cm": motion, "active": active == "1"}
                 elif fields[0] == native_player_avatar.TAG:
                     player_id, outfit = native_player_avatar.parse(fields, data.get("state"), data.get("map"))
                     outfits = data.setdefault(native_player_avatar.KEY, {})

@@ -141,6 +141,11 @@ async def verify(work, vanilla):
         assert observed["muzzle_flash"] and observed["stock_sound"] and not observed["recoil"], observed
         rendered = await wait(host, lambda frame: recoil(frame, weapon.path, 1), timeout=8)
         proof["shotgun_recoil"] = recoil(rendered, weapon.path, 1)
+        def bolt_cycle(frame):
+            return next((row for row in frame.get("game", {}).get("native_avatar_cycle", {}).values()
+                         if row["weapon"] == weapon.path and row["count"] == 1
+                         and not row["active"] and row["travel_cm"] > .1), None)
+        proof["shotgun_cycle"] = bolt_cycle(await wait(host, bolt_cycle, timeout=8))
         proof["guest_shot"] = {"stock": spent, "effect": observed}
         assert len(events(guest, SHOT)) == proof["rounds_fired"] + 1
 

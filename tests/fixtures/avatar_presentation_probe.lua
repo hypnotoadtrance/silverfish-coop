@@ -11,6 +11,7 @@ local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local mesh_root = "/Game/Classes/Player/PlayerAssets/HelmetMeshes/"
 local inventory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
+local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local face_field = "Mesh_Head_60_630BB776410363C64BE2C89A3F72B1C5"
 local plumage_field = "Mesh_Plumage_80_4B6C3DD94D27DEC901D6829472D5F546"
 local skin_field = "Color_Skin_53_0B756DAC41D1CF33A2BB2480770F4445"
@@ -65,7 +66,7 @@ local function style(pawn, face, plumage, tint)
     pawn.Save.PlayerArmor = row
 end
 
-local function equip(pawn, blueprint)
+local function equip(pawn, blueprint, rounds)
     local save = pawn.Save
     local slots = save.PlayerEquipment
     assert(slots:GetArrayNum() >= 2 and not valid(slots[1][item_class]) and not valid(slots[2][item_class]),
@@ -75,6 +76,7 @@ local function equip(pawn, blueprint)
     asset(inventory):MakeDefaultItem(expected, pawn, out)
     local row = out.Item or out
     assert(same(row[item_class], expected), "avatar_probe_item_factory_unavailable")
+    if rounds then row[item_ammo] = rounds end
     local result = {}
     pawn:GetWorld().OwningGameInstance:EquipItemToLoadout(row, result)
     assert(result.EquippedSuccessfully == true or result[1] == true, "avatar_probe_stock_loadout_refused")
@@ -115,7 +117,7 @@ local function run(operation)
     if operation == "equip" then
         style(host, "SM_Head_UV_02_EarRing", "SM_Plumage_007", { R = .2, G = .7, B = .35, A = 1 })
         style(guest, "SM_Head_UV_Fangs_01", "SM_Plumage_012", { R = .8, G = .25, B = .33, A = 1 })
-        equip(host, "Wep_Pistol")
+        equip(host, "Wep_Pistol", 3)
     elseif operation == "aim" or operation == "lower" then
         local weapon = host.EquipedItem
         assert(valid(weapon) and same(weapon.User, host), "avatar_probe_stock_equip_unavailable")
@@ -130,14 +132,17 @@ local function run(operation)
         assert(not valid(save.PlayerEquipment[index][item_class]), "avatar_probe_stock_holster_unavailable")
     elseif operation == "bat" then
         equip(host, "MeleeWeapons/MeleeWep_Bat")
-    elseif operation == "swing" then
+    elseif operation == "swing" or operation == "cycle" then
         local weapon = host.EquipedItem
-        assert(valid(weapon) and same(weapon.User, host) and weapon:GetClass():GetFullName():match("MeleeWep_Bat_C$"),
-            "avatar_probe_stock_bat_unavailable")
+        local expected = operation == "swing" and "MeleeWep_Bat_C$" or "Wep_Pistol_C$"
+        assert(valid(weapon) and same(weapon.User, host) and weapon:GetClass():GetFullName():match(expected),
+            "avatar_probe_stock_weapon_unavailable")
         local eye, teammate = host:K2_GetActorLocation(), guest:K2_GetActorLocation()
         host.Controller:SetControlRotation({Pitch = 0, Yaw = math.deg(math.atan(eye.Y - teammate.Y, eye.X - teammate.X)), Roll = 0})
+        local before = weapon.Ammo
         weapon:Use_Item_Primary(true, 0)
         weapon:Use_Item_Primary(false, 0)
+        if operation == "cycle" then assert(weapon.Ammo == before - 1, "avatar_probe_stock_fire_failed") end
     else
         error("avatar_probe_unknown_operation", 0)
     end

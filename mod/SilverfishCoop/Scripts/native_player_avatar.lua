@@ -304,6 +304,19 @@ function avatar.animate_recoil(get_world)
     weapon_view.animate_recoil(get_world)
 end
 
+function avatar.play_cycle(world, id, weapon, serial, clip)
+    for _, entry in pairs(avatars) do
+        if entry.id == id and valid(entry.pawn) and entry.pawn:GetWorld():GetAddress() == world:GetAddress() then
+            return weapon_view.cycle(entry, world, weapon, serial, clip)
+        end
+    end
+    return false
+end
+
+function avatar.animate_cycle(get_world)
+    weapon_view.animate_cycle(get_world)
+end
+
 local function aim_head(entry)
     local rotation = entry.pawn:GetBaseAimRotation()
     local pitch = (rotation.Pitch + 180) % 360 - 180
@@ -528,6 +541,8 @@ function avatar.rows(row)
         end
         local recoil = weapon_view.recoil_row(entry, row)
         if recoil then rows[#rows + 1] = recoil end
+        local cycle = weapon_view.cycle_row(entry, row)
+        if cycle then rows[#rows + 1] = cycle end
     end
     for id, outfit in pairs(observations) do
         rows[#rows + 1] = row("native-avatar-outfit", id, outfit.pawn, outfit.body, outfit.head, outfit.weapon,

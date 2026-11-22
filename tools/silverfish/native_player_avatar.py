@@ -47,16 +47,26 @@ def weapon_meshes(model):
     if len(parts) > 12:
         return None
     meshes = []
+    has_rig = needs_rig = False
     for part in parts:
         columns = part.split("@")
-        if len(columns) != 11 or columns[0] not in ("s", "k"):
+        if len(columns) not in (11, 12) or columns[0] not in ("s", "k", "r", "h"):
             return None
-        path, pose = columns[1], columns[2:]
+        kind, path, *pose = columns[:11]
+        rig = kind in ("r", "h")
+        socket = columns[11] if len(columns) == 12 else None
+        if rig and has_rig or socket is not None and (rig or not re.fullmatch(r"[A-Za-z0-9_]{1,64}", socket)):
+            return None
+        has_rig = has_rig or rig
+        needs_rig = needs_rig or socket is not None
         if (len(path) > 192 or not _MESH.fullmatch(path) or not all(_NUMBER.fullmatch(value) for value in pose)
                 or any(abs(float(value)) > bound for value, bound in zip(pose, _POSE_BOUNDS, strict=True))
                 or any(abs(float(value)) < .01 for value in pose[-3:])):
             return None
-        meshes.append(path)
+        if kind != "h":
+            meshes.append(path)
+    if needs_rig and not has_rig:
+        return None
     return meshes
 
 
