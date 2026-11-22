@@ -445,6 +445,10 @@ async def verify_stock_use(host: Seat, guest: Seat, pawn: str, *, starter: bool)
     candidates = [row for row in before["items"] if row["source"] == "backpack" and row["class_path"] in classes]
     assert candidates and (not starter or len(candidates) == 1), before
     item = min(candidates, key=lambda row: row["guid"])
+    previous_use = None
+    if not starter:
+        observer = await wait(host_run, lambda state: pawn in state.get("game", {}).get("native_player_avatars", {}))
+        previous_use = observer["game"].get("native_avatar_use", {}).get(pawn, {}).get("serial")
     assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
     gesture = "drag" if starter else "context"
@@ -490,7 +494,17 @@ async def verify_stock_use(host: Seat, guest: Seat, pawn: str, *, starter: bool)
         (host.campaign / "save" / "campaign.json").read_text(encoding="utf-8")))
     assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
-    return {"gesture": gesture, "receipt": receipt}
+    evidence = {"gesture": gesture, "receipt": receipt}
+    if not starter:
+        def observed_use(state):
+            use = state.get("game", {}).get("native_avatar_use", {}).get(pawn, {})
+            return (use.get("serial") != previous_use and use.get("item") == item["class_path"]
+                    and not use["active"] and use["hand_motion_cm"] > 20)
+        host_state = await wait(host_run, observed_use, timeout=8)
+        presentation = host_state["game"]["native_avatar_use"][pawn]
+        assert presentation["mesh"].endswith(".SM_Prop_Bandage_02"), presentation
+        evidence["host_observed"] = presentation
+    return evidence
 
 
 async def create_stock_drop_character(guest, join, name):

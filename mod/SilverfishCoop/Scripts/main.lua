@@ -1655,6 +1655,7 @@ LoopInGameThreadWithDelay(25, function()
     if not leaving then pcall(native_player_avatar.animate_melee, current_world) end
     if not leaving then pcall(native_player_avatar.animate_recoil, current_world) end
     if not leaving then pcall(native_player_avatar.animate_cycle, current_world) end
+    if not leaving then pcall(native_player_avatar.animate_use, current_world) end
     local now = os.clock()
     local periodic = now >= next_snapshot or now >= next_file_status
     local fields, pending = read_command(periodic)

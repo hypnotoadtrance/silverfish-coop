@@ -250,7 +250,16 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
                     await asyncio.sleep(.05)
             cue, = cues
             assert cue["item_class"] == "/Game/Classes/Items/Item_Bandage.Item_Bandage_C", cue
-            evidence["stock_bandage_sound"] = cue
+            def observed_use(state):
+                return next((use for use in state.get("game", {}).get("native_avatar_use", {}).values()
+                             if use["serial"] == cue["serial"] and use["item"] == cue["item_class"]), None)
+            final = await wait(guest_run, lambda state: (use := observed_use(state))
+                               and not use["active"] and use["hand_motion_cm"] > 20, timeout=8)
+            visual, = events(guest_run, "native_avatar_use_visual_played")
+            assert visual["serial"] == cue["serial"], visual
+            prop = observed_use(final)
+            assert prop["mesh"].endswith(".SM_Prop_Bandage_02"), prop
+            evidence["stock_bandage_presentation"] = {"sound": cue, "visual": visual, "prop": prop}
         if pose:
             await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
             evidence["pose"] = await verify_pose(host_run, guest_run)
@@ -462,7 +471,7 @@ if __name__ == "__main__":
     parser.add_argument("--melee", action="store_true", help="verify a visible stock bat swing after the equipment checks")
     parser.add_argument("--pose", action="store_true", help="verify the centered rig and stock attachments through a turn and jump")
     parser.add_argument("--rifle", action="store_true", help="verify a guest's stock break-action quick-slot selection")
-    parser.add_argument("--consumable", action="store_true", help="verify positional sound after stock host Bandage use")
+    parser.add_argument("--consumable", action="store_true", help="verify stock host Bandage geometry and positional sound")
     parser.add_argument("--movement", action="store_true", help="sample stock walk and sprint on the runner and the observing peer")
     options = parser.parse_args()
     if options.melee and (not options.equipment or options.lifecycle):

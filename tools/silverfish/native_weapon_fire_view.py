@@ -64,9 +64,10 @@ def valid_melee(cue):
 
 
 def valid_use(cue):
-    return (type(cue) is list and len(cue) == 6 and type(cue[0]) is int and 0 < cue[0] < 10**15
+    return (type(cue) is list and len(cue) in (6, 7) and type(cue[0]) is int and 0 < cue[0] < 10**15
             and cue[1] == "consume" and type(cue[2]) is str and len(cue[2]) <= 160
-            and _STOCK_CONSUMABLE.fullmatch(cue[2]) and valid_position(cue[3:]))
+            and _STOCK_CONSUMABLE.fullmatch(cue[2]) and valid_position(cue[3:6])
+            and (len(cue) == 6 or type(cue[6]) is int and 0 <= cue[6] <= 2147483647))
 
 
 def _captured(data):
@@ -92,9 +93,11 @@ def _captured(data):
             if valid_melee(cue):
                 cues.append(cue)
             continue
-        if len(fields) == 6 and fields[1] == "consume":
+        if len(fields) in (6, 7) and fields[1] == "consume":
             try:
-                cue = [int(fields[0]), "consume", fields[2], *map(float, fields[3:])]
+                cue = [int(fields[0]), "consume", fields[2], *map(float, fields[3:6])]
+                if len(fields) == 7:
+                    cue.append(int(fields[6]))
             except ValueError:
                 continue
             if valid_use(cue):
@@ -152,7 +155,7 @@ async def relay(host, bridge, transport):
             elif cue[1] == "melee":
                 payload = cue[:4] + [round(value, 3) for value in cue[4:]]
             elif cue[1] == "consume":
-                payload = cue[:3] + [round(value, 2) for value in cue[3:]]
+                payload = cue[:3] + [round(value, 2) for value in cue[3:6]] + cue[6:]
             else:
                 payload = cue[:2] + [round(axis, 2) for axis in cue[2:]]
             packet = json.dumps([area, epoch, payload], separators=(",", ":")).encode("ascii")
@@ -198,6 +201,11 @@ class Playback:
             if use and (source := selected.get(int(use[1]))) and source[0] == "consume":
                 control.event("native_avatar_use_sound_played", serial=int(use[1]), item_class=source[1])
                 continue
+            visual = re.fullmatch(r"([0-9]{1,15}):consume_visual", receipt)
+            if visual and (source := selected.get(int(visual[1]))) and source[0] == "consume" and len(source) == 6:
+                control.event("native_avatar_use_visual_played", serial=int(visual[1]), item_class=source[1],
+                              player_id=source[5])
+                continue
             cycle = re.fullmatch(r"([0-9]{1,15}):cycle", receipt)
             if cycle and (source := selected.get(int(cycle[1]))) and source[0] == "cycle":
                 control.event("native_avatar_cycle_played", serial=int(cycle[1]), player_id=source[1],
@@ -208,7 +216,7 @@ class Playback:
                 control.event("native_avatar_melee_played", serial=int(hit[1]), player_id=source[1], clip=hit[2])
                 continue
             match = re.fullmatch(r"([0-9]{1,15}):([01]):([01]):([01]):([01])", receipt)
-            if match and (serial := int(match[1])) in selected and selected[serial][0] not in ("melee", "cycle"):
+            if match and (serial := int(match[1])) in selected and selected[serial][0] not in ("melee", "cycle", "consume"):
                 control.event("native_weapon_shot_played", serial=serial, weapon=selected[serial][0],
                               muzzle_flash=match[2] == "1", audio_component=match[3] == "1", stock_sound=match[4] == "1",
                               recoil=match[5] == "1")

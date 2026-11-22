@@ -23,6 +23,7 @@ local identity = {
 }
 local avatars = {}
 local swings = {}
+local uses = {}
 local observations, client_outfits = {}, {}
 local observed_weapons = {}
 local client_world, client_map, client_receipt
@@ -234,8 +235,28 @@ local function apply_locomotion(entry, aim, sprinting)
     entry.pose_animation, entry.pose_mesh = name, mesh:GetAddress()
 end
 
+local function stop_use(entry)
+    uses[entry] = nil
+    if valid(entry.use_prop) and valid(entry.pawn) then entry.use_prop:K2_DestroyComponent(entry.pawn) end
+    entry.use_prop = nil
+    for _, part in pairs(entry.hidden_for_use or {}) do
+        if valid(part) then part:SetHiddenInGame(false, false) end
+    end
+    entry.hidden_for_use = nil
+end
+
+local function hide_held_item(entry)
+    for _, part in ipairs(entry.weapon_parts or {}) do
+        if valid(part) and part.bHiddenInGame == false then
+            entry.hidden_for_use[part:GetAddress()] = part
+            part:SetHiddenInGame(true, false)
+        end
+    end
+end
+
 local function remove(entry)
     swings[entry] = nil
+    stop_use(entry)
     weapon_view.clear(entry)
     character_view.clear(entry)
     if valid(entry.helmet) and valid(entry.pawn) then
@@ -314,6 +335,65 @@ function avatar.animate_melee(get_world)
                 math.sqrt((position.X - swing.x)^2 + (position.Y - swing.y)^2 + (position.Z - swing.z)^2))
             local fraction = math.max(0, now - swing.start) / swing.duration
             entry.body:SetPosition(swing.first + fraction * (swing.length - swing.first), false)
+        end
+    end
+end
+
+function avatar.play_consumable(world, id, item_path, defaults, serial)
+    if id == nil then return false end
+    for _, entry in pairs(avatars) do
+        if entry.id == id and valid(entry.body) and valid(entry.pawn)
+            and entry.pawn:GetWorld():GetAddress() == world:GetAddress() then
+            local template = StaticFindObject(item_path .. ":DisplayMesh_GEN_VARIABLE")
+            local mesh = valid(template) and template.StaticMesh
+            local duration, transform = defaults.UseTime, defaults.Anim_Trans
+            local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+            local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+            if not valid(mesh) or not transform or type(duration) ~= "number" or duration <= 0 or duration > 30
+                or not valid(statics) or not valid(math_api) then return false end
+            local rotation = math_api:Quat_Rotator(transform.Rotation)
+            local position = {X = transform.Translation.X, Y = transform.Translation.Y, Z = transform.Translation.Z}
+            local scale = {X = transform.Scale3D.X, Y = transform.Scale3D.Y, Z = transform.Scale3D.Z}
+            stop_use(entry)
+            local prop = visual_component(entry, "use_prop", entry.body, "Weapon_Socket01")
+            prop:SetStaticMesh(mesh)
+            prop:SetHiddenInGame(false, false)
+            prop:SetRelativeScale3D(scale)
+            if not valid(prop.StaticMesh) or mesh:GetAddress() ~= prop.StaticMesh:GetAddress() then
+                stop_use(entry)
+                return false
+            end
+            local use = {serial = serial, item = item_path, mesh = mesh:GetFullName(), duration = duration,
+                world = world:GetAddress(), start = statics:GetRealTimeSeconds(world), peak = 0,
+                position = position, rotation = {Pitch = rotation.Pitch, Yaw = rotation.Yaw, Roll = rotation.Roll}}
+            uses[entry], entry.last_use, entry.hidden_for_use = use, use, {}
+            hide_held_item(entry)
+            return true
+        end
+    end
+    return false
+end
+
+function avatar.animate_use(get_world)
+    if not next(uses) then return end
+    local world = get_world()
+    local clock = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    if not valid(world) or not valid(clock) then return end
+    local now, scope = clock:GetRealTimeSeconds(world), world:GetAddress()
+    for entry, use in pairs(uses) do
+        local elapsed = math.max(0, now - use.start)
+        if use.world ~= scope or not valid(entry.use_prop) or elapsed >= use.duration + .8 then
+            stop_use(entry)
+        else
+            local lift = math.min(1, elapsed / .3)
+            local using = math.min(1, math.max(0, elapsed - .3) / use.duration)
+            local lower = math.max(0, elapsed - .3 - use.duration) / .5
+            local p, r = use.position, use.rotation
+            local z = (p.Z * lift + 10 * using) * (1 - lower) - 100 * lower
+            entry.use_prop:K2_SetRelativeLocationAndRotation(
+                {X = p.X * lift * (1 - lower), Y = p.Y * lift * (1 - lower), Z = z},
+                {Pitch = r.Pitch * lift, Yaw = r.Yaw * lift, Roll = r.Roll * lift}, false, {}, true)
+            use.peak = math.max(use.peak, math.abs(entry.use_prop.RelativeLocation.Z))
         end
     end
 end
@@ -495,6 +575,7 @@ function avatar.sync(state, phase)
                             apply_outfit(entry, outfit, cosmetics)
                             character_view.apply(entry, cosmetics, appearance, asset, visual_component)
                             weapon_view.apply(entry, outfit and outfit.weapon or "-", outfit and outfit.firearm or "-")
+                            if uses[entry] then hide_held_item(entry) end
                             local aim = outfit and outfit.aim or "-"
                             if phase == "hosting" then
                                 aim = outfit and host_aims[entry.id] == outfit.gun and outfit.gun or "-"
@@ -575,6 +656,11 @@ function avatar.rows(row)
             local swing = entry.last_melee
             rows[#rows + 1] = row("native-avatar-melee", entry.name, swing.serial, swing.clip, swing.peak,
                 swings[entry] and 1 or 0)
+        end
+        if entry.last_use then
+            local use = entry.last_use
+            rows[#rows + 1] = row("native-avatar-use", entry.name, use.serial, use.item, use.mesh,
+                use.peak, uses[entry] and 1 or 0)
         end
         local recoil = weapon_view.recoil_row(entry, row)
         if recoil then rows[#rows + 1] = recoil end

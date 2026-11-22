@@ -50,13 +50,15 @@ local function stock_consumable(path)
     return package and package:match("([%w_%-]+)$") == class
 end
 
-local function use_sound(path, listener, point)
-    if not stock_consumable(path) then return false end
+local function consumable_defaults(path)
     local class, base = asset(path), asset(consumable_base)
     local defaults = valid(class) and class:GetCDO()
+    if valid(defaults) and valid(base) and defaults:IsA(base) then return defaults end
+end
+
+local function use_sound(defaults, listener, point)
     local statics, attenuation = StaticFindObject(statics_path), asset(local_attenuation)
-    if not valid(defaults) or not valid(base) or not defaults:IsA(base)
-        or not valid(statics) or not valid(attenuation) or not valid(defaults.UseSound) then return false end
+    if not valid(statics) or not valid(attenuation) or not valid(defaults.UseSound) then return false end
     local origin = listener:K2_GetActorLocation()
     if (origin.X - point.X)^2 + (origin.Y - point.Y)^2 + (origin.Z - point.Z)^2 > 1800^2 then return false end
     statics:PlaySoundAtLocation(listener, defaults.UseSound, point, {Pitch = 0, Yaw = 0, Roll = 0},
@@ -89,10 +91,16 @@ function view.consumed(pawn, path, stock_played)
     if not current or not valid(pawn) or not pawn:HasAuthority() or not stock_consumable(path)
         or not same(pawn:GetWorld(), current.world) then return end
     local point = pawn:K2_GetActorLocation()
+    local player = current.avatar.player_id({pawn = pawn, controller_object = pawn.Controller})
     serial = serial + 1
-    record({serial, "consume", path, point.X, point.Y, point.Z,
+    record({serial, "consume", path, point.X, point.Y, point.Z, player,
         expires = current.statics:GetRealTimeSeconds(pawn) + .25})
-    if not stock_played and valid(current.listener) then use_sound(path, current.listener, point) end
+    if not stock_played and valid(current.listener) then
+        local defaults = consumable_defaults(path)
+        if not defaults then return end
+        pcall(use_sound, defaults, current.listener, point)
+        pcall(current.avatar.play_consumable, current.world, player, path, defaults, serial)
+    end
 end
 
 local function capture_use(context)
@@ -319,12 +327,21 @@ function view.command(args, state, phase, avatar)
         local values = {}
         for field in (args[index] .. "|"):gmatch("([^|]*)|") do values[#values + 1] = field end
         local id, path = math.tointeger(tonumber(values[1])), values[2]
-        if #values == 6 and id and id > last_played and path == "consume" and stock_consumable(values[3]) then
+        if (#values == 6 or #values == 7) and id and id > last_played and path == "consume"
+            and stock_consumable(values[3]) then
             local x, y, z = tonumber(values[4]), tonumber(values[5]), tonumber(values[6])
             if bounded(x, -1e7, 1e7) and bounded(y, -1e7, 1e7) and bounded(z, -1e7, 1e7) then
                 last_played = id
-                local ok, heard = pcall(use_sound, values[3], pawn, {X = x, Y = y, Z = z})
-                if ok and heard then receipts[#receipts + 1] = ("%d:consume"):format(id) end
+                local resolved, defaults = pcall(consumable_defaults, values[3])
+                if resolved and defaults then
+                    local ok, heard = pcall(use_sound, defaults, pawn, {X = x, Y = y, Z = z})
+                    if ok and heard then receipts[#receipts + 1] = ("%d:consume"):format(id) end
+                    local player = math.tointeger(tonumber(values[7]))
+                    if player and player >= 0 and player <= 2147483647 then
+                        local shown, visual = pcall(avatar.play_consumable, state.world, player, values[3], defaults, id)
+                        if shown and visual then receipts[#receipts + 1] = ("%d:consume_visual"):format(id) end
+                    end
+                end
             end
             goto next_cue
         end
