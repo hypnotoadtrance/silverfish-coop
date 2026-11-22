@@ -1849,6 +1849,9 @@ class Host:
 
     def snapshot_for_guest(self, guest_id: str, role: str) -> dict:
         gameplay = self.public_gameplay()
+        if (isinstance(self.relay, link.HostLink) and self.prop_carry_bridge is not None
+                and self.prop_carry_bridge.local_bridge is not None):
+            gameplay[native_prop_carry.POSE_DATAGRAM] = True
         if self.last_game.get(native_inventory.SPLIT_CAPABILITY) == 1:
             gameplay[native_inventory.SPLIT_CAPABILITY] = 1
         if self.last_game.get(native_inventory.SORT_CAPABILITY) == 1:
@@ -1939,6 +1942,13 @@ class Host:
         if receipt != self.applied_guest_sprints:
             await bridge.command("player-guest-sprints", area, *(value for state in states for value in state), timeout=2)
             self.applied_guest_sprints = receipt
+
+    def receive_prop_pose(self, guest_id: str, frame: bytes) -> None:
+        bridge, identity = self.prop_carry_bridge, self.authenticated_guest(guest_id)
+        if bridge is None or bridge.local_bridge is None or identity is None or self.guest_leave_pending(guest_id):
+            return
+        with contextlib.suppress(OSError, RuntimeError, ValueError):
+            self.prop_carry.apply_pose(bridge, identity[1], *native_prop_carry.unpack_pose(frame))
 
     def guest_request(self, guest_id: str, request: dict):
         """Derive character identity from the authenticated link, never the payload."""
@@ -3929,6 +3939,9 @@ class Host:
         if self.mindcore_carry:
             self.mindcore_carry.bridge = bridge
         self.prop_carry_bridge = bridge
+        pose_link = isinstance(transport, link.HostLink)
+        if pose_link:
+            transport.set_prop_pose_handler(self.receive_prop_pose)
         engine = bridge.process if isinstance(bridge.process, EmbeddedEngine) else None
         invites = (native_host_invitation.HostInvitationMailbox(
             bridge.directory, self.control.run, self.invite, engine=engine)
@@ -3945,6 +3958,9 @@ class Host:
         try:
             await self.run_session(bridge, transport, invites, pause_exit=pause_exit)
         finally:
+            self.prop_carry_bridge = None
+            if pose_link:
+                transport.set_prop_pose_handler(None)
             for task in (heartbeat, weapon_shots, loot_motion):
                 if task:
                     task.cancel()

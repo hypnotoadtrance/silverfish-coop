@@ -266,6 +266,11 @@ class SteamTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(forwarded, data)
         unreal_host.sendto(reply, source)
         self.assertEqual(await guest_inbox.receive(), (reply, client.address))
+        poses = asyncio.Queue()
+        relay.set_prop_pose_handler(lambda guest_id, packet: poses.put_nowait((guest_id, packet)))
+        pose = b"\xab" * 58
+        self.assertTrue(client.send_prop_pose(pose))
+        self.assertEqual(await asyncio.wait_for(poses.get(), 2), (request["guest_id"], pose))
 
     async def test_rejects_lobbies_with_the_wrong_owner_or_fingerprint(self):
         platform = Platform()

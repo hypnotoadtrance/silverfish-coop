@@ -99,10 +99,11 @@ _KEEPALIVE_INTERVAL = 3.0
 _MAX_GAME_PACKET = 65507
 _FRAGMENT_SIZE = 1024
 _FRAGMENT_HEADER = struct.Struct("!IHH")
-# Unreal fragments always declare a nonzero size. The reserved header carries
-# small, host-to-guest cosmetic events on the same authenticated connection.
+# Unreal fragments always declare a nonzero size. The reserved headers carry
+# small application datagrams on the same authenticated connection.
 _WEAPON_SHOT_HEADER = _FRAGMENT_HEADER.pack(0, 0, 1)
 _LOOT_MOTION_HEADER = _FRAGMENT_HEADER.pack(0, 0, 2)
+_PROP_POSE_HEADER = _FRAGMENT_HEADER.pack(0, 0, 3)
 _WEAPON_SHOT_MAX_AGE = .25
 _FRAGMENT_TTL = 1.0
 _MAX_ASSEMBLIES = 32
@@ -121,6 +122,7 @@ Enroll = Callable[[Admission, str], Awaitable[Admission]]
 OnDisconnect = Callable[[str], None | Awaitable[None]]
 Action = dict[str, Any]
 OnRequest = Callable[[str, Action], Action | Awaitable[Action]]
+OnPropPose = Callable[[str, bytes], None]
 
 _ACTION_ERRORS = {
     "disabled": "application requests are disabled",
@@ -363,6 +365,9 @@ class _TransportStatistics:
     relay_queue_evicted_frames: int = 0
     relay_queue_expired_frames: int = 0
     weapon_cues_rejected_full_queue: int = 0
+    prop_pose_datagrams_queued: int = 0
+    prop_pose_datagrams_replaced: int = 0
+    prop_pose_datagrams_received: int = 0
     reassembly_expired_packets: int = 0
     reassembly_max_pending_packets: int = 0
     snapshot_responses_encoded: int = 0
@@ -580,21 +585,33 @@ class _LinkProtocol(QuicConnectionProtocol):
         stats.relay_queue_max_frames = max(stats.relay_queue_max_frames, len(pending))
         self.transmit()
 
-    def _forward_presentation(self, header: bytes, data: bytes) -> None:
+    def _forward_presentation(self, header: bytes, data: bytes) -> bool:
         if not self.authorized or not self.game_access or self.terminated or not 0 < len(data) <= _FRAGMENT_SIZE:
-            return
+            return False
         now = self._loop.time()
         self._expire_game_queue(now)
         pending = self._quic._datagrams_pending
+        frame = header + data
+        if header == _PROP_POSE_HEADER:
+            for index, queued in enumerate(pending):
+                if queued.startswith(header):
+                    # Preserve this slot without queuing obsolete targets under congestion.
+                    pending[index] = frame
+                    self._stats.prop_pose_datagrams_replaced += 1
+                    self.transmit()
+                    return True
         if len(pending) >= _MAX_QUEUED_FRAMES:
             if header == _WEAPON_SHOT_HEADER:
                 self._stats.weapon_cues_rejected_full_queue += 1
-            return
+            return False
         if not pending:
             self._game_queue_started = now
-        self._quic.send_datagram_frame(header + data)
+        self._quic.send_datagram_frame(frame)
+        if header == _PROP_POSE_HEADER:
+            self._stats.prop_pose_datagrams_queued += 1
         self._stats.relay_queue_max_frames = max(self._stats.relay_queue_max_frames, len(pending))
         self.transmit()
+        return True
 
     def _expire_game_queue(self, now: float) -> None:
         if self._game_queue_started is not None and now - self._game_queue_started >= _GAME_QUEUE_AGE:
@@ -677,6 +694,9 @@ class _HostProtocol(_LinkProtocol):
                     action.deadline = None
                     self._actions.pop(event.stream_id)
         elif isinstance(event, events.DatagramFrameReceived):
+            if event.data.startswith(_PROP_POSE_HEADER):
+                self.host._receive_prop_pose(self, event.data[_FRAGMENT_HEADER.size:])
+                return
             packet = self._game_payload(event)
             if packet is not None:
                 self.host._to_game(self, packet)
@@ -777,6 +797,7 @@ class HostLink:
         self._admit_callback = admit
         self._disconnect_callback = on_disconnect
         self._request_callback = on_request
+        self._prop_pose_handler: OnPropPose | None = None
         self._enroll = enroll
         self._guest_routes: dict[str, _GameRoute] = {}
         self._protocols: dict[str, _HostProtocol] = {}
@@ -1087,6 +1108,19 @@ class HostLink:
         protocol = self._protocols.get(guest_id)
         if protocol is not None and self._native_route_permitted(guest_id):
             protocol.forward_game_packet(data)
+
+    def set_prop_pose_handler(self, handler: OnPropPose | None) -> None:
+        """Set the synchronous recipient of transient, admitted guest prop poses."""
+        self._prop_pose_handler = handler
+
+    def _receive_prop_pose(self, protocol: _HostProtocol, data: bytes) -> None:
+        handler, guest_id = self._prop_pose_handler, protocol.guest_id
+        if (handler is not None and not self._closed and guest_id is not None
+                and protocol.authorized and protocol.game_access and not protocol.terminated
+                and self._protocols.get(guest_id) is protocol and guest_id in self._guest_routes
+                and self._native_route_permitted(guest_id) and 0 < len(data) <= _FRAGMENT_SIZE):
+            self._stats.prop_pose_datagrams_received += 1
+            handler(guest_id, data)
 
     def send_weapon_shot(self, data: bytes, allowed: Callable[[str], bool]) -> None:
         self._send_presentation(_WEAPON_SHOT_HEADER, data, allowed)
@@ -1525,6 +1559,12 @@ class ClientLink:
         result = [data for received, data in self._weapon_shots if now - received <= _WEAPON_SHOT_MAX_AGE]
         self._weapon_shots.clear()
         return result
+
+    def send_prop_pose(self, data: bytes) -> bool:
+        """Queue one transient prop pose on the current authenticated game link."""
+        protocol = self._protocol
+        return bool(protocol is not None and not self._closed and protocol.session_end is None
+                    and isinstance(data, bytes) and protocol._forward_presentation(_PROP_POSE_HEADER, data))
 
     def _receive_loot_motion(self, data: bytes, now: float) -> None:
         if 0 < len(data) <= _FRAGMENT_SIZE:

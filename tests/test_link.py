@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from aioquic.quic.events import ConnectionTerminated
+from aioquic.quic.events import ConnectionTerminated, DatagramFrameReceived
 from cryptography.hazmat.primitives import serialization
 
 from tools.silverfish import link, party
@@ -171,6 +171,28 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
             protocol._expire_game_queue(now + link._GAME_QUEUE_AGE + .001)
             self.assertEqual(self.client.statistics()["relay_queue_expired_frames"], link._MAX_QUEUED_FRAMES)
             self.assertFalse(protocol._quic._datagrams_pending)
+
+    async def test_prop_pose_replaces_pending_pose_without_growing_the_queue(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        protocol = self.client._protocol
+        pending = protocol._quic._datagrams_pending
+        now = protocol._loop.time()
+        with patch.object(protocol, "transmit"), patch.object(protocol._loop, "time", return_value=now):
+            self.assertTrue(self.client.send_prop_pose(b"old"))
+            for _ in range(link._MAX_QUEUED_FRAMES - 1):
+                protocol.forward_game_packet(b"Unreal")
+            unreal_frames = list(pending)[1:]
+            self.assertTrue(self.client.send_prop_pose(b"latest"))
+            self.assertEqual(list(pending), [link._PROP_POSE_HEADER + b"latest", *unreal_frames])
+            protocol._expire_game_queue(now + link._GAME_QUEUE_AGE + .001)
+            self.assertFalse(pending)
+            for _ in range(link._MAX_QUEUED_FRAMES):
+                protocol.forward_game_packet(b"Unreal")
+            self.assertFalse(self.client.send_prop_pose(b"full queue"))
+            self.assertEqual(len(pending), link._MAX_QUEUED_FRAMES)
+            stats = self.client.statistics()
+            self.assertEqual(stats["prop_pose_datagrams_queued"], 1)
+            self.assertEqual(stats["prop_pose_datagrams_replaced"], 1)
 
     def test_reassembly_expires_older_partial_packet_and_preserves_live_packet(self):
         stats = link._TransportStatistics()
@@ -579,6 +601,65 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client_stats["snapshot_received_bytes"], host_stats["snapshot_encoded_bytes"])
         self.assertGreater(host_stats["snapshot_encode_total_ns"], 0)
         self.assertGreater(client_stats["snapshot_decode_total_ns"], 0)
+
+    async def test_prop_pose_reaches_only_the_current_authenticated_game_route(self):
+        guest_id = self.request["guest_id"]
+        received = asyncio.Queue()
+        self.host.set_prop_pose_handler(lambda guest, data: received.put_nowait((guest, data)))
+        self.assertFalse(self.client.send_prop_pose(b"pre-admission"))
+        self.assertTrue((await self.connect_guest())["accepted"])
+        self.assertFalse(self.client.send_prop_pose(b""))
+        self.assertFalse(self.client.send_prop_pose(bytes(link._FRAGMENT_SIZE + 1)))
+        self.assertFalse(self.client.send_prop_pose("not bytes"))
+        self.assertTrue(self.client.send_prop_pose(b"first grip"))
+        self.assertEqual(await asyncio.wait_for(received.get(), 3), (guest_id, b"first grip"))
+        self.assertTrue(self.host_inbox.messages.empty())
+
+        dispatched = asyncio.Queue()
+        route_pose = self.host._receive_prop_pose
+
+        def observe(protocol, data):
+            route_pose(protocol, data)
+            dispatched.put_nowait(data)
+
+        with patch.object(self.host, "_receive_prop_pose", side_effect=observe):
+            with self.host.hold_game_routes():
+                self.assertTrue(self.client.send_prop_pose(b"during travel"))
+                self.assertEqual(await asyncio.wait_for(dispatched.get(), 3), b"during travel")
+            self.host.restrict_game_routes(set())
+            self.assertTrue(self.client.send_prop_pose(b"restricted"))
+            self.assertEqual(await asyncio.wait_for(dispatched.get(), 3), b"restricted")
+            self.host.restrict_game_routes(None)
+        self.assertTrue(received.empty())
+        self.assertTrue(self.host_inbox.messages.empty())
+
+        old = self.host._protocols[guest_id]
+        await self.client.disconnect()
+        await asyncio.wait_for(self.disconnected.get(), 3)
+        self.assertTrue((await self.connect_guest())["accepted"])
+        with (patch.object(old, "authorized", True), patch.object(old, "game_access", True),
+              patch.object(old, "terminated", False)):
+            old.quic_event_received(DatagramFrameReceived(link._PROP_POSE_HEADER + b"stale connection"))
+        current = self.host._protocols[guest_id]
+        for bad_data in (b"", bytes(link._FRAGMENT_SIZE + 1)):
+            current.quic_event_received(DatagramFrameReceived(link._PROP_POSE_HEADER + bad_data))
+        self.assertTrue(received.empty())
+        self.assertTrue(self.client.send_prop_pose(b"next grip"))
+        self.assertEqual(await asyncio.wait_for(received.get(), 3), (guest_id, b"next grip"))
+        self.assertTrue(received.empty())
+        self.assertTrue(self.host_inbox.messages.empty())
+        self.assertEqual(self.host.statistics()["prop_pose_datagrams_received"], 2)
+        await self.exchange(1200)
+
+    async def test_catalog_admission_cannot_send_prop_poses(self):
+        guest_id = self.request["guest_id"]
+        recipient = Mock()
+        self.host.set_prop_pose_handler(recipient)
+        self.assertTrue((await self.connect_guest(dict(self.request, catalog=True)))["accepted"])
+        self.assertFalse(self.client.send_prop_pose(b"catalog grip"))
+        protocol = self.host._protocols[guest_id]
+        protocol.quic_event_received(DatagramFrameReceived(link._PROP_POSE_HEADER + b"catalog grip"))
+        recipient.assert_not_called()
 
     async def test_weapon_cues_reach_current_game_guest_without_entering_unreal(self):
         guest_id = self.request["guest_id"]

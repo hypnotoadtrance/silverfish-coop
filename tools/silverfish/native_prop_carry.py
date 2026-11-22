@@ -4,6 +4,7 @@ import asyncio
 from collections import deque
 import math
 import re
+from struct import Struct
 import time
 import uuid
 
@@ -11,6 +12,7 @@ from . import native_loot, party
 
 ACTION = "native-prop-carry"
 AIM = "native-prop-carry-aim"
+POSE_DATAGRAM = "native_prop_pose_datagram"
 FIXTURE = "native-prop-carry-fixture"
 BARRELS = "native_authored_physics_barrels"
 BARREL_ROW = "native-authored-physics-barrel"
@@ -24,6 +26,8 @@ _PLACED_NAME = re.compile(r"[A-Za-z0-9_-]{1,100}\Z")
 _BONE = re.compile(r"[A-Za-z0-9_ .-]{1,64}\Z")
 _EDGES = {"grab", "drop", "throw"}
 _ORDER_LIMIT = 2**53
+_POSE_LIMITS = (1e7, 1e7, 1e7, 360, 360, 360)
+_POSE_FRAME = Struct("!16s16sQiiihhh")
 
 
 def _serial(value):
@@ -47,6 +51,18 @@ def _class(value):
 
 def _token(value):
     return isinstance(value, str) and party.REQUEST_ID.fullmatch(value)
+
+
+def pack_pose(epoch, lease, sequence, position):
+    return _POSE_FRAME.pack(bytes.fromhex(epoch), bytes.fromhex(lease), _serial(sequence),
+                            *(round(axis * 10) for axis in _numbers(position, _POSE_LIMITS)))
+
+
+def unpack_pose(frame):
+    if len(frame) != _POSE_FRAME.size:
+        raise ValueError("Invalid physics carry frame length")
+    epoch, lease, sequence, *position = _POSE_FRAME.unpack(frame)
+    return epoch.hex(), lease.hex(), _serial(sequence), _numbers((axis / 10 for axis in position), _POSE_LIMITS)
 
 
 def _corpse(fields):
@@ -171,6 +187,7 @@ class Host:
         elif len(payload) == 2 and holder and (holder["lease"], holder["pawn"]) == (lease, pawn) and number > holder["sequence"]:
             args = ()
             identity = holder["identity"]
+            holder["closing"] = True
         else:
             raise party.RuleError("native_prop_carry_wrong_holder")
         snapshot = await bridge.command(ACTION, lease, pawn, edge, str(number), str(pitch), str(yaw), *args, timeout=4)
@@ -190,22 +207,26 @@ class Host:
         return {PROOF: proof}
 
     def aim(self, bridge, character, target):
+        fields = target.split("@") if isinstance(target, str) and len(target) <= 180 else []
+        if len(fields) != 9:
+            raise party.RuleError("native_prop_carry_invalid_pose")
+        epoch, lease, raw_sequence, *coordinates = fields
+        self.apply_pose(bridge, character, epoch, lease, _serial(raw_sequence), _numbers(coordinates, _POSE_LIMITS))
+        return {"ok": True}
+
+    def apply_pose(self, bridge, character, epoch, lease, sequence, position):
         from .runtime import write_text
 
         self._reset()
-        fields = target.split("@") if isinstance(target, str) and len(target) <= 180 else []
-        if len(fields) != 9 or fields[0] != self.epoch:
+        if epoch != self.epoch:
             raise party.RuleError("native_prop_carry_invalid_pose")
-        _, lease, raw_sequence, *coordinates = fields
         now = time.monotonic()
         holder = self.holders.get(character)
-        if (not holder or holder["lease"] != lease or holder["pawn"] != self._pawn(character)
+        if (not holder or holder.get("closing") or holder["lease"] != lease or holder["pawn"] != self._pawn(character)
                 or now >= holder["deadline"]):
             raise party.RuleError("native_prop_carry_wrong_holder")
-        sequence = _serial(raw_sequence)
         if sequence <= holder["sample"]:
             raise party.RuleError("native_prop_carry_stale_pose")
-        position = _numbers(coordinates, (1e7, 1e7, 1e7, 360, 360, 360))
         # The game thread verifies reach against the live pawn before moving the handle.
         # The worker's periodic pawn snapshot can trail the actual carrier while running.
         allowed = {entry["lease"] for entry in self.holders.values() if entry["deadline"] > now}
@@ -219,7 +240,6 @@ class Host:
             raise RuntimeError("The game could not queue the local prop poses")
         self.poses = poses
         holder["sample"], holder["deadline"] = sequence, now + 1.4
-        return {"ok": True}
 
 
 class Guest:
@@ -303,8 +323,11 @@ class Guest:
                 return
             self.next_pose, self.sample = now + .1, self.sample + 1
             self.last_pose, self.pose_heartbeat = position, now + .45
-            target = "@".join((self.epoch, self.lease, str(self.sample), *position))
-            self.pose = asyncio.create_task(self._pose(target))
+            if service.gameplay.get(POSE_DATAGRAM) is True:
+                service.transport.send_prop_pose(pack_pose(self.epoch, self.lease, self.sample, position))
+            else:
+                target = "@".join((self.epoch, self.lease, str(self.sample), *position))
+                self.pose = asyncio.create_task(self._pose(target))
 
     def close(self):
         for task in (self.action, self.pose):
