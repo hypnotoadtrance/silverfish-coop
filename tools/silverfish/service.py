@@ -1815,6 +1815,8 @@ class Host:
                 }
             if angler_lights := native_anomaly_effects.angler_frame(self.last_game, self.zone_epoch, pawn):
                 gameplay[native_anomaly_effects.ANGLER_COLORS] = angler_lights
+            if observer_opacity := native_anomaly_effects.observer_frame(self.last_game, self.zone_epoch, pawn):
+                gameplay[native_anomaly_effects.OBSERVER_OPACITY] = observer_opacity
             props = {path: row["phase"] for path, row in self.last_game.get(native_anomaly_effects.CANISTERS, {}).items()
                      if row["changed"]}
             if props:
@@ -5512,6 +5514,8 @@ class Client:
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.ELECTRODE_PHASES), self.zone_epoch)
                     self.last_game = await native_anomaly_effects.project_angler_colors(
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.ANGLER_COLORS), self.zone_epoch)
+                    self.last_game = await native_anomaly_effects.project_observer_opacity(
+                        self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.OBSERVER_OPACITY), self.zone_epoch)
                     self.last_game = await native_anomaly_effects.project_canisters(
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.CANISTERS), self.zone_epoch)
                     self.last_game = await native_anomaly_effects.project_fixed_explosives(

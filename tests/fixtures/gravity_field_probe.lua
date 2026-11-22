@@ -412,6 +412,21 @@ local function command(operation, world, driver, host, local_pawn, argument)
         selected.well:CheckPlayerLooking()
         assert(same(selected.well["As Player FP"], local_pawn), "Observer retained the temporary target")
         return local_pawn:GetFullName()
+    elseif observer and operation == "observervisual" then
+        for _, actor in ipairs(current) do
+            local point = actor:K2_GetActorLocation()
+            local material = actor.DynamicMat
+            if (point.X - test_lane.X)^2 + (point.Y - test_lane.Y)^2 < 30^2 and valid(material) then
+                local meshes = {actor.Sphere1, actor.Sphere2, actor.Sphere3}
+                local matching = 0
+                for _, mesh in ipairs(meshes) do
+                    if valid(mesh) and same(mesh:GetOwner(), actor) and same(mesh:GetMaterial(0), material)
+                        and mesh:IsVisible() then matching = matching + 1 end
+                end
+                return ("%.5f|%d"):format(material:K2_GetScalarParameterValue(FName("Opacity")), matching)
+            end
+        end
+        return ""
     elseif shadow and operation == "shadowhit" then
         assert(host and selected and valid(selected.well) and #driver.ClientConnections == 1)
         local guest = driver.ClientConnections[1].PlayerController.Pawn

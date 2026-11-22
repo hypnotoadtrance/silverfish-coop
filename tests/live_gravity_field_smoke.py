@@ -126,6 +126,19 @@ async def verify_observer(guest, host_box, guest_box, probe):
     assert await probe(guest_box, "guestguard") == "0"
     guarded = await wait(guest, lambda view: blocked_triggers(view) >= vetoes + 5, timeout=5)
 
+    async def visible_pair(is_expected):
+        async with asyncio.timeout(8):
+            while True:
+                first, second = await asyncio.gather(
+                    probe(host_box, "observervisual"), probe(guest_box, "observervisual"))
+                if first and second:
+                    authority, host_parts = map(float, first.split("|"))
+                    replica, guest_parts = map(float, second.split("|"))
+                    if host_parts == guest_parts == 3 and is_expected(authority) and is_expected(replica):
+                        return {"host_opacity": authority, "guest_opacity": replica,
+                                "host_meshes": int(host_parts), "guest_meshes": int(guest_parts)}
+                await asyncio.sleep(.1)
+
     async def check_pose(pose):
         facing = await probe(host_box, "observerpose", pose)
         await asyncio.sleep(.6)
@@ -134,6 +147,7 @@ async def verify_observer(guest, host_box, guest_box, probe):
         return facing, stock_target, current
 
     initial = list(map(float, (await probe(host_box, "shadowstate")).split("|")))
+    visible = await visible_pair(lambda opacity: opacity >= .95)
     far = await check_pose("far")
     away = await check_pose("away")
     assert far[2] == initial and away[2] == initial, (initial, far, away)
@@ -144,6 +158,7 @@ async def verify_observer(guest, host_box, guest_box, probe):
     assert guest_hits and all(row.startswith("guest|") for row in guest_hits), guest_hits
     await probe(host_box, "observerpose", "far")
     await asyncio.sleep(1)
+    faded = await visible_pair(lambda opacity: opacity <= .06)
     retreated = list(map(float, (await probe(host_box, "shadowstate")).split("|")))
     await asyncio.sleep(8.2)
     host_looks = await check_pose("host")
@@ -151,6 +166,7 @@ async def verify_observer(guest, host_box, guest_box, probe):
     assert host_looks[2][2:] == retreated[2:] and far[1] == away[1] == face[1] == host_looks[1], (retreated, host_looks)
     return {"guest_native_vetoes": blocked_triggers(guarded) - vetoes, "initial": initial,
             "out_of_range": far, "facing_away": away, "guest_gaze": face, "retreated": retreated, "host_gaze": host_looks,
+            "before_gaze": visible, "after_gaze": faded,
             "stock_psy_attack_recipients": attack_log.read_text().splitlines()}
 
 

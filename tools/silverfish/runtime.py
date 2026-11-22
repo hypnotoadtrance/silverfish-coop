@@ -2622,6 +2622,13 @@ class Bridge:
                     row = [values[:3], values[3:]]
                     if len(lights) < native_anomaly_effects.MAX_ANGLER_LAMPS and native_anomaly_effects.valid_angler_colors(row):
                         lights.append(row)
+                elif (fields[0] == "native-observer-opacity" and len(fields) == 6
+                      and data.get("map") == native_anomaly_effects.ANGLER_MAP and data.get("state") in {"hosting", "connected"}):
+                    observers = data.setdefault(native_anomaly_effects.OBSERVER_OPACITY, [])
+                    values = [_finite(field) for field in fields[1:]]
+                    row = [values[:3], *values[3:]]
+                    if len(observers) < native_anomaly_effects.MAX_ANGLER_LAMPS and native_anomaly_effects.valid_observer_opacity(row):
+                        observers.append(row)
                 elif fields[0] == "native-anomaly-position" and len(fields) == 6:
                     positions = data.setdefault("native_anomaly_positions", [])
                     if (len(positions) < 1024 and fields[1] in {

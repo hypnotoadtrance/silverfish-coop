@@ -141,6 +141,7 @@ function fields.start(role)
     if type(SilverfishSetNativeAnomalyGuest) ~= "function" or type(RegisterBeginPlayPreHook) ~= "function"
         or type(RegisterBeginPlayPostHook) ~= "function" then return end
     lamps.start()
+    observers.start()
     RegisterBeginPlayPreHook(function(context)
         local seat = role()
         if seat ~= "host" and seat ~= "client" then return end
@@ -224,6 +225,7 @@ end
 function fields.command(args, state, phase)
     if args[2] == "native-vortex-apply-sensors" then return project_placed_sensors(args, state, phase) end
     if args[2] == "native-angler-apply-colors" then return lamps.apply_colors(args, state, phase, active) end
+    if args[2] == "native-observer-apply-opacity" then return observers.apply_opacity(args, state, phase, active) end
     local electrode = electrodes.command(args, state, phase, world, active)
     if electrode ~= nil then return electrode end
     local canister = canisters.command(args, state, phase)
@@ -308,12 +310,17 @@ function fields.command(args, state, phase)
 end
 
 function fields.rows(state, phase, row)
-    if phase ~= "hosting" and phase ~= "connected" or not valid(state.world) then lamps.clear(); return {} end
+    if phase ~= "hosting" and phase ~= "connected" or not valid(state.world) then
+        lamps.clear()
+        observers.clear_visuals()
+        return {}
+    end
     if not same(world, state.world) or world_map ~= state.map then
         active, fires, fixtures, world, world_map = {}, {}, {}, state.world, state.map
         effects.clear()
         electrodes.clear()
         lamps.clear()
+        observers.clear_visuals()
         -- Initial replicated actors can finish BeginPlay while the new driver is still pending.
         if phase == "connected" and state.map == crossroads then
             local names = {"GravityAnomaly_BP_C", "Pyrogeist_BP_C"}
@@ -405,6 +412,8 @@ function fields.rows(state, phase, row)
                 rows[#rows + 1] = electrodes.observe(entry, phase, row, position)
             elseif entry.kind == "angler-lamp" then
                 rows[#rows + 1] = lamps.color_row(actor, row)
+            elseif entry.kind == "observer" then
+                rows[#rows + 1] = observers.opacity_row(actor, phase, row, position)
             end
         else
             if phase == "hosting" and entry.kind == "electrode" then electrodes.retire(entry) end

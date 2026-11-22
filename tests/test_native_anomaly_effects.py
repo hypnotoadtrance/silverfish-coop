@@ -2,13 +2,33 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish.native_anomaly_effects import (
-    ANGLER_COLORS, ANGLER_MAP, CANISTERS, ELECTRODE_PHASES, FIXED_EXPLOSIVES, Playback, VORTEX_SENSORS,
-    angler_frame, project_angler_colors, project_canisters, project_electrodes, project_fixed_explosives, project_sensors,
+    ANGLER_COLORS, ANGLER_MAP, CANISTERS, ELECTRODE_PHASES, FIXED_EXPLOSIVES, OBSERVER_OPACITY, Playback, VORTEX_SENSORS,
+    angler_frame, observer_frame, project_angler_colors, project_canisters, project_electrodes,
+    project_fixed_explosives, project_observer_opacity, project_sensors,
 )
 from tools.silverfish.native_damage_feedback import Playback as HurtPlayback
 
 
 class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_observer_opacity_waits_for_a_unique_replica_and_updates_its_fade(self):
+        epoch = "d" * 32
+        host = {"state": "hosting", "map": ANGLER_MAP,
+                "pawns": {"guest": {"name": "Guest", "location": [0, 0, 0]}},
+                OBSERVER_OPACITY: [[[100, 0, 0], .8, 0], [[350, 0, 0], float("nan"), 1], [[20000, 0, 0], 1, 1]]}
+        frame = observer_frame(host, epoch, "Guest")
+        self.assertEqual(frame["actors"], [host[OBSERVER_OPACITY][0]])
+        game = {"state": "connected", "map": ANGLER_MAP,
+                "native_anomaly_positions": [{"kind": "observer", "location": [100, 0, 0]},
+                                               {"kind": "observer", "location": [120, 0, 0]}]}
+        bridge = Mock(command=AsyncMock(return_value=game))
+        await project_observer_opacity(bridge, game, frame, epoch)
+        bridge.command.assert_not_awaited()
+        game["native_anomaly_positions"].pop()
+        game[OBSERVER_OPACITY] = [[[100, 0, 0], .85, 1]]
+        await project_observer_opacity(bridge, game, frame, epoch)
+        bridge.command.assert_awaited_once_with(
+            "native-observer-apply-opacity", ANGLER_MAP, epoch, "100.00000|0.00000|0.00000|0.80000|0.00000", timeout=1.5)
+
     async def test_angler_colors_require_nearby_unambiguous_replica_and_current_visit(self):
         epoch = "c" * 32
         old, changed = [0, 0, 0, 0, 0, 0], [1, .1, .2, .3, .4, .5]

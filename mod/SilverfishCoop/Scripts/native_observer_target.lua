@@ -6,7 +6,10 @@ observers.enabled = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local trace_path = "/Script/Engine.Default__KismetSystemLibrary"
 local clock_path = "/Script/Engine.Default__GameplayStatics"
+local material_library = "/Script/Engine.Default__KismetMaterialLibrary"
+local asset_path = "/Game/Assets/Materials/Mat_Observer.Mat_Observer"
 local color = {R = 0, G = 0, B = 0, A = 0}
+local visuals = {}
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -14,6 +17,117 @@ end
 
 local function same(first, second)
     return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function fraction(value)
+    return type(value) == "number" and value >= 0 and value <= 1
+end
+
+local function difference(first, second)
+    return (first.X - second.X)^2 + (first.Y - second.Y)^2 + (first.Z - second.Z)^2
+end
+
+local function stock_parts(actor)
+    local first, second, third = actor.Sphere1, actor.Sphere2, actor.Sphere3
+    if not valid(first) or not valid(second) or not valid(third) then return end
+    for _, component in ipairs({first, second, third}) do
+        if not same(component:GetOwner(), actor)
+            or component:GetClass():GetFullName() ~= "Class /Script/Engine.StaticMeshComponent" then return end
+    end
+    return first, second, third
+end
+
+local function view_material(actor)
+    local first, second, third = stock_parts(actor)
+    local library, source = StaticFindObject(material_library), StaticFindObject(asset_path)
+    if not first or not valid(library) or not valid(source) or source:GetFullName() ~= "Material " .. asset_path then return end
+    local material = library:CreateDynamicMaterialInstance(actor, source, FName("None"), 0)
+    if not valid(material) then return end
+    for _, component in ipairs({first, second, third}) do component:SetMaterial(0, material) end
+    actor.DynamicMat = material
+    return material
+end
+
+function observers.clear_visuals()
+    visuals = {}
+end
+
+local function tick_visuals()
+    if not next(visuals) then return end
+    local clock = StaticFindObject(clock_path)
+    if not valid(clock) then return end
+    for address, view in pairs(visuals) do
+        local actor = view.actor
+        if not valid(actor) or actor:IsActorBeingDestroyed() or not valid(view.material)
+            or actor:GetLocalRole() ~= 1 or not same(actor:GetWorld(), view.world) then
+            visuals[address] = nil
+        elseif view.opacity ~= view.target then
+            local now = clock:GetTimeSeconds(view.world)
+            local alpha = math.min(1, math.max(0, (now - view.clock) * 5))
+            local opacity = view.opacity + (view.target - view.opacity) * alpha
+            if math.abs(opacity - view.target) < .001 then opacity = view.target end
+            view.material:SetScalarParameterValue(view.parameter, opacity)
+            view.opacity, view.clock = opacity, now
+        end
+    end
+end
+
+function observers.start()
+    if observers.enabled then LoopInGameThreadWithDelay(50, tick_visuals) end
+end
+
+function observers.opacity_row(actor, phase, row, position)
+    local view = visuals[actor:GetAddress()]
+    local material = phase == "hosting" and actor.DynamicMat or view and view.material
+    if not valid(material) then return end
+    local opacity = material:K2_GetScalarParameterValue(FName("Opacity"))
+    local target = phase == "hosting" and actor.OpacityTarget or view and view.target
+    if fraction(opacity) and fraction(target) then
+        return row("native-observer-opacity", position.X, position.Y, position.Z, opacity, target)
+    end
+end
+
+function observers.apply_opacity(args, state, phase, active)
+    local epoch = args[4]
+    if not observers.enabled or phase ~= "connected" or not state.server or state.map ~= crossroads or state.map ~= args[3]
+        or not epoch or #epoch ~= 32 or not epoch:match("^[a-f0-9]+$") or #args < 5 or #args > 36 then
+        error("Observer opacity is outside the current guest visit", 0)
+    end
+    local clock = StaticFindObject(clock_path)
+    if not valid(clock) then return end
+    for index = 5, #args do
+        local x, y, z, opacity, target = args[index]:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
+        x, y, z, opacity, target = tonumber(x), tonumber(y), tonumber(z), tonumber(opacity), tonumber(target)
+        if x and y and z and math.abs(x) <= 1e6 and math.abs(y) <= 1e6 and math.abs(z) <= 1e6
+            and fraction(opacity) and fraction(target) then
+            local point, actor = {X = x, Y = y, Z = z}, nil
+            for _, entry in pairs(active) do
+                local candidate = entry.actor
+                if entry.kind == "observer" and valid(candidate) and same(candidate:GetWorld(), state.world)
+                    and candidate:GetLocalRole() == 1 and not candidate:IsActorBeingDestroyed()
+                    and difference(candidate:K2_GetActorLocation(), point) < 180^2 then
+                    if actor then actor = nil; break end
+                    actor = candidate
+                end
+            end
+            if actor then
+                local address = actor:GetAddress()
+                local view = visuals[address]
+                if not view or not same(view.actor, actor) then
+                    local material = view_material(actor)
+                    if valid(material) then
+                        view = {actor = actor, world = state.world, material = material, parameter = FName("Opacity")}
+                        visuals[address] = view
+                    end
+                end
+                if view then
+                    view.material:SetScalarParameterValue(view.parameter, opacity)
+                    view.opacity, view.target, view.clock = opacity, target, clock:GetTimeSeconds(state.world)
+                end
+            end
+        end
+    end
+    return "Applied the host Observer opacity"
 end
 
 local function gaze_distance(actor, pawn, point, trace)
