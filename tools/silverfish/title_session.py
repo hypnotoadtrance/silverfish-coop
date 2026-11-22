@@ -23,6 +23,7 @@ _GAME_PHASE = {"host": "hosting", "join": "connected"}
 _PROGRESS = {"starting", "character_creation", "waiting_for_host", "hosting", "connected", "reconnecting"}
 _TITLE_ACTIVE = {"waiting_title", "offered", "starting", "ready", "failed"}
 _TITLE_EVENTS = {"ready", "stopped", "failed", "cleanup_unverified"}
+_TITLE_RETURN_WAIT = 2.0
 
 
 @dataclass(frozen=True)
@@ -429,12 +430,13 @@ class TitleSession:
                             await asyncio.wait((task,), timeout=self._poll_interval)
                         reason = await task
                         if self._resident:
-                            final, returned = _read_plan_status(plan), self._bridge.snapshot()
+                            final = _read_plan_status(plan)
                             if (not _is_attempt(final, baseline, started_wall, claim.action, producer_pid())
                                     or final["generation"] != child_generation or final.get("active") is not False
-                                    or final.get("state") != "stopped"
-                                    or not self._solo_title(returned)):
+                                    or final.get("state") != "stopped"):
                                 raise RuntimeError("The resident session did not return to its solo title")
+                            # The in-memory save-scope release can finish before the file-backed title frame arrives.
+                            await self._bridge.wait_for(self._solo_title, timeout=_TITLE_RETURN_WAIT)
                             self._publish("stopped", attempt=attempt)
                             return False
                         if reason in native_session_exit.ORDERLY_REASONS:
@@ -476,8 +478,11 @@ class TitleSession:
         current = _is_attempt(status, baseline, started_wall, claim.action, producer_pid())
         cleanup_proven = current and status.get("active") is False and status["generation"] == child_generation
         unsafe = (current and status.get("active") is True) or (child_generation is not None and not cleanup_proven)
-        if self._resident and cleanup_proven and not self._solo_title(self._bridge.snapshot()):
-            unsafe = True
+        if self._resident and cleanup_proven:
+            try:
+                await self._bridge.wait_for(self._solo_title, timeout=_TITLE_RETURN_WAIT)
+            except (OSError, RuntimeError, ValueError):
+                unsafe = True
         if self._resident and cleanup_proven and not unsafe and status.get("stop_reason") == "creator_cancelled":
             self._last_failure = None
             self._publish("stopped", attempt=attempt)

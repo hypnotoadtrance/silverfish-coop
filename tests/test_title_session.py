@@ -16,6 +16,8 @@ from tools.silverfish.travel import OBSERVATORY
 
 
 class TitleBridge:
+    wait_for = runtime.Bridge.wait_for
+
     def __init__(self, directory):
         self.directory = directory
         self.process = self
@@ -303,6 +305,45 @@ class TitleSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.status()["state"], "offered")
         await self.wait(lambda: renders >= 9)
         notify.assert_called_once_with()
+
+    async def test_resident_stop_waits_for_the_file_title_to_report_released_save_scope(self):
+        saved = self.directory.resolve() / "game-user" / "Saved"
+        saved.mkdir(parents=True)
+        child = Child("host")
+        original = self.bridge.snapshot
+        waiting_for_title = asyncio.Event()
+        released = asyncio.Event()
+
+        def snapshot():
+            data = original()
+            if child.state is not None and not released.is_set():
+                if child.state["state"] == "stopped":
+                    waiting_for_title.set()
+                data.update(child.state.get("game", {}))
+                data["save_scope"] = "campaign"
+                return data
+            data["save_scope"] = None
+            data[native_title_entry.PANEL_KEY] = dict(state="ready", mounted=True, actions=["host"])
+            data[native_title_entry.STARTUP_KEY] = dict(map=data["map"], sequence=data["sequence"], saved_directory=str(saved))
+            return data
+
+        self.bridge.snapshot = snapshot
+        session = TitleSession(self.bridge, {"host": child.plan()}, resident=True,
+                               on_title_ready=Mock(), title_saved_directory=saved, poll_interval=.005)
+        task = asyncio.create_task(session.run())
+        self.addAsyncCleanup(self.stop, task)
+        offer = await self.wait(self.generation)
+        self.request("host", offer)
+        await child.started.wait()
+        child.ready()
+        await self.wait(lambda: self.status().get("state") == "ready")
+        child.finish.set()
+        await asyncio.wait_for(waiting_for_title.wait(), 1)
+        self.assertFalse(task.done())
+        released.set()
+        await self.wait(lambda: self.generation() and self.generation() != offer)
+        self.assertEqual(self.status()["state"], "offered")
+        self.assertIsNone(self.status()["last_failure"])
 
     async def test_refuses_a_stock_title_that_reports_the_wrong_effective_save_directory(self):
         saved = self.directory.resolve() / "game-user" / "Saved"

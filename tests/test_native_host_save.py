@@ -1,4 +1,5 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import native_host_save
 from tools.silverfish.campaign import CampaignFormatError, CampaignStore
-from tools.silverfish.service import Host
+from tools.silverfish.service import CHECKPOINT_INTERVAL, Host
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
@@ -69,6 +70,7 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.host = object.__new__(Host)
         self.host.native_profile = root / "game-user"
+        self.host.next_save = 0.0
         native_host_save.directory(self.host.native_profile).mkdir(parents=True)
         self.host.allowed_maps = {CROSSROADS}
         self.host.last_game = {"state": "hosting", "map": CROSSROADS,
@@ -143,3 +145,19 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await Host.commit_checkpoint(self.host, None, native_record=next_frame), 3)
         self.assertEqual(store.status()["revision"], 3)
         self.host.control.event.assert_called_once_with("native_host_save_prune_deferred", reason="busy")
+
+    async def test_completed_transaction_postpones_periodic_capture_and_preserves_forced_capture(self):
+        self.host.store = SimpleNamespace(wait_for_checkpoint=AsyncMock(), checkpoint_async=AsyncMock(return_value=2))
+        self.host.checkpoint_contents = Mock(return_value=({}, {}))
+        start = time.monotonic()
+        self.host.next_save = start + 0.1
+        self.assertEqual(await Host.commit_checkpoint(self.host, None), 2)
+        self.assertGreaterEqual(self.host.next_save, start + CHECKPOINT_INTERVAL)
+
+        async def disconnect_during_commit(*args, **kwargs):
+            self.host.next_save = 0.0
+            return 3
+
+        self.host.store.checkpoint_async.side_effect = disconnect_during_commit
+        self.assertEqual(await Host.commit_checkpoint(self.host, None), 3)
+        self.assertEqual(self.host.next_save, 0.0)

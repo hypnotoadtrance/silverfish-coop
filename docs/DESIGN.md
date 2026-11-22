@@ -48,6 +48,7 @@ Project Silverfish co-op is a shared, host-run campaign. The party shares the wo
 - Apply gameplay changes on the game thread when their inputs and current world are ready. Use exact, bounded requests and budget bulk discovery and projection across frames.
 - Send player actions and lasting outcomes reliably. Settle competing claims at the host in accepted order, using one result per operation ID. Apply a confirmed inventory transfer, trade, revive, or quest change to the relevant players. Use a current baseline on late join, travel, or reconnect.
 - Give gameplay traffic and action receipts priority over bulky snapshots and diagnostics. Use short-lived messages for replaceable visual and audio effects. Keep the host's saved state and per-character ownership authoritative through a delay or disconnect.
+- Keep routine campaign changes in memory until the next checkpoint. Save on explicit requests, travel, and session exit, with a one-minute fallback during play. Keep immediate durable commits for ownership transfers, shared-money transactions, and one-time rewards.
 
 ## Implementation milestones
 

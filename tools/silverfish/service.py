@@ -65,6 +65,8 @@ _MENU_NATIVE_SAVE_BYTES = 128 * 1024**2
 MENU_HOST_OPTIONS = {"native_events": True, "native_guest": True, "native_zones": True,
                      "native_zone_walls": True, "expanded_zones": True}
 POSITION_MAX_AGE = 3.0
+CHECKPOINT_INTERVAL = 60.0
+CHECKPOINT_RETRY_INTERVAL = 5.0
 GUEST_EXPIRY_CAPTURE_ATTEMPTS = 2
 NATIVE_RUNTIME_RETIRING = "native_runtime_retiring"
 # The stock driver can retain a silent connection for 110 seconds.
@@ -481,6 +483,10 @@ class Host:
             # proposed party in memory. Shutdown must not overwrite that commit.
             self.native_checkpoint_unsafe = True
             raise
+        # A completed transaction already saved this interval's state. Preserve
+        # an immediate checkpoint requested by a disconnect during capture.
+        if self.next_save != 0.0:
+            self.next_save = time.monotonic() + CHECKPOINT_INTERVAL
         if cleanup_error is not None:
             with contextlib.suppress(OSError):
                 self.control.event("native_host_save_prune_deferred", reason=cleanup_error)
@@ -3989,7 +3995,7 @@ class Host:
                         self.last_game, self.last_seen = snapshot, time.monotonic()
             now = time.monotonic()
             if not self.stopping and now >= self.next_save:
-                self.next_save = now + 5
+                self.next_save = now + CHECKPOINT_RETRY_INTERVAL
                 try:
                     await self.checkpoint_native(bridge)
                 except (OSError, RuntimeError) as error:
