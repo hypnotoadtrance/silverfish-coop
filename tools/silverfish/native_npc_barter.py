@@ -74,13 +74,23 @@ def parse(frame: list[str], items: list[list[str]], moved: list[list[str]], pref
         available.append({"guid": guid, "class_path": path, "ammo": integer(ammo, -(2**31), 2**31 - 1),
                           "weight": weight, "value": integer(value, 0, 2**31 - 1), "never_drop": never_drop == "1",
                           "quote": quote})
-    transfers, changed = [], set()
+    transfers, changed, sources = [], set(), set()
     for row in moved:
-        if (len(row) != 5 or row[1] not in {"give", "receive"} or not item_key(row[3], row[2])
-                or row[2] in changed or (row[2] in seen) != (row[1] == "give")):
+        if len(row) not in {5, 6}:
             raise ValueError("Invalid native NPC barter transfer")
-        changed.add(row[2])
-        transfers.append({"direction": row[1], "guid": row[2], "class_path": row[3], "quantity": integer(row[4], 1, 1000000)})
+        _, direction, source, *transfer_data = row
+        partial = len(transfer_data) == 3
+        guid, path, amount = transfer_data if partial else (source, *transfer_data)
+        if (direction not in {"give", "receive"} or not item_key(path, guid) or not valid_guid(source)
+                or source in sources or guid in changed or (guid in seen) != (direction == "give")
+                or (partial and (source == guid or (source in seen) != (direction == "receive")))):
+            raise ValueError("Invalid native NPC barter transfer")
+        changed.add(guid)
+        sources.add(source)
+        transfer = {"direction": direction, "guid": guid, "class_path": path, "quantity": integer(amount, 1, 1000000)}
+        if partial:
+            transfer["source_guid"] = source
+        transfers.append(transfer)
     taste = {}
     if len(preferences) > 256:
         raise ValueError("The NPC barter preference list is too large")
@@ -202,22 +212,25 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         except party.RuleError:
             host.native_checkpoint_unsafe = False
             raise
-        moved = {direction: {row["guid"]: row["quantity"] for row in result["transfers"] if row["direction"] == direction}
+        moved = {direction: {row.get("source_guid", row["guid"]): row["quantity"]
+                             for row in result["transfers"] if row["direction"] == direction}
                  for direction in expected}
         if moved != expected or result["cash_before"] != result["cash"] + cash:
             raise RuntimeError("The NPC barter did not verify the exact transfer and shared funds")
         before = party.load_party(host.party)
         inventory = before["players"][character].get("native_inventory", {})
-        for row in result["transfers"]:
-            inventory.pop(row["guid"], None)
+        detached = {row.get("source_guid", row["guid"]) if row["direction"] == "give" else row["guid"]
+                    for row in result["transfers"]}
+        for guid in detached:
+            inventory.pop(guid, None)
         recorded = before["receipts"].setdefault(character, [])
         proof = {STOCK: result}
         recorded.append({"id": operation, "request": fingerprint, "result": proof})
         del recorded[:-party.RECENT_ACTIONS]
         revision = await host.checkpoint_native(bridge, before, require_guest_frames=frozenset({character}))
         host.party = before
-        for row in result["transfers"]:
-            host.native_pickup.forget_committed_row(character, row["guid"])
+        for guid in detached:
+            host.native_pickup.forget_committed_row(character, guid)
         host.native_checkpoint_unsafe = False
     except (OSError, RuntimeError, ValueError, KeyError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:

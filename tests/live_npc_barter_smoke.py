@@ -136,6 +136,17 @@ async def verify(work, canary, offer):
             elif offer in ("high-value", "skinflint"):
                 assert transfers == {("receive", "Item_Jewely_C", 8), ("give", "Item_CannedPeaches_C", 1)}, transfers
                 assert commit["cash_before"] == 20000 and 1000 < 20000 - commit["cash"] <= 20000, commit
+            elif offer == "partial":
+                assert transfers == {("receive", "Item_Jewely_C", 3), ("give", "Item_Bandage_C", 2)}, transfers
+                portion, = [row for row in result["transfers"] if row["direction"] == "receive"]
+                payment, = [row for row in result["transfers"] if row["direction"] == "give"]
+                assert portion["guid"] != portion["source_guid"]
+                assert payment["guid"] != payment["source_guid"]
+                remainder, = [row for row in result["stock"] if row["guid"] == portion["source_guid"]]
+                assert remainder["ammo"] == 5 and remainder["class_path"] == portion["class_path"]
+                added, = [row for row in result["stock"] if row["guid"] == payment["guid"]]
+                assert added["ammo"] == 2 and added["class_path"] == payment["class_path"]
+                assert commit["cash_before"] == 20000 and 1000 < 20000 - commit["cash"] < 12868, commit
             evidence = {"offer": offer, "commit": commit, "receipt": receipt, "checkpoint_revision": checkpoint["revision"],
                         "guest_stock_screen": view["game"]["native_npc_barter_view"], "guest_inventory": inventory}
             if offer == "skinflint":
@@ -167,6 +178,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
-    parser.add_argument("--offer", choices=("cash", "high-value", "donation", "refresh", "skinflint"), default="cash")
+    parser.add_argument("--offer", choices=("cash", "high-value", "donation", "refresh", "skinflint", "partial"), default="cash")
     options = parser.parse_args()
     asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve(strict=True), options.offer))

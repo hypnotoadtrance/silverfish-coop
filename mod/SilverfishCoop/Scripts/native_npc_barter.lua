@@ -239,6 +239,27 @@ local function read_item(text)
             C = tonumber(id:sub(17, 24), 16), D = tonumber(id:sub(25, 32), 16)}}
 end
 
+local function amounts(items)
+    local count = items and (items.GetArrayNum and items:GetArrayNum() or #items)
+    if not count or count < 0 or count > 4096 then fail("view_selection_bounds") end
+    local result = {}
+    for index = 1, count do
+        local row = items[index]
+        local class = row and row[item_class]
+        local id = row and guid(row[item_guid])
+        local base = valid(class) and class:GetCDO()
+        local quantity
+        if valid(base) then
+            quantity = base.Stacks == true and math.tointeger(row[item_ammo]) or (base.Stacks == false and 1)
+        end
+        if not id or not id:find("[^0]") or result[id] or not quantity or quantity < 1 or quantity > 1000000 then
+            fail("view_selection")
+        end
+        result[id] = {class = class:GetFullName(), quantity = quantity}
+    end
+    return result
+end
+
 local function guest_command(action, fields, state, phase)
     local context = local_context(state, phase)
     local sequence = math.tointeger(tonumber(fields[3]))
@@ -292,9 +313,11 @@ local function guest_command(action, fields, state, phase)
     if not valid(original_stock) or not valid(original_pack)
         or not copy_items(context.actor.Inventory, original_stock.PlayerBackpack)
         or not copy_items(save.PlayerBackpack, original_pack.PlayerBackpack) then fail("view_before_image") end
+    local stock_before, pack_before = amounts(entries), amounts(original_pack.PlayerBackpack)
     session = context
     session.sequence, session.state, session.save = sequence, "ready", save
     session.original_stock, session.original_pack = original_stock, original_pack
+    session.stock_before, session.pack_before = stock_before, pack_before
     session.original_preferences, session.original_seed = preferences(context.actor)
     session.original_minimum = context.actor.MinWeaponValue
     session.original_accepts_cash = context.actor.AcceptCash
@@ -334,19 +357,28 @@ local function guest_command(action, fields, state, phase)
     return "exact stock NPC barter screen shown"
 end
 
-local function choices(items)
-    local selected = {}
-    local count = items and items:GetArrayNum()
-    if not count or count < 0 or count > 12 then fail("view_selection_bounds") end
-    for index = 1, count do
-        local row = items[index]
-        local class = row and row[item_class]
-        local id = row and guid(row[item_guid])
-        local base = valid(class) and class:GetCDO()
-        local amount = valid(base) and (base.Stacks == true and math.tointeger(row[item_ammo]) or 1)
-        if not id or not id:find("[^0]") or not amount or amount < 1 or amount > 1000000 then fail("view_selection") end
-        selected[#selected + 1] = id .. ":" .. amount
+local function choices(offer, original, inventory)
+    local selected, offered, remaining = {}, {}, amounts(inventory)
+    for _, row in pairs(amounts(offer)) do
+        offered[row.class] = (offered[row.class] or 0) + row.quantity
     end
+    for id, row in pairs(remaining) do
+        local source = original[id]
+        if not source or row.class ~= source.class or row.quantity > source.quantity then fail("view_source_changed") end
+    end
+    -- The stock split gives the offered part a new GUID and leaves the original
+    -- GUID on the remainder. Send the authoritative source and selected count.
+    for id, source in pairs(original) do
+        local taken = source.quantity - (remaining[id] and remaining[id].quantity or 0)
+        if taken > 0 then
+            local quantity = offered[source.class] or 0
+            if taken > quantity or #selected >= 12 then fail("view_selection") end
+            offered[source.class] = quantity - taken
+            selected[#selected + 1] = id .. ":" .. taken
+        end
+    end
+    for _, remainder in pairs(offered) do if remainder ~= 0 then fail("view_selection") end end
+    table.sort(selected)
     return #selected == 0 and "-" or table.concat(selected, ",")
 end
 
@@ -375,7 +407,8 @@ function barter.sync(state, phase)
         local sequence = SilverfishTakeNativeNpcBarterConfirm(address)
         if sequence then
             local okay, give, receive = pcall(function()
-                return choices(session.screen.PlayerOffer), choices(session.screen.TraderOffer)
+                return choices(session.screen.PlayerOffer, session.pack_before, session.save.PlayerBackpack),
+                    choices(session.screen.TraderOffer, session.stock_before, session.actor.Inventory)
             end)
             local cash = math.tointeger(session.screen.PlayerCashOffer)
             if not okay or not cash or cash < 0 or cash > 2147483647 then close_stock(); return end
