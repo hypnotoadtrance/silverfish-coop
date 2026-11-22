@@ -2,9 +2,12 @@
 
 import argparse
 import asyncio
+from contextlib import contextmanager, nullcontext
 import json
 import math
 from pathlib import Path
+import shutil
+from statistics import median
 import subprocess
 import sys
 import uuid
@@ -21,10 +24,107 @@ from tools.silverfish.control import submit
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY
 
 CRATE = f"{OBSERVATORY}.Observitory_P:PersistentLevel.LootCrate_Small_BP_C_1"
+TYPEWRITER = f"{CROSSROADS}.CrossRoads_P:PersistentLevel.Prop_TypeWriter_C_3"
+TRACE_COLUMNS = ("seconds", "turn_fraction", "body_x", "body_y", "body_z", "body_pitch", "body_yaw", "body_roll",
+                 "velocity_x", "velocity_y", "velocity_z", "target_x", "target_y", "target_z",
+                 "target_pitch", "target_yaw", "target_roll")
 
 
-async def exercise(work, untouched, kind="crate", *, require_release_pose=False):
-    token = f"{kind}-carry-{uuid.uuid4().hex[:8]}"
+@contextmanager
+def staged_grip_probe(work):
+    mods = work / "stage/SilverFish/Binaries/Win64/ue4ss/Mods"
+    if mods.resolve(strict=True) != mods or "steamapps" in {part.casefold() for part in mods.parts}:
+        raise ValueError("Use a private staged mod directory for the grip trace")
+    mod = mods / "SilverfishTypewriterGripProbe"
+    scripts = mod / "Scripts"
+    source, activation = scripts / "main.lua", mod / "enabled.txt"
+    mod.mkdir()
+    try:
+        scripts.mkdir()
+        shutil.copyfile(Path(__file__).with_name("fixtures") / "typewriter_grip_probe.lua", source)
+        activation.touch()
+        yield
+    finally:
+        if mod.resolve() != mod or scripts.resolve() != scripts:
+            raise RuntimeError("The private grip probe path changed during the test")
+        activation.unlink(missing_ok=True)
+        source.unlink(missing_ok=True)
+        if scripts.exists():
+            scripts.rmdir()
+        mod.rmdir()
+
+
+def grip_trace_metrics(samples):
+    def target_offset(sample):
+        x, y, z = (body - target for body, target in zip(sample[2:5], sample[11:14], strict=True))
+        yaw = math.radians(sample[15])
+        sine, cosine = math.sin(yaw), math.cos(yaw)
+        return cosine * x + sine * y, -sine * x + cosine * y, z
+
+    stationary = [sample for sample in samples if sample[1] == 0]
+    turning = [sample for sample in samples if sample[1] > 0]
+    if min(len(stationary), len(turning)) < 8:
+        raise ValueError("The grip trace did not record both motion phases")
+    rest_offset = tuple(map(median, zip(*(target_offset(row) for row in stationary[-8:]), strict=True)))
+    metrics = {}
+    for name, rows in (("stationary", stationary), ("turning", turning)):
+        steps = []
+        turns = []
+        intervals = []
+        for first, second in zip(rows, rows[1:]):
+            interval = second[0] - first[0]
+            intervals.append(interval)
+            steps.append(math.dist(first[2:5], second[2:5]))
+            turns.append(max(abs((end - start + 180) % 360 - 180)
+                             for start, end in zip(first[5:8], second[5:8], strict=True)))
+        metrics[name] = {
+            "samples": len(rows), "max_sample_interval_ms": max(intervals) * 1000,
+            "max_position_step_cm": max(steps), "max_rotation_axis_step_deg": max(turns),
+            "max_position_step_cm_per_s": max(step / dt for step, dt in zip(steps, intervals, strict=True)),
+            "max_rotation_axis_step_deg_per_s": max(turn / dt for turn, dt in zip(turns, intervals, strict=True)),
+            "max_target_offset_drift_cm": max(math.dist(target_offset(row), rest_offset) for row in rows),
+        }
+    return metrics
+
+
+async def collect_grip_trace(run):
+    mailbox, = (run / "game-bridge").iterdir()
+    reply = mailbox / "prop-grip-trace-reply.tsv"
+    pending = mailbox / "prop-grip-trace-request.pending"
+    pending.write_text("start\n", encoding="ascii", newline="")
+    pending.replace(mailbox / "prop-grip-trace-request")
+    async with asyncio.timeout(8):
+        while True:
+            try:
+                text = reply.read_text(encoding="utf-8")
+            except (FileNotFoundError, PermissionError):
+                text = ""
+            lines = text.splitlines()
+            if text.endswith("\n") and lines:
+                header = lines[0].split("\t")
+                if header[0] == "error":
+                    raise RuntimeError(f"The stock grip trace failed: {header[1:]}")
+                if len(header) != 3 or header[:2] != ["ok", TYPEWRITER]:
+                    raise ValueError(f"Unexpected stock grip trace header: {header}")
+                count = int(header[2])
+                if not 16 <= count <= 96:
+                    raise ValueError(f"The stock grip trace reported {count} samples")
+                if len(lines) == count + 1:
+                    break
+            await asyncio.sleep(.05)
+    samples = [tuple(map(float, row.split("\t"))) for row in lines[1:]]
+    if (any(len(row) != len(TRACE_COLUMNS) or not all(math.isfinite(value) for value in row)
+            or not 0 <= row[1] <= 1 for row in samples)
+            or any(second[0] <= first[0] or second[1] < first[1] for first, second in zip(samples, samples[1:]))
+            or samples[0][1] != 0 or samples[-1][1] != 1):
+        raise ValueError("The stock grip trace has invalid or unordered samples")
+    return {"actor": TYPEWRITER, "columns": TRACE_COLUMNS,
+            "metrics": grip_trace_metrics(samples), "samples": samples}
+
+
+async def exercise(work, untouched, kind="crate", *, require_release_pose=False, trace_local_grip=False):
+    trace_tag = "trace-" if trace_local_grip else ""
+    token = f"{kind}-carry-{trace_tag}{uuid.uuid4().hex[:8]}"
     host, guest = ("--campaign", token), ("--profile", token)
     hrun, grun = work / "campaigns" / token / "run", work / "clients" / token / "run"
     hrun.mkdir(parents=True)
@@ -109,7 +209,7 @@ async def exercise(work, untouched, kind="crate", *, require_release_pose=False)
         await start("host", host, "host", *host, "--port", "0", "--headless", "--fixtures", "--native-events",
                     "--native-guest", "--native-zones", "--native-expanded-zones", "--start-zone", area)
         barrel_class = "Prop_FuelDrum_C " if fuel_drum else "Prop_PlasticBarrel_C " if kind == "barrel" else None
-        placed_name = f"Prop_TypeWriter_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Prop_TypeWriter_C_3"
+        placed_name = f"Prop_TypeWriter_C {TYPEWRITER}"
 
         def barrels_of_class(state):
             return [item for item in state.get("game", {}).get(carry.BARRELS, {}).values()
@@ -171,7 +271,12 @@ async def exercise(work, untouched, kind="crate", *, require_release_pose=False)
         grabbed = await wait(hrun, lambda state: prop(state).get("held") and prop(state).get("grip")
                              and proof(state).get("edge") == "grab")
         assert proof(grabbed)["actor"] == initial["actor"], proof(grabbed)
-        await fixture(guest, "turn")
+        trace = None
+        if trace_local_grip:
+            trace = await collect_grip_trace(grun)
+            (hrun / "prop-grip-trace.json").write_text(json.dumps(trace, indent=2) + "\n", encoding="utf-8")
+        else:
+            await fixture(guest, "turn")
         moved = await wait(hrun, lambda state: prop(state).get("held") and prop(state).get("grip")
                            and math.dist(prop(state)["grip"], prop(grabbed)["grip"]) > 50
                            and math.dist(prop(state)["position"], prop(grabbed)["position"]) > 25)
@@ -224,6 +329,8 @@ async def exercise(work, untouched, kind="crate", *, require_release_pose=False)
                 repeated = await submit(hrun, loose.CLAIM, target=target)
                 assert not repeated["ok"] and repeated["error"] == "loose_pickup_already_claimed", repeated
                 effect.update(stock_pickup=applied, backpack=item, competing_claim=repeated["error"])
+        if trace is not None:
+            effect["local_grip_trace"] = trace["metrics"]
         (hrun / "prop-carry-verification.json").write_text(json.dumps(dict(
             initial=initial, grabbed=prop(grabbed), moved=prop(moved),
             grab_receipt=proof(grabbed), canary_files=len(original), **effect,
@@ -241,8 +348,11 @@ if __name__ == "__main__":
     parser.add_argument("--kind", choices=("crate", "lantern", "barrel", "fuel-drum", "fuel-drum-grab", "placed-prop", "placed-item"),
                         default="crate")
     parser.add_argument("--require-release-pose", action="store_true", help="require the rigid-body handoff and settled agreement")
+    parser.add_argument("--trace-local-grip", action="store_true", help="measure the local Typewriter grip during one hold and turn")
     options = parser.parse_args()
-    if options.require_release_pose and options.kind != "placed-prop":
-        parser.error("--require-release-pose uses the placed rigid-prop fixture")
-    asyncio.run(exercise(options.work.resolve(), options.vanilla_saved.resolve(), options.kind,
-                         require_release_pose=options.require_release_pose))
+    if (options.require_release_pose or options.trace_local_grip) and options.kind != "placed-prop":
+        parser.error("--require-release-pose and --trace-local-grip use the placed rigid-prop fixture")
+    work = options.work.resolve()
+    with staged_grip_probe(work) if options.trace_local_grip else nullcontext():
+        asyncio.run(exercise(work, options.vanilla_saved.resolve(), options.kind,
+                             require_release_pose=options.require_release_pose, trace_local_grip=options.trace_local_grip))
