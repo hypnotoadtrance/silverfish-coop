@@ -2,13 +2,14 @@ local box = os.getenv("SILVERFISH_COOP_BRIDGE")
 local pyrogeist = box and box:find("pyrogeist%-proof%-%x+") ~= nil
 local shadow = box and box:find("shadow%-sphere%-proof%-%x+") ~= nil
 local angler = box and box:find("angler%-lamp%-proof%-%x+") ~= nil
+local observer = box and box:find("observer%-proof%-%x+") ~= nil
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not box
-    or not (pyrogeist or shadow or angler or box:find("gravity%-proof%-%x+")) then return end
+    or not (pyrogeist or shadow or angler or observer or box:find("gravity%-proof%-%x+")) then return end
 
 local level = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local director_path = level .. ":PersistentLevel.DynaimicSpawnControler_BP_C_1"
 local class = pyrogeist and "Pyrogeist_BP_C" or shadow and "ShadowSphere_BP_C"
-    or angler and "AnglerLamp_BP_C" or "GravityAnomaly_BP_C"
+    or angler and "AnglerLamp_BP_C" or observer and "Observers_BP_C" or "GravityAnomaly_BP_C"
 local particle_name = pyrogeist and "NI_Pyrogeist_Center" or "NI_GravityDistortion"
 local particle = "NiagaraSystem /Game/Assets/PFX/" .. particle_name .. "." .. particle_name
 local jet_particle = "NiagaraSystem /Game/Assets/PFX/NI_FireJet_Continuous_2.NI_FireJet_Continuous_2"
@@ -20,6 +21,7 @@ local weights = "Anomalies_WtWeights_41_BDF2F049400F5C73E9FF86B6B2B4E19F"
 local test_lane = {X = 13850, Y = -200, Z = 132}
 local previous, lift, hooked, selected
 local watched, damage_hooked
+local gaze_hooked
 
 local function valid(object)
     return object and object:IsValid()
@@ -55,7 +57,8 @@ local function stock_roll(world)
     local cap = director.Max_AnomalyFields
     local ok, issue = pcall(function()
         map:Empty()
-        map:Add(FName(pyrogeist and "Pyrogiest" or shadow and "ShadowSwarm" or angler and "AnglerLamp" or "GravityWell"), 1)
+        map:Add(FName(pyrogeist and "Pyrogiest" or shadow and "ShadowSwarm" or angler and "AnglerLamp"
+            or observer and "Observers" or "GravityWell"), 1)
         director.Max_AnomalyFields = 2
         director:SpawnAnomalies()
     end)
@@ -119,14 +122,15 @@ local function command(operation, world, driver, host, local_pawn, argument)
         for _, well in ipairs(current) do
             local at = well:K2_GetActorLocation()
             local fx = pyrogeist and well.NI_StarburstHint or shadow and well.PostProcess_CreepingShadows
-                or angler and well.PostProcessLure or well.NI_GravityDistortion
+                or angler and well.PostProcessLure or observer and well.Sphere1 or well.NI_GravityDistortion
             local post = shadow or angler
-            local available = valid(fx) and same(fx:GetOwner(), well) and (post or valid(fx.Asset) and fx.Asset:GetFullName() == particle)
-            assert(pyrogeist or post or available)
+            local available = valid(fx) and same(fx:GetOwner(), well)
+                and (post or observer or valid(fx.Asset) and fx.Asset:GetFullName() == particle)
+            assert(pyrogeist or post or observer or available)
             if available then
                 rows[#rows + 1] = ("%.2f|%.2f|%.2f|%d|%s|%s|%s"):format(at.X, at.Y, at.Z, well:GetLocalRole(),
                     tostring(well:GetActorEnableCollision()), tostring(well:IsActorTickEnabled()),
-                    tostring(post and fx.bEnabled or not post and fx:IsActive()))
+                    tostring(not observer and (post and fx.bEnabled or not post and fx:IsActive())))
             end
         end
         return table.concat(rows, ";")
@@ -134,6 +138,16 @@ local function command(operation, world, driver, host, local_pawn, argument)
         assert(not host and #current > 0)
         local well = current[1]
         assert(well:GetLocalRole() == 1 and not well:GetActorEnableCollision() and not well:IsActorTickEnabled())
+        if observer then
+            local opacity = well.OpacityTarget
+            well:ReceiveBeginPlay()
+            well:CheckPlayerLooking()
+            well:Rage()
+            well:TryCatchItem(local_pawn, {X = 1, Y = 0, Z = 0})
+            well:AbsorbItem(local_pawn)
+            assert(well.OpacityTarget == opacity)
+            return "0"
+        end
         if angler then
             well:ReceiveBeginPlay()
             well:ReceiveTick(.2)
@@ -169,7 +183,7 @@ local function command(operation, world, driver, host, local_pawn, argument)
         well:ReceiveTick(.2)
         assert(#well.Characters == characters and #well.PhysActors == bodies)
         return tostring(characters) .. "|" .. tostring(bodies)
-    elseif (shadow or angler) and operation == "prepare" then
+    elseif (shadow or angler or observer) and operation == "prepare" then
         assert(host and #current > 0 and #driver.ClientConnections == 0)
         local body = current[1]
         assert(body:HasAuthority() and body.bReplicates and body:GetActorEnableCollision())
@@ -177,11 +191,15 @@ local function command(operation, world, driver, host, local_pawn, argument)
         -- Scope this lane above the roaming NPCs so unrelated attacks cannot alter either save during the proof.
         local_pawn.CharacterMovement:StopMovementImmediately()
         local_pawn.CharacterMovement:SetMovementMode(0, 0)
-        assert(local_pawn:K2_SetActorLocation({X = anchor.X + 1050, Y = anchor.Y, Z = anchor.Z}, false, {}, true))
+        assert(local_pawn:K2_SetActorLocation({X = anchor.X + (observer and 2800 or 1050), Y = anchor.Y, Z = anchor.Z}, false, {}, true))
         assert(body:K2_SetActorLocation(anchor, false, {}, true))
+        if observer then
+            body.FloatingPawnMovement:StopMovementImmediately()
+            body.FloatingPawnMovement:SetComponentTickEnabled(false)
+        end
         body:ForceNetUpdate()
         local_pawn:ForceNetUpdate()
-        selected = {well = body, entry = {X = anchor.X + 120, Y = anchor.Y, Z = anchor.Z}}
+        selected = {well = body, entry = {X = anchor.X + 120, Y = anchor.Y, Z = anchor.Z}, anchor = anchor}
         return ("%.2f|%.2f|%.2f"):format(anchor.X, anchor.Y, anchor.Z)
     elseif pyrogeist and operation == "prepare" then
         assert(host and #current > 0 and #driver.ClientConnections == 0)
@@ -347,7 +365,7 @@ local function command(operation, world, driver, host, local_pawn, argument)
             end
         end
         return table.concat(rows, ";")
-    elseif shadow and operation == "shadowstate" then
+    elseif (shadow or observer) and operation == "shadowstate" then
         assert(host and #driver.ClientConnections == 1)
         local guest = driver.ClientConnections[1].PlayerController.Pawn
         local name = FName("Player_Fatigue")
@@ -357,6 +375,43 @@ local function command(operation, world, driver, host, local_pawn, argument)
         end
         return ("%d|%.3f|%d|%.3f"):format(fatigue(local_pawn), local_pawn.Save.PlayerHealth,
             fatigue(guest), guest.Save.PlayerHealth)
+    elseif observer and operation == "observerpose" then
+        assert(host and selected and valid(selected.well) and #driver.ClientConnections == 1)
+        local guest = driver.ClientConnections[1].PlayerController.Pawn
+        assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled())
+        local use_host = argument == "host"
+        local distance = argument == "far" and 2500 or 600
+        local away = argument == "away"
+        assert(use_host or argument == "far" or argument == "away" or argument == "guest")
+        local point = selected.anchor
+        local target, other = use_host and local_pawn or guest, use_host and guest or local_pawn
+        local function place(pawn, x, y, rotation)
+            pawn.CharacterMovement:StopMovementImmediately()
+            pawn.CharacterMovement:SetMovementMode(0, 0)
+            assert(pawn:K2_SetActorLocation({X = x, Y = y, Z = point.Z}, false, {}, true))
+            pawn.Controller:SetControlRotation(rotation)
+            pawn.Camera:K2_SetWorldRotation(rotation, false, {}, true)
+            pawn:ForceNetUpdate()
+        end
+        place(other, point.X + 2800, point.Y + 320, {Pitch = 0, Yaw = 0, Roll = 0})
+        place(target, point.X + distance, point.Y, {Pitch = 0, Yaw = away and 0 or 180, Roll = 0})
+        if not gaze_hooked then
+            RegisterHook("/Game/Classes/Player/Player_FP.Player_FP_C:PsyAttack", function(context, amount)
+                local pawn = context:get()
+                if (same(pawn, local_pawn) or same(pawn, guest)) and amount:get() == 4 then
+                    write("observer-gaze", (same(pawn, local_pawn) and "host" or "guest") .. "|" .. pawn:GetFullName(),
+                        "ab")
+                end
+            end)
+            gaze_hooked = true
+        end
+        local eye, look = target.Camera:K2_GetComponentLocation(), target.Camera:GetForwardVector()
+        return ("%.1f|%.1f|%.1f|%.3f|%.3f|%.3f"):format(eye.X, eye.Y, eye.Z, look.X, look.Y, look.Z)
+    elseif observer and operation == "observercheck" then
+        assert(host and selected and valid(selected.well) and same(selected.well["As Player FP"], local_pawn))
+        selected.well:CheckPlayerLooking()
+        assert(same(selected.well["As Player FP"], local_pawn), "Observer retained the temporary target")
+        return local_pawn:GetFullName()
     elseif shadow and operation == "shadowhit" then
         assert(host and selected and valid(selected.well) and #driver.ClientConnections == 1)
         local guest = driver.ClientConnections[1].PlayerController.Pawn

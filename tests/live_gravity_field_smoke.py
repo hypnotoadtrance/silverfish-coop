@@ -121,6 +121,39 @@ def angler_rows(raw):
     return result
 
 
+async def verify_observer(guest, host_box, guest_box, probe):
+    vetoes = blocked_triggers(status(guest))
+    assert await probe(guest_box, "guestguard") == "0"
+    guarded = await wait(guest, lambda view: blocked_triggers(view) >= vetoes + 5, timeout=5)
+
+    async def check_pose(pose):
+        facing = await probe(host_box, "observerpose", pose)
+        await asyncio.sleep(.6)
+        stock_target = await probe(host_box, "observercheck")
+        current = list(map(float, (await probe(host_box, "shadowstate")).split("|")))
+        return facing, stock_target, current
+
+    initial = list(map(float, (await probe(host_box, "shadowstate")).split("|")))
+    far = await check_pose("far")
+    away = await check_pose("away")
+    assert far[2] == initial and away[2] == initial, (initial, far, away)
+    face = await check_pose("guest")
+    assert face[2][:2] == initial[:2] and face[2][2] > initial[2] and face[2][3] < initial[3], (initial, face)
+    attack_log = host_box / "observer-gaze"
+    guest_hits = attack_log.read_text().splitlines()
+    assert guest_hits and all(row.startswith("guest|") for row in guest_hits), guest_hits
+    await probe(host_box, "observerpose", "far")
+    await asyncio.sleep(1)
+    retreated = list(map(float, (await probe(host_box, "shadowstate")).split("|")))
+    await asyncio.sleep(8.2)
+    host_looks = await check_pose("host")
+    assert host_looks[2][0] > retreated[0] and host_looks[2][1] < retreated[1], (retreated, host_looks)
+    assert host_looks[2][2:] == retreated[2:] and far[1] == away[1] == face[1] == host_looks[1], (retreated, host_looks)
+    return {"guest_native_vetoes": blocked_triggers(guarded) - vetoes, "initial": initial,
+            "out_of_range": far, "facing_away": away, "guest_gaze": face, "retreated": retreated, "host_gaze": host_looks,
+            "stock_psy_attack_recipients": attack_log.read_text().splitlines()}
+
+
 async def verify_angler(guest, host_box, guest_box, probe):
     parking = list(map(float, (await probe(host_box, "anglerholdguest")).split("|")))
     await wait(guest, lambda view: math.dist(
@@ -207,6 +240,8 @@ async def verify(work, family):
             env["SILVERFISH_COOP_SHADOW_SPHERE_FIXTURE"] = "1"
         if family == "angler-lamp" and args[0] == "join":
             env["SILVERFISH_COOP_ANGLER_LAMP_FIXTURE"] = "1"
+        if family == "observer":
+            env["SILVERFISH_COOP_OBSERVER_FIXTURE"] = "1"
         with (host / f"{args[0]}.log").open("wb") as log:
             child = await asyncio.create_subprocess_exec(*cli, *args, stdout=log, stderr=log,
                 creationflags=flags, env=env)
@@ -250,8 +285,9 @@ async def verify(work, family):
                     if attempt == 5:
                         raise
             anchor = list(map(float, (await probe(host_box, "prepare")).split("|")))
+            spawn_limit = 3100 if family == "observer" else 1500
             await wait(host, lambda view: math.dist(
-                view.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), anchor) < 1500)
+                view.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), anchor) < spawn_limit)
             invite = await command("invite", "--campaign", profile, "--name", "Anomaly observer", "--character", "Observer")
             await start(guest, "join", "--profile", profile, "--invite", invite["invite_file"], "--headless", "--native-zones")
             guest_state = await wait(guest, lambda view: view.get("state") == "connected" and view.get("gameplay_fresh"))
@@ -299,6 +335,12 @@ async def verify(work, family):
                 evidence.write_text(json.dumps(common, indent=2), encoding="utf-8")
                 print(evidence, flush=True)
                 return
+            if family == "observer":
+                common.update(await verify_observer(guest, host_box, guest_box, probe))
+                evidence = host / "live-observer-gaze.json"
+                evidence.write_text(json.dumps(common, indent=2), encoding="utf-8")
+                print(evidence, flush=True)
+                return
             local_effects = await probe(guest_box, "guestguard")
             assert local_effects == "0|0"
             launch_origin = await probe(host_box, "lift")
@@ -336,6 +378,6 @@ async def verify(work, family):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
-    parser.add_argument("--family", choices=("gravity", "pyrogeist", "shadow-sphere", "angler-lamp"), default="gravity")
+    parser.add_argument("--family", choices=("gravity", "pyrogeist", "shadow-sphere", "angler-lamp", "observer"), default="gravity")
     args = parser.parse_args()
     asyncio.run(verify(args.work.resolve(), args.family))

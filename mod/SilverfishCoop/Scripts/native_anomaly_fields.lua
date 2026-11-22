@@ -6,6 +6,7 @@ local fixed = require("native_fixed_explosives")
 local pyrogeist = require("native_pyrogeist_view")
 local shadows = require("native_shadow_sphere_view")
 local lamps = require("native_angler_lamp_view")
+local observers = require("native_observer_target")
 
 local classes = {
     starburst = "/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C",
@@ -40,11 +41,12 @@ end
 
 local function trap_kind(actor, class)
     if class == gravity or class == pyrogeist.body or shadows.enabled and class == shadows.class
-        or lamps.enabled and class == lamps.class then
+        or lamps.enabled and class == lamps.class or observers.enabled and class == observers.class then
         local at = actor:GetWorld()
         if valid(at) and at:GetFullName() == "World " .. crossroads .. ".CrossRoads_P" then
             if class == gravity then return "gravity" end
             if class == pyrogeist.body then return "pyrogeist" end
+            if class == observers.class then return "observer" end
             return class == shadows.class and "shadow-sphere" or "angler-lamp"
         end
         return
@@ -53,7 +55,7 @@ local function trap_kind(actor, class)
 end
 
 local function disables_replica_tick(kind)
-    return kind == "gravity" or kind == "pyrogeist" or kind == "shadow-sphere" or kind == "angler-lamp"
+    return kind == "gravity" or kind == "pyrogeist" or kind == "shadow-sphere" or kind == "angler-lamp" or kind == "observer"
 end
 
 local function replica(actor)
@@ -317,6 +319,7 @@ function fields.rows(state, phase, row)
             local names = {"GravityAnomaly_BP_C", "Pyrogeist_BP_C"}
             if shadows.enabled then names[#names + 1] = "ShadowSphere_BP_C" end
             if lamps.enabled then names[#names + 1] = "AnglerLamp_BP_C" end
+            if observers.enabled then names[#names + 1] = "Observers_BP_C" end
             for _, name in ipairs(names) do
                 for _, actor in ipairs(FindAllOf(name) or {}) do
                     if in_world(actor, world) and replica(actor) then
@@ -360,6 +363,7 @@ function fields.rows(state, phase, row)
     pyrogeist.apply(world, phase, active, replica)
     shadows.project(active, state, phase)
     lamps.project(active, state, phase)
+    observers.target(active, state, phase)
     for address, fire in pairs(pending_fires) do
         if in_world(fire, world) then
             if phase == "hosting" then

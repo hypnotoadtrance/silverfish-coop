@@ -1,5 +1,6 @@
 #include "guest_sickness.hpp"
 
+#include "anomaly_fields.hpp"
 #include "enemy_loot.hpp"
 #include "guest_regen.hpp"
 
@@ -307,19 +308,21 @@ namespace
         return item ? nullptr : data;
     }
 
-    bool shadow_source(U::FFrame* resolve, U::UObject* pawn)
+    enum class PsychicSource { None, ShadowSphere, Observer };
+
+    PsychicSource psychic_source(U::FFrame* resolve, U::UObject* pawn)
     {
         auto* method = resolve ? resolve->Node() : nullptr;
         auto* type = pawn ? pawn->GetClassPrivate() : nullptr;
         if (!method || method->GetFName() != resolve_psy_name || resolve->Object() != pawn ||
-            !type || type != method->GetOuterPrivate() || type->GetPathName() != pawn_path) return false;
+            !type || type != method->GetOuterPrivate() || type->GetPathName() != pawn_path) return PsychicSource::None;
         auto* controller = object(pawn, STR("Controller"));
         auto* connection = object(controller, STR("Player"));
         auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
         auto* driver = object(world, STR("NetDriver"));
         if (!controller || !connection || !driver || !world || world->GetPathName() != crossroads ||
             object(connection, STR("Driver")) != driver || object(connection, STR("PlayerController")) != controller)
-            return false;
+            return PsychicSource::None;
         auto* previous = resolve->PreviousFrame();
         for (int depth = 0; previous && depth < 8; ++depth, previous = previous->PreviousFrame())
         {
@@ -328,9 +331,11 @@ namespace
             auto* source_type = source ? source->GetClassPrivate() : nullptr;
             if (node && node->GetFName() == shadow_graph && source_type && source_type == node->GetOuterPrivate() &&
                 source_type->GetPathName() == shadow_class && object(source, STR("AttackTarget")) == pawn &&
-                static_cast<U::AActor*>(source)->GetWorld() == world) return true;
+                static_cast<U::AActor*>(source)->GetWorld() == world) return PsychicSource::ShadowSphere;
+            if (source && silverfish::native_anomaly_fields::exact_observer_gaze(source, pawn))
+                return PsychicSource::Observer;
         }
-        return false;
+        return PsychicSource::None;
     }
 
     bool redirect_psy(Iteration& iteration, U::UObject* receiver, U::FFrame& frame)
@@ -338,7 +343,7 @@ namespace
         if (!shadow_routing || !frame.Node()) return false;
         if (!schema_bound || !schema.resolve_psy)
         {
-            if (!shadow_source(&frame, receiver)) return false;
+            if (psychic_source(&frame, receiver) == PsychicSource::None) return false;
             iteration.PreventOriginalFunctionCall();
             return true;
         }
@@ -349,7 +354,8 @@ namespace
         if (!resolve && !fatigue && !passive) return false;
         auto* parent = resolve ? &frame : frame.PreviousFrame();
         auto* pawn = parent ? parent->Object() : nullptr;
-        if (!shadow_source(parent, pawn)) return false;
+        const auto source = psychic_source(parent, pawn);
+        if (source == PsychicSource::None) return false;
         auto* scope = entry_for(pawn);
         Flags guest, host;
         const bool qualified = scope && current(*scope) && !scope->proof.quarantined
@@ -368,7 +374,7 @@ namespace
             }
             return true;
         }
-        // A Shadow Sphere's personal writes must never reach the session's host save.
+        // Psychic effects on a guest must never mutate the session's host save.
         iteration.PreventOriginalFunctionCall();
         if (!iteration.OriginalFunctionCallPrevented() || !qualified) return true;
         auto* locals = frame.Locals();
@@ -402,7 +408,8 @@ namespace
         schema.fatigue_value->SetPropertyValue(value, before.value);
         const auto amount = schema.fatigue_delta->GetPropertyValueInContainer(locals);
         std::int32_t trauma{};
-        if (amount < 6 || amount > 100 || !silverfish::native_enemy_loot::count_save_passive(save, schema.trauma, trauma))
+        const auto minimum = source == PsychicSource::Observer ? 4 : 6;
+        if (amount < minimum || amount > 100 || !silverfish::native_enemy_loot::count_save_passive(save, schema.trauma, trauma))
             return true;
         const auto next = std::clamp<std::int64_t>(static_cast<std::int64_t>(before.value) + amount, trauma > 0 ? 15 : 0, 100);
         if (guest.write(schema.fatigue, before, static_cast<std::int32_t>(next)) && current(*scope)
