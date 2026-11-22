@@ -537,6 +537,8 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
                 and staged_script(work, "native_campaign_npc.lua", "NPC_NotDeer_C")):
             env.update(SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC="1", SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER="1",
                        SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW="notdeer")
+            if staged_script(work, "native_campaign_npc.lua", "SilverfishReadCampaignNpcHostRoster"):
+                env["SILVERFISH_COOP_NATIVE_CROSSROADS_ROSTER"] = "1"
         if host_role and native_fixtures:
             env["SILVERFISH_COOP_NATIVE_FIXTURES"] = "1"
             env["SILVERFISH_COOP_NATIVE_LOOT"] = "1"
@@ -1781,6 +1783,10 @@ class Bridge:
                         "map": fields[1], "viewer": fields[2], "stock_receipts": int(fields[3]), "stage": fields[4],
                         "spawner": fields[5], "squad_data": fields[6], "cohort_size": int(fields[7]),
                         "replicated": int(fields[8]), "spawn_denials": int(fields[9]), "members": [],
+                    }
+                elif fields[0] == "native-campaign-npc-host-roster" and len(fields) == 5 and data.get("state") == "hosting":
+                    data["native_campaign_npc_host_roster"] = {
+                        "map": fields[1], "husks": int(fields[2]), "boars": int(fields[3]), "defeated": int(fields[4]),
                     }
                 elif fields[0] == "native-campaign-npc-census" and len(fields) == 10 and "native_campaign_npc" in data:
                     metrics = ("natural_calls", "authority", "simulated", "other", "simulated_controllers",

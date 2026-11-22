@@ -1,4 +1,4 @@
-"""Prove Crossroads stock boars have one authority and no duplicate guest spawn."""
+"""Prove qualified Crossroads stock NPCs have one authority and no duplicate guest spawn."""
 
 import argparse
 import asyncio
@@ -36,7 +36,7 @@ def staged_probe(work, combat):
                 b"campaign_npc.boar_test_stock_aim = flayer_projectile_aim\nreturn campaign_npc"))
             weapons = scripts / "native_guest_weapon.lua"
             weapons.write_bytes(pristine[weapons].replace(b"if action == \"fire\" and shot_fixture then", b'''
-    if action == "fire" and fixtures and headless and os.getenv("SILVERFISH_COOP_NATIVE_BOAR_FIXTURE") == "1" then
+    if action == "fire" and fixtures and headless and os.getenv("SILVERFISH_COOP_BOAR_PROBE_SHOT") == "1" then
         restore, refusal = require("campaign_boar_probe").before_fire(state, phase, name)
     elseif action == "fire" and shot_fixture then'''))
         yield
@@ -58,7 +58,7 @@ def census(mailbox):
         return {}
 
 
-async def proof(work, combat=False, squad="single", corpse=False):
+async def proof(work, combat=False, squad="single", production=False, corpse=False):
     profile = "boar-proof-" + uuid.uuid4().hex[:8]
     host = work / "campaigns" / profile / "run"
     guest = work / "clients" / profile / "run"
@@ -67,8 +67,13 @@ async def proof(work, combat=False, squad="single", corpse=False):
     shutil.copytree(Path(__file__).resolve().parents[1] / "tools", runtime_copy / "tools",
                     ignore=shutil.ignore_patterns("__pycache__"))
     cli = [sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work)]
-    environment = {**os.environ, "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC": "1", "SILVERFISH_COOP_NATIVE_BOAR_FIXTURE": "1",
-                   "SILVERFISH_COOP_BOAR_SQUAD": squad}
+    environment = {**os.environ, "SILVERFISH_COOP_BOAR_SQUAD": squad}
+    for flag in ("CAMPAIGN_NPC", "BOAR_FIXTURE", "CROSSROADS_ROSTER"):
+        environment.pop("SILVERFISH_COOP_NATIVE_" + flag, None)
+    if not production:
+        environment.update(SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC="1", SILVERFISH_COOP_NATIVE_BOAR_FIXTURE="1")
+    if combat:
+        environment["SILVERFISH_COOP_BOAR_PROBE_SHOT"] = "1"
     processes = []
 
     async def start(run, *args):
@@ -100,10 +105,14 @@ async def proof(work, combat=False, squad="single", corpse=False):
                     raise RuntimeError(f"{command}: {result}")
                 return result
 
+    stock_asset = {"single": "WildLife/Boar_Single", "group": "WildLife/Boar_SmallGroup",
+                   "husks": "Monsters/Husks_Scattered"}[squad]
+    family = "husk" if squad == "husks" else "boar"
+
     def host_ready(value):
         return (value.get("receipts", 0) > 0 and value.get("replicated", 0) > 0
                 and value.get("stage") in ("stock_initial", "stock_refresh")
-                and ("WildLife/Boar_SmallGroup" if squad == "group" else "WildLife/Boar_Single") in value.get("data", "")
+                and stock_asset in value.get("data", "")
                 and value.get("authority_network_ready", 0) >= value["replicated"])
 
     def guest_ready(value, count):
@@ -118,7 +127,8 @@ async def proof(work, combat=False, squad="single", corpse=False):
             await wait(host, lambda row: row.get("state") == "hosting")
             invitation = await output("invite", "--campaign", profile, "--name", "Boar observer", "--character", "Boar observer")
             await start(guest, "join", "--profile", profile, "--invite", invitation["invite_file"], "--headless",
-                        "--native-zones", *(("--native-guest-primary-input",) if combat else ()))
+                        "--native-zones", *(("--native-guest-primary-input",) if combat else ()),
+                        *(("--native-guest-inventory-view",) if production else ()))
             await wait(guest, lambda row: row.get("state") == "connected" and row.get("gameplay_fresh"))
             host_box, guest_box = [next((side / "game-bridge").iterdir()) for side in (host, guest)]
             before = census(host_box)
@@ -129,20 +139,20 @@ async def proof(work, combat=False, squad="single", corpse=False):
                 await asyncio.sleep(.95)
                 before = census(host_box)
             assert host_ready(before), (before, census(guest_box))
+            guest_pre = census(guest_box)
+            marker = before["marker"].split(" ", 1)[1]
+            result = await probe(guest_box, f"veto|{marker}")
+            assert result == ("stock refresh" if production else "0"), result
+            async with asyncio.timeout(8):
+                while census(guest_box).get("denials", 0) <= guest_pre["denials"]:
+                    await asyncio.sleep(.15)
             target = await probe(host_box, "approach")
             async with asyncio.timeout(12):
                 while not guest_ready(census(guest_box), before["authority_network_ready"]):
                     await asyncio.sleep(.15)
-            guest_pre = census(guest_box)
-            marker = before["marker"].split(" ", 1)[1]
-            result = await probe(guest_box, f"veto|{marker}")
-            assert result == "0", result
-            async with asyncio.timeout(8):
-                while census(guest_box).get("denials", 0) <= guest_pre["denials"]:
-                    await asyncio.sleep(.15)
             guest_post = census(guest_box)
             assert guest_ready(guest_post, before["authority_network_ready"]), guest_post
-            assert guest_post["stage"] == "stock_client_boar_spawn_denied", guest_post
+            assert guest_post["stage"] == f"stock_client_{family}_spawn_denied", guest_post
             def positions(raw, role):
                 actors = []
                 for entry in raw.split(";"):
@@ -161,6 +171,14 @@ async def proof(work, combat=False, squad="single", corpse=False):
             report = {"target": target, "host": before, "guest": guest_pre, "after_veto": guest_post,
                       "fixture_output": result, "refreshes": refreshes, "host_stock": host_actors,
                       "guest_simulated": guest_actors}
+            if production:
+                expected = before["authority_network_ready"]
+                count_field = "husks" if squad == "husks" else "boars"
+                roster = (await wait(host, lambda row: row.get("game", {}).get(
+                    "native_campaign_npc_host_roster", {}).get(count_field) == expected))["game"]["native_campaign_npc_host_roster"]
+                report["production_host_roster"] = roster
+                if squad == "single":
+                    report["local_replica_damage"] = await probe(guest_box, "localdamage")
             result_path = host / "live-boar-encounter.json"
             result_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
             print(result_path, flush=True)
@@ -226,9 +244,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--combat", action="store_true")
-    parser.add_argument("--squad", choices=("single", "group"), default="single")
+    parser.add_argument("--squad", choices=("single", "group", "husks"), default="single")
+    parser.add_argument("--production-roster", action="store_true")
     parser.add_argument("--corpse", action="store_true")
     options = parser.parse_args()
-    if options.corpse and (not options.combat or options.squad != "single"):
-        parser.error("--corpse requires the single-boar combat fixture")
-    asyncio.run(proof(options.work.resolve(), options.combat, options.squad, options.corpse))
+    if options.squad == "husks" and not options.production_roster:
+        parser.error("The Husk trial exercises the production roster")
+    if options.squad != "single" and options.combat:
+        parser.error("The stock pistol trial requires one boar")
+    if options.corpse and not options.combat:
+        parser.error("--corpse requires --combat")
+    asyncio.run(proof(options.work.resolve(), combat=options.combat, squad=options.squad,
+                      production=options.production_roster, corpse=options.corpse))

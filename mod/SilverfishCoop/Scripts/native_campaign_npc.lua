@@ -571,6 +571,12 @@ local function read_rows(state, phase, status_row)
     local rows = family_rows(state, pawn, host, status_row, view, "native-campaign-npc")
     if #rows == 0 then return rows end
     active = state.world:GetAddress()
+    if host and type(SilverfishReadCampaignNpcHostRoster) == "function" then
+        local husks, boars, defeated = SilverfishReadCampaignNpcHostRoster(pawn:GetAddress())
+        if type(husks) == "number" then
+            rows[#rows + 1] = status_row("native-campaign-npc-host-roster", state.map, husks, boars, defeated)
+        end
+    end
     if shot_ticket then
         local guest = state.guests and #state.guests == 1 and state.guests[1]
         local controller = guest and guest.controller_object

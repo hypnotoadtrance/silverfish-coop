@@ -59,6 +59,7 @@ namespace
         STR("/Game/Classes/Libraries/DataAssets/Squads/WildLife/Boar_SmallGroup.Boar_SmallGroup"),
     };
     bool operate_boars{};
+    bool production_roster{};
     constexpr auto not_deer_class = STR("/Game/Classes/NPCs/NPC_NotDeer.NPC_NotDeer_C");
     constexpr auto not_deer_squad = STR("/Game/Classes/Libraries/DataAssets/Squads/Monsters/NotDeer.NotDeer");
     constexpr auto npc_controller = STR("/Game/Classes/NPCs/NPC_Assets/MasterNPC_AI_Controler_BP.MasterNPC_AI_Controler_BP_C");
@@ -69,6 +70,7 @@ namespace
     constexpr auto melee_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:ResolveMelee");
     constexpr auto player_damage_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:DealDamage");
     constexpr auto npc_damage_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:DealDamage");
+    constexpr auto npc_death_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:ResolveDeath");
     constexpr auto projectile_base = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C");
     constexpr auto projectile_calc = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C:CalcDmg");
     constexpr auto light_projectile = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Pistol_Light.Projectile_Pistol_Light_C");
@@ -520,6 +522,12 @@ namespace
         int calls{};
     };
 
+    struct RosterMember
+    {
+        U::FWeakObjectPtr actor;
+        NpcFamily family;
+    };
+
     struct Scope
     {
         U::FWeakObjectPtr world, driver;
@@ -531,6 +539,7 @@ namespace
         Flayers flayers;
         AntfarmCohort not_deer;
         AntfarmCohort boars;
+        std::vector<RosterMember> roster;
         SavedSquad not_deer_saved;
         U::FWeakObjectPtr not_deer_replica;
         RefreshObservation refresh;
@@ -629,7 +638,7 @@ namespace
         if (family == NpcFamily::Flayer) return publish_flayers;
         if (family == NpcFamily::NotDeer) return operate_not_deer;
         if (family == NpcFamily::Boar) return operate_boars;
-        return family == NpcFamily::Husk && operate;
+        return family == NpcFamily::Husk && (operate || production_roster);
     }
 
     bool hook_ready()
@@ -1132,9 +1141,46 @@ namespace
         if (!next.cohort.empty() || published->latest.cohort.empty()) published->latest = std::move(next);
     }
 
+    bool prevent_roster_damage(Iteration& call, U::UObject* receiver, U::UFunction* function,
+                               U::FFrame* frame, void* parameters)
+    {
+        if (!production_roster || !receiver || !function || call.OriginalFunctionCallPrevented()) return false;
+        static const U::FName damage_name{STR("DealDamage")}, death_name{STR("ResolveDeath")};
+        const auto name = function->GetFName();
+        const bool damage = name == damage_name;
+        if ((!damage && name != death_name) || function != find<U::UFunction>(damage ? npc_damage_path : npc_death_path)
+            || function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)
+            || byte_field(receiver, STR("Role")) != 1 || !bool_field(receiver, STR("bReplicates"), true)) return false;
+        const auto family = npc_family(receiver);
+        if (family != NpcFamily::Husk && family != NpcFamily::Boar) return false;
+        const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld());
+        if (active.seat != Seat::Client || !in_level(receiver, active.world) ||
+            (frame && frame->Object() != receiver)) return false;
+        call.PreventOriginalFunctionCall();
+        if (!call.OriginalFunctionCallPrevented()) return false;
+        if (!damage) return true;
+
+        auto* total = hit_field<U::FDoubleProperty>(function, STR("TotalDamage"), 0x178, true);
+        auto* lethal = hit_field<U::FBoolProperty>(function, STR("IsLethal"), 0x180, true);
+        if (!total || !lethal) return true;
+        if (frame)
+        {
+            if (auto* output = hit_output(*frame, total);
+                output && reinterpret_cast<std::uintptr_t>(output) % alignof(double) == 0)
+                total->SetPropertyValue(output, 0.0);
+            if (auto* output = hit_output(*frame, lethal)) lethal->SetPropertyValue(output, false);
+        }
+        else if (parameters)
+        {
+            total->SetPropertyValueInContainer(parameters, 0.0);
+            lethal->SetPropertyValueInContainer(parameters, false);
+        }
+        return true;
+    }
+
     void prevent_replica_brain(Iteration& call, U::UObject* receiver, U::UFunction* function)
     {
-        if ((!operate && !publish_flayers && !operate_not_deer && !operate_boars) || !function || !receiver ||
+        if ((!operate && !publish_flayers && !operate_not_deer && !operate_boars && !production_roster) || !function || !receiver ||
             call.OriginalFunctionCallPrevented()) return;
         static const U::FName init_name{STR("InitializeAI")};
         static const U::FName perceive_name{STR("Proscess_TargetPerception")};
@@ -1165,11 +1211,20 @@ namespace
         auto* data = get_object(schema.data, frame.Locals());
         const bool boar = boar_squad_size(data) > 0;
         if (!boar && (data_index(data) < 0 || !bool_field(data, STR("ForceWander"), true))) return;
+        if (production_roster)
+        {
+            auto* caller = frame.PreviousFrame();
+            if (!caller || !exact_director(caller->Object(), active)) return;
+            const auto usage = byte_field(receiver, STR("Usage"));
+            const bool initial = usage == 0 && caller->Node() == find<U::UFunction>(initial_path);
+            const bool refresh = usage == 3 && caller->Node() == find<U::UFunction>(refresh_path);
+            if (!initial && !refresh) return;
+        }
         auto& calls = boar ? scope.boars.calls : scope.natural_calls;
         auto& latest = boar ? scope.boars.latest : scope.latest;
         ++calls;
         latest = {receiver, data, {}, boar ? "stock_client_boar_spawn_observed" : "stock_client_husk_spawn_observed", 0};
-        if (!boar && !operate) return;
+        if (!boar && !operate && !production_roster) return;
         auto* output = schema.output_address(frame);
         if (!output)
         {
@@ -1196,6 +1251,7 @@ namespace
         static const U::FName perceive_name{STR("Proscess_TargetPerception")};
         static const U::FName damage_name{STR("DealDamage")};
         const auto name = frame.Node()->GetFName();
+        if (prevent_roster_damage(call, receiver, frame.Node(), &frame, nullptr)) return;
         if (name == damage_name)
         {
             if (watch_combat) before_stock_melee(receiver, frame);
@@ -1289,6 +1345,13 @@ namespace
             boar_count ? NpcFamily::Boar : NpcFamily::Husk, initial, {}};
     }
 
+    void prune_roster(U::UWorld* world)
+    {
+        std::erase_if(scope.roster, [world](const RosterMember& member) {
+            return !in_level(member.actor.Get(), world);
+        });
+    }
+
     void on_post(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
     {
         if (!hook_ready()) return;
@@ -1375,7 +1438,19 @@ namespace
             ++(boar ? scope.boars.receipts : scope.receipts);
             for (auto* actor : after) next.cohort.emplace_back(actor);
             next.stage = observed.initial ? "stock_initial" : "stock_refresh";
-            if ((boar || operate) && Replication{}.apply(after)) next.replicated = static_cast<int>(after.size());
+            if ((boar || operate || production_roster) && Replication{}.apply(after))
+            {
+                next.replicated = static_cast<int>(after.size());
+                if (production_roster)
+                {
+                    prune_roster(active.world);
+                    for (auto* actor : after)
+                    {
+                        if (scope.roster.size() == max_scene_npcs) break;
+                        scope.roster.push_back({actor, observed.family});
+                    }
+                }
+            }
         }
         // Retain the latest successful stock receipt across an occupied or failed marker.
         if (!next.cohort.empty() || latest.cohort.empty()) latest = std::move(next);
@@ -1527,6 +1602,30 @@ namespace
             return 28;
         }
         return 27;
+    }
+
+    int report_host_roster(const Lua& lua)
+    {
+        if (!hook_ready() || !production_roster || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto expected = static_cast<std::uintptr_t>(lua.get_integer());
+        const auto active = network(find<U::UWorld>(world_path));
+        auto* director = find<U::UObject>(director_path);
+        if (!expected || active.seat != Seat::Host || !exact_director(director, active) ||
+            reinterpret_cast<std::uintptr_t>(local_pawn(director, active)) != expected) return 0;
+        update_scope(active);
+        prune_roster(active.world);
+        int live_boars{}, live_husks{}, defeated{};
+        for (const auto& member : scope.roster)
+        {
+            auto* actor = member.actor.Get();
+            if (bool_field(actor, STR("Alive"), false)) ++defeated;
+            else if (member.family == NpcFamily::Boar) ++live_boars;
+            else if (member.family == NpcFamily::Husk) ++live_husks;
+        }
+        lua.set_integer(live_husks);
+        lua.set_integer(live_boars);
+        lua.set_integer(defeated);
+        return 3;
     }
 
     bool stock_script(U::UFunction* function, U::UClass* owner, int parameters, int size)
@@ -1834,7 +1933,8 @@ namespace silverfish::campaign_npc
         publish_flayers = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_PUBLISH");
         veto_flayer_spawns = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO");
         operate_not_deer = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER");
-        operate_boars = env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_NATIVE_BOAR_FIXTURE");
+        production_roster = env("SILVERFISH_COOP_NATIVE_CROSSROADS_ROSTER");
+        operate_boars = production_roster || (env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_NATIVE_BOAR_FIXTURE"));
         const bool headless_fixture = env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_NATIVE_FIXTURES");
         watch_combat = headless_fixture && env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT");
         refresh_fixture = headless_fixture && env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH");
@@ -1843,13 +1943,15 @@ namespace silverfish::campaign_npc
         callbacks[1] = Hook::RegisterProcessLocalScriptFunctionPostCallback(
             on_post, {false, false, STR("SilverfishCoopNative"), STR("Observe natural CrossRoads Husk squads")});
         callbacks[2] = Hook::RegisterProcessEventPreCallback(
-            [](Iteration& call, U::UObject* receiver, U::UFunction* function, void*) {
-                if (hook_ready()) prevent_replica_brain(call, receiver, function);
+            [](Iteration& call, U::UObject* receiver, U::UFunction* function, void* parameters) {
+                if (hook_ready() && !prevent_roster_damage(call, receiver, function, nullptr, parameters))
+                    prevent_replica_brain(call, receiver, function);
             }, {false, false, STR("SilverfishCoopNative"), STR("Guard stock CrossRoads Husk replica brains")});
         callbacks[3] = Hook::RegisterProcessInternalPreCallback(
             [](Iteration& call, U::UObject* receiver, U::FFrame& frame, void*) {
                 if (!hook_ready() || (!operate && !veto_flayer_spawns && !operate_not_deer && !operate_boars) || !receiver || !frame.Node() ||
                     call.OriginalFunctionCallPrevented()) return;
+                if (prevent_roster_damage(call, receiver, frame.Node(), &frame, nullptr)) return;
                 static const U::FName spawn_name{STR("SpawnSquadFromData")};
                 static const U::FName load_name{STR("LoadSquad")};
                 const auto name = frame.Node()->GetFName();
@@ -1924,6 +2026,7 @@ namespace silverfish::campaign_npc
     {
         lua.register_function("SilverfishReadCampaignNpc", report);
         lua.register_function("SilverfishClearCampaignNpc", reset);
+        if (production_roster) lua.register_function("SilverfishReadCampaignNpcHostRoster", report_host_roster);
         if (publish_flayers && veto_flayer_spawns)
             lua.register_function("SilverfishReadCampaignFlayerProjectile", read_flayer_projectile);
         if (refresh_fixture) lua.register_function("SilverfishStockCampaignNpcRefresh", stock_refresh);
