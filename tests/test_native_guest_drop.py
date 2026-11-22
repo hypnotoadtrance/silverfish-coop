@@ -125,6 +125,37 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
             await drop.perform(host, bridge, OWNER, drop.RECLAIM, DROP, CLAIM)
         bridge.command.assert_awaited_once()
 
+    async def test_merged_player_drop_recovers_exact_quantity_and_replays_destination(self):
+        for amount in (9, 8):
+            with self.subTest(amount=amount):
+                host, _, escrow, _, item, row = self.make_world()
+                host.party[record.STATE] = {DROP: row}
+                host.last_game["native_paired_save_capture"] = True
+                destination = "D" * 32
+                raw = [probe.SETTLE, MAP, "reclaim", PAWN, DROP, escrow["slot"], "-", "1", "merged", "1",
+                       GUID, destination, str(amount), "12", str(12 + amount)]
+                reply = {**host.last_game, probe.SETTLE_KEY: probe.parse(raw, "hosting", MAP)}
+                bridge = SimpleNamespace(command=AsyncMock(return_value=reply))
+                with patch.object(drop.native_inventory, "read_complete", AsyncMock(return_value={"items": [item]})):
+                    if amount != 9:
+                        with self.assertRaisesRegex(RuntimeError, "exact stock loot stack merge did not verify"):
+                            await drop.perform(host, bridge, OWNER, drop.RECLAIM, DROP, CLAIM)
+                        self.assertEqual(record.active_frames(host.party, {OWNER}), [escrow])
+                        self.assertTrue(host.stopping and host.native_checkpoint_unsafe)
+                        self.assertEqual(host.checkpoint_native.await_count, 1)
+                        continue
+                    result = await drop.perform(host, bridge, OWNER, drop.RECLAIM, DROP, CLAIM)
+                self.assertEqual(bridge.command.await_args.args[-1], GUID)
+                self.assertEqual(result[drop.RESULT]["guid"], GUID)
+                self.assertEqual(result[drop.RESULT]["inventory_guid"], destination)
+                self.assertEqual(result[drop.RESULT]["stack_merge"], {"amount": 9, "before": 12, "after": 21})
+                self.assertEqual(host.checkpoint_native.await_args.kwargs,
+                                 {"require_guest_frames": frozenset({OWNER}), "typed_inventory": True})
+                self.assertEqual(record.active_frames(host.party, {OWNER}), [])
+                host.party["receipts"].clear()
+                self.assertEqual(await drop.perform(host, bridge, OWNER, drop.RECLAIM, DROP, CLAIM), result)
+                bridge.command.assert_awaited_once()
+
     async def test_host_claim_uses_exact_local_pawn_and_canonical_checkpoint(self):
         host, _, escrow, _, item, row = self.make_world()
         host.party[record.STATE] = {DROP: row}

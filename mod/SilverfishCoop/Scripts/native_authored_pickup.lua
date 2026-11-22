@@ -3,6 +3,7 @@ local guest_save = require("guest_save")
 local stock_input_fixture = require("native_authored_pickup_input_fixture")
 local drill_head = require("native_prototype_drill_pickup")
 local loot_projection = require("native_guest_drop_projection")
+local ground_stack = require("native_ground_stack")
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
@@ -391,10 +392,10 @@ local function owner(state, phase, name)
     local instance = statics:GetGameInstance(info.pawn)
     local stock = valid(instance) and instance.SaveSlot_Ref
     if not valid(stock) or not same(info.pawn.Save, stock) then return end
-    if name == info.name then return info.pawn, stock, statics end
+    if name == info.name then return info.pawn, stock, statics, stock end
     local pawn, save = guest_save.exact_item_context(state, phase, name)
     if not valid(pawn) or not valid(save) or same(save, stock) or not same(save, pawn.Save) then return end
-    return pawn, save, statics
+    return pawn, save, statics, stock
 end
 
 local function claim(fields, state, phase, profile)
@@ -403,7 +404,7 @@ local function claim(fields, state, phase, profile)
         error("authored_pickup_claim_arguments", 0)
     end
     report = {source = profile.source, pawn = name, slot = slot, ok = false, applied = false, loose = profile.loose and profile}
-    local pawn, save, statics = owner(state, phase, name)
+    local pawn, save, statics, stock = owner(state, phase, name)
     local sight = profile.loose and stock_input_fixture.loose_sight or stock_input_fixture.authority_sight
     local stock_input = fields[6] == "stock-input" and state.local_pawn and same(pawn, state.local_pawn.pawn)
         and type(SilverfishReadNativeAuthoredPickup) == "function"
@@ -510,10 +511,17 @@ local function claim(fields, state, phase, profile)
             return "authored loose pickup reported"
         end
     end
-    local applied, status, count = SilverfishRecoverNativeInventoryBag(source:GetAddress(), save:GetAddress(), pawn:GetAddress())
-    report.applied = applied == true or tostring(status):match("^mutation_unverified_") ~= nil
-    report.ok = applied == true and status == "recovered" and count == 1
-    report.status = report.ok and "claimed" or (applied and "mutation_unverified_authored_pickup_count" or tostring(status))
+    local status, merged = "append", nil
+    if memory then status, merged = ground_stack.merge(pawn, save, stock, source, item) end
+    if status == "append" then
+        local applied, outcome, count = SilverfishRecoverNativeInventoryBag(source:GetAddress(), save:GetAddress(), pawn:GetAddress())
+        report.applied = applied == true or tostring(outcome):match("^mutation_unverified_") ~= nil
+        report.ok = applied == true and outcome == "recovered" and count == 1
+        report.status = report.ok and "claimed" or (applied and "mutation_unverified_authored_pickup_count" or tostring(outcome))
+    else
+        report.ok, report.status, report.stack_merge = merged ~= nil, status, merged
+        report.applied = report.ok or status:match("^mutation_unverified_") ~= nil
+    end
     if report.ok and profile.loose then
         local actor = StaticFindObject(profile.path)
         if not valid(actor) then error("mutation_unverified_loose_pickup_source_lost", 0) end
@@ -866,11 +874,12 @@ function pickup.rows(state, phase, status_row)
         end
     end
     if report and phase == "hosting" and report.loose then
-        local profile, cash = report.loose, report.cash
+        local profile, cash, merge = report.loose, report.cash, report.stack_merge
+        local evidence = merge and {merge.source, merge.destination, merge.amount, merge.before, merge.after} or {}
         rows[#rows + 1] = status_row("native-loose-pickup-claim", state.map, profile.source, profile.class,
             profile.mode, report.pawn, report.slot, report.status, report.ok and 1 or 0, report.applied and 1 or 0,
             report.guid or "-", cash and cash.amount or 0, cash and cash.before or 0, cash and cash.after or 0,
-            report.memory and "memory" or "disk")
+            report.memory and "memory" or "disk", table.unpack(evidence))
     elseif report and phase == "hosting" then
         rows[#rows + 1] = status_row("native-authored-pickup-claim", report.source, state.map, report.pawn,
             report.ok and 1 or 0, report.applied and 1 or 0, report.status, report.guid or "-", report.slot)

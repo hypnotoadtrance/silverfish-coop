@@ -29,6 +29,7 @@ CROWBAR_RESULT = "native_guest_crowbar"
 PRY_TOOL_ACTIONS = {"blowtorch": TORCH_USE, "crowbar": CROWBAR_USE}
 PRY_TOOL_RESULTS = {"blowtorch": TORCH_RESULT, "crowbar": CROWBAR_RESULT}
 PLACEMENT = "native-loot-placement"
+STACK_MERGE_TAG = "native-loot-stack-merge"
 PLACEMENT_KEY = "native_loot_placement"
 FORCED_ROLL_STATUS = "opened_fixture_seeded"
 CASH_RANGES = {
@@ -486,6 +487,32 @@ def _verified_cash_credit(proof: dict, item: dict, balance: int | None) -> dict:
     return {"amount": amount, "before": before, "after": after}
 
 
+def _valid_stack_merge(guid, inventory_guid, amount, before, after) -> bool:
+    return (valid_guid(guid) and valid_guid(inventory_guid) and guid != inventory_guid
+            and all(type(value) is int for value in (amount, before, after))
+            and 0 < amount and 0 < before < after < 2**31 and after - before == amount)
+
+
+def parse_stack_merge(fields) -> dict:
+    guid, inventory_guid, *counts = fields
+    if len(counts) != 3 or not all(count.isascii() and count.isdecimal() and len(count) <= 10 for count in counts):
+        raise ValueError("Invalid stock loot stack merge counts")
+    amount, before, after = map(int, counts)
+    if not _valid_stack_merge(guid, inventory_guid, amount, before, after):
+        raise ValueError("Invalid stock loot stack merge")
+    return dict(guid=guid, inventory_guid=inventory_guid, amount=amount, before=before, after=after)
+
+
+def verified_stack_merge(proof: dict, source_guid: str, source_count: int | None) -> dict:
+    guid, inventory_guid, amount, before, after = (
+        proof.get(key) for key in ("guid", "inventory_guid", "amount", "before", "after")
+    )
+    if (not _valid_stack_merge(guid, inventory_guid, amount, before, after)
+            or guid != source_guid or type(source_count) is not int or amount != source_count):
+        raise RuntimeError("The exact stock loot stack merge did not verify")
+    return dict(inventory_guid=inventory_guid, stack_merge=dict(amount=amount, before=before, after=after))
+
+
 async def perform(host, bridge, character: str, action: str, target: str, operation_id: str, *,
                   fixture_nonempty: bool = False, pried: bool = False, tool_receipt=None,
                   power_sequence: int | None = None) -> dict:
@@ -668,10 +695,12 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
         if action == "claim":
             if not proof["invoked"] or proof["escrow_slot"] != arguments[1]:
                 raise RuntimeError("The exact stock crate item transfer did not verify")
-            credit = None
+            credit, merge = None, {}
             if item["class_path"] in CASH_RANGES:
                 credit = _verified_cash_credit(proof, item, snapshot.get("native_wallet"))
-            elif proof["status"] not in ("claimed", "already_claimed") or proof.get("cash"):
+            elif proof["status"] == "merged" and "cash" not in proof:
+                merge = verified_stack_merge(proof.get("merge", {}), guid, item.get("ammo"))
+            elif proof["status"] not in ("claimed", "already_claimed") or "cash" in proof or "merge" in proof:
                 raise RuntimeError("The exact stock crate item transfer did not verify")
 
             candidate = party.load_party(host.party)
@@ -680,14 +709,15 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             if credit:
                 candidate["economy"].update(wallet=credit["after"], native_wallet_active=True)
                 claimed["wallet_credit"] = credit
-            result = {"native_loot_claim": claimed, "native_loot_crate": crate}
+            result = {"native_loot_claim": {**claimed, **merge}, "native_loot_crate": crate}
             receipts = candidate["receipts"].setdefault(character, [])
             receipts.append({"id": operation_id, "request": fingerprint, "result": result})
             del receipts[:-party.RECENT_ACTIONS]
-            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}),
+                                                    typed_inventory=bool(merge))
             host.party = candidate
             host.native_checkpoint_unsafe = False
-            host.control.event("native_loot_claim_committed", revision=revision, **claimed)
+            host.control.event("native_loot_claim_committed", revision=revision, **result["native_loot_claim"])
             native_pickup_audio.committed(host, pawn, operation_id, claimed["class_path"])
             return result
         if action == "seed":

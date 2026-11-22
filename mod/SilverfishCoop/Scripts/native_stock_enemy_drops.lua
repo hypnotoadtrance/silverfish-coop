@@ -208,10 +208,11 @@ local function transfer(fields, state, phase)
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local pool = api and api:IsValid() and api:LoadGameFromSlot(slot, 0)
     if not pool or not pool:IsValid() then error("stock_enemy_loot_escrow_unavailable", 0) end
-    local ok, status, amount, before, after = SilverfishClaimNativeLootEscrow(pawn:GetAddress(), save:GetAddress(),
+    local ok, status, amount, before, after, inventory_guid = SilverfishClaimNativeLootEscrow(pawn:GetAddress(), save:GetAddress(),
         stock:GetAddress(), pool:GetAddress(), guid)
     if not ok then error(tostring(status), 0) end
     claim = {name, slot, guid, status, amount or 0, before or 0, after or 0}
+    if status == "merged" then claim[8] = inventory_guid or "-" end
     return "exact stock NPC item transferred"
 end
 

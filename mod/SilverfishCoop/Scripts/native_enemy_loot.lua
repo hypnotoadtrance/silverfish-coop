@@ -372,10 +372,11 @@ local function claim(state, phase, fields)
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local pool = valid(api) and api:LoadGameFromSlot(slot, 0)
     if not valid(pool) or not valid(pawn.Save) or not valid(host.Save) then error("native_enemy_loot_claim_unavailable", 0) end
-    local ok, status = SilverfishClaimNativeEnemyLootEscrow(pawn:GetAddress(), pawn.Save:GetAddress(),
+    local ok, status, amount, before, after, inventory_guid = SilverfishClaimNativeEnemyLootEscrow(pawn:GetAddress(), pawn.Save:GetAddress(),
         host.Save:GetAddress(), pool:GetAddress(), guid)
     if not ok then error(tostring(status), 0) end
     escrow = {world = state.world, status = status, pawn = name, actor = "-", slot = slot, guid = guid}
+    if status == "merged" then escrow.merge = {inventory_guid or "-", amount or "-", before or "-", after or "-"} end
     return "typed stock enemy ammunition claim verified"
 end
 
@@ -665,7 +666,8 @@ function enemy_loot.rows(state, phase, status_row)
     if escrow and same(escrow.world, state.world) then
         local at = escrow.at
         rows[#rows + 1] = status_row("native-enemy-loot-escrow", state.map, escrow.status, escrow.pawn, escrow.actor,
-            escrow.slot, escrow.guid, escrow.units or "-", at and at.X or "-", at and at.Y or "-", at and at.Z or "-")
+            escrow.slot, escrow.guid, escrow.units or "-", at and at.X or "-", at and at.Y or "-", at and at.Z or "-",
+            table.unpack(escrow.merge or {}))
         if escrow.raw_verified then
             rows[#rows + 1] = status_row("native-enemy-loot-retire-proof", 1, state.map, escrow.actor, escrow.slot, escrow.guid)
         end

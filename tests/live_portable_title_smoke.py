@@ -305,12 +305,14 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         events = [json.loads(line) for line in (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
         nearby_proof, = [event[native_loose_pickup.PROOF] for event in events
                          if event.get(native_loose_pickup.PROOF, {}).get("actor") == DEFAULT_ACTOR]
-        display = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=f"{target}@{nearby_proof['guid']}")
+        inventory_guid = nearby_proof.get("inventory_guid", nearby_proof["guid"])
+        quantity = nearby_proof.get("stack_merge", {}).get("after", 1)
+        display = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=f"{target}@{inventory_guid}")
         assert display["ok"] and display["proof"] == "verified stock Nearby Items transfer", display
         inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
         assert inventory["owner"] == nearby_proof["owner"], nearby_proof
-        matching = [row for row in inventory["items"] if row["guid"] == nearby_proof["guid"]]
-        assert [(row["class_path"], row["quantity"]) for row in matching] == [(nearby_proof["class_path"], 1)], matching
+        matching = [row for row in inventory["items"] if row["guid"] == inventory_guid]
+        assert [(row["class_path"], row["quantity"]) for row in matching] == [(nearby_proof["class_path"], quantity)], matching
         assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before
         duplicate = await submit(host_run, native_loose_pickup.CLAIM, target=target)
         assert duplicate.get("error") == "loose_pickup_already_claimed", duplicate
@@ -327,13 +329,17 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         drop_reclaim_proof, = [row for event in events if (row := event.get(native_guest_drop.RESULT))
                                and row.get("state") == "reclaimed" and row.get("drop_id") == stock_drop_proof["drop_id"]]
         assert (drop_reclaim_proof["guid"], drop_reclaim_proof["quantity"]) == (stock_drop_proof["guid"], count)
+        inventory_guid = drop_reclaim_proof.get("inventory_guid", stock_drop_proof["guid"])
+        merge = drop_reclaim_proof.get("stack_merge", {})
+        if stock_split:
+            assert inventory_guid == split_proof["new_guid"] and merge.get("amount") == count, drop_reclaim_proof
         display = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE,
-                               target=f"{dropped_actor}@{drop_reclaim_proof['guid']}")
+                               target=f"{dropped_actor}@{inventory_guid}")
         assert display["ok"] and display["proof"] == "verified stock Nearby Items transfer", display
         guest_inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
         assert drop_reclaim_proof["claimed_by"] == guest_inventory["owner"]
-        returned = [row["quantity"] for row in guest_inventory["items"] if row["guid"] == drop_reclaim_proof["guid"]]
-        assert returned == [count], guest_inventory
+        returned = [row["quantity"] for row in guest_inventory["items"] if row["guid"] == inventory_guid]
+        assert returned == [merge.get("after", count)], guest_inventory
         assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before["native_inventory"]
     normal_tab_proof = None
     if stock_drop:
@@ -399,15 +405,18 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str) -> dict:
 
     await wait(host_run, settled)
     await wait(guest_run, settled)
-    display = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=f"{actor}@{item['guid']}")
+    events = (json.loads(line) for line in (host_run / "events.jsonl").read_text(encoding="utf-8").splitlines())
+    claim, = [event for event in events if event["event"] == "native_loot_claim_committed" and event.get("guid") == item["guid"]]
+    inventory_guid = claim.get("inventory_guid", item["guid"])
+    display = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=f"{actor}@{inventory_guid}")
     assert display["ok"] and display["proof"] == "verified stock Nearby Items transfer", display
     inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
-    received, = [row for row in inventory["items"] if row["guid"] == item["guid"]]
+    received, = [row for row in inventory["items"] if row["guid"] == inventory_guid]
     assert received["class_path"] == item["class_path"], received
     if received["stackable"]:
-        assert received["quantity"] == item["ammo"], received
-        if received["quantity"] > 1:
-            assert clicked["proof"] == f"stock Nearby Items card requested x{received['quantity']}", clicked
+        assert received["quantity"] == claim.get("stack_merge", {}).get("after", item["ammo"]), received
+        if item["ammo"] > 1:
+            assert clicked["proof"] == f"stock Nearby Items card requested x{item['ammo']}", clicked
     assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before
     duplicate = await submit(host_run, "native-loot-claim", target=f"{item['guid']}@{crate}")
     assert duplicate.get("error") == "native_loot_already_claimed", duplicate

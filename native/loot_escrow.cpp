@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -17,6 +18,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
@@ -43,6 +45,8 @@ namespace
     constexpr auto item_base_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto library_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C");
     constexpr auto converter_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:ItemActorToStruct");
+    constexpr auto stack_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Items.FL_Items_C:StackItem_Stats");
+    constexpr auto stack_library = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Items.Default__FL_Items_C");
     constexpr auto item_struct_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto guid_struct_path = STR("/Script/CoreUObject.Guid");
     constexpr auto payload_struct_path = STR("/Script/StructUtils.InstancedStruct");
@@ -211,6 +215,81 @@ namespace
                 payload->Identical(payload->ContainerPtrToValuePtr<void>(first), payload->ContainerPtrToValuePtr<void>(second));
         }
     };
+
+    struct StackTotals
+    {
+        int unit_value{};
+        double unit_weight{};
+        int preset_quantity{};
+
+        bool safe(int quantity) const
+        {
+            return quantity > 0 && (unit_value == 0 || quantity <= (std::numeric_limits<int>::max)() / unit_value) &&
+                std::isfinite(quantity * unit_weight);
+        }
+
+        bool matches(const Inventory& inventory, const void* row, int quantity) const
+        {
+            if (!safe(quantity)) return false;
+            const auto value = inventory.value->GetPropertyValueInContainer(row);
+            const auto weight = inventory.weight->GetPropertyValueInContainer(row);
+            const auto near_weight = [&](double expected) { return std::abs(weight - expected) <= 1e-9; };
+            return (value == quantity * unit_value && near_weight(quantity * unit_weight)) ||
+                (quantity == preset_quantity && value == unit_value && near_weight(unit_weight));
+        }
+    };
+
+    struct StackPickup
+    {
+        Value row{};
+        Guid guid{};
+        int index{};
+        int before{};
+        int units{};
+    };
+
+    StackPickup propose_stack(const Inventory& inventory, Unreal::UClass* type, const void* incoming,
+                              Unreal::FScriptArrayHelper& destination)
+    {
+        auto* defaults = type ? type->GetClassDefaultObject().Get() : nullptr;
+        auto* stacks = field<Unreal::FBoolProperty>(defaults, STR("Stacks"));
+        auto* value = field<Unreal::FIntProperty>(defaults, STR("Value"));
+        auto* weight = field<Unreal::FDoubleProperty>(defaults, STR("Weight"));
+        auto* preset = field<Unreal::FIntProperty>(defaults, STR("Ammo"));
+        if (!stacks || !value || !weight || !preset || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
+            defaults->GetClassPrivate() != type || !stacks->GetPropertyValueInContainer(defaults)) return {};
+        const StackTotals totals{value->GetPropertyValueInContainer(defaults),
+            weight->GetPropertyValueInContainer(defaults), preset->GetPropertyValueInContainer(defaults)};
+        const auto units = inventory.ammo->GetPropertyValueInContainer(incoming);
+        if (totals.unit_value < 0 || totals.unit_weight < 0 || !totals.matches(inventory, incoming, units)) return {};
+
+        auto row = copy_value(inventory.row, incoming);
+        if (!row) return {};
+        for (int index = 0; index < destination.Num(); ++index)
+        {
+            const auto* current = destination.GetRawPtr(index);
+            if (inventory.klass(current) != type) continue;
+            const auto guid = inventory.identity(current);
+            const auto before = inventory.ammo->GetPropertyValueInContainer(current);
+            if (guid == Guid{} || !totals.matches(inventory, current, before) ||
+                before > (std::numeric_limits<int>::max)() - units || !totals.safe(before + units)) continue;
+
+            // Compare the full typed row after normalizing the fields that change when stock stacks.
+            inventory.guid->CopyCompleteValue(inventory.guid->ContainerPtrToValuePtr<void>(row.get()),
+                                              inventory.guid->ContainerPtrToValuePtr<void>(current));
+            inventory.ammo->SetPropertyValueInContainer(row.get(), before);
+            inventory.value->SetPropertyValueInContainer(row.get(), inventory.value->GetPropertyValueInContainer(current));
+            inventory.weight->SetPropertyValueInContainer(row.get(), inventory.weight->GetPropertyValueInContainer(current));
+            if (!inventory.identical(row.get(), current)) continue;
+
+            const auto after = before + units;
+            inventory.ammo->SetPropertyValueInContainer(row.get(), after);
+            inventory.value->SetPropertyValueInContainer(row.get(), after * totals.unit_value);
+            inventory.weight->SetPropertyValueInContainer(row.get(), after * totals.unit_weight);
+            return {std::move(row), guid, index, before, units};
+        }
+        return {};
+    }
 
     Unreal::UObject* isolated_save(Address address, const Inventory& inventory, std::string_view& failure)
     {
@@ -548,12 +627,12 @@ namespace
         return instance;
     }
 
-    template <bool enemy>
+    template <bool enemy, bool merge_only = false>
     int claim(const Lua& lua)
     {
         std::array<Address, 4> arguments{};
         const auto argc = lua.get_stack_size();
-        if (!enabled() || !Unreal::IsInGameThreadRaw() || (argc != 5 && (enemy || argc != 6)) || !lua.is_string(5) ||
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || (argc != 5 && (enemy || merge_only || argc != 6)) || !lua.is_string(5) ||
             !read_addresses(lua, arguments, 4)) return result(lua, false, "native_loot_escrow_claim_unavailable");
         const auto guid = parse_guid(lua.get_string());
         if (guid == Guid{}) return result(lua, false, "native_loot_exact_escrow_guid_required");
@@ -605,11 +684,19 @@ namespace
         if (!inspect_owner(inventory, owner.save, guid, recipient) || recipient.count > 1 ||
             (recipient.row && !inventory.identical(item, recipient.row)))
             return result(lua, false, "native_loot_claimant_guid_conflict");
-        std::array<Unreal::UObject*, max_party> protected_saves{};
-        if (!other_saves(owner, inventory, protected_saves)) return result(lua, false, "native_loot_save_ownership_conflict");
         auto* backpack = inventory.backpack;
         auto* target = backpack->ContainerPtrToValuePtr<void>(owner.save);
         Unreal::FScriptArrayHelper destination(backpack, target);
+        if (destination.Num() && source.GetRawPtr(0) == destination.GetRawPtr(0))
+            return result(lua, false, "native_loot_escrow_backpack_alias");
+        auto stack = cash || recipient.row ? StackPickup{} : propose_stack(inventory, item_type, item, destination);
+        if constexpr (merge_only)
+        {
+            if (cash || recipient.row) return result(lua, false, "native_loot_ground_merge_already_owned_or_cash");
+            if (!stack.row) return result(lua, true, "append");
+        }
+        std::array<Unreal::UObject*, max_party> protected_saves{};
+        if (!other_saves(owner, inventory, protected_saves)) return result(lua, false, "native_loot_save_ownership_conflict");
         std::array<Value, max_party> protected_backpacks;
         for (std::size_t index = 0; index < protected_saves.size() && protected_saves[index]; ++index)
         {
@@ -624,11 +711,8 @@ namespace
             if (!recipient.row) protected_backpacks[index] = copy_value(backpack, data);
             if (!recipient.row && !protected_backpacks[index]) return result(lua, false, "native_loot_save_snapshot_unavailable");
         }
-        if (destination.Num() && source.GetRawPtr(0) == destination.GetRawPtr(0))
-            return result(lua, false, "native_loot_escrow_backpack_alias");
         if (recipient.row)
             return cash ? result(lua, false, "native_loot_cash_inventory_conflict") : result(lua, true, "already_claimed");
-        if (!cash && destination.Num() >= max_inventory) return result(lua, false, "native_loot_claimant_backpack_full");
         auto before = copy_value(backpack, target);
         auto escrow_before = copy_value(backpack, backpack->ContainerPtrToValuePtr<void>(escrow));
         if (!before || !escrow_before) return result(lua, false, "native_loot_save_snapshot_unavailable");
@@ -672,6 +756,62 @@ namespace
             return 5;
         }
 
+        if (stack.row)
+        {
+            const auto* current = destination.GetRawPtr(stack.index);
+            Match existing;
+            if (!inspect_owner(inventory, owner.save, stack.guid, existing) || existing.count != 1 || existing.row != current)
+                return result(lua, false, "native_loot_claimant_stack_guid_conflict");
+            for (auto* save : protected_saves)
+            {
+                if (!save) break;
+                Match other;
+                if (!inspect_owner(inventory, save, stack.guid, other) || other.count)
+                    return result(lua, false, "native_loot_other_owner_stack_guid_conflict");
+            }
+            const std::array<Unreal::FProperty*, 3> gear{inventory.equipment, inventory.armor, inventory.helmet};
+            std::array<Value, gear.size()> gear_before;
+            for (std::size_t index = 0; index < gear.size(); ++index)
+            {
+                gear_before[index] = copy_value(gear[index], gear[index]->ContainerPtrToValuePtr<void>(owner.save));
+                if (!gear_before[index]) return result(lua, false, "native_loot_save_snapshot_unavailable");
+            }
+            const auto gear_unchanged = [&] {
+                for (std::size_t index = 0; index < gear.size(); ++index)
+                    if (!gear[index]->Identical(gear_before[index].get(), gear[index]->ContainerPtrToValuePtr<void>(owner.save)))
+                        return false;
+                return true;
+            };
+            const bool stock_agrees = silverfish::loot_escrow::stock_stack_matches(
+                owner.pawn, inventory.row, current, stack.row.get(), stack.units);
+            if (!same_owner_and_escrow() || !backpack->Identical(before.get(), target) ||
+                !gear_unchanged() || !protected_inventories_unchanged())
+                return result(lua, false, "mutation_unverified_native_loot_stock_stack_calculation");
+            if (stock_agrees)
+            {
+                auto proposed = copy_value(backpack, before.get());
+                if (!proposed) return result(lua, false, "native_loot_save_snapshot_unavailable");
+                Unreal::FScriptArrayHelper staged(backpack, proposed.get());
+                inventory.row->CopyCompleteValue(staged.GetRawPtr(stack.index), stack.row.get());
+                backpack->CopyCompleteValue(target, proposed.get());
+                if (!same_owner_and_escrow() || !gear_unchanged() || !protected_inventories_unchanged() ||
+                    !backpack->Identical(proposed.get(), target) ||
+                    !inventory.identical(destination.GetRawPtr(stack.index), stack.row.get()))
+                {
+                    if (same_owner_and_escrow()) backpack->CopyCompleteValue(target, before.get());
+                    return result(lua, false, "mutation_unverified_native_loot_stack_readback");
+                }
+                result(lua, true, "merged");
+                lua.set_integer(stack.units);
+                lua.set_integer(stack.before);
+                lua.set_integer(stack.before + stack.units);
+                lua.set_string(print_guid(stack.guid));
+                return 6;
+            }
+        }
+        if constexpr (merge_only) return result(lua, true, "append");
+
+        if (destination.Num() >= max_inventory) return result(lua, false, "native_loot_claimant_backpack_full");
         AddedRows append{destination};
         const auto index = destination.AddValue();
         if (index != append.before || destination.Num() != append.before + 1)
@@ -695,6 +835,44 @@ namespace
 
 namespace silverfish::loot_escrow
 {
+    bool stock_stack_matches(Unreal::UObject* pawn, Unreal::FStructProperty* row,
+                             const void* previous, const void* expected, int difference)
+    {
+        auto* fn = find<Unreal::UFunction>(stack_path);
+        auto* library = find<Unreal::UObject>(stack_library);
+        auto* input = field<Unreal::FStructProperty>(fn, STR("InventoryItem_Struct"));
+        auto* delta = parameter<Unreal::FIntProperty>(fn, STR("Difference"), 0x50, false);
+        auto* context = parameter<Unreal::FObjectProperty>(fn, STR("__WorldContext"), 0x58, false);
+        auto* output = parameter<Unreal::FStructProperty>(fn, STR("StackedStruct"), 0x60, true);
+        auto* payload = field<Unreal::FStructProperty>(row->GetStruct().Get(), STR("DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"));
+        if (!fn || !library || !library->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
+            fn->GetOuterPrivate() != library->GetClassPrivate() || fn->GetNumParms() != 4 ||
+            fn->GetReturnProperty() || fn->GetParmsSize() > parameter_capacity ||
+            fn->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) || !input || !delta || !context || !output || !payload ||
+            !input->HasAllPropertyFlags(Unreal::CPF_Parm | Unreal::CPF_OutParm | Unreal::CPF_ReferenceParm | Unreal::CPF_ConstParm) ||
+            input->HasAnyPropertyFlags(Unreal::CPF_ReturnParm) || input->GetOffset_Internal() != 0 ||
+            output->HasAnyPropertyFlags(Unreal::CPF_ReferenceParm) || input->GetSize() != 0x50 || output->GetSize() != 0x50 ||
+            input->GetStruct().Get() != row->GetStruct().Get() || output->GetStruct().Get() != row->GetStruct().Get() ||
+            context->GetPropertyClass().Get() != find<Unreal::UClass>(STR("/Script/CoreUObject.Object"))) return false;
+
+        alignas(std::max_align_t) std::array<std::byte, parameter_capacity> buffer{};
+        auto* storage = buffer.data();
+        input->InitializeValue_InContainer(storage);
+        output->InitializeValue_InContainer(storage);
+        auto release = [input, output](std::byte* data) {
+            output->DestroyValue_InContainer(data);
+            input->DestroyValue_InContainer(data);
+        };
+        const std::unique_ptr<std::byte, decltype(release)> lifetime(storage, release);
+        input->CopyCompleteValue(input->ContainerPtrToValuePtr<void>(storage), previous);
+        delta->SetPropertyValueInContainer(storage, difference);
+        context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(storage), pawn);
+        library->ProcessEvent(fn, storage);
+        const auto* calculated = output->ContainerPtrToValuePtr<void>(storage);
+        return row->Identical(calculated, expected) &&
+            payload->Identical(payload->ContainerPtrToValuePtr<void>(calculated), payload->ContainerPtrToValuePtr<void>(expected));
+    }
+
     bool convert_stock_item(Unreal::UObject* pawn, Unreal::UObject* actor, void* initialized_row)
     {
         Inventory inventory;
@@ -828,6 +1006,7 @@ namespace silverfish::loot_escrow
         lua.register_function("SilverfishCaptureNativeLootEscrow", capture<false>);
         lua.register_function("SilverfishVerifyNativeLootEscrow", verify_escrow);
         lua.register_function("SilverfishClaimNativeLootEscrow", claim<false>);
+        lua.register_function("SilverfishMergeNativeGroundStack", claim<false, true>);
         lua.register_function("SilverfishCaptureNativeEnemyLootEscrow", capture<true>);
         lua.register_function("SilverfishCaptureStockEnemyDrop", capture_stock_enemy_drop);
         lua.register_function("SilverfishClaimNativeEnemyLootEscrow", claim<true>);

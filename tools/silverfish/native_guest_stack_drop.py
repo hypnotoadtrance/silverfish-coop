@@ -4,7 +4,7 @@ import asyncio
 import re
 import time
 
-from . import native_guest_drop_record, native_host_save, native_inventory, party
+from . import native_guest_drop_record, native_host_save, native_inventory, native_loot, party
 from .native_gold import valid_guid
 from .travel import OBSERVATORY
 
@@ -81,17 +81,24 @@ def parse(fields: list[str], state: str, area: str) -> dict:
 
 
 def parse_settlement(fields: list[str], state: str, area: str) -> dict:
-    if len(fields) != 10 or state != "hosting" or not native_guest_drop_record.supported_map(area) or fields[1] != area:
+    if len(fields) not in (10, 15) or state != "hosting" or not native_guest_drop_record.supported_map(area) or fields[1] != area:
         raise ValueError("Invalid isolated stack drop settlement")
-    _, operation, pawn, drop_id, source, replacement, flag, status, count = fields[1:]
+    _, operation, pawn, drop_id, source, replacement, flag, status, count = fields[1:10]
     if (operation not in ("debit", "reclaim") or not native_guest_drop_record.pawn_matches(area, pawn) or not native_guest_drop_record.valid_id(drop_id)
             or not native_host_save.SLOT.fullmatch(source) or source == replacement
             or (operation == "debit" and not native_host_save.SLOT.fullmatch(replacement))
             or (operation == "reclaim" and replacement != "-") or flag not in ("0", "1") or count != flag
             or not _STATUS.fullmatch(status)):
         raise ValueError("Invalid isolated stock stack settlement identity")
-    return dict(map=area, operation=operation, pawn=pawn, drop_id=drop_id, source=source,
-                replacement=replacement if operation == "debit" else None, ok=flag == "1", status=status, count=int(count))
+    proof = dict(map=area, operation=operation, pawn=pawn, drop_id=drop_id, source=source,
+                 replacement=replacement if operation == "debit" else None, ok=flag == "1", status=status, count=int(count))
+    if status == "merged":
+        if len(fields) != 15 or operation != "reclaim" or not proof["ok"]:
+            raise ValueError("Invalid isolated dropped stack merge settlement")
+        proof["merge"] = native_loot.parse_stack_merge(fields[10:])
+    elif len(fields) == 15:
+        raise ValueError("Unexpected isolated dropped stack merge settlement")
+    return proof
 
 
 async def perform(host, bridge, character: str, guid: str, count: int, *, fixture: bool = True) -> dict:

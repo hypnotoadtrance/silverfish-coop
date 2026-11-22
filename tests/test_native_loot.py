@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call, patch
 
-from tools.silverfish import native_host_save, native_loose_pickup, native_loot, party, runtime
+from tools.silverfish import native_host_save, native_loose_pickup, native_loot, native_stock_enemy_drops, party, runtime
 from tools.silverfish.authored_loot import (CRATES, LEGACY_CRATE, OFFICE_DESK, PLACEMENTS, OVERRIDDEN_PLACEMENTS,
                                            SMALL_CABINET, full_name, loot_capacity, random_lid)
 from tools.silverfish.campaign import CampaignFormatError
@@ -86,6 +86,36 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(host.checkpoint_native.await_args.kwargs["typed_inventory"], bool(mode))
                 self.assertEqual(saved.call_count, int(not mode))
                 self.assertFalse(host.native_checkpoint_unsafe)
+
+    async def test_placed_stack_merge_keeps_source_and_checkpoints_exact_recipient(self):
+        loose = native_loose_pickup
+        path = f"{OBSERVATORY}.Observitory_P:PersistentLevel.Item_Bandage_C_1"
+        slot, epoch, destination = "SFCoop_" + "b" * 32, "d" * 32, "B" * 32
+        scene = {"state": "hosting", "map": OBSERVATORY, loose.CAPABILITY: 1,
+                 "pawns": {"local": {"name": PAWN}}}
+        receipt = [loose.CLAIM, OBSERVATORY, path, ITEM["class_path"], "2", PAWN, slot, "merged", "1", "1",
+                   ITEM["guid"], "0", "0", "0", "memory", ITEM["guid"], destination, "2", "4", "6"]
+        with self.assertRaisesRegex(ValueError, "source changed"):
+            loose.parse_claim([*receipt[:15], "C" * 32, *receipt[16:]], "hosting", OBSERVATORY)
+        proof = loose.parse_claim(receipt, "hosting", OBSERVATORY)
+        bridge = SimpleNamespace(command=AsyncMock(return_value={**scene, loose.PROOF: proof}))
+        state = party.new_party()
+        state["players"]["host"] = {"downed": False}
+        host = SimpleNamespace(last_game=scene, zone_epoch=epoch, native_profile=Path("fixture"),
+                               stopping=False, transitioning=False, native_checkpoint_unsafe=False,
+                               party=state, control=Mock(), checkpoint_native=AsyncMock(return_value=2),
+                               loose_pickups=loose.Visibility())
+        with patch.object(native_host_save, "new_slot", return_value=slot), patch.object(native_host_save, "record") as saved:
+            result = await loose.claim(host, bridge, "host", f"loose:{path}", OPERATION)
+        row = result[loose.PROOF]
+        self.assertEqual((row["actor"], row["guid"], row["inventory_guid"]), (path, ITEM["guid"], destination))
+        self.assertEqual(row["stack_merge"], {"amount": 2, "before": 4, "after": 6})
+        loose.validate_records(host.party, {})
+        self.assertIn(path, host.loose_pickups.hidden(host))
+        self.assertEqual(await loose.claim(host, bridge, "host", f"loose:{path}", OPERATION), result)
+        bridge.command.assert_awaited_once()
+        self.assertTrue(host.checkpoint_native.await_args.kwargs["typed_inventory"])
+        saved.assert_not_called()
 
     async def test_temporary_item_reappears_only_after_stock_item_returns(self):
         loose = native_loose_pickup
@@ -441,6 +471,68 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
                                                "result": legacy_result})
         self.assertEqual(await native_loot.perform(host, bridge, "host", "claim", guid, "e" * 32), legacy_result)
         bridge.command.assert_awaited_once()
+
+    def test_escrow_merge_frames_bind_distinct_exact_guids_and_quantities(self):
+        guid, destination, slot = ITEM["guid"], "B" * 32, native_host_save.new_slot()
+        base = f"schema\t1\nsession\thost\thosting\t{CROSSROADS}\t0\t1\n"
+        crate = f"native-loot\tclaim\t{CROSSROADS}\t{OTHER_CRATE}\t{PAWN}\t1\tmerged\t0\t0\t-\t0\t100\t0\t1\t{slot}\n"
+        stock = f"{native_stock_enemy_drops.CLAIMED}\t{CROSSROADS}\t{PAWN}\t{slot}\t{guid}\tmerged"
+        shells = f"native-enemy-loot-escrow\t{CROSSROADS}\tmerged\t{PAWN}\t-\t{slot}\t{guid}\t-\t-\t-\t-"
+        cases = (
+            (f"{crate}{native_loot.STACK_MERGE_TAG}\t{guid}\t{destination}\t4\t7\t11", "native_loot"),
+            (f"{stock}\t4\t7\t11\t{destination}", native_stock_enemy_drops.CLAIM_KEY),
+            (f"{shells}\t{destination}\t4\t7\t11", "native_enemy_loot_escrow"),
+        )
+        status = self.root / "status.tsv"
+        for frame, key in cases:
+            with self.subTest(key=key):
+                status.write_text(base + frame + "\n", encoding="utf-8")
+                proof = runtime.Bridge(self.root, None).snapshot()[key]["merge"]
+                self.assertEqual(proof, dict(guid=guid, inventory_guid=destination, amount=4, before=7, after=11))
+                for invalid in (frame.replace(destination, guid), frame.replace("\t11", "\t12")):
+                    status.write_text(base + invalid + "\n", encoding="utf-8")
+                    self.assertNotIn(key, runtime.Bridge(self.root, None).snapshot() or {})
+
+    async def test_stock_crate_merge_commits_typed_inventory_and_replays_source_claim(self):
+        roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
+        item = roll["items"][0]
+        item["ammo"] = 4
+        host = self.host(CROSSROADS, {OTHER_CRATE: roll})
+        destination = "B" * 32
+        proof = {"action": "claim", "map": CROSSROADS, "pawn": PAWN, "crate": OTHER_CRATE,
+                 "escrow_slot": roll["escrow"]["slot"], "ok": True, "invoked": True, "status": "merged",
+                 "merge": dict(guid=item["guid"], inventory_guid=destination, amount=4, before=7, after=11)}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=self.game(CROSSROADS, native_loot=proof)))
+        arguments = (host, bridge, "host", "claim", f"{item['guid']}@{OTHER_CRATE}")
+        result = await native_loot.perform(*arguments, OPERATION)
+        self.assertEqual(result["native_loot_claim"],
+                         dict(item, claimed_by="host", inventory_guid=destination,
+                              stack_merge=dict(amount=4, before=7, after=11)))
+        row, = host.party[native_loot.STATE_KEY][OTHER_CRATE]["items"]
+        self.assertEqual(row, dict(item, claimed_by="host"))
+        host.party = party.load_party(host.party)
+        self.assertEqual(await native_loot.perform(*arguments, OPERATION), result)
+        with self.assertRaisesRegex(party.RuleError, "native_loot_already_claimed"):
+            await native_loot.perform(*arguments, "2" * 32)
+        bridge.command.assert_awaited_once()
+        host.checkpoint_native.assert_awaited_once()
+        self.assertTrue(host.checkpoint_native.await_args.kwargs["typed_inventory"])
+
+    async def test_unverified_stock_crate_merge_fences_checkpoint_and_leaves_the_item_unclaimed(self):
+        roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
+        item = roll["items"][0]
+        item["ammo"] = 4
+        host = self.host(CROSSROADS, {OTHER_CRATE: roll})
+        proof = {"action": "claim", "map": CROSSROADS, "pawn": PAWN, "crate": OTHER_CRATE,
+                 "escrow_slot": roll["escrow"]["slot"], "ok": True, "invoked": True, "status": "merged",
+                 "merge": dict(guid=item["guid"], inventory_guid="B" * 32, amount=5, before=7, after=12)}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=self.game(CROSSROADS, native_loot=proof)))
+        with self.assertRaisesRegex(RuntimeError, "stack merge did not verify"):
+            await native_loot.perform(host, bridge, "host", "claim", f"{item['guid']}@{OTHER_CRATE}", OPERATION)
+        host.checkpoint_native.assert_not_awaited()
+        self.assertTrue(host.native_checkpoint_unsafe and host.stopping)
+        row, = host.party[native_loot.STATE_KEY][OTHER_CRATE]["items"]
+        self.assertNotIn("claimed_by", row)
 
     async def test_stock_cash_credits_wallet_once_and_persists_the_exact_receipt(self):
         roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)

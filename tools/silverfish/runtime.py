@@ -1731,10 +1731,18 @@ class Bridge:
                             "map": area, "actor": actor, "state": mode, "epoch": None if epoch == "-" else epoch,
                             "guid": None if guid == "-" else guid, "hidden": hidden == "1", "collision": collision == "1",
                         })
-                elif fields[0] == "native-enemy-loot-escrow" and len(fields) == 11:
-                    data["native_enemy_loot_escrow"] = dict(zip(("map", "state", "pawn", "actor", "slot", "guid"), fields[1:7]),
-                                                            units=None if fields[7] == "-" else int(fields[7]),
-                                                            position=[_finite(axis) for axis in fields[8:11]])
+                elif fields[0] == "native-enemy-loot-escrow" and len(fields) in (11, 15):
+                    proof = dict(zip(("map", "state", "pawn", "actor", "slot", "guid"), fields[1:7]),
+                                 units=None if fields[7] == "-" else int(fields[7]),
+                                 position=[_finite(axis) for axis in fields[8:11]])
+                    if proof["state"] == "merged":
+                        if (len(fields) != 15 or data.get("state") != "hosting" or proof["map"] != data.get("map")
+                                or not SLOT.fullmatch(proof["slot"]) or fields[7:11] != ["-"] * 4):
+                            raise ValueError("Invalid stock enemy shell merge proof")
+                        proof["merge"] = native_loot.parse_stack_merge((proof["guid"], *fields[11:]))
+                    elif len(fields) != 11:
+                        raise ValueError("Unexpected stock enemy shell merge proof")
+                    data["native_enemy_loot_escrow"] = proof
                 elif (fields[0] == "native-enemy-loot-retire-proof" and len(fields) == 6 and fields[1] == "1"
                         and fields[2] == data.get("map") and SLOT.fullmatch(fields[4]) and valid_guid(fields[5])):
                     data["native_enemy_loot_retire_proof"] = dict(schema=1, map=fields[2], actor=fields[3],
@@ -2302,10 +2310,17 @@ class Bridge:
                     loot["items"].append(item)
                 elif fields[0] == "native-loot-cash" and len(fields) == 5 and "native_loot" in data:
                     loot = data["native_loot"]
-                    if loot.get("action") != "claim" or "cash" in loot:
+                    if loot.get("action") != "claim" or "cash" in loot or "merge" in loot:
                         raise ValueError("Stock crate cash proof is out of scope")
                     loot["cash"] = dict(zip(("guid", "amount", "before", "after"),
                                             (fields[1], *map(int, fields[2:]))))
+                elif fields[0] == native_loot.STACK_MERGE_TAG:
+                    loot = data.get("native_loot", {})
+                    if (len(fields) != 6 or loot.get("action") != "claim" or loot.get("status") != "merged"
+                            or not loot.get("ok") or not loot.get("invoked") or "merge" in loot or "cash" in loot
+                            or data.get("state") != "hosting" or loot.get("map") != data.get("map")):
+                        raise ValueError("Stock crate merge proof is out of scope")
+                    loot["merge"] = native_loot.parse_stack_merge(fields[1:])
                 elif fields[0] == "native-wipe-inventory" and len(fields) == 8:
                     data["native_wipe_inventory"] = {
                         "map": fields[1], "source": fields[2], "replacement": fields[3],

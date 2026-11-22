@@ -3,6 +3,7 @@
 #include "guest_regen.hpp"
 #include "guest_weapon_registry.hpp"
 #include "interaction_input.hpp"
+#include "loot_escrow.hpp"
 #include "mindcore.hpp"
 #include "stock_cash.hpp"
 #include "quest_rewards.hpp"
@@ -315,8 +316,6 @@ namespace
     constexpr auto converter_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:ItemActorToStruct");
     constexpr auto default_item_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:MakeDefaultItem");
     constexpr auto library_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C");
-    constexpr auto stack_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Items.FL_Items_C:StackItem_Stats");
-    constexpr auto stack_library = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Items.Default__FL_Items_C");
     constexpr auto tape_station_class = STR("/Game/Classes/Actors/DataTape_DownloadStation_BP.DataTape_DownloadStation_BP_C");
     constexpr auto blank_tape_path = STR("/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C");
     struct TapeExchangeProfile
@@ -1588,40 +1587,6 @@ namespace
         }
     };
 
-    bool stock_stack_matches(const RowSchema& rows, U::UObject* pawn,
-                             const void* previous, const void* expected, int difference)
-    {
-        auto* fn = find<U::UFunction>(stack_path);
-        auto* library = find<U::UObject>(stack_library);
-        auto* input = parameter<U::FStructProperty>(fn, STR("InventoryItem_Struct"), 0, true);
-        auto* delta = parameter<U::FIntProperty>(fn, STR("Difference"), 0x50);
-        auto* context = parameter<U::FObjectProperty>(fn, STR("__WorldContext"), 0x58);
-        auto* output = parameter<U::FStructProperty>(fn, STR("StackedStruct"), 0x60, true);
-        if (!fn || !library || !library->HasAnyFlags(U::RF_ClassDefaultObject) ||
-            fn->GetOuterPrivate() != library->GetClassPrivate() || fn->GetNumParms() != 4 ||
-            fn->GetReturnProperty() || fn->GetParmsSize() > parameter_capacity ||
-            fn->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || !input || !delta || !context || !output ||
-            !input->HasAnyPropertyFlags(U::CPF_ReferenceParm) || !input->HasAnyPropertyFlags(U::CPF_ConstParm) ||
-            output->HasAnyPropertyFlags(U::CPF_ReferenceParm) || input->GetSize() != 0x50 || output->GetSize() != 0x50 ||
-            input->GetStruct().Get() != rows.type || output->GetStruct().Get() != rows.type ||
-            context->GetPropertyClass().Get() != find<U::UClass>(STR("/Script/CoreUObject.Object"))) return false;
-
-        alignas(std::max_align_t) std::array<std::byte, parameter_capacity> buffer{};
-        auto* storage = buffer.data();
-        input->InitializeValue_InContainer(storage);
-        output->InitializeValue_InContainer(storage);
-        auto release = [input, output](std::byte* data) {
-            output->DestroyValue_InContainer(data);
-            input->DestroyValue_InContainer(data);
-        };
-        const std::unique_ptr<std::byte, decltype(release)> lifetime(storage, release);
-        input->CopyCompleteValue(input->ContainerPtrToValuePtr<void>(storage), previous);
-        delta->SetPropertyValueInContainer(storage, difference);
-        context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(storage), pawn);
-        library->ProcessEvent(fn, storage);
-        return rows.identical(output->ContainerPtrToValuePtr<void>(storage), expected);
-    }
-
     int merge_supply(const Lua& lua)
     {
         const auto fail = [&](std::string_view reason) { return result(lua, false, reason); };
@@ -1762,7 +1727,7 @@ namespace
         U::FScriptArrayHelper staged(rows.array, proposed.get());
         auto* staged_row = staged.GetRawPtr(index);
         stats.write(staged_row, after);
-        const bool stock_agrees = stock_stack_matches(rows, pawn, selected, staged_row, difference);
+        const bool stock_agrees = silverfish::loot_escrow::stock_stack_matches(pawn, rows.row, selected, staged_row, difference);
         if (!unchanged() || !same_backpack(rows, frozen.get(), original_data))
             return fail("mutation_unverified_authored_supply_stock_calculation");
         if (!stock_agrees || !owner_current()) return fail("authored_supply_merge_stock_calculation_unqualified");

@@ -60,9 +60,10 @@ def parse(fields, phase, area):
 
 
 def parse_claim(fields, phase, area):
-    if len(fields) not in (14, 15) or fields[1] != area or phase != "hosting":
+    if len(fields) not in (14, 15, 20) or fields[1] != area or phase != "hosting":
         raise ValueError("Invalid loose stock item transfer")
-    _, _, actor, class_path, mode, pawn, slot, status, ok, applied, guid, amount, before, after, *method = fields
+    _, _, actor, class_path, mode, pawn, slot, status, ok, applied, guid, amount, before, after = fields[:14]
+    method = fields[14:15]
     if method and (method[0] not in ("disk", "memory") or method[0] == "memory" and class_path in native_loot.CASH_RANGES):
         raise ValueError("Invalid loose stock item transfer method")
     if (not _stock_source(area, actor, class_path, int(mode)) or not _SLOT.fullmatch(slot)
@@ -70,9 +71,19 @@ def parse_claim(fields, phase, area):
             or len(status) > 256 or not all(value.isascii() and value.isdecimal() and len(value) < 11
                                             for value in (amount, before, after))):
         raise ValueError("Invalid loose stock item transfer receipt")
-    return dict(map=area, actor=actor, class_path=class_path, mode=int(mode), pawn=pawn, slot=slot,
-                status=status, ok=ok == "1", applied=applied == "1", guid=guid,
-                amount=int(amount), before=int(before), after=int(after), memory=method == ["memory"])
+    proof = dict(map=area, actor=actor, class_path=class_path, mode=int(mode), pawn=pawn, slot=slot,
+                 status=status, ok=ok == "1", applied=applied == "1", guid=guid,
+                 amount=int(amount), before=int(before), after=int(after), memory=method == ["memory"])
+    if status == "merged":
+        if (len(fields) != 20 or not proof["memory"] or (ok, applied) != ("1", "1")
+                or class_path in native_loot.CASH_RANGES or any(proof[key] for key in ("amount", "before", "after"))):
+            raise ValueError("Invalid loose stock stack merge receipt")
+        proof["merge"] = native_loot.parse_stack_merge(fields[15:])
+        if proof["merge"]["guid"] != guid:
+            raise ValueError("Loose stock stack merge source changed")
+    elif len(fields) == 20:
+        raise ValueError("Unexpected loose stock stack merge receipt")
+    return proof
 
 
 def validate_records(data, members):
@@ -87,6 +98,17 @@ def validate_records(data, members):
                 or not isinstance(row.get("epoch"), str) or not party.REQUEST_ID.fullmatch(row["epoch"])
                 or (row["class_path"] not in native_loot.CASH_RANGES and not valid_guid(row.get("guid")))):
             raise ValueError("Invalid placed stock pickup record")
+        if "stack_merge" in row or "inventory_guid" in row:
+            merge = row.get("stack_merge")
+            if (row["class_path"] in native_loot.CASH_RANGES or type(merge) is not dict
+                    or merge.keys() != {"amount", "before", "after"}):
+                raise ValueError("Invalid placed stock pickup stack merge")
+            try:
+                native_loot.verified_stack_merge(
+                    dict(merge, guid=row["guid"], inventory_guid=row.get("inventory_guid")), row["guid"], merge["amount"],
+                )
+            except RuntimeError as error:
+                raise ValueError("Invalid placed stock pickup stack merge") from error
 
 
 class Visibility:
@@ -223,9 +245,14 @@ async def claim(host, bridge, character, requested, operation, *, local_input=Fa
             row["wallet_credit"] = credit
             candidate["economy"].update(wallet=credit["after"], native_wallet_active=True)
         else:
-            if proof["status"] != "claimed" or not valid_guid(proof["guid"]):
+            if proof["status"] not in ("claimed", "merged") or not valid_guid(proof["guid"]):
                 raise RuntimeError("The placed stock item did not transfer")
             row["guid"] = proof["guid"]
+            if proof["status"] == "merged":
+                if not proof.get("memory"):
+                    raise RuntimeError("The placed stock stack merge requires a typed inventory checkpoint")
+                merge = proof.get("merge", {})
+                row.update(native_loot.verified_stack_merge(merge, proof["guid"], merge.get("amount")))
             if not proof.get("memory"):
                 await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True)
         candidate.setdefault(STATE, {})[path] = row

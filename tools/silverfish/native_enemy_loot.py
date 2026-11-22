@@ -144,9 +144,10 @@ async def approach(host, bridge, target: str | None) -> dict:
     return {"native_enemy_loot_approach": proof}
 
 
-async def _commit(host, bridge, candidate, snapshot, *, require_guest_frames=frozenset()):
+async def _commit(host, bridge, candidate, snapshot, *, require_guest_frames=frozenset(), typed_inventory=False):
     host.last_game, host.last_seen = snapshot, time.monotonic()
-    revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=require_guest_frames)
+    revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=require_guest_frames,
+                                            typed_inventory=typed_inventory)
     host.party = candidate
     host.native_checkpoint_unsafe = False
     return revision
@@ -411,18 +412,22 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
             raise
         proof = snapshot.get("native_enemy_loot_escrow", {})
         if ((snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"), proof.get("slot"), proof.get("guid"))
-                != ("hosting", area, area, pawn, frame["slot"], guid) or proof.get("state") not in ("claimed", "already_claimed")):
+                != ("hosting", area, area, pawn, frame["slot"], guid)
+                or proof.get("state") not in ("claimed", "already_claimed", "merged")):
             raise RuntimeError("The typed stock enemy claim did not match its exact participant")
+        merge = (native_loot.verified_stack_merge(proof.get("merge", {}), guid, roll["quantity"])
+                 if proof["state"] == "merged" else {})
         candidate = party.load_party(host.party)
         committed = candidate[STATE_KEY][guid]
         committed["claimed_by"] = character
         committed.pop("escrow")
-        report = _public_roll(committed)
+        report = {**_public_roll(committed), **merge}
         result = {"native_enemy_loot_claim": report}
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        revision = await _commit(host, bridge, candidate, snapshot, require_guest_frames=frozenset({character} - {"host"}))
+        revision = await _commit(host, bridge, candidate, snapshot, require_guest_frames=frozenset({character} - {"host"}),
+                                 typed_inventory=bool(merge))
         host.control.event("native_enemy_loot_claim_committed", revision=revision, operation_id=operation, **report)
         native_pickup_audio.committed(host, pawn, operation, committed["class_path"])
         return result

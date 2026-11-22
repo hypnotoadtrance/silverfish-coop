@@ -32,6 +32,7 @@ MAX_DROPS = 128
 MAX_ACTIVE = 4
 MAX_QUANTITY = 200
 _RECORD_FIELDS = {"owner", "guid", "quantity", "class_path", "map", "location", "claim_id"}
+_MERGE_FIELDS = {"inventory_guid", "stack_merge"}
 _CLASS = re.compile(r"/Game/Classes/(?:[A-Za-z0-9_-]+/)*([A-Za-z0-9_-]+)\.\1_C\Z")
 
 
@@ -140,6 +141,8 @@ def active_frames(data: dict, members) -> list[dict]:
         fields = _RECORD_FIELDS | ({"escrow"} if claim_id is None else set())
         if claim_id is not None and "claimed_by" in row:
             fields |= {"claimed_by"}
+        if claim_id is not None and _MERGE_FIELDS.intersection(row):
+            fields |= _MERGE_FIELDS
         if ((owner, drop_id) in operations or (claim_id is not None and not valid_id(claim_id))
                 or row.keys() != fields
                 or not valid_guid(row.get("guid")) or not valid_quantity(row.get("class_path"), row.get("quantity"))
@@ -147,6 +150,19 @@ def active_frames(data: dict, members) -> list[dict]:
             raise ValueError("Invalid stock stack drop payload")
         operations.add((owner, drop_id))
         if claim_id is not None:
+            if "stack_merge" in row:
+                from . import native_loot
+
+                merge, destination = row["stack_merge"], row["inventory_guid"]
+                if (type(merge) is not dict or merge.keys() != {"amount", "before", "after"}
+                        or "claimed_by" not in row or STACKABLE.get(row["class_path"]) is False):
+                    raise ValueError("Invalid stock stack drop merge")
+                try:
+                    native_loot.verified_stack_merge(
+                        dict(merge, guid=row["guid"], inventory_guid=destination), row["guid"], row["quantity"],
+                    )
+                except RuntimeError as error:
+                    raise ValueError("Invalid stock stack drop merge") from error
             claimant = claimed_by(row)
             if not isinstance(claimant, str) or (claimant != "host" and claimant not in members):
                 raise ValueError("Invalid stock stack drop claimant")

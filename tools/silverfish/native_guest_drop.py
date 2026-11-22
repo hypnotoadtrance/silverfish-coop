@@ -9,7 +9,8 @@ import uuid
 
 from . import native_guest_drop_record as record
 from . import native_guest_consumable
-from . import native_guest_stack_drop as probe, native_host_save, native_inventory, native_inventory_death, native_pickup_audio, party
+from . import native_guest_stack_drop as probe
+from . import native_host_save, native_inventory, native_inventory_death, native_loot, native_pickup_audio, party
 from .native_gold import valid_guid
 
 
@@ -38,6 +39,8 @@ def _result(row: dict, drop_id: str, action: str) -> dict:
     result = record.visible(row, drop_id)
     if action == RECLAIM:
         result.update(state="reclaimed", claimed_by=record.claimed_by(row))
+        if "stack_merge" in row:
+            result.update(inventory_guid=row["inventory_guid"], stack_merge=dict(row["stack_merge"]))
     else:
         result["state"] = "dropped"
     return {RESULT: result}
@@ -287,11 +290,12 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
         raise party.RuleError("native_guest_stack_drop_out_of_range")
     verb, expected = ("debit", "applied") if action == DROP else ("reclaim", "recovered")
     replacement = prepared["slot"] if prepared else None
+    merge_source = (row["guid"],) if action == RECLAIM and host.last_game.get("native_paired_save_capture") is True else ()
     host.native_checkpoint_unsafe = True
     try:
         try:
             snapshot = await bridge.command(probe.SETTLE, verb, pawn, drop_id, source["slot"], replacement or "-",
-                                            *(str(axis) for axis in row["location"]), area, timeout=7)
+                                            *(str(axis) for axis in row["location"]), area, *merge_source, timeout=7)
         except RuntimeError as error:
             if str(error).startswith(probe.REFUSAL):
                 host.native_checkpoint_unsafe = False
@@ -305,16 +309,21 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
             raise RuntimeError("The native stack drop settlement did not verify its exact recipient and frames")
         host.last_game, host.last_seen = snapshot, time.monotonic()
         status = proof.get("status", "")
-        if not proof["ok"] and proof.get("count") == 0 and status.startswith("native_inventory_wipe_"):
+        if not proof["ok"] and proof.get("count") == 0 and status.startswith(("native_inventory_wipe_", "native_loot_")):
             host.native_checkpoint_unsafe = False
             raise party.RuleError(status)
-        if not proof["ok"] or status != expected or proof.get("count") != 1:
+        merged = status == "merged"
+        if not proof["ok"] or proof.get("count") != 1 or (status != expected and not (merge_source and merged)):
             raise RuntimeError(status or "The native typed stack drop mutation was unverified")
+        if merged:
+            row.update(native_loot.verified_stack_merge(proof.get("merge", {}), row["guid"], row["quantity"]))
         result = _result(row, drop_id, action)
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": [action, request, None], "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
+        capture = {"typed_inventory": True} if merged else {}
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}),
+                                                **capture)
     except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True

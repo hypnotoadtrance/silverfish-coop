@@ -4,6 +4,7 @@ local host_save = require("native_host_save")
 local players = require("players")
 local maps = require("native_guest_drop_maps")
 local drop_items = require("native_guest_drop_items")
+local ground_stack = require("native_ground_stack")
 
 local action = "native-guest-stack-drop-probe"
 local birth = "native-guest-stack-drop-birth"
@@ -57,10 +58,12 @@ end
 local function transfer(fields, state, phase)
     local operation, name, id, source, replacement = table.unpack(fields, 3, 7)
     local debit = operation == "debit"
+    local reclaim_guid = fields[12]
     local x, y, z = tonumber(fields[8]), tonumber(fields[9]), tonumber(fields[10])
     local apply = SilverfishRecoverNativeInventoryBag
     if debit then apply = SilverfishApplyPreparedNativeInventory end
-    if #fields ~= 11 or fields[11] ~= state.map or not hosting_map(state, phase)
+    if (#fields ~= 11 and (#fields ~= 12 or debit or not item_guid(reclaim_guid)))
+        or fields[11] ~= state.map or not hosting_map(state, phase)
         or (not debit and operation ~= "reclaim") or type(id) ~= "string" or #id ~= 32
         or not id:match("^[0-9a-f]+$") or not slot_name(source) or source == replacement
         or (debit and not slot_name(replacement)) or (not debit and replacement ~= "-")
@@ -80,18 +83,28 @@ local function transfer(fields, state, phase)
     if not valid(frozen) or (debit and not valid(prepared)) or (not debit and frozen.PlayerBackpack:GetArrayNum() ~= 1) then
         error("native_guest_stack_drop_settlement_slot_unavailable", 0)
     end
-    local called, ok, status, count
+    local called, ok, status, count, merged
     if debit then
         called, ok, status = pcall(apply, frozen:GetAddress(), prepared:GetAddress(), save:GetAddress(), pawn:GetAddress())
         count = ok == true and 1 or 0
     else
-        called, ok, status, count = pcall(apply, frozen:GetAddress(), save:GetAddress(), pawn:GetAddress())
-        count = count or 0
+        status = "append"
+        if reclaim_guid and type(SilverfishVerifyNativeStashSave) == "function" then
+            local instance = host_save.canonical_host(state, phase)
+            local canonical = valid(instance) and instance.SaveSlot_Ref
+            status, merged = ground_stack.merge(pawn, save, canonical, frozen, reclaim_guid)
+        end
+        if status == "append" then
+            called, ok, status, count = pcall(apply, frozen:GetAddress(), save:GetAddress(), pawn:GetAddress())
+            count = count or 0
+        else
+            called, ok, count = true, merged ~= nil, merged and 1 or 0
+        end
     end
     if not called or type(ok) ~= "boolean" or type(status) ~= "string" or not status:match("^[a-z0-9_]+$")
         or count ~= (ok and 1 or 0) then error("mutation_unverified_native_guest_stack_drop_settlement_call", 0) end
     settlement = {map = state.map, operation = operation, pawn = name, id = id, source = source,
-        replacement = replacement, ok = ok, status = status, count = count}
+        replacement = replacement, ok = ok, status = status, count = count, stack_merge = merged}
     return "isolated stock stack settlement reported"
 end
 
@@ -158,9 +171,10 @@ function stack_drop.rows(state, phase, status_row)
             row.actor, row.new_guid, table.unpack(details))
     end
     if settlement then
-        local proof = settlement
+        local proof, merge = settlement, settlement.stack_merge
+        local evidence = merge and {merge.source, merge.destination, merge.amount, merge.before, merge.after} or {}
         rows[#rows + 1] = status_row(settle, proof.map, proof.operation, proof.pawn, proof.id, proof.source,
-            proof.replacement, proof.ok and 1 or 0, proof.status, proof.count)
+            proof.replacement, proof.ok and 1 or 0, proof.status, proof.count, table.unpack(evidence))
     end
     return rows
 end

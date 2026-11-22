@@ -125,7 +125,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                    automatic_cqc_loot: bool = False, both_cqc: bool = False, stock_shell_input: str | None = None,
                    restart_unclaimed_shells: bool = False, refinery_cqc: bool = False, stock_drop_census: bool = False,
                    stock_weapon_input: bool = False, restart_unclaimed_weapon: bool = False,
-                   resident_game: Path | None = None) -> dict:
+                   resident_game: Path | None = None, verify_shell_stacking: bool = False) -> dict:
     placed_cqc = dead_bridge_cqc or refinery_cqc
     area = REFINERY if refinery_cqc else DEAD_BRIDGE if dead_bridge_cqc else MAP
     first_target, second_target = (REFINERY_CQC, REFINERY_CQC_SECOND) if refinery_cqc else (CQC, CQC_SECOND)
@@ -171,6 +171,16 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
         if reply.get("ok") is not True:
             raise RuntimeError(f"{action}: {reply.get('error', 'control request failed')}")
         return reply
+
+    async def inventory(directory):
+        result = accepted("inspect the stock inventory",
+                          await combat_action(directory, "native-inventory-list"))["native_inventory"]
+        items = {item["guid"]: item for item in result["items"]}
+        assert result["next_offset"] is None and len(items) == result["total"], result
+        return items
+
+    def claim_source(receipt):
+        return {key: value for key, value in receipt.items() if key not in ("inventory_guid", "stack_merge")}
 
     async def pick_nearby(identity, position, count=1):
         from tools.silverfish import native_loose_pickup, native_world_loot
@@ -276,7 +286,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             assert denied["spawner_denials"] > 0 and denied["authority_count"] == denied["simulated_count"] == 0, denied
             evidence["stock_client_spawn_denied"] = denied
 
-        weapon_guid, remaining = None, None
+        weapon_guid, remaining, reserve_guid = None, None, None
         loadout = "sg-71-a" if both_cqc else "light-pistol"
         min_loaded, projectiles = (1, 9) if both_cqc else (2, 1)
         projectile = "Projectile_ShotGun_Pellet_C" if both_cqc else "Projectile_Pistol_Light_C"
@@ -289,6 +299,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             assert proof["status"] == "equipped" and proof["pawn"] == exact_pawn and proof["guid"] == weapon_guid, proof
             remaining = proof["stored_ammo"]
             reserve = accepted("stage the weapon's stock reserve", await combat_action(run, "native-guest-weapon-seed-ammo"))
+            reserve_guid = reserve["native_guest_weapon"]["guid"]
             evidence["stock_loadout"] = {"kind": loadout, "weapon": proof, "reserve": reserve["native_guest_weapon"]}
 
         if placed_cqc:
@@ -606,6 +617,13 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 recipient = invitation["character_id"] if winner == "guest" else "host"
                 winner_run, loser_run = (guest_run, run) if winner == "guest" else (run, guest_run)
 
+                before, reserve_before = None, None
+                if verify_shell_stacking:
+                    before = await inventory(winner_run)
+                    reserve_before = before[reserve_guid]
+                    assert (reserve_before["class_path"], reserve_before["source"]) == (SHELLS, "backpack"), before
+                    assert reserve_before["quantity"] > 0 and guid not in before, before
+
                 async def approach_drop(role):
                     deadline = time.monotonic() + 5
                     while True:
@@ -631,14 +649,45 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     if resident_game:
                         press = await pick_nearby(identity, roll["position"], roll["quantity"])
                     else:
-                        pressed = await combat_action(winner_run, "native-world-loot-fixture", identity)
-                        if pressed.get("error", "").startswith(("world_loot_fixture_focus_unavailable",
-                                                                "world_loot_fixture_outside_verified_reach")):
-                            accepted("place the claimant in sight of the stock actor", await combat_action(
-                                run, "native-world-loot-approach", f"{winner}@{identity}"))
+                        focus_errors = ("world_loot_fixture_focus_unavailable", "world_loot_fixture_outside_verified_reach")
+                        reach_errors = {"native_enemy_loot_focus_obstructed", "native_enemy_loot_out_of_reach"}
+                        attempts = 3 if verify_shell_stacking else 2
+                        event_path = winner_run / "events.jsonl"
+                        for attempt in range(attempts):
+                            if attempt:
+                                accepted("place the claimant in sight of the stock actor", await combat_action(
+                                    run, "native-world-loot-approach", f"{winner}@{identity}"))
+                            event_start = event_path.stat().st_size if verify_shell_stacking else 0
                             pressed = await combat_action(winner_run, "native-world-loot-fixture", identity)
-                        press = accepted("exercise the claimant's stock Interact", pressed)["native_world_loot_items"][identity]
-                        assert press["map"] == area and press["sequence"] > 0, press
+                            if attempt + 1 < attempts and pressed.get("error", "").startswith(focus_errors):
+                                continue
+                            press = accepted("exercise the claimant's stock Interact", pressed)["native_world_loot_items"][identity]
+                            assert press["map"] == area and press["sequence"] > 0, press
+                            if not verify_shell_stacking:
+                                break
+
+                            rejected = None
+                            def outcome(state):
+                                nonlocal rejected
+                                row = state.get("gameplay", {}).get("native_enemy_loot_rolls", {}).get(guid, {})
+                                if row.get("claimed_by") == recipient:
+                                    return True
+                                # This staged press is the guest's only pending interaction.
+                                with event_path.open("rb") as events:
+                                    events.seek(event_start)
+                                    complete = events.read().rpartition(b"\n")[0]
+                                for line in complete.splitlines():
+                                    entry = json.loads(line)
+                                    if entry.get("event") == "interaction_rejected":
+                                        rejected = entry
+                                        return True
+                                return False
+
+                            await wait(run, outcome, timeout=12)
+                            if rejected is None:
+                                break
+                            if attempt + 1 == attempts or rejected.get("reason") not in reach_errors:
+                                raise AssertionError(rejected)
                     settled = await wait(run, lambda state: state.get("gameplay", {}).get(
                         "native_enemy_loot_rolls", {}).get(guid, {}).get("claimed_by") == recipient, timeout=12)
                     claimed = settled["gameplay"]["native_enemy_loot_rolls"][guid]
@@ -647,16 +696,28 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                         "native_enemy_loot_claim_committed", guid
                     )]
                     operation = event["operation_id"]
+                    claimed = {**claimed, **{key: event[key] for key in ("inventory_guid", "stack_merge") if key in event}}
                     for local_run in (run, guest_run):
                         await wait(local_run, lambda state: state.get("active") and not projected_item(state), timeout=10)
                     if resident_game:
-                        await verify_nearby_delivery(press, guid)
+                        await verify_nearby_delivery(press, claimed.get("inventory_guid", guid))
                     proof_log["stock_shell_input"] = {"press": press, "commit": event, "both_actors_cleared": True}
                 else:
                     await approach_drop(winner)
                     claimed = accepted("claim the stock shells for the host", await combat_action(
                         run, "native-enemy-loot-claim", guid, operation_id=operation))["native_enemy_loot_claim"]
-                assert claimed == dict(roll, claimed_by=recipient), claimed
+                assert claim_source(claimed) == dict(roll, claimed_by=recipient), claimed
+                inventory_guid = claimed.get("inventory_guid", guid)
+                quantity = roll["quantity"]
+                if merge := claimed.get("stack_merge"):
+                    assert inventory_guid != guid and merge["before"] > 0, claimed
+                    assert (merge["amount"], merge["after"]) == (quantity, merge["before"] + quantity), claimed
+                    if reserve_before is not None:
+                        assert (inventory_guid, merge["before"]) == (reserve_guid, reserve_before["quantity"]), claimed
+                    quantity = merge["after"]
+                else:
+                    assert not verify_shell_stacking and inventory_guid == guid, claimed
+                inventory_before_replay = await inventory(winner_run) if verify_shell_stacking else None
                 retry = accepted("replay the exact stock claim", await combat_action(
                     winner_run, "native-enemy-loot-claim", selection, operation_id=operation))["native_enemy_loot_claim"]
                 assert retry == claimed, retry
@@ -664,18 +725,26 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 assert refused.get("ok") is False and refused.get("error") == "native_enemy_loot_already_claimed", refused
                 home = accepted("inspect the claimant's inventory", await combat_action(winner_run, "native-inventory-list"))["native_inventory"]
                 away = accepted("inspect the other member's inventory", await combat_action(loser_run, "native-inventory-list"))["native_inventory"]
-                row, = [item for item in home["items"] if item["guid"] == guid]
-                assert (row["class_path"], row["quantity"]) == (roll["class_path"], roll["quantity"]), row
+                row, = [item for item in home["items"] if item["guid"] == inventory_guid]
+                assert (row["class_path"], row["quantity"]) == (roll["class_path"], quantity), row
+                if inventory_guid != guid:
+                    assert all(item["guid"] != guid for item in home["items"]), home
+                if inventory_before_replay is not None:
+                    expected_inventory = {**before, inventory_guid: row}
+                    assert inventory_before_replay == expected_inventory, inventory_before_replay
+                    assert home["next_offset"] is None, home
+                    assert {item["guid"]: item for item in home["items"]} == inventory_before_replay, home
+                    proof_log["stock_shell_stack"] = {"before": reserve_before, "after": row, "replay": retry}
                 assert all(item["guid"] != guid for item in away["items"]), away
                 proof_log["shared_enemy_ammunition"] = {"roll": roll, "claim": claimed, "stored_item": row,
                                                        "duplicate_guest_claim" if winner == "host" else "duplicate_host_claim": refused["error"]}
                 if placed_cqc:
                     settled = await wait(guest_run, lambda state: state.get("gameplay", {}).get(
-                        "native_enemy_loot_rolls", {}).get(guid) == claimed)
+                        "native_enemy_loot_rolls", {}).get(guid) == claim_source(claimed))
                     assert settled["gameplay_fresh"], settled
                     saved = json.loads((run.parent / "save" / "campaign.json").read_text(encoding="utf-8"))
                     durable = saved["world"]["party"]["native_enemy_loot_rolls"][guid]
-                    assert {key: value for key, value in durable.items() if key != "retirement"} == claimed, durable
+                    assert {key: value for key, value in durable.items() if key != "retirement"} == claim_source(claimed), durable
                     if defer_until_restart:
                         assert cqc_retired(durable), durable
                     assert saved["world"]["map"] == area, saved["world"]
@@ -793,13 +862,28 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 if stock_weapon_input:
                     second = encounters[second_target]
                     second["stock_weapon_pickup"] = await pickup_stock_weapon(second["stock_dropped_weapon_payload"], second_target)
+            if verify_shell_stacking and reserve_guid not in await inventory(guest_run):
+                reserve = accepted("restore the spent stock buckshot reserve", await combat_action(
+                    run, "native-guest-weapon-seed-ammo"))
+                reserve_guid = reserve["native_guest_weapon"]["guid"]
             if not stock_drop_census or stock_shell_input:
                 await share(first_target, encounters[first_target], first_observed)
                 await share(second_target, encounters[second_target], second_observed, defer_until_restart=restart_unclaimed_shells)
                 first, second = (encounters[actor]["shared_enemy_ammunition"]["claim"] for actor in (first_target, second_target))
                 assert first["epoch"] == second["epoch"] and first["guid"] != second["guid"] and first["actor"] != second["actor"]
                 final = status(run)["gameplay"]["native_enemy_loot_rolls"]
-                assert final == {first["guid"]: first, second["guid"]: second}, final
+                assert final == {receipt["guid"]: claim_source(receipt) for receipt in (first, second)}, final
+                if verify_shell_stacking:
+                    assert first["inventory_guid"] == second["inventory_guid"] == reserve_guid, (first, second)
+                    assert second["stack_merge"]["before"] == first["stack_merge"]["after"], (first, second)
+                    await restart_pair()
+                    restored = await inventory(guest_run)
+                    expected = encounters[second_target]["stock_shell_stack"]["after"]
+                    assert restored[reserve_guid] == expected, restored
+                    assert first["guid"] not in restored and second["guid"] not in restored, restored
+                    saved = status(run)["gameplay"]["native_enemy_loot_rolls"]
+                    assert saved == final, saved
+                    evidence["stock_shell_stack_after_restart"] = restored[reserve_guid]
         elif enemy_loot:
             _, observed = await fight(target, evidence, remaining)
             if stock_weapon_input:
@@ -837,7 +921,8 @@ async def main(args) -> None:
                        stock_shell_input=args.stock_shell_input, restart_unclaimed_shells=args.restart_unclaimed_shells,
                        refinery_cqc=args.refinery_cqc, stock_drop_census=args.stock_drop_census,
                        stock_weapon_input=args.stock_weapon_input, restart_unclaimed_weapon=args.restart_unclaimed_weapon,
-                       resident_game=args.resident_game.resolve(strict=True) if args.resident_game else None)
+                       resident_game=args.resident_game.resolve(strict=True) if args.resident_game else None,
+                       verify_shell_stacking=args.verify_shell_stacking)
 
 
 if __name__ == "__main__":
@@ -858,6 +943,8 @@ if __name__ == "__main__":
                         help="arm and bank the exact stock CQC kill through the ordinary host path")
     parser.add_argument("--both-cqc", action="store_true", help="defeat and claim from both placed CQC in one native visit")
     parser.add_argument("--stock-shell-input", choices=("host", "guest"), help="claim visible shells through stock Interact")
+    parser.add_argument("--verify-shell-stacking", action="store_true",
+                        help="merge both physical shell drops into the guest reserve and verify it after restart")
     parser.add_argument("--restart-unclaimed-shells", action="store_true", help="restart before claiming the second stock shell stack")
     parser.add_argument("--stock-drop-census", action="store_true",
                         help="verify observed ammunition and weapon payloads; add --stock-shell-input to test shell pickup too")
@@ -879,6 +966,8 @@ if __name__ == "__main__":
         parser.error("--both-cqc requires --automatic-cqc-loot")
     if args.stock_shell_input and not args.automatic_cqc_loot:
         parser.error("--stock-shell-input requires --automatic-cqc-loot")
+    if args.verify_shell_stacking and (not args.both_cqc or args.stock_shell_input != "guest" or args.resident_game):
+        parser.error("--verify-shell-stacking requires --both-cqc and a headless guest using --stock-shell-input guest")
     if args.resident_game and (args.stock_shell_input != "guest" or not args.vanilla_saved
                                or args.restart_unclaimed_shells or args.restart_unclaimed_weapon):
         parser.error("--resident-game requires guest stock pickup, copied stock saves, and a single host run")

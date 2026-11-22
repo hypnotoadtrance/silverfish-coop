@@ -229,7 +229,36 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
 
         raise RuntimeError(f"No exact Observatory lane settled at the required {position} distance: {attempts}")
 
-    async def collect(recipient, recipient_id, role, before, dropped, committed, typed, preferred_lane):
+    async def assert_reclaim(recipient, recipient_id, before, dropped, committed, typed, claim_id, reclaimed,
+                             required_destination=None):
+        source = dropped["guid"]
+        destination = reclaimed.get("inventory_guid", source)
+        after = await inventory(recipient, recipient_id)
+        expected = {**dropped, "state": "reclaimed", "claimed_by": recipient_id}
+        durable = {key: value for key, value in committed.items() if key != "escrow"}
+        if required_destination is not None:
+            assert destination == required_destination and destination != source, reclaimed
+        if destination != source:
+            previous, = (item for item in before if item["guid"] == destination)
+            assert previous["source"] == "backpack" and previous["class_path"] == typed["class_path"], previous
+            assert previous["stackable"] is True and typed["stackable"] is True, (previous, typed)
+            units = previous["quantity"] + dropped["quantity"]
+            merge = dict(amount=dropped["quantity"], before=previous["quantity"], after=units)
+            expected.update(inventory_guid=destination, stack_merge=merge)
+            durable.update(inventory_guid=destination, stack_merge=merge)
+            assert after == [dict(item, quantity=units) if item["guid"] == destination else item
+                             for item in before], after
+        else:
+            inserted, = (item for item in after if item["guid"] == source)
+            assert {key: val for key, val in inserted.items() if key != "index"} == {
+                key: val for key, val in typed.items() if key != "index"}
+            assert [item for item in after if item["guid"] != source] == before
+        assert reclaimed == expected, reclaimed
+        assert saved()[dropped["drop_id"]] == dict(durable, claim_id=claim_id, claimed_by=recipient_id)
+        return after
+
+    async def collect(recipient, recipient_id, role, before, dropped, committed, typed, preferred_lane,
+                      required_destination=None):
         drop_id = dropped["drop_id"]
         identity = projection.player_drop_identity(drop_id)
         near = await place(recipient_id, "near", dropped["location"], preferred_lane=preferred_lane, role=role)
@@ -263,19 +292,12 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
                     raise RuntimeError(f"The {target[0]} engine did not invoke the stock item pickup sound")
             evidence["pickup_audio"] = witnesses
         claim_id, reclaimed = event["operation_id"], event[drop.RESULT]
-        assert reclaimed == {**dropped, "state": "reclaimed", "claimed_by": recipient_id}, reclaimed
-        after = await inventory(recipient, recipient_id)
-        source = dropped["guid"]
-        inserted, = (item for item in after if item["guid"] == source)
-        assert {key: val for key, val in inserted.items() if key != "index"} == {
-            key: val for key, val in typed.items() if key != "index"}
-        assert [item for item in after if item["guid"] != source] == before
+        after = await assert_reclaim(recipient, recipient_id, before, dropped, committed, typed, claim_id, reclaimed,
+                                     required_destination)
         replay = await action(recipient, drop.HOST_RECLAIM if recipient == host else drop.RECLAIM,
                               "--target", drop_id, "--operation-id", claim_id)
         assert replay[drop.RESULT] == reclaimed, replay
         assert await inventory(recipient, recipient_id) == after
-        durable = {key: value for key, value in committed.items() if key != "escrow"}
-        assert saved()[drop_id] == dict(durable, claim_id=claim_id, claimed_by=recipient_id)
         return {"stock_projection_interact": press, "reclaim_position": near["location"], "reclaim": reclaimed,
                 "stock_projection_reclaim_operation": claim_id, "lane": near["lane"]}
 
@@ -298,7 +320,12 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
 
         source, attempt, claim_id = uuid.uuid4().hex.upper(), uuid.uuid4().hex, uuid.uuid4().hex
         host_items = await inventory(host, "host")
+        owner_destination = teammate_destination = None
         if other in clients:
+            if not pistol_kind and claimant == "teammate":
+                teammate_destination = uuid.uuid4().hex.upper()
+                await action(host, "native-guest-weapon-seed-ammo", "--target", "guest2", "--item-guid",
+                             teammate_destination)
             other_items = await inventory(other, other_id)
         if pistol_kind:
             await action(host, "native-guest-weapon-seed", "--target", "guest", "--item-guid", source,
@@ -306,6 +333,12 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
             evidence["loaded_source"] = await inspect_loaded_pistol(owner, source)
         else:
             await action(host, "native-guest-weapon-seed-ammo", "--target", "guest", "--item-guid", source)
+            if claimant == "owner" and not host_origin:
+                split = (await action(owner, "native-inventory-split", "--target",
+                                      f"{source}|4|{quantity}"))["native_inventory_split"]
+                owner_destination, quantity = split["new_guid"], split["remaining"]
+                assert owner_destination != source and quantity == 5, split
+                evidence["owner_ammo_split"] = split
         initial_items = await inventory(owner, owner_id)
         typed, = (item for item in initial_items if item["guid"] == source)
         assert (typed["source"], typed["class_path"], typed["quantity"]) == ("backpack", item_class, quantity), typed
@@ -329,7 +362,10 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
         assert record.valid_position(dropped["location"])
         assert math.dist(dropped["location"], drop_site["location"]) < 180, (dropped, drop_site)
         assert (await action(owner, *request))[drop.RESULT] == dropped
-        assert all(item["guid"] != source for item in await inventory(owner, owner_id))
+        owner_after_drop = await inventory(owner, owner_id)
+        assert [{key: value for key, value in item.items() if key != "index"} for item in owner_after_drop] == [
+            {key: value for key, value in item.items() if key != "index"}
+            for item in initial_items if item["guid"] != source], owner_after_drop
         committed = evidence["durable_escrow"] = saved()[attempt]
         assert "escrow" in committed and committed["claim_id"] is None and "actor" not in committed, committed
         if other in clients:
@@ -392,7 +428,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
                 recipient, recipient_id, role, before = other, other_id, "guest2", other_items
             evidence["owner_projection"] = await projected(owner, owner_id, attempt, owner_id)
             evidence.update(await collect(recipient, recipient_id, role, before, dropped, committed, typed,
-                                          drop_site["lane"]))
+                                          drop_site["lane"], teammate_destination))
             claim_id = evidence["stock_projection_reclaim_operation"]
             assert await inventory(owner, owner_id) == [item for item in initial_items if item["guid"] != source]
             if recipient != host:
@@ -420,7 +456,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
                                  and state.get("character_id") == owner_id and attempt in state.get("gameplay", {}).get(record.STATE, {}))
         assert owner_state["gameplay"][record.STATE][attempt]["guid"] == source
         assert saved()[attempt] == committed
-        assert all(item["guid"] != source for item in await inventory(owner, owner_id))
+        assert await inventory(owner, owner_id) == owner_after_drop
         assert (await action(owner, *request))[drop.RESULT] == dropped
 
         anchor = dropped["location"]
@@ -447,7 +483,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
         evidence["reclaim_position"] = near["location"]
         if visible_projection:
             unclaimed = await projected(owner, owner_id, attempt, owner_id)
-            assert (await inventory(owner, owner_id)) == [item for item in initial_items if item["guid"] != source]
+            assert await inventory(owner, owner_id) == owner_after_drop
             identity = projection.player_drop_identity(attempt)
             press = (await action(owner, projection.FIXTURE, "--target", identity))[projection.KEY][identity]
             assert press["sequence"] > unclaimed["sequence"] and press == {**unclaimed, "sequence": press["sequence"]}
@@ -465,11 +501,11 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
             reclaimed = (await action(owner, drop.RECLAIM, "--target", attempt, "--operation-id", claim_id))[drop.RESULT]
         recover = (drop.RECLAIM, "--target", attempt, "--operation-id", claim_id)
         evidence["reclaim"] = reclaimed
-        assert reclaimed == {**dropped, "state": "reclaimed", "claimed_by": owner_id}, reclaimed
-        durable = {key: value for key, value in committed.items() if key != "escrow"}
-        assert saved()[attempt] == dict(durable, claim_id=claim_id, claimed_by=owner_id)
-        assert await inventory(owner, owner_id) == initial_items and await inventory(host, "host") == host_items
+        after = await assert_reclaim(owner, owner_id, owner_after_drop, dropped, committed, typed, claim_id, reclaimed,
+                                     owner_destination)
+        assert await inventory(host, "host") == host_items
         assert (await action(owner, *recover))[drop.RESULT] == reclaimed
+        assert await inventory(owner, owner_id) == after
         assert (await action(owner, drop.RECLAIM, "--target", attempt, success=False))["error"] == "native_guest_stack_drop_already_reclaimed"
         evidence["verified"] = True
     except BaseException as error:

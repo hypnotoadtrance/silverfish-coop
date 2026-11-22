@@ -321,6 +321,32 @@ class OrdinaryDeadBridgeLootTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(party.RuleError, "unavailable"):
             await native_enemy_loot.approach(self.host, bridge, f"host|{self.guid}")
 
+    async def test_stack_merge_keeps_exact_shell_claim_identity_across_replay(self):
+        roll = dict(map=DEAD_BRIDGE, epoch=self.host.zone_epoch, bandit=self.target, actor=self.ammo,
+                    guid=self.guid, quantity=8, class_path=native_enemy_loot.SHELLS, position=[1, 2, 3],
+                    killer=self.second, claimed_by=None, escrow=self.frame)
+        self.party[native_enemy_loot.STATE_KEY] = {self.guid: roll}
+        destination = "C" * 32
+        merge = dict(guid=self.guid, inventory_guid=destination, amount=8, before=7, after=15)
+        proof = dict(self.captured, state="merged", pawn=self.first_pawn, merge=merge)
+        bridge = SimpleNamespace(command=AsyncMock(return_value=dict(self.initial, native_enemy_loot_escrow=proof)))
+        with patch.object(native_host_save, "verify_record"):
+            result = await native_enemy_loot.claim(self.host, bridge, self.first, self.guid, "b" * 32)
+            self.host.party = party.load_party(self.host.party)
+            repeated = await native_enemy_loot.claim(self.host, bridge, self.first, self.guid, "b" * 32)
+            with self.assertRaisesRegex(party.RuleError, "already_claimed"):
+                await native_enemy_loot.claim(self.host, bridge, "host", self.guid, "a" * 32)
+        self.assertEqual(result, repeated)
+        claim = result["native_enemy_loot_claim"]
+        self.assertEqual((claim["guid"], claim["inventory_guid"], claim["claimed_by"]),
+                         (self.guid, destination, self.first))
+        self.assertEqual(claim["stack_merge"], dict(amount=8, before=7, after=15))
+        self.assertNotIn("inventory_guid", self.host.party[native_enemy_loot.STATE_KEY][self.guid])
+        bridge.command.assert_awaited_once()
+        self.host.checkpoint_native.assert_awaited_once()
+        self.assertEqual(self.host.checkpoint_native.await_args.kwargs,
+                         dict(require_guest_frames=frozenset({self.first}), typed_inventory=True))
+
     async def test_stock_shell_view_waits_for_retirement_and_authoritative_focus_is_rechecked(self):
         roll = dict(map=DEAD_BRIDGE, epoch=self.host.zone_epoch, bandit=self.target, actor=self.ammo,
                     guid=self.guid, quantity=8, class_path=native_enemy_loot.SHELLS, position=[1, 2, 3],

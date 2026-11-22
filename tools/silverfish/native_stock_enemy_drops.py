@@ -90,20 +90,26 @@ def parse_bank(fields, game):
 
 
 def parse_claim(fields, game):
-    if len(fields) != 9 or fields[1] != game.get("map") or game.get("state") != "hosting":
+    from .native_loot import parse_stack_merge
+
+    if len(fields) not in (9, 10) or fields[1] != game.get("map") or game.get("state") != "hosting":
         raise ValueError("Invalid stock enemy loot claim frame")
     _, area, pawn, slot, guid, status, *values = fields
     if (not re.fullmatch(r"SFCoop_[0-9a-f]{32}", slot) or not valid_guid(guid)
-            or status not in ("claimed", "already_claimed", "cash_credited")
-            or not all(re.fullmatch(r"[0-9]{1,10}", value) for value in values)):
+            or not all(re.fullmatch(r"[0-9]{1,10}", value) for value in values[:3])):
         raise ValueError("Invalid stock enemy loot claim payload")
+    proof = dict(map=area, pawn=pawn, slot=slot, guid=guid, status=status)
+    if status == "merged" and len(values) == 4:
+        return dict(proof, merge=parse_stack_merge((guid, values[3], *values[:3])))
+    if len(values) != 3 or status not in ("claimed", "already_claimed", "cash_credited"):
+        raise ValueError("Invalid stock enemy loot claim status")
     amount, before, after = map(int, values)
     if status == "cash_credited":
         if not 0 < amount == after - before or not 0 <= before < after < 2**31:
             raise ValueError("Invalid stock enemy loot cash credit")
     elif (amount, before, after) != (0, 0, 0):
         raise ValueError("Unexpected cash in stock enemy item transfer")
-    return dict(map=area, pawn=pawn, slot=slot, guid=guid, status=status, amount=amount, before=before, after=after)
+    return dict(proof, amount=amount, before=before, after=after)
 
 
 def active_frames(data, members):
@@ -291,22 +297,26 @@ async def claim(host, bridge, character, guid, operation):
         committed = candidate[STATE][guid]
         committed["claimed_by"] = character
         committed.pop("escrow")
+        merge = {}
         if roll["class_path"] in native_loot.CASH_RANGES:
             credit = native_loot._verified_cash_credit(
                 {"status": proof.get("status"), "cash": proof}, roll, snapshot.get("native_wallet"))
             candidate["economy"].update(wallet=credit["after"], native_wallet_active=True)
             committed["wallet_credit"] = credit
+        elif proof.get("status") == "merged":
+            merge = native_loot.verified_stack_merge(proof.get("merge", {}), guid, roll["ammo"])
         elif proof.get("status") not in ("claimed", "already_claimed"):
             raise RuntimeError("The stock enemy item transfer did not verify")
-        result = {CLAIM_KEY: _public(committed)}
+        result = {CLAIM_KEY: {**_public(committed), **merge}}
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
         host.last_game, host.last_seen = snapshot, time.monotonic()
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}),
+                                                typed_inventory=bool(merge))
         host.party = candidate
         host.native_checkpoint_unsafe = False
-        host.control.event("native_stock_enemy_loot_claimed", revision=revision, operation_id=operation, **_public(committed))
+        host.control.event("native_stock_enemy_loot_claimed", revision=revision, operation_id=operation, **result[CLAIM_KEY])
         native_pickup_audio.committed(host, pawn, operation, committed["class_path"])
         return result
     finally:
