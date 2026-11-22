@@ -1,8 +1,13 @@
 local ai = {}
+local guest_save = require("guest_save")
 
 local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
+local aggro_path = npc_path .. ":Agro_Buffer"
+local remember_path = npc_path .. ":AddTargetToList"
+local remembered_target = "CombatTarget_7_5EB8D2544EEE9E5E6FB88485135FB2B4"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local world, candidates, sampled_at
+local threat_session, threat_downed, threat_viewport, threat_hook
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -14,6 +19,61 @@ end
 
 local function is_downed(actor, downed)
     return valid(actor) and downed[actor:GetAddress()] == true
+end
+
+local function remember_stock_attacker(npc, source, from_damage)
+    local state = threat_session
+    if not state or from_damage ~= true or not valid(npc) or not valid(source)
+        or not valid(threat_viewport) or not same(threat_viewport.World, state.world)
+        or not npc:HasAuthority() or npc.Alive ~= true or npc:IsActorBeingDestroyed()
+        or not source:HasAuthority() or source.Dead ~= false or source:IsActorBeingDestroyed()
+        or not same(npc:GetWorld(), state.world) or not same(source:GetWorld(), state.world)
+        or not same(npc.CombatTarget, source) then return end
+    local driver = state.world.NetDriver
+    if not valid(driver) or valid(driver.ServerConnection) or #driver.ClientConnections == 0 then return end
+    local controller = source.Controller
+    if not valid(controller) or not same(controller.Pawn, source) or not same(controller:GetWorld(), state.world)
+        or not controller:HasAuthority() or controller:IsActorBeingDestroyed() then return end
+    local record = threat_downed[source:GetFullName()]
+    if record and same(record.pawn, source) and same(record.world, state.world) then return end
+
+    local targets = npc.TargetList
+    for index = 1, targets:GetArrayNum() do
+        if same(targets[index][remembered_target], source) then return end
+    end
+
+    local locally_controlled = source:IsLocallyControlled()
+    local is_host = locally_controlled and same(state.local_pawn.pawn, source)
+        and same(state.local_pawn.controller_object, controller)
+    for _, guest in ipairs(state.guests) do
+        local is_guest = not locally_controlled and same(guest.pawn, source)
+            and same(guest.controller_object, controller)
+        if is_host or is_guest then
+            local pawn = guest_save.exact_item_context(state, "hosting", guest.name)
+            if same(pawn, guest.pawn) then
+                -- Some stock combat reactions set CombatTarget directly.
+                -- Keep the already accepted attacker available to stock retargeting.
+                npc:AddTargetToList(source, {})
+                return
+            end
+        end
+    end
+end
+
+local function arm_stock_threat_hook(state, desired)
+    if not threat_session or not same(threat_session.world, state.world) or not valid(threat_viewport) then
+        threat_viewport = FindFirstOf("GameViewportClient")
+    end
+    threat_session, threat_downed = state, desired
+    if not threat_hook and valid(StaticFindObject(aggro_path)) and valid(StaticFindObject(remember_path)) then
+        RegisterHook(aggro_path, function(context, source, _, _faction, _force, from_damage)
+            -- UE4SS calls Blueprint hooks after the original script.
+            if threat_session then
+                pcall(function() remember_stock_attacker(context:get(), source:get(), from_damage:get()) end)
+            end
+        end)
+        threat_hook = true
+    end
 end
 
 local function npc_candidates(current)
@@ -31,7 +91,13 @@ end
 function ai.sync(state, phase, desired)
     if phase ~= "hosting" or not state.listening or state.server or not valid(state.world) then
         world, candidates, sampled_at = nil, nil, nil
+        threat_session, threat_downed, threat_viewport = nil, nil, nil
         return
+    end
+    if state.clients > 0 and state.local_pawn and #state.guests > 0 then
+        arm_stock_threat_hook(state, desired)
+    else
+        threat_session, threat_downed, threat_viewport = nil, nil, nil
     end
     if next(desired) == nil then return end
     local downed, standing = {}, 0
