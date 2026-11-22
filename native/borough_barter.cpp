@@ -1,7 +1,10 @@
 #include "borough_barter.hpp"
 #include "guest_armor.hpp"
+#include "guest_sickness.hpp"
+#include "enemy_loot.hpp"
 #include "loot_escrow.hpp"
 #include "shared_loot.hpp"
+#include "stock_wallet.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1076,6 +1079,322 @@ namespace
         return result(false, layout.backpack->Identical(backpack, before.get()) && flags->Identical(flags_value, stock_flags.get())
             ? "borough_barter_refused_exchange_rolled_back" : "mutation_unverified_borough_barter_exchange");
     }
+    constexpr auto stalker_npc_path = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.NPC_LoneStalker_C_0");
+    constexpr auto stalker_npc_class = STR("/Game/Classes/NPCs/NPC_Stalker_Freelance.NPC_Stalker_Freelance_C");
+    constexpr auto stalker_trader_class = STR("/Game/Classes/Actors/Barter_BP.Barter_BP_C");
+    constexpr auto stalker_merchant_path = STR("/Game/Classes/Libraries/DataAssets/Merchants/StalkerTradesData.StalkerTradesData");
+    constexpr auto barter_record_path = STR("/Game/Classes/Libraries/DataAssets/Barter/BarterSaveStruct.BarterSaveStruct");
+    constexpr Guid stalker_identity{0x025127D8, 0x4BAC8B77, 0x6150CCA7, 0x772B0300};
+
+    struct StalkerBarter
+    {
+        silverfish::shared_loot::EscrowOwner owner;
+        U::UObject* instance{};
+        U::UObject* npc{};
+        U::UObject* actor{};
+        U::UObject* data{};
+        U::FArrayProperty* inventory{};
+        U::FArrayProperty* saved{};
+        U::FArrayProperty* saved_inventory{};
+        U::FStructProperty* saved_id{};
+        U::FIntProperty* prior_day{};
+        U::FIntProperty* day{};
+        U::FDoubleProperty* prior_min_weapon{};
+        U::FDoubleProperty* min_weapon{};
+        U::UFunction* value_item{};
+        U::FStructProperty* value_row{};
+        U::FDoubleProperty* quoted{};
+        U::UFunction* save_inventory{};
+        Inventory layout;
+        silverfish::stock_wallet::Wallet wallet;
+        int money() const { return wallet.amount(instance); }
+
+        bool bind(Address pawn, Address save, Address stock)
+        {
+            auto* world = find<U::UWorld>(observatory_path);
+            if (!world || pawn == 0 || save == 0 || stock == 0 || save == stock ||
+                !silverfish::shared_loot::qualify_escrow_owner_in_world(world, pawn, save, stock, owner)) return false;
+            instance = object(world, STR("OwningGameInstance"));
+            npc = find<U::UObject>(stalker_npc_path);
+            actor = object(npc, STR("BarterRef"));
+            data = object(actor, STR("MerchantData"));
+            if (!exact(npc, stalker_npc_class) || !authority(npc, world) || !exact(actor, stalker_trader_class) ||
+                !authority(actor, world) || !near(owner.pawn, actor) || !near(owner.pawn, npc) ||
+                !bool_value(npc, STR("Alive"), npc, true) || !bool_value(owner.pawn, STR("Dead"), owner.pawn, false) ||
+                object(actor, STR("LinkedNPC")) != npc || data != find<U::UObject>(stalker_merchant_path) || !data ||
+                !bool_value(actor, STR("Save"), actor, true) || object(actor, STR("As Game Instance FP")) != instance ||
+                object(instance, STR("SaveSlot_Ref")) != owner.stock || !wallet.bind(instance) ||
+                !layout.bind(owner.save)) return false;
+            inventory = field<U::FArrayProperty>(actor, STR("Inventory"));
+            saved = field<U::FArrayProperty>(owner.stock, STR("BarterInventories"));
+            auto* record = find<U::UScriptStruct>(barter_record_path);
+            auto* entry = saved ? U::CastField<U::FStructProperty>(saved->GetInner()) : nullptr;
+            auto* id = field<U::FStructProperty>(actor, STR("TraderID"));
+            saved_id = field<U::FStructProperty>(record, STR("TraderID_4_F301FE89472A9E41F27630A20A7CBFF4"));
+            day = field<U::FIntProperty>(actor, STR("DayGenerated"));
+            prior_day = field<U::FIntProperty>(record, STR("Day_6_C06910BA424639E2002A1ABDB6BE5272"));
+            min_weapon = field<U::FDoubleProperty>(actor, STR("MinWeaponValue"));
+            prior_min_weapon = field<U::FDoubleProperty>(record, STR("MinWeaponValue_13_BC19B130432FEB493DEB13BECD0875E3"));
+            saved_inventory = field<U::FArrayProperty>(record, STR("Inventory_10_7102DB204B6D7CBB59DC659331FF259D"));
+            value_item = find<U::UFunction>(STR("/Game/Classes/Actors/Barter_BP.Barter_BP_C:ValueItem"));
+            value_row = parameter<U::FStructProperty>(value_item, STR("Item"), 0, false);
+            quoted = parameter<U::FDoubleProperty>(value_item, STR("TraderValue"), 0x50, true);
+            save_inventory = find<U::UFunction>(STR("/Game/Classes/Actors/Barter_BP.Barter_BP_C:SaveInventory"));
+            if (!inventory || !layout.row_is(inventory->GetInner()) || !saved_inventory ||
+                !layout.row_is(saved_inventory->GetInner()) || !entry || !record || entry->GetStruct().Get() != record ||
+                !id || !saved_id || id->GetStruct().Get() != layout.guid->GetStruct().Get() ||
+                saved_id->GetStruct().Get() != id->GetStruct().Get() || identity(id, actor) != stalker_identity ||
+                !day || !prior_day || !min_weapon || !prior_min_weapon || !layout.row_is(value_row) || !quoted ||
+                value_item->GetOuterPrivate() != actor->GetClassPrivate() || value_item->GetNumParms() != 2 ||
+                value_item->GetParmsSize() != 0x58 || !save_inventory ||
+                save_inventory->GetOuterPrivate() != actor->GetClassPrivate() || save_inventory->GetNumParms() != 0 ||
+                save_inventory->GetParmsSize() != 0) return false;
+            return money() >= 0;
+        }
+
+        Guid identity(U::FStructProperty* field, const void* row) const
+        {
+            const auto* value = field->ContainerPtrToValuePtr<void>(row);
+            Guid result{};
+            for (std::size_t i = 0; i < result.size(); ++i)
+                result[i] = static_cast<std::uint32_t>(layout.words[i]->GetPropertyValueInContainer(value));
+            return result;
+        }
+
+        double quote(const void* row) const
+        {
+            alignas(std::max_align_t) std::array<std::byte, 0x58> arguments{};
+            value_row->InitializeValue_InContainer(arguments.data());
+            value_row->CopyCompleteValue(value_row->ContainerPtrToValuePtr<void>(arguments.data()), row);
+            actor->ProcessEvent(value_item, arguments.data());
+            const auto result = quoted->GetPropertyValueInContainer(arguments.data());
+            value_row->DestroyValue_InContainer(arguments.data());
+            return result;
+        }
+
+        bool saved_matches() const
+        {
+            U::FScriptArrayHelper rows(saved, saved->ContainerPtrToValuePtr<void>(owner.stock));
+            if (rows.Num() < 1 || rows.Num() > capacity) return false;
+            int seen{};
+            for (int index = 0; index < rows.Num(); ++index)
+            {
+                const auto* row = rows.GetRawPtr(index);
+                if (identity(saved_id, row) != stalker_identity) continue;
+                if (prior_day->GetPropertyValueInContainer(row) != day->GetPropertyValueInContainer(actor) ||
+                    prior_min_weapon->GetPropertyValueInContainer(row) != min_weapon->GetPropertyValueInContainer(actor) ||
+                    !saved_inventory->Identical(saved_inventory->ContainerPtrToValuePtr<void>(row),
+                        inventory->ContainerPtrToValuePtr<void>(actor))) return false;
+                ++seen;
+            }
+            return seen == 1;
+        }
+    };
+
+    struct BarterSelection
+    {
+        Guid id;
+        int units;
+    };
+
+    bool selections(std::string_view encoded, std::vector<BarterSelection>& rows)
+    {
+        if (encoded == "-") return true;
+        while (!encoded.empty())
+        {
+            const auto boundary = encoded.find(',');
+            const auto piece = encoded.substr(0, boundary);
+            const auto id = parse_guid(piece.substr(0, 32));
+            if (rows.size() >= 12 || id == Guid{} || piece.size() < 34 || piece[32] != ':' ||
+                std::ranges::any_of(rows, [&id](const auto& prior) { return prior.id == id; })) return false;
+            int units{};
+            const auto parsed = std::from_chars(piece.data() + 33, piece.data() + piece.size(), units);
+            if (parsed.ec != std::errc{} || parsed.ptr != piece.data() + piece.size() || units < 1 || units > 1000000)
+                return false;
+            rows.push_back({id, units});
+            if (boundary == encoded.npos) return true;
+            encoded.remove_prefix(boundary + 1);
+            if (encoded.empty()) return false;
+        }
+        return true;
+    }
+
+    int barter_units(const Inventory& layout, const void* row)
+    {
+        auto* base = find<U::UClass>(base_path);
+        auto* type = U::Cast<U::UClass>(layout.klass(row));
+        auto* defaults = type && base && type->IsChildOf(base) ? type->GetClassDefaultObject().Get() : nullptr;
+        auto* stack = field<U::FBoolProperty>(defaults, STR("Stacks"));
+        if (!stack) return 0;
+        return stack->GetPropertyValueInContainer(defaults) ? layout.units->GetPropertyValueInContainer(row) : 1;
+    }
+
+    bool keeps_weapon(const StalkerBarter& barter, U::FScriptArrayHelper& inventory)
+    {
+        const auto minimum = barter.min_weapon->GetPropertyValueInContainer(barter.actor);
+        if (!std::isfinite(minimum)) return false;
+        if (minimum <= 0) return true;
+        auto* weapon = find<U::UClass>(STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"));
+        for (int index = 0; weapon && index < inventory.Num(); ++index)
+        {
+            const auto* row = inventory.GetRawPtr(index);
+            auto* type = U::Cast<U::UClass>(barter.layout.klass(row));
+            auto* defaults = type && type->IsChildOf(weapon) ? type->GetClassDefaultObject().Get() : nullptr;
+            auto* category = field<U::FByteProperty>(defaults, STR("ItemType"));
+            if (!category) continue;
+            const auto kind = category->GetPropertyValueInContainer(defaults);
+            if ((kind == 3 || kind == 4) && barter.quote(row) >= minimum) return true;
+        }
+        return false;
+    }
+
+    bool transfer_selection(const StalkerBarter& barter, U::FScriptArrayHelper& source, U::FScriptArrayHelper& destination,
+                            const std::vector<BarterSelection>& selections, bool outbound, double& total, std::string& receipt)
+    {
+        const auto& inventory = barter.layout;
+        auto* row = inventory.backpack->GetInner();
+        auto* weapon = find<U::UClass>(STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"));
+        if (!weapon) return false;
+        for (const auto& choice : selections)
+        {
+            int selected = -1;
+            for (int index = 0; index < source.Num(); ++index)
+            {
+                if (inventory.identity(source.GetRawPtr(index)) != choice.id) continue;
+                if (selected != -1) return false;
+                selected = index;
+            }
+            if (selected < 0 || destination.Num() >= capacity) return false;
+            const auto* value = source.GetRawPtr(selected);
+            auto* item = U::Cast<U::UClass>(inventory.klass(value));
+            if (!item || item->IsUnreachable() || inventory.never->GetPropertyValueInContainer(value) ||
+                barter_units(inventory, value) != choice.units || (outbound && item->IsChildOf(weapon))) return false;
+            bool duplicate{};
+            for (int index = 0; index < destination.Num(); ++index)
+                duplicate |= inventory.identity(destination.GetRawPtr(index)) == choice.id;
+            if (!inventory.rows(barter.owner.stock, [&](const void* row, int) { duplicate |= inventory.identity(row) == choice.id; }) ||
+                (!outbound && !inventory.rows(barter.owner.save, [&](const void* row, int) { duplicate |= inventory.identity(row) == choice.id; })) ||
+                duplicate) return false;
+            const auto price = barter.quote(value);
+            if (!std::isfinite(price) || price <= 0 || price > 1000000) return false;
+            total += price;
+            const auto type = stock_class(item);
+            if (type.empty()) return false;
+            receipt += std::format("{}|{}|{}|{}\n", outbound ? "give" : "receive", guid_string(choice.id), type, choice.units);
+            auto* target = destination.GetRawPtr(destination.AddValue());
+            row->CopyCompleteValue(target, value);
+            if (!row->Identical(target, value)) return false;
+            source.RemoveValues(selected);
+        }
+        return true;
+    }
+
+    int stalker_barter(const Lua& lua)
+    {
+        const auto reply = [&](bool okay, std::string_view status, const std::string& rows = {}, int before = 0, int after = 0) {
+            lua.set_bool(okay);
+            lua.set_string(status);
+            lua.set_string(rows);
+            lua.set_integer(before);
+            lua.set_integer(after);
+            return 5;
+        };
+        if (!enabled() || lua.get_stack_size() != 6 || !lua.is_integer(1) || !lua.is_integer(2) ||
+            !lua.is_integer(3) || !lua.is_string(4) || !lua.is_string(5) || !lua.is_integer(6))
+            return reply(false, "barter_refused_arguments");
+        const auto pawn = lua.get_integer();
+        const auto save = lua.get_integer();
+        const auto stock = lua.get_integer();
+        const auto player_selection = lua.get_string();
+        const auto trader_selection = lua.get_string();
+        const auto cash = lua.get_integer();
+        StalkerBarter barter;
+        if (pawn <= 0 || save <= 0 || stock <= 0 || !barter.bind(pawn, save, stock))
+            return reply(false, "barter_refused_exact_owner_and_trader");
+        const auto funds = barter.money();
+        if (cash < 0 || cash > 1000 || cash > funds ||
+            (cash && !bool_value(barter.actor, STR("AcceptCash"), barter.actor, true)))
+            return reply(false, "barter_refused_wallet");
+        std::vector<BarterSelection> give, receive;
+        if (!selections(player_selection, give) || !selections(trader_selection, receive) ||
+            (give.empty() && cash == 0) || receive.empty()) return reply(false, "barter_refused_selection");
+        auto* bag = barter.layout.backpack;
+        void* stock_list = barter.inventory->ContainerPtrToValuePtr<void>(barter.actor);
+        void* bag_list = bag->ContainerPtrToValuePtr<void>(barter.owner.save);
+        void* records = barter.saved->ContainerPtrToValuePtr<void>(barter.owner.stock);
+        auto* flags = field<U::FMapProperty>(barter.owner.stock, STR("Flags"));
+        if (!flags) return reply(false, "barter_refused_wallet_schema");
+        void* flag_values = flags->ContainerPtrToValuePtr<void>(barter.owner.stock);
+        U::FScriptArrayHelper offer(barter.inventory, stock_list), carry(bag, bag_list);
+        if (offer.Num() < 1 || offer.Num() > 128 || carry.Num() < 0 || carry.Num() > capacity)
+            return reply(false, "barter_refused_stock_bounds");
+        auto old_bag = copy(bag, bag_list), new_bag = copy(bag, bag_list);
+        auto old_stock = copy(barter.inventory, stock_list), new_stock = copy(barter.inventory, stock_list);
+        auto old_records = copy(barter.saved, records), old_flags = copy(flags, flag_values);
+        if (!old_bag || !new_bag || !old_stock || !new_stock || !old_records || !old_flags)
+            return reply(false, "barter_refused_before_image");
+        U::FScriptArrayHelper stock_result(barter.inventory, new_stock.get()), bag_result(bag, new_bag.get());
+        double player_value{}, trade_value{};
+        std::string receipt;
+        if (!transfer_selection(barter, stock_result, bag_result, receive, false, trade_value, receipt) ||
+            !transfer_selection(barter, bag_result, stock_result, give, true, player_value, receipt) ||
+            !keeps_weapon(barter, stock_result)) return reply(false, "barter_refused_stock_selection");
+        auto* cash_factor = field<U::FDoubleProperty>(barter.data, STR("CashValueMod"));
+        auto* targets = field<U::FStructProperty>(barter.data, STR("TargetBalanceMin/Max"));
+        auto* faction = field<U::FByteProperty>(barter.npc, STR("Faction"));
+        auto* vector = find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector2D"));
+        auto* best = field<U::FDoubleProperty>(vector, STR("X"));
+        auto* neutral = field<U::FDoubleProperty>(vector, STR("Y"));
+        if (!cash_factor || !targets || targets->GetStruct().Get() != vector || !best || !neutral || !faction)
+            return reply(false, "barter_refused_quote_schema");
+        const auto* target = targets->ContainerPtrToValuePtr<void>(barter.data);
+        const auto ceiling = neutral->GetPropertyValueInContainer(target);
+        auto base_minimum = ceiling;
+        const auto faction_id = faction->GetPropertyValueInContainer(barter.npc);
+        if (faction_id > 1)
+        {
+            auto* reputation = find<U::UFunction>(STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:Find_PlayerReputation"));
+            auto* faction_param = parameter<U::FByteProperty>(reputation, STR("Faction"), 0, false);
+            auto* points = parameter<U::FIntProperty>(reputation, STR("Points"), 4, true);
+            if (!faction_param || !points || reputation->GetOuterPrivate() != barter.instance->GetClassPrivate() ||
+                reputation->GetNumParms() != 4 || reputation->GetParmsSize() != 8)
+                return reply(false, "barter_refused_reputation_quote");
+            alignas(int) std::array<std::byte, 8> arguments{};
+            faction_param->SetPropertyValueInContainer(arguments.data(), faction_id);
+            barter.instance->ProcessEvent(reputation, arguments.data());
+            const auto fraction = std::clamp((1000.0 - points->GetPropertyValueInContainer(arguments.data())) / 1100.0, 0.0, 1.0);
+            const auto floor = best->GetPropertyValueInContainer(target);
+            base_minimum = floor + (ceiling - floor) * fraction;
+        }
+        auto* guest_save = barter.owner.save;
+        std::int32_t count{}, bonus{};
+        if (!silverfish::native_enemy_loot::count_save_passive(guest_save, U::FName{STR("Haggler")}, count) ||
+            (count > 0 && !silverfish::native_guest_sickness::read_passive_amplification(guest_save, bonus)))
+            return reply(false, "barter_refused_passive_quote");
+        const auto minimum = count ? base_minimum * (0.7 * (count + bonus)) : base_minimum;
+        player_value += cash * cash_factor->GetPropertyValueInContainer(barter.data);
+        const auto balance = player_value / (player_value + trade_value);
+        if (!std::isfinite(minimum) || minimum <= 0.0 || minimum > 0.95 || !std::isfinite(balance) ||
+            balance < minimum || balance > minimum + 0.05)
+            return reply(false, std::format("barter_refused_native_balance:{:.5f}:{:.5f}:{}:{}:{:.5f}",
+                minimum, balance, count, count + bonus, base_minimum));
+        bag->CopyCompleteValue(bag_list, new_bag.get());
+        barter.inventory->CopyCompleteValue(stock_list, new_stock.get());
+        if (cash) barter.wallet.change(barter.instance, static_cast<int>(cash), true);
+        barter.actor->ProcessEvent(barter.save_inventory, nullptr);
+        if (bag->Identical(bag_list, new_bag.get()) && barter.inventory->Identical(stock_list, new_stock.get()) &&
+            barter.money() == funds - cash && barter.saved_matches())
+            return reply(true, "exchanged", receipt, funds, barter.money());
+        bag->CopyCompleteValue(bag_list, old_bag.get());
+        barter.inventory->CopyCompleteValue(stock_list, old_stock.get());
+        barter.saved->CopyCompleteValue(records, old_records.get());
+        flags->CopyCompleteValue(flag_values, old_flags.get());
+        const bool restored = bag->Identical(bag_list, old_bag.get()) &&
+            barter.inventory->Identical(stock_list, old_stock.get()) && barter.saved->Identical(records, old_records.get()) &&
+            flags->Identical(flag_values, old_flags.get());
+        return reply(false, restored ? "barter_refused_rolled_back" : "mutation_unverified_npc_barter_commit");
+    }
+
 }
 
 namespace silverfish::borough_barter
@@ -1087,5 +1406,6 @@ namespace silverfish::borough_barter
         lua.register_function("SilverfishPreviewNativeCraftingBench", trade<true, true>);
         lua.register_function("SilverfishSeedNativeCraftingScrap", seed_crafting_scrap);
         lua.register_function("SilverfishNativeSewerTrade", sewer_trade);
+        lua.register_function("SilverfishNativeStalkerBarter", stalker_barter);
     }
 }

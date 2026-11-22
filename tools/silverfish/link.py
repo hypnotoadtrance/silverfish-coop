@@ -56,6 +56,7 @@ _COMPRESSED_SNAPSHOT = b"SFZ\x01"
 _MAX_ACTIONS = 8
 _ACTION_TIMEOUT = 8.0
 _CHECKPOINT_ACTION_TIMEOUTS = {
+    "native-npc-barter-exchange": 22.0,
     GUEST_LEAVE: 40.0,
     "native-dialogue-choose": 20.0,
     "native-mosby-tape-convert": 20.0,

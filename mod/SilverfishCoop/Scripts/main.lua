@@ -28,6 +28,7 @@ local native_wire_quest = require("native_wire_quest")
 local native_wire_quest_turn_in = require("native_wire_quest_turn_in")
 local native_wire_board = require("native_wire_board")
 local native_dialogue = require("native_dialogue")
+local native_npc_barter = require("native_npc_barter")
 local native_borough_barter = require("native_borough_barter")
 local native_sewer_barter = require("native_sewer_barter")
 local native_mosby_tape = require("native_mosby_tape")
@@ -565,7 +566,7 @@ local function run_command(fields, state, current_phase)
         native_host_dig.clear()
         native_host_dig_live.clear()
     end
-    if command == "travel" or command == "leave" or command == "join" then native_dialogue.clear() end
+    if command == "travel" or command == "leave" or command == "join" then native_dialogue.clear(); native_npc_barter.clear() end
     if command == "travel" or command == "leave" or command == "join" then native_coop_pause.clear() end
     if command == "travel" or command == "leave" or command == "join" then
         native_mosby_station.clear()
@@ -1080,6 +1081,7 @@ local function run_command(fields, state, current_phase)
         or native_wire_quest_turn_in.command(fields, state, current_phase)
         or native_wire_board.command(fields, state, current_phase)
         or native_dialogue.command(fields, state, current_phase)
+        or native_npc_barter.command(fields, state, current_phase)
         or native_borough_barter.command(fields, state, current_phase, players)
         or native_sewer_barter.command(fields, state, current_phase, players)
         or native_mosby_tape.command(fields, state, current_phase)
@@ -1296,6 +1298,7 @@ local function write_status(state, current_phase, failure, fields, pending)
         for _, row in ipairs(native_wire_quest_turn_in.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_dialogue.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_npc_barter.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_borough_barter.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_sewer_barter.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mosby_tape.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1505,6 +1508,7 @@ local function tick(fields, pending)
     native_world_view.sync(state, current_phase)
     native_inventory_view.sync(state, current_phase)
     native_shop_view.sync(state, current_phase)
+    native_npc_barter.sync(state, current_phase)
     native_loot_view.sync(state, current_phase)
     native_guest_primary_input.sync(state, current_phase)
     native_guest_clock.sync(state, current_phase)

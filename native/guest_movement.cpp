@@ -101,17 +101,14 @@ namespace
         next.save = save;
         next.stock = stock;
         next.expires = now + std::chrono::milliseconds(250);
-        std::int32_t fatigue{};
-        if (!silverfish::native_guest_sickness::read_fatigue(save, fatigue)) return nullptr;
-        int attuned{};
-        if (fatigue >= 75 && !silverfish::native_enemy_loot::count_save_passive(
-                save, U::FName{STR("AttunedMadness"), U::FNAME_Find}, attuned)) return nullptr;
+        std::int32_t bonus{};
+        if (!silverfish::native_guest_sickness::read_passive_amplification(save, bonus)) return nullptr;
         for (std::size_t i = 0; i < effects.size(); ++i)
         {
             const U::FName name{effects[i].name, U::FNAME_Find};
             auto& count = next.counts[i];
             if (name.IsNone() || !silverfish::native_enemy_loot::count_save_passive(save, name, count)) return nullptr;
-            if (count > 0 && attuned > 0) ++count;
+            if (count > 0) count += bonus;
         }
         *slot = next;
         return slot;

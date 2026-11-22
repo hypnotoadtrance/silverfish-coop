@@ -642,12 +642,17 @@ bool silverfish::native_guest_sickness::read_exact(RC::Unreal::UObject* pawn, RC
     return true;
 }
 
-bool silverfish::native_guest_sickness::read_fatigue(RC::Unreal::UObject* save, std::int32_t& value)
+bool silverfish::native_guest_sickness::read_passive_amplification(RC::Unreal::UObject* save, std::int32_t& bonus)
 {
     const U::FName name{STR("Player_Fatigue"), U::FNAME_Find};
     Flags flags;
     if (name.IsNone() || !flags.bind(save)) return false;
-    value = flags.read(name).value;
+    bonus = 0;
+    if (flags.read(name).value < 75) return true;
+    std::int32_t attuned{};
+    if (!silverfish::native_enemy_loot::count_save_passive(
+            save, U::FName{STR("AttunedMadness"), U::FNAME_Find}, attuned)) return false;
+    bonus = attuned > 0 ? 1 : 0;
     return true;
 }
 

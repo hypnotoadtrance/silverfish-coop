@@ -22,7 +22,7 @@ from . import (direct_ip, link, matrix_service, native_authored_pickup, native_b
                native_purple, native_quest, native_quest_catalog, native_red, native_rest, native_rewards, native_shop_view, native_turret_photo,
                native_wipe_view, native_wire_board, native_zone_rejoin, party, wipe)
 from .campaign import CampaignError, CampaignFormatError, CampaignStore, DEFAULT_RECONNECT_GRACE
-from . import native_spratt, native_spratt_fixture
+from . import native_npc_barter, native_spratt, native_spratt_fixture
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS, AuthoredRoute
 from .authored_world_view import WORLD_VIEW_ACTORS
 from .control import Control
@@ -94,7 +94,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_stock_door.ACTION, *native_stock_door.PRY_ACTIONS.values(),
                         *native_guest_drop.ACTIONS,
                         "native-wipe-items", "native-wipe-recover",
-                        *native_finite_shop.ACTIONS,
+                        *native_finite_shop.ACTIONS, native_npc_barter.OPEN, native_npc_barter.EXCHANGE,
                         native_authored_pickup.ACTION, native_loose_pickup.CLAIM, native_enemy_loot.CLAIM, native_stock_enemy_drops.CLAIM,
                         native_mushrooms.CLAIM,
                         native_prop_carry.ACTION, native_flare.ACTION,
@@ -2098,6 +2098,8 @@ class Host:
                 result = await native_inventory_death.recover(self, bridge, character, target, request["operation_id"])
             elif action in native_finite_shop.ACTIONS:
                 result = await native_finite_shop.perform(self, bridge, character, action, target, request["operation_id"])
+            elif action in (native_npc_barter.OPEN, native_npc_barter.EXCHANGE):
+                result = await native_npc_barter.perform(self, bridge, character, action, target, request["operation_id"])
             elif action == native_loose_pickup.CLAIM:
                 result = await native_loose_pickup.claim(self, bridge, character, target, request["operation_id"])
             elif action == native_mushrooms.CLAIM:
@@ -4807,6 +4809,7 @@ class Client:
         self.downed_markers = native_downed_markers.MarkerView()
         self.enemy_shell_view = native_enemy_shells.ShellView()
         self.shop_view = native_shop_view.ShopView() if invite.get("native_shop_view") else None
+        self.npc_barter_view = native_npc_barter.View() if self.shop_view else None
         self.server_transitioning = False
         self.native_return_reservation: int | None = None
         self.native_return_retry_allowed = False
@@ -6015,6 +6018,8 @@ class Client:
                 current = active and not self.stopping and self.host_session and self.zone_epoch and time.monotonic() - self.gameplay_seen < 2
                 epoch = f"{self.host_session}:{self.zone_epoch}"
                 self.last_game = await self.dialogue_view.sync(self.last_game, epoch, current, self.gameplay_action)
+            if self.npc_barter_view:
+                await self.npc_barter_view.sync(self, active and not self.stopping and time.monotonic() - self.gameplay_seen < 2)
             if self.mosby_station:
                 current = active and not self.stopping and self.host_session and self.zone_epoch and time.monotonic() - self.gameplay_seen < 2
                 epoch = f"{self.host_session}:{self.zone_epoch}"
@@ -6031,7 +6036,11 @@ class Client:
                 self.last_game = await self.wipe_view.sync(self.last_game, draft, frozen_items, retain)
             await self.service_inventory_view(active)
             await native_guest_drop.service_stock_view(self, active)
-            await self.guest_ui.sync(self, active)
+            barter_view = self.last_game.get(native_npc_barter.VIEW, {})
+            if barter_view.get("state") in ("opening", "ready", "confirming"):
+                await self.guest_ui.close()
+            else:
+                await self.guest_ui.sync(self, active)
             await native_stash.service_view(self, active)
             await self.service_inventory_equip(active)
             await self.service_inventory_use(active)

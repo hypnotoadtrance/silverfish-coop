@@ -22,6 +22,7 @@ import uuid
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
+from . import native_npc_barter
 from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore, native_mindcore_carry, native_mindcore_fixture, native_mindcore_view
 from . import native_dust_cabinet, native_savlo_locker
 from . import native_inventory, native_sewer_barter, native_stash
@@ -1146,6 +1147,7 @@ class Bridge:
             data = {"pawns": {}, "player_effects": {}, "loot_actors": []}
             quest_rows, board_rows = [], []
             dialogue_frame, dialogue_progress, dialogue_lines, dialogue_choices = None, None, [], []
+            npc_barter_frame, npc_barter_items, npc_barter_transfers, npc_barter_preferences = None, [], [], []
             sewer_frame, sewer_rows = None, []
             mosby_frame, mosby_reputation = None, []
             drill_frame, drill_reputation = None, []
@@ -1388,6 +1390,20 @@ class Bridge:
                     balances = ("cash_before", "cash_after", "xp_before", "xp_after", "rep_before", "rep_after")
                     photo.update(zip(balances, map(int, fields[10:])))
                     data["native_turret_photo"] = photo
+                elif fields[0] == "native-npc-barter-frame":
+                    if npc_barter_frame is not None:
+                        raise ValueError("Duplicate NPC barter frame")
+                    npc_barter_frame = fields
+                elif fields[0] == "native-npc-barter-item":
+                    npc_barter_items.append(fields)
+                elif fields[0] == "native-npc-barter-preference":
+                    npc_barter_preferences.append(fields)
+                elif fields[0] == "native-npc-barter-transfer":
+                    npc_barter_transfers.append(fields)
+                elif fields[0] == "native-npc-barter-view":
+                    if native_npc_barter.VIEW in data or data.get("map") != native_npc_barter.OBSERVATORY:
+                        raise ValueError("Invalid NPC barter view")
+                    data[native_npc_barter.VIEW] = native_npc_barter.parse_view(fields)
                 elif fields[0] == "native-dialogue-view" and len(fields) in (6, 7):
                     pawn, state, serial, row, token = fields[1:6]
                     sequence = int(serial)
@@ -2938,6 +2954,11 @@ class Bridge:
                         data["native_authored_pickup"] = placed[source]
                     if source in intents:
                         data["native_authored_pickup_interaction"] = intents[source]
+                if npc_barter_frame or npc_barter_items or npc_barter_transfers or npc_barter_preferences:
+                    if not npc_barter_frame or data.get("state") != "hosting" or data.get("map") != native_npc_barter.OBSERVATORY:
+                        raise ValueError("Invalid host NPC barter frame")
+                    data[native_npc_barter.STOCK] = native_npc_barter.parse(npc_barter_frame, npc_barter_items,
+                                                                          npc_barter_transfers, npc_barter_preferences)
                 if dialogue_frame or dialogue_progress or dialogue_lines or dialogue_choices:
                     if not dialogue_frame or len(dialogue_frame) != 6 or data.get("state") != "hosting" or data.get("map") != dialogue_frame[1]:
                         raise ValueError("Stock dialogue frame has no qualified listen world")
