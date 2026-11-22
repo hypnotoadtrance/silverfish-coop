@@ -19,11 +19,14 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
+#include <Unreal/FWeakObjectPtr.hpp>
+#include <Unreal/GameplayStatics.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/World.hpp>
@@ -58,6 +61,8 @@ namespace
     constexpr int max_escrow = 2;
     constexpr int max_party = 5;
     constexpr std::size_t parameter_capacity = 256;
+    std::array<Unreal::FWeakObjectPtr, 64> qualified_escrows{};
+    std::size_t next_qualified_escrow{};
 
     template<typename T>
     T* find(const Unreal::TCHAR* path)
@@ -334,6 +339,11 @@ namespace
         {
             failure = "native_loot_escrow_save_outer_unqualified";
             return nullptr;
+        }
+        if (std::ranges::none_of(qualified_escrows, [result](const auto& reference) { return reference.Get() == result; }))
+        {
+            qualified_escrows[next_qualified_escrow] = Unreal::FWeakObjectPtr(result);
+            next_qualified_escrow = (next_qualified_escrow + 1) % qualified_escrows.size();
         }
         return result;
     }
@@ -676,23 +686,45 @@ namespace
         auto* property = field<Unreal::FObjectProperty>(pawn_type, STR("Save"));
         if (!property || property->GetPropertyClass().Get() != inventory.save_class) return false;
         std::size_t count = 0;
-        bool qualified = true;
         if (owner.stock != owner.save) saves[count++] = owner.stock;
-        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int, int) {
-            if (object == owner.pawn || object->GetClassPrivate() != pawn_type || !live(object) ||
-                static_cast<Unreal::AActor*>(object)->GetWorld() != owner.world) return RC::LoopAction::Continue;
+        std::vector<Unreal::AActor*> pawns;
+        Unreal::UGameplayStatics::GetAllActorsOfClass(owner.world, pawn_type, pawns);
+        if (std::ranges::find(pawns, owner.pawn) == pawns.end()) return false;
+        for (auto* object : pawns)
+        {
+            if (object == owner.pawn || !live(object) || object->GetClassPrivate() != pawn_type ||
+                object->GetWorld() != owner.world) continue;
             auto* save = property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(object));
-            if (!live(save) || std::ranges::find(saves, save) != saves.end()) return RC::LoopAction::Continue;
-            if (save == owner.save && save == owner.stock) return RC::LoopAction::Continue;
-            if (save->GetClassPrivate() != inventory.save_class || save == owner.save || count == saves.size())
-            {
-                qualified = false;
-                return RC::LoopAction::Break;
-            }
+            if (!live(save) || std::ranges::find(saves, save) != saves.end()) continue;
+            if (save == owner.save && save == owner.stock) continue;
+            if (save->GetClassPrivate() != inventory.save_class || save == owner.save || count == saves.size()) return false;
             saves[count++] = save;
-            return RC::LoopAction::Continue;
-        });
-        return qualified;
+        }
+        return true;
+    }
+
+    Unreal::UObject* claim_escrow(Address address, const Inventory& inventory, const Owner& owner,
+                                std::span<Unreal::UObject* const> protected_saves, std::string_view& failure)
+    {
+        const auto matches_address = [address](const Unreal::UObject* object) {
+            return reinterpret_cast<Address>(object) == address;
+        };
+        if (matches_address(owner.save) || matches_address(owner.stock) ||
+            std::ranges::any_of(protected_saves, matches_address))
+        {
+            failure = "native_loot_escrow_save_attached_to_owner";
+            return nullptr;
+        }
+        // A released cache entry cannot recognize a recycled UObject address. Cold loads
+        // still prove the stock save class, ownership and transient outer before caching.
+        for (const auto& reference : qualified_escrows)
+        {
+            auto* save = reference.Get();
+            if (matches_address(save) && live(save) && save->GetClassPrivate() == inventory.save_class &&
+                save->GetOuterPrivate() && save->GetOuterPrivate()->GetPathName() == STR("/Engine/Transient"))
+                return save;
+        }
+        return isolated_save(address, inventory, failure);
     }
 
     Unreal::UObject* canonical_game_instance(const Owner& owner)
@@ -732,8 +764,10 @@ namespace
         }
         Inventory inventory;
         if (!inventory.bind()) return result(lua, false, "native_loot_inventory_schema_unavailable");
+        std::array<Unreal::UObject*, max_party> protected_saves{};
+        if (!other_saves(owner, inventory, protected_saves)) return result(lua, false, "native_loot_save_ownership_conflict");
         std::string_view failure;
-        auto* escrow = isolated_save(arguments[3], inventory, failure);
+        auto* escrow = claim_escrow(arguments[3], inventory, owner, protected_saves, failure);
         if (!escrow) return result(lua, false, failure);
         Unreal::FScriptArrayHelper source(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(escrow));
         if (!qualified_escrow(inventory, escrow, source, capacity)) return result(lua, false, "native_loot_escrow_shape_changed");
@@ -773,8 +807,6 @@ namespace
             if (cash || recipient.row) return result(lua, false, "native_loot_ground_merge_already_owned_or_cash");
             if (!stack.row) return result(lua, true, "append");
         }
-        std::array<Unreal::UObject*, max_party> protected_saves{};
-        if (!other_saves(owner, inventory, protected_saves)) return result(lua, false, "native_loot_save_ownership_conflict");
         std::array<Value, max_party> protected_backpacks;
         for (std::size_t index = 0; index < protected_saves.size() && protected_saves[index]; ++index)
         {

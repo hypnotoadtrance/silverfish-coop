@@ -228,13 +228,53 @@ namespace
     Unreal::UObject* live_object_at(Address requested)
     {
         if (!requested) return nullptr;
+        // Resolve an address through the engine registry once, then let its
+        // weak serial reject destroyed objects and recycled addresses.
+        constexpr std::size_t cache_size = 64;
+        thread_local std::array<Unreal::FWeakObjectPtr, cache_size> objects{};
+        auto& cached = objects[(requested >> 4) % cache_size];
+        if (auto* object = cached.Get(); address(object) == requested && live(object)) return object;
+
         Unreal::UObject* found{};
         Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* candidate, int, int) {
             if (address(candidate) != requested) return RC::LoopAction::Continue;
             if (live(candidate)) found = candidate;
             return RC::LoopAction::Break;
         });
+        if (found) cached = Unreal::FWeakObjectPtr(found);
         return found;
+    }
+
+    Unreal::UObject* matching_pawn(Unreal::UObject* player, Address requested)
+    {
+        if (!live(player)) return nullptr;
+        auto* controller = object_field(player, STR("PlayerController"));
+        auto* pawn = live(controller) ? object_field(controller, STR("Pawn")) : nullptr;
+        return address(pawn) == requested && live(pawn) ? pawn : nullptr;
+    }
+
+    Unreal::UObject* connected_pawn(Address requested, Unreal::UObject* instance, Unreal::UObject* driver)
+    {
+        if (!requested || !live(instance)) return nullptr;
+        auto* players = field<Unreal::FArrayProperty>(instance, STR("LocalPlayers"));
+        auto* local_entry = players ? Unreal::CastField<Unreal::FObjectProperty>(players->GetInner()) : nullptr;
+        if (!local_entry) return nullptr;
+        Unreal::FScriptArrayHelper locals(players, players->ContainerPtrToValuePtr<void>(instance));
+        if (locals.Num() != 1) return nullptr;
+        if (auto* pawn = matching_pawn(local_entry->GetObjectPropertyValue(locals.GetRawPtr(0)), requested)) return pawn;
+
+        if (!live(driver)) return nullptr;
+        auto* clients = field<Unreal::FArrayProperty>(driver, STR("ClientConnections"));
+        auto* remote_entry = clients ? Unreal::CastField<Unreal::FObjectProperty>(clients->GetInner()) : nullptr;
+        if (!remote_entry) return nullptr;
+        Unreal::FScriptArrayHelper remotes(clients, clients->ContainerPtrToValuePtr<void>(driver));
+        if (remotes.Num() < 1 || remotes.Num() > max_clients) return nullptr;
+        for (int index = 0; index < remotes.Num(); ++index)
+        {
+            auto* connection = remote_entry->GetObjectPropertyValue(remotes.GetRawPtr(index));
+            if (auto* pawn = matching_pawn(connection, requested)) return pawn;
+        }
+        return nullptr;
     }
 
     std::string_view qualify_opener(Address pawn, Address save, Address stock, Context& context,
@@ -243,16 +283,16 @@ namespace
         auto* player_type = find<Unreal::UClass>(pawn_class);
         auto* save_type = find<Unreal::UClass>(save_class);
         if (!live(context.world) || !player_type || !save_type) return "stock_opener_world_or_class_unavailable";
-        context.pawn = live_object_at(pawn);
+        context.instance = object_field(context.world, STR("OwningGameInstance"));
+        auto* driver = object_field(context.world, STR("NetDriver"));
+        context.pawn = connected_pawn(pawn, context.instance, driver);
         if (!context.pawn || context.pawn->GetClassPrivate() != player_type ||
             !authority(context.pawn, context.world) || (!capture_only && !read_bool(context.pawn, STR("Dead"), false)))
             return "standing_stock_opener_unavailable";
         context.save = object_field(context.pawn, STR("Save"));
-        context.instance = object_field(context.world, STR("OwningGameInstance"));
         context.stock = object_field(context.instance, STR("SaveSlot_Ref"));
         context.controller = object_field(context.pawn, STR("Controller"));
         context.player = object_field(context.controller, STR("Player"));
-        auto* driver = object_field(context.world, STR("NetDriver"));
         auto* instance_type = find<Unreal::UClass>(instance_class);
         auto* controller_type = find<Unreal::UClass>(controller_class);
         auto* health = field<Unreal::FDoubleProperty>(context.save, STR("PlayerHealth"));
@@ -273,19 +313,17 @@ namespace
 
     bool qualify_authored_opener(Address pawn, Address save, Address stock, Context& context)
     {
-        for (const auto* path : silverfish::authored_loot::worlds)
-        {
-            auto* world = find<Unreal::UWorld>(path);
-            if (!world) continue;
-            Context next;
-            next.world = world;
-            if (qualify_opener(pawn, save, stock, next).empty())
-            {
-                context = next;
-                return true;
-            }
-        }
-        return false;
+        auto* player = live_object_at(pawn);
+        if (!player || player->GetClassPrivate() != find<Unreal::UClass>(pawn_class)) return false;
+        auto* world = static_cast<Unreal::AActor*>(player)->GetWorld();
+        if (!live(world)) return false;
+        // Looking up every authored map with StaticFindObject makes each unloaded map
+        // miss fall back to a full Unreal object-table scan. Only this pawn's world matters.
+        const auto path = world->GetPathName();
+        if (std::ranges::none_of(silverfish::authored_loot::worlds,
+                [&path](const auto* authored) { return path == authored; })) return false;
+        context.world = world;
+        return qualify_opener(pawn, save, stock, context).empty();
     }
 
     std::string_view qualify(Address crate, Address pawn, Address box, Address save, Address stock, Context& context)
