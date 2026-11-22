@@ -13,6 +13,7 @@ local crouched_walk = "Crouched_Walking"
 local firearm_class = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
 local aimed = {pistol = {"HandGun_Idle_3", "HandGun_Walk"}, rifle = {"Rifle_Aiming_Idle", "Rifle_Walk"}}
 local lowered = {pistol = "HandGun_Idle", rifle = "Rifle_Idle_1_"}
+local running = {pistol = "HandGun_Run", rifle = "Rifle_Run_Forward"}
 local melee_clips = {slash = "Standing_Melee_Attack_Horizontal", backhand = "Standing_Melee_Attack_Backhand",
     overhead = "Standing_Melee_Attack_Downward"}
 local identity = {
@@ -122,7 +123,7 @@ local function observe(state, phase)
                     if not firearm or not firearm_path(firearm) then firearm = "-" end
                     observations[id] = { pawn = details.name, body = body, head = head, weapon = read_weapon and weapon or "-",
                         appearance = read_appearance and appearance or "-", gun = gun, aim = pawn.Aiming and gun or "-",
-                        firearm = firearm }
+                        firearm = firearm, sprinting = pawn.Sprinting == true }
                 end
             end
         end
@@ -189,7 +190,7 @@ local function restore_locomotion(entry)
     end
 end
 
-local function apply_locomotion(entry, aim)
+local function apply_locomotion(entry, aim, sprinting)
     if swings[entry] then return end
     local crouched = entry.pawn.bIsCrouched == true
     local profile = aimed[aim]
@@ -206,6 +207,8 @@ local function apply_locomotion(entry, aim)
         else
             name = moving and crouched_walk or crouched_idle
         end
+    elseif sprinting and moving then
+        name = running[entry.weapon_stance] or "Running_Unarmed"
     elseif profile then
         name = profile[moving and 2 or 1]
     elseif not moving then
@@ -496,7 +499,7 @@ function avatar.sync(state, phase)
                             if phase == "hosting" then
                                 aim = outfit and host_aims[entry.id] == outfit.gun and outfit.gun or "-"
                             end
-                            apply_locomotion(entry, aim)
+                            apply_locomotion(entry, aim, outfit and outfit.sprinting)
                             aim_head(entry)
                         end
                         if entry.weapon_parts and #entry.weapon_parts > 0 then
@@ -540,21 +543,22 @@ function avatar.command(fields, state, phase)
     if fields[2] ~= "native-avatar-outfits" then return end
     local receipt = fields[4]
     if phase ~= "connected" or fields[3] ~= state.map or not receipt or #receipt ~= 32
-        or not receipt:match("^[0-9a-f]+$") or (#fields - 4) % 7 ~= 0 or #fields > 39 then
+        or not receipt:match("^[0-9a-f]+$") or (#fields - 4) % 8 ~= 0 or #fields > 44 then
         error("Invalid remote avatar outfit scope")
     end
     local outfits = {}
-    for index = 5, #fields, 7 do
+    for index = 5, #fields, 8 do
         local id = math.tointeger(tonumber(fields[index]))
         local body, head, weapon, appearance = fields[index + 1], fields[index + 2], fields[index + 3], fields[index + 4]
-        local aim, firearm = fields[index + 5], fields[index + 6]
+        local aim, firearm, sprint = fields[index + 5], fields[index + 6], fields[index + 7]
         if not id or id < 0 or id > 2147483647 or outfits[id] or not outfit_path(body) or not outfit_path(head)
             or not weapon_view.decode(weapon) or not character_view.decode(appearance)
-            or not firearm_path(firearm) or weapon == "-" and firearm ~= "-"
+            or not firearm_path(firearm) or weapon == "-" and firearm ~= "-" or sprint ~= "0" and sprint ~= "1"
             or aim ~= "-" and (weapon == "-" or not aimed[aim]) then
             error("Invalid remote avatar outfit")
         end
-        outfits[id] = { body = body, head = head, weapon = weapon, appearance = appearance, aim = aim, firearm = firearm }
+        outfits[id] = {body = body, head = head, weapon = weapon, appearance = appearance, aim = aim,
+            firearm = firearm, sprinting = sprint == "1"}
     end
     client_world, client_map, client_outfits, client_receipt = state.world:GetAddress(), state.map, outfits, receipt
     return "Remote avatar outfits received"
@@ -579,7 +583,7 @@ function avatar.rows(row)
     end
     for id, outfit in pairs(observations) do
         rows[#rows + 1] = row("native-avatar-outfit", id, outfit.pawn, outfit.body, outfit.head, outfit.weapon,
-            outfit.appearance, outfit.aim, outfit.gun, outfit.firearm)
+            outfit.appearance, outfit.aim, outfit.gun, outfit.firearm, outfit.sprinting and 1 or 0)
     end
     if client_receipt then rows[#rows + 1] = row("native-avatar-outfits-receipt", client_receipt) end
     if host_aim_receipt then rows[#rows + 1] = row("native-avatar-host-aim-receipt", host_aim_receipt) end

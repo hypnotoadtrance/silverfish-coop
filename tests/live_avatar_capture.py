@@ -125,6 +125,11 @@ async def capture_movement(host_run, guest_run, command, host, guest):
         result = await avatar_probe(run, operation)
         return dict(zip(fields, map(float, result), strict=True))
 
+    def guest_pose(state):
+        game = state.get("game", {})
+        pawn = game.get("pawns", {}).get("guest", {}).get("name")
+        return game.get("native_player_avatars", {}).get(pawn, {})
+
     await avatar_probe(host_run, "preparemovement")
     await asyncio.sleep(.75)
     await avatar_probe(guest_run, "preparemovement")
@@ -140,7 +145,11 @@ async def capture_movement(host_run, guest_run, command, host, guest):
             samples = []
             for _ in range(5):
                 own, observed = await asyncio.gather(read(runner, "localmovement"), read(observer, "remotemovement"))
-                samples.append({"runner": own, "observer": observed})
+                sample = {"runner": own, "observer": observed}
+                if role == "guest":
+                    state = json.loads((observer / "status.json").read_text(encoding="utf-8"))
+                    sample["avatar"] = guest_pose(state)
+                samples.append(sample)
                 await asyncio.sleep(.12)
             await avatar_probe(runner, "stopmovement")
             await asyncio.sleep(.7)
@@ -156,6 +165,10 @@ async def capture_movement(host_run, guest_run, command, host, guest):
                    and abs(row["runner"]["walk_cap"] - row["observer"]["walk_cap"]) < 1 for row in settled), phase
         assert min(speeds) > 500 and abs(speeds[0] - speeds[1]) < 40, speeds
         assert phase["observer_after_release"]["sprinting"] == 0, phase
+        clips = {row["avatar"].get("pose_clip") for row in phase["samples"]}
+        assert ("Running_Unarmed" in clips) == sprinting, clips
+    await wait(host_run, lambda state: guest_pose(state)
+               and guest_pose(state).get("pose_clip") != "Running_Unarmed", timeout=4)
     assert (guest_movement["run"]["samples"][-1]["observer"]["walk_cap"]
             > guest_movement["walk"]["samples"][-1]["observer"]["walk_cap"])
     return evidence
