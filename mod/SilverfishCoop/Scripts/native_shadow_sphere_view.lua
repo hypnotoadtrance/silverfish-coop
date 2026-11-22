@@ -1,8 +1,11 @@
 local shadows = {}
 
 shadows.class = "BlueprintGeneratedClass /Game/Classes/Anomalies/ShadowSphere_BP.ShadowSphere_BP_C"
-shadows.enabled = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+local observer_fixture = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_SHADOW_SPHERE_FIXTURE") == "1"
+shadows.enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
+    and (os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1" or observer_fixture)
 local material_path = "/Game/Assets/Materials/Mat_Misc/PP_Darkness_VoidAnom.PP_Darkness_VoidAnom"
 local material_class = "Material " .. material_path
 local material_library = "/Script/Engine.Default__KismetMaterialLibrary"
@@ -43,7 +46,7 @@ local function bind_material(actor, visual)
 end
 
 function shadows.project(active, state, phase)
-    if not shadows.enabled or phase ~= "connected" or state.server ~= true then return end
+    if not shadows.enabled or phase ~= "connected" or state.server ~= true or state.map ~= crossroads then return end
     local pawn = state.local_pawn and state.local_pawn.pawn
     local camera = valid(pawn) and pawn.Camera
     if not valid(pawn) or not pawn:IsLocallyControlled() or not owned(camera, pawn) then return end

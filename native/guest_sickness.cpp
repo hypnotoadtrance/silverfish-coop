@@ -68,7 +68,13 @@ namespace
         return opt_in("SILVERFISH_COOP_NATIVE_FIXTURES") && opt_in("SILVERFISH_COOP_HEADLESS");
     }
 
-    bool shadow_fixture{};
+    bool shadow_enabled()
+    {
+        return opt_in("SILVERFISH_COOP_NATIVE_ZONE") && opt_in("SILVERFISH_COOP_NATIVE_GUEST_SAVE");
+    }
+
+    bool sickness_routing{}, shadow_routing{};
+    U::FName shadow_graph, resolve_psy_name;
 
     template <typename T>
     T* find(const U::TCHAR* path)
@@ -134,7 +140,7 @@ namespace
         U::FBoolProperty* passive_count{};
         U::FBoolProperty* passive_active{};
         U::FIntProperty* passive_instances{};
-        U::FName shadow_graph{}, mindful{}, bad_aura{}, trauma{}, attuned{};
+        U::FName mindful{}, bad_aura{}, trauma{}, attuned{};
 
         bool bind()
         {
@@ -155,7 +161,7 @@ namespace
             force_decrease = parameter<U::FBoolProperty>(add_flag, STR("Force_Decrease"), 13);
             sickness = U::FName{STR("Sickness"), U::FNAME_Find};
             fatigue = U::FName{STR("Player_Fatigue"), U::FNAME_Find};
-            if (shadow_fixture)
+            if (shadow_routing)
             {
                 resolve_psy = blueprint(resolve_psy_path, pawn, 1, 4);
                 add_fatigue = blueprint(add_fatigue_path, find<U::UClass>(effects_class), 4, 28);
@@ -168,7 +174,6 @@ namespace
                 passive_count = parameter<U::FBoolProperty>(find_passive, STR("CountInstances"), 8);
                 passive_active = parameter<U::FBoolProperty>(find_passive, STR("EffectActive"), 9, true);
                 passive_instances = parameter<U::FIntProperty>(find_passive, STR("Instances"), 12, true);
-                shadow_graph = U::FName{STR("ExecuteUbergraph_ShadowSphere_BP"), U::FNAME_Add};
                 mindful = U::FName{STR("Mindful"), U::FNAME_Add};
                 bad_aura = U::FName{STR("BadAura"), U::FNAME_Add};
                 trauma = U::FName{STR("LingeringTrauma"), U::FNAME_Add};
@@ -304,8 +309,10 @@ namespace
 
     bool shadow_source(U::FFrame* resolve, U::UObject* pawn)
     {
-        if (!resolve || !pawn || !schema.resolve_psy || resolve->Node() != schema.resolve_psy ||
-            resolve->Object() != pawn || pawn->GetClassPrivate() != schema.resolve_psy->GetOuterPrivate()) return false;
+        auto* method = resolve ? resolve->Node() : nullptr;
+        auto* type = pawn ? pawn->GetClassPrivate() : nullptr;
+        if (!method || method->GetFName() != resolve_psy_name || resolve->Object() != pawn ||
+            !type || type != method->GetOuterPrivate() || type->GetPathName() != pawn_path) return false;
         auto* controller = object(pawn, STR("Controller"));
         auto* connection = object(controller, STR("Player"));
         auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
@@ -318,9 +325,9 @@ namespace
         {
             auto* source = previous->Object();
             auto* node = previous->Node();
-            auto* type = source ? source->GetClassPrivate() : nullptr;
-            if (node && node->GetFName() == schema.shadow_graph && type && type == node->GetOuterPrivate() &&
-                type->GetPathName() == shadow_class && object(source, STR("AttackTarget")) == pawn &&
+            auto* source_type = source ? source->GetClassPrivate() : nullptr;
+            if (node && node->GetFName() == shadow_graph && source_type && source_type == node->GetOuterPrivate() &&
+                source_type->GetPathName() == shadow_class && object(source, STR("AttackTarget")) == pawn &&
                 static_cast<U::AActor*>(source)->GetWorld() == world) return true;
         }
         return false;
@@ -328,7 +335,14 @@ namespace
 
     bool redirect_psy(Iteration& iteration, U::UObject* receiver, U::FFrame& frame)
     {
-        if (!shadow_fixture || !schema_bound || !schema.resolve_psy || !frame.Locals()) return false;
+        if (!shadow_routing || !frame.Node()) return false;
+        if (!schema_bound || !schema.resolve_psy)
+        {
+            if (!shadow_source(&frame, receiver)) return false;
+            iteration.PreventOriginalFunctionCall();
+            return true;
+        }
+        if (!frame.Locals()) return false;
         const bool resolve = frame.Node() == schema.resolve_psy;
         const bool fatigue = frame.Node() == schema.add_fatigue;
         const bool passive = frame.Node() == schema.find_passive;
@@ -419,8 +433,9 @@ namespace
     // to redirection. Nothing changes the GameInstance save pointer or cache.
     void redirect(Iteration& iteration, U::UObject* receiver, U::FFrame& frame, void*)
     {
-        if (!U::IsInGameThreadRaw() || !schema_bound || iteration.OriginalFunctionCallPrevented()) return;
+        if (!U::IsInGameThreadRaw() || iteration.OriginalFunctionCallPrevented()) return;
         if (redirect_psy(iteration, receiver, frame)) return;
+        if (!sickness_routing || !schema_bound) return;
         const bool lookup = frame.Node() == schema.check_flag;
         if (!lookup && frame.Node() != schema.add_flag) return;
         auto* caller = frame.PreviousFrame();
@@ -638,11 +653,16 @@ bool silverfish::native_guest_sickness::read_fatigue(RC::Unreal::UObject* save, 
 
 void silverfish::native_guest_sickness::install_hooks()
 {
-    if (!enabled() || callback != Hook::ERROR_ID) return;
-    shadow_fixture = fixtures() && opt_in("SILVERFISH_COOP_SHADOW_SPHERE_FIXTURE");
+    if (callback != Hook::ERROR_ID) return;
+    sickness_routing = enabled();
+    shadow_routing = shadow_enabled();
+    if (!sickness_routing && !shadow_routing) return;
     callback = Hook::RegisterProcessLocalScriptFunctionPreCallback(
         redirect, {false, false, owner, STR("Redirect exact guest Sickness flag effects")});
-    if (shadow_fixture)
+    if (shadow_routing)
+    {
+        shadow_graph = U::FName{STR("ExecuteUbergraph_ShadowSphere_BP"), U::FNAME_Add};
+        resolve_psy_name = U::FName{STR("Resolve_PsyAttack"), U::FNAME_Add};
         shadow_feedback_callback = Hook::RegisterProcessLocalScriptFunctionPostCallback(
             [](Iteration&, U::UObject*, U::FFrame& frame, void*) {
                 if (shadow_feedback_frame == &frame)
@@ -651,6 +671,7 @@ void silverfish::native_guest_sickness::install_hooks()
                     shadow_feedback_pawn = U::FWeakObjectPtr{};
                 }
             }, {false, false, owner, STR("Close the exact guest ShadowSphere feedback scope")});
+    }
 }
 
 void silverfish::native_guest_sickness::uninstall_hooks()
@@ -673,11 +694,11 @@ void silverfish::native_guest_sickness::clear_scope()
 
 void silverfish::native_guest_sickness::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
-    if (!enabled()) return;
+    if (!enabled() && !shadow_enabled()) return;
     clear_scope();
     lua.register_function("SilverfishSetNativeGuestSickness", set_scope);
     lua.register_function("SilverfishReadNativeGuestSickness", read);
     lua.register_function("SilverfishClearNativeGuestSickness", clear);
-    if (shadow_fixture) lua.register_function("SilverfishIsNativeShadowFeedbackTarget", is_shadow_feedback);
-    if (fixtures()) lua.register_function("SilverfishProbeNativeGuestSickness", probe);
+    if (shadow_enabled()) lua.register_function("SilverfishIsNativeShadowFeedbackTarget", is_shadow_feedback);
+    if (enabled() && fixtures()) lua.register_function("SilverfishProbeNativeGuestSickness", probe);
 }

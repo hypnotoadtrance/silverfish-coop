@@ -195,9 +195,8 @@ async def verify(work, family):
 
     with probe_mod(work):
         try:
-            host_flags = ("--native-guest-sickness",) if family == "shadow-sphere" else ()
             await start(host, "host", "--campaign", profile, "--port", "0", "--headless", "--fixtures",
-                        "--native-zones", "--native-events", "--native-guest", "--start-zone", MAP, *host_flags)
+                        "--native-zones", "--native-events", "--native-guest", "--start-zone", MAP)
             await wait(host, lambda view: view.get("state") == "hosting" and view.get("game", {}).get("map") == MAP)
             host_box, = (host / "game-bridge").iterdir()
             for attempt in range(6):

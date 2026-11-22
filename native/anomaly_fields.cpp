@@ -56,7 +56,7 @@ namespace
     U::FName gravity, gravity_graph, gravity_add_actors;
     U::FName pyrogeist, pyrogeist_graph, directed_jet, fire_graph, fire_damage;
     U::FName shadow, shadow_graph;
-    bool shadow_fixture{};
+    bool shadow_replication{};
     U::FName patch_name;
     std::array<U::FName, 3> patch_events;
     std::array<U::FName, 6> electrode_events;
@@ -136,7 +136,7 @@ namespace
         const auto name = type->GetFName();
         if (name == gravity) return type->GetPathName() == gravity_class;
         if (name == pyrogeist) return type->GetPathName() == pyrogeist_class;
-        return shadow_fixture && name == shadow && type->GetPathName() == shadow_class;
+        return shadow_replication && name == shadow && type->GetPathName() == shadow_class;
     }
 
     bool passive_directed_jet(U::UObject* actor, U::UObject* type, U::UObject* binding)
@@ -177,7 +177,7 @@ namespace
         const bool gravity_event = name == gravity_graph || name == gravity_add_actors;
         const bool pyrogeist_event = name == pyrogeist_graph;
         const bool fire_event = name == fire_graph || name == fire_damage;
-        const bool shadow_event = shadow_fixture && name == shadow_graph;
+        const bool shadow_event = shadow_replication && name == shadow_graph;
         const bool prop_event = !field && std::find(canister_events.begin(), canister_events.end(), name) != canister_events.end();
         const bool fixed_event = !field && std::find(fixed_prop_events.begin(), fixed_prop_events.end(), name) != fixed_prop_events.end();
         const bool patch_event = std::ranges::find(patch_events, name) != patch_events.end();
@@ -314,7 +314,9 @@ namespace silverfish::native_anomaly_fields
         directed_jet = U::FName{STR("Fire_Jet_Directed_BP_C"), U::FNAME_Add};
         fire_graph = U::FName{STR("ExecuteUbergraph_Fire_BP"), U::FNAME_Add};
         fire_damage = U::FName{STR("FireDmg_Actor"), U::FNAME_Add};
-        shadow_fixture = opt_in("SILVERFISH_COOP_HEADLESS") && opt_in("SILVERFISH_COOP_SHADOW_SPHERE_FIXTURE");
+        const bool shadow_fixture = opt_in("SILVERFISH_COOP_HEADLESS") && opt_in("SILVERFISH_COOP_SHADOW_SPHERE_FIXTURE");
+        shadow_replication = opt_in("SILVERFISH_COOP_NATIVE_ZONE") &&
+            (opt_in("SILVERFISH_COOP_NATIVE_GUEST_SAVE") || shadow_fixture);
         shadow = U::FName{STR("ShadowSphere_BP_C"), U::FNAME_Add};
         shadow_graph = U::FName{STR("ExecuteUbergraph_ShadowSphere_BP"), U::FNAME_Add};
         patch_name = U::FName{STR("MushroomPatch_BP_C"), U::FNAME_Add};

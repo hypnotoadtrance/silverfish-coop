@@ -140,9 +140,9 @@ function feedback.start(is_host)
     RegisterBeginPlayPreHook(function(context)
         if not is_host() then return end
         local actor = context:get()
-        if not valid(actor) or not actor:HasAuthority() then return end
+        if not valid(actor) then return end
         local class = actor:GetClass():GetFullName()
-        if class ~= damage_class and class ~= psyche_class then return end
+        if (class ~= damage_class and class ~= psyche_class) or not actor:HasAuthority() then return end
         local victim = actor.Player
         if not valid(victim) or not guest_save.matches(victim) or victim:IsLocallyControlled() then return end
         local psyche = class == psyche_class
