@@ -55,7 +55,7 @@ local function find_trader(state, identifier)
     return match, npc
 end
 
-local function host_context(state, phase, name, identifier)
+local function host_context(state, phase, name, identifier, listing)
     if phase ~= "hosting" or state.server ~= false or state.listening ~= true or not valid(state.world)
         or type(name) ~= "string" or type(identifier) ~= "string" or #identifier ~= 32
         or not identifier:match("^[0-9A-F]+$") or not identifier:find("[^0]") then fail("scene") end
@@ -67,7 +67,7 @@ local function host_context(state, phase, name, identifier)
     local instance = state.world.OwningGameInstance
     local stock = valid(instance) and instance.SaveSlot_Ref
     local host_stack = valid(state.controller) and state.controller.MenuStack
-    if host_stack then
+    if host_stack and not listing then
         for index = 1, host_stack:GetArrayNum() do
             local menu = host_stack[index]
             if exact(menu, "/Game/Classes/GUI/New/BarterScreen.BarterScreen_C") and same(menu.Trader, actor) then
@@ -213,6 +213,7 @@ local function close_stock(committed)
         copy_items(current.original_stock.PlayerBackpack, current.actor.Inventory)
         set_preferences(current.actor, current.original_preferences, current.original_seed)
         current.actor.MinWeaponValue = current.original_minimum
+        current.actor.AcceptCash = current.original_accepts_cash
         current.actor.Save = true
     end
     if not committed and valid(current.save) and valid(current.original_pack) and valid(current.pawn) and same(current.pawn.Save, current.save) then
@@ -241,20 +242,31 @@ end
 local function guest_command(action, fields, state, phase)
     local context = local_context(state, phase)
     local sequence = math.tointeger(tonumber(fields[3]))
-    if not session or sequence ~= session.sequence or not (session.state == "opening" or session.state == "confirming")
-        then fail("view_sequence") end
+    local refresh = action == "native-npc-barter-refresh"
+    if not session or sequence ~= session.sequence then fail("view_sequence") end
+    if refresh then
+        if session.state ~= "ready" or not context or not top(context, session.screen)
+            or #session.screen.PlayerOffer ~= 0 or #session.screen.TraderOffer ~= 0 or session.screen.PlayerCashOffer ~= 0 then
+            return "stock NPC barter selection pending"
+        end
+    elseif session.state ~= "opening" and session.state ~= "confirming" then
+        fail("view_sequence")
+    end
     if action == "native-npc-barter-close" then
         close_stock()
         return "exact NPC barter screen closed"
     end
     if not context or not same(context.pawn, session.pawn) or not same(context.actor, session.actor)
-        or fields[4] ~= session.identifier or #fields < 7 or #fields > 391 or session.expires < os.time() then fail("view_scope") end
+        or fields[4] ~= session.identifier or #fields < 8 or #fields > 392
+        or session.expires and session.expires < os.time() then fail("view_scope") end
     local cash = math.tointeger(tonumber(fields[5]))
     local seed, minimum = math.tointeger(tonumber(fields[6])), tonumber(fields[7])
+    local accepts = fields[8]
     if not cash or cash < 0 or cash > 2147483647 or not seed or seed < -2147483648 or seed > 2147483647
-        or not minimum or not (minimum >= 0 and minimum <= 1000000) then fail("view_wallet_and_seed") end
+        or not minimum or not (minimum >= 0 and minimum <= 1000000) or accepts ~= "0" and accepts ~= "1"
+        then fail("view_wallet_and_seed") end
     local entries, observed, taste = {}, {}, {}
-    for index = 8, #fields do
+    for index = 9, #fields do
         local encoded = fields[index]
         if encoded:sub(1, 2) == "p|" then
             local path, weight = encoded:match("^p|(/Game/Classes/[%w_./%-]+_C)|([^|]+)$")
@@ -282,9 +294,10 @@ local function guest_command(action, fields, state, phase)
         or not copy_items(save.PlayerBackpack, original_pack.PlayerBackpack) then fail("view_before_image") end
     session = context
     session.sequence, session.state, session.save = sequence, "ready", save
-    session.original_stock, session.original_pack, session.expires = original_stock, original_pack, os.time() + 35
+    session.original_stock, session.original_pack = original_stock, original_pack
     session.original_preferences, session.original_seed = preferences(context.actor)
     session.original_minimum = context.actor.MinWeaponValue
+    session.original_accepts_cash = context.actor.AcceptCash
     local okay, reason = pcall(function()
         local flag = FName("Player_Cash")
         if save.Flags:Contains(flag) then save.Flags:Remove(flag) end
@@ -292,7 +305,9 @@ local function guest_command(action, fields, state, phase)
         if not save.Flags:Contains(flag) or save.Flags:Find(flag):get() ~= cash then fail("view_wallet_projection") end
         context.actor.Save = false
         context.actor.MinWeaponValue = minimum
+        context.actor.AcceptCash = accepts == "1"
         if not set_preferences(context.actor, taste, seed) or context.actor.MinWeaponValue ~= minimum
+            or context.actor.AcceptCash ~= (accepts == "1")
             then fail("view_preferences_projection") end
         local inventory = context.actor.Inventory
         inventory:Empty()
@@ -339,7 +354,7 @@ function barter.sync(state, phase)
     if not enabled or type(SilverfishSetNativeNpcBarter) ~= "function" then return end
     local current = local_context(state, phase)
     if not current then close_stock(); return end
-    if session and (session.expires < os.time() or not same(current.pawn, session.pawn)
+    if session and (session.expires and session.expires < os.time() or not same(current.pawn, session.pawn)
         or not same(current.actor, session.actor) or session.screen and not top(current, session.screen)
             and not confirmation(current, session.screen)) then close_stock() end
     local stack = current.controller.MenuStack
@@ -373,13 +388,15 @@ end
 
 function barter.command(fields, state, phase)
     local action = fields[2]
-    if action == "native-npc-barter-project" or action == "native-npc-barter-close" then return guest_command(action, fields, state, phase) end
+    if action == "native-npc-barter-project" or action == "native-npc-barter-refresh" or action == "native-npc-barter-close" then
+        return guest_command(action, fields, state, phase)
+    end
     if action ~= "native-npc-barter-open" and action ~= "native-npc-barter-exchange" then return end
     latest = nil
     local listing = action == "native-npc-barter-open"
     if #fields ~= (listing and 4 or 7) then fail("arguments") end
     local identifier = fields[4]
-    local pawn, save, stock, instance, actor = host_context(state, phase, fields[3], identifier)
+    local pawn, save, stock, instance, actor = host_context(state, phase, fields[3], identifier, listing)
     if listing then
         latest = catalog(state, pawn, instance, actor, identifier)
         return "exact native NPC barter stock read"

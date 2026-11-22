@@ -1,6 +1,8 @@
 """Qualify a stock NPC trader and settle authenticated exchanges against the host save."""
 
 import asyncio
+import hashlib
+import json
 import math
 import re
 import time
@@ -13,15 +15,19 @@ from .native_gold import valid_guid
 OPEN = "native-npc-barter-open"
 EXCHANGE = "native-npc-barter-exchange"
 PROJECT = "native-npc-barter-project"
+REFRESH = "native-npc-barter-refresh"
 CLOSE = "native-npc-barter-close"
 STOCK = "native_npc_barter"
 VIEW = "native_npc_barter_view"
+STOCK_VERSION = "native_npc_barter_stock_version"
+REFRESH_SECONDS = 3
 MAX_ITEMS = 128
 MAX_CASH = 2**31 - 1
 REPUTATION_FLAG = re.compile(r"Rep_[A-Za-z0-9_ -]{1,120}")
 ITEM = re.compile(r"/Game/Classes/[A-Za-z0-9_./-]+_C")
 MAP = re.compile(r"/Game/Classes/Maps(?:/[A-Za-z0-9_-]+)+")
 PAWN_SUFFIX = re.compile(r"[0-9]+")
+STOCK_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
 def pawn_in_map(pawn: str, area: str) -> bool:
@@ -153,6 +159,11 @@ async def _report(host, bridge, command: str, area: str, pawn: str, trader: str,
     return report
 
 
+def stock_version(report: dict) -> str:
+    fields = [report[key] for key in ("stock", "cash", "accepts_cash", "seed", "preferences", "minimum_weapon_value")]
+    return hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 async def perform(host, bridge, character: str, action: str, target: str | None, operation: str) -> dict:
     scope = _scope(host, character)
     if not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
@@ -160,11 +171,16 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     if not isinstance(target, str) or len(target) > 1150:
         raise party.RuleError("native_npc_barter_invalid_trader")
     parts = target.split("@")
-    if len(parts) != (2 if action == OPEN else 5) or parts[0] != scope[0] or not valid_guid(parts[1]):
+    if len(parts) not in ((2, 3) if action == OPEN else (5,)) or parts[0] != scope[0] or not valid_guid(parts[1]):
         raise party.RuleError("native_npc_barter_invalid_trader")
     _, trader, *proposal = parts
     if action == OPEN:
-        return {STOCK: await _report(host, bridge, OPEN, scope[1], scope[2], trader)}
+        known = proposal[0] if proposal else None
+        if known is not None and not STOCK_DIGEST.fullmatch(known):
+            raise party.RuleError("native_npc_barter_invalid_stock_version")
+        report = await _report(host, bridge, OPEN, scope[1], scope[2], trader)
+        version = stock_version(report)
+        return {STOCK_VERSION: version} if version == known else {STOCK: report, STOCK_VERSION: version}
     payment, offered, wanted = proposal
     cash = integer(payment, 0, MAX_CASH)
     expected = {"give": selection(offered), "receive": selection(wanted)}
@@ -214,22 +230,70 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
 class View:
     def __init__(self):
         self.latest = 0
+        self.scope = None
+        self.version = None
+        self.next_refresh = 0.0
+        self.refresh_task = None
+
+    def cancel_refresh(self):
+        if self.refresh_task is not None:
+            self.refresh_task.cancel()
+            self.refresh_task = None
+
+    async def read_stock(self, client, target):
+        try:
+            return await client.gameplay_action(OPEN, uuid.uuid4().hex, target)
+        except (OSError, RuntimeError, ValueError):
+            return None
 
     async def sync(self, client, active: bool):
         state = client.last_game.get(VIEW, {})
         sequence = state.get("sequence", 0)
-        action = {"opening": OPEN, "confirming": EXCHANGE}.get(state.get("state"))
-        if (not active or not action or sequence <= self.latest or not client.host_session or not client.zone_epoch
+        mode = state.get("state")
+        if (not active or not mode or not client.host_session or not client.zone_epoch
                 or state.get("map") != client.last_game.get("map") or not valid_guid(state.get("trader"))
                 or state.get("pawn") != client.last_game.get("pawns", {}).get("local", {}).get("name")):
+            self.cancel_refresh()
+            self.version = None
             return
-        self.latest = sequence
         epoch = client.zone_epoch
         trader = state["trader"]
-        target = f"{epoch}@{trader}" if action == OPEN else "@".join((epoch, trader, str(state["cash"]), state["give"], state["receive"]))
-        operation = uuid.uuid5(client.bridge.input_namespace, f"{client.host_session}:{epoch}:{trader}:{sequence}").hex
+        scope = client.host_session, epoch, client.bridge.input_namespace
+        if self.scope != scope:
+            self.cancel_refresh()
+            self.scope, self.latest, self.version = scope, 0, None
+        refresh = mode == "ready"
+        action = {"opening": OPEN, "confirming": EXCHANGE}.get(mode)
+        target = f"{epoch}@{trader}"
+        if refresh:
+            if self.refresh_task is None:
+                if self.version and time.monotonic() >= self.next_refresh:
+                    self.next_refresh = time.monotonic() + REFRESH_SECONDS
+                    self.refresh_task = asyncio.create_task(self.read_stock(client, f"{target}@{self.version}"))
+                return
+            if not self.refresh_task.done():
+                return
+            reply = self.refresh_task.result()
+            self.refresh_task = None
+            if reply is None:
+                return
+        else:
+            self.cancel_refresh()
+            if not action or sequence <= self.latest:
+                return
+            self.latest = sequence
+            if action == EXCHANGE:
+                target = "@".join((target, str(state["cash"]), state["give"], state["receive"]))
+            operation = uuid.uuid5(client.bridge.input_namespace, f"{client.host_session}:{epoch}:{trader}:{sequence}").hex
+            self.next_refresh = time.monotonic() + REFRESH_SECONDS
         try:
-            reply = await client.gameplay_action(action, operation, target)
+            if not refresh:
+                reply = await client.gameplay_action(action, operation, target)
+            version = reply.get(STOCK_VERSION)
+            if version is not None and (not isinstance(version, str) or not STOCK_DIGEST.fullmatch(version)):
+                raise ValueError("The host NPC returned an invalid stock version")
+            if refresh and version == self.version and STOCK not in reply:
+                return
             catalog = reply[STOCK]
             if catalog["trader"] != trader or catalog["map"] != state["map"] or len(catalog["stock"]) > MAX_ITEMS:
                 raise ValueError("The host NPC returned invalid barter stock")
@@ -239,10 +303,17 @@ class View:
                 client.guest_ui.digest = "-"
                 await client.guest_ui.refresh(client)
             preferences = [f"p|{path}|{weight}" for path, weight in catalog["preferences"].items()]
-            client.last_game = await client.bridge.command(PROJECT, str(sequence), trader, str(catalog["cash"]),
-                                                           str(catalog["seed"]), str(catalog["minimum_weapon_value"]),
-                                                           *items, *preferences, timeout=4)
+            client.last_game = await client.bridge.command(
+                REFRESH if refresh else PROJECT, str(sequence), trader, str(catalog["cash"]), str(catalog["seed"]),
+                str(catalog["minimum_weapon_value"]), str(int(catalog["accepts_cash"])), *items, *preferences, timeout=4)
+            if not refresh or client.last_game.get("ack", {}).get("message") == "exact stock NPC barter screen shown":
+                self.version = version or stock_version(catalog)
+                if refresh:
+                    client.control.event("native_npc_barter_stock_refreshed", trader=trader, entries=len(items), cash=catalog["cash"])
         except (OSError, RuntimeError, ValueError, KeyError) as error:
+            if refresh:
+                return
+            self.version = None
             client.guest_ui.digest = "-"
             client.control.event("native_npc_barter_refused", action=action, sequence=sequence, reason=str(error))
             try:

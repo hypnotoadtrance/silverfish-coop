@@ -87,6 +87,28 @@ async def verify(work, canary, offer):
             await start(guest, "join", "--profile", profile, "--invite", descriptor["invite_file"], "--headless",
                         "--native-zones")
             await wait(guest, lambda state: state.get("state") == "connected" and state.get("gameplay_fresh"))
+            if offer == "refresh":
+                def visible(cash):
+                    return next((int(fields[1]) for line in tail(guest) if (fields := line.split("\t"))[0] == "visible"
+                                 and int(fields[2]) == cash), None)
+
+                ready = await wait(guest, lambda state: state.get("game", {}).get(native_npc_barter.VIEW, {}).get("state") == "ready"
+                                   and visible(1200), timeout=15)
+                sequence = ready["game"][native_npc_barter.VIEW]["sequence"]
+                original_count = visible(1200)
+                mailbox, = (host / "game-bridge").iterdir()
+                (mailbox / "npc-barter-flow-refresh").touch()
+                updated = await wait(guest, lambda state: state.get("game", {}).get(native_npc_barter.VIEW, {}).get("state") == "ready"
+                                     and visible(1375), timeout=14)
+                assert updated["game"][native_npc_barter.VIEW]["sequence"] == sequence
+                assert visible(1375) == original_count + 1
+                refreshed, = events(guest, "native_npc_barter_stock_refreshed")
+                assert refreshed["entries"] == original_count + 1 and refreshed["cash"] == 1375
+                assert not events(host, "native_npc_barter_committed")
+                proof = {"initial_items": original_count, "initial_cash": 1200, "stock_refresh": refreshed, "sequence": sequence}
+                (host / "npc-barter-refresh.json").write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
+                print(host / "npc-barter-refresh.json", flush=True)
+                return
             async with asyncio.timeout(22):
                 while not (commits := events(host, "native_npc_barter_committed")):
                     refused = events(guest, "native_npc_barter_refused")
@@ -137,6 +159,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
-    parser.add_argument("--offer", choices=("cash", "high-value", "donation"), default="cash")
+    parser.add_argument("--offer", choices=("cash", "high-value", "donation", "refresh"), default="cash")
     options = parser.parse_args()
     asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve(strict=True), options.offer))

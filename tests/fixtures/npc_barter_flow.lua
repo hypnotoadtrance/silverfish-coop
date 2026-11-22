@@ -12,9 +12,10 @@ local jewelry = "/Game/Classes/Items/Item_Jewely.Item_Jewely_C"
 local peaches = "/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"
 local mode = os.getenv("SILVERFISH_COOP_BARTER_PROBE")
 local donation, high_value = mode == "donation", mode == "high-value"
+local refresh_test = mode == "refresh"
 local payment = donation and jewelry or high_value and peaches or nil
 local money = high_value and 20000 or 1200
-local next_attempt, armed, committed, pending_confirmation = 0, false, false, false
+local next_attempt, armed, committed, pending_confirmation, refreshed = 0, false, false, false, false
 
 local function valid(value) return value and value:IsValid() end
 
@@ -124,6 +125,14 @@ function probe.sample(state, phase)
     local ok, error_message = pcall(function()
         if phase == "hosting" and not armed then
             prepare(state, phase, actor)
+        elseif phase == "hosting" and refresh_test and not refreshed then
+            local signal = io.open(box .. "/npc-barter-flow-refresh", "r")
+            if not signal then return end
+            signal:close()
+            state.world.OwningGameInstance:Give_PlayerCash(175, false)
+            seed(actor, actor.Inventory, jewelry, 8)
+            refreshed = true
+            proof("restocked", actor.Inventory:GetArrayNum(), 1375)
         elseif phase == "hosting" and payment then
             local guest = state.guests[1]
             local pawn = guest and saves.exact_item_context(state, phase, guest.name)
@@ -160,7 +169,14 @@ function probe.sample(state, phase)
                 actor:SendInteractionToActor(pawn, actor.Box)
                 proof("interact", valid(menus[1]) and menus[1]:GetFullName() or "-")
             elseif view and view[5] == "ready" and menus:GetArrayNum() == 1 then
-                confirm(state, menus[1], actor, payment_row)
+                if refresh_test then
+                    local flag = FName("Player_Cash")
+                    if pawn.Save.Flags:Contains(flag) then
+                        proof("visible", actor.Inventory:GetArrayNum(), pawn.Save.Flags:Find(flag):get())
+                    end
+                else
+                    confirm(state, menus[1], actor, payment_row)
+                end
             end
         end
     end)
