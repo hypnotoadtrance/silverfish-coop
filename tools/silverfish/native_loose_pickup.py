@@ -168,7 +168,7 @@ async def expire_fixture(host, bridge, target):
     return {"actor": path, "days": int(match[1]), "revision": revision}
 
 
-async def claim(host, bridge, character, requested, operation):
+async def claim(host, bridge, character, requested, operation, *, local_input=False):
     from . import native_host_save
 
     target, _, epoch = requested.partition("@") if isinstance(requested, str) else ("", "", "")
@@ -197,7 +197,8 @@ async def claim(host, bridge, character, requested, operation):
     host.native_checkpoint_unsafe = True
     try:
         try:
-            snapshot = await bridge.command(CLAIM, pawn, slot, path, timeout=7)
+            receipt = ("stock-input",) if local_input and character == "host" else ()
+            snapshot = await bridge.command(CLAIM, pawn, slot, path, *receipt, timeout=7)
         except RuntimeError as error:
             if str(error) == "loose_pickup_source_unavailable":
                 host.native_checkpoint_unsafe = False

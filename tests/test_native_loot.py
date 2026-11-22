@@ -140,6 +140,14 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(change=change):
                 self.assertIsNone(native_loot.interaction(dict(game, native_loot_crate_interaction=proof | change), 3))
 
+    def test_batched_container_input_keeps_each_exact_press_in_order(self):
+        first = {"map": CROSSROADS, "crate": LEGACY_CRATE, "pawn": PAWN, "entry": "stock", "sequence": 11}
+        second = dict(first, crate=OTHER_CRATE, sequence=13)
+        foreign = dict(first, pawn="another pawn", sequence=14)
+        game = self.game(CROSSROADS, native_loot_crate_interactions=[second, first, foreign, first])
+        self.assertEqual(native_loot.interactions(game, 10), [(11, LEGACY_CRATE, "stock"), (13, OTHER_CRATE, "stock")])
+        self.assertEqual(native_loot.interactions(game, 11), [(13, OTHER_CRATE, "stock")])
+
     def test_publication_excludes_other_maps_and_invalid_saved_identity(self):
         roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
         records = {

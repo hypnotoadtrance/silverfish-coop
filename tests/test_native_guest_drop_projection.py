@@ -69,6 +69,31 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(identity, view.items)
         self.assertNotEqual(view.epoch, epoch)
 
+    async def test_exact_world_pickup_receipt_does_not_wait_for_the_status_file(self):
+        client = self.client()
+        rows = client.gameplay[record.STATE]
+        identity = native_world_loot.player_drop_identity(ID)
+        for phase in ("hosting", "connected"):
+            with self.subTest(phase=phase):
+                view = native_world_loot.Projection()
+                game = dict(client.last_game, state=phase)
+                bridge = SimpleNamespace(command=AsyncMock(return_value=game))
+                await view.sync(bridge, game, {}, "first", client.zone_epoch, active=True, player_drops=rows)
+                epoch = view.epoch
+                target = native_world_loot.target_parts(f"world-loot:{epoch}:{identity}:7")
+                self.assertEqual(target, (epoch, identity, 7))
+                self.assertEqual(view.claim_target(game, target), (drop.RECLAIM, ID))
+                with self.assertRaisesRegex(party.RuleError, "native_world_loot_intent_stale"):
+                    view.claim_target(game, target)
+                for current, intent in (
+                    (dict(game, pawns={"local": {"name": "next pawn"}}), (epoch, identity, 8)),
+                    (dict(game, map="next map"), (epoch, identity, 8)),
+                    (game, ("0" * 32, identity, 8)),
+                    (game, (epoch, identity)),
+                ):
+                    with self.assertRaisesRegex(party.RuleError, "native_world_loot_intent_stale"):
+                        view.claim_target(current, intent)
+
     async def test_guest_can_collect_nearest_stock_drop_from_another_guest(self):
         client, view = self.client(), projection.Projection()
         row = client.gameplay[record.STATE][ID]

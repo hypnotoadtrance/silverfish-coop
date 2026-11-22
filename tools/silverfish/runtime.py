@@ -1984,8 +1984,10 @@ class Bridge:
                         and 1 <= (days := int(fields[3])) <= 12):
                     data["native_loot_replenishment_fixture"] = dict(map=fields[1], crate=fields[2], days=days)
                 elif fields[0] == "native-loot-crate-interaction" and len(fields) == 6:
-                    data["native_loot_crate_interaction"] = {"map": fields[1], "crate": fields[2], "pawn": fields[3],
-                                                            "sequence": int(fields[4]), "entry": fields[5]}
+                    proof = dict(map=fields[1], crate=fields[2], pawn=fields[3], sequence=int(fields[4]), entry=fields[5])
+                    data.setdefault("native_loot_crate_interactions", []).append(proof)
+                    if proof["sequence"] > data.get("native_loot_crate_interaction", {}).get("sequence", 0):
+                        data["native_loot_crate_interaction"] = proof
                 elif (fields[0] == "native-loot-electronic-powered-open" and len(fields) == 5
                       and data.get("state") == "hosting" and fields[1] == data.get("map")
                       and AUTHORED_CRATES.get(fields[2]) == fields[1] and fields[2].startswith("ElectronicLocker_01_BP_C ")

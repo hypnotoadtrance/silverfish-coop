@@ -405,11 +405,18 @@ local function claim(fields, state, phase, profile)
     report = {source = profile.source, pawn = name, slot = slot, ok = false, applied = false, loose = profile.loose and profile}
     local pawn, save, statics = owner(state, phase, name)
     local sight = profile.loose and stock_input_fixture.loose_sight or stock_input_fixture.authority_sight
+    local stock_input = fields[6] == "stock-input" and state.local_pawn and same(pawn, state.local_pawn.pawn)
+        and type(SilverfishReadNativeAuthoredPickup) == "function"
+    if stock_input then
+        local active, claimed, sequence, fixture = SilverfishReadNativeAuthoredPickup(profile.source)
+        stock_input = active == true and claimed == false and math.type(sequence) == "integer" and sequence > 0
+            and fixture == false
+    end
     if profile.stock_cash then
         local cash = SilverfishClaimNativeAuthoredCash
         local actor = StaticFindObject(profile.path)
         if type(cash) ~= "function" or not valid(pawn) or not valid(actor)
-            or not sight(state, phase, profile, pawn, actor) then
+            or not stock_input and not sight(state, phase, profile, pawn, actor) then
             report.status = "authored_cash_exact_authority_sight_required"
             return "authored cash pickup refused"
         end
@@ -444,7 +451,7 @@ local function claim(fields, state, phase, profile)
             return "authored loose pickup reported"
         end
     end
-    if profile.stock_supply or profile.authority_sight or profile.loose then
+    if not stock_input and (profile.stock_supply or profile.authority_sight or profile.loose) then
         local checked, visible = pcall(sight, state, phase, profile, pawn, StaticFindObject(profile.path))
         if not checked or visible ~= true then
             report.status = "authored_pickup_exact_authority_sight_required"
@@ -635,7 +642,8 @@ function pickup.command(fields, state, phase)
     end
     if action == "native-loose-pickup-claim" then
         pickup.update(state, phase)
-        local profile = #fields == 5 and loose_profile(fields[5], state)
+        local valid_args = #fields == 5 or (#fields == 6 and fields[6] == "stock-input")
+        local profile = valid_args and loose_profile(fields[5], state)
         if not profile or profile.claimed then error("loose_pickup_source_unavailable", 0) end
         return claim(fields, state, phase, profile)
     end
@@ -732,7 +740,8 @@ function pickup.command(fields, state, phase)
     end
     local count = arguments[action]
     if not count then return end
-    if #fields ~= count and #fields ~= count + 1 then error("authored_pickup_arguments", 0) end
+    local stock_claim = action == "native-authored-pickup-claim" and #fields == 6 and fields[6] == "stock-input"
+    if #fields ~= count and #fields ~= count + 1 and not stock_claim then error("authored_pickup_arguments", 0) end
     local ok, reason = pickup.update(state, phase)
     if not ok then error(reason or "authored_pickup_scope_unavailable", 0) end
     local profile = select_profile(fields[count + 1])

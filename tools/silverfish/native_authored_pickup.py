@@ -283,7 +283,7 @@ def parse_effect(fields, snapshot):
     return effect
 
 
-async def claim(host, bridge, character: str, target: str | None, operation_id: str) -> dict:
+async def claim(host, bridge, character: str, target: str | None, operation_id: str, *, local_input=False) -> dict:
     if not isinstance(target, str) or not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
         raise party.RuleError("invalid_authored_pickup_request")
     target, has_epoch, epoch = target.partition("@")
@@ -342,7 +342,8 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
     slot = native_host_save.new_slot()
     host.native_checkpoint_unsafe = True
     try:
-        snapshot = await bridge.command(ACTION, pawn, slot, target, timeout=7)
+        receipt = ("stock-input",) if local_input and character == "host" else ()
+        snapshot = await bridge.command(ACTION, pawn, slot, target, *receipt, timeout=7)
         report = snapshot.get("native_authored_pickup_claim", {})
         if (snapshot.get("state") != "hosting" or snapshot.get("map") != area
                 or tuple(report.get(key) for key in ("source", "map", "pawn", "slot")) != (target, area, pawn, slot)):

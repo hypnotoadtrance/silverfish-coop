@@ -43,7 +43,11 @@ assert(projection.command(frame, state, "connected") == "stock world loot synchr
 local initial = rows_by_item()
 assert(initial[good][1] == "native-world-loot-item" and initial[good][8] == ammo)
 assert(initial[failed][1] == "native-world-loot-projection-error" and initial[failed][5] == revolver)
-assert(projection.take_press(pawn) == "world-loot:" .. epoch .. ":" .. good)
+assert(projection.take_press(pawn) == "world-loot:" .. epoch .. ":" .. good .. ":1")
+for _, row in pairs(active) do
+    if row[3] == good then row[5] = 0 end
+end
+assert(projection.take_press(pawn) == nil)
 
 reject = false
 assert(projection.command(frame, state, "connected") == "stock world loot synchronized")

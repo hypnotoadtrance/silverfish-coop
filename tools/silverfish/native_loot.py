@@ -53,15 +53,26 @@ def _scope(host, character: str) -> str:
     return record.get("pawn", "") if record.get("connected") else ""
 
 
-def interaction(game: dict, last_sequence: int) -> tuple[int, str] | None:
-    proof = game.get("native_loot_crate_interaction", {})
+def interactions(game: dict, last_sequence: int) -> list[tuple[int, str, str]]:
+    proofs = game.get("native_loot_crate_interactions", [game.get("native_loot_crate_interaction", {})])
     pawn = game.get("pawns", {}).get("local", {}).get("name")
-    area, crate, sequence = game.get("map"), proof.get("crate"), proof.get("sequence")
-    if (isinstance(crate, str) and crate in CRATES and CRATES[crate] == area and pawn
-            and type(sequence) is int and last_sequence < sequence < 2**53
-            and (proof.get("map"), proof.get("pawn")) == (area, pawn)
-            and (proof.get("entry") in ("stock", "fixture") or (proof.get("entry") == "pried"
-                 and game.get("state") == "hosting" and lockable_container(crate, area)))):
+    area = game.get("map")
+    pending = {}
+    for proof in proofs:
+        crate, sequence, entry = (proof.get(key) for key in ("crate", "sequence", "entry"))
+        if (isinstance(crate, str) and crate in CRATES and CRATES[crate] == area and pawn
+                and type(sequence) is int and last_sequence < sequence < 2**53
+                and (proof.get("map"), proof.get("pawn")) == (area, pawn)
+                and (entry in ("stock", "fixture") or (entry == "pried"
+                     and game.get("state") == "hosting" and lockable_container(crate, area)))):
+            pending[sequence] = (sequence, crate, entry)
+    return sorted(pending.values())
+
+
+def interaction(game: dict, last_sequence: int) -> tuple[int, str] | None:
+    pending = interactions(game, last_sequence)
+    if pending:
+        sequence, crate, _ = pending[-1]
         return sequence, crate
 
 

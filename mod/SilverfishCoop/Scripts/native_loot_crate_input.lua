@@ -709,7 +709,6 @@ end
 local function append_receipts(rows, state, status_row)
     local detail = state.local_pawn
     if not detail or not valid(detail.pawn) then return end
-    local latest, reported = 0, nil
     local receipts = table.pack(SilverfishReadNativeLootCrateReceipts(detail.pawn:GetAddress()))
     for offset = 1, receipts.n, 4 do
         local index, sequence, pried, guest = table.unpack(receipts, offset, offset + 3)
@@ -724,14 +723,12 @@ local function append_receipts(rows, state, status_row)
                         break
                     end
                 end
-            elseif sequence > latest then
-                latest = sequence
-                reported = status_row("native-loot-crate-interaction", state.map, profile.name, detail.name, sequence,
+            else
+                rows[#rows + 1] = status_row("native-loot-crate-interaction", state.map, profile.name, detail.name, sequence,
                     pried and "pried" or sequence == fixture_sequences[index] and "fixture" or "stock")
             end
         end
     end
-    if reported then rows[#rows + 1] = reported end
 end
 
 function input.rows(state, phase, status_row, fields)

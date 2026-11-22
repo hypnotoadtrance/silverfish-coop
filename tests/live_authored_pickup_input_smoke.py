@@ -28,7 +28,7 @@ CITY_POSITIONS = {
 }
 
 
-async def exercise(work: Path, vanilla_saved: Path | None) -> None:
+async def exercise(work: Path, vanilla_saved: Path | None, *, host_second=False) -> None:
     name = "stock-city-pickup-" + uuid.uuid4().hex[:8]
     campaign, profile = ("--campaign", name), ("--profile", name)
     host_run = work / "campaigns" / name / "run"
@@ -110,17 +110,20 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
         raise AssertionError("The exact owned stock inventory census exceeded its page bound")
 
     async def press(source, character):
-        assert (await action(campaign, APPROACH, "--target", "guest", "--pickup-source", source))["actor"] == SOURCES[source][1]
+        is_host = character == "host"
+        owner, directory = (campaign, host_run) if is_host else (profile, guest_run)
+        role = "host" if is_host else "guest"
+        assert (await action(campaign, APPROACH, "--target", role, "--pickup-source", source))["actor"] == SOURCES[source][1]
 
         def in_reach(state):
             position = state.get("game", {}).get("pawns", {}).get("local", {}).get("location")
             return (position and len(position) == 3 and all(type(value) in (int, float) for value in position)
                     and math.dist(position, CITY_POSITIONS[source]) < 238 and source_state(state, source, "available"))
 
-        guest = await wait(guest_run, in_reach)
-        receipt = (await action(profile, STOCK_FIXTURE, "--pickup-source", source))["native_authored_pickup_interaction"]
+        state = await wait(directory, in_reach)
+        receipt = (await action(owner, STOCK_FIXTURE, "--pickup-source", source))["native_authored_pickup_interaction"]
         assert tuple(receipt[key] for key in ("source", "map", "entry", "pawn")) == (
-            source, CITY, "stock", guest["game"]["pawns"]["local"]["name"],
+            source, CITY, "stock", state["game"]["pawns"]["local"]["name"],
         ), receipt
         assert type(receipt["sequence"]) is int and receipt["sequence"] > 0, receipt
         commit = await wait(host_run, lambda state: source in ledger(state))
@@ -128,9 +131,13 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
         assert tuple(row[key] for key in ("map", "actor", "class_path", "owner")) == (*SOURCES[source], character), row
         assert row["source"] == source and valid_guid(row["guid"]), row
         await wait(guest_run, lambda state: source_state(state, source, "claimed"))
-        events = (await command("events", *profile, "--tail", "40"))["events"]
-        routed = [event for event in events if event["event"] == "local_interaction"
-                  and event.get("native_authored_pickup_claim") == row]
+        events = (await command("events", *owner, "--tail", "40"))["events"]
+        if is_host:
+            routed = [event for event in events if event["event"] == "native_authored_pickup_committed"
+                      and all(event.get(key) == value for key, value in row.items())]
+        else:
+            routed = [event for event in events if event["event"] == "local_interaction"
+                      and event.get("native_authored_pickup_claim") == row]
         assert len(routed) == 1, events
         proof["sources"][source] = {"stock_press": receipt, "committed": row, "operation": routed[0]["operation_id"]}
 
@@ -150,17 +157,20 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
         contested = await action(campaign, "native-authored-pickup-claim", "--target", CITY_WIRE, expected=False)
         assert contested["error"] == "native_authored_pickup_already_claimed", contested
         proof["contested"] = contested["error"]
-        await press(CITY_BRANDY, character)
+        await press(CITY_BRANDY, "host" if host_second else character)
 
         claims = {source: values["committed"] for source, values in proof["sources"].items()}
         presses = [values["stock_press"]["sequence"] for values in proof["sources"].values()]
-        assert presses[0] < presses[1] and len({claim["guid"] for claim in claims.values()}) == 2, proof
+        if not host_second:
+            assert presses[0] < presses[1], proof
+        assert len({claim["guid"] for claim in claims.values()}) == 2, proof
         assert len({values["operation"] for values in proof["sources"].values()}) == 2, proof
         visitor_items, host_items = await inventory(profile, character), await inventory(campaign, "host")
         for row in claims.values():
-            item = visitor_items[row["guid"]]
+            owned, other = (host_items, visitor_items) if row["owner"] == "host" else (visitor_items, host_items)
+            item = owned[row["guid"]]
             assert (item["class_path"], item["source"], item["quantity"]) == (row["class_path"], "backpack", 1), item
-            assert row["guid"] not in host_items, host_items
+            assert row["guid"] not in other, other
         await action(campaign, "checkpoint")
         await stop(host, campaign)
         await stop(guest, profile)
@@ -204,5 +214,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True, help="prepared isolated stage workspace")
     parser.add_argument("--vanilla-saved", type=Path, help="original Saved directory to hash before and after")
+    parser.add_argument("--host-second", action="store_true", help="have the host pick up the brandy through stock Interact")
     args = parser.parse_args()
-    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved))
+    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved, host_second=args.host_second))

@@ -25,7 +25,7 @@ CAPABILITY = "native_world_loot_version"
 SHARED_PICKUPS_VERSION = 2
 CRATE_CLAIM = "native-loot-claim"
 ENEMY_CLAIM = "native-enemy-loot-claim"
-_TARGET = re.compile(r"world-loot:([0-9a-f]{32}):([0-9a-f]{32})\Z")
+_TARGET = re.compile(r"world-loot:([0-9a-f]{32}):([0-9a-f]{32})(?::([1-9][0-9]{0,15}))?\Z")
 _CLASS = re.compile(r"/Game/Classes/[A-Za-z0-9_./-]+\.([A-Za-z0-9_-]+_C)\Z")
 _AREA = re.compile(r"/Game/Classes/Maps/[A-Za-z0-9_/]+/([A-Za-z0-9_-]+)\Z")
 _MAX_VISIBLE = 64
@@ -34,7 +34,14 @@ _VISIBILITY_RADIUS = 1800
 
 def target_parts(target):
     match = _TARGET.fullmatch(target) if isinstance(target, str) else None
-    return match.groups() if match else None
+    if not match:
+        return None
+    epoch, identity, sequence = match.groups()
+    if sequence is None:
+        return epoch, identity
+    if (press := int(sequence)) < 2**53:
+        return epoch, identity, press
+    return None
 
 
 def pawn_matches(area, pawn):
@@ -175,6 +182,8 @@ def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drop
 class Projection:
     def __init__(self):
         self.epoch = None
+        self.seat = None
+        self.presses = {}
         self.previous = None
         self.next_sync = 0.0
         self.last_error = None
@@ -186,12 +195,14 @@ class Projection:
         phase = game.get("state")
         if phase not in {"hosting", "connected"} or not isinstance(zone, str):
             self.previous = None
+            self.seat = None
             self.items = {}
             return game
         area = game.get("map")
         epoch = uuid.uuid5(uuid.NAMESPACE_OID, f"{generation}:{zone}:{area}:world-loot").hex
         if epoch != self.epoch:
             self.retired.clear()
+            self.presses.clear()
         self.items = nearby(game, rolls, zone, enemy_frame=enemy_frame, enemy_rolls=enemy_rolls,
                             player_drops=player_drops, stock_enemy_drops=stock_enemy_drops) if active else {}
         for identity in self.retired:
@@ -199,7 +210,8 @@ class Projection:
         args = tuple("|".join((identity, item.class_path, *(("ground",) if item.ground_snap else ()), *(str(axis)
             for field in ("position", "rotation", "scale") for axis in item.transform[field]), str(item.stack_count)))
             for identity, item in sorted(self.items.items()))
-        signature = (epoch, args)
+        seat = (phase, area, game.get("pawns", {}).get("local", {}).get("name"))
+        signature = (epoch, seat, args)
         now = time.monotonic()
         if not args and not game.get(KEY) and self.previous in (None, signature):
             return game
@@ -209,22 +221,33 @@ class Projection:
         self.previous = signature
         snapshot = await bridge.command(FRAME, area, epoch, *args, timeout=3)
         self.epoch = epoch
+        self.seat = seat
         self.last_error = None
         return snapshot
 
     def claim_target(self, game, target):
-        epoch, identity = target
-        projected = game.get(KEY, {}).get(identity, {})
+        epoch, identity = target[:2]
         item = self.items.get(identity)
-        if (epoch != self.epoch or not item or projected.get("epoch") != epoch
-                or projected.get("map") != game.get("map")
-                or projected.get("pawn") != game.get("pawns", {}).get("local", {}).get("name")
-                or projected.get("sequence", 0) <= 0 or projected.get("class_path") != item.class_path):
+        pawn = game.get("pawns", {}).get("local", {}).get("name")
+        seat = (game.get("state"), game.get("map"), pawn)
+        if epoch != self.epoch or not item or not pawn or seat != self.seat:
             raise party.RuleError("native_world_loot_intent_stale")
+        if len(target) == 3:
+            # The game thread sends the native receipt with the press. The next
+            # status snapshot can arrive after the input stream wakes the worker.
+            sequence = target[2]
+            if sequence <= self.presses.get(identity, 0):
+                raise party.RuleError("native_world_loot_intent_stale")
+            self.presses[identity] = sequence
+        else:
+            projected = game.get(KEY, {}).get(identity, {})
+            if (projected.get("epoch") != epoch or (projected.get("map"), projected.get("pawn")) != seat[1:]
+                    or projected.get("sequence", 0) <= 0 or projected.get("class_path") != item.class_path):
+                raise party.RuleError("native_world_loot_intent_stale")
         return item.claim_action, item.claim_target
 
     async def retire_claim(self, bridge, game, target):
-        epoch, identity = target
+        epoch, identity = target[:2]
         if epoch != self.epoch:
             return game
         self.retired.add(identity)

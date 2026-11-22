@@ -231,7 +231,19 @@ end
 local function distance_to_box(pawn, box, allow_distant)
     local position, target = pawn:K2_GetActorLocation(), box:K2_GetComponentLocation()
     local x, y, z = position.X - target.X, position.Y - target.Y, position.Z - target.Z
-    local squared = x * x + y * y + z * z
+    local extent = box:GetScaledBoxExtent()
+    local squared = 0
+    for _, dimension in ipairs({
+        { box:GetForwardVector(), extent.X },
+        { box:GetRightVector(), extent.Y },
+        { box:GetUpVector(), extent.Z },
+    }) do
+        local direction, radius = dimension[1], dimension[2]
+        local dot = x * direction.X + y * direction.Y + z * direction.Z
+        if not finite(dot) or not finite(radius) or radius < 0 then error("native_loot_invalid_crate_box", 0) end
+        local offset = math.max(0, math.abs(dot) - radius)
+        squared = squared + offset * offset
+    end
     local range = pawn.InteractionRange
     if not finite(range) or range <= 0 or range > 1000 or not finite(squared)
         or not allow_distant and squared > range * range then

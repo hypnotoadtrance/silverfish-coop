@@ -3806,17 +3806,19 @@ class Host:
                                                  not self.transitioning and not self.party["wipe"], wire_action)
                 if snapshot is not self.last_game:
                     self.last_game, self.last_seen = snapshot, time.monotonic()
-            if (self.native_loot_input and not self.stopping and not self.native_checkpoint_unsafe
-                    and (intent := native_loot.interaction(self.last_game, self.last_crate_intent))):
-                sequence, crate = intent
-                self.last_crate_intent = sequence
-                operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.control.generation}:{self.zone_epoch}:host-crate:{sequence}:{crate}").hex
-                entry = self.last_game["native_loot_crate_interaction"]["entry"]
-                try:
-                    await native_loot.perform(self, bridge, "host", "open", crate, operation, pried=entry == "pried")
-                    self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, crate=crate, entry=entry)
-                except (OSError, ValueError, RuntimeError) as error:
-                    self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, crate=crate, reason=str(error))
+            if self.native_loot_input:
+                area, epoch = self.last_game.get("map"), self.zone_epoch
+                for sequence, crate, entry in native_loot.interactions(self.last_game, self.last_crate_intent):
+                    if (self.stopping or self.native_checkpoint_unsafe or self.transitioning
+                            or (self.last_game.get("map"), self.zone_epoch) != (area, epoch)):
+                        break
+                    self.last_crate_intent = sequence
+                    operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.control.generation}:{epoch}:host-crate:{sequence}:{crate}").hex
+                    try:
+                        await native_loot.perform(self, bridge, "host", "open", crate, operation, pried=entry == "pried")
+                        self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, crate=crate, entry=entry)
+                    except (OSError, ValueError, RuntimeError) as error:
+                        self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, crate=crate, reason=str(error))
             await self.stock_drop_input.poll(self, bridge)
             for operation_id, target in bridge.interactions():
                 if self.stopping or self.native_checkpoint_unsafe:
@@ -3843,10 +3845,10 @@ class Host:
                             result = await self.stack_drop_projection.reclaim_host(self, bridge, operation_id, stack_drop)
                         self.control.event("local_interaction", operation_id=operation_id, **result)
                     elif native_loose_pickup.target_path(target):
-                        result = await native_loose_pickup.claim(self, bridge, "host", target, operation_id)
+                        result = await native_loose_pickup.claim(self, bridge, "host", target, operation_id, local_input=True)
                         self.control.event("local_interaction", operation_id=operation_id, **result)
                     elif target in native_authored_pickup.SOURCES:
-                        await native_authored_pickup.claim(self, bridge, "host", target, operation_id)
+                        await native_authored_pickup.claim(self, bridge, "host", target, operation_id, local_input=True)
                     elif target == native_subway_valve.INPUT:
                         await native_subway_valve.activate(self, bridge, "host", self.zone_epoch)
                     elif native_enemy_shells.target_parts(target):
@@ -4964,20 +4966,19 @@ class Client:
     async def service_crate_interaction(self, active: bool) -> None:
         if not self.invite.get("native_loot_input"):
             return
-        intent = native_loot.interaction(self.last_game, self.last_crate_intent)
-        if intent is None:
-            return
-        sequence, crate = intent
-        self.last_crate_intent = sequence
-        if not active or self.stopping or not self.host_session or not self.zone_epoch:
-            return
-        operation = uuid.uuid5(self.bridge.input_namespace,
-                               f"{self.host_session}:{self.zone_epoch}:{self.invite['character_id']}:crate:{sequence}:{crate}").hex
-        try:
-            result = await self.gameplay_action("native-loot-open", operation, crate)
-            self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, crate=crate, **result)
-        except (ValueError, OSError, RuntimeError) as error:
-            self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, operation_id=operation, crate=crate, reason=str(error))
+        session, epoch = self.host_session, self.zone_epoch
+        for sequence, crate, _ in native_loot.interactions(self.last_game, self.last_crate_intent):
+            self.last_crate_intent = sequence
+            if (not active or self.stopping or not session or not epoch
+                    or (self.host_session, self.zone_epoch) != (session, epoch)):
+                continue
+            operation = uuid.uuid5(self.bridge.input_namespace,
+                                   f"{session}:{epoch}:{self.invite['character_id']}:crate:{sequence}:{crate}").hex
+            try:
+                result = await self.gameplay_action("native-loot-open", operation, crate)
+                self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, crate=crate, **result)
+            except (ValueError, OSError, RuntimeError) as error:
+                self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, operation_id=operation, crate=crate, reason=str(error))
 
     async def service_broker_input(self, active: bool) -> None:
         if not self.invite.get("native_broker_input"):

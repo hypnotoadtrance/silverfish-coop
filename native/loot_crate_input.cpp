@@ -8,7 +8,6 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <string_view>
@@ -224,27 +223,6 @@ namespace
     }
 
 
-    bool in_reach(U::UObject* pawn, U::UObject* box)
-    {
-        auto* range = field<U::FDoubleProperty>(pawn, STR("InteractionRange"));
-        auto* getter = find<U::UFunction>(STR("/Script/Engine.SceneComponent:K2_GetComponentLocation"));
-        auto* output = field<U::FStructProperty>(getter, STR("ReturnValue"));
-        auto* type = find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
-        std::array<double, 3> point{};
-        if (!range || !output || !type || output != getter->GetReturnProperty() || getter->GetNumParms() != 1 ||
-            output->GetStruct().Get() != type || output->GetOffset_Internal() != 0 ||
-            getter->GetParmsSize() != sizeof(point) || !getter->HasAnyFunctionFlags(U::FUNC_Native)) return false;
-        const double reach = range->GetPropertyValueInContainer(pawn);
-        if (!std::isfinite(reach) || reach <= 0 || reach > 1000) return false;
-        box->ProcessEvent(getter, point.data());
-        auto location = static_cast<U::AActor*>(pawn)->K2_GetActorLocation();
-        const double x = location.GetX() - point[0];
-        const double y = location.GetY() - point[1];
-        const double z = location.GetZ() - point[2];
-        const double square = x * x + y * y + z * z;
-        return std::isfinite(square) && square <= reach * reach;
-    }
-
     struct Scope
     {
         U::FWeakObjectPtr crate{}, pawn{};
@@ -363,12 +341,10 @@ namespace
         if (local.host && silverfish::shared_loot::permits_stock_interaction(crate, pawn, hit, method)) return;
 
         call.PreventOriginalFunctionCall();
-        if (!call.OriginalFunctionCallPrevented() || pawn != local.pawn ||
-            !silverfish::native_interaction_input::consume_current_press(pawn)) return;
-        if (!scoped || sequence == max_sequence ||
+        if (!call.OriginalFunctionCallPrevented() || pawn != local.pawn || !scoped || sequence == max_sequence ||
             !boolean(crate, STR("Looted"), false) || !boolean(pawn, STR("Holding_Interact"), true) ||
             !hit || hit != stock_box(crate) || object(pawn, STR("InteractionTarget_Component")) != hit ||
-            !in_reach(pawn, hit)) return;
+            !silverfish::native_interaction_input::consume_current_press(pawn)) return;
         active->observed = ++sequence;
         active->receipt = now + receipt_lifetime;
         active->pried = false;
