@@ -415,7 +415,7 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str) -> dict:
     await wait(host_run, settled)
     await wait(guest_run, settled)
     events = (json.loads(line) for line in (host_run / "events.jsonl").read_text(encoding="utf-8").splitlines())
-    claim, = [event for event in events if event["event"] == "native_loot_claim_committed" and event.get("guid") == item["guid"]]
+    claim, = [event for event in events if event["event"] == "native_loot_claim_accepted" and event.get("guid") == item["guid"]]
     inventory_guid = claim.get("inventory_guid", item["guid"])
     display = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=f"{actor}@{inventory_guid}")
     assert display["ok"] and display["proof"] == "verified stock Nearby Items transfer", display
@@ -429,6 +429,8 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str) -> dict:
     assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before
     duplicate = await submit(host_run, "native-loot-claim", target=f"{item['guid']}@{crate}")
     assert duplicate.get("error") == "native_loot_already_claimed", duplicate
+    checkpoint = await submit(host_run, "checkpoint")
+    assert checkpoint["ok"], checkpoint
     saved = json.loads((host.campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
     native_host_save.verify_checkpoint(host.profile, saved)
     durable = saved["world"]["party"][native_loot.STATE_KEY][crate]

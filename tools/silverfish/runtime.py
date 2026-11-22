@@ -1196,6 +1196,8 @@ class Bridge:
                     data["native_zone_party_guard"] = True
                 elif fields == ["native-paired-save-capture", "1"] and data.get("state") == "hosting":
                     data["native_paired_save_capture"] = True
+                elif fields == ["native-guest-save-retention", "1"] and data.get("state") == "hosting":
+                    data["native_guest_save_retention"] = True
                 elif fields[0] in ("native-guest-melee-equip", "native-guest-melee-canary", "native-guest-melee-swing",
                                     "native-guest-melee-aim-fixture", "native-guest-melee-contact-fixture"):
                     parsed = parse_guest_melee(fields)
@@ -2367,7 +2369,7 @@ class Bridge:
                             row.update(zip(native_weather_view.RAIN_FIELDS, rain))
                             row["rain_verified"] = fields[31] == "1"
                     data["native_world_view"] = row
-                elif fields[0] == "native-loot" and len(fields) in (14, 15):
+                elif fields[0] == "native-loot" and len(fields) in (14, 15, 16, 17):
                     count = int(fields[12])
                     if AUTHORED_CRATES.get(fields[3]) != fields[2] or not 0 <= count <= loot_capacity(fields[3]):
                         raise ValueError("Stock container receipt has an unqualified map or item count")
@@ -2376,8 +2378,12 @@ class Bridge:
                         "ok": fields[5] == "1", "status": fields[6], "looted": fields[7] == "1",
                         "lucky_looter": fields[8] == "1", "trait_source": fields[9], "trait_calls": int(fields[10]),
                         "distance": _finite(fields[11]), "item_count": count, "invoked": fields[13] == "1",
-                        "items": [], "escrow_slot": fields[14] if len(fields) == 15 else "-",
+                        "items": [], "escrow_slot": fields[14] if len(fields) >= 15 else "-",
                     }
+                    if len(fields) >= 16 and fields[15] == "1":
+                        data["native_loot"]["retained"] = True
+                    if len(fields) == 17 and fields[16] == "1":
+                        data["native_loot"]["memory_escrow"] = True
                 elif fields[0] == native_loot.PLACEMENT and len(fields) == 13:
                     _, area, crate, index, *axes = fields
                     transform = dict(zip(("position", "rotation", "scale"),
@@ -2770,6 +2776,11 @@ class Bridge:
                 elif fields[0] == "native-world-flush" and len(fields) == 6:
                     data["native_world_flush"] = {"map": fields[1], "state": fields[2], "antfarm": fields[3],
                                                   "explosives": fields[4], "reason": fields[5]}
+                elif fields[0] == "native-guest-save-rebound" and len(fields) == 3:
+                    data.setdefault("native_guest_save_rebound", {})[fields[1]] = fields[2]
+                elif fields[0] == "native-guest-save-retained-frame" and len(fields) == 6:
+                    data.setdefault("native_guest_save_retained_frames", {})[fields[1]] = {
+                        "slot": fields[2], "map": fields[3], "pawn": fields[4], "health": _finite(fields[5])}
                 elif fields[0] in ("native-guest-save-frame", "native-guest-save-member-frame") and len(fields) == 7:
                     frame = {
                         "state": fields[1], "slot": fields[2], "map": fields[3], "pawn": fields[4],

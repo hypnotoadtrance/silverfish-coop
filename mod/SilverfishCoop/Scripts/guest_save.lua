@@ -16,6 +16,7 @@ local xp_flag = "Player_Xp"
 local heartbeat_path
 local clear_death_scope
 local bindings = {}
+local retained = {}
 local slot_owners = {}
 
 local function valid(object)
@@ -204,14 +205,33 @@ local function clear_binding(binding)
     return true
 end
 
-function guest_save.clear(name)
-    if name then return clear_binding(bindings[name]) end
+local function release_retained(character)
+    local binding = retained[character]
+    if not binding then return end
+    if valid(binding.owner) and valid(binding.detached) then
+        local stock = binding.owner.SaveSlot_Ref
+        if not valid(stock) or not SilverfishReferenceNativeDetachedSave(
+            stock:GetAddress(), binding.detached:GetAddress(), false) then
+            error("Could not release the retained co-op guest save", 0)
+        end
+    end
+    retained[character] = nil
+end
+
+function guest_save.clear_bindings()
     local changed, failure = false, nil
     for _, candidate in ipairs(sorted_names()) do
         local cleared, result = pcall(clear_binding, bindings[candidate])
         if cleared then changed = result or changed else failure = failure or result end
     end
     if failure then error(failure, 0) end
+    return changed
+end
+
+function guest_save.clear(name)
+    if name then return clear_binding(bindings[name]) end
+    local changed = guest_save.clear_bindings()
+    for character in pairs(retained) do release_retained(character) end
     return changed
 end
 
@@ -278,6 +298,21 @@ function guest_save.exact_item_context(state, phase, name)
     if not binding or not binding.character or
         not live_binding(binding, state, host, guest, heartbeat_fresh(), os.time()) then return end
     return guest.pawn, binding.detached, binding.character
+end
+
+function guest_save.retain(state, phase, name)
+    if type(SilverfishReferenceNativeDetachedSave) ~= "function" then return false end
+    local pawn, detached, character = guest_save.exact_item_context(state, phase, name)
+    if not pawn then return false end
+    local binding = bindings[name]
+    if retained[character] then return retained[character] == binding end
+    if not SilverfishReferenceNativeDetachedSave(binding.stock:GetAddress(), detached:GetAddress(), true) then return false end
+    retained[character] = binding
+    return true, character
+end
+
+function guest_save.cancel_retention(character)
+    if character then release_retained(character) end
 end
 
 local function flag_value(flags, key)
@@ -379,6 +414,7 @@ local function bind(state, phase, name, raw_health, slot, proof)
     if slot and slot_owners[slot] and slot_owners[slot] ~= character then
         error("The native guest save generation belongs to a different character", 0)
     end
+    local previous = retained[character]
     local count = 0
     for _, other in pairs(bindings) do
         count = count + 1
@@ -405,17 +441,28 @@ local function bind(state, phase, name, raw_health, slot, proof)
         error("The active host and guest must share the canonical stock save before detaching", 0)
     end
 
-    local detached, backpack, equipment = detached_save(statics, class, stock, slot)
+    local detached, backpack, equipment
+    if previous then
+        detached = previous.detached
+        if not (same(previous.world, state.world) and same(previous.host, host.pawn)
+            and same(previous.owner, owner) and same(previous.stock, stock)
+            and exact_save(detached, class) and not same(detached, stock) and finite(detached.PlayerHealth)) then
+            error("The retained guest save belongs to a different live campaign", 0)
+        end
+        health = math.min(maximum, detached.PlayerHealth)
+    else
+        detached, backpack, equipment = detached_save(statics, class, stock, slot)
+        if slot and not finite(detached.PlayerHealth) then error("The native guest save generation has invalid health", 0) end
+        if not override then health = slot and math.min(maximum, detached.PlayerHealth) or maximum end
+    end
     if managed_save(detached) then error("The detached native save is already in use", 0) end
-    if proof and proof.appearance then
+    if not previous and proof and proof.appearance then
         require("native_avatar_character_view").install(detached.Character, proof.appearance)
         if proof.profile then
             require("native_guest_creator").install(detached, proof.profile, proof.name, guest.pawn)
         end
     end
-    if slot and not finite(detached.PlayerHealth) then error("The native guest save generation has invalid health", 0) end
-    if not override then health = slot and math.min(maximum, detached.PlayerHealth) or maximum end
-    local was_downed = health <= 0
+    local was_downed = health <= 0 or previous and previous.was_downed
     -- Keep a restored downed pawn above stock death before scope is ready.
     if was_downed then health = math.min(1, maximum) end
     detached.PlayerHealth = health
@@ -429,7 +476,8 @@ local function bind(state, phase, name, raw_health, slot, proof)
         world = state.world, map = state.map, owner = owner, stock = stock, detached = detached,
         created = os.time(), lease_seen = heartbeat_fresh(), was_downed = was_downed,
         restore_slot = slot,
-        frame = slot and { kind = "restored", slot = slot, backpack = backpack, equipment = equipment } or nil,
+        rebound = previous ~= nil,
+        frame = not previous and slot and { kind = "restored", slot = slot, backpack = backpack, equipment = equipment } or nil,
     }
     bindings[name] = binding
     guest.pawn.Save = detached
@@ -437,18 +485,16 @@ local function bind(state, phase, name, raw_health, slot, proof)
         guest_save.clear(name)
         error("Could not verify the detached guest save binding", 0)
     end
-    if slot or (proof and proof.profile) then guest.pawn:Compile_VoxSetup() end
+    if previous then retained[character] = binding end
+    if slot or previous or (proof and proof.profile) then guest.pawn:Compile_VoxSetup() end
     if character and not was_downed then guest.pawn:ApplyDynamicStats() end
     if slot and character then slot_owners[slot] = character end
     return "native guest save bound"
 end
 
-function guest_save.capture(state, phase, name, slot, typed_inventory)
-    if not enabled then error("Native guest saves are disabled", 0) end
+local function capture_binding(binding, slot, typed_inventory, still_authoritative)
     if not generation_slot(slot) then error("An exact co-op guest save generation is required", 0) end
-    local _, guest = exact_guest(state, phase, name)
-    local binding = bindings[name]
-    if not matches(binding, guest.pawn) or binding.map ~= state.map or not same(binding.world, state.world) then
+    if not still_authoritative() then
         error("The authoritative guest does not have a bound detached stock save", 0)
     end
     local statics, class = stock_save_objects()
@@ -467,7 +513,7 @@ function guest_save.capture(state, phase, name, slot, typed_inventory)
 
     local verified = statics:LoadGameFromSlot(slot, 0)
     if not exact_save(verified, class) or same(verified, detached) or same(verified, binding.stock)
-        or managed_save(verified) or not matches(binding, guest.pawn) then
+        or managed_save(verified) or not still_authoritative() then
         error("The co-op guest save generation failed stock readback", 0)
     end
     local checked_backpack, checked_equipment = inventory_counts(verified)
@@ -480,14 +526,36 @@ function guest_save.capture(state, phase, name, slot, typed_inventory)
         and verify(detached:GetAddress(), verified:GetAddress()) ~= true then
         error("The detached stash and backpack did not survive stock serialization", 0)
     end
-    binding.frame = { kind = "captured", slot = slot, backpack = checked_backpack, equipment = checked_equipment }
+    binding.frame = { kind = "captured", slot = slot, backpack = checked_backpack, equipment = checked_equipment, health = health }
     return "detached stock guest save captured"
+end
+
+function guest_save.capture(state, phase, name, slot, typed_inventory)
+    if not enabled then error("Native guest saves are disabled", 0) end
+    local _, guest = exact_guest(state, phase, name)
+    local binding = bindings[name]
+    return capture_binding(binding, slot, typed_inventory, function()
+        return matches(binding, guest.pawn) and binding.map == state.map and same(binding.world, state.world)
+    end)
+end
+
+local function capture_retained(state, phase, character, slot)
+    local binding = retained[character]
+    local host = participants(state, phase)
+    return capture_binding(binding, slot, true, function()
+        return binding and host and binding.map == state.map and same(binding.world, state.world)
+            and same(host.pawn, binding.host) and same(host.controller_object, binding.host_controller)
+            and same(host.pawn.Save, binding.stock) and valid(binding.owner)
+            and same(binding.owner.SaveSlot_Ref, binding.stock)
+            and not managed_save(binding.detached, binding)
+    end)
 end
 
 function guest_save.command(fields, state, phase)
     local command = fields[2]
     if command ~= "native-guest-bind" and command ~= "native-guest-bind-exact" and command ~= "native-guest-clear"
-        and command ~= "native-guest-save-capture" then return end
+        and command ~= "native-guest-save-capture" and command ~= "native-guest-save-capture-retained"
+        and command ~= "native-guest-save-release-retained" then return end
     if not enabled then error("Native guest saves are disabled", 0) end
     if command == "native-guest-clear" then
         if #fields > 3 or (#fields == 3 and not stock_name(fields[3])) then
@@ -499,6 +567,25 @@ function guest_save.command(fields, state, phase)
     if command == "native-guest-save-capture" then
         if #fields ~= 4 then error("Expected the exact guest pawn name and generation slot", 0) end
         return guest_save.capture(state, phase, fields[3], fields[4])
+    end
+    if command == "native-guest-save-capture-retained" then
+        if #fields ~= 4 or not character_uuid(fields[3]) then error("Expected the retained guest and generation slot", 0) end
+        return capture_retained(state, phase, fields[3], fields[4])
+    end
+    if command == "native-guest-save-release-retained" then
+        if phase ~= "hosting" or #fields < 4 or #fields > 10 or #fields % 2 ~= 0 then
+            error("Expected the committed retained guest generations", 0)
+        end
+        for index = 3, #fields, 2 do
+            local character, slot = fields[index], fields[index + 1]
+            local binding = retained[character]
+            if not character_uuid(character) or not generation_slot(slot)
+                or binding and (not binding.frame or binding.frame.slot ~= slot or binding.frame.kind ~= "captured") then
+                error("The retained guest save does not match the committed generation", 0)
+            end
+        end
+        for index = 3, #fields, 2 do release_retained(fields[index]) end
+        return "committed retained guest saves released"
     end
     if command == "native-guest-bind-exact" then
         if #fields < 7 or (#fields > 8 and ((#fields ~= 18 and #fields ~= 20) or fields[8] ~= "-")) then
@@ -576,9 +663,19 @@ function guest_save.rows(status_row)
         rows[#rows + 1] = save_row(status_row, "native-guest-save-member", binding)
         local frame = frame_row(status_row, "native-guest-save-member-frame", binding)
         if frame then rows[#rows + 1] = frame end
+        if binding.rebound and not binding.revoked then
+            rows[#rows + 1] = status_row("native-guest-save-rebound", binding.character, binding.name)
+        end
         if binding.revive and not binding.revoked then
             rows[#rows + 1] = status_row("native-guest-revive", binding.map, binding.name, binding.character or "-",
                 binding.revive.health, binding.revive.maximum)
+        end
+    end
+    for character, binding in pairs(retained) do
+        local frame = binding.frame
+        if frame and frame.kind == "captured" then
+            rows[#rows + 1] = status_row("native-guest-save-retained-frame", character, frame.slot, binding.map,
+                binding.name, frame.health)
         end
     end
     return rows

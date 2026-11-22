@@ -38,6 +38,9 @@ async def verify(work: Path, canary: Path) -> None:
     def checkpoint():
         return json.loads(saved.read_text(encoding="utf-8"))
 
+    def stock_generations():
+        return {path.name for path in (campaign / "game-user").rglob("SFCoop_*.sav")}
+
     def item_claim(current, guid):
         rolls = current.get(native_loot.STATE_KEY, {})
         return next((item.get("claimed_by") for item in rolls.get(crate, {}).get("items", ()) if item["guid"] == guid), None)
@@ -71,10 +74,11 @@ async def verify(work: Path, canary: Path) -> None:
         process, started = await start(0, "host")
         assert not started.get("link_connected")
         before = checkpoint()
+        generations = stock_generations()
         await local("native-loot-approach", target=f"host@{crate}")
         await local("native-loot-crate-fixture", target=crate)
         opened = await wait(run, lambda state: crate in state.get("gameplay", {}).get(native_loot.STATE_KEY, {}))
-        assert checkpoint() == before
+        assert checkpoint() == before and stock_generations() == generations
         proof.update(revision_before_open=before["revision"], revision_after_open=checkpoint()["revision"])
         roll = opened["gameplay"][native_loot.STATE_KEY][crate]
         item = next(row for row in roll["items"] if row["class_path"] not in native_loot.CASH_RANGES)
@@ -86,7 +90,7 @@ async def verify(work: Path, canary: Path) -> None:
         live = await wait(run, lambda state: state.get("native_inventory_checkpoint_pending") is True
                           and item_claim(state.get("gameplay", {}), guid) == "host"
                           and identity not in state.get("game", {}).get(native_world_loot.KEY, {}))
-        assert checkpoint() == before and not live.get("link_connected")
+        assert checkpoint() == before and stock_generations() == generations and not live.get("link_connected")
         inventory = (await local("native-inventory-list"))["native_inventory"]
         granted, = [row for row in inventory["items"] if row["guid"] == guid]
         assert granted["class_path"] == item["class_path"], granted

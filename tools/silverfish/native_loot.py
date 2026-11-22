@@ -43,6 +43,28 @@ def public_roll(roll: dict) -> dict:
     return {key: value for key, value in roll.items() if key != "escrow"}
 
 
+async def flush_pending_escrows(host, bridge, state):
+    rolls = state.get(STATE_KEY, {})
+    pending = {crate: roll["escrow"] for crate, roll in rolls.items()
+               if (roll.get("escrow") or {}).get("pending") is True}
+    if not pending:
+        return state, {}
+    slots = [row["slot"] for row in pending.values()]
+    for start in range(0, len(slots), 16):
+        snapshot = await bridge.command("native-loot-flush-escrows", *slots[start:start + 16])
+        if snapshot.get("state") != "hosting" or snapshot.get("map") != host.last_game.get("map"):
+            raise RuntimeError("The stock loot escrow save changed campaign map")
+        host.last_game, host.last_seen = snapshot, time.monotonic()
+
+    def read_frames():
+        return {crate: native_host_save.record(host.native_profile, row["slot"], row["map"], flush=True)
+                for crate, row in pending.items()}
+
+    records = await asyncio.to_thread(read_frames)
+    return {**state, STATE_KEY: {**rolls, **{crate: dict(rolls[crate], escrow=frame)
+                                           for crate, frame in records.items()}}}, records
+
+
 def pry_defers_unlock(crate: str) -> bool:
     return crate.partition(" ")[0] in DEFERRED_PRY_CLASSES
 
@@ -114,10 +136,15 @@ async def retire_replenished(host, bridge):
             raise RuntimeError("A replenished crate has an invalid or repeated roll identity")
         retired[roll["id"]] = crate
         del candidate[STATE_KEY][crate]
-    revision = await host.checkpoint_native(bridge, candidate)
+    slots = [escrow["slot"] for roll in expired.values()
+             if (escrow := roll.get("escrow")) and escrow.get("pending") is True]
+    for start in range(0, len(slots), 16):
+        host.last_game = await bridge.command("native-loot-release-escrows", *slots[start:start + 16])
+        host.last_seen = time.monotonic()
+    host.pending_native_loot_save = bool(host.pending_native_loot_save)
     host.party = candidate
     for crate, roll in expired.items():
-        host.control.event("native_loot_roll_replenished", crate=crate, roll_id=roll["id"], revision=revision)
+        host.control.event("native_loot_roll_replenished", crate=crate, roll_id=roll["id"])
 
 
 async def restore_legacy_placement(host, bridge) -> None:
@@ -147,9 +174,9 @@ async def restore_legacy_placement(host, bridge) -> None:
             if "transform" not in row:
                 row["transform"] = available.pop(min(available))
         host.last_game, host.last_seen = snapshot, time.monotonic()
-        revision = await host.checkpoint_native(bridge, candidate)
+        host.pending_native_loot_save = bool(host.pending_native_loot_save)
         host.party = candidate
-        host.control.event("native_loot_legacy_placement_restored", crate=crate, map=area, revision=revision)
+        host.control.event("native_loot_legacy_placement_restored", crate=crate, map=area)
         return
 
 
@@ -609,10 +636,13 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
         escrow = saved["escrow"]
         if escrow.get("map") != area:
             raise RuntimeError("The crate escrow belongs to a different map")
-        await asyncio.to_thread(native_host_save.verify_record, host.native_profile, escrow)
+        if not escrow.get("pending"):
+            await asyncio.to_thread(native_host_save.verify_record, host.native_profile, escrow)
         arguments = (guid, escrow["slot"])
         if (transform := item.get("transform")) is not None:
             arguments += tuple(str(axis) for axis in transform["position"])
+        if defer_save and character != "host" and host.last_game.get("native_guest_save_retention"):
+            arguments += ("defer-save",)
     elif action == "open":
         arguments = (native_host_save.new_slot(),)
         if fixture_nonempty:
@@ -621,6 +651,8 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             arguments += ("stock-vehicle-pried",)
         elif power_sequence is not None:
             arguments += ("stock-electronic-powered", str(power_sequence))
+        elif defer_save and host.last_game.get("native_guest_save_retention"):
+            arguments += ("memory-escrow",)
     mutates = action in ("open", "seed", "claim")
     if mutates:
         host.native_checkpoint_unsafe = True
@@ -668,8 +700,11 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 raise RuntimeError("The exact stock crate roll did not verify")
             if fixture_nonempty and (proof["status"] != FORCED_ROLL_STATUS or not items or proof["trait_calls"] != 3):
                 raise RuntimeError("The exact staged stock stream draw did not produce a retained item")
-            frame = await asyncio.to_thread(native_host_save.record, host.native_profile, arguments[0], area,
-                                            flush=True)
+            if proof.get("memory_escrow") is True:
+                frame = {"slot": arguments[0], "map": area, "pending": True}
+            else:
+                frame = await asyncio.to_thread(native_host_save.record, host.native_profile, arguments[0], area,
+                                                flush=True)
             roll = {"id": operation_id, "map": area, "crate": crate, "opener": character,
                     "lucky_looter": proof["lucky_looter"], "trait_source": proof["trait_source"],
                     "trait_calls": proof["trait_calls"], "items": items, "escrow": frame}
@@ -726,9 +761,12 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             receipts = candidate["receipts"].setdefault(character, [])
             receipts.append({"id": operation_id, "request": fingerprint, "result": result})
             del receipts[:-party.RECENT_ACTIONS]
-            deferred = defer_save and character == "host"
+            deferred = defer_save and (character == "host" or proof.get("retained") is True)
             if deferred:
-                host.pending_native_loot_save = bool(host.pending_native_loot_save or merge)
+                if character == "host":
+                    host.pending_native_loot_save = bool(host.pending_native_loot_save or merge)
+                else:
+                    host.queue_guest_loot_save(character, pawn)
             else:
                 revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}),
                                                         typed_inventory=bool(merge))

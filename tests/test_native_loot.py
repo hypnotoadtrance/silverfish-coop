@@ -226,7 +226,8 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         expected = {**roll, "items": [roll["items"][0], dict(unclaimed, transform=restored)]}
         self.assertEqual(host.party[native_loot.STATE_KEY][OTHER_CRATE], expected)
         bridge.command.assert_awaited_once_with(native_loot.PLACEMENT, OTHER_CRATE, timeout=3)
-        host.checkpoint_native.assert_awaited_once_with(bridge, host.party)
+        host.checkpoint_native.assert_not_awaited()
+        self.assertIs(host.pending_native_loot_save, False)
         await native_loot.restore_legacy_placement(host, bridge)
         bridge.command.assert_awaited_once()
 
@@ -250,7 +251,8 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         await native_loot.retire_replenished(host, bridge)
         self.assertEqual(host.party[native_loot.STATE_KEY], {LEGACY_CRATE: untouched})
         self.assertEqual(host.party[native_loot.RETIRED], {"1" * 32: OTHER_CRATE})
-        host.checkpoint_native.assert_awaited_once_with(bridge, host.party)
+        host.checkpoint_native.assert_not_awaited()
+        self.assertIs(host.pending_native_loot_save, False)
         with self.assertRaisesRegex(party.RuleError, "roll_replenished"):
             await native_loot.perform(host, bridge, "host", "open", OTHER_CRATE, expired["id"])
         bridge.command.assert_not_awaited()

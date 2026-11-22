@@ -16,6 +16,10 @@ from live_multi_smoke import saved_hashes
 
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+from tools.silverfish import native_host_save, native_loot, native_world_loot
+from tools.silverfish.authored_loot import full_name
+
 OBSERVATORY = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 CROSSROADS = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 GRACE_SECONDS = 90
@@ -36,22 +40,6 @@ def status(run: Path) -> dict:
 def lease(server: dict, character: str) -> dict:
     return next((row for row in server.get("campaign", {}).get("leases", [])
                  if row.get("character_id") == character), {})
-
-
-def expiry_receipt(run: Path, character: str, slot: str) -> dict:
-    try:
-        lines = (run / "events.jsonl").read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return {}
-    for line in reversed(lines):
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if (event.get("event") == "native_guest_expiry_checkpointed" and event.get("character_id") == character
-                and event.get("slot") == slot):
-            return event
-    return {}
 
 
 def native_guest(server: dict, character: str) -> dict:
@@ -81,11 +69,13 @@ def manifest_digest(hashes: dict[str, str]) -> str:
     return sha256(json.dumps(hashes, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-async def validate(work: Path, original_saved: Path, *, outage: float, check_expiry: bool, single_slot: bool) -> None:
+async def validate(work: Path, original_saved: Path, *, outage: float, check_expiry: bool, single_slot: bool,
+                   guest_crate: bool) -> None:
     if os.name != "nt":
         raise OSError("The live reconnect test requires the staged Windows game")
     name = "reconnect-grace-" + uuid.uuid4().hex[:8]
-    host_run = work / "campaigns" / name / "run"
+    host_campaign = work / "campaigns" / name
+    host_run = host_campaign / "run"
     guest_run = work / "clients" / name / "run"
     host_run.mkdir(parents=True)
     guest_run.mkdir(parents=True)
@@ -205,6 +195,9 @@ async def validate(work: Path, original_saved: Path, *, outage: float, check_exp
             raise AssertionError("The exact staged item is missing from the guest backpack")
         return {key: items[0][key] for key in ("guid", "class_path", "source", "quantity")}
 
+    def save_hashes(root, pattern):
+        return {path.relative_to(root): sha256(path.read_bytes()).hexdigest() for path in root.rglob(pattern)}
+
     try:
         await start("host", host_run, primary, "--port", "0", "--headless", "--fixtures",
                     "--native-zones", "--native-events", "--native-guest",
@@ -221,13 +214,47 @@ async def validate(work: Path, original_saved: Path, *, outage: float, check_exp
             await action(primary, "native-guest-weapon-seed", "--target", "guest", "--item-guid", marker)
             evidence["placed_inventory"] = await inventory_item(marker)
 
+        if guest_crate:
+            revision = (await action(primary, "checkpoint"))["revision"]
+            campaign_hashes = save_hashes(host_campaign / "save", "campaign*.json")
+            native_hashes = save_hashes(host_campaign / "game-user", "*.sav")
+            crate = full_name(OBSERVATORY, "LootCrate_Small_BP_C_1")
+            await action(primary, "native-loot-approach", "--target", f"host@{crate}")
+            await action(primary, "native-loot-crate-fixture", "--target", crate)
+            opened, _ = await wait("The host did not open the authored crate", lambda server, _:
+                                   crate in server.get("gameplay", {}).get(native_loot.STATE_KEY, {}))
+            roll = opened["gameplay"][native_loot.STATE_KEY][crate]
+            item = next(row for row in roll["items"] if row["class_path"] not in native_loot.CASH_RANGES)
+            identity = native_world_loot.crate_identity(roll["id"], item["guid"])
+            await wait("The host did not see the physical item", lambda server, _:
+                       identity in server.get("game", {}).get(native_world_loot.KEY, {}))
+            await action(primary, native_world_loot.APPROACH, "--target", f"guest@{identity}")
+            await wait("The guest did not see the physical item", lambda _, client:
+                       identity in client.get("game", {}).get(native_world_loot.KEY, {}))
+            await action(secondary, native_world_loot.FIXTURE, "--target", identity)
+            await wait("The guest did not receive the crate pickup", lambda server, client:
+                       any(row.get("claimed_by") == character for row in
+                           server.get("gameplay", {}).get(native_loot.STATE_KEY, {}).get(crate, {}).get("items", ())
+                           if row["guid"] == item["guid"]))
+            events = (json.loads(line) for line in (host_run / "events.jsonl").read_text(encoding="utf-8").splitlines())
+            claim, = [event for event in events if event["event"] == "native_loot_claim_accepted"
+                      and event.get("guid") == item["guid"]]
+            inventory_guid = claim.get("inventory_guid", item["guid"])
+            evidence["unsaved_crate_pickup"] = await inventory_item(inventory_guid)
+            assert save_hashes(host_campaign / "save", "campaign*.json") == campaign_hashes
+            assert save_hashes(host_campaign / "game-user", "*.sav") == native_hashes
+
         # Leave the guest at the normal spawn and position only the listen host at the Observatory exit.
         await action(primary, "native-exit-position", "--target", "host", "--exit-position", "near")
         server, client = await settled_pair()
         initial = native_guest(server, character)
         client_pawn = client["game"]["pawns"]["local"]["name"]
         evidence["before_outage"] = initial
-        await action(primary, "checkpoint")
+        if not guest_crate:
+            revision = (await action(primary, "checkpoint"))["revision"]
+            campaign_hashes = save_hashes(host_campaign / "save", "campaign*.json")
+            native_hashes = save_hashes(host_campaign / "game-user", "*.sav")
+        assert campaign_hashes and any(path.name.startswith("SFCoop_") for path in native_hashes)
         started, first_reserved = await pause_link()
         paused = native_guest(first_reserved, character)
         if (not paused or exact_identity(paused) != exact_identity(initial)
@@ -297,9 +324,15 @@ async def validate(work: Path, original_saved: Path, *, outage: float, check_exp
             raise AssertionError({"last_disconnected": retained, "after": after})
         evidence["resumed"] = after
         evidence["post_resume_blocker"] = await blocked_travel()
+        assert host_after["campaign"]["revision"] == revision
+        assert save_hashes(host_campaign / "save", "campaign*.json") == campaign_hashes
+        assert save_hashes(host_campaign / "game-user", "*.sav") == native_hashes
+        evidence["no_save_on_reconnect"] = True
+        if guest_crate:
+            assert await inventory_item(inventory_guid) == evidence["unsaved_crate_pickup"]
 
         if check_expiry:
-            second_outage, reserved = await pause_link()
+            second_outage, _ = await pause_link()
             expired, _ = await wait("The reservation and old native pawn did not clear after expiry",
                 lambda server, _: server.get("state") == "hosting" and not lease(server, character)
                 and server.get("game", {}).get("remote_clients") == 0
@@ -314,11 +347,10 @@ async def validate(work: Path, original_saved: Path, *, outage: float, check_exp
             frame = durable.get("native_guest_save", {})
             if frame.get("character_id") != character or frame.get("map") != OBSERVATORY or "health" not in durable:
                 raise AssertionError("The expired character did not retain an exact detached native save generation")
-            receipt = expiry_receipt(host_run, character, frame["slot"])
-            if (type(receipt.get("revision")) is not int
-                    or not reserved["campaign"]["revision"] < receipt["revision"] <= expired["campaign"]["revision"]):
-                raise AssertionError({"durable_slot": frame["slot"], "expiry_checkpoint": receipt})
-            evidence["expiry_checkpoint"] = receipt
+            assert expired["campaign"]["revision"] == revision
+            assert save_hashes(host_campaign / "save", "campaign*.json") == campaign_hashes
+            assert save_hashes(host_campaign / "game-user", "*.sav") == native_hashes
+            evidence["no_save_on_expiry"] = True
             resumed = await action(secondary, "reconnect")
             if resumed.get("resumed") is not False or resumed.get("link_connected") is not True:
                 raise AssertionError(resumed)
@@ -332,6 +364,15 @@ async def validate(work: Path, original_saved: Path, *, outage: float, check_exp
             if await inventory_item(marker) != evidence["placed_inventory"]:
                 raise AssertionError("The replacement did not restore the exact stock inventory item")
             evidence["expired_replacement"] = {"pawn": returned, "durable_slot": frame["slot"], "inventory_restored": True}
+        if guest_crate:
+            assert await inventory_item(inventory_guid) == evidence["unsaved_crate_pickup"]
+            saved_revision = (await action(primary, "checkpoint"))["revision"]
+            assert saved_revision == revision + 1
+            saved = json.loads((host_campaign / "save/campaign.json").read_text(encoding="utf-8"))
+            native_host_save.verify_checkpoint(host_campaign / "game-user", saved)
+            saved_items = saved["world"]["party"][native_loot.STATE_KEY][crate]["items"]
+            assert any(row["guid"] == item["guid"] and row["claimed_by"] == character for row in saved_items)
+            evidence["crate_pickup_saved_at_revision"] = saved_revision
         evidence["verified"] = True
     except BaseException as error:
         evidence["verified"] = False
@@ -371,12 +412,13 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path,
                         default=Path(os.environ.get("LOCALAPPDATA", ".")) / "SilverFish" / "Saved")
     parser.add_argument("--outage", type=float, default=75, help="seconds to remain suspended within the 90-second grace")
-    parser.add_argument("--expiry", action="store_true", help="verify the final expiry checkpoint and replacement stock state")
+    parser.add_argument("--expiry", action="store_true", help="verify expiry leaves saves untouched and allows a replacement pawn")
     parser.add_argument("--single-slot", action="store_true", help="test the legacy one-slot host instead of PartyMembers")
+    parser.add_argument("--guest-crate", action="store_true", help="keep a stock guest pickup in memory until an explicit save")
     options = parser.parse_args()
     if not 5 <= options.outage <= 80:
         parser.error("--outage must be between 5 and 80 seconds")
     if not options.vanilla_saved.is_dir():
         parser.error("--vanilla-saved must be an existing original Saved directory")
     asyncio.run(validate(options.work.resolve(), options.vanilla_saved.resolve(), outage=options.outage,
-                         check_expiry=options.expiry, single_slot=options.single_slot))
+                         check_expiry=options.expiry, single_slot=options.single_slot, guest_crate=options.guest_crate))

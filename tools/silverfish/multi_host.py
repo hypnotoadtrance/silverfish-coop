@@ -7,7 +7,7 @@ import time
 
 from . import link, native_host_save, party
 from .party_members import PartyMemberError, PartyMembers
-from .service import GUEST_EXPIRY_CAPTURE_ATTEMPTS, Host, POSITION_MAX_AGE, PROTOCOL, _pawn, guest_arrival_positions
+from .service import Host, POSITION_MAX_AGE, PROTOCOL, _pawn, guest_arrival_positions
 from .travel import SLATE
 
 
@@ -26,7 +26,6 @@ class MultiHost(Host):
         self.return_waiting: int | None = None
         self.return_retried: set[str] = set()
         self.return_retry_request: tuple[int, int, asyncio.Future] | None = None
-        self.retirement_processed: set[str] = set()
 
     def _return_blocked(self) -> bool:
         # The new listener can open before the durable wipe and host respawn are complete.
@@ -94,12 +93,8 @@ class MultiHost(Host):
             return
         intentional = self.consume_guest_leave(guest_id)
         member = self.members.disconnect(guest_id, intentional=intentional)
-        if member and intentional:
-            self.retirement_processed.add(member.lease_id)
-            return
-        if member:
+        if member and not intentional:
             self.control.event("guest_link_lost", guest_id=guest_id, grace_seconds=self.members.grace_seconds)
-            self.request_disconnect_save(member.character_id, ready=member.ready)
 
     def authenticated_guest(self, guest_id: str) -> tuple[str, str] | None:
         member = self.members.get(guest_id)
@@ -320,6 +315,9 @@ class MultiHost(Host):
             targets[member.character_id] = pawn
         return targets
 
+    def guest_lease_ids(self) -> dict[str, str]:
+        return {member.character_id: member.lease_id for member in self.members.members}
+
     async def _place_member(self, bridge, member, observation, *, near_host: bool):
         area = self.last_game["map"]
         if area == SLATE and self.dream_isolated(self.last_game):
@@ -375,7 +373,12 @@ class MultiHost(Host):
         scope = snapshot.get("native_guest_save_members", {}).get(binding.pawn, {})
         if scope.get("state") != "bound" or scope.get("pawn") != binding.pawn:
             raise RuntimeError("The game did not detach the exact authenticated guest save")
-        if frame:
+        if member.character_id in self.pending_guest_loot_saves:
+            if snapshot.get("native_guest_save_rebound", {}).get(member.character_id) != binding.pawn:
+                raise RuntimeError("The game did not rebind the retained guest inventory")
+            self.last_game = snapshot
+            self.queue_guest_loot_save(member.character_id, binding.pawn)
+        elif frame:
             proof = snapshot.get("native_guest_save_member_frames", {}).get(binding.pawn, {})
             if (proof.get("state") != "restored" or proof.get("slot") != frame["slot"]
                     or proof.get("pawn") != binding.pawn):
@@ -415,7 +418,7 @@ class MultiHost(Host):
             identifier = result.reservation.guest_id
             self.control.event("native_guest_enrollment_aborted", guest_id=identifier, reason=result.reason)
             await transport.abort_guest_route(identifier)
-        await self._retire_expired_guests(bridge, transport)
+        await self._retire_expired_guests(transport)
         participants = self.members.match_pawns(self.last_game)
         for member in self.members.members:
             observation = participants.get(member.role)
@@ -428,22 +431,8 @@ class MultiHost(Host):
                     raise
         self._reserve_next_return()
 
-    async def _retire_expired_guests(self, bridge, transport) -> None:
-        expired = self.members.expired()
-        still_bound = self.members.match_pawns(self.last_game, include_expired=True) if expired else {}
-        candidates = [member for member in expired if member.ready and member.binding
-                      and member.lease_id not in self.retirement_processed]
-        departing = {member.character_id: row.binding.pawn for member in candidates
-                     if (row := still_bound.get(member.role))}
-        committed = await self.checkpoint_departing_guests(bridge, departing)
-        awaiting = {}
-        for member in candidates:
-            attempts = self.expiry_capture_attempts.get(member.lease_id, 0) + 1
-            if member.character_id not in committed and attempts < GUEST_EXPIRY_CAPTURE_ATTEMPTS:
-                awaiting[member.lease_id] = attempts
-        self.expiry_capture_attempts = awaiting
-        self.retirement_processed = {member.lease_id for member in expired if member.lease_id not in awaiting}
-        for member in self.members.expire(self.last_game, awaiting_checkpoint=frozenset(awaiting)):
+    async def _retire_expired_guests(self, transport) -> None:
+        for member in self.members.expire(self.last_game):
             if self.members.get(member.guest_id) is not None:
                 continue
             self.report_guest_runtime_retired(member.guest_id)
