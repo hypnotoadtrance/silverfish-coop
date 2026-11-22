@@ -158,7 +158,7 @@ local function execution(world, director, driver, pawn, host, operation, marker_
         return tostring(deaths)
     elseif operation == "corpseposition" or operation == "corpsemove" then
         local corpse
-        for _, actor in ipairs(exact_boars(world)) do
+        for _, actor in ipairs(exact_npcs(world)) do
             if not actor.Alive and actor:GetLocalRole() == (host and 3 or 1)
                 and valid(actor.Mesh) and actor.Mesh:IsAnySimulatingPhysics() then
                 assert(not corpse, "expected one stock corpse")
