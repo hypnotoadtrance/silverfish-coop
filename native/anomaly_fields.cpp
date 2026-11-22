@@ -70,8 +70,9 @@ namespace
     std::array<U::FName, 3> observer_events;
     bool shadow_replication{};
     bool angler_replication{};
+    bool observer_enabled{};
     bool observer_fixture{};
-    bool observer_loot_fixture{};
+    bool observer_reward_replication_fixture{};
     H::GlobalCallbackId observer_script_post = H::ERROR_ID, observer_internal_post = H::ERROR_ID;
     H::GlobalCallbackId observer_actor_begin = H::ERROR_ID;
     U::FName patch_name;
@@ -168,7 +169,7 @@ namespace
     int set_observer_target(const Lua& lua)
     {
         bool accepted = false;
-        if (observer_fixture && !guest_session && U::IsInGameThreadRaw() &&
+        if (observer_enabled && !guest_session && U::IsInGameThreadRaw() &&
             observer_script_post != H::ERROR_ID && observer_internal_post != H::ERROR_ID &&
             lua.get_stack_size() == 2 && lua.is_string(1) && lua.is_string(2))
         {
@@ -204,7 +205,7 @@ namespace
     void begin_observer_check(Iteration& call, U::UObject* actor, U::FFrame& frame)
     {
         auto* method = frame.Node();
-        if (!observer_fixture || guest_session || checking_observer.frame || !method ||
+        if (!observer_enabled || guest_session || checking_observer.frame || !method ||
             method->GetFName() != observer_check || !U::IsInGameThreadRaw() || call.OriginalFunctionCallPrevented() ||
             !actual_observer(actor) || method->GetOuterPrivate() != actor->GetClassPrivate()) return;
         const auto now = Clock::now();
@@ -237,7 +238,7 @@ namespace
     void begin_observer_offering(Iteration& call, U::UObject* actor, U::FFrame& frame)
     {
         auto* method = frame.Node();
-        if (!observer_fixture || guest_session || observer_offering.frame || !method ||
+        if (!observer_enabled || guest_session || observer_offering.frame || !method ||
             method->GetFName() != observer_absorb || frame.Object() != actor || call.OriginalFunctionCallPrevented() ||
             !U::IsInGameThreadRaw() || !actual_observer(actor) || method->GetOuterPrivate() != actor->GetClassPrivate() ||
             method->GetNumParms() != 1 || method->GetReturnProperty() || !frame.Locals()) return;
@@ -277,7 +278,7 @@ namespace
         if (call.OriginalFunctionCallPrevented()) return;
         auto* base = U::UObjectGlobals::StaticFindObject<U::UClass*>(nullptr, nullptr, item_class);
         if (!item || !base || !item->IsA(base) || static_cast<U::AActor*>(item)->GetWorld() != world) return;
-        if (observer_loot_fixture)
+        if (!observer_reward_replication_fixture)
         {
             if (silverfish::stock_enemy_drops::track_observer_reward(observer_actor, item)) ++observer_reward_results;
             return;
@@ -290,7 +291,7 @@ namespace
 
     int take_observer_reward(const Lua& lua)
     {
-        if (!observer_fixture || guest_session || !U::IsInGameThreadRaw() ||
+        if (!observer_reward_replication_fixture || guest_session || !U::IsInGameThreadRaw() ||
             lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
         const auto world = static_cast<std::uintptr_t>(lua.get_integer());
         for (auto& entry : observer_rewards)
@@ -339,7 +340,7 @@ namespace
         if (name == gravity) return type->GetPathName() == gravity_class;
         if (name == pyrogeist) return type->GetPathName() == pyrogeist_class;
         if (angler_replication && name == angler) return type->GetPathName() == angler_class;
-        if (observer_fixture && name == observer) return type->GetPathName() == observer_class;
+        if (observer_enabled && name == observer) return type->GetPathName() == observer_class;
         return shadow_replication && name == shadow && type->GetPathName() == shadow_class;
     }
 
@@ -383,7 +384,7 @@ namespace
         const bool fire_event = name == fire_graph || name == fire_damage;
         const bool shadow_event = shadow_replication && name == shadow_graph;
         const bool angler_event = angler_replication && std::ranges::find(angler_events, name) != angler_events.end();
-        const bool observer_event = observer_fixture && std::ranges::find(observer_events, name) != observer_events.end();
+        const bool observer_event = observer_enabled && std::ranges::find(observer_events, name) != observer_events.end();
         const bool prop_event = !field && std::find(canister_events.begin(), canister_events.end(), name) != canister_events.end();
         const bool fixed_event = !field && std::find(fixed_prop_events.begin(), fixed_prop_events.end(), name) != fixed_prop_events.end();
         const bool patch_event = std::ranges::find(patch_events, name) != patch_events.end();
@@ -512,7 +513,7 @@ namespace silverfish::native_anomaly_fields
 {
     bool exact_observer_gaze(U::UObject* actor, U::UObject* pawn)
     {
-        return observer_fixture && checking_observer.frame && checking_observer.actor.Get() == actor &&
+        return observer_enabled && checking_observer.frame && checking_observer.actor.Get() == actor &&
             checking_observer.pawn.Get() == pawn && object(actor, STR("As Player FP")) == pawn;
     }
 
@@ -543,8 +544,9 @@ namespace silverfish::native_anomaly_fields
             U::FName{STR("AddLook"), U::FNAME_Add},
             U::FName{STR("SubtractLook"), U::FNAME_Add},
         };
-        observer_fixture = opt_in("SILVERFISH_COOP_HEADLESS") && opt_in("SILVERFISH_COOP_OBSERVER_FIXTURE");
-        observer_loot_fixture = observer_fixture && opt_in("SILVERFISH_COOP_OBSERVER_LOOT_FIXTURE");
+        observer_enabled = opt_in("SILVERFISH_COOP_NATIVE_ZONE");
+        observer_fixture = observer_enabled && opt_in("SILVERFISH_COOP_HEADLESS") && opt_in("SILVERFISH_COOP_OBSERVER_FIXTURE");
+        observer_reward_replication_fixture = observer_fixture && opt_in("SILVERFISH_COOP_OBSERVER_REWARD_REPLICATION_FIXTURE");
         observer = U::FName{STR("Observers_BP_C"), U::FNAME_Add};
         observer_check = U::FName{STR("CheckPlayerLooking"), U::FNAME_Add};
         observer_absorb = U::FName{STR("AbsorbItem"), U::FNAME_Add};
@@ -636,7 +638,7 @@ namespace silverfish::native_anomaly_fields
                U::FURL, U::UPendingNetGame*, U::FString&) {
                 if (loading.context == &context) loading = {};
             }, {false, true, owner, STR("Release the guest trap map loading scope")});
-        if (observer_fixture)
+        if (observer_enabled)
         {
             const auto stock_result = [](Iteration& call, U::UObject* actor, U::FFrame& frame, void* result) {
                 end_observer_check(call, actor, frame, result);
@@ -670,10 +672,11 @@ namespace silverfish::native_anomaly_fields
     {
         lua.register_function("SilverfishSetNativeAnomalyGuest", set_guest);
         lua.register_function("SilverfishReadNativeAnomalySkips", count);
+        if (observer_enabled) lua.register_function("SilverfishSetNativeObserverTarget", set_observer_target);
+        if (observer_reward_replication_fixture)
+            lua.register_function("SilverfishTakeNativeObserverReward", take_observer_reward);
         if (observer_fixture)
         {
-            lua.register_function("SilverfishSetNativeObserverTarget", set_observer_target);
-            lua.register_function("SilverfishTakeNativeObserverReward", take_observer_reward);
             lua.register_function("SilverfishReadObserverOfferingFixture", [](const Lua& access) {
                 access.set_integer(observer_offers);
                 access.set_integer(observer_reward_results);

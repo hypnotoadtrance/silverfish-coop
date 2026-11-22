@@ -15,7 +15,7 @@ local enrolled, holdings, edges, local_hold, latest = {}, {}, {}, nil, nil
 local fixture_actor
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local fixtures = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
-local offering_fixture = observers.enabled and os.getenv("SILVERFISH_COOP_OBSERVER_THROW_FIXTURE") == "1"
+local offering_fixture = headless and observers.enabled and os.getenv("SILVERFISH_COOP_OBSERVER_THROW_FIXTURE") == "1"
 
 local function valid(value) return value and value ~= false and value:IsValid() end
 local function same(left, right) return valid(left) and valid(right) and left:GetAddress() == right:GetAddress() end

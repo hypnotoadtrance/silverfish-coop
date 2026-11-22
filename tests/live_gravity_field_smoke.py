@@ -391,9 +391,10 @@ async def verify(work, family, observer_offering=None):
         if family == "angler-lamp" and args[0] == "join":
             env["SILVERFISH_COOP_ANGLER_LAMP_FIXTURE"] = "1"
         if family == "observer":
-            env["SILVERFISH_COOP_OBSERVER_FIXTURE"] = "1"
-            if observer_offering in ("loot", "input"):
-                env["SILVERFISH_COOP_OBSERVER_LOOT_FIXTURE"] = "1"
+            if observer_offering in ("contact", "flight", "input"):
+                env["SILVERFISH_COOP_OBSERVER_FIXTURE"] = "1"
+            if observer_offering in ("contact", "flight"):
+                env["SILVERFISH_COOP_OBSERVER_REWARD_REPLICATION_FIXTURE"] = "1"
             if observer_offering == "input":
                 env["SILVERFISH_COOP_OBSERVER_THROW_FIXTURE"] = "1"
         with (host / f"{args[0]}.log").open("wb") as log:
@@ -491,6 +492,8 @@ async def verify(work, family, observer_offering=None):
                 return
             if family == "observer":
                 if observer_offering:
+                    if observer_offering == "loot":
+                        common["gaze"] = await verify_observer(guest, host_box, guest_box, probe)
                     common.update(await verify_observer_offering(
                         host, guest, host_box, guest_box, probe, observer_offering, invite["character_id"]))
                     evidence = host / "live-observer-offering.json"

@@ -2,7 +2,7 @@ local observers = {}
 local guest_save = require("guest_save")
 
 observers.class = "BlueprintGeneratedClass /Game/Classes/Anomalies/Observers_BP.Observers_BP_C"
-observers.enabled = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_OBSERVER_FIXTURE") == "1"
+observers.enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local trace_path = "/Script/Engine.Default__KismetSystemLibrary"
 local clock_path = "/Script/Engine.Default__GameplayStatics"
@@ -197,8 +197,7 @@ function observers.catch_offering(state, pawn, item, direction)
 end
 
 function observers.publish_rewards(state, phase)
-    if not observers.enabled or phase ~= "hosting" or state.server or not state.listening or state.map ~= crossroads
-        or type(SilverfishTakeNativeObserverReward) ~= "function" then return end
+    if not observers.enabled or phase ~= "hosting" or state.server or not state.listening or state.map ~= crossroads then return end
     if fixture_box and fixture_box:find("observer%-proof%-%x+") and type(SilverfishReadObserverOfferingFixture) == "function" then
         local calls, results = SilverfishReadObserverOfferingFixture()
         local report = tostring(calls) .. ":" .. tostring(results)
@@ -207,6 +206,7 @@ function observers.publish_rewards(state, phase)
             if file then file:write(report, "\n"); file:close(); last_fixture_report = report end
         end
     end
+    if type(SilverfishTakeNativeObserverReward) ~= "function" then return end
     for _ = 1, 32 do
         local path = SilverfishTakeNativeObserverReward(state.world:GetAddress())
         if not path then break end
