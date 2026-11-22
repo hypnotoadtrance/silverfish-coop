@@ -191,7 +191,8 @@ if __name__ == "__main__":
     if args.lean:
         from avatar_lean_probe import installed_probe
 
-        os.environ.update(SILVERFISH_COOP_AVATAR_LEAN="1", SILVERFISH_COOP_AVATAR_LEAN_PROBE="1")
+        os.environ.pop("SILVERFISH_COOP_AVATAR_LEAN", None)
+        os.environ["SILVERFISH_COOP_AVATAR_LEAN_PROBE"] = "1"
         with installed_probe(work / "stage"):
             asyncio.run(verify(work, original, lean=True))
     else:

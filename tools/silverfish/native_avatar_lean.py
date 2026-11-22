@@ -19,7 +19,7 @@ _MAX_PLAYERS = 16
 
 
 def enabled(bridge):
-    return (os.getenv("SILVERFISH_COOP_AVATAR_LEAN") == "1" and bridge.local_bridge is not None
+    return (os.getenv("SILVERFISH_COOP_AVATAR_LEAN", "1") == "1" and bridge.local_bridge is not None
             and bridge.local_bridge.avatar_pose_available)
 
 

@@ -6,6 +6,16 @@ from tools.silverfish import native_avatar_lean as lean, native_player_avatar as
 
 
 class AvatarLeanSequenceTests(unittest.IsolatedAsyncioTestCase):
+    def test_mailbox_capability_enables_stock_lean_with_no_flag(self):
+        key = "SILVERFISH_COOP_AVATAR_LEAN"
+        bridge = SimpleNamespace(local_bridge=SimpleNamespace(avatar_pose_available=True))
+        with patch.dict(lean.os.environ, {key: "0"}):
+            self.assertFalse(lean.enabled(bridge))
+            del lean.os.environ[key]
+            self.assertTrue(lean.enabled(bridge))
+            bridge.local_bridge.avatar_pose_available = False
+            self.assertFalse(lean.enabled(bridge))
+
     async def test_relay_keeps_pose_sequence_when_the_same_host_visit_recovers(self):
         pawn = "Player_FP_C Host"
         visit = "a" * 32

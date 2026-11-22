@@ -1,6 +1,6 @@
 local avatar = require("native_player_avatar")
 local players = require("players")
-local lean_bridge = {enabled = os.getenv("SILVERFISH_COOP_AVATAR_LEAN") == "1"}
+local lean_bridge = {enabled = (os.getenv("SILVERFISH_COOP_AVATAR_LEAN") or "1") == "1"}
 local scope
 
 local function valid(object)
@@ -53,6 +53,7 @@ function lean_bridge.update(get_world, role, leaving)
         scope = nil
         return
     end
+    if type(SilverfishTakeRemoteAvatarPoses) ~= "function" or type(SilverfishPublishLocalAvatarPose) ~= "function" then return end
     local now = os.clock()
     if now < current.next_sample then return end
     current.next_sample = now + .05
@@ -66,7 +67,6 @@ function lean_bridge.update(get_world, role, leaving)
         scope = nil
         return
     end
-    if type(SilverfishTakeRemoteAvatarPoses) ~= "function" or type(SilverfishPublishLocalAvatarPose) ~= "function" then return end
     local attached, frame = SilverfishTakeRemoteAvatarPoses()
     if attached ~= true then
         current.last_roll, current.last_publish = nil, nil
