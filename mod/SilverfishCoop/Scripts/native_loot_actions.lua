@@ -132,7 +132,8 @@ function actions.command(fields, state, phase)
         return "stock loot claim reported"
     end
     local inspect = action == "approach" and loot.approach_fixture or loot.qualify
-    local qualified, scope = pcall(inspect, state, phase, pawn, crate, action == "inspect" or action == "seed" or pried or powered)
+    -- Stock Interact already chose the hit component before the shared open was queued.
+    local qualified, scope = pcall(inspect, state, phase, pawn, crate, true)
     if not qualified then
         result.status = tostring(scope)
         return "stock loot unavailable"

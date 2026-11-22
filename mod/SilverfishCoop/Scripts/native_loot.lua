@@ -244,10 +244,12 @@ local function distance_to_box(pawn, box, allow_distant)
         local offset = math.max(0, math.abs(dot) - radius)
         squared = squared + offset * offset
     end
-    local range = pawn.InteractionRange
-    if not finite(range) or range <= 0 or range > 1000 or not finite(squared)
-        or not allow_distant and squared > range * range then
-        error("native_loot_crate_out_of_reach", 0)
+    if not finite(squared) then error("native_loot_invalid_crate_box", 0) end
+    if not allow_distant then
+        local range = pawn.InteractionRange
+        if not finite(range) or range <= 0 or range > 1000 or squared > range * range then
+            error("native_loot_crate_out_of_reach", 0)
+        end
     end
     return target, math.sqrt(squared)
 end

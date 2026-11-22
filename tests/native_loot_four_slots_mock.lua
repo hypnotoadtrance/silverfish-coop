@@ -8,7 +8,7 @@ end
 local map, name, pawn_name = "exact lab map", "exact permanent cabinet", "exact guest"
 local slot = "SFCoop_" .. ("a"):rep(32)
 local scope = {profile = {small_cabinet = true, capacity = 4}, crate = object(1), pawn = object(2),
-    box = object(3), save = object(4), stock = object(5), lucky_looter = true, lucky_source = "detached", distance = 105}
+    box = object(3), save = object(4), stock = object(5), lucky_looter = true, lucky_source = "detached", distance = 350}
 local scratched, restored = object(6), object(7)
 local retired, writes, claims = {}, 0, 0
 local expected_outputs, expected_items = {11, 0, 33, 44}, "11,33,44"
@@ -43,7 +43,10 @@ end
 
 package.loaded.native_loot = {
     profile = function(area, target) if area == map and target == name then return scope.profile end end,
-    qualify = function(_, _, pawn, target) assert(pawn == pawn_name and target == name); return scope end,
+    qualify = function(_, _, pawn, target, allow_distant)
+        assert(pawn == pawn_name and target == name and allow_distant)
+        return scope
+    end,
     claim_context = function(_, _, pawn, target) assert(pawn == pawn_name and target == name); return scope end,
     results = results,
 }

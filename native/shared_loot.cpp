@@ -61,7 +61,6 @@ namespace
     constexpr auto passive_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:FindPassiveEffect");
     constexpr auto items_library = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Items.Default__FL_Items_C");
     constexpr auto find_key_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Items.FL_Items_C:FindItem_InBackPack");
-    constexpr auto box_location_path = STR("/Script/Engine.SceneComponent:K2_GetComponentLocation");
     constexpr auto box_collision_path = STR("/Script/Engine.PrimitiveComponent:GetCollisionEnabled");
     constexpr auto character_type_path =
         STR("/Game/Classes/Libraries/Structs/PlayerCharacter_Struct.PlayerCharacter_Struct");
@@ -213,34 +212,6 @@ namespace
         return matched;
     }
 
-    bool qualified_reach(const Context& context)
-    {
-        auto* range_prop = field<Unreal::FDoubleProperty>(context.pawn, STR("InteractionRange"));
-        auto* location = find<Unreal::UFunction>(box_location_path);
-        auto* vector = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
-        auto* output = field<Unreal::FStructProperty>(location, STR("ReturnValue"));
-        struct BoxLocation
-        {
-            double x{};
-            double y{};
-            double z{};
-        } result;
-        if (!range_prop || !location || !vector || !output || output->GetStruct().Get() != vector ||
-            output != location->GetReturnProperty() || location->GetNumParms() != 1 ||
-            location->GetParmsSize() != sizeof(result) || output->GetOffset_Internal() != 0 ||
-            !location->HasAnyFunctionFlags(Unreal::FUNC_Native)) return false;
-
-        context.box->ProcessEvent(location, &result);
-        auto source = static_cast<Unreal::AActor*>(context.pawn)->K2_GetActorLocation();
-        const auto dx = result.x - source.GetX();
-        const auto dy = result.y - source.GetY();
-        const auto dz = result.z - source.GetZ();
-        const auto range = range_prop->GetPropertyValueInContainer(context.pawn);
-        const auto squared = dx * dx + dy * dy + dz * dz;
-        return std::isfinite(range) && range > 0.0 && range <= 1000.0 &&
-               std::isfinite(squared) && squared <= range * range;
-    }
-
     bool query_collision_enabled(Unreal::UObject* box)
     {
         auto* function = find<Unreal::UFunction>(box_collision_path);
@@ -317,7 +288,7 @@ namespace
         return false;
     }
 
-    std::string_view qualify(Address crate, Address pawn, Address box, Address save, Address stock, Context& context, bool deferred_open)
+    std::string_view qualify(Address crate, Address pawn, Address box, Address save, Address stock, Context& context)
     {
         context.crate = live_object_at(crate);
         context.profile = silverfish::shared_loot::authored_profile(context.crate);
@@ -349,8 +320,7 @@ namespace
         if (!silverfish::shared_loot::read_spawners(context.crate, context.instance, context.spawners))
             return "stock_crate_child_spawner_unavailable";
         if (!query_collision_enabled(context.box)) return "stock_crate_box_not_interactable";
-        // Deferred continuations have already been triggered by a stock tool or power signal.
-        return deferred_open || qualified_reach(context) ? std::string_view{} : "stock_crate_out_of_reach";
+        return {};
     }
 
     struct OpenParams
@@ -1067,7 +1037,7 @@ namespace
         if (force_nonempty && pried) return result(lua, false, "stock_loot_pry_fixture_scope_unavailable");
         if (force_nonempty && !seeded_fixture_enabled())
             return result(lua, false, "stock_loot_fixture_seed_unavailable");
-        if (const auto failure = qualify(addresses[0], addresses[1], addresses[2], addresses[3], addresses[4], context, pried || powered);
+        if (const auto failure = qualify(addresses[0], addresses[1], addresses[2], addresses[3], addresses[4], context);
             !failure.empty()) return result(lua, false, failure);
         Unreal::UClass* key{};
         if (!pried && !powered && context.profile->stock_class->pry_entry && read_bool(context.crate, STR("Locked"), true))
