@@ -266,6 +266,21 @@ local function run(operation)
     elseif pose_fixture and operation == "jump" then
         assert(host.CharacterMovement:IsMovingOnGround(), "avatar_probe_jump_ground_unavailable")
         host:Jump()
+    elseif operation == "consume" then
+        local class = asset("/Game/Classes/Items/Item_Bandage.Item_Bandage_C")
+        local statics = asset("/Script/Engine.Default__GameplayStatics")
+        local transform = host.Prop_Arrow:K2_GetComponentToWorld()
+        local actor = statics:BeginDeferredActorSpawnFromClass(host, class, transform, 1, host, 2)
+        assert(valid(actor), "avatar_probe_bandage_spawn_failed")
+        actor.Instigator, actor.Item_RespawnMode = host, 0
+        actor = statics:FinishSpawningActor(actor, transform, 2)
+        assert(valid(actor), "avatar_probe_stock_bandage_missing")
+        actor.Player_Ref = host
+        assert(actor:K2_AttachToComponent(host.Prop_Arrow, FName("None", EFindName.FNAME_Find), 2, 2, 2, true),
+            "avatar_probe_bandage_attach_failed")
+        actor:Use_Item_Primary(true, 0)
+        assert(actor.BeingUsed == true and host.UsingItem == true and valid(actor.UseSound),
+            "avatar_probe_stock_bandage_use_unverified")
     elseif operation == "equip" then
         style(host, "SM_Head_UV_02_EarRing", "SM_Plumage_007", { R = .2, G = .7, B = .35, A = 1 })
         style(guest, "SM_Head_UV_Fangs_01", "SM_Plumage_012", { R = .8, G = .25, B = .33, A = 1 })

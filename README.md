@@ -11,14 +11,14 @@ Anyone is free to use, modify, fork, and redistribute the original mod code for 
 
 An unofficial UE4SS mod that adds co-op via Steam invites or Direct IP to the Windows Steam version of Project Silverfish. Open **Multiplayer** from the game’s title screen to host a campaign or join a friend. The mod runs in the existing Steam installation and keeps multiplayer campaigns separate from singleplayer saves.
 
-[Download the release candidate](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-5bbd79a) · [Player guide](docs/PLAYING-COOP.md) · [18-rule design](docs/DESIGN.md) · [Contribute with a coding agent](CONTRIBUTING.md) · [Build and publish a release](docs/RELEASING.md)
+[Download a release candidate](https://github.com/hypnotoadtrance/silverfish-coop/releases) · [Player guide](docs/PLAYING-COOP.md) · [18-rule design](docs/DESIGN.md) · [Contribute with a coding agent](CONTRIBUTING.md) · [Build and publish a release](docs/RELEASING.md)
 
 ![Project Silverfish title screen showing the Singleplayer and Multiplayer choices](docs/screenshots/title-menu.png)
 
 ## Install or update
 
 1. Close Project Silverfish on both PCs.
-2. On the [Releases page](https://github.com/hypnotoadtrance/silverfish-coop/releases), download the **Silverfish-Coop-RC-*.zip** file under **Assets**. Both players need the same ZIP and a compatible Steam game build.
+2. Check the features and test coverage in the release notes. Download **Silverfish-Coop-RC-*.zip** from **Assets**. Both players need the same ZIP and a compatible Steam game build. [GitHub Releases](https://github.com/hypnotoadtrance/silverfish-coop/releases)
 3. In Steam, right-click **Project Silverfish** and choose **Manage → Browse local files**. The game folder contains `SilverFish.exe`.
 4. Extract the ZIP and merge its `SilverFish` folder into the game folder. Replace existing bundled files when prompted. This also updates the included UE4SS loader and its settings.
 5. Launch from Steam and select **Multiplayer**. Use these same steps for future updates.

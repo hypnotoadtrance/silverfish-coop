@@ -117,7 +117,8 @@ async def verify_pose(host_run, guest_run):
 
 
 async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: bool = False,
-                  melee: bool = False, pose: bool = False, rifle: bool = False) -> None:
+                  melee: bool = False, pose: bool = False, rifle: bool = False,
+                  consumable: bool = False) -> None:
     profile = "avatar-" + uuid.uuid4().hex[:8]
     host_dir = work / "campaigns" / profile
     guest_dir = work / "clients" / profile
@@ -179,6 +180,14 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             assert all(row["state"] == "default_body" for row in evidence[role].values()), evidence
         if lifecycle:
             identity = invitation["character_id"]
+        if consumable:
+            await avatar_probe(host_run, "consume")
+            async with asyncio.timeout(8):
+                while not (cues := events(guest_run, "native_avatar_use_sound_played")):
+                    await asyncio.sleep(.05)
+            cue, = cues
+            assert cue["item_class"] == "/Game/Classes/Items/Item_Bandage.Item_Bandage_C", cue
+            evidence["stock_bandage_sound"] = cue
         if pose:
             await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
             evidence["pose"] = await verify_pose(host_run, guest_run)
@@ -390,6 +399,7 @@ if __name__ == "__main__":
     parser.add_argument("--melee", action="store_true", help="verify a visible stock bat swing after the equipment checks")
     parser.add_argument("--pose", action="store_true", help="verify the centered rig and stock attachments through a turn and jump")
     parser.add_argument("--rifle", action="store_true", help="verify a guest's stock break-action quick-slot selection")
+    parser.add_argument("--consumable", action="store_true", help="verify positional sound after stock host Bandage use")
     options = parser.parse_args()
     if options.melee and (not options.equipment or options.lifecycle):
         parser.error("--melee requires --equipment and runs independently of --lifecycle")
@@ -398,6 +408,7 @@ if __name__ == "__main__":
     if options.rifle and (options.pose or options.equipment or options.lifecycle):
         parser.error("--rifle verifies stock guest equipment selection independently")
     work = options.work.resolve(strict=True)
-    with installed_probe(work) if options.equipment or options.pose or options.rifle else nullcontext():
+    with installed_probe(work) if any((options.equipment, options.pose, options.rifle, options.consumable)) else nullcontext():
         asyncio.run(capture(work, options.vanilla_saved.resolve(strict=True),
-                            options.lifecycle, options.equipment, options.melee, options.pose, options.rifle))
+                            options.lifecycle, options.equipment, options.melee, options.pose,
+                            options.rifle, options.consumable))

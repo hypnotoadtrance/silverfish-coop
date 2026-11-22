@@ -96,9 +96,17 @@ function view.consumed(pawn, path, stock_played)
 end
 
 local function capture_use(context)
-    local item, pawn = equipped_player(context:get())
-    if not item then return end
+    local item = context:get()
+    if not current or not valid(item) or not item:HasAuthority()
+        or not same(item:GetWorld(), current.world) or item.BeingUsed ~= true then return end
+    local pawn, pawn_class = item.Player_Ref, StaticFindObject("/Game/Classes/Player/Player_FP.Player_FP_C")
+    if not valid(pawn) or not valid(pawn_class) or not pawn:IsA(pawn_class)
+        or not pawn:IsLocallyControlled() or pawn.UsingItem ~= true then return end
+    local root = item.RootComponent
+    if not valid(root) or not same(item:GetOwner(), pawn) or not same(item:GetInstigator(), pawn)
+        or not same(root:GetAttachParent(), pawn.Prop_Arrow) or same(item, current.latest_use) then return end
     local path = item:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
+    current.latest_use = item
     view.consumed(pawn, path, true)
 end
 
@@ -219,10 +227,13 @@ function view.sync(state, phase, avatar)
         pending, last_round = {}, nil
     end
     current.listener = state.local_pawn and state.local_pawn.pawn
-    local use = consumable_base .. ":ApplyItemEffects"
-    if not use_hooked and valid(StaticFindObject(use)) then
-        RegisterHook(use, function(context) pcall(capture_use, context) end)
-        use_hooked = true
+    local use = consumable_base .. ":Use_Item_Primary"
+    if not use_hooked and not current.use_checked then
+        current.use_checked = true
+        if valid(asset(consumable_base)) and valid(StaticFindObject(use)) then
+            RegisterHook(use, function(context) pcall(capture_use, context) end)
+            use_hooked = true
+        end
     end
     local recoil = weapon_base .. ":ApplyRecoil"
     if not recoil_hooked and valid(StaticFindObject(recoil)) then
