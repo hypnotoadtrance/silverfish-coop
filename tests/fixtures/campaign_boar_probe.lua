@@ -120,6 +120,24 @@ local function execution(world, director, driver, pawn, host, operation, marker_
                 and valid(actor.Mesh) and actor.Mesh:IsAnySimulatingPhysics() then deaths = deaths + 1 end
         end
         return tostring(deaths)
+    elseif operation == "corpseposition" or operation == "corpsemove" then
+        local corpse
+        for _, actor in ipairs(exact_boars(world)) do
+            if not actor.Alive and actor:GetLocalRole() == (host and 3 or 1)
+                and valid(actor.Mesh) and actor.Mesh:IsAnySimulatingPhysics() then
+                assert(not corpse, "expected one stock corpse")
+                corpse = actor
+            end
+        end
+        assert(corpse, "stock corpse missing")
+        local mesh = corpse.Mesh
+        if operation == "corpsemove" then
+            assert(host)
+            mesh:K2_AddWorldOffset({X = 0, Y = 360, Z = 10}, false, {}, true)
+        end
+        local pelvis = FName("pelvis", EFindName.FNAME_Find)
+        local point = mesh:DoesSocketExist(pelvis) and mesh:GetSocketLocation(pelvis) or mesh:K2_GetComponentLocation()
+        return ("%.2f|%.2f|%.2f"):format(point.X, point.Y, point.Z)
     elseif operation == "position" then
         local actors = {}
         for _, actor in ipairs(exact_boars(world)) do

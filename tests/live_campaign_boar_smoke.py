@@ -58,7 +58,7 @@ def census(mailbox):
         return {}
 
 
-async def proof(work, combat=False, squad="single"):
+async def proof(work, combat=False, squad="single", corpse=False):
     profile = "boar-proof-" + uuid.uuid4().hex[:8]
     host = work / "campaigns" / profile / "run"
     guest = work / "clients" / profile / "run"
@@ -194,6 +194,23 @@ async def proof(work, combat=False, squad="single"):
                 await asyncio.sleep(1)
                 assert await probe(guest_box, "death") == "1"
                 (host / "live-boar-stock-combat.json").write_text(json.dumps(witness, indent=2), encoding="utf-8")
+                if corpse:
+                    async def position(box, action):
+                        return [float(value) for value in (await probe(box, action)).split("|")]
+
+                    initial = await position(host_box, "corpseposition")
+                    initial_guest = await position(guest_box, "corpseposition")
+                    await position(host_box, "corpsemove")
+                    await asyncio.sleep(2)
+                    moved = await position(host_box, "corpseposition")
+                    moved_guest = await position(guest_box, "corpseposition|moved")
+                    assert math.dist(initial, moved) > 200 and math.dist(initial_guest, moved_guest) > 200, (
+                        initial, initial_guest, moved, moved_guest)
+                    assert math.dist(moved[:2], moved_guest[:2]) < 30, (moved, moved_guest)
+                    assert abs(moved[2] - moved_guest[2]) < 60, (moved, moved_guest)
+                    (host / "live-boar-corpse-movement.json").write_text(json.dumps(
+                        {"host_before": initial, "guest_before": initial_guest,
+                         "host_after": moved, "guest_after": moved_guest}, indent=2), encoding="utf-8")
         finally:
             for process, run in reversed(processes):
                 if run.is_dir():
@@ -210,5 +227,8 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--combat", action="store_true")
     parser.add_argument("--squad", choices=("single", "group"), default="single")
+    parser.add_argument("--corpse", action="store_true")
     options = parser.parse_args()
-    asyncio.run(proof(options.work.resolve(), options.combat, options.squad))
+    if options.corpse and (not options.combat or options.squad != "single"):
+        parser.error("--corpse requires the single-boar combat fixture")
+    asyncio.run(proof(options.work.resolve(), options.combat, options.squad, options.corpse))
