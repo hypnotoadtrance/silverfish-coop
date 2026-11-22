@@ -201,12 +201,15 @@ local function item_frame(fields, state, phase)
             occupied[slot] = true
             if not valid(StaticFindObject(item.class)) then LoadAsset(item.class) end
             local t = item.transform
-            local visual_z = previous and previous.visual_z
-            if not visual_z then visual_z = item.snap and projection.floor_z(state, t) or t[3] end
+            local visual_z = t[3]
+            if item.snap then
+                local same_origin = previous and t[1] == previous.x and t[2] == previous.y and t[3] == previous.z
+                visual_z = same_origin and previous.visual_z or projection.floor_z(state, t)
+            end
             local ok, reason = SilverfishSyncNativeWorldLootItem(pawn:GetAddress(), epoch, id,
                 t[1], t[2], visual_z, visual_z, item.class, t[4], t[5], t[6], t[7], t[8], t[9], item.stack_count, slot)
             world_items[id] = { map = area, epoch = epoch, pawn = pawn, world = state.world,
-                class = item.class, slot = slot, visual_z = visual_z,
+                class = item.class, slot = slot, visual_z = visual_z, x = t[1], y = t[2], z = t[3],
                 stack_count = item.stack_count,
                 error = not ok and (reason or "stock_drop_projection_unavailable") or nil }
             changed = changed or (ok and (not previous or previous.error ~= nil or previous.stack_count ~= item.stack_count))

@@ -431,6 +431,36 @@ namespace
         return property && structure && property->GetStruct().Get() == structure;
     }
 
+    bool update_pose(U::AActor* actor, const Position& position, const Position& rotation)
+    {
+        static auto* function = find<U::UFunction>(STR("/Script/Engine.Actor:K2_SetActorLocationAndRotation"));
+        static auto* location = parameter<U::FStructProperty>(function, STR("NewLocation"), 0, sizeof(Position));
+        static auto* orientation = parameter<U::FStructProperty>(function, STR("NewRotation"), 0x18, sizeof(Position));
+        static auto* hit = parameter<U::FStructProperty>(function, STR("SweepHitResult"), 0x38, 0xF8, true);
+        static auto* teleport = parameter<U::FBoolProperty>(function, STR("bTeleport"), 0x130, 1);
+        static auto* success = parameter<U::FBoolProperty>(function, STR("ReturnValue"), 0x131, 1, true);
+        static const bool qualified = location && orientation && hit && teleport && success &&
+            location->GetStruct().Get() == find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector")) &&
+            orientation->GetStruct().Get() == find<U::UScriptStruct>(STR("/Script/CoreUObject.Rotator")) &&
+            hit->GetStruct().Get() == find<U::UScriptStruct>(STR("/Script/Engine.HitResult")) &&
+            parameter<U::FBoolProperty>(function, STR("bSweep"), 0x30, 1) &&
+            function->GetOuterPrivate() == find<U::UClass>(STR("/Script/Engine.Actor")) &&
+            function->GetNumParms() == 6 && function->GetParmsSize() == 0x132 &&
+            function->HasAnyFunctionFlags(U::FUNC_Native) && success->HasAnyPropertyFlags(U::CPF_ReturnParm);
+        if (!qualified) return false;
+        // UE5 uses doubles for both positions and rotators. The UE4SS actor
+        // convenience wrapper writes single-precision rotation fields.
+        alignas(std::max_align_t) std::array<std::byte, 0x132> parameters{};
+        hit->InitializeValue_InContainer(parameters.data());
+        std::memcpy(location->ContainerPtrToValuePtr<void>(parameters.data()), position.data(), sizeof(position));
+        std::memcpy(orientation->ContainerPtrToValuePtr<void>(parameters.data()), rotation.data(), sizeof(rotation));
+        teleport->SetPropertyValueInContainer(parameters.data(), true);
+        actor->ProcessEvent(function, parameters.data());
+        const bool applied = success->GetPropertyValueInContainer(parameters.data());
+        hit->DestroyValue_InContainer(parameters.data());
+        return applied;
+    }
+
     bool byte_enum(U::UFunction* call, const U::TCHAR* name, int offset, const U::TCHAR* path)
     {
         auto* property = parameter<U::FEnumProperty>(call, name, offset, 1);
@@ -827,11 +857,19 @@ namespace
         if (Clock::now() < lease.expiry + hidden_retention && lease.epoch == epoch && lease.id == id &&
             lease.pawn.Get() == pawn && lease.world.Get() == world && lease.driver.Get() == driver &&
             lease.host == (connection == nullptr) && lease.connection.Get() == connection && lease.display == display &&
-            lease.stock_type.Get() == type && lease.rotation == rotation && lease.scale == scale &&
-            lease.source == source && mutable_actor(existing) &&
+            lease.stock_type.Get() == type && lease.scale == scale && mutable_actor(existing) &&
+            (stock_loot || (lease.rotation == rotation && lease.source == source && lease.visual_z == visual)) &&
             existing->GetClassPrivate() == projection.display_type.Get() && live(projection.box.Get()) &&
             object(existing, STR("Box")) == projection.box.Get())
         {
+            if (lease.source != source || lease.rotation != rotation || lease.visual_z != visual)
+            {
+                if (!update_pose(existing, {source[0], source[1], visual}, rotation))
+                    return report(lua, false, "stock_drop_projection_pose_change_unverified");
+                lease.source = source;
+                lease.rotation = rotation;
+                lease.visual_z = visual;
+            }
             lease.expiry = Clock::now() + heartbeat;
             lease.stack_count = stack_count;
             if (lease.visible || (inert(existing) && show(lease, existing))) return report(lua, true, "projected");
