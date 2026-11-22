@@ -2610,7 +2610,8 @@ namespace
             const auto path = reserve ? reserve->item : seed_selection.path;
             auto* expected_class = find<Unreal::UClass>(path);
             if (!expected_class || (operation == Operation::Seed && !qualified_weapon(expected_class) &&
-                !qualified_blowtorch(expected_class) && !qualified_melee_item(expected_class, crowbar_path)))
+                !qualified_blowtorch(expected_class) && !qualified_melee_item(expected_class, crowbar_path) &&
+                !flare_profile(expected_class)))
                 return fail(operation == Operation::SeedAmmo ? "stock_guest_ammo_fixture_class_unavailable"
                                                              : "stock_guest_weapon_class_unavailable");
             if (const auto error = locate(context, inventory, expected_class); !error.empty()) return fail(error);
