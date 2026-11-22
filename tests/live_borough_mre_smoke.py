@@ -10,6 +10,7 @@ import uuid
 
 from live_ai_smoke import wait
 from live_computer_board_smoke import stock_flags
+from live_guest_held_fire_smoke import wait_event
 from live_multi_smoke import saved_hashes
 
 REPO = Path(__file__).resolve().parents[1]
@@ -84,7 +85,7 @@ async def verify(work: Path, original: Path):
         invitation = await invite()
         character = invitation["character_id"]
         guest = await launch(guest_run, "guest", "join", *client, "--invite", invitation["invite_file"], *guest_flags)
-        initial, _ = await paired(character)
+        initial, attached = await paired(character)
         prepared = await action(host_run, pickup.APPROACH, target="guest", pickup_source=pickup.BOROUGH_MRE)
         assert prepared["actor"] == pickup.SOURCES[pickup.BOROUGH_MRE][1], prepared
         raw = (await action(guest_run, pickup.STOCK_FIXTURE, pickup_source=pickup.BOROUGH_MRE))["native_authored_pickup_interaction"]
@@ -102,6 +103,11 @@ async def verify(work: Path, original: Path):
         assert (seeded["food"], seeded["intoxication"]) == (17, 42), seeded
         assert seeded["wound_baseline"] == {"hp_before": 250, "hp_after": 210, "regen_before": 250, "regen_after": 230}, seeded
         evidence["seed"] = seeded
+        guest_before = await inventory(guest_run, character)
+        tuna = "native-guest-canned-tuna"
+        tuna_key = consume.RESULT[tuna]
+        tuna_guid, = [held for held, row in guest_before.items() if row["class_path"] == consume.MEALS[tuna].class_path]
+        assert guest_before[tuna_guid]["quantity"] == 2
 
         operation = uuid.uuid4().hex
         proof = (await action(guest_run, consume.MRE, target=guid, operation_id=operation))["native_guest_mre"]
@@ -119,6 +125,23 @@ async def verify(work: Path, original: Path):
         assert await inventory(host_run, "host") == host_before
         evidence.update(operation_id=operation, effect=proof)
 
+        await action(guest_run, "native-inventory-view-fixture")
+        await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+        pressed = (await action(guest_run, "native-inventory-stock-use-click-fixture", target=tuna_guid))["stock_action"]
+        assert pressed["guid"] == tuna_guid and pressed["entry"] == "use-canned-tuna", pressed
+        receipt = await wait_event(guest_run, "native_stock_inventory_action", lambda row: row.get(
+            "generation") == attached["generation"] and row.get(tuna_key, {}).get("guid") == tuna_guid)
+        meal = receipt[tuna_key]
+        assert (meal["quantity_before"], meal["quantity_after"], meal["infection_dose"]) == (2, 1, 4), meal
+        assert 1 <= meal["sickness_after"] - meal["sickness_before"] <= 4, meal
+        assert meal["food_after"] == meal["food_before"] + 6 * 0.8, meal
+        actual = await inventory(guest_run, character)
+        assert actual[tuna_guid]["quantity"] == 1 and set(actual) == set(after), actual
+        assert {key: row for key, row in actual.items() if key != tuna_guid} == {
+            key: row for key, row in after.items() if key != tuna_guid}
+        assert await inventory(host_run, "host") == host_before
+        evidence["stock_tuna_use"] = receipt
+
         await action(host_run, "checkpoint")
         await stop(guest_run, guest)
         await stop(host_run, host)
@@ -132,6 +155,8 @@ async def verify(work: Path, original: Path):
         host_flags_saved = stock_flags(save_root, host_frame, BOROUGH)
         assert 0 < guest_flags_saved["Player_Intox"] <= proof["intox_after"], guest_flags_saved
         assert host_flags_saved.get("Player_Intox", 0) == proof["host_intox_after"], host_flags_saved
+        assert guest_flags_saved.get("Sickness", 0) == meal["sickness_after"], guest_flags_saved
+        assert host_flags_saved.get("Sickness", 0) == 0, host_flags_saved
 
         await launch(host_run, "restart-host", "host", *campaign, "--port", str(initial["endpoint"]["port"]), *host_flags)
         await wait(host_run, lambda state: state.get("state") == "hosting" and state.get("generation") != initial["generation"])
@@ -140,8 +165,9 @@ async def verify(work: Path, original: Path):
         await launch(guest_run, "restart-guest", "join", *client, "--invite", renewed["invite_file"], *guest_flags)
         restarted, _ = await paired(character, initial["generation"])
         assert restarted["endpoint"]["port"] == initial["endpoint"]["port"]
-        assert await inventory(guest_run, character) == after and await inventory(host_run, "host") == host_before
+        assert await inventory(guest_run, character) == actual and await inventory(host_run, "host") == host_before
         assert (await action(guest_run, consume.MRE, target=guid, operation_id=operation))["native_guest_mre"] == proof
+        assert (await action(guest_run, tuna, target=tuna_guid, operation_id=receipt["operation_id"]))[tuna_key] == meal
         evidence.update(verified=True, restart={"guest_intoxication_saved": guest_flags_saved["Player_Intox"],
                                                "host_intoxication_saved": host_flags_saved.get("Player_Intox", 0), "item_absent": guid})
     except BaseException as error:

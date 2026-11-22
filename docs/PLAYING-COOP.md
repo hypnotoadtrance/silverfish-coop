@@ -32,9 +32,7 @@ Set `$sfPython` and `$sfCli` again when opening a new terminal. The workspace pa
 
 Choose **Multiplayer** on the first screen, then **Host**. **New Game** opens the stock character creator and creates a co-op save automatically. **Load Game** lists saves by location and last-saved time. The selected save restores its character and world. Use **Network** to select the connection method. The Direct IP form starts with the configured UDP port and listening address. Select **Require password** to enable the password field for either method. Up to four guests can join.
 
-## Create an invitation in the development build
-
-Open the stock **Journal** in the active co-op campaign with **J** or your configured key and choose **Invite a co-op player**. Enter the participant's name, their starter character's name, and the address they can reach. Leave the address blank to use the configured host address. Choose **Create**, then **Copy invitation** once it is ready. Share the invitation privately. It contains the guest credential.
+Host container pickups take effect immediately. Rest, Save and Quit, level transitions, and the loss of an enrolled guest connection can save the live campaign. If the game closes unexpectedly before a save, the campaign resumes at the last saved checkpoint.
 
 ## Join from the co-op title
 

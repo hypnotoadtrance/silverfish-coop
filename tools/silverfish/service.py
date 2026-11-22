@@ -243,6 +243,7 @@ class Host:
         self.last_game = {}
         self.stopping = False
         self.next_save = 0.0
+        self.disconnect_save_requests: set[str] = set()
         self.next_crate_placement = 0.0
         self.crate_placement_error = None
         self.last_seen = 0.0
@@ -300,6 +301,8 @@ class Host:
             self.allowed_maps |= EXPANDED_MAPS
         self.next_zone_heartbeat = 0.0
         self.native_checkpoint_unsafe = False
+        # None means clean. A pending pickup batch records whether it needs typed readback.
+        self.pending_host_pickup_save: bool | None = None
         self.matrix_supported = matrix_supported
         self.world_flush_supported = world_flush_supported
         self.native_guest_health = None
@@ -454,14 +457,25 @@ class Host:
             return
         self.guest["disconnected"] = time.monotonic()
         self.store.disconnect(self.guest["lease_id"])
-        if not self.transitioning and not self.native_checkpoint_unsafe:
-            self.next_save = 0.0
+        self.request_disconnect_save(self.guest["character_id"], ready=bool(self.guest_pawn))
         with contextlib.suppress(OSError):
             self.control.event("guest_link_lost", guest_id=guest_id, grace_seconds=DEFAULT_RECONNECT_GRACE)
+
+    def request_disconnect_save(self, character: str, *, ready: bool) -> None:
+        if self.native_profile is not None:
+            if ready and self.persist_native_guest:
+                self.disconnect_save_requests.add(character)
+                self.next_save = 0.0
+        elif not self.transitioning and not self.native_checkpoint_unsafe:
+            self.next_save = 0.0
 
     def checkpoint(self, proposed_party: dict | None = None, *, native_record: dict | None = None,
                    guest_records: dict[str, dict] | None = None, unleased_states: dict | None = None,
                    require_guest_frames: frozenset[str] = frozenset()) -> int:
+        if self.pending_host_pickup_save is not None:
+            # The existing native generation omits in-memory pickups. Keep new party changes
+            # eligible for the next paired save instead of writing a mismatched revision.
+            return self.store.status()["revision"]
         world, changes = self.checkpoint_contents(proposed_party, native_record=native_record,
                                                   guest_records=guest_records, unleased_states=unleased_states,
                                                   require_guest_frames=require_guest_frames)
@@ -499,7 +513,7 @@ class Host:
             raise
         # A completed transaction already saved this interval's state. Preserve
         # an immediate checkpoint requested by a disconnect during capture.
-        if self.next_save != 0.0:
+        if self.next_save != 0.0 and not self.disconnect_save_requests:
             self.next_save = time.monotonic() + CHECKPOINT_INTERVAL
         if cleanup_error is not None:
             with contextlib.suppress(OSError):
@@ -665,6 +679,9 @@ class Host:
                 raise RuntimeError("The typed inventory requires a stock campaign checkpoint")
             return await self.commit_checkpoint(proposed_party, unleased_states=unleased_states,
                                                 require_guest_frames=require_guest_frames)
+        pending_pickups = self.pending_host_pickup_save is not None
+        if pending_pickups:
+            typed_inventory = typed_inventory or self.pending_host_pickup_save
         source = self.last_game.get("map")
         pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
         if self.last_game.get("state") != "hosting" or not pawn or source not in self.allowed_maps:
@@ -709,8 +726,12 @@ class Host:
         self.last_seen = time.monotonic()
         if not guests:
             guest_records = await self.capture_guest_records(bridge)
-        return await self.commit_checkpoint(proposed_party, native_record=record, guest_records=guest_records,
-                                            unleased_states=unleased_states, require_guest_frames=require_guest_frames)
+        revision = await self.commit_checkpoint(proposed_party, native_record=record, guest_records=guest_records,
+                                                unleased_states=unleased_states, require_guest_frames=require_guest_frames)
+        if pending_pickups:
+            self.pending_host_pickup_save = None
+        self.disconnect_save_requests.difference_update(require_guest_frames, unleased_states or {})
+        return revision
 
     async def end_session(self, bridge: Bridge, transport) -> dict:
         """End this host generation only after its final paired checkpoint."""
@@ -3850,7 +3871,7 @@ class Host:
         engine = bridge.process if isinstance(bridge.process, EmbeddedEngine) else None
         invites = (native_host_invitation.HostInvitationMailbox(
             bridge.directory, self.control.run, self.invite, engine=engine)
-                   if self.native_events and self.native_zones else None)
+                   if self.fixtures and self.native_events and self.native_zones else None)
         pause_exit = (native_session_exit.PauseExit(bridge.directory, self.control, "host", engine=engine)
                       if engine is not None and self.native_zones else None)
         heartbeat = asyncio.create_task(self.renew_native_scope(bridge)) if self.native_events else None
@@ -3883,7 +3904,7 @@ class Host:
         package_journal = native_package_handoff_journal.Journal() if self.native_host_dig_live else None
 
         async def claim_crate(operation, guid):
-            return await native_loot.perform(self, bridge, "host", "claim", guid, operation)
+            return await native_loot.perform(self, bridge, "host", "claim", guid, operation, defer_host_save=True)
 
         async def frozen_items(offset):
             return native_inventory_death.items(self, "host", offset)
@@ -4034,7 +4055,8 @@ class Host:
                             async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                                 result = await native_guest_drop.perform(self, bridge, "host", action, claim, operation_id)
                         else:
-                            result = await native_loot.perform(self, bridge, "host", "claim", claim, operation_id)
+                            result = await native_loot.perform(self, bridge, "host", "claim", claim, operation_id,
+                                                               defer_host_save=True)
                         self.control.event("local_interaction", operation_id=operation_id, **result)
                         try:
                             self.last_game = await self.world_loot.retire_claim(bridge, self.last_game, world_loot)
@@ -4134,10 +4156,14 @@ class Host:
                     if snapshot is not self.last_game:
                         self.last_game, self.last_seen = snapshot, time.monotonic()
             now = time.monotonic()
-            if not self.stopping and now >= self.next_save:
+            if (not (self.stopping or self.transitioning or self.native_checkpoint_unsafe)
+                    and now >= self.next_save and (self.native_profile is None or self.disconnect_save_requests)):
                 self.next_save = now + CHECKPOINT_RETRY_INTERVAL
                 try:
-                    await self.checkpoint_native(bridge)
+                    captures = (self.disconnect_save_requests.intersection(self.guest_capture_targets())
+                                if self.disconnect_save_requests else ())
+                    if self.native_profile is None or captures:
+                        await self.checkpoint_native(bridge, require_guest_frames=frozenset(captures))
                 except (OSError, RuntimeError) as error:
                     self.control.event("native_host_checkpoint_error", reason=str(error))
             self.publish_host_status(transport, bridge)
@@ -4155,6 +4181,7 @@ class Host:
                             campaign=self.store.status(), gameplay=self.public_gameplay(),
                             zone_epoch=self.zone_epoch, awaiting_zone_guest=self.awaiting_zone_guest,
                             link_connected=linked,
+                            native_inventory_checkpoint_pending=self.pending_host_pickup_save is not None,
                             transport=transport.statistics() if isinstance(transport, link.HostLink) else {},
                             local_bridge="memory" if bridge.local_bridge is not None else "file")
 
@@ -4357,7 +4384,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
         raise ValueError("Restage the native host to enable stock guest regeneration")
     if guest_sickness and not staged_script(work, "native_guest_sickness.lua"):
         raise ValueError("Restage the native host to enable stock guest sickness")
-    if guest_mre and not (native_guest and native_zones and staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMre")):
+    if guest_mre and not (native_guest and native_zones and staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMeal")):
         raise ValueError("Stage the native campaign guest MRE bridge before enabling it")
     if native_events and native_backend != "cpp":
         raise ValueError("--native-events requires the staged C++ lab")
@@ -6171,7 +6198,7 @@ def guest_engine_options(work: Path, invite: dict, *, native_zones: bool = False
         raise ValueError("Restage the native client for Mama's stock Borough dialogue")
     if invite.get("native_dialogue_sewer") and not staged_script(work, "native_dialogue_sewer.lua", "Trade_Sewer"):
         raise ValueError("Restage the native client for the Sewer Thing's stock dialogue")
-    if invite.get("native_guest_mre") and not staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMre"):
+    if invite.get("native_guest_mre") and not staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMeal"):
         raise ValueError("Restage the native client for stock guest MRE use")
     if native_loot_input and not staged_script(work, "native_loot_crate_input.lua"):
         raise ValueError("Restage the native client for stock crate interaction")
@@ -6198,7 +6225,7 @@ def unified_host_options(work: Path) -> dict:
         "native_shop_view": staged_script(work, "native_shop_view.lua"),
         "guest_regen": staged_script(work, "native_guest_regen.lua"),
         "guest_sickness": staged_script(work, "native_guest_sickness.lua"),
-        "guest_mre": staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMre"),
+        "guest_mre": staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMeal"),
         "guest_held_fire": staged_guest_controls(work) and _staged_held_fire(work),
         "native_dead_bridge_enemy_loot": (native_death_backend(work) == "cpp"
                                          and staged_script(work, "native_loot_crate_input.lua") and _staged_cqc_loot(work)),

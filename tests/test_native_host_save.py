@@ -71,6 +71,8 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.host = object.__new__(Host)
         self.host.native_profile = root / "game-user"
         self.host.next_save = 0.0
+        self.host.pending_host_pickup_save = None
+        self.host.disconnect_save_requests = set()
         native_host_save.directory(self.host.native_profile).mkdir(parents=True)
         self.host.allowed_maps = {CROSSROADS}
         self.host.last_game = {"state": "hosting", "map": CROSSROADS,
@@ -83,7 +85,8 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.bridge = SimpleNamespace(command=AsyncMock(side_effect=self.capture))
 
     async def capture(self, action, host_slot, dig_token, first, first_slot, second, second_slot, *, timeout):
-        self.assertEqual(action, "native-host-save-capture")
+        expected = "native-host-save-capture-typed" if self.host.pending_host_pickup_save else "native-host-save-capture"
+        self.assertEqual(action, expected)
         self.assertIn(dig_token, ("-", "dig-token"))
         self.assertEqual((first, second), ("first-pawn", "second-pawn"))
         self.assertEqual(len({host_slot, first_slot, second_slot}), 3)
@@ -113,6 +116,36 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "exact detached guest save"):
             await self.host.checkpoint_native(self.bridge)
         self.host.commit_checkpoint.assert_not_awaited()
+
+    async def test_ordinary_party_update_cannot_save_a_half_persisted_pickup(self):
+        self.host.pending_host_pickup_save = True
+        self.host.store.status = Mock(return_value={"revision": 18})
+        self.host.store.checkpoint = Mock()
+        candidate = {"queued": True}
+        self.assertEqual(self.host.checkpoint(candidate), 18)
+        self.host.store.checkpoint.assert_not_called()
+        self.host.commit_checkpoint.side_effect = OSError("failed write")
+        with self.assertRaisesRegex(OSError, "failed write"):
+            await self.host.checkpoint_native(self.bridge, candidate)
+        self.assertTrue(self.host.pending_host_pickup_save)
+        self.host.commit_checkpoint.side_effect = None
+        self.assertEqual(await self.host.checkpoint_native(self.bridge, candidate), 19)
+        self.assertIsNone(self.host.pending_host_pickup_save)
+        self.assertIs(self.host.commit_checkpoint.await_args.args[0], candidate)
+
+    async def test_connection_loss_requests_a_save_until_its_guest_frame_commits(self):
+        self.host.persist_native_guest = True
+        self.host.request_disconnect_save("second", ready=False)
+        self.assertFalse(self.host.disconnect_save_requests)
+        self.host.request_disconnect_save("second", ready=True)
+        self.assertEqual(self.host.disconnect_save_requests, {"second"})
+        self.missing_proof = True
+        with self.assertRaisesRegex(RuntimeError, "exact detached guest save"):
+            await self.host.checkpoint_native(self.bridge, require_guest_frames=frozenset({"second"}))
+        self.assertEqual(self.host.disconnect_save_requests, {"second"})
+        self.missing_proof = False
+        await self.host.checkpoint_native(self.bridge, require_guest_frames=frozenset({"second"}))
+        self.assertFalse(self.host.disconnect_save_requests)
 
     async def test_missing_generation_never_publishes_campaign(self):
         self.missing_file = True

@@ -6,27 +6,26 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
 local headless_test = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough.Borough"
-local meals = {
-    ["native-guest-mre"] = {
-        kind = "mre", helper = "SilverfishUseNativeGuestMre", blueprint = "Item_MRE", label = "MRE", food = 30, gain = 10,
-    },
-    ["native-guest-canned-peaches"] = {
-        kind = "canned_peaches", helper = "SilverfishUseNativeGuestCannedPeaches", blueprint = "Item_CannedPeaches",
-        label = "Canned Peaches", food = 12, gain = 0,
-    },
-    ["native-guest-canned-beans"] = {
-        kind = "canned_beans", helper = "SilverfishUseNativeGuestCannedBeans", blueprint = "Item_CannedBeans",
-        label = "Canned Beans", food = 14, gain = 0,
-    },
-    ["native-guest-brown-mushroom"] = {
-        kind = "brown_mushroom", helper = "SilverfishUseNativeGuestBrownMushroom", blueprint = "Item_BrownMushroom",
-        label = "Brown Mushroom", food = 3.5, gain = 0,
-    },
-}
-local labels = {}
-for _, meal in pairs(meals) do
-    labels[string.format("/Game/Classes/Items/%s.%s_C", meal.blueprint, meal.blueprint)] = meal.label
+local meals, labels = {}, {}
+local function register_meal(slug, asset, label, food, gain, infection)
+    local class = string.format("/Game/Classes/Items/Item_%s.Item_%s_C", asset, asset)
+    labels[class] = label
+    meals["native-guest-" .. slug] = {kind = slug:gsub("-", "_"), entry = "use-" .. slug,
+        class = class, food = food, gain = gain or 0, infection = infection or 0}
 end
+register_meal("mre", "MRE", "MRE", 30, 10)
+register_meal("canned-peaches", "CannedPeaches", "Canned Peaches", 12)
+register_meal("canned-beans", "CannedBeans", "Canned Beans", 14)
+register_meal("brown-mushroom", "BrownMushroom", "Brown Mushroom", 3.5)
+register_meal("canned-beef", "CannedBeef", "Canned Beef", 16, 0, 8)
+register_meal("canned-soup", "CannedSoup", "Canned Soup", 10, 0, 3)
+register_meal("canned-tuna", "CannedTuna", "Canned Tuna", 6, 0, 4)
+register_meal("dead-beetle", "DeadBeetle", "Dead Beetle", 3, 0, 3)
+register_meal("dog-meat", "DogMeat", "Dog Meat", 5, 0, 40)
+register_meal("milk-bites", "MilkBites", "Milk Bites", 4)
+register_meal("pork-ribs", "PorkRibs", "Pork Ribs", 22, 0, 25)
+register_meal("sausage", "Sausage", "Sausage", 10, 0, 20)
+register_meal("venison", "Venison", "Venison", 13, 0, 25)
 function mre.label(class) return labels[class] end
 
 local observation, fixture, ready
@@ -66,7 +65,7 @@ function mre.command(fields, state, phase)
     if not test and not meal then return end
     local kind = meal and meal.kind or "mre"
     local refused, unverified = "guest_" .. kind .. "_refused_", "mutation_unverified_guest_" .. kind .. "_"
-    local use = meal and _G[meal.helper]
+    local use = meal and SilverfishUseNativeGuestMeal
     if test then fixture = nil else observation = nil end
     local name, guid = fields[3], fields[4]
     if not enabled or phase ~= "hosting" or state.server ~= false or not state.listening
@@ -108,19 +107,39 @@ function mre.command(fields, state, phase)
             or stored[3]:ToString() ~= "Hemophilia" then
             error("mutation_unverified_guest_mre_fixture_traits", 0)
         end
+        local tuna_path = meals["native-guest-canned-tuna"].class
+        local tuna = StaticFindObject(tuna_path)
+        if not valid(tuna) then LoadAsset(tuna_path); tuna = StaticFindObject(tuna_path) end
+        local factory = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C")
+        if not valid(tuna) or not valid(factory) then error("mutation_unverified_guest_mre_fixture_factory", 0) end
+        local generated = {}
+        factory:MakeItemStack(tuna, 2, pawn, generated)
+        local item = generated.Item or generated
+        if not same(item.Item_Class_3_2813641E42AA35FC0693029E4EE49F81, tuna)
+            or item.Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788 ~= 2 then
+            error("mutation_unverified_guest_mre_fixture_tuna", 0)
+        end
+        detached.PlayerBackpack[detached.PlayerBackpack:GetArrayNum() + 1] = item
         fixture = {map = state.map, name = name, food = food, intox = intox, stock_intox = stock_intox,
             hp_before = hp_before, hp_after = hp_after, regen_before = regen_before, regen_after = regen_after}
         return "isolated guest MRE wound and food baseline verified"
     end
     local called, used, status, before, after, food_before, food_after, regen_before, regen_after,
-        health, maximum, intox_before, intox_after, host_intox, trait, gourmand, healthy_eating =
-        pcall(use, pawn:GetAddress(), detached:GetAddress(), stock:GetAddress(), guid)
+        health, maximum, intox_before, intox_after, host_intox, trait, gourmand, healthy_eating,
+        sickness_before, sickness_after, dose = pcall(use, pawn:GetAddress(), detached:GetAddress(), stock:GetAddress(), guid, meal.entry)
     if not called then error(unverified .. "call", 0) end
     if used == false and type(status) == "string" and (status:match("^" .. refused .. "[a-z0-9_]+$")
         or status:match("^" .. unverified .. "[a-z0-9_]+$")) then error(status, 0) end
     if math.type(gourmand) ~= "integer" or not bounded(gourmand, 0, 1025)
         or math.type(healthy_eating) ~= "integer" or not bounded(healthy_eating, 0, 1025) then
         error(unverified .. "food_traits", 0)
+    end
+    if math.type(sickness_before) ~= "integer" or math.type(sickness_after) ~= "integer" or math.type(dose) ~= "integer"
+        or not bounded(sickness_before, -2147483648, 2147483647) or not bounded(sickness_after, -2147483648, 2147483647)
+        or (dose ~= 0 and dose ~= meal.infection)
+        or (dose == 0 and sickness_after ~= sickness_before)
+        or (dose ~= 0 and not bounded(sickness_after - sickness_before, 1, dose)) then
+        error(unverified .. "infection_proof", 0)
     end
     local appetite = meal.food * (1 - gourmand * 0.2)
     local gain = meal.gain + healthy_eating * appetite * 0.3
@@ -139,8 +158,9 @@ function mre.command(fields, state, phase)
     observation = {verb = verb, map = state.map, name = name, guid = guid, before = before, after = after,
         food_before = food_before, food_after = food_after, regen_before = regen_before, regen_after = regen_after,
         health = health, maximum = maximum, intox_before = intox_before, intox_after = intox_after,
-        host_intox = host_intox, trait = trait, gourmand = gourmand, healthy_eating = healthy_eating}
-    pcall(use_presentation.consumed, pawn, string.format("/Game/Classes/Items/%s.%s_C", meal.blueprint, meal.blueprint), false)
+        host_intox = host_intox, trait = trait, gourmand = gourmand, healthy_eating = healthy_eating,
+        sickness_before = sickness_before, sickness_after = sickness_after, dose = dose}
+    pcall(use_presentation.consumed, pawn, meal.class, false)
     return "exact stock guest food effects verified"
 end
 
@@ -157,7 +177,7 @@ function mre.rows(state, phase, status_row)
         rows[#rows + 1] = status_row(row.verb, "used", row.map, row.name, row.guid, row.before, row.after,
             real(row.food_before), real(row.food_after), real(row.regen_before), real(row.regen_after),
             real(row.health), real(row.maximum), row.intox_before, row.intox_after, row.host_intox, row.trait and 1 or 0,
-            row.gourmand, row.healthy_eating)
+            row.gourmand, row.healthy_eating, row.sickness_before, row.sickness_after, row.dose)
     end
     return rows
 end

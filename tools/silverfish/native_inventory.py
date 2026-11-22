@@ -321,10 +321,15 @@ async def read_page(host, bridge, frame: dict, offset: int) -> dict:
         await asyncio.to_thread(native_host_save.guest_record, host.native_profile, frame, character)
     slot = frame["slot"]
     snapshot = await bridge.command("native-inventory-census", slot, str(offset), timeout=6)
+    return _verified_page(host, snapshot, slot, offset)
+
+
+def _verified_page(host, snapshot: dict, slot: str, offset: int, *, pawn: str | None = None) -> dict:
     report = snapshot.get("native_inventory_census", {})
     total, count, items = (report.get(key) for key in ("total", "count", "items"))
     if (snapshot.get("state") != "hosting" or snapshot.get("map") != host.last_game.get("map")
             or report.get("map") != snapshot.get("map") or report.get("slot") != slot or report.get("offset") != offset
+            or report.get("pawn") != pawn
             or type(total) is not int or not 0 <= total <= MAX_ITEMS or type(items) is not list
             or count != len(items) or count != min(PAGE_SIZE, max(0, total - offset))):
         raise RuntimeError("The isolated stock inventory census returned an incomplete page")
@@ -349,13 +354,16 @@ async def inspect(host, bridge, character: str, offset: int) -> dict:
             or host.native_checkpoint_unsafe or host.last_game.get("state") != "hosting"
             or character not in host.roles().values()):
         raise party.RuleError("native_inventory_scope_unavailable")
-    if character != "host" and character not in host.native_recipients():
+    if character == "host":
+        pawn = host.last_game.get("pawns", {}).get("local", {}).get("name")
+        role = "host"
+    else:
+        pawn = host.native_recipients().get(character, {}).get("pawn")
+        role = "guest"
+    if not pawn or host.last_game.get("native_live_inventory_census") is not True:
         raise party.RuleError("native_inventory_scope_unavailable")
-    await host.checkpoint_native(bridge, require_guest_frames=frozenset({character} - {"host"}))
-    frame = saved_frame(host, host.store.status(), character)
-    if not frame or frame["map"] != host.last_game.get("map"):
-        raise RuntimeError("The exact character inventory frame is unavailable")
-    return {"native_inventory": {"owner": character, **await read_page(host, bridge, frame, offset)}}
+    snapshot = await bridge.command("native-inventory-live-census", pawn, str(offset), role, timeout=6)
+    return {"native_inventory": {"owner": character, **_verified_page(host, snapshot, "-", offset, pawn=pawn)}}
 
 
 def saved_frame(host, campaign: dict, character: str) -> dict | None:

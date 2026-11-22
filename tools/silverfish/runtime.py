@@ -2455,11 +2455,15 @@ class Bridge:
                         "replacement": None if fields[5] == "-" else fields[5],
                         "ok": fields[6] == "1", "status": fields[7], "count": int(fields[8]),
                     }
-                elif fields[0] == "native-inventory-census" and len(fields) == 6:
+                elif fields == ["native-live-inventory-census", "1"] and data.get("state") == "hosting":
+                    data["native_live_inventory_census"] = True
+                elif fields[0] == "native-inventory-census" and len(fields) in (6, 7):
                     data["native_inventory_census"] = {
                         "slot": fields[1], "map": fields[2], "total": int(fields[3]), "offset": int(fields[4]),
                         "count": int(fields[5]), "items": [],
                     }
+                    if len(fields) == 7:
+                        data["native_inventory_census"]["pawn"] = fields[6]
                 elif (fields[0] == "native-stash-setting" and len(fields) == 3 and data.get("state") == "hosting"
                         and data.get("map") == fields[1] and fields[2] in {"0", "1"}):
                     data[native_stash.SETTING] = fields[2] == "1"

@@ -266,6 +266,7 @@ namespace
     thread_local U::FFrame* shadow_feedback_frame{};
     thread_local U::FWeakObjectPtr shadow_feedback_pawn;
     thread_local Entry* barter_psy_scope{};
+    thread_local Entry* food_infection_scope{};
     std::atomic<std::uint64_t> generation{1};
     bool schema_bound{};
 
@@ -446,17 +447,19 @@ namespace
     {
         if (!U::IsInGameThreadRaw() || iteration.OriginalFunctionCallPrevented()) return;
         if (redirect_psy(iteration, receiver, frame)) return;
-        if (!(sickness_routing || crossroads_routing) || !schema_bound) return;
+        if (!(sickness_routing || crossroads_routing || food_infection_scope) || !schema_bound) return;
         const bool lookup = frame.Node() == schema.check_flag;
         if (!lookup && frame.Node() != schema.add_flag) return;
         auto* caller = frame.PreviousFrame();
         if (!caller || frame.Object() != receiver) return;
         const bool infect = caller->Node() == schema.infect;
         if (!infect && caller->Node() != schema.slow) return;
-        auto* entry = entry_for(caller->Object());
+        auto* food = infect && food_infection_scope && caller->Object() == food_infection_scope->pawn.Get()
+            ? food_infection_scope : nullptr;
+        auto* entry = food ? food : entry_for(caller->Object());
         auto* locals = frame.Locals();
         if (!entry || !locals || receiver != entry->instance.Get()) return;
-        if (!sickness_routing)
+        if (!food && !sickness_routing)
         {
             auto* pawn = entry->pawn.Get();
             auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
@@ -673,6 +676,37 @@ bool silverfish::native_guest_sickness::read_passive_amplification(RC::Unreal::U
     return true;
 }
 
+bool silverfish::native_guest_sickness::food_infection(RC::Unreal::UObject* pawn, RC::Unreal::UObject* detached,
+                                                      RC::Unreal::UObject* stock, std::int32_t dose,
+                                                      std::int32_t& sickness, bool apply)
+{
+    if (!available() || food_infection_scope || dose <= 0 || dose > 120 ||
+        !silverfish::native_guest_regen::qualifies_detached_guest(pawn, detached, stock)) return false;
+    if (!schema_bound) schema_bound = schema.bind();
+    Flags guest, host;
+    if (!schema_bound || !guest.bind(detached) || !host.bind(stock)) return false;
+    const auto before = guest.read(schema.sickness);
+    if (before.value > std::numeric_limits<std::int32_t>::max() - dose ||
+        (!before.found && guest.map->GetMaxIndex() >= max_flags - 1)) return false;
+    sickness = before.value;
+    if (!apply) return true;
+
+    const auto canonical = host.read(schema.sickness);
+    Entry scope{pawn, detached, stock, object(pawn, STR("As Game Instance FP")),
+        Clock::now() + lease, {}, generation.load(std::memory_order_acquire)};
+    struct Restore { ~Restore() { food_infection_scope = nullptr; } } restore;
+    food_infection_scope = &scope;
+    auto amount = dose;
+    pawn->ProcessEvent(schema.infect, &amount);
+    const auto after = guest.read(schema.sickness);
+    if (!current(scope) || scope.proof.quarantined || scope.proof.infect_reads != 1 || scope.proof.infect_writes != 1 ||
+        scope.proof.previous != before || scope.proof.current != after || !after.found ||
+        after.value <= before.value || after.value > before.value + dose || host.read(schema.sickness) != canonical)
+        return false;
+    sickness = after.value;
+    return true;
+}
+
 bool silverfish::native_guest_sickness::barter_psy(U::UObject* pawn, U::UObject* detached, U::UObject* stock,
                                                 std::int32_t amount, bool apply)
 {
@@ -705,7 +739,8 @@ void silverfish::native_guest_sickness::install_hooks()
     shadow_routing = shadow_enabled();
     // Default Crossroads Flayers can infect a guest through the shared GameInstance.
     crossroads_routing = shadow_routing && opt_in("SILVERFISH_COOP_NATIVE_CROSSROADS_ROSTER");
-    if (!sickness_routing && !shadow_routing) return;
+    const bool food = opt_in("SILVERFISH_COOP_NATIVE_GUEST_SAVE") && opt_in("SILVERFISH_COOP_NATIVE_GUEST_MRE");
+    if (!sickness_routing && !shadow_routing && !food) return;
     callback = Hook::RegisterProcessLocalScriptFunctionPreCallback(
         redirect, {false, false, owner, STR("Redirect exact guest Sickness flag effects")});
     if (shadow_routing)

@@ -1,5 +1,6 @@
 #include "guest_consumable.hpp"
 #include "enemy_loot.hpp"
+#include "guest_meal_profiles.hpp"
 #include "guest_regen.hpp"
 #include "guest_sickness.hpp"
 #include "loot_escrow.hpp"
@@ -45,10 +46,6 @@ namespace
     constexpr auto item_base_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto health_item_path = STR("/Game/Classes/Items/HealthItem_Master_BP.HealthItem_Master_BP_C");
     constexpr auto bandage_path = STR("/Game/Classes/Items/Item_Bandage.Item_Bandage_C");
-    constexpr auto mre_path = STR("/Game/Classes/Items/Item_MRE.Item_MRE_C");
-    constexpr auto canned_peaches_path = STR("/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C");
-    constexpr auto canned_beans_path = STR("/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C");
-    constexpr auto brown_mushroom_path = STR("/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C");
     constexpr auto starter_bag_path = STR("/Game/Classes/Items/Random_GearBag_Starter.Random_GearBag_Starter_C");
     constexpr auto hyper_bag_path = STR("/Game/Classes/Items/HyperRandom_GearBag_Starter.HyperRandom_GearBag_Starter_C");
     constexpr auto boost_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:GiveRegenBoost");
@@ -56,18 +53,8 @@ namespace
     constexpr std::array guid_component{STR("A"), STR("B"), STR("C"), STR("D")};
     constexpr int max_clients = 4;
     constexpr int max_inventory = 4096;
-    struct Consumable
-    {
-        const Unreal::TCHAR* path;
-        int value;
-        double weight, regen_gain, food;
-        bool can_cook{};
-    };
+    using silverfish::native_guest_consumable::Consumable;
     constexpr Consumable bandage{bandage_path, 15, 0.05, 45.0, 0.0};
-    constexpr Consumable mre{mre_path, 25, 0.65, 10.0, 30.0};
-    constexpr Consumable canned_peaches{canned_peaches_path, 8, 0.4, 0.0, 12.0};
-    constexpr Consumable canned_beans{canned_beans_path, 14, 0.4, 0.0, 14.0, true};
-    constexpr Consumable brown_mushroom{brown_mushroom_path, 1, 0.05, 0.0, 3.5, true};
 
     bool opt_in(const char* name)
     {
@@ -313,7 +300,7 @@ namespace
                 !number_is<Unreal::FDoubleProperty>(defaults, STR("Instant_Health"), 0.0) ||
                 !number_is<Unreal::FDoubleProperty>(defaults, STR("Regen_Boost"), profile.food) ||
                 !number_is<Unreal::FDoubleProperty>(defaults, STR("Regen_SpeedStim"), 0.0) ||
-                !number_is<Unreal::FIntProperty>(defaults, STR("Infection"), 0) ||
+                !number_is<Unreal::FIntProperty>(defaults, STR("Infection"), profile.infection) ||
                 !effect_map || effect_map->ContainerPtrToValuePtr<Unreal::FScriptMap>(defaults)->Num() != 0 ||
                 !default_tag || !matches_payload(default_payload)) return false;
             if (profile.food > 0.0 && !read_bool(defaults, STR("CanCook"), profile.can_cook)) return false;
@@ -378,7 +365,7 @@ namespace
                 if (selected != -1) return "guest_bandage_refused_guid_conflict";
                 selected = index;
                 units = row.quantity->GetPropertyValueInContainer(item);
-                if (&profile == &mre && units == 0) units = 1;
+                if (&profile != &bandage && units == 0) units = 1;
                 if (!row.stock_consumable(item, units, profile)) return "guest_bandage_refused_stock_stack";
             }
             return selected >= 0 ? "" : "guest_bandage_refused_owned_guid";
@@ -833,30 +820,37 @@ namespace
         auto hash() const { return [this](const void* raw) { return key->GetValueTypeHash(raw); }; }
         auto identical_key() const { return [this](const void* a, const void* b) { return key->Identical(a, b); }; }
 
-        void* find_value(Unreal::FScriptMap* entries) const
+        void* find_value(Unreal::FScriptMap* entries, const Unreal::FName& name) const
         {
-            return entries->FindValue(&flag, layout, hash(), identical_key());
+            return entries->FindValue(&name, layout, hash(), identical_key());
         }
 
-        int read(Unreal::FScriptMap* entries) const
+        int read(Unreal::FScriptMap* entries, const Unreal::FName& name) const
         {
-            const auto* value = find_value(entries);
+            const auto* value = find_value(entries, name);
             return value ? number->GetPropertyValue(value) : 0;
         }
 
-        bool write(Unreal::FScriptMap* entries, int expected) const
+        int read(Unreal::FScriptMap* entries) const { return read(entries, flag); }
+
+        bool write(Unreal::FScriptMap* entries, const Unreal::FName& name, int expected) const
         {
-            if (!usable(entries) || expected < 0 || expected > 100) return false;
+            if (!usable(entries) || name.IsNone()) return false;
             const int count = entries->Num();
-            const bool existed = find_value(entries) != nullptr;
-            auto* value = entries->FindOrAdd(&flag, layout, hash(), identical_key(), [&](void* name, void* data) {
-                key->InitializeValue(name);
-                key->SetPropertyValue(name, flag);
+            const bool existed = find_value(entries, name) != nullptr;
+            auto* value = entries->FindOrAdd(&name, layout, hash(), identical_key(), [&](void* destination, void* data) {
+                key->InitializeValue(destination);
+                key->SetPropertyValue(destination, name);
                 number->InitializeValue(data);
             });
             if (!value) return false;
             number->SetPropertyValue(value, expected);
-            return entries->Num() == count + !existed && read(entries) == expected;
+            return entries->Num() == count + !existed && read(entries, name) == expected;
+        }
+
+        bool write(Unreal::FScriptMap* entries, int expected) const
+        {
+            return expected >= 0 && expected <= 100 && write(entries, flag, expected);
         }
     };
 
@@ -1009,15 +1003,23 @@ namespace
         return 5;
     }
 
-    int use_meal(const Lua& lua, const Consumable& profile, std::string_view kind)
+    int use_meal(const Lua& lua)
     {
+        if (lua.get_stack_size() != 5 || !lua.is_string(5)) return result(lua, false, "guest_meal_refused_arguments");
+        const auto entry = lua.get_string(5);
+        const auto& meals = silverfish::native_guest_consumable::meals;
+        const auto found = std::ranges::find(meals, entry, &Consumable::entry);
+        if (found == meals.end()) return result(lua, false, "guest_meal_refused_profile");
+        const auto& profile = *found;
+        std::string kind(profile.entry.substr(4));
+        std::ranges::replace(kind, '-', '_');
         const auto refuse = [&](std::string_view reason) {
             return result(lua, false, std::string("guest_").append(kind).append("_refused_").append(reason));
         };
         const auto unverified = [&](std::string_view reason) {
             return result(lua, false, std::string("mutation_unverified_guest_").append(kind).append("_").append(reason));
         };
-        if (!food_available() || lua.get_stack_size() != 4 || !lua.is_integer(1) || !lua.is_integer(2) ||
+        if (!food_available() || !lua.is_integer(1) || !lua.is_integer(2) ||
             !lua.is_integer(3) || !lua.is_string(4) || meal) return refuse("arguments");
         const auto pawn_address = lua.get_integer(), guest_address = lua.get_integer(), stock_address = lua.get_integer();
         Guid guid{};
@@ -1058,6 +1060,23 @@ namespace
             return refuse("intoxication_schema");
         auto* guest_flags = personal.data(scope.guest);
         auto* host_flags = canonical.data(scope.stock);
+        const Unreal::FName sickness{STR("Sickness"), Unreal::FNAME_Find};
+        if (sickness.IsNone()) return refuse("sickness_schema");
+        const auto sickness_before = personal.read(guest_flags, sickness);
+        std::int32_t sickness_after = sickness_before;
+        int dose = profile.infection;
+        if (dose)
+        {
+            std::int32_t iron_gut{};
+            if (!silverfish::native_enemy_loot::count_save_passive(
+                    scope.guest, Unreal::FName{STR("IronGut"), Unreal::FNAME_Find}, iron_gut))
+                return refuse("infection_passive");
+            if (iron_gut) dose = 0;
+            if (dose && (!silverfish::native_guest_sickness::food_infection(
+                    scope.pawn, scope.guest, scope.stock, dose, sickness_after, false) || sickness_after != sickness_before))
+                return refuse("infection_schema");
+        }
+
         auto* bag = inventory.backpack;
         auto* guest_rows = inventory.bag_data(scope.guest);
         auto* host_rows = inventory.bag_data(scope.stock);
@@ -1123,6 +1142,14 @@ namespace
         health.regen->SetPropertyValueInContainer(scope.guest, expected.regen);
         if (!prove(backup_bag.get(), expected))
             return rollback(false, only_food) ? refuse("regen_rolled_back") : unverified("regen");
+        if (dose)
+        {
+            // Keep the stock infection roll and update the expected copy used for the atomic readback.
+            if (!silverfish::native_guest_sickness::food_infection(
+                    scope.pawn, scope.guest, scope.stock, dose, sickness_after, true) ||
+                !personal.write(static_cast<Unreal::FScriptMap*>(expected_flags.get()), sickness, sickness_after) ||
+                !prove(backup_bag.get(), expected)) return unverified("infection");
+        }
         bag->CopyCompleteValue(guest_rows, expected_bag.get());
         if (!prove(expected_bag.get(), expected))
             return rollback(true, expected) ? refuse("debit_rolled_back") : unverified("debit");
@@ -1142,13 +1169,12 @@ namespace
         lua.set_bool(health.hemophilia);
         lua.set_integer(gourmand);
         lua.set_integer(healthy_eating);
-        return 16;
+        lua.set_integer(sickness_before);
+        lua.set_integer(sickness_after);
+        lua.set_integer(dose);
+        return 19;
     }
 
-    int use_mre(const Lua& lua) { return use_meal(lua, mre, "mre"); }
-    int use_canned_peaches(const Lua& lua) { return use_meal(lua, canned_peaches, "canned_peaches"); }
-    int use_canned_beans(const Lua& lua) { return use_meal(lua, canned_beans, "canned_beans"); }
-    int use_brown_mushroom(const Lua& lua) { return use_meal(lua, brown_mushroom, "brown_mushroom"); }
 }
 
 void silverfish::native_guest_consumable::install_hooks()
@@ -1175,10 +1201,7 @@ void silverfish::native_guest_consumable::register_lua(RC::LuaMadeSimple::Lua& l
     if (mre_enabled())
     {
         lua.register_function("SilverfishPrepareNativeGuestMre", prepare_food);
-        lua.register_function("SilverfishUseNativeGuestMre", use_mre);
-        lua.register_function("SilverfishUseNativeGuestCannedPeaches", use_canned_peaches);
-        lua.register_function("SilverfishUseNativeGuestCannedBeans", use_canned_beans);
-        lua.register_function("SilverfishUseNativeGuestBrownMushroom", use_brown_mushroom);
+        lua.register_function("SilverfishUseNativeGuestMeal", use_meal);
         if (opt_in("SILVERFISH_COOP_HEADLESS") && opt_in("SILVERFISH_COOP_NATIVE_FIXTURES"))
             lua.register_function("SilverfishSeedNativeGuestMreFixture", seed_mre_test);
     }

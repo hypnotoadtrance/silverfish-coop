@@ -3,6 +3,7 @@
 #include "drop_item_class.hpp"
 #include "guest_drop_maps.hpp"
 #include "guest_item.hpp"
+#include "guest_meal_profiles.hpp"
 #include "guest_weapon_registry.hpp"
 
 #include <algorithm>
@@ -1395,10 +1396,8 @@ namespace
         if (path == STR("/Game/Classes/Items/Random_GearBag_Starter.Random_GearBag_Starter_C") ||
             path == STR("/Game/Classes/Items/HyperRandom_GearBag_Starter.HyperRandom_GearBag_Starter_C"))
             return "use-starter-bag";
-        if (path == STR("/Game/Classes/Items/Item_MRE.Item_MRE_C")) return "use-mre";
-        if (path == STR("/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C")) return "use-canned-peaches";
-        if (path == STR("/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C")) return "use-canned-beans";
-        if (path == STR("/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C")) return "use-brown-mushroom";
+        for (const auto& meal : silverfish::native_guest_consumable::meals)
+            if (path == meal.path) return meal.entry;
         return {};
     }
 

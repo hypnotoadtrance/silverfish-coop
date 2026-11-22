@@ -510,6 +510,8 @@ Canned Beans in City and Crash Site, and Brown Mushroom in CrossRoads, use the s
 
 Supported guest food now accounts for Gourmand, Healthy Eating, Hemophilia, and amplified passives on the guest's own saved character and equipment. In Borough the guest picked up the placed MRE through Interact and used it through the local control command. With one stack of each of those three traits, food rose from 17 to 41, the regeneration buffer rose from 230 to 240.32, and intoxication dropped by two. The host's inventory and intoxication were unaffected. The consumed MRE and its receipt persisted across restart. The unusual combination of food that raises intoxication and an active Drunk Power effect still requires support. [Borough MRE test](../tests/live_borough_mre_smoke.py)
 
+The shared food path also covers stock Canned Beef, Canned Soup, Canned Tuna, Dead Beetle, Dog Meat, Milk Bites, Pork Ribs, Sausage, and Venison. Positive sickness rolls use the stock infection function with the guest's fatigue and sickness. Iron Gut cancels the positive dose. The Borough test selected Use on a two-unit tuna stack in the stock Backpack. One unit remained, the guest gained two sickness, and the host stayed at zero. The saved stack and operation receipt survived restart. Cooking and foods with special effects have separate paths. [Borough test](../tests/live_borough_mre_smoke.py)
+
 With `--native-guest-sickness`, the stock infection callback rolled 110 sickness for the exact enrolled guest. The host stayed at zero. The guest's saved sickness was 109 by checkpoint and reloaded at 109 on the same Direct IP port. A signed treatment callback then changed only the guest's sickness. The original single-player save hashes matched.
 
 ## Pending live verification

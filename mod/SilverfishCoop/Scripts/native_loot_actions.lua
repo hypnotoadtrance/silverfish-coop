@@ -6,6 +6,8 @@ local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local observation, placement, daily_update
+local escrow_cache, escrow_order = {}, {}
+local max_cached_escrows = 16
 local statics = "/Script/Engine.Default__GameplayStatics"
 local save = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 
@@ -15,6 +17,15 @@ end
 
 local function valid_object(value)
     return value and value:IsValid()
+end
+
+local function remember_escrow(slot, pool)
+    for index, cached in ipairs(escrow_order) do
+        if cached == slot then table.remove(escrow_order, index); break end
+    end
+    escrow_cache[slot] = pool
+    escrow_order[#escrow_order + 1] = slot
+    if #escrow_order > max_cached_escrows then escrow_cache[table.remove(escrow_order, 1)] = nil end
 end
 
 local function capture(scope, slot, outputs, items)
@@ -60,6 +71,7 @@ local function capture(scope, slot, outputs, items)
         end
         item.object:K2_DestroyActor()
     end
+    if #items > 0 then remember_escrow(slot, restored) end
 end
 
 function actions.command(fields, state, phase)
@@ -114,12 +126,16 @@ function actions.command(fields, state, phase)
             result.status = tostring(scope)
             return "stock loot claim scope unavailable"
         end
-        local api = StaticFindObject(statics)
-        local pool = valid_object(api) and api:LoadGameFromSlot(slot, 0)
+        local pool = escrow_cache[slot]
+        if not valid_object(pool) then
+            local api = StaticFindObject(statics)
+            pool = valid_object(api) and api:LoadGameFromSlot(slot, 0)
+        end
         if not valid_object(pool) then
             result.status = "native_loot_escrow_generation_missing"
             return "stock loot escrow missing"
         end
+        remember_escrow(slot, pool)
         result.distance, result.escrow_slot = scope.distance, slot
         local source = scope.profile.capacity ~= 2 and {scope.crate:GetAddress()} or {}
         local ok, status, amount, before, after, inventory_guid = SilverfishClaimNativeLootEscrow(scope.pawn:GetAddress(),
@@ -220,6 +236,7 @@ end
 
 function actions.reset()
     observation, placement, daily_update = nil, nil, nil
+    escrow_cache, escrow_order = {}, {}
 end
 
 function actions.rows(state, phase, status_row)

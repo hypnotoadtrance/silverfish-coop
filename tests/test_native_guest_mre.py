@@ -76,6 +76,16 @@ class NativeMreTests(unittest.IsolatedAsyncioTestCase):
                 invalid[column] = change
                 consume.parse_meal(invalid)
 
+    def test_food_infection_uses_the_stock_dose_or_iron_gut_immunity(self):
+        frame = ["native-guest-canned-tuna", "used", BOROUGH, PAWN, GUID, "2", "1", "17", "23",
+                 "230", "230", "210", "250", "42", "42", "4", "0", "0", "0", "12", "14", "4"]
+        self.assertEqual(consume.parse_meal(frame)["sickness_after"], 14)
+        self.assertEqual(consume.parse_meal(frame[:-3] + ["12", "12", "0"])["infection_dose"], 0)
+        for fields in (frame[:-3], frame[:-2] + ["12", "4"], frame[:-2] + ["17", "4"],
+                       frame[:-2] + ["14", "0"], frame[:-1] + ["5"]):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                consume.parse_meal(fields)
+
     def test_stock_beans_and_mushroom_keep_exact_food_and_intoxication(self):
         for action, food_after, intox_after in ((consume.CANNED_BEANS, "31", "41"),
                                                 (consume.BROWN_MUSHROOM, "20.5", "42")):

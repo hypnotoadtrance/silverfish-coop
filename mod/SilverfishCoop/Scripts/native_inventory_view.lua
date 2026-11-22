@@ -866,7 +866,7 @@ function inventory_view.command(fields, state, phase)
     if operation == "native-inventory-stock-use-click-fixture"
         and (#fields == 3 or #fields == 4 and (fields[4] == "drag" or fields[4] == "take-ammo"))
         and headless and stock_session and not stock_drop
-        and (os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" or fields[4] == "take-ammo"
+        and (os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" or (mre_enabled and #fields == 3) or fields[4] == "take-ammo"
             and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1") then
         local screen = stock_session.screen
         local cards, manager = screen.BackpackPanel.Cards, screen.ItemManager

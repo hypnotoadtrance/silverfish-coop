@@ -99,8 +99,7 @@ class MultiHost(Host):
             return
         if member:
             self.control.event("guest_link_lost", guest_id=guest_id, grace_seconds=self.members.grace_seconds)
-            if not self.transitioning and not self.native_checkpoint_unsafe and self.last_game.get("state") == "hosting":
-                self.next_save = 0.0
+            self.request_disconnect_save(member.character_id, ready=member.ready)
 
     def authenticated_guest(self, guest_id: str) -> tuple[str, str] | None:
         member = self.members.get(guest_id)
