@@ -3,6 +3,7 @@ local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
 local pose_fixture = os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_POSE") == "1"
 local rifle_fixture = os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_RIFLE") == "1"
 local sprint_fixture = os.getenv("SILVERFISH_COOP_MOVEMENT_PROBE") == "1"
+local aim_movement_fixture = os.getenv("SILVERFISH_COOP_AIM_MOVEMENT_PROBE") == "1"
 local sprint_trait_fixture = os.getenv("SILVERFISH_COOP_MOVEMENT_TRAIT_PROBE") == "1"
 local guest_fixture = mailbox and mailbox:match("[/\\]clients[/\\]avatar%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
     and (pose_fixture or rifle_fixture or sprint_fixture or os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_EQUIPMENT") == "1")
@@ -188,7 +189,7 @@ local function prepare_lane(pawn, y)
     assert(pawn:K2_SetActorLocation(point, false, {}, true), "avatar_probe_lane_position_unavailable")
 end
 
-local function face_open_lane(pawn, teammate)
+local function face_open_lane(pawn, teammate, strafe)
     local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local point = pawn:K2_GetActorLocation()
     local capsule = pawn.CapsuleComponent
@@ -204,7 +205,7 @@ local function face_open_lane(pawn, teammate)
             local floor = {X = target.X, Y = target.Y, Z = start.Z - height - 180}
             if not blocked and trace:LineTraceSingle(pawn, top, floor, 0, false,
                 {pawn, teammate}, 0, {}, true, trace_color, trace_color, 0) then
-                pawn.Controller:SetControlRotation({Pitch = 0, Yaw = yaw, Roll = 0})
+                pawn.Controller:SetControlRotation({Pitch = 0, Yaw = strafe and yaw - 90 or yaw, Roll = 0})
                 return math.cos(radians), math.sin(radians)
             end
         end
@@ -224,11 +225,32 @@ end
 
 local movement_operations = {localmovement = true, remotemovement = true, preparemovement = true,
     walk = true, run = true, stopmovement = true, resetlane = true, faceteammate = true, readpose = true}
+local aim_movement_operations = {localstance = true, remotestance = true, aimwalk = true, aimstrafe = true,
+    crouch = true, stand = true}
+
+local function stance_row(pawn, observed)
+    local point = pawn:K2_GetActorLocation()
+    local rotation = observed and pawn:GetBaseAimRotation() or pawn.Controller:GetControlRotation()
+    local body = observed and display_body(pawn)
+    local instance = body and body:GetAnimInstance()
+    local animation = valid(instance) and instance.CurrentAsset
+    local clip, position, socket_height = "-", 0, 0
+    if valid(animation) then
+        local socket = FName("Weapon_Socket01", EFindName.FNAME_Find)
+        assert(body:DoesSocketExist(socket), "avatar_probe_aim_socket_unavailable")
+        clip, position = animation:GetFName():ToString(), body:GetPosition()
+        socket_height = body:GetSocketTransform(socket, 2).Translation.Z
+    end
+    return table.concat({pawn.bIsCrouched and 1 or 0, pawn.CharacterMovement:IsMovingOnGround() and 1 or 0,
+        point.X, point.Y, rotation.Yaw, clip, position, socket_height}, "\t")
+end
 
 local function movement_probe(operation, local_pawn, remote_pawn)
     assert(valid(local_pawn) and valid(remote_pawn), "avatar_probe_movement_pawns_unavailable")
     if operation == "localmovement" then return movement_row(local_pawn) end
     if operation == "remotemovement" then return movement_row(remote_pawn) end
+    if operation == "localstance" then return stance_row(local_pawn, false) end
+    if operation == "remotestance" then return stance_row(remote_pawn, true) end
     if operation == "readpose" then
         local body = display_body(remote_pawn)
         local instance = body:GetAnimInstance()
@@ -279,6 +301,19 @@ local function movement_probe(operation, local_pawn, remote_pawn)
         local_pawn.MovementInput = {X = 0, Y = 1}
         local_pawn:Action_Sprint(operation == "run")
         return string.format("%.5f\t%.5f", x, y)
+    elseif operation == "aimwalk" or operation == "aimstrafe" then
+        assert(local_pawn.CharacterMovement:IsMovingOnGround() and local_pawn.MoveInputs_Enabled
+            and not local_pawn.Sprinting, "avatar_probe_aim_movement_unavailable")
+        local strafe = operation == "aimstrafe"
+        local x, y = face_open_lane(local_pawn, remote_pawn, strafe)
+        local_pawn.MovementInput = strafe and {X = 1, Y = 0} or {X = 0, Y = 1}
+        return string.format("%.5f\t%.5f", x, y)
+    elseif operation == "crouch" then
+        assert(local_pawn.CharacterMovement:IsMovingOnGround() and local_pawn.MoveInputs_Enabled,
+            "avatar_probe_aim_crouch_unavailable")
+        local_pawn:Crouch(false)
+    elseif operation == "stand" then
+        local_pawn:UnCrouch(false)
     elseif operation == "stopmovement" then
         local_pawn.MovementInput = {X = 0, Y = 0}
         local_pawn:Action_Sprint(false)
@@ -293,6 +328,7 @@ end
 
 local function run(operation)
     local movement_operation = sprint_fixture and movement_operations[operation]
+        or aim_movement_fixture and aim_movement_operations[operation]
     if guest_fixture then
         local clip_index, clip_sample = operation:match("^clip([1-4])([01])$")
         local rig_operation = pose_fixture and (operation == "rig" or operation == "wrists" or clip_index)

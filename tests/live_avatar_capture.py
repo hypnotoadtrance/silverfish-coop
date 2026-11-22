@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from contextlib import contextmanager, nullcontext
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -68,8 +69,6 @@ async def avatar_probe(run, operation, *, allow_pending=False):
 
 
 async def verify_pose(host_run, guest_run):
-    import math
-
     fields = ("base_cm", "body_cm", "neck_error_cm", "head_offset_error_cm", "head_roll", "head_yaw",
               "tail_x", "tail_z", "tail_yaw", "actor_yaw", "falling")
 
@@ -187,9 +186,80 @@ async def capture_movement(host_run, guest_run, command, host, guest, with_trait
     return evidence
 
 
+async def verify_aim_movement(host_run, guest_run, command, host, guest, projections):
+    async def stance(run, operation):
+        crouched, grounded, x, y, yaw, clip, position, height = await avatar_probe(run, operation)
+        return {"crouched": crouched == "1", "grounded": grounded == "1", "position": [float(x), float(y)],
+                "yaw": float(yaw), "clip": clip, "clip_time": float(position), "socket_height": float(height)}
+
+    async def observe(run, clip, weapon_mesh, crouched=False):
+        def projected(state):
+            return next((row for row in (projections(state) or {}).values()
+                         if not row.get("diagnostic") and row.get("pose_clip") == clip
+                         and row.get("animation_mode") == 1 and any(
+                             mesh.endswith("." + weapon_mesh) for mesh in row.get("weapon_meshes", ()))), None)
+
+        projection = projected(await wait(run, projected, timeout=8))
+        async with asyncio.timeout(3):
+            while True:
+                observed = await stance(run, "remotestance")
+                if (observed["clip"] == clip and observed["grounded"] and observed["crouched"] == crouched
+                        and observed["clip_time"] > 0 and observed["socket_height"] > 0):
+                    return {"avatar": projection, "rig": observed}
+                await asyncio.sleep(.05)
+
+    async def move(runner, observer, target, operation, clip, weapon_mesh, *, crouched=False):
+        x, y = await avatar_probe(runner, operation)
+        before = await stance(runner, "localstance")
+        reply = await command("action", *target, "walk", "--continuous", f"--x={x}", f"--y={y}",
+                              "--milliseconds", "2600")
+        assert reply["ok"], reply
+        observed = await observe(observer, clip, weapon_mesh, crouched)
+        after = await stance(runner, "localstance")
+        dx, dy = (end - start for start, end in zip(before["position"], after["position"], strict=True))
+        distance = math.hypot(dx, dy)
+        yaw = math.radians(after["yaw"])
+        forward = dx * math.cos(yaw) + dy * math.sin(yaw)
+        sideways = -dx * math.sin(yaw) + dy * math.cos(yaw)
+        assert after["grounded"] and after["crouched"] == crouched and distance > 10, (before, after, observed)
+        assert (sideways if operation == "aimstrafe" else forward) > .8 * distance, (before, after, observed)
+        await avatar_probe(runner, "stopmovement")
+        return {"start": before, "moving": after, "observed": observed}
+
+    await avatar_probe(host_run, "equip")
+    await avatar_probe(host_run, "preparemovement")
+    await avatar_probe(guest_run, "preparemovement")
+    evidence = {}
+    for role, runner, observer, target, idle, moving, lowered, mesh in (
+        ("host", host_run, guest_run, host, "HandGun_Idle_3", "HandGun_Walk", "HandGun_Idle", "9mmAuto_Frame"),
+        ("guest", guest_run, host_run, guest, "Rifle_Aiming_Idle", "Rifle_Walk", "Rifle_Idle_1_", "BreakAction_BMG_Frame"),
+    ):
+        await avatar_probe(host_run, "resetlane")
+        await observe(observer, lowered, mesh)
+        await avatar_probe(runner, "aim")
+        try:
+            aimed = await observe(observer, idle, mesh)
+            assert 130 <= aimed["rig"]["socket_height"] <= 143, aimed
+            strafing = await move(runner, observer, target, "aimstrafe", moving, mesh)
+            await observe(observer, idle, mesh)
+            await avatar_probe(runner, "crouch")
+            crouched = await observe(observer, "Idle_Crouching_Aiming", mesh, True)
+            crouched_walking = await move(runner, observer, target, "aimwalk", "Walk_Crouching_Forward", mesh,
+                                          crouched=True)
+            await observe(observer, "Idle_Crouching_Aiming", mesh, True)
+        finally:
+            await avatar_probe(runner, "stopmovement")
+            await avatar_probe(runner, "lower")
+            await avatar_probe(runner, "stand")
+        evidence[role] = {"aimed": aimed, "strafing": strafing, "crouched": crouched,
+            "crouched_walking": crouched_walking, "released": await observe(observer, lowered, mesh)}
+    return evidence
+
+
 async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: bool = False,
                   melee: bool = False, pose: bool = False, rifle: bool = False,
-                  consumable: bool = False, movement: bool = False, movement_traits: bool = False) -> None:
+                  consumable: bool = False, movement: bool = False, movement_traits: bool = False,
+                  aim_movement: bool = False) -> None:
     profile = "avatar-" + uuid.uuid4().hex[:8]
     host_dir = work / "campaigns" / profile
     guest_dir = work / "clients" / profile
@@ -198,12 +268,14 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
     env = dict(os.environ, SILVERFISH_COOP_RENDER_CAPTURE="guest")
     if pose:
         env["SILVERFISH_COOP_RENDER_CAPTURE_POSE"] = "1"
-    if rifle:
+    if rifle or aim_movement:
         env["SILVERFISH_COOP_RENDER_CAPTURE_RIFLE"] = "1"
     if equipment:
         env["SILVERFISH_COOP_RENDER_CAPTURE_EQUIPMENT"] = "1"
-    if movement:
+    if movement or aim_movement:
         env["SILVERFISH_COOP_MOVEMENT_PROBE"] = "1"
+    if aim_movement:
+        env["SILVERFISH_COOP_AIM_MOVEMENT_PROBE"] = "1"
     if movement_traits:
         env["SILVERFISH_COOP_MOVEMENT_TRAIT_PROBE"] = "1"
     base = (sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work))
@@ -222,7 +294,7 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
 
     async def start(log, target, *args):
         process_env = dict(env)
-        if equipment and target == host:
+        if (equipment or aim_movement) and target == host:
             process_env["SILVERFISH_COOP_RENDER_CAPTURE"] = "host"
         with (host_run / log).open("wb") as stream:
             process = await asyncio.create_subprocess_exec(*base, *args, cwd=REPO, env=process_env,
@@ -243,7 +315,7 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
         await wait(host_run, lambda state: state.get("state") == "hosting")
         invitation = await command("invite", *host, "--name", "Loopback avatar guest", "--character", "Avatar guest")
         join = ("join", *guest, "--invite", invitation["invite_file"], "--headless", "--native-zones")
-        if equipment or rifle:
+        if equipment or rifle or aim_movement:
             join += ("--native-guest-primary-input",)
         if rifle:
             join += ("--native-guest-reload-input",)
@@ -255,7 +327,7 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             assert all(row["state"] == "default_body" for row in evidence[role].values()), evidence
         if lifecycle:
             identity = invitation["character_id"]
-        if movement and not (equipment or rifle):
+        if movement and not (equipment or rifle or aim_movement):
             await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
             evidence["stock_movement"] = await capture_movement(host_run, guest_run, command, host, guest, movement_traits,
                 {"host": "Running_Unarmed", "guest": "Running_Unarmed"})
@@ -279,7 +351,7 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
         if pose:
             await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
             evidence["pose"] = await verify_pose(host_run, guest_run)
-        if rifle:
+        if rifle or aim_movement:
             await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
             guid, = await avatar_probe(host_run, "seedrifle")
             async with asyncio.timeout(15):
@@ -298,9 +370,12 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             fields = ("magazine", "caliber", "fire_rate", "burst_length", "action_on_release", "single_reload", "projectile")
             evidence["guest_rifle_selection"] = {"receipt": receipt, "observer": projections(mounted),
                 "stock_profile": dict(zip(fields, authority_profile, strict=True))}
-            if movement:
+            if movement and rifle:
                 evidence["stock_movement"] = await capture_movement(host_run, guest_run, command, host, guest, movement_traits,
                     {"host": "Running_Unarmed", "guest": "Rifle_Run_Forward"})
+            if aim_movement:
+                evidence["stock_moving_aim"] = await verify_aim_movement(host_run, guest_run, command, host, guest, projections)
+        if rifle:
             async with asyncio.timeout(8):
                 while True:
                     await wait(guest_run, lambda state: state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
@@ -518,6 +593,8 @@ if __name__ == "__main__":
     parser.add_argument("--consumable", action="store_true", help="verify stock host Bandage geometry and positional sound")
     parser.add_argument("--movement", action="store_true", help="sample stock walk and sprint on the runner and the observing peer")
     parser.add_argument("--movement-traits", action="store_true", help="give only the guest a stock movement-speed effect")
+    parser.add_argument("--aim-movement", action="store_true",
+                        help="verify pistol and break-action ADS while strafing, crouching, and crouch-walking")
     options = parser.parse_args()
     if options.melee and (not options.equipment or options.lifecycle):
         parser.error("--melee requires --equipment and runs independently of --lifecycle")
@@ -527,10 +604,14 @@ if __name__ == "__main__":
         parser.error("--pose verifies the rig independently of --equipment and --lifecycle")
     if options.rifle and (options.pose or options.equipment or options.lifecycle):
         parser.error("--rifle verifies stock guest equipment selection independently")
+    if options.aim_movement and (options.pose or options.equipment or options.lifecycle
+                                 or options.movement and not options.rifle):
+        parser.error("--aim-movement can run alone or with --rifle")
     work = options.work.resolve(strict=True)
     with installed_probe(work) if any(
-        (options.equipment, options.pose, options.rifle, options.consumable, options.movement)
+        (options.equipment, options.pose, options.rifle, options.consumable, options.movement, options.aim_movement)
     ) else nullcontext():
         asyncio.run(capture(work, options.vanilla_saved.resolve(strict=True),
                             options.lifecycle, options.equipment, options.melee, options.pose,
-                            options.rifle, options.consumable, options.movement, options.movement_traits))
+                            options.rifle, options.consumable, options.movement, options.movement_traits,
+                            options.aim_movement))
