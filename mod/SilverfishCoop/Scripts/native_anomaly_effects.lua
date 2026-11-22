@@ -15,11 +15,13 @@ local assets = {
     canister = {"/Game/Assets/PFX/FX_Blast_FragGrenade_Converted.FX_Blast_FragGrenade_Converted",
         "/Game/Assets/Sounds/MetaSounds/MS_Blast_Pop.MS_Blast_Pop",
         "/Game/Assets/Sounds/SoundClasses/Blast_Attenuation.Blast_Attenuation"},
+    wandering = {"/Game/Assets/PFX/NI_Singularity_01.NI_Singularity_01",
+        "/Game/Assets/Sounds/CUEs/Blast_Cues/Teleport_Cue.Teleport_Cue"},
 }
 assets.fixedtank = assets.blast
 assets.powerbox = {assets.electrode[1], assets.electrode[2], assets.blast[3]}
 assets.fixedfire = {assets.blast[1], "/Game/Assets/Sounds/MetaSounds/MS_Blast_Firey.MS_Blast_Firey", assets.blast[3]}
-local audio_range = {charge = 4000, blast = 500100, vortex = 500100, electrode = 8100, canister = 500100,
+local audio_range = {charge = 4000, blast = 500100, vortex = 500100, electrode = 8100, canister = 500100, wandering = 500100,
     powerbox = 500100, fixedtank = 500100, fixedfire = 500100}
 local observer_blasts = {
     [0] = {kind = "observersparks", particle = "NI_Sparks"},
@@ -91,6 +93,13 @@ function effects.observe_charge(entry)
         record("charge", trap.Sphere:K2_GetComponentLocation(), 1)
     end
     entry.charged = charged
+end
+
+function effects.observe_wandering_teleport(point)
+    if point and type(point.X) == "number" and type(point.Y) == "number" and type(point.Z) == "number"
+        and math.abs(point.X) <= 1e7 and math.abs(point.Y) <= 1e7 and math.abs(point.Z) <= 1e7 then
+        record("wandering", point, 1, .6)
+    end
 end
 
 local function stock_blast(cue, point, pfx, sfx, scale, volume)
@@ -165,7 +174,7 @@ local function play(pawn, origin, kind, point, scale, volume)
     local niagara = StaticFindObject("/Script/Niagara.Default__NiagaraFunctionLibrary")
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     if not valid(niagara) or not valid(statics) or not valid(particle) or not valid(sound)
-        or kind ~= "charge" and not valid(attenuation) then return false end
+        or profile[3] and not valid(attenuation) then return false end
     if kind == "charge" or kind == "blast" then effects.retire_charges(point) end
     local rotation = {Pitch = 0, Yaw = 0, Roll = 0}
     local component = niagara:SpawnSystemAtLocation(pawn, particle, point, rotation,
@@ -175,7 +184,9 @@ local function play(pawn, origin, kind, point, scale, volume)
             if #charging >= 12 then remove_charge(1) end
             charging[#charging + 1] = {component = component, point = point, expires = os.clock() + 3}
         end
-        statics:PlaySoundAtLocation(pawn, sound, point, rotation, 1, 1, 0, nil, nil, nil, nil)
+    end
+    if not profile[3] then
+        statics:PlaySoundAtLocation(pawn, sound, point, rotation, volume, 1, 0, nil, nil, nil, nil)
     else
         local audio = statics:SpawnSoundAtLocation(pawn, sound, point, rotation, volume, 1, 0, attenuation, nil, true)
         if valid(audio) then

@@ -927,6 +927,48 @@ async def verify_rook_anomaly_motion():
     await wait(client_run, tracks_authority, timeout=22)
     note("rook_wandering_anomaly_tracks_host_motion", observed | {"placed_actors": len(initial_host)})
 
+    def effects():
+        path = client_run / "events.jsonl"
+        if not path.is_file():
+            return []
+        contents = path.read_text(encoding="utf-8")
+        return [event for line in contents[:contents.rfind("\n")].splitlines()
+                if (event := json.loads(line)).get("event") == "native_wandering_teleport_effect_played"]
+
+    original = json.loads((run / "status.json").read_text(encoding="utf-8"))
+    health = original["game"]["pawns"]["local"]["health"]
+    host_position = original["game"]["pawns"]["local"]["location"]
+    original_guest = original["game"]["pawns"]["guest"]
+    old_cues = {row["serial"] for row in effects()}
+    local_guest = json.loads((client_run / "status.json").read_text(encoding="utf-8"))
+    prior_blocks = local_guest["game"]["native_anomaly_field"]["blocked_triggers"]
+    await command("action", "--profile", profile, "native-placed-anomaly-guest-fixture", "--target", observed["actor"])
+    await wait(client_run, lambda row: row["game"]["native_anomaly_field"]["blocked_triggers"] > prior_blocks, timeout=6)
+    assert {row["serial"] for row in effects()} == old_cues
+    await command("action", "--campaign", campaign, "native-anomaly-trigger-fixture", "--target", observed["actor"])
+    await wait(client_run, lambda _: len([row for row in effects() if row["serial"] not in old_cues]) >= 2, timeout=12)
+    start, finish = [row for row in effects() if row["serial"] not in old_cues]
+    assert start["particles"] and finish["particles"] and start["serial"] < finish["serial"]
+    assert all(abs(row["volume"] - .6) < .001 for row in (start, finish))
+    assert math.dist(start["location"], finish["location"]) > 150
+
+    def arrived(row, role):
+        pawn = row.get("game", {}).get("pawns", {}).get(role, {})
+        return pawn and math.dist(pawn["location"], finish["location"]) < 200
+
+    host_done, guest_done = await asyncio.gather(
+        wait(run, lambda row: arrived(row, "guest"), timeout=10),
+        wait(client_run, lambda row: arrived(row, "local"), timeout=10),
+    )
+    host_pawn, guest_pawn = host_done["game"]["pawns"]["local"], guest_done["game"]["pawns"]["local"]
+    authority_pawn = host_done["game"]["pawns"]["guest"]
+    assert math.dist(host_pawn["location"], host_position) < 50 and host_pawn["health"] == health
+    assert authority_pawn["name"] == original_guest["name"] and authority_pawn["health"] == original_guest["health"]
+    assert math.dist(authority_pawn["location"], guest_pawn["location"]) < 100
+    note("rook_wandering_teleport_moves_guest_once", {"start": start, "finish": finish, "guest": guest_pawn})
+    await command("action", "--campaign", campaign, "native-anomaly-trigger-fixture", "--target", "restore-wandering-probe")
+    await wait(run, lambda row: math.dist(row["game"]["pawns"]["guest"]["location"], host_position) < 150, timeout=10)
+
 
 async def stardust_visit(character_id, host_session):
     guid = uuid.uuid4().hex.upper()
@@ -1323,14 +1365,18 @@ async def smoke():
             catalog = await command("characters", "--invite", issued["invite_file"])
             assert len(catalog["characters"]) == 2
             note("character_catalog_and_idempotent_create", {"selected": chosen, "characters": 2})
+        guest_environment = dict(os.environ)
+        if args.native_reload_input:
+            guest_environment["SILVERFISH_COOP_NATIVE_GUEST_RELOAD_FIXTURES"] = "1"
+        if args.rook_motion:
+            guest_environment["SILVERFISH_COOP_RENDER_CAPTURE"] = "guest"
         client = await start("join", "--profile", profile, "--invite", str(fixture), "--headless",
                              "--character", chosen, *(["--native-zones"] if args.native_zones else []),
                              *(["--native-zone-walls"] if args.native_walls else []),
                              *(["--native-guest-reload-input"] if args.native_reload_input else []),
                              *(["--native-guest-primary-input"] if args.native_primary_input else []),
                              *(["--native-guest-inventory-view"] if args.native_inventory_view else []),
-                             env=dict(os.environ, SILVERFISH_COOP_NATIVE_GUEST_RELOAD_FIXTURES="1")
-                             if args.native_reload_input else None)
+                             env=guest_environment)
         guest = await wait(client_run, lambda state: state.get("state") == "connected"
                            and len(state.get("game", {}).get("pawns", {})) == 2)
         host_status = await wait(run, lambda state: state.get("game", {}).get("remote_clients") == 1

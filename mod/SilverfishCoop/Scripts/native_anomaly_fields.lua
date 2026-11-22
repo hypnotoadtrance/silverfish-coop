@@ -21,11 +21,12 @@ for kind, path in pairs(classes) do kinds["BlueprintGeneratedClass " .. path] = 
 local fire_jet = "BlueprintGeneratedClass /Game/Classes/Anomalies/Fire_Jet_BP.Fire_Jet_BP_C"
 local overlap = "BndEvt__Starburst_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature"
 local electrode_overlap = "BndEvt__Electrode_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature"
+local wandering_overlap = "BndEvt__Wandering_Teleport_BP_Capsule_K2Node_ComponentBoundEvent_1_ComponentBeginOverlapSignature__DelegateSignature"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local pending, active, pending_fires, fires, fixtures = {}, {}, {}, {}, {}
-local world, world_map, fixture_kind
+local world, world_map, fixture_kind, wandering_hook, wandering_probe
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -37,6 +38,23 @@ end
 
 local function in_world(actor, current)
     return valid(actor) and not actor:IsActorBeingDestroyed() and same(actor:GetWorld(), current)
+end
+
+local function bind_wandering_effect()
+    if wandering_hook or type(RegisterHook) ~= "function" then return end
+    local path = classes["wandering-teleport"] .. ":Tele_FX"
+    if not valid(StaticFindObject(path)) then return end
+    RegisterHook(path, function(context, position)
+        local actor = context:get()
+        if not in_world(actor, world) or not actor:HasAuthority() then return end
+        local entry = active[actor:GetAddress()]
+        local driver = actor:GetWorld().NetDriver
+        if entry and entry.kind == "wandering-teleport" and same(entry.actor, actor)
+            and valid(driver) and same(driver.World, world) and not valid(driver.ServerConnection) then
+            effects.observe_wandering_teleport(position:get())
+        end
+    end)
+    wandering_hook = true
 end
 
 local function trap_kind(actor, class)
@@ -234,6 +252,20 @@ function fields.command(args, state, phase)
     if explosive ~= nil then return explosive end
     local effect = effects.command(args, state, phase, animate_vortex)
     if effect ~= nil then return effect end
+    if args[2] == "native-anomaly-trigger-fixture" and args[3] == "restore-wandering-probe" then
+        local guest = #state.guests == 1 and state.guests[1].pawn
+        if #args ~= 3 or not host_fixture or phase ~= "hosting" or not wandering_probe
+            or not same(wandering_probe.world, state.world) or not in_world(guest, state.world)
+            or not same(wandering_probe.guest, guest) or not guest:HasAuthority() or guest:IsLocallyControlled() then
+            error("Wandering teleport restore probe unavailable", 0)
+        end
+        if not guest:K2_TeleportTo(wandering_probe.origin, guest:K2_GetActorRotation()) then
+            error("The wandering teleport probe could not restore the guest", 0)
+        end
+        guest:ForceNetUpdate()
+        wandering_probe = nil
+        return "The test guest returned to the party"
+    end
     if args[2] == "native-anomaly-trigger-fixture" or args[2] == "native-placed-anomaly-guest-fixture"
         or args[2] == "native-electrode-retire-fixture" then
         local guest_probe = args[2] == "native-placed-anomaly-guest-fixture"
@@ -244,7 +276,8 @@ function fields.command(args, state, phase)
                 if entry.placed == args[3] then trap, kind = entry.actor, entry.kind; break end
             end
         end
-        local trigger = in_world(trap, state.world) and (kind == "vortex" and vortex_sensor(trap) or trap.Sphere)
+        local trigger = in_world(trap, state.world) and (kind == "vortex" and vortex_sensor(trap)
+            or kind == "wandering-teleport" and trap.Capsule or trap.Sphere)
         if #args ~= 3 or not headless or not valid(trigger) then
             error("Trap trigger probe unavailable", 0)
         end
@@ -254,7 +287,9 @@ function fields.command(args, state, phase)
                 or not valid(pawn.CapsuleComponent) or trap:GetActorEnableCollision() ~= false then
                 error("Placed trap guest overlap probe unavailable", 0)
             end
-            trap[kind == "electrode" and electrode_overlap or overlap](trap, trigger, pawn, pawn.CapsuleComponent, 0, false, {})
+            local callback = kind == "electrode" and electrode_overlap
+                or kind == "wandering-teleport" and wandering_overlap or overlap
+            trap[callback](trap, trigger, pawn, pawn.CapsuleComponent, 0, false, {})
             if kind == "electrode" then
                 trap:ReceiveBeginPlay()
                 trap:Burst(2)
@@ -271,6 +306,13 @@ function fields.command(args, state, phase)
         local guest = #state.guests == 1 and state.guests[1].pawn
         if not host_fixture or phase ~= "hosting" or not in_world(guest, state.world)
             or not guest:HasAuthority() or guest:IsLocallyControlled() then error("Trap trigger probe unavailable", 0) end
+        if kind == "wandering-teleport" then
+            if #trap.Waypoints < 1 or not trap:HasAuthority() then error("Stock teleport waypoints unavailable", 0) end
+            local original = guest:K2_GetActorLocation()
+            wandering_probe = {world = state.world, guest = guest, origin = {X = original.X, Y = original.Y, Z = original.Z}}
+            trap[wandering_overlap](trap, trigger, guest, guest.CapsuleComponent, 0, false, {})
+            return "Stock wandering teleport overlap invoked on the host"
+        end
         local center = trigger:K2_GetComponentLocation()
         if not guest:K2_TeleportTo({X = center.X, Y = center.Y, Z = center.Z + 45}, guest:K2_GetActorRotation()) then
             error("The stock guest could not enter the trap trigger", 0)
@@ -391,6 +433,9 @@ function fields.rows(state, phase, row)
         local actor = entry.actor
         if valid(actor) and not actor:IsActorBeingDestroyed() and valid(actor.RootComponent) then
             if phase == "hosting" and entry.kind == "starburst" then effects.observe_charge(entry) end
+            if phase == "hosting" and entry.kind == "wandering-teleport" and not wandering_hook then
+                bind_wandering_effect()
+            end
             if phase == "connected" and entry.placed and actor:GetActorEnableCollision() then
                 actor:SetActorEnableCollision(false)
             end
