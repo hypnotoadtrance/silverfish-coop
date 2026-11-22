@@ -27,6 +27,13 @@ local function valid(object)
     return object and object:IsValid()
 end
 
+local function clear_offering_lane(observer_, start, target, ignore)
+    local kismet = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local color = {R = 0, G = 0, B = 0, A = 0}
+    return not kismet:SphereTraceSingleForObjects(observer_, start, target, 70, {0, 1, 2, 3, 4, 5},
+        false, ignore, 0, {}, true, color, color, 0)
+end
+
 local function same(left, right)
     return valid(left) and valid(right) and left:GetAddress() == right:GetAddress()
 end
@@ -417,12 +424,27 @@ local function command(operation, world, driver, host, local_pawn, argument)
         local path = "/Game/Classes/Items/Item_Jewely.Item_Jewely_C"
         local kind = StaticFindObject(path)
         if not valid(kind) then LoadAsset(path); kind = StaticFindObject(path) end
-        local point = selected.well:K2_GetActorLocation()
-        local item = world:SpawnActor(kind, {X = point.X + 265, Y = point.Y, Z = point.Z}, {Pitch = 0, Yaw = 0, Roll = 0})
+        local body, guest = selected.well, driver.ClientConnections[1].PlayerController.Pawn
+        local point = body:K2_GetActorLocation()
+        local start = {X = point.X + 265, Y = point.Y, Z = point.Z}
+        if argument == "flight" then
+            local clear
+            for _, height in ipairs({3000, 2500, 2000, 1500, 1000, 700}) do
+                local target = {X = point.X, Y = point.Y, Z = test_lane.Z + height}
+                start = {X = target.X + 265, Y = target.Y, Z = target.Z}
+                if clear_offering_lane(body, start, target, {body, local_pawn, guest}) then
+                    assert(body:K2_SetActorLocation(target, false, {}, true))
+                    clear = true
+                    break
+                end
+            end
+            assert(clear, "No clear stock throw lane")
+        end
+        local item = world:SpawnActor(kind, start, {Pitch = 0, Yaw = 0, Roll = 0})
         assert(valid(item) and item:HasAuthority() and valid(item.Box))
         -- A high-value item guarantees an ordinary stock reward without choosing its tier.
         item.Value = 2500
-        item.Instigator = driver.ClientConnections[1].PlayerController.Pawn
+        item.Instigator = guest
         item.Box:SetSimulatePhysics(true)
         item.Box:SetEnableGravity(false)
         item:SetReplicates(true)
@@ -447,6 +469,29 @@ local function command(operation, world, driver, host, local_pawn, argument)
         item.Value = 2500
         assert(item:K2_SetActorLocation(target, false, {}, true))
         return "entered stock capsule"
+    elseif observer and operation == "observerlaunch" then
+        assert(host and selected and valid(selected.offering) and valid(selected.well) and #driver.ClientConnections == 1)
+        local item, body = selected.offering, selected.well
+        local guest = driver.ClientConnections[1].PlayerController.Pawn
+        assert(same(item.Instigator, guest) and valid(guest.Camera) and valid(item.RootComponent))
+        local source, target = item:K2_GetActorLocation(), body:K2_GetActorLocation()
+        local offset = {X = target.X - source.X, Y = target.Y - source.Y, Z = target.Z - source.Z}
+        local length = math.sqrt(offset.X^2 + offset.Y^2 + offset.Z^2)
+        local direction = {X = offset.X / length, Y = offset.Y / length, Z = offset.Z / length}
+        local angle = {Pitch = math.deg(math.asin(direction.Z)), Yaw = math.deg(math.atan(direction.Y, direction.X)), Roll = 0}
+        guest.Controller:SetControlRotation(angle)
+        guest.Camera:K2_SetWorldRotation(angle, false, {}, true)
+        direction = guest.Camera:GetForwardVector()
+        local dot = (offset.X * direction.X + offset.Y * direction.Y + offset.Z * direction.Z) / length
+        assert(dot > .95, ("guest aim does not align with throw %.2f"):format(dot))
+        item.Value = 2500
+        assert(clear_offering_lane(body, source, target, {body, item, guest, local_pawn}),
+            "The fixture throw path became obstructed")
+        body:TryCatchItem(item, direction)
+        local grabbed = same(body.GrabbedComponent, item.RootComponent)
+        item.Box:AddImpulse({X = 600 * direction.X, Y = 600 * direction.Y, Z = 600 * direction.Z},
+            FName("None"), true)
+        return ("%s|%.3f|%.2f"):format(tostring(grabbed), dot, length)
     elseif observer and operation == "observerabsorptions" then
         assert(host and selected and selected.absorptions)
         return tostring(selected.absorptions)

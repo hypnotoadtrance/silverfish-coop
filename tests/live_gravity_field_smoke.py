@@ -170,15 +170,20 @@ async def verify_observer(guest, host_box, guest_box, probe):
             "stock_psy_attack_recipients": attack_log.read_text().splitlines()}
 
 
-async def verify_observer_offering(host_box, guest_box, probe):
-    await probe(host_box, "observerpose", "far")
-    source = await probe(host_box, "observeroffering")
+async def verify_observer_offering(host_box, guest_box, probe, approach):
+    await probe(host_box, "observerpose", "guest" if approach == "flight" else "far")
+    source = await probe(host_box, "observeroffering", approach)
     assert source.startswith("Item_Jewely_C ")
     async with asyncio.timeout(8):
         while await probe(guest_box, "observerrewards") != "1|":
             await asyncio.sleep(.15)
     assert await probe(host_box, "observerrewards") == "1|"
-    assert await probe(host_box, "observerimpact") == "entered stock capsule"
+    if approach == "flight":
+        launch = await probe(host_box, "observerlaunch")
+        assert launch.startswith("true|"), launch
+    else:
+        launch = await probe(host_box, "observerimpact")
+        assert launch == "entered stock capsule"
     host_result = guest_result = ""
     try:
         async with asyncio.timeout(10):
@@ -193,7 +198,7 @@ async def verify_observer_offering(host_box, guest_box, probe):
                         assert await probe(host_box, "observerabsorptions") == "1"
                         assert await probe(host_box, "observerrewards") == host_result
                         assert await probe(guest_box, "observerrewards") == guest_result
-                        return {"offering": source, "reward": tier, "host": host_result, "guest": guest_result,
+                        return {"offering": source, "launch": launch, "reward": tier, "host": host_result, "guest": guest_result,
                                 "stock_reward_count": 1}
                 await asyncio.sleep(.15)
     except TimeoutError as error:
@@ -273,7 +278,7 @@ async def verify_shadow(guest, host_box, guest_box, probe):
             "guest_stock_psychic_feedback": True, "guest_darkness_cleared": True}
 
 
-async def verify(work, family, observer_offering=False):
+async def verify(work, family, observer_offering=None):
     profile = f"{family}-proof-" + uuid.uuid4().hex[:8]
     host, guest = [work / role / profile / "run" for role in ("campaigns", "clients")]
     host.mkdir(parents=True)
@@ -384,7 +389,7 @@ async def verify(work, family, observer_offering=False):
                 return
             if family == "observer":
                 if observer_offering:
-                    common.update(await verify_observer_offering(host_box, guest_box, probe))
+                    common.update(await verify_observer_offering(host_box, guest_box, probe, observer_offering))
                     evidence = host / "live-observer-offering.json"
                 else:
                     common.update(await verify_observer(guest, host_box, guest_box, probe))
@@ -430,7 +435,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--family", choices=("gravity", "pyrogeist", "shadow-sphere", "angler-lamp", "observer"), default="gravity")
-    parser.add_argument("--observer-offering", action="store_true")
+    parser.add_argument("--observer-offering", nargs="?", const="contact", choices=("contact", "flight"))
     args = parser.parse_args()
     if args.observer_offering and args.family != "observer":
         parser.error("--observer-offering requires --family observer")
