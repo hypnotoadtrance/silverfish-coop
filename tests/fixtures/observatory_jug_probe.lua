@@ -1,6 +1,7 @@
 local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
-if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not mailbox
-    or not mailbox:match("[/\\]observatory%-jug%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$") then return end
+local jug_case = mailbox and mailbox:match("[/\\]observatory%-jug%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
+local health_case = mailbox and mailbox:match("[/\\]guest%-regen%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
+if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not (jug_case or health_case) then return end
 
 local observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local npc_path = observatory .. ":PersistentLevel.NPC_LoneStalker_C_0"
@@ -330,6 +331,10 @@ end
 
 local function observe(operation)
     local world, pawn, guest, hosting = context()
+    if health_case then
+        assert(operation == "hudhealth" and not hosting, "the regeneration fixture only reads the guest's stock health widgets")
+        return stock_health(world, pawn)
+    end
     local actor = npc_in(world)
     if operation == "sample" then return sample(actor, pawn, guest) end
     if operation == "hudhealth" and not hosting then return stock_health(world, pawn) end

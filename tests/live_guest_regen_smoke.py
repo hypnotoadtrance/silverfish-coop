@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from contextlib import nullcontext
 import json
 import math
 import os
@@ -12,6 +13,7 @@ import time
 import uuid
 
 from live_multi_smoke import saved_hashes
+from live_observatory_jug_smoke import installed_probe, stock_health
 from live_reconnect_grace_smoke import OBSERVATORY, exact_identity, lease, manifest_digest, native_guest, status
 
 
@@ -23,6 +25,8 @@ MIN_DOWNED_FRAMES = 4
 MIN_HEALING_PULSES = 3
 MIN_HEALING = 2.0
 ACCURACY = 1e-6
+BAR_SAMPLE_WINDOW = 1.5
+BAR_HEALTH_TOLERANCE = .25
 
 
 def regen_proof(server: dict, pawn: str) -> dict:
@@ -37,7 +41,7 @@ def same_number(first: float, second: float) -> bool:
     return finite(first) and finite(second) and math.isclose(first, second, rel_tol=0, abs_tol=ACCURACY)
 
 
-async def validate(work: Path, original_saved: Path, *, check_reconnect: bool) -> None:
+async def validate(work: Path, original_saved: Path, *, check_reconnect: bool, check_stock_health: bool = False) -> None:
     if os.name != "nt":
         raise OSError("The live regeneration test requires the staged Windows game")
     name = "guest-regen-" + uuid.uuid4().hex[:8]
@@ -134,6 +138,45 @@ async def validate(work: Path, original_saved: Path, *, check_reconnect: bool) -
                 and 0 <= row["stim_after"] <= row["stim_before"]):
             raise AssertionError({"guest": guest, "regeneration": row})
 
+    async def read_stock_bars(label, minimum_health):
+        def menu(state):
+            return state.get("game", {}).get("native_inventory_view", {}).get("state")
+
+        await action(secondary, "native-inventory-view-fixture")
+        await wait(f"{label}: the stock backpack did not open", lambda _, guest: menu(guest) == "stock", 8)
+        samples, last_sequence, display = [], None, None
+        end = time.monotonic() + 8
+        try:
+            while time.monotonic() < end:
+                server, client = status(host_run), status(guest_run)
+                if paired(server, client):
+                    guest = native_guest(server, character)
+                    verify_ownership(server, guest)
+                    sequence = server["game"]["sequence"]
+                    now = time.monotonic()
+                    if sequence != last_sequence and standing(server, guest) and finite(guest["health"]):
+                        last_sequence = sequence
+                        samples.append((now, guest["health"]))
+                    # The guest consumes a roughly 0.5 s snapshot while native healing
+                    # continues. Compare to a short envelope of actual host readbacks.
+                    samples = [(at, hp) for at, hp in samples if now - at <= BAR_SAMPLE_WINDOW]
+                    display = await stock_health(guest_run)
+                    if (display["pawn"] != client_pawn or display["slot"] != "SFCoopGuest_" + uuid.UUID(character).hex
+                            or not same_number(display["maximum"], EXPECTED_CEILING)):
+                        raise AssertionError({"wrong_stock_health_view": display, "checkpoint": label})
+                    if samples:
+                        low, high = min(hp for _, hp in samples), max(hp for _, hp in samples)
+                        if max(low, minimum_health) - BAR_HEALTH_TOLERANCE <= display["health"] <= high + BAR_HEALTH_TOLERANCE:
+                            return {"stock": display, "authority_health_range": [low, high],
+                                    "maximum_sample_age_seconds": BAR_SAMPLE_WINDOW,
+                                    "health_tolerance": BAR_HEALTH_TOLERANCE}
+                await asyncio.sleep(.12)
+            raise AssertionError({"stock_health_outside_host_samples": display, "samples": samples, "checkpoint": label})
+        finally:
+            if menu(status(guest_run)) == "stock":
+                await action(secondary, "native-inventory-view-fixture")
+                await wait(f"{label}: the stock backpack did not close", lambda _, guest: menu(guest) == "closed", 8)
+
     try:
         await start("host", host_run, primary, "--port", "0", "--headless", "--fixtures", "--native-zones",
                     "--native-events", "--native-guest", "--native-guest-regen", "--start-zone", OBSERVATORY)
@@ -143,7 +186,9 @@ async def validate(work: Path, original_saved: Path, *, check_reconnect: bool) -
         invitation = await command("invite", *primary, "--name", "Regeneration guest", "--character", "Regeneration guest")
         character = invitation["character_id"]
         evidence["character_id"] = character
-        await start("join", guest_run, secondary, "--headless", "--native-zones", "--invite", invitation["invite_file"])
+        health_flags = ("--native-guest-inventory-view",) if check_stock_health else ()
+        await start("join", guest_run, secondary, "--headless", "--native-zones", "--invite",
+                    invitation["invite_file"], *health_flags)
 
         def ready(server, client):
             guest = native_guest(server, character)
@@ -166,6 +211,8 @@ async def validate(work: Path, original_saved: Path, *, check_reconnect: bool) -
         evidence["initial_guest"] = initial
         evidence["initial_native_regeneration"] = regen_proof(server, initial["pawn"])
         evidence["canonical_host"] = {"pawn": host_pawn, "health": host_health}
+        if check_stock_health:
+            evidence["stock_health_full"] = await read_stock_bars("initial full guest", EXPECTED_CEILING)
 
         damage = await action(primary, "native-guest-damage", "--target", "guest")
         hit = damage["native_damage_canary"]
@@ -229,8 +276,10 @@ async def validate(work: Path, original_saved: Path, *, check_reconnect: bool) -
             revived_state, _ = await wait("The exact standing native pawn did not report the 25 HP revival", revived_in_game, 12)
         finally:
             revival = await revive
+        # Older coordinators return party health in legacy 100-point units.
+        # The authoritative native 25-HP receipt was already required above.
         if (revival.get("effect") != "revive" or revival.get("target") != character
-                or not same_number(revival.get("health"), 10.0)):
+                or not any(same_number(revival.get("health"), amount) for amount in (10.0, REVIVE_HEALTH))):
             raise AssertionError(revival)
         evidence["revive"] = {key: revival[key] for key in ("effect", "target", "health")}
         evidence["native_revive"] = {"guest": native_guest(revived_state, character),
@@ -264,6 +313,8 @@ async def validate(work: Path, original_saved: Path, *, check_reconnect: bool) -
         if client["game"]["pawns"]["local"]["name"] != client_pawn:
             raise AssertionError("The owning client pawn changed during revival")
         evidence["natural_healing"] = {"guest": healed, "pulses": healing, "health_gained": healed["health"] - REVIVE_HEALTH}
+        if check_stock_health:
+            evidence["stock_health_healed"] = await read_stock_bars("revived and healing guest", healed["health"])
 
         if check_reconnect:
             dropped = await action(secondary, "drop-link")
@@ -288,6 +339,8 @@ async def validate(work: Path, original_saved: Path, *, check_reconnect: bool) -
                 raise AssertionError({"retained": retained, "returned": returned})
             evidence["reconnect"] = {"held": retained, "returned": returned,
                                      "reserved_lease": lease(reserved, character), "resumed": True}
+            if check_stock_health:
+                evidence["stock_health_reconnected"] = await read_stock_bars("resumed guest", retained["health"])
         evidence["verified"] = True
     except BaseException as error:
         evidence["verified"] = False
@@ -330,7 +383,11 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path,
                         default=Path(os.environ.get("LOCALAPPDATA", ".")) / "SilverFish" / "Saved")
     parser.add_argument("--reconnect", action="store_true", help="verify the revived native guest across a brief link outage")
+    parser.add_argument("--stock-health", action="store_true", help="verify both stock health bars against the native guest")
     options = parser.parse_args()
     if not options.vanilla_saved.is_dir():
         parser.error("--vanilla-saved must be an existing original Saved directory")
-    asyncio.run(validate(options.work.resolve(), options.vanilla_saved.resolve(), check_reconnect=options.reconnect))
+    work = options.work.resolve()
+    with installed_probe(work) if options.stock_health else nullcontext():
+        asyncio.run(validate(work, options.vanilla_saved.resolve(), check_reconnect=options.reconnect,
+                             check_stock_health=options.stock_health))
