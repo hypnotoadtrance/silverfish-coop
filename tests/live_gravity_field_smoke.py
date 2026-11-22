@@ -330,8 +330,11 @@ async def verify_angler(guest, host_box, guest_box, probe):
     async with asyncio.timeout(6):
         while any(row["lure"] for row in angler_rows(await probe(guest_box, "anglervisual"))):
             await asyncio.sleep(.1)
+    npc, x, y, z, duration = (await probe(host_box, "anglernpc")).split("|")
+    assert float(duration) >= 3
     return {"host_lamp": host_lamp, "guest_lamp": replica, "guest_aim_before": aim, "lure_cleared": True,
-            "guest_native_vetoes": blocked_triggers(guarded) - vetoes}
+            "guest_native_vetoes": blocked_triggers(guarded) - vetoes,
+            "host_npc_alert": {"actor": npc, "position": [float(axis) for axis in (x, y, z)], "duration": float(duration)}}
 
 
 async def verify_shadow(guest, host_box, guest_box, probe):

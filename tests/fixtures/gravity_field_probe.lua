@@ -293,6 +293,37 @@ local function command(operation, world, driver, host, local_pawn, argument)
         local camera = local_pawn.Camera
         local point, ahead = camera:K2_GetComponentLocation(), camera:GetForwardVector()
         return ("%.3f|%.3f|%.3f|%.5f|%.5f|%.5f"):format(point.X, point.Y, point.Z, ahead.X, ahead.Y, ahead.Z)
+    elseif angler and operation == "anglernpc" then
+        assert(host and selected and valid(selected.well) and not selected.home)
+        local lamp = selected.well
+        local original = lamp:K2_GetActorLocation()
+        local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        local npc_class = StaticFindObject("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C")
+        local list = {}
+        assert(valid(npc_class) and valid(api))
+        api:GetAllActorsOfClass(world, npc_class, list)
+        local proved
+        for _, npc in ipairs(list.OutActors or list) do
+            if npc and type(npc.type) == "function" and npc:type() == "RemoteUnrealParam" then npc = npc:get() end
+            if valid(npc) and same(npc:GetWorld(), world) and npc:HasAuthority() and npc.Alive and not npc.Agro
+                and valid(npc.Controller) then
+                local start = npc:K2_GetActorLocation()
+                local where = {X = start.X + 260, Y = start.Y, Z = start.Z + 50}
+                local old = npc.LastSpottedPoint
+                if math.abs(old.X - where.X) > 50 and lamp:K2_SetActorLocation(where, false, {}, true) then
+                    lamp:Attract_NPCs(npc)
+                    local spot = npc.LastSpottedPoint
+                    if npc.Alert and math.abs(spot.X - where.X) < 1 and math.abs(spot.Y - where.Y) < 1
+                        and math.abs(spot.Z - where.Z) < 1 then
+                        proved = ("%s|%.3f|%.3f|%.3f|%.3f"):format(npc:GetFullName(), spot.X, spot.Y, spot.Z, npc.AllertDurration)
+                        break
+                    end
+                end
+            end
+        end
+        assert(lamp:K2_SetActorLocation(original, false, {}, true))
+        assert(proved, "No stock NPC accepted the AnglerLamp's alert")
+        return proved
     elseif angler and operation == "anglerpresent" then
         assert(host and selected and valid(selected.well) and not selected.home)
         local x, y, z, ax, ay, az = argument:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
