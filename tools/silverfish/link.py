@@ -539,7 +539,8 @@ class _LinkProtocol(QuicConnectionProtocol):
         self._admission_finished = False
         self._reassembler = _Reassembler(stats)
         self._next_packet_id = 0
-        self._game_queue_started: float | None = None
+        self._game_enqueued: deque[float] = deque()
+        self._next_game_expiry: float | None = None
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         super().connection_made(_MeasuredDatagramTransport(transport, self._stats))
@@ -576,15 +577,19 @@ class _LinkProtocol(QuicConnectionProtocol):
             evicted = pending.popleft()[:6]
             while pending and pending[0][:6] == evicted:
                 pending.popleft()
-        stats.relay_queue_evicted_frames += before - len(pending)
+        dropped = before - len(pending)
+        for _ in range(dropped):
+            self._game_enqueued.popleft()
+        stats.relay_queue_evicted_frames += dropped
         if not pending:
-            self._game_queue_started = now
+            self._next_game_expiry = now + _GAME_QUEUE_AGE
         packet_id = self._next_packet_id
         self._next_packet_id = (packet_id + 1) % 2**32
         for index in range(count):
             start = index * _FRAGMENT_SIZE
             frame = _FRAGMENT_HEADER.pack(packet_id, len(data), index)
             self._quic.send_datagram_frame(frame + data[start:start + _FRAGMENT_SIZE])
+        self._game_enqueued.extend([now] * count)
         stats.game_packets_queued += 1
         stats.game_payload_bytes_queued += len(data)
         stats.game_fragments_queued += count
@@ -603,6 +608,7 @@ class _LinkProtocol(QuicConnectionProtocol):
                 if queued.startswith(header):
                     # Preserve the channel's queue position while discarding the older pose.
                     pending[index] = frame
+                    self._game_enqueued[index] = now
                     if header == _PROP_POSE_HEADER:
                         self._stats.prop_pose_datagrams_replaced += 1
                     else:
@@ -614,8 +620,9 @@ class _LinkProtocol(QuicConnectionProtocol):
                 self._stats.weapon_cues_rejected_full_queue += 1
             return False
         if not pending:
-            self._game_queue_started = now
+            self._next_game_expiry = now + _GAME_QUEUE_AGE
         self._quic.send_datagram_frame(frame)
+        self._game_enqueued.append(now)
         if header == _PROP_POSE_HEADER:
             self._stats.prop_pose_datagrams_queued += 1
         elif header == _AVATAR_POSE_HEADER:
@@ -625,17 +632,32 @@ class _LinkProtocol(QuicConnectionProtocol):
         return True
 
     def _expire_game_queue(self, now: float) -> None:
-        if self._game_queue_started is not None and now - self._game_queue_started >= _GAME_QUEUE_AGE:
-            pending = self._quic._datagrams_pending
-            self._stats.relay_queue_expired_frames += len(pending)
-            pending.clear()
-            self._game_queue_started = None
+        if self._next_game_expiry is None or now < self._next_game_expiry:
+            return
+        pending = self._quic._datagrams_pending
+        # All fragments of a packet share a deadline. A replacement pose keeps
+        # its queue position but gets a fresh deadline.
+        fresh = [(frame, queued_at) for frame, queued_at in zip(pending, self._game_enqueued)
+                 if now < queued_at + _GAME_QUEUE_AGE]
+        self._stats.relay_queue_expired_frames += len(pending) - len(fresh)
+        pending.clear()
+        pending.extend(frame for frame, _ in fresh)
+        self._game_enqueued = deque(queued_at for _, queued_at in fresh)
+        self._next_game_expiry = min(self._game_enqueued) + _GAME_QUEUE_AGE if fresh else None
 
     def transmit(self) -> None:
         self._expire_game_queue(self._loop.time())
-        super().transmit()
-        if not self._quic._datagrams_pending:
-            self._game_queue_started = None
+        try:
+            super().transmit()
+        finally:
+            # aioquic consumes only the front of the pending datagram queue.
+            pending = self._quic._datagrams_pending
+            if pending:
+                for _ in range(len(self._game_enqueued) - len(pending)):
+                    self._game_enqueued.popleft()
+            else:
+                self._game_enqueued.clear()
+                self._next_game_expiry = None
 
     def _admission_payload(self, event: events.StreamDataReceived) -> bytes | None:
         if event.stream_id != _ADMISSION_STREAM or self._admission_finished:

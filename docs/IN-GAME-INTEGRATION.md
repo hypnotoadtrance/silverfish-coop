@@ -208,6 +208,8 @@ In a muted drag-and-drop installation test, the guest turned while holding the O
 
 The follow-up Direct IP trial recorded two authenticated pose datagrams for the same stock lantern carry and verified the stock grab and throw receipts, with no pose mailbox file. The transport tests also exercised replacement of a queued pose, stale connection rejection, and delivery through the simulated Steam tunnel. Two-PC timing and settled physics under loss still need a playtest.
 
+The Direct IP and Steam tunnels share the QUIC datagram queue. During congestion, a 120 ms cutoff used to expire the entire queue when its oldest entry hit the cutoff. It now expires each queued Unreal packet as a fragment group and preserves newer packets and replacement poses. A controlled queue test held an old two-fragment packet beside a newer Unreal update and a refreshed prop pose. Only the older fragments expired at the first cutoff. [Transport tests](../tests/test_link.py)
+
 The host now samples the guest's stock movement mode to keep track of falls. A muted trial downed the guest from a stock landing and verified a stock poison gas hit, revive, reconnect, and restart.
 
 On RC 8676316, the placed PlaytestMap sludge dealt two stock 20-point acid pulses to each seat in turn. Native health went from 25 to −15 for the guest and from 28.34 to −11.66 for the host. Each victim ran the stock damage-effect pulse twice, and the other pawn took zero acid hits. Both seats observed the downed state. The guest recovered to 25 HP, and the host's stock revival receipt also reported 25 HP before regeneration. The muted trial checked stock cue dispatch on the authority process. Foreground audio and visual playback remain two-PC checks. [Stock acid smoke test](../tests/live_smoke.py)

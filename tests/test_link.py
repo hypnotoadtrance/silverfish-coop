@@ -194,6 +194,30 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stats["prop_pose_datagrams_queued"], 1)
             self.assertEqual(stats["prop_pose_datagrams_replaced"], 1)
 
+    async def test_relay_expiry_keeps_new_packets_and_replacement_poses(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        protocol = self.client._protocol
+        pending = protocol._quic._datagrams_pending
+        now = protocol._loop.time()
+        with patch.object(protocol, "transmit"), patch.object(protocol._loop, "time", return_value=now) as clock:
+            self.assertTrue(self.client.send_prop_pose(b"old"))
+            protocol.forward_game_packet(b"a" * (link._FRAGMENT_SIZE + 1))
+            clock.return_value = now + link._GAME_QUEUE_AGE / 2
+            self.assertTrue(self.client.send_prop_pose(b"fresh"))
+            packet_id = protocol._next_packet_id
+            update = b"new Unreal packet"
+            protocol.forward_game_packet(update)
+
+            protocol._expire_game_queue(now + link._GAME_QUEUE_AGE + .001)
+            self.assertEqual(list(pending), [
+                link._PROP_POSE_HEADER + b"fresh",
+                link._FRAGMENT_HEADER.pack(packet_id, len(update), 0) + update,
+            ])
+            self.assertEqual(self.client.statistics()["relay_queue_expired_frames"], 2)
+            protocol._expire_game_queue(clock.return_value + link._GAME_QUEUE_AGE + .001)
+            self.assertFalse(pending)
+            self.assertEqual(self.client.statistics()["relay_queue_expired_frames"], 4)
+
     async def test_avatar_poses_coalesce_independently_from_prop_and_unreal_frames(self):
         self.assertTrue((await self.connect_guest())["accepted"])
         guest_id = self.request["guest_id"]
