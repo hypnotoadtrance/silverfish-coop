@@ -146,7 +146,8 @@ local stock_save_probes = {
 local gameplay_statics_path = "/Script/Engine.Default__GameplayStatics"
 local command_path = bridge .. "/command.tsv"
 local status_path = bridge .. "/status.tsv"
-local next_file_status = 0
+local next_status = 0
+local mirror_status = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 -- A quiet Direct IP link can take up to 12 seconds to declare a disconnect.
 local connection_timeout_seconds = 110
 local restore_position_tolerance = 0.25
@@ -1449,11 +1450,14 @@ local function write_status(state, current_phase, failure, fields, pending)
         SilverfishPublishLocalBridgeReply(pending.ticket, frame)
     end
 
-    -- Keep status.tsv fresh for diagnostics and acknowledge legacy file commands immediately.
     local now = os.clock()
     local file_command = fields and not pending
-    if not file_command and now < next_file_status then return end
-    next_file_status = now + 0.25
+    if not file_command and now < next_status then return end
+    next_status = now + 0.25
+    -- The embedded worker reads the latest frame directly. Isolated diagnostics and
+    -- explicit filesystem commands can still observe their game-thread receipts.
+    if type(SilverfishPublishLocalBridgeStatus) == "function" and SilverfishPublishLocalBridgeStatus(frame)
+        and not mirror_status and not file_command then return end
     local temporary = status_path .. ".tmp"
     local file = io.open(temporary, "wb")
     if not file then return end
@@ -1671,7 +1675,7 @@ LoopInGameThreadWithDelay(25, function()
     if not leaving then pcall(native_player_avatar.animate_cycle, current_world) end
     if not leaving then pcall(native_player_avatar.animate_use, current_world) end
     local now = os.clock()
-    local periodic = now >= next_snapshot or now >= next_file_status
+    local periodic = now >= next_snapshot or now >= next_status
     local fields, pending = read_command(periodic)
     if not fields and not periodic then return end
     next_snapshot = now + 0.25

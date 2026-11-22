@@ -648,7 +648,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False,
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
-                 stock_use: bool = False) -> None:
+                 stock_use: bool = False, memory_status: bool = False) -> None:
     roots = (work, first_game, second_game, original)
     if second_legacy_work is not None:
         roots += (second_legacy_work,)
@@ -725,6 +725,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 guest_status = await wait(guest.client / "run", lambda state: state.get("local_bridge") == "memory")
                 assert host_status["transport"]["schema_version"] == guest_status["transport"]["schema_version"] == 1
                 evidence["local_bridge"] = {"host": host_status["local_bridge"], "guest": guest_status["local_bridge"]}
+            if memory_status:
+                for run in (host.campaign / "run", guest.client / "run"):
+                    await wait(run, lambda state: state.get("local_status_source") == "memory")
+                evidence["memory_status_both_peers"] = True
             if container_nearby:
                 evidence["guest_stock_nearby_container_pickup"] = await verify_container_pickup(host, guest, pawn)
             return evidence
@@ -781,6 +785,7 @@ if __name__ == "__main__":
     parser.add_argument("--container-nearby", action="store_true", help="pick up live stock container loot through Nearby Items")
     parser.add_argument("--steam-cloud", action="store_true", help="test a copied cloud backup through Host Load Game")
     parser.add_argument("--memory-bridge", action="store_true", help="verify both embedded workers use the native bridge")
+    parser.add_argument("--memory-status", action="store_true", help="verify both workers consume live frames through memory")
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
@@ -794,4 +799,4 @@ if __name__ == "__main__":
                        stock_drop=args.stock_drop, stock_split=args.stock_split, stock_equip=args.stock_equip,
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
-                       stock_use=args.stock_use))
+                       stock_use=args.stock_use, memory_status=args.memory_status))

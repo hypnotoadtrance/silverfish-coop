@@ -25,11 +25,14 @@ namespace
     std::condition_variable changed;
     bool ready{};
     bool attached{};
+    bool status_enabled{};
     std::int64_t last_ticket{};
     std::int64_t active_ticket{};
     State state{State::idle};
     std::string command;
     std::string reply;
+    std::string status_frame;
+    std::uint64_t status_revision{};
     std::deque<std::string> input;
 
     void clear()
@@ -116,6 +119,28 @@ namespace
         changed.notify_all();
         return 0;
     }
+
+    int publish_status(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 1 || !lua.is_string()) return 0;
+        const auto frame = lua.get_string();
+        bool published{};
+        {
+            std::lock_guard lock(mutex);
+            if (status_enabled)
+            {
+                published = !frame.empty() && frame.size() <= reply_limit;
+                if (published)
+                {
+                    status_frame.assign(frame);
+                    ++status_revision;
+                }
+                else status_frame.clear();
+            }
+        }
+        lua.set_bool(published);
+        return 1;
+    }
 }
 
 extern "C" __declspec(dllexport) int SilverfishBridgeOpenV1()
@@ -130,8 +155,37 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
 {
     std::lock_guard lock(mutex);
     attached = false;
+    status_enabled = false;
+    status_frame.clear();
     input.clear();
     clear();
+}
+
+extern "C" __declspec(dllexport) int SilverfishBridgeEnableStatusV1()
+{
+    std::lock_guard lock(mutex);
+    status_enabled = attached;
+    return status_enabled;
+}
+
+extern "C" __declspec(dllexport) std::uint64_t SilverfishBridgeStatusRevisionV1()
+{
+    std::lock_guard lock(mutex);
+    return status_frame.empty() ? 0 : status_revision;
+}
+
+extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeCopyStatusV1(
+    std::uint64_t previous, char* buffer, std::uint32_t capacity, std::uint64_t* revision)
+{
+    std::lock_guard lock(mutex);
+    if (status_frame.empty() || status_revision == previous || !buffer || !revision) return 0;
+    const auto size = static_cast<std::uint32_t>(status_frame.size());
+    if (capacity >= size)
+    {
+        std::memcpy(buffer, status_frame.data(), size);
+        *revision = status_revision;
+    }
+    return size;
 }
 
 extern "C" __declspec(dllexport) int SilverfishBridgeInputReadyV1()
@@ -194,6 +248,7 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishTakeLocalBridgeCommand", take);
         lua.register_function("SilverfishClaimLocalBridgeCommand", claim_command);
         lua.register_function("SilverfishPublishLocalBridgeReply", publish);
+        lua.register_function("SilverfishPublishLocalBridgeStatus", publish_status);
         lua.register_function("SilverfishEnqueueLocalBridgeInput", enqueue_input);
     }
 
@@ -202,6 +257,8 @@ namespace silverfish::local_bridge
         std::lock_guard lock(mutex);
         ready = false;
         attached = false;
+        status_enabled = false;
+        status_frame.clear();
         input.clear();
         clear();
     }

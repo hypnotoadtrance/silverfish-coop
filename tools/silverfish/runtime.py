@@ -704,6 +704,7 @@ class Bridge:
         self._status_text = ""
         self._status_snapshot: dict | None = None
         self.local_bridge = None
+        self.status_source = "file"
         self._local_status = None
         self._file_command_lock = asyncio.Lock()
 
@@ -723,15 +724,17 @@ class Bridge:
                 ("native-mosby-station-events", self.mosby_station_offset),
             ))
         while (remaining := deadline - time.monotonic()) > 0:
-            if (wake_if is not None and wake_if()) or (self.local_bridge is not None and self.local_bridge.input_ready()):
+            if ((wake_if is not None and wake_if()) or (self.local_bridge is not None
+                    and (self.local_bridge.input_ready() or self.local_bridge.status_ready()))):
                 return
-            try:
-                published = (self.directory / "status.tsv").stat()
-            except OSError:
-                pass
-            else:
-                if (published.st_mtime_ns, published.st_size) != self._status_revision:
-                    return
+            if self.status_source == "file":
+                try:
+                    published = (self.directory / "status.tsv").stat()
+                except OSError:
+                    pass
+                else:
+                    if (published.st_mtime_ns, published.st_size) != self._status_revision:
+                        return
             ready = False
             for filename, offset in streams:
                 try:
@@ -1125,15 +1128,18 @@ class Bridge:
         return requests
 
     def snapshot(self) -> dict | None:
-        """Return the current read-only bridge frame, parsing each write once."""
+        """Return the current read-only bridge frame, parsing each publication once."""
+        text = self.local_bridge.read_status() if self.local_bridge is not None else None
+        self.status_source = "memory" if text is not None else "file"
         try:
-            with (self.directory / "status.tsv").open(encoding="utf-8") as stream:
-                published = os.fstat(stream.fileno())
-                text = stream.read()
-            self._status_revision = published.st_mtime_ns, published.st_size
+            if text is None:
+                with (self.directory / "status.tsv").open(encoding="utf-8") as stream:
+                    published = os.fstat(stream.fileno())
+                    text = stream.read()
+                self._status_revision = published.st_mtime_ns, published.st_size
         except (OSError, UnicodeError):
-            return None
-        frame = self._parse_status(text)
+            text = None
+        frame = self._parse_status(text) if text is not None else None
         if self.local_bridge is not None and self._local_status is not None:
             if frame is None or frame.get("sequence", -1) < self._local_status["sequence"]:
                 return self._local_status

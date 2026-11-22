@@ -1,10 +1,12 @@
-"""Process-local command receipts for the embedded engine worker."""
+"""Process-local commands, input, and status for the embedded engine worker."""
 
 import asyncio
 import ctypes
 from ctypes import wintypes
 import os
 from pathlib import Path
+
+STATUS_LIMIT = 2 * 1024 * 1024
 
 
 class LocalBridge:
@@ -28,6 +30,18 @@ class LocalBridge:
         self._read_input = library.SilverfishBridgeReadInputV1
         self._read_input.argtypes, self._read_input.restype = [ctypes.c_void_p, ctypes.c_uint32], ctypes.c_uint32
         self._lock = asyncio.Lock()
+        self._status_buffer = None
+        self._status_revision = 0
+        self._status_frame = None
+        self._enable_status = getattr(library, "SilverfishBridgeEnableStatusV1", None)
+        self._latest_status = getattr(library, "SilverfishBridgeStatusRevisionV1", None)
+        self._copy_status = getattr(library, "SilverfishBridgeCopyStatusV1", None)
+        if self._enable_status is not None and self._latest_status is not None and self._copy_status is not None:
+            self._enable_status.argtypes, self._enable_status.restype = [], ctypes.c_int
+            self._latest_status.argtypes, self._latest_status.restype = [], ctypes.c_uint64
+            self._copy_status.argtypes = [ctypes.c_uint64, ctypes.c_void_p, ctypes.c_uint32,
+                                         ctypes.POINTER(ctypes.c_uint64)]
+            self._copy_status.restype = ctypes.c_uint32
 
     @classmethod
     def connect(cls, image: Path):
@@ -46,7 +60,38 @@ class LocalBridge:
             bridge = cls(library)
         except (AttributeError, OSError):
             return None
-        return bridge if bridge._open() else None
+        if not bridge._open():
+            return None
+        bridge.enable_status()
+        return bridge
+
+    def enable_status(self) -> None:
+        if self._enable_status is None or self._latest_status is None or self._copy_status is None:
+            return
+        if self._enable_status():
+            self._status_buffer = ctypes.create_string_buffer(STATUS_LIMIT)
+
+    def status_ready(self) -> bool:
+        return self._status_buffer is not None and self._latest_status() != self._status_revision
+
+    def read_status(self) -> str | None:
+        if self._status_buffer is None:
+            return None
+        latest = self._latest_status()
+        if not latest:
+            self._status_revision = 0
+            self._status_frame = None
+        elif latest != self._status_revision:
+            revision = ctypes.c_uint64()
+            size = self._copy_status(self._status_revision, self._status_buffer, STATUS_LIMIT, ctypes.byref(revision))
+            if not revision.value or not 0 < size <= STATUS_LIMIT:
+                return None
+            self._status_revision = revision.value
+            try:
+                self._status_frame = self._status_buffer[:size].decode("utf-8")
+            except UnicodeError:
+                self._status_frame = None
+        return self._status_frame
 
     async def command(self, payload: bytes, timeout: float) -> str:
         async with self._lock:

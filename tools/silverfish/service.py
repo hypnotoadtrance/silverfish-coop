@@ -4187,6 +4187,7 @@ class Host:
                             native_inventory_checkpoint_pending=(self.pending_host_save is not None
                                                                  or bool(self.pending_guest_saves)),
                             transport=transport.statistics() if isinstance(transport, link.HostLink) else {},
+                            local_status_source=bridge.status_source,
                             local_bridge="memory" if bridge.local_bridge is not None else "file")
 
 
@@ -6156,6 +6157,7 @@ class Client:
                             link_connected=linked, reconnect_suspended=self.suspended,
                             unreal_local_port=self.transport.unreal_local_port,
                             transport=self.transport.statistics() if isinstance(self.transport, link.ClientLink) else {},
+                            local_status_source=self.bridge.status_source,
                             local_bridge="memory" if self.bridge.local_bridge is not None else "file",
                             character_id=self.invite["character_id"], host_session=self.host_session,
                             game=self.last_game, gameplay=self.gameplay, gameplay_fresh=fresh,
