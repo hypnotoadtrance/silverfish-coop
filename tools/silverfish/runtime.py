@@ -538,8 +538,8 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
         if (backend == "cpp" and (native_guest or guest_inventory_view)
                 and "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC" not in env
                 and staged_script(work, "native_campaign_npc.lua", "NPC_NotDeer_C")):
-            env.update(SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC="1", SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER="1",
-                       SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW="notdeer")
+            env.update(SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC="1", SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER="1")
+            env.setdefault("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW", "notdeer")
             if staged_script(work, "native_campaign_npc.lua", "SilverfishReadCampaignNpcHostRoster"):
                 env["SILVERFISH_COOP_NATIVE_CROSSROADS_ROSTER"] = "1"
         if host_role and native_fixtures:
@@ -705,6 +705,7 @@ class Bridge:
         self._status_snapshot: dict | None = None
         self.local_bridge = None
         self._local_status = None
+        self._file_command_lock = asyncio.Lock()
 
     async def wait_for_interaction(self, timeout: float, *, wake_if=None, guest=False) -> None:
         """Wake for local input, a new game frame, or pending network work."""
@@ -1196,6 +1197,8 @@ class Bridge:
                     data["native_zone_party_guard"] = True
                 elif fields == ["native-paired-save-capture", "1"] and data.get("state") == "hosting":
                     data["native_paired_save_capture"] = True
+                elif fields == ["native-guest-save-retention", "1"] and data.get("state") == "hosting":
+                    data["native_guest_save_retention"] = True
                 elif fields[0] in ("native-guest-melee-equip", "native-guest-melee-canary", "native-guest-melee-swing",
                                     "native-guest-melee-aim-fixture", "native-guest-melee-contact-fixture"):
                     parsed = parse_guest_melee(fields)
@@ -2271,6 +2274,7 @@ class Bridge:
                     key = native_flare.PROOF if fields[0] == native_flare.ACTION else native_flare.INTENT
                     data[key] = native_flare.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] in (native_prop_carry.ACTION, native_prop_carry.FIXTURE, native_prop_carry.BARREL_ROW,
+                                   native_prop_carry.PLACED_PROP_ROW,
                                    "native-prop-carry-input", "native-prop-carry-target"):
                     prop = native_prop_carry.parse(fields, data.get("state"), data.get("map"))
                     if fields[0] == "native-prop-carry-input":
@@ -2279,6 +2283,8 @@ class Bridge:
                         data[native_prop_carry.FIXTURE] = prop
                     elif fields[0] == native_prop_carry.BARREL_ROW:
                         data.setdefault(native_prop_carry.BARRELS, {})[prop["actor"]] = prop
+                    elif fields[0] == native_prop_carry.PLACED_PROP_ROW:
+                        data.setdefault(native_prop_carry.PLACED_PROPS, {})[prop["actor"]] = prop
                     else:
                         key = native_prop_carry.PROOF if fields[0] == native_prop_carry.ACTION else native_prop_carry.TARGET
                         data[key] = prop
@@ -2313,10 +2319,16 @@ class Bridge:
                             or not pawn or not 0 < int(serial) < 2**53 or entry not in ("fixture", "stock")):
                         raise ValueError("Invalid authored pickup interaction status")
                     intents[source] = {"source": source, "map": area, "pawn": pawn, "sequence": int(serial), "entry": entry}
-                elif fields[0] == "native-authored-pickup-claim" and len(fields) == 9:
+                elif fields == ["native-authored-pickup-memory", "1"] and data.get("state") == "hosting":
+                    data[native_authored_pickup.MEMORY_CAPABILITY] = True
+                elif fields[0] == "native-authored-pickup-claim" and len(fields) in (9, 10):
                     data["native_authored_pickup_claim"] = {"source": fields[1], "map": fields[2], "pawn": fields[3],
                                                             "ok": fields[4] == "1", "applied": fields[5] == "1",
                                                             "status": fields[6], "guid": fields[7], "slot": fields[8]}
+                    if len(fields) == 10:
+                        if fields[9] not in ("disk", "memory"):
+                            raise ValueError("Invalid authored pickup save mode")
+                        data["native_authored_pickup_claim"]["memory"] = fields[9] == "memory"
                 elif fields[0] == native_authored_pickup.EFFECT_TAG:
                     if native_authored_pickup.EFFECT_KEY in data:
                         raise ValueError("Repeated level pickup effect receipt")
@@ -2364,7 +2376,7 @@ class Bridge:
                             row.update(zip(native_weather_view.RAIN_FIELDS, rain))
                             row["rain_verified"] = fields[31] == "1"
                     data["native_world_view"] = row
-                elif fields[0] == "native-loot" and len(fields) in (14, 15):
+                elif fields[0] == "native-loot" and len(fields) in (14, 15, 16, 17):
                     count = int(fields[12])
                     if AUTHORED_CRATES.get(fields[3]) != fields[2] or not 0 <= count <= loot_capacity(fields[3]):
                         raise ValueError("Stock container receipt has an unqualified map or item count")
@@ -2373,8 +2385,12 @@ class Bridge:
                         "ok": fields[5] == "1", "status": fields[6], "looted": fields[7] == "1",
                         "lucky_looter": fields[8] == "1", "trait_source": fields[9], "trait_calls": int(fields[10]),
                         "distance": _finite(fields[11]), "item_count": count, "invoked": fields[13] == "1",
-                        "items": [], "escrow_slot": fields[14] if len(fields) == 15 else "-",
+                        "items": [], "escrow_slot": fields[14] if len(fields) >= 15 else "-",
                     }
+                    if len(fields) >= 16 and fields[15] == "1":
+                        data["native_loot"]["retained"] = True
+                    if len(fields) == 17 and fields[16] == "1":
+                        data["native_loot"]["memory_escrow"] = True
                 elif fields[0] == native_loot.PLACEMENT and len(fields) == 13:
                     _, area, crate, index, *axes = fields
                     transform = dict(zip(("position", "rotation", "scale"),
@@ -2395,6 +2411,12 @@ class Bridge:
                     if item["id"] in projected:
                         raise ValueError("Duplicate stock world loot actor identity")
                     projected[item["id"]] = item
+                elif fields[0] == native_world_loot.PHYSICS_ROW:
+                    observed = native_world_loot.parse_physics(fields, data.get("state"), data.get("map"))
+                    rows = data.setdefault(native_world_loot.PHYSICS, {})
+                    if observed["id"] in rows or len(rows) >= 64:
+                        raise ValueError("Duplicate or oversized shared loot physics report")
+                    rows[observed["id"]] = observed
                 elif fields[0] == native_world_loot.ERROR_ROW:
                     failure = native_world_loot.parse_projection_error(fields, data.get("state"), data.get("map"))
                     errors = data.setdefault(native_world_loot.ERROR_KEY, {})
@@ -2446,11 +2468,15 @@ class Bridge:
                         "replacement": None if fields[5] == "-" else fields[5],
                         "ok": fields[6] == "1", "status": fields[7], "count": int(fields[8]),
                     }
-                elif fields[0] == "native-inventory-census" and len(fields) == 6:
+                elif fields == ["native-live-inventory-census", "1"] and data.get("state") == "hosting":
+                    data["native_live_inventory_census"] = True
+                elif fields[0] == "native-inventory-census" and len(fields) in (6, 7):
                     data["native_inventory_census"] = {
                         "slot": fields[1], "map": fields[2], "total": int(fields[3]), "offset": int(fields[4]),
                         "count": int(fields[5]), "items": [],
                     }
+                    if len(fields) == 7:
+                        data["native_inventory_census"]["pawn"] = fields[6]
                 elif (fields[0] == "native-stash-setting" and len(fields) == 3 and data.get("state") == "hosting"
                         and data.get("map") == fields[1] and fields[2] in {"0", "1"}):
                     data[native_stash.SETTING] = fields[2] == "1"
@@ -2466,6 +2492,8 @@ class Bridge:
                     sites[fields[2]] = dict(map=fields[1], actor=fields[3], location=location)
                 elif fields == ["native-stash-live-census", "1"] and data.get("state") == "hosting":
                     data[native_stash.LIVE_CENSUS] = True
+                elif fields == ["native-stash-live-move", "1"] and data.get("state") == "hosting":
+                    data[native_stash.LIVE_MOVE] = True
                 elif fields[0] == native_stash.CENSUS and len(fields) == 9 and data.get("state") == "hosting":
                     live = fields[3] == "-" and data.get(native_stash.LIVE_CENSUS) is True
                     if (fields[1] != data.get("map") or not (live or SLOT.fullmatch(fields[3])) or not valid_guid(fields[4])
@@ -2475,7 +2503,8 @@ class Bridge:
                     data["native_stash_census"] = dict(map=fields[1], pawn=fields[2], slot=fields[3], site=fields[4],
                         combined=fields[5] == "1", total=int(fields[6]), offset=int(fields[7]), count=int(fields[8]), items=[])
                 elif fields[0] == native_stash.MOVE and len(fields) == 10 and data.get("state") == "hosting":
-                    if (fields[1] != data.get("map") or not SLOT.fullmatch(fields[3]) or not valid_guid(fields[4])
+                    live = fields[3] == "-" and data.get(native_stash.LIVE_MOVE) is True
+                    if (fields[1] != data.get("map") or not (live or SLOT.fullmatch(fields[3])) or not valid_guid(fields[4])
                             or not valid_guid(fields[5]) or fields[6] not in {"deposit", "withdraw"}
                             or fields[7] not in {"0", "1"} or not fields[8].startswith("/Game/")
                             or not 1 <= int(fields[9]) < 2**31):
@@ -2622,11 +2651,18 @@ class Bridge:
                     row = [values[:3], values[3:]]
                     if len(lights) < native_anomaly_effects.MAX_ANGLER_LAMPS and native_anomaly_effects.valid_angler_colors(row):
                         lights.append(row)
+                elif (fields[0] == "native-observer-opacity" and len(fields) == 6
+                      and data.get("map") == native_anomaly_effects.ANGLER_MAP and data.get("state") in {"hosting", "connected"}):
+                    observers = data.setdefault(native_anomaly_effects.OBSERVER_OPACITY, [])
+                    values = [_finite(field) for field in fields[1:]]
+                    row = [values[:3], *values[3:]]
+                    if len(observers) < native_anomaly_effects.MAX_ANGLER_LAMPS and native_anomaly_effects.valid_observer_opacity(row):
+                        observers.append(row)
                 elif fields[0] == "native-anomaly-position" and len(fields) == 6:
                     positions = data.setdefault("native_anomaly_positions", [])
                     if (len(positions) < 1024 and fields[1] in {
                             "starburst", "burner", "vortex", "electrode", "wandering-teleport", "gravity",
-                            "pyrogeist", "shadow-sphere", "angler-lamp",
+                            "pyrogeist", "shadow-sphere", "angler-lamp", "observer",
                         }
                             and fields[5] in {"0", "1"}):
                         positions.append({"kind": fields[1], "location": [_finite(value) for value in fields[2:5]],
@@ -2750,6 +2786,11 @@ class Bridge:
                 elif fields[0] == "native-world-flush" and len(fields) == 6:
                     data["native_world_flush"] = {"map": fields[1], "state": fields[2], "antfarm": fields[3],
                                                   "explosives": fields[4], "reason": fields[5]}
+                elif fields[0] == "native-guest-save-rebound" and len(fields) == 3:
+                    data.setdefault("native_guest_save_rebound", {})[fields[1]] = fields[2]
+                elif fields[0] == "native-guest-save-retained-frame" and len(fields) == 6:
+                    data.setdefault("native_guest_save_retained_frames", {})[fields[1]] = {
+                        "slot": fields[2], "map": fields[3], "pawn": fields[4], "health": _finite(fields[5])}
                 elif fields[0] in ("native-guest-save-frame", "native-guest-save-member-frame") and len(fields) == 7:
                     frame = {
                         "state": fields[1], "slot": fields[2], "map": fields[3], "pawn": fields[4],
@@ -3035,8 +3076,9 @@ class Bridge:
             raise ValueError("Invalid game bridge command value")
         request = "\t".join(fields) + "\n"
         if self.local_bridge is None:
-            write_text(self.directory / "command.tsv", request)
-            status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout, interval=.025)
+            async with self._file_command_lock:
+                write_text(self.directory / "command.tsv", request)
+                status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout, interval=.025)
         else:
             status = self._parse_status(await self.local_bridge.command(request.encode("utf-8"), timeout))
             if not status or status.get("ack", {}).get("id") != fields[0]:

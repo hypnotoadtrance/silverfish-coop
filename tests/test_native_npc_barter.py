@@ -1,4 +1,6 @@
+import asyncio
 import unittest
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -128,3 +130,44 @@ class BarterCommitTests(unittest.IsolatedAsyncioTestCase):
             await barter.perform(self.host, self.bridge, "guest", barter.EXCHANGE, self.target, OPERATION)
         self.assertFalse(self.host.native_checkpoint_unsafe or self.host.stopping)
         self.assertIn(PAYMENT, self.host.party["players"]["guest"]["native_inventory"])
+
+    async def test_unchanged_stock_read_returns_only_the_version_and_skips_checkpoints(self):
+        target = f"{EPOCH}@{TRADER}"
+        first = await barter.perform(self.host, self.bridge, "guest", barter.OPEN, target, OPERATION)
+        version = first[barter.STOCK_VERSION]
+        unchanged = await barter.perform(self.host, self.bridge, "guest", barter.OPEN, f"{target}@{version}", OPERATION)
+        self.assertEqual(unchanged, {barter.STOCK_VERSION: version})
+        self.host.checkpoint_native.assert_not_awaited()
+
+
+class BarterViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_changed_stock_stays_pending_until_the_open_screen_accepts_it(self):
+        before = barter.parse(*exchange())
+        changed = {**before, "cash": 31}
+        changed_version = barter.stock_version(changed)
+        frame = {"map": OBSERVATORY, "pawns": {"local": {"name": PAWN}}, barter.VIEW: {
+            "map": OBSERVATORY, "pawn": PAWN, "state": "ready", "sequence": 2, "trader": TRADER,
+        }}
+        bridge = SimpleNamespace(input_namespace=uuid.uuid4(), command=AsyncMock(side_effect=[
+            {**frame, "ack": {"message": "stock NPC barter selection pending"}},
+            {**frame, "ack": {"message": "exact stock NPC barter screen shown"}},
+        ]))
+        client = SimpleNamespace(
+            host_session="host", zone_epoch=EPOCH, bridge=bridge, last_game=frame, control=SimpleNamespace(event=Mock()),
+            gameplay_action=AsyncMock(return_value={barter.STOCK: changed, barter.STOCK_VERSION: changed_version}),
+        )
+        view = barter.View()
+        view.scope = client.host_session, EPOCH, bridge.input_namespace
+        view.version = barter.stock_version(before)
+        await view.sync(client, True)
+        bridge.command.assert_not_awaited()
+        await asyncio.sleep(0)
+        await view.sync(client, True)
+        self.assertEqual(view.version, barter.stock_version(before))
+        view.next_refresh = 0
+        await view.sync(client, True)
+        await asyncio.sleep(0)
+        await view.sync(client, True)
+        self.assertEqual(view.version, changed_version)
+        self.assertEqual(bridge.command.await_args.args[:4], (barter.REFRESH, "2", TRADER, "31"))
+        client.control.event.assert_called_once_with("native_npc_barter_stock_refreshed", trader=TRADER, entries=1, cash=31)

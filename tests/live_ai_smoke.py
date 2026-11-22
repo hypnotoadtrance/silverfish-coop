@@ -2,7 +2,7 @@
 
 import argparse
 import asyncio
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, nullcontext
 import json
 import math
 import os
@@ -125,7 +125,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                    automatic_cqc_loot: bool = False, both_cqc: bool = False, stock_shell_input: str | None = None,
                    restart_unclaimed_shells: bool = False, refinery_cqc: bool = False, stock_drop_census: bool = False,
                    stock_weapon_input: bool = False, restart_unclaimed_weapon: bool = False,
-                   resident_game: Path | None = None, verify_shell_stacking: bool = False) -> dict:
+                   resident_game: Path | None = None, verify_shell_stacking: bool = False, carry_weapon: bool = False) -> dict:
     placed_cqc = dead_bridge_cqc or refinery_cqc
     area = REFINERY if refinery_cqc else DEAD_BRIDGE if dead_bridge_cqc else MAP
     first_target, second_target = (REFINERY_CQC, REFINERY_CQC_SECOND) if refinery_cqc else (CQC, CQC_SECOND)
@@ -766,7 +766,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             from tools.silverfish import native_host_save, native_stock_enemy_drops, native_world_loot
 
             guid = payload["guid"]
-            identity = native_world_loot.stock_enemy_identity(guid)
+            identity = native_world_loot.stock_enemy_identity(guid, payload.get("visual_id"))
             area = payload["map"]
 
             def projection(state):
@@ -811,6 +811,17 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 assert result["effect"] == "revive", result
                 await wait(run, lambda state: state["gameplay"]["players"]["guest"]["downed"] is False
                            and state["game"].get("player_effects", {}).get("guest", {}).get("state") == "standing")
+            carry = None
+            if carry_weapon:
+                from live_world_loot_carry import carry_and_throw
+
+                def settled(state):
+                    return state.get("gameplay", {}).get(native_stock_enemy_drops.STATE, {}).get(guid, {}).get("transform")
+
+                carry = await carry_and_throw(run, guest_run, identity, payload["transform"], settled, wait)
+                evidence["stock_weapon_carry_and_throw"] = carry
+                accepted("approach the thrown stock weapon", await combat_action(
+                    run, native_world_loot.APPROACH, f"guest@{identity}"))
             if resident_game:
                 pressed = await pick_nearby(identity, payload["transform"]["position"])
             else:
@@ -843,6 +854,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             native_host_save.verify_checkpoint(campaign / "game-user", saved)
             durable = saved["world"]["party"][native_stock_enemy_drops.STATE][guid]
             assert "escrow" not in durable and durable["claimed_by"] == invitation["character_id"], durable
+            if carry:
+                assert durable["transform"] == carry["settled_transform"], durable
             return {"visible": visible, "press": pressed, "claim": commit, "inventory": item,
                     "competing_claim": competing["error"], "replayed": replay[native_stock_enemy_drops.CLAIM_KEY]}
 
@@ -911,9 +924,16 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
 
 
 async def main(args) -> None:
+    if args.carry_weapon:
+        if str(REPO) not in sys.path:
+            sys.path.insert(0, str(REPO))
+        from live_world_loot_carry import staged_carry_probe
+
+    work = args.work.resolve()
     subjects = ("host", "guest") if args.subject == "both" else (args.subject,)
-    for subject in subjects:
-        await exercise(args.work.resolve(), subject, hostile=args.hostile, require_combat=args.require_combat,
+    with staged_carry_probe(work) if args.carry_weapon else nullcontext():
+        for subject in subjects:
+            await exercise(work, subject, hostile=args.hostile, require_combat=args.require_combat,
                        require_movement=args.require_movement, require_damage=args.require_damage,
                        enemy_loot=args.enemy_loot, original_save=args.vanilla_saved, enemy_bounty=args.enemy_bounty,
                        shared_enemy_loot=args.shared_enemy_loot, dead_bridge_cqc=args.dead_bridge_cqc,
@@ -922,7 +942,7 @@ async def main(args) -> None:
                        refinery_cqc=args.refinery_cqc, stock_drop_census=args.stock_drop_census,
                        stock_weapon_input=args.stock_weapon_input, restart_unclaimed_weapon=args.restart_unclaimed_weapon,
                        resident_game=args.resident_game.resolve(strict=True) if args.resident_game else None,
-                       verify_shell_stacking=args.verify_shell_stacking)
+                       verify_shell_stacking=args.verify_shell_stacking, carry_weapon=args.carry_weapon)
 
 
 if __name__ == "__main__":
@@ -950,6 +970,7 @@ if __name__ == "__main__":
                         help="verify observed ammunition and weapon payloads; add --stock-shell-input to test shell pickup too")
     parser.add_argument("--stock-weapon-input", action="store_true", help="claim the stock dropped weapon through Interact")
     parser.add_argument("--restart-unclaimed-weapon", action="store_true", help="restart before the stock weapon pickup")
+    parser.add_argument("--carry-weapon", action="store_true", help="throw the enemy's actual stock weapon before pickup")
     parser.add_argument("--resident-game", type=Path, help="use a separate portable guest replica and collect through stock Nearby Items")
     parser.add_argument("--vanilla-saved", type=Path)
     args = parser.parse_args()
@@ -958,6 +979,8 @@ if __name__ == "__main__":
     placed_cqc = args.dead_bridge_cqc or args.refinery_cqc
     if args.restart_unclaimed_weapon:
         args.stock_weapon_input = True
+    if args.carry_weapon and (not args.stock_weapon_input or args.resident_game or args.restart_unclaimed_weapon):
+        parser.error("--carry-weapon requires --stock-weapon-input with two headless seats in one campaign")
     if args.stock_weapon_input:
         args.stock_drop_census = True
     if args.stock_drop_census and not args.automatic_cqc_loot:

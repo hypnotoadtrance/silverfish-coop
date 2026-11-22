@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -60,6 +61,7 @@ namespace
     constexpr auto maximum_sequence = (std::int64_t{1} << 53) - 1;
     constexpr auto heartbeat = std::chrono::seconds(2);
     constexpr auto hidden_retention = std::chrono::seconds(8);
+    constexpr auto pose_blend = std::chrono::milliseconds(80);
     constexpr double range = 250.0;
     constexpr std::size_t component_limit = 24;
 
@@ -72,6 +74,12 @@ namespace
 
     struct Lease
     {
+        struct Motion
+        {
+            Position position, rotation;
+            Clock::time_point start;
+        };
+
         U::FWeakObjectPtr pawn, world, driver, connection, stock_type;
         bool host{};
         const items::StackDisplay* display{};
@@ -83,7 +91,8 @@ namespace
         Clock::time_point expiry{};
         std::int64_t intent{}, last_press{};
         Clock::time_point intent_expiry{};
-        bool visible{};
+        bool visible{}, claimable{true}, simulating{};
+        std::optional<Motion> motion;
     };
 
     struct Projection
@@ -232,9 +241,9 @@ namespace
         const auto offset = std::hypot(actual.GetX() - lease.source[0], actual.GetY() - lease.source[1],
                                        actual.GetZ() - lease.visual_z);
         if (!std::isfinite(offset) || offset > 5) return false;
-        actor->SetActorEnableCollision(true);
+        actor->SetActorEnableCollision(lease.claimable);
         actor->SetActorHiddenInGame(false);
-        if (!actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false)) return false;
+        if (actor->GetActorEnableCollision() != lease.claimable || !boolean(actor, STR("bHidden"), false)) return false;
         lease.visible = true;
         return true;
     }
@@ -243,14 +252,22 @@ namespace
     {
         auto& [projection, lease] = entry;
         if (!lease.visible) return;
+        if (lease.simulating)
+        {
+            clear(entry);
+            return;
+        }
         lease.visible = false;
         lease.intent = 0;
+        lease.motion.reset();
         auto* actor = static_cast<U::AActor*>(projection.object.Get());
         if (!mutable_actor(actor)) return;
         actor->SetActorEnableCollision(false);
         actor->SetActorHiddenInGame(true);
         if (actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), true)) clear(entry);
     }
+
+    bool update_pose(U::AActor* actor, const Position& position, const Position& rotation);
 
     void tick()
     {
@@ -260,6 +277,27 @@ namespace
             for (auto& entry : std::span{projections}.first(active_projection_slots)) clear(entry);
         }
         const auto now = Clock::now();
+        for (auto& [projection, lease] : std::span{projections}.first(active_projection_slots))
+        {
+            if (!lease.motion) continue;
+            auto* actor = static_cast<U::AActor*>(projection.object.Get());
+            if (!mutable_actor(actor) || !scope_current(lease))
+            {
+                lease.motion.reset();
+                continue;
+            }
+            const auto& previous = *lease.motion;
+            const auto progress = std::clamp(std::chrono::duration<double>(now - previous.start) / pose_blend, 0.0, 1.0);
+            Position position{};
+            Position rotation{};
+            for (std::size_t axis = 0; axis < position.size(); ++axis)
+            {
+                position[axis] = std::lerp(previous.position[axis], lease.source[axis], progress);
+                rotation[axis] = previous.rotation[axis] +
+                    std::remainder(lease.rotation[axis] - previous.rotation[axis], 360.0) * progress;
+            }
+            if (!update_pose(actor, position, rotation) || progress == 1.0) lease.motion.reset();
+        }
         if (now < next_check) return;
         next_check = now + std::chrono::milliseconds(100);
         for (auto& entry : std::span{projections}.first(active_projection_slots))
@@ -388,7 +426,7 @@ namespace
                 auto* caller = frame ? frame->PreviousFrame() : nullptr;
                 if (!caller || caller->Node() != find<U::UFunction>(floor_query_path) ||
                     object(caller->Object(), STR("PlayerFP")) != lease.pawn.Get() ||
-                    !lease.visible || !scope_current(lease) || !inert(actor))
+                    !lease.claimable || !lease.visible || !scope_current(lease) || !inert(actor))
                     call.PreventOriginalFunctionCall();
             }
             else if (function == projection.add_inventory.Get() &&
@@ -404,7 +442,8 @@ namespace
         call.PreventOriginalFunctionCall();
         if (!call.OriginalFunctionCallPrevented()) return;
         if (function == projection.begin.Get()) projection.begin_veto = true;
-        if (function != projection.interaction.Get() || !lease.visible || !scope_current(lease) || !inert(actor)) return;
+        if (function != projection.interaction.Get() || !lease.claimable || !lease.visible ||
+            !scope_current(lease) || !inert(actor)) return;
         auto* pawn = read(field<U::FObjectProperty>(function, STR("Player")), args);
         auto* box = read(field<U::FObjectProperty>(function, STR("HitComponent")), args);
         auto* caller = frame ? frame->PreviousFrame() : nullptr;
@@ -429,6 +468,49 @@ namespace
         auto* property = parameter<U::FStructProperty>(call, STR("SpawnTransform"), 0x10, 0x60);
         auto* structure = find<U::UScriptStruct>(STR("/Script/CoreUObject.Transform"));
         return property && structure && property->GetStruct().Get() == structure;
+    }
+
+    bool update_pose(U::AActor* actor, const Position& position, const Position& rotation)
+    {
+        static auto* function = find<U::UFunction>(STR("/Script/Engine.Actor:K2_SetActorLocationAndRotation"));
+        static auto* location = parameter<U::FStructProperty>(function, STR("NewLocation"), 0, sizeof(Position));
+        static auto* orientation = parameter<U::FStructProperty>(function, STR("NewRotation"), 0x18, sizeof(Position));
+        static auto* hit = parameter<U::FStructProperty>(function, STR("SweepHitResult"), 0x38, 0xF8, true);
+        static auto* teleport = parameter<U::FBoolProperty>(function, STR("bTeleport"), 0x130, 1);
+        static auto* success = parameter<U::FBoolProperty>(function, STR("ReturnValue"), 0x131, 1, true);
+        static const bool qualified = location && orientation && hit && teleport && success &&
+            location->GetStruct().Get() == find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector")) &&
+            orientation->GetStruct().Get() == find<U::UScriptStruct>(STR("/Script/CoreUObject.Rotator")) &&
+            hit->GetStruct().Get() == find<U::UScriptStruct>(STR("/Script/Engine.HitResult")) &&
+            parameter<U::FBoolProperty>(function, STR("bSweep"), 0x30, 1) &&
+            function->GetOuterPrivate() == find<U::UClass>(STR("/Script/Engine.Actor")) &&
+            function->GetNumParms() == 6 && function->GetParmsSize() == 0x132 &&
+            function->HasAnyFunctionFlags(U::FUNC_Native) && success->HasAnyPropertyFlags(U::CPF_ReturnParm);
+        if (!qualified) return false;
+        // UE5 uses doubles for both positions and rotators. The UE4SS actor
+        // convenience wrapper writes single-precision rotation fields.
+        alignas(std::max_align_t) std::array<std::byte, 0x132> parameters{};
+        hit->InitializeValue_InContainer(parameters.data());
+        std::memcpy(location->ContainerPtrToValuePtr<void>(parameters.data()), position.data(), sizeof(position));
+        std::memcpy(orientation->ContainerPtrToValuePtr<void>(parameters.data()), rotation.data(), sizeof(rotation));
+        teleport->SetPropertyValueInContainer(parameters.data(), true);
+        actor->ProcessEvent(function, parameters.data());
+        const bool applied = success->GetPropertyValueInContainer(parameters.data());
+        hit->DestroyValue_InContainer(parameters.data());
+        if (applied) return true;
+
+        // Unreal may report no movement when a serialized settle pose rounds to the existing transform.
+        auto point = actor->K2_GetActorLocation();
+        auto facing = actor->K2_GetActorRotation();
+        const Position actual_position{point.GetX(), point.GetY(), point.GetZ()};
+        const Position actual_rotation{facing.GetPitch(), facing.GetYaw(), facing.GetRoll()};
+        for (std::size_t axis = 0; axis < position.size(); ++axis)
+        {
+            if (!(std::abs(actual_position[axis] - position[axis]) <= .001 &&
+                  std::abs(std::remainder(actual_rotation[axis] - rotation[axis], 360.0)) <= .001))
+                return false;
+        }
+        return true;
     }
 
     bool byte_enum(U::UFunction* call, const U::TCHAR* name, int offset, const U::TCHAR* path)
@@ -553,6 +635,23 @@ namespace
             std::array arguments{number, effect};
             component->ProcessEvent(function, arguments.data());
             return arguments[1];
+        }
+
+        bool world_body(U::UObject* box, bool enabled_physics) const
+        {
+            constexpr std::uint8_t world_static = 0, world_dynamic = 1, ignore = 0, block = 2;
+            constexpr std::uint8_t query_only = 1, query_and_physics = 3;
+            const auto mode = enabled_physics ? query_and_physics : query_only;
+            const auto effect = enabled_physics ? block : ignore;
+            if (!enabled_physics) byte_call(box, simulate, 0);
+            channel(box, set_channel, world_static, effect);
+            channel(box, set_channel, world_dynamic, effect);
+            byte_call(box, set_enabled, mode);
+            if (enabled_physics) byte_call(box, simulate, 1);
+            return byte_call(box, enabled, 0xff) == mode &&
+                (byte_call(box, simulating, 0) != 0) == enabled_physics &&
+                channel(box, response, world_static, 0xff) == effect &&
+                channel(box, response, world_dynamic, 0xff) == effect;
         }
 
         const char* configure(U::AActor* actor, U::UObject* box, std::span<U::UObject* const> components, bool stock_ammo)
@@ -765,7 +864,7 @@ namespace
         auto& [projection, lease] = entry;
         const auto arguments = lua.get_stack_size();
         const bool stock_loot = &entry != &projections.front();
-        if (!ready() || (stock_loot ? arguments != 15 : arguments != 7 && arguments != 8) ||
+        if (!ready() || (stock_loot ? arguments != 15 && arguments != 16 : arguments != 7 && arguments != 8) ||
             !lua.is_integer(1) || !lua.is_string(2) || !lua.is_string(3) ||
             (arguments >= 8 && !lua.is_string(8)))
             return report(lua, false, "stock_drop_projection_sync_arguments");
@@ -775,6 +874,9 @@ namespace
             if (!lua.is_number(index)) return report(lua, false, "stock_drop_projection_transform_arguments");
         if (stock_loot && !lua.is_integer(15))
             return report(lua, false, "stock_drop_projection_stack_count_invalid");
+        if (arguments == 16 && !lua.is_bool(16))
+            return report(lua, false, "stock_drop_projection_pickup_mode_invalid");
+        const bool claimable = arguments != 16 || lua.get_bool(16);
         const auto address = static_cast<std::uintptr_t>(lua.get_integer());
         const std::string epoch{lua.get_string()}, id{lua.get_string()};
         Position source{};
@@ -827,14 +929,46 @@ namespace
         if (Clock::now() < lease.expiry + hidden_retention && lease.epoch == epoch && lease.id == id &&
             lease.pawn.Get() == pawn && lease.world.Get() == world && lease.driver.Get() == driver &&
             lease.host == (connection == nullptr) && lease.connection.Get() == connection && lease.display == display &&
-            lease.stock_type.Get() == type && lease.rotation == rotation && lease.scale == scale &&
-            lease.source == source && mutable_actor(existing) &&
+            lease.stock_type.Get() == type && lease.scale == scale && mutable_actor(existing) &&
+            (stock_loot || (lease.rotation == rotation && lease.source == source && lease.visual_z == visual)) &&
             existing->GetClassPrivate() == projection.display_type.Get() && live(projection.box.Get()) &&
             object(existing, STR("Box")) == projection.box.Get())
         {
+            if (lease.simulating)
+            {
+                // Keep the current Chaos pose while the ledger still carries the last settled transform.
+                lease.expiry = Clock::now() + heartbeat;
+                lease.stack_count = stack_count;
+                lease.claimable = claimable;
+                return report(lua, true, "projected");
+            }
+            if (lease.source != source || lease.rotation != rotation || lease.visual_z != visual ||
+                (claimable && !lease.claimable))
+            {
+                if (!claimable && !lease.claimable && lease.visible)
+                {
+                    auto point = existing->K2_GetActorLocation();
+                    auto facing = existing->K2_GetActorRotation();
+                    lease.motion = Lease::Motion{{point.GetX(), point.GetY(), point.GetZ()},
+                        {facing.GetPitch(), facing.GetYaw(), facing.GetRoll()}, Clock::now()};
+                }
+                else
+                {
+                    lease.motion.reset();
+                    if (!update_pose(existing, {source[0], source[1], visual}, rotation))
+                        return report(lua, false, "stock_drop_projection_pose_change_unverified");
+                }
+                lease.source = source;
+                lease.rotation = rotation;
+                lease.visual_z = visual;
+            }
             lease.expiry = Clock::now() + heartbeat;
             lease.stack_count = stack_count;
-            if (lease.visible || (inert(existing) && show(lease, existing))) return report(lua, true, "projected");
+            const bool changed_mode = lease.claimable != claimable;
+            lease.claimable = claimable;
+            if (changed_mode) lease.intent = 0;
+            if ((!changed_mode && lease.visible) || (inert(existing) && show(lease, existing)))
+                return report(lua, true, "projected");
             clear(entry);
             return report(lua, false, "stock_drop_projection_reappear_unverified");
         }
@@ -854,6 +988,7 @@ namespace
         lease.source = source;
         lease.visual_z = visual;
         lease.stack_count = stack_count;
+        lease.claimable = claimable;
         lease.expiry = Clock::now() + heartbeat;
         if (const auto* failure = spawn_projection(entry))
         {
@@ -878,10 +1013,52 @@ namespace
 
     int sync_world_item(const Lua& lua)
     {
-        if (lua.get_stack_size() != 16) return report(lua, false, "stock_drop_projection_sync_arguments");
-        auto* entry = requested_projection(lua, 16);
+        const auto arguments = lua.get_stack_size();
+        if (arguments != 16 && arguments != 17) return report(lua, false, "stock_drop_projection_sync_arguments");
+        auto* entry = requested_projection(lua, arguments);
         if (!entry || entry == &projections.front()) return report(lua, false, "stock_drop_projection_slot_unqualified");
         return sync_projection(lua, *entry);
+    }
+
+    int set_world_item_physics(const Lua& lua)
+    {
+        if (!ready() || lua.get_stack_size() != 4 || !lua.is_string(2) || !lua.is_string(3) || !lua.is_bool(4))
+            return report(lua, false, "stock_world_loot_physics_arguments");
+        auto* entry = requested_projection(lua, 1);
+        const std::string epoch{lua.get_string()}, id{lua.get_string()};
+        const bool simulate = lua.get_bool();
+        if (!entry || entry == &projections.front())
+            return report(lua, false, "stock_world_loot_physics_slot_unqualified");
+        auto& [projection, lease] = *entry;
+        auto* actor = static_cast<U::AActor*>(projection.object.Get());
+        auto* box = projection.box.Get();
+        if (lease.epoch != epoch || lease.id != id || !lease.visible || !scope_current(lease) ||
+            !mutable_actor(actor) || !live(box) || object(actor, STR("RootComponent")) != box ||
+            object(actor, STR("Box")) != box || (simulate && !lease.simulating && (!lease.claimable || !inert(actor))))
+            return report(lua, false, "stock_world_loot_physics_scope_unqualified");
+        if (lease.simulating == simulate) return report(lua, true, "stock_world_loot_physics_unchanged");
+
+        Collision collision;
+        auto* physics = field<U::FBoolProperty>(actor, STR("Physics"));
+        if (!physics || !collision.bind()) return report(lua, false, "stock_world_loot_physics_schema");
+        if (!collision.world_body(box, simulate))
+        {
+            if (!collision.world_body(box, lease.simulating)) clear(*entry);
+            return report(lua, false, "stock_world_loot_physics_body_unverified");
+        }
+        physics->SetPropertyValueInContainer(actor, simulate);
+        lease.simulating = simulate;
+        lease.motion.reset();
+        lease.intent = 0;
+        if (!simulate)
+        {
+            auto point = actor->K2_GetActorLocation();
+            auto rotation = actor->K2_GetActorRotation();
+            lease.source = {point.GetX(), point.GetY(), point.GetZ()};
+            lease.rotation = {rotation.GetPitch(), rotation.GetYaw(), rotation.GetRoll()};
+            lease.visual_z = point.GetZ();
+        }
+        return report(lua, true, simulate ? "stock_world_loot_physics_active" : "stock_world_loot_physics_settled");
     }
 
     int read_projection(const Lua& lua)
@@ -1035,7 +1212,8 @@ namespace silverfish::native_guest_drop_projection
         {
             auto* actor = projection.object.Get();
             auto* box = projection.box.Get();
-            if (!lease.visible || lease.pawn.Get() != pawn || std::ranges::find(shown, actor) != shown.end() ||
+            if (!lease.claimable || !lease.visible || lease.pawn.Get() != pawn ||
+                std::ranges::find(shown, actor) != shown.end() ||
                 !scope_current(lease) || !live(actor) || !inert(actor) ||
                 !near_source(lease, pawn) || !input::local_interaction_in_reach(pawn, actor, box)) continue;
             if (floor_box_visible(pawn, actor, box, *eye)) visible.push_back(actor);
@@ -1046,7 +1224,7 @@ namespace silverfish::native_guest_drop_projection
     std::optional<int> nearby_stack_count(U::UObject* actor, U::UObject* pawn)
     {
         auto* entry = projection_for(actor);
-        if (!entry || !entry->lease.stack_count || !entry->lease.visible ||
+        if (!entry || !entry->lease.claimable || !entry->lease.stack_count || !entry->lease.visible ||
             entry->lease.pawn.Get() != pawn || !scope_current(entry->lease) || !inert(actor)) return {};
         auto* defaults = actor->GetClassPrivate()->GetClassDefaultObject().Get();
         return boolean(defaults, STR("Stacks"), true) ? std::optional{entry->lease.stack_count} : std::nullopt;
@@ -1058,7 +1236,7 @@ namespace silverfish::native_guest_drop_projection
         if (!entry) return false;
         auto& [projection, lease] = *entry;
         auto* box = projection.box.Get();
-        if (!pawn || pawn != lease.pawn.Get() || !lease.visible || !scope_current(lease) ||
+        if (!pawn || pawn != lease.pawn.Get() || !lease.claimable || !lease.visible || !scope_current(lease) ||
             !inert(actor) || !near_source(lease, pawn) || sequence >= maximum_sequence ||
             !input::local_interaction_in_reach(pawn, actor, box)) return false;
         enqueue_pickup(lease);
@@ -1108,6 +1286,7 @@ namespace silverfish::native_guest_drop_projection
         if (!enabled()) return;
         lua.register_function("SilverfishSyncNativeGuestDropProjection", sync);
         lua.register_function("SilverfishSyncNativeWorldLootItem", sync_world_item);
+        lua.register_function("SilverfishSetNativeWorldLootPhysics", set_world_item_physics);
         lua.register_function("SilverfishReadNativeGuestDropProjection", read_projection);
         lua.register_function("SilverfishTakeNativeGuestDropProjectionPress", take_press);
         lua.register_function("SilverfishClearNativeGuestDropProjection", clear_lua);

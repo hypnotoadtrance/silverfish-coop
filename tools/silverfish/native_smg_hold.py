@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 
-from . import party
+from . import native_inventory, party
 from .native_gold import valid_guid
 from .travel import OBSERVATORY
 
@@ -44,6 +44,7 @@ class Stroke:
     guid: str
     token: str
     serial: int
+    deferred: bool = False
 
     def receipt(self, snapshot: dict) -> dict:
         frame = snapshot.get(ALL, {}).get(self.pawn, {})
@@ -55,7 +56,7 @@ class Stroke:
 
 
 class Authority:
-    """Fence each guest’s stock trigger and checkpoint verified terminal receipts."""
+    """Fence each guest’s stock trigger and verify its terminal receipt."""
 
     def __init__(self, host):
         self.host = host
@@ -147,6 +148,7 @@ class Authority:
 
 
     async def _start(self, character, area, pawn, guid, token) -> dict:
+        deferred = await native_inventory.retain_guest_save(self.host, self.bridge, character, pawn)
         try:
             snapshot = await self.bridge.held_fire_command("start", pawn, guid, str(LEASE_MS))
         except RuntimeError as error:
@@ -163,7 +165,7 @@ class Authority:
             raise
         try:
             frame = snapshot.get(ALL, {}).get(pawn, {})
-            stroke = Stroke(area, pawn, guid, token, frame["serial"])
+            stroke = Stroke(area, pawn, guid, token, frame["serial"], deferred=deferred)
             proof = self._update(stroke, snapshot)
             if proof["rounds"] < 1:
                 raise RuntimeError("Stock held fire did not produce a verified first round")
@@ -192,12 +194,13 @@ class Authority:
                         raise RuntimeError("Stock held fire has an unclosed trigger at a campaign checkpoint")
             if not finished:
                 return
-            revision = await self.host.checkpoint_native(bridge, require_guest_frames=frozenset(finished))
+            durable = frozenset(character for character in finished if not self.strokes[character].deferred)
+            revision = await self.host.checkpoint_native(bridge, require_guest_frames=durable) if durable else None
             for character, frame in finished.items():
                 del self.strokes[character]
                 del self.frames[frame["serial"]]
-                self.host.control.event("native_guest_smg_hold_committed",
-                                        character_id=character, revision=revision, **frame)
+                event = "native_guest_smg_hold_committed" if character in durable else "native_guest_smg_hold_accepted"
+                self.host.control.event(event, character_id=character, revision=revision, **frame)
         except (OSError, RuntimeError, ValueError):
             self._fail_closed()
             raise

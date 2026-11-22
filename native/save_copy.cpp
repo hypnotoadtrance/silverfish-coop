@@ -8,11 +8,13 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <Helpers/String.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
+#include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
@@ -30,6 +32,7 @@ namespace
         STR("PlayerHealth"), STR("PlayerRegen"), STR("PlayerFood"),
         STR("PlayerStim"), STR("PlayerRads"), STR("PlayerShieldHealth")};
     constexpr std::array guid_names{STR("A"), STR("B"), STR("C"), STR("D")};
+    std::vector<Unreal::FWeakObjectPtr> retained_saves;
 
     struct SavePair
     {
@@ -138,6 +141,48 @@ namespace
         lua.set_bool(ok);
         lua.set_string(detail);
         return 2;
+    }
+
+    int reference_detached_save(const Lua& lua)
+    {
+        const auto arguments = lua.get_stack_size();
+        if ((arguments != 3 && arguments != 4) || !lua.is_bool(3) ||
+            (arguments == 4 && !lua.is_bool(4)))
+        {
+            return result(lua, false, "expected_save_addresses_and_keep");
+        }
+        const bool newly_constructed = arguments == 4 && lua.get_bool(4);
+        const bool keep = lua.get_bool(3);
+        SavePair pair;
+        if (const auto error = resolve_pair(lua, pair); !error.empty())
+        {
+            return result(lua, false, error);
+        }
+        const auto owned = std::ranges::find_if(retained_saves, [&pair](const auto& save) { return save.Get() == pair.guest; });
+        if (!keep)
+        {
+            if (owned != retained_saves.end())
+            {
+                pair.guest->ClearRootSet();
+                retained_saves.erase(owned);
+            }
+            return result(lua, true, "detached_save_released");
+        }
+        if (owned != retained_saves.end() || (pair.guest->IsRootSet() && !newly_constructed))
+        {
+            return result(lua, false, "detached_save_already_retained");
+        }
+        retained_saves.emplace_back(pair.guest);
+        if (!pair.guest->IsRootSet())
+        {
+            pair.guest->SetRootSet();
+        }
+        if (!pair.guest->IsRootSet())
+        {
+            retained_saves.pop_back();
+            return result(lua, false, "detached_save_reference_mismatch");
+        }
+        return result(lua, true, "detached_save_retained");
     }
 
     int copy_guest_save(const Lua& lua)
@@ -372,6 +417,7 @@ namespace
 
 void silverfish::register_native_save_copy_lua(RC::LuaMadeSimple::Lua& lua)
 {
+    lua.register_function("SilverfishReferenceNativeDetachedSave", run<reference_detached_save>);
     lua.register_function("SilverfishCopyNativeGuestSave", run<copy_guest_save>);
     lua.register_function("SilverfishProbeNativeInventory", run<probe_stock_inventory>);
     lua.register_function("SilverfishProbeNativeInventoryFixture", run<probe_fixture_inventory>);

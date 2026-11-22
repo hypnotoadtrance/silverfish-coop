@@ -295,7 +295,7 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         await projection.sync(bridge, game, {}, "generation", host.zone_epoch, active=True, player_drops=visible)
         self.assertEqual(len(projection.items), 2)
         args = bridge.command.await_args.args[3:]
-        self.assertTrue(all(f"|{record.ITEM}|ground|" in line for line in args))
+        self.assertTrue(all(f"|{record.ITEM}|carry-ground|" in line for line in args))
         first = native_world_loot.player_drop_identity(DROP)
         second = native_world_loot.player_drop_identity(other_id)
         proof = dict(epoch=projection.epoch, sequence=1, class_path=record.ITEM, map=MAP,

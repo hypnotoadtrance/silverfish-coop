@@ -69,9 +69,6 @@ _MENU_NATIVE_SAVE_BYTES = 128 * 1024**2
 MENU_HOST_OPTIONS = {"native_events": True, "native_guest": True, "native_zones": True,
                      "native_zone_walls": True, "expanded_zones": True}
 POSITION_MAX_AGE = 3.0
-CHECKPOINT_INTERVAL = 60.0
-CHECKPOINT_RETRY_INTERVAL = 5.0
-GUEST_EXPIRY_CAPTURE_ATTEMPTS = 2
 NATIVE_RUNTIME_RETIRING = "native_runtime_retiring"
 # The stock driver can retain a silent connection for 110 seconds.
 NATIVE_RUNTIME_RETIREMENT_WAIT = 130.0
@@ -242,7 +239,6 @@ class Host:
         self.guest_pawn = None
         self.last_game = {}
         self.stopping = False
-        self.next_save = 0.0
         self.next_crate_placement = 0.0
         self.crate_placement_error = None
         self.last_seen = 0.0
@@ -300,6 +296,9 @@ class Host:
             self.allowed_maps |= EXPANDED_MAPS
         self.next_zone_heartbeat = 0.0
         self.native_checkpoint_unsafe = False
+        # None means clean. Pending host changes record whether they need typed readback.
+        self.pending_host_save: bool | None = None
+        self.pending_guest_saves: dict[str, tuple[str, dict]] = {}
         self.matrix_supported = matrix_supported
         self.world_flush_supported = world_flush_supported
         self.native_guest_health = None
@@ -335,7 +334,6 @@ class Host:
         self.transitioning = False
         self.awaiting_zone_guest = None
         self.expired_characters: set[str] = set()
-        self.expiry_capture_attempts: dict[str, int] = {}
         self.native_restart_candidate: tuple[int, tuple[str, str], float] | None = None
         self.native_restart_attempted = 0
         self.relay = None
@@ -454,14 +452,15 @@ class Host:
             return
         self.guest["disconnected"] = time.monotonic()
         self.store.disconnect(self.guest["lease_id"])
-        if not self.transitioning and not self.native_checkpoint_unsafe:
-            self.next_save = 0.0
         with contextlib.suppress(OSError):
             self.control.event("guest_link_lost", guest_id=guest_id, grace_seconds=DEFAULT_RECONNECT_GRACE)
 
     def checkpoint(self, proposed_party: dict | None = None, *, native_record: dict | None = None,
                    guest_records: dict[str, dict] | None = None, unleased_states: dict | None = None,
                    require_guest_frames: frozenset[str] = frozenset()) -> int:
+        if self.native_profile is not None:
+            # Live party mutations are committed with the matching Unreal generations.
+            return self.store.revision
         world, changes = self.checkpoint_contents(proposed_party, native_record=native_record,
                                                   guest_records=guest_records, unleased_states=unleased_states,
                                                   require_guest_frames=require_guest_frames)
@@ -469,11 +468,13 @@ class Host:
 
     async def commit_checkpoint(self, proposed_party: dict | None, *, native_record: dict | None = None,
                                 guest_records: dict[str, dict] | None = None, unleased_states: dict | None = None,
-                                require_guest_frames: frozenset[str] = frozenset()) -> int:
+                                require_guest_frames: frozenset[str] = frozenset(),
+                                retained_guest_changes: dict | None = None) -> int:
         await self.store.wait_for_checkpoint()
         world, changes = self.checkpoint_contents(proposed_party, native_record=native_record,
                                                   guest_records=guest_records, unleased_states=unleased_states,
-                                                  require_guest_frames=require_guest_frames)
+                                                  require_guest_frames=require_guest_frames,
+                                                  retained_guest_changes=retained_guest_changes)
         cleanup = None
         cleanup_error = None
         profile = self.native_profile
@@ -497,17 +498,13 @@ class Host:
             # proposed party in memory. Shutdown must not overwrite that commit.
             self.native_checkpoint_unsafe = True
             raise
-        # A completed transaction already saved this interval's state. Preserve
-        # an immediate checkpoint requested by a disconnect during capture.
-        if self.next_save != 0.0:
-            self.next_save = time.monotonic() + CHECKPOINT_INTERVAL
         if cleanup_error is not None:
             with contextlib.suppress(OSError):
                 self.control.event("native_host_save_prune_deferred", reason=cleanup_error)
         return revision
 
     def checkpoint_contents(self, proposed_party, *, native_record, guest_records,
-                            unleased_states, require_guest_frames) -> tuple[dict, dict]:
+                            unleased_states, require_guest_frames, retained_guest_changes=None) -> tuple[dict, dict]:
         if self.last_game.get("state") != "hosting":
             raise RuntimeError("Wait for the host map to finish loading")
         native_kill_volume.fence(self)
@@ -542,6 +539,8 @@ class Host:
                 world.pop("native_rest", None)
         captures = guest_records or {}
         changes = self.checkpoint_guest_changes(status, captures)
+        if retained_guest_changes:
+            changes = retained_guest_changes | changes
         if require_guest_frames:
             previous = {entry["character_id"]: entry["state"].get("native_guest_save") or {} for entry in status["characters"]}
             planned = [state.get("native_guest_save") for state in changes.values()]
@@ -606,45 +605,33 @@ class Host:
         self.last_seen = time.monotonic()
         return dict(frame, character_id=character)
 
-    async def checkpoint_departing_guests(self, bridge: Bridge, guests: dict[str, str]) -> set[str]:
-        """Commit grace-expired native pawns while their old connections are still live."""
-        if not guests or not self.persist_native_guest or not self.native_profile or self.native_checkpoint_unsafe:
-            return set()
-        transitioning = self.transitioning
-        committed = set()
-        self.transitioning = True
-        try:
-            leased = {row["character_id"] for row in self.store.status()["leases"]}
-            detached = {}
-            for character, pawn in guests.items():
-                if character in leased:
-                    continue
-                try:
-                    frame = await self.capture_guest_generation(bridge, pawn, character)
-                    aliases = [alias for alias, row in self.last_game.get("pawns", {}).items() if row.get("name") == pawn]
-                    if len(aliases) != 1:
-                        raise RuntimeError("The retiring guest pawn did not survive save readback")
-                    state = _pawn(self.last_game, aliases[0])
-                    if state.get("health") is None or None in state["location"]:
-                        raise RuntimeError("The retiring guest's exact health or position is unavailable")
-                    detached[character] = dict(state, native_guest_save=frame)
-                except (OSError, ValueError, RuntimeError) as error:
-                    self.control.event("native_guest_expiry_capture_failed", character_id=character, reason=str(error))
-            if detached:
-                revision = await self.checkpoint_native(bridge, unleased_states=detached)
-                committed.update(detached)
-                for character, saved in detached.items():
-                    self.control.event("native_guest_expiry_checkpointed", character_id=character, revision=revision,
-                                       slot=saved["native_guest_save"]["slot"])
-        except (OSError, ValueError, RuntimeError) as error:
-            self.control.event("native_guest_expiry_checkpoint_failed", reason=str(error))
-        finally:
-            self.transitioning = transitioning
-        return committed
-
     async def capture_guest_records(self, bridge: Bridge) -> dict[str, dict]:
         return {character: await self.capture_guest_generation(bridge, pawn, character)
                 for character, pawn in self.guest_capture_targets().items()}
+
+    def guest_lease_ids(self) -> dict[str, str]:
+        return {self.guest["character_id"]: self.guest["lease_id"]} if self.guest else {}
+
+    def queue_guest_save(self, character: str, pawn: str) -> None:
+        for alias, details in self.last_game.get("pawns", {}).items():
+            if details.get("name") == pawn:
+                self.pending_guest_saves[character] = (pawn, _pawn(self.last_game, alias))
+                return
+        raise RuntimeError("The retained guest did not report its character state")
+
+    async def capture_retained_guest_save(self, bridge: Bridge, character: str, source: str) -> dict:
+        pawn, state = self.pending_guest_saves[character]
+        slot = native_host_save.new_slot()
+        snapshot = await bridge.command("native-guest-save-capture-retained", character, slot, timeout=7)
+        proof = snapshot.get("native_guest_save_retained_frames", {}).get(character, {})
+        health = proof.get("health")
+        if (snapshot.get("state") != "hosting" or snapshot.get("map") != source
+                or (proof.get("map"), proof.get("pawn"), proof.get("slot")) != (source, pawn, slot)
+                or type(health) not in (int, float) or not math.isfinite(health)):
+            raise RuntimeError("The game did not verify the retained guest save generation")
+        self.last_game, self.last_seen = snapshot, time.monotonic()
+        frame = await asyncio.to_thread(native_host_save.record, self.native_profile, slot, source, flush=True)
+        return dict(state, health=max(0, health), native_guest_save=dict(frame, character_id=character))
 
     async def flush_native_world(self, bridge: Bridge) -> None:
         source = self.last_game.get("map")
@@ -665,10 +652,18 @@ class Host:
                 raise RuntimeError("The typed inventory requires a stock campaign checkpoint")
             return await self.commit_checkpoint(proposed_party, unleased_states=unleased_states,
                                                 require_guest_frames=require_guest_frames)
+        pending_host = self.pending_host_save is not None
+        if pending_host:
+            typed_inventory = typed_inventory or self.pending_host_save
+        pending_guests = frozenset(self.pending_guest_saves)
+        require_guest_frames |= pending_guests
+        typed_inventory = typed_inventory or bool(pending_guests)
         source = self.last_game.get("map")
         pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
         if self.last_game.get("state") != "hosting" or not pawn or source not in self.allowed_maps:
             raise RuntimeError("The canonical native host is unavailable for checkpointing")
+        checkpoint_party = self.party if proposed_party is None else proposed_party
+        saved_party, escrow_records = await native_loot.flush_pending_escrows(self, bridge, checkpoint_party)
         slot = native_host_save.new_slot()
         guests = {}
         if self.last_game.get("native_paired_save_capture") is True:
@@ -709,8 +704,54 @@ class Host:
         self.last_seen = time.monotonic()
         if not guests:
             guest_records = await self.capture_guest_records(bridge)
-        return await self.commit_checkpoint(proposed_party, native_record=record, guest_records=guest_records,
-                                            unleased_states=unleased_states, require_guest_frames=require_guest_frames)
+        retained_changes = {}
+        if missing := pending_guests.difference(guest_records, unleased_states or {}):
+            unleased_states = dict(unleased_states or {})
+            current_leases = {lease["character_id"] for lease in self.store.status()["leases"]}
+            lease_ids = self.guest_lease_ids()
+            for character in sorted(missing):
+                saved = await self.capture_retained_guest_save(bridge, character, source)
+                guest_records[character] = saved["native_guest_save"]
+                if character in current_leases:
+                    lease_id = lease_ids.get(character)
+                    if not lease_id:
+                        raise RuntimeError("The retained guest has no matching campaign lease")
+                    retained_changes[lease_id] = saved
+                else:
+                    unleased_states[character] = saved
+        revision = await self.commit_checkpoint(saved_party if escrow_records else proposed_party,
+                                                native_record=record, guest_records=guest_records,
+                                                unleased_states=unleased_states, require_guest_frames=require_guest_frames,
+                                                retained_guest_changes=retained_changes)
+        if pending_host:
+            self.pending_host_save = None
+        if escrow_records:
+            slots = []
+            for crate, frame in escrow_records.items():
+                checkpoint_party[native_loot.STATE_KEY][crate]["escrow"] = frame
+                slots.append(frame["slot"])
+            for start in range(0, len(slots), 16):
+                try:
+                    self.last_game = await bridge.command("native-loot-release-escrows", *slots[start:start + 16])
+                    self.last_seen = time.monotonic()
+                except (OSError, RuntimeError) as error:
+                    self.control.event("native_loot_escrow_release_failed", reason=str(error))
+        if pending_guests:
+            arguments = []
+            holds = getattr(self, "smg_holds", None)
+            for character in sorted(pending_guests):
+                if holds is not None and (character in holds.strokes or holds.lock.locked()):
+                    continue
+                self.pending_guest_saves.pop(character)
+                frame = guest_records.get(character) or unleased_states[character]["native_guest_save"]
+                arguments.extend((character, frame["slot"]))
+            for start in range(0, len(arguments), 8):
+                try:
+                    self.last_game = await bridge.command("native-guest-save-release-retained", *arguments[start:start + 8])
+                    self.last_seen = time.monotonic()
+                except (OSError, RuntimeError) as error:
+                    self.control.event("native_guest_save_retention_release_failed", reason=str(error))
+        return revision
 
     async def end_session(self, bridge: Bridge, transport) -> dict:
         """End this host generation only after its final paired checkpoint."""
@@ -924,8 +965,10 @@ class Host:
             view[native_enemy_loot.STATE_KEY] = native_enemy_loot.published(rolls)
             if frame := native_enemy_loot.shell_frame(self):
                 view[native_enemy_shells.FRAME_KEY] = frame
-        if drops := native_stock_enemy_drops.published(self.party, self.last_game):
+        if drops := native_stock_enemy_drops.published(self.party, self.last_game, pinned=self.world_loot.moving):
             view[native_stock_enemy_drops.STATE] = drops
+        if self.world_loot.moving:
+            view[native_world_loot.MOVING] = sorted(self.world_loot.moving)
         if broker_cue := native_stock_enemy_drops.broker_cue_frame(self.last_game, self.zone_epoch):
             view[native_stock_enemy_drops.BROKER_CUE] = broker_cue
         if pending := pending_cube(self.party):
@@ -1815,6 +1858,8 @@ class Host:
                 }
             if angler_lights := native_anomaly_effects.angler_frame(self.last_game, self.zone_epoch, pawn):
                 gameplay[native_anomaly_effects.ANGLER_COLORS] = angler_lights
+            if observer_opacity := native_anomaly_effects.observer_frame(self.last_game, self.zone_epoch, pawn):
+                gameplay[native_anomaly_effects.OBSERVER_OPACITY] = observer_opacity
             props = {path: row["phase"] for path, row in self.last_game.get(native_anomaly_effects.CANISTERS, {}).items()
                      if row["changed"]}
             if props:
@@ -2011,7 +2056,7 @@ class Host:
                 result = await native_guest_consumable.use(self, bridge, character, target, request["operation_id"], action=action)
             elif action in ("native-loot-inspect", "native-loot-open", "native-loot-claim"):
                 result = await native_loot.perform(self, bridge, character, action.removeprefix("native-loot-"),
-                                                   target, request["operation_id"])
+                                                   target, request["operation_id"], defer_save=True)
             elif action in native_loot.PRY_TOOL_ACTIONS.values():
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                     result = await native_loot.use_vehicle_pry_tool(self, bridge, character, target, request["operation_id"], action)
@@ -2559,7 +2604,13 @@ class Host:
                 snapshot = await bridge.command("native-guest-bind", pawn["name"], health, *arguments, timeout=7)
             if snapshot.get("native_guest_save", {}).get("pawn") != pawn["name"]:
                 raise RuntimeError("The guest's independent native save could not be verified")
-            if frame:
+            character = self.guest["character_id"]
+            if character in self.pending_guest_saves:
+                if snapshot.get("native_guest_save_rebound", {}).get(character) != pawn["name"]:
+                    raise RuntimeError("The game did not rebind the retained guest inventory")
+                self.last_game = snapshot
+                self.queue_guest_save(character, pawn["name"])
+            elif frame:
                 proof = snapshot.get("native_guest_save_frame", {})
                 if (proof.get("state") != "restored" or proof.get("slot") != frame["slot"]
                         or proof.get("pawn") != pawn["name"]):
@@ -2594,21 +2645,7 @@ class Host:
             self.control.event("guest_pawn_ready", character_id=self.guest["character_id"], pawn=self.guest_pawn)
         if self.guest and self.guest["disconnected"] is not None:
             expired = time.monotonic() - self.guest["disconnected"] >= DEFAULT_RECONNECT_GRACE
-            if expired and self.guest["character_id"] not in self.expired_characters:
-                character = self.guest["character_id"]
-                if pawn and self.guest_pawn == pawn["name"] and bound_pawn == pawn["name"]:
-                    committed = await self.checkpoint_departing_guests(bridge, {character: pawn["name"]})
-                    attempts = self.expiry_capture_attempts.get(character, 0) + 1
-                    if character not in committed and attempts < GUEST_EXPIRY_CAPTURE_ATTEMPTS:
-                        self.expiry_capture_attempts[character] = attempts
-                    else:
-                        self.expired_characters.add(character)
-                        self.expiry_capture_attempts.pop(character, None)
-                else:
-                    self.expired_characters.add(character)
-                    self.expiry_capture_attempts.pop(character, None)
-            if (expired and self.guest["character_id"] in self.expired_characters
-                    and self.last_game.get("remote_clients") == 0):
+            if expired and self.last_game.get("remote_clients") == 0:
                 expired_guest = self.guest
                 guest_id = expired_guest["guest_id"]
                 can_retire = True
@@ -2630,7 +2667,6 @@ class Host:
                     await transport.release_guest(guest_id)
                     character = expired_guest["character_id"]
                     self.expired_characters.add(character)
-                    self.expiry_capture_attempts.pop(character, None)
                     self.guest = None
                     self.guest_pawn = None
                     self.awaiting_zone_guest = None
@@ -3665,6 +3701,8 @@ class Host:
                         raise ValueError("Open an integrated co-op campaign to end it from the game")
                     result = await self.end_session(bridge, transport)
                 elif action == "checkpoint" or action == "stop":
+                    if self.smg_holds:
+                        await self.smg_holds.settle(bridge, stop_all=True)
                     result = {"revision": await self.checkpoint_native(bridge)}
                     self.control.event("checkpoint_saved", revision=result["revision"], command_id=path.stem)
                     if action == "stop":
@@ -3846,21 +3884,23 @@ class Host:
         engine = bridge.process if isinstance(bridge.process, EmbeddedEngine) else None
         invites = (native_host_invitation.HostInvitationMailbox(
             bridge.directory, self.control.run, self.invite, engine=engine)
-                   if self.native_events and self.native_zones else None)
+                   if self.fixtures and self.native_events and self.native_zones else None)
         pause_exit = (native_session_exit.PauseExit(bridge.directory, self.control, "host", engine=engine)
                       if engine is not None and self.native_zones else None)
         heartbeat = asyncio.create_task(self.renew_native_scope(bridge)) if self.native_events else None
         weapon_shots = (asyncio.create_task(native_weapon_fire_view.relay(self, bridge, transport))
                         if self.native_guest else None)
+        loot_motion = (asyncio.create_task(native_stock_enemy_drops.relay_motion(self, transport))
+                       if self.native_events else None)
         if self.wipe_view_enabled:
             self.wipe_view = native_wipe_view.WipeView(bridge, self.control, "host")
         try:
             await self.run_session(bridge, transport, invites, pause_exit=pause_exit)
         finally:
-            for task in (heartbeat, weapon_shots):
+            for task in (heartbeat, weapon_shots, loot_motion):
                 if task:
                     task.cancel()
-            for task in (heartbeat, weapon_shots):
+            for task in (heartbeat, weapon_shots, loot_motion):
                 if task:
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
@@ -3877,7 +3917,7 @@ class Host:
         package_journal = native_package_handoff_journal.Journal() if self.native_host_dig_live else None
 
         async def claim_crate(operation, guid):
-            return await native_loot.perform(self, bridge, "host", "claim", guid, operation)
+            return await native_loot.perform(self, bridge, "host", "claim", guid, operation, defer_save=True)
 
         async def frozen_items(offset):
             return native_inventory_death.items(self, "host", offset)
@@ -3942,6 +3982,7 @@ class Host:
             self.sync_native_health_limits()
             await native_enemy_loot.observe(self, bridge)
             await native_stock_enemy_drops.observe(self, bridge)
+            self.world_loot.observe_physics(self.party, self.last_game)
             try:
                 await self.loose_pickups.refresh(self, bridge)
             except (OSError, RuntimeError) as error:
@@ -3964,8 +4005,8 @@ class Host:
                                         for row in self.last_game.get("native_guest_regen", {}).values()):
                 self.native_checkpoint_unsafe = True
                 raise RuntimeError("A stock guest regeneration update failed authority readback")
-            if self.guest_sickness and any(row["state"].startswith("mutation_unverified_")
-                                           for row in self.last_game.get("native_guest_sickness", {}).values()):
+            if any(row["state"].startswith("mutation_unverified_")
+                   for row in self.last_game.get("native_guest_sickness", {}).values()):
                 self.native_checkpoint_unsafe = True
                 raise RuntimeError("A stock guest sickness update failed authority readback")
             now = time.monotonic()
@@ -4008,7 +4049,8 @@ class Host:
                     self.last_crate_intent = sequence
                     operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.control.generation}:{epoch}:host-crate:{sequence}:{crate}").hex
                     try:
-                        await native_loot.perform(self, bridge, "host", "open", crate, operation, pried=entry == "pried")
+                        await native_loot.perform(self, bridge, "host", "open", crate, operation, pried=entry == "pried",
+                                                  defer_save=True)
                         self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, crate=crate, entry=entry)
                     except (OSError, ValueError, RuntimeError) as error:
                         self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, crate=crate, reason=str(error))
@@ -4027,7 +4069,8 @@ class Host:
                             async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                                 result = await native_guest_drop.perform(self, bridge, "host", action, claim, operation_id)
                         else:
-                            result = await native_loot.perform(self, bridge, "host", "claim", claim, operation_id)
+                            result = await native_loot.perform(self, bridge, "host", "claim", claim, operation_id,
+                                                               defer_save=True)
                         self.control.event("local_interaction", operation_id=operation_id, **result)
                         try:
                             self.last_game = await self.world_loot.retire_claim(bridge, self.last_game, world_loot)
@@ -4094,7 +4137,8 @@ class Host:
                         active=can_project,
                         enemy_frame=native_enemy_loot.shell_frame(self) if world_items else None,
                         enemy_rolls=self.party.get(native_enemy_loot.STATE_KEY),
-                        stock_enemy_drops=native_stock_enemy_drops.published(self.party, self.last_game),
+                        stock_enemy_drops=native_stock_enemy_drops.published(
+                            self.party, self.last_game, pinned=self.world_loot.moving),
                         player_drops=native_guest_drop.visible_drops(self.party, self.last_game.get("map"))
                         if shared_pickups else None,
                     )
@@ -4125,13 +4169,6 @@ class Host:
                     snapshot = await loot_view.sync(self.last_game, rolls, claim_crate)
                     if snapshot is not self.last_game:
                         self.last_game, self.last_seen = snapshot, time.monotonic()
-            now = time.monotonic()
-            if not self.stopping and now >= self.next_save:
-                self.next_save = now + CHECKPOINT_RETRY_INTERVAL
-                try:
-                    await self.checkpoint_native(bridge)
-                except (OSError, RuntimeError) as error:
-                    self.control.event("native_host_checkpoint_error", reason=str(error))
             self.publish_host_status(transport, bridge)
             await bridge.wait_for_interaction(
                 .25, wake_if=lambda: not self.native_checkpoint_unsafe and not self.native_requests.empty(),
@@ -4147,6 +4184,8 @@ class Host:
                             campaign=self.store.status(), gameplay=self.public_gameplay(),
                             zone_epoch=self.zone_epoch, awaiting_zone_guest=self.awaiting_zone_guest,
                             link_connected=linked,
+                            native_inventory_checkpoint_pending=(self.pending_host_save is not None
+                                                                 or bool(self.pending_guest_saves)),
                             transport=transport.statistics() if isinstance(transport, link.HostLink) else {},
                             local_bridge="memory" if bridge.local_bridge is not None else "file")
 
@@ -4349,7 +4388,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
         raise ValueError("Restage the native host to enable stock guest regeneration")
     if guest_sickness and not staged_script(work, "native_guest_sickness.lua"):
         raise ValueError("Restage the native host to enable stock guest sickness")
-    if guest_mre and not (native_guest and native_zones and staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMre")):
+    if guest_mre and not (native_guest and native_zones and staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMeal")):
         raise ValueError("Stage the native campaign guest MRE bridge before enabling it")
     if native_events and native_backend != "cpp":
         raise ValueError("--native-events requires the staged C++ lab")
@@ -4642,13 +4681,6 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                 try:
                     if controller:
                         controller.stopping = True
-                        if (result == "stopped" and not controller.native_checkpoint_unsafe
-                                and controller.session_stop_reason != "host_session_ended"
-                                and controller.last_game.get("state") == "hosting" and process.poll() is None):
-                            with contextlib.suppress(CampaignError, OSError, RuntimeError):
-                                if controller.smg_holds:
-                                    await controller.smg_holds.settle(bridge, stop_all=True)
-                                await controller.checkpoint_native(bridge)
                         if native_guest and process.poll() is None:
                             with contextlib.suppress(OSError, RuntimeError):
                                 await bridge.command("native-guest-clear", timeout=2)
@@ -4804,6 +4836,7 @@ class Client:
         self.weather_sirens = native_weather_view.SirenPlayback()
         self.anomaly_playback = native_anomaly_effects.Playback()
         self.weapon_shot_playback = native_weapon_fire_view.Playback()
+        self.loot_motion_playback = native_stock_enemy_drops.MotionPlayback()
         self.snapshot_request: asyncio.Task | None = None
         self.next_snapshot = 0.0
         self.last_sprint_sent = None
@@ -5073,8 +5106,8 @@ class Client:
         if not reply.get("ok"):
             raise ValueError(reply.get("error", "interaction_refused"))
         if (self.last_game.get("map"), self.zone_epoch) == (area, epoch) and epoch:
-            # The request already returned the committed roll or pickup. Feed it
-            # to the normal projection before the next periodic host snapshot.
+            # Feed the confirmed roll or pickup to the normal projection before
+            # the next periodic host snapshot.
             roll = reply.get("native_loot_roll")
             if (action == "native-loot-open" and isinstance(roll, dict)
                     and (roll.get("map"), roll.get("crate")) == (area, target)
@@ -5512,6 +5545,8 @@ class Client:
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.ELECTRODE_PHASES), self.zone_epoch)
                     self.last_game = await native_anomaly_effects.project_angler_colors(
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.ANGLER_COLORS), self.zone_epoch)
+                    self.last_game = await native_anomaly_effects.project_observer_opacity(
+                        self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.OBSERVER_OPACITY), self.zone_epoch)
                     self.last_game = await native_anomaly_effects.project_canisters(
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.CANISTERS), self.zone_epoch)
                     self.last_game = await native_anomaly_effects.project_fixed_explosives(
@@ -5551,6 +5586,7 @@ class Client:
                 self.last_game = await self.weather_sirens.sync(
                     self.bridge, self.control, self.last_game,
                     self.gameplay.get("host_world", {}).get(native_weather_view.KEY), self.zone_epoch,
+                    snapshot_age=time.monotonic() - self.gameplay_seen,
                 )
                 if self.guest_clock:
                     await self.guest_clock.sync(self)
@@ -6074,8 +6110,13 @@ class Client:
                 self.last_game = await self.enemy_shell_view.sync(
                     self.bridge, self.last_game, "connected", self.zone_epoch, frame, present=not world_items,
                 )
+            motion_packets = self.transport.take_loot_motion()
             if self.invite.get("native_loot_input") or world_items:
                 try:
+                    motion = self.loot_motion_playback.frame(
+                        motion_packets, self.last_game.get("map"), self.zone_epoch,
+                        active=active and world_items and self.transport.game_access, now=time.monotonic(),
+                    )
                     self.last_game = await self.world_loot.sync(
                         self.bridge, self.last_game, self.gameplay.get(native_loot.STATE_KEY, {}),
                         f"{self.host_session}:{self.stack_drop_projection.admission}", self.zone_epoch,
@@ -6084,6 +6125,8 @@ class Client:
                         enemy_frame=frame if world_items else None,
                         enemy_rolls=self.gameplay.get(native_enemy_loot.STATE_KEY),
                         stock_enemy_drops=self.gameplay.get(native_stock_enemy_drops.STATE),
+                        enemy_motion=motion,
+                        carried=self.gameplay.get(native_world_loot.MOVING),
                         player_drops=self.gameplay.get(native_guest_drop_record.STATE) if shared_pickups else None,
                         mushroom_frame=self.gameplay.get(native_mushrooms.KEY),
                     )
@@ -6099,7 +6142,8 @@ class Client:
                 await self.project_gameplay()
             self.publish_gameplay_status(active)
             await self.bridge.wait_for_interaction(
-                .25, wake_if=lambda: self.gameplay_snapshot_ready() or self.transport.weapon_shots_ready(), guest=True)
+                .25, wake_if=lambda: self.gameplay_snapshot_ready() or self.transport.weapon_shots_ready()
+                or self.transport.loot_motion_ready(), guest=True)
 
     def publish_gameplay_status(self, active: bool) -> None:
         fresh = active and time.monotonic() - self.gameplay_seen < 3
@@ -6151,7 +6195,7 @@ def guest_engine_options(work: Path, invite: dict, *, native_zones: bool = False
         raise ValueError("Restage the native client for Mama's stock Borough dialogue")
     if invite.get("native_dialogue_sewer") and not staged_script(work, "native_dialogue_sewer.lua", "Trade_Sewer"):
         raise ValueError("Restage the native client for the Sewer Thing's stock dialogue")
-    if invite.get("native_guest_mre") and not staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMre"):
+    if invite.get("native_guest_mre") and not staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMeal"):
         raise ValueError("Restage the native client for stock guest MRE use")
     if native_loot_input and not staged_script(work, "native_loot_crate_input.lua"):
         raise ValueError("Restage the native client for stock crate interaction")
@@ -6178,7 +6222,7 @@ def unified_host_options(work: Path) -> dict:
         "native_shop_view": staged_script(work, "native_shop_view.lua"),
         "guest_regen": staged_script(work, "native_guest_regen.lua"),
         "guest_sickness": staged_script(work, "native_guest_sickness.lua"),
-        "guest_mre": staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMre"),
+        "guest_mre": staged_script(work, "native_guest_mre.lua", "SilverfishUseNativeGuestMeal"),
         "guest_held_fire": staged_guest_controls(work) and _staged_held_fire(work),
         "native_dead_bridge_enemy_loot": (native_death_backend(work) == "cpp"
                                          and staged_script(work, "native_loot_crate_input.lua") and _staged_cqc_loot(work)),

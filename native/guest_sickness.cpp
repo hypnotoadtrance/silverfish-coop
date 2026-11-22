@@ -1,5 +1,6 @@
 #include "guest_sickness.hpp"
 
+#include "anomaly_fields.hpp"
 #include "enemy_loot.hpp"
 #include "guest_regen.hpp"
 
@@ -46,6 +47,7 @@ namespace
     constexpr auto add_fatigue_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.FL_GameEffects_C:Add_PlayerFatigue");
     constexpr auto find_passive_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:FindPassiveEffect");
     constexpr auto resolve_psy_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Resolve_PsyAttack");
+    constexpr auto psy_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:PsyAttack");
     constexpr auto owner = STR("SilverfishCoopNative");
     constexpr int max_entries = 4;
     constexpr int max_flags = 16384;
@@ -73,7 +75,7 @@ namespace
         return opt_in("SILVERFISH_COOP_NATIVE_ZONE") && opt_in("SILVERFISH_COOP_NATIVE_GUEST_SAVE");
     }
 
-    bool sickness_routing{}, shadow_routing{};
+    bool sickness_routing{}, crossroads_routing{}, shadow_routing{};
     U::FName shadow_graph, resolve_psy_name;
 
     template <typename T>
@@ -263,6 +265,8 @@ namespace
     Hook::GlobalCallbackId shadow_feedback_callback = Hook::ERROR_ID;
     thread_local U::FFrame* shadow_feedback_frame{};
     thread_local U::FWeakObjectPtr shadow_feedback_pawn;
+    thread_local Entry* barter_psy_scope{};
+    thread_local Entry* food_infection_scope{};
     std::atomic<std::uint64_t> generation{1};
     bool schema_bound{};
 
@@ -307,19 +311,23 @@ namespace
         return item ? nullptr : data;
     }
 
-    bool shadow_source(U::FFrame* resolve, U::UObject* pawn)
+    enum class PsychicSource { None, ShadowSphere, Observer, Skinflint };
+
+    PsychicSource psychic_source(U::FFrame* resolve, U::UObject* pawn)
     {
         auto* method = resolve ? resolve->Node() : nullptr;
         auto* type = pawn ? pawn->GetClassPrivate() : nullptr;
         if (!method || method->GetFName() != resolve_psy_name || resolve->Object() != pawn ||
-            !type || type != method->GetOuterPrivate() || type->GetPathName() != pawn_path) return false;
+            !type || type != method->GetOuterPrivate() || type->GetPathName() != pawn_path) return PsychicSource::None;
         auto* controller = object(pawn, STR("Controller"));
         auto* connection = object(controller, STR("Player"));
         auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
         auto* driver = object(world, STR("NetDriver"));
-        if (!controller || !connection || !driver || !world || world->GetPathName() != crossroads ||
+        if (!controller || !connection || !driver || !world ||
             object(connection, STR("Driver")) != driver || object(connection, STR("PlayerController")) != controller)
-            return false;
+            return PsychicSource::None;
+        if (barter_psy_scope && barter_psy_scope->pawn.Get() == pawn) return PsychicSource::Skinflint;
+        if (world->GetPathName() != crossroads) return PsychicSource::None;
         auto* previous = resolve->PreviousFrame();
         for (int depth = 0; previous && depth < 8; ++depth, previous = previous->PreviousFrame())
         {
@@ -328,9 +336,11 @@ namespace
             auto* source_type = source ? source->GetClassPrivate() : nullptr;
             if (node && node->GetFName() == shadow_graph && source_type && source_type == node->GetOuterPrivate() &&
                 source_type->GetPathName() == shadow_class && object(source, STR("AttackTarget")) == pawn &&
-                static_cast<U::AActor*>(source)->GetWorld() == world) return true;
+                static_cast<U::AActor*>(source)->GetWorld() == world) return PsychicSource::ShadowSphere;
+            if (source && silverfish::native_anomaly_fields::exact_observer_gaze(source, pawn))
+                return PsychicSource::Observer;
         }
-        return false;
+        return PsychicSource::None;
     }
 
     bool redirect_psy(Iteration& iteration, U::UObject* receiver, U::FFrame& frame)
@@ -338,7 +348,7 @@ namespace
         if (!shadow_routing || !frame.Node()) return false;
         if (!schema_bound || !schema.resolve_psy)
         {
-            if (!shadow_source(&frame, receiver)) return false;
+            if (psychic_source(&frame, receiver) == PsychicSource::None) return false;
             iteration.PreventOriginalFunctionCall();
             return true;
         }
@@ -349,8 +359,9 @@ namespace
         if (!resolve && !fatigue && !passive) return false;
         auto* parent = resolve ? &frame : frame.PreviousFrame();
         auto* pawn = parent ? parent->Object() : nullptr;
-        if (!shadow_source(parent, pawn)) return false;
-        auto* scope = entry_for(pawn);
+        const auto source = psychic_source(parent, pawn);
+        if (source == PsychicSource::None) return false;
+        auto* scope = source == PsychicSource::Skinflint ? barter_psy_scope : entry_for(pawn);
         Flags guest, host;
         const bool qualified = scope && current(*scope) && !scope->proof.quarantined
             && guest.bind(scope->guest.Get()) && host.bind(scope->stock.Get());
@@ -368,7 +379,7 @@ namespace
             }
             return true;
         }
-        // A Shadow Sphere's personal writes must never reach the session's host save.
+        // Psychic effects on a guest must never mutate the session's host save.
         iteration.PreventOriginalFunctionCall();
         if (!iteration.OriginalFunctionCallPrevented() || !qualified) return true;
         auto* locals = frame.Locals();
@@ -402,7 +413,8 @@ namespace
         schema.fatigue_value->SetPropertyValue(value, before.value);
         const auto amount = schema.fatigue_delta->GetPropertyValueInContainer(locals);
         std::int32_t trauma{};
-        if (amount < 6 || amount > 100 || !silverfish::native_enemy_loot::count_save_passive(save, schema.trauma, trauma))
+        const auto minimum = source == PsychicSource::Skinflint ? 1 : source == PsychicSource::Observer ? 4 : 6;
+        if (amount < minimum || amount > 100 || !silverfish::native_enemy_loot::count_save_passive(save, schema.trauma, trauma))
             return true;
         const auto next = std::clamp<std::int64_t>(static_cast<std::int64_t>(before.value) + amount, trauma > 0 ? 15 : 0, 100);
         if (guest.write(schema.fatigue, before, static_cast<std::int32_t>(next)) && current(*scope)
@@ -435,16 +447,24 @@ namespace
     {
         if (!U::IsInGameThreadRaw() || iteration.OriginalFunctionCallPrevented()) return;
         if (redirect_psy(iteration, receiver, frame)) return;
-        if (!sickness_routing || !schema_bound) return;
+        if (!(sickness_routing || crossroads_routing || food_infection_scope) || !schema_bound) return;
         const bool lookup = frame.Node() == schema.check_flag;
         if (!lookup && frame.Node() != schema.add_flag) return;
         auto* caller = frame.PreviousFrame();
         if (!caller || frame.Object() != receiver) return;
         const bool infect = caller->Node() == schema.infect;
         if (!infect && caller->Node() != schema.slow) return;
-        auto* entry = entry_for(caller->Object());
+        auto* food = infect && food_infection_scope && caller->Object() == food_infection_scope->pawn.Get()
+            ? food_infection_scope : nullptr;
+        auto* entry = food ? food : entry_for(caller->Object());
         auto* locals = frame.Locals();
         if (!entry || !locals || receiver != entry->instance.Get()) return;
+        if (!food && !sickness_routing)
+        {
+            auto* pawn = entry->pawn.Get();
+            auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
+            if (!world || world->GetPathName() != crossroads) return;
+        }
         const auto key = (lookup ? schema.check_key : schema.add_key)->GetPropertyValueInContainer(locals);
         if (key != schema.sickness && (!lookup || !infect || key != schema.fatigue)) return;
 
@@ -656,12 +676,71 @@ bool silverfish::native_guest_sickness::read_passive_amplification(RC::Unreal::U
     return true;
 }
 
+bool silverfish::native_guest_sickness::food_infection(RC::Unreal::UObject* pawn, RC::Unreal::UObject* detached,
+                                                      RC::Unreal::UObject* stock, std::int32_t dose,
+                                                      std::int32_t& sickness, bool apply)
+{
+    if (!available() || food_infection_scope || dose <= 0 || dose > 120 ||
+        !silverfish::native_guest_regen::qualifies_detached_guest(pawn, detached, stock)) return false;
+    if (!schema_bound) schema_bound = schema.bind();
+    Flags guest, host;
+    if (!schema_bound || !guest.bind(detached) || !host.bind(stock)) return false;
+    const auto before = guest.read(schema.sickness);
+    if (before.value > std::numeric_limits<std::int32_t>::max() - dose ||
+        (!before.found && guest.map->GetMaxIndex() >= max_flags - 1)) return false;
+    sickness = before.value;
+    if (!apply) return true;
+
+    const auto canonical = host.read(schema.sickness);
+    Entry scope{pawn, detached, stock, object(pawn, STR("As Game Instance FP")),
+        Clock::now() + lease, {}, generation.load(std::memory_order_acquire)};
+    struct Restore { ~Restore() { food_infection_scope = nullptr; } } restore;
+    food_infection_scope = &scope;
+    auto amount = dose;
+    pawn->ProcessEvent(schema.infect, &amount);
+    const auto after = guest.read(schema.sickness);
+    if (!current(scope) || scope.proof.quarantined || scope.proof.infect_reads != 1 || scope.proof.infect_writes != 1 ||
+        scope.proof.previous != before || scope.proof.current != after || !after.found ||
+        after.value <= before.value || after.value > before.value + dose || host.read(schema.sickness) != canonical)
+        return false;
+    sickness = after.value;
+    return true;
+}
+
+bool silverfish::native_guest_sickness::barter_psy(U::UObject* pawn, U::UObject* detached, U::UObject* stock,
+                                                std::int32_t amount, bool apply)
+{
+    if (!available() || !shadow_routing || barter_psy_scope || amount < 1 || amount > 100) return false;
+    if (!schema_bound) schema_bound = schema.bind();
+    Flags guest, host;
+    auto* effect = blueprint(psy_path, find<U::UClass>(pawn_path), 1, 4);
+    if (!schema_bound || !schema.resolve_psy || !schema.fatigue_instance || !schema.fatigue_delta ||
+        !schema.fatigue_pawn || !schema.fatigue_value || !schema.passive_name || !schema.passive_count ||
+        !schema.passive_active || !schema.passive_instances || !parameter<U::FIntProperty>(effect, STR("Fatigue"), 0) ||
+        !silverfish::native_guest_regen::qualifies_detached_guest(pawn, detached, stock) ||
+        !guest.bind(detached) || !host.bind(stock)) return false;
+    std::int32_t count{};
+    if (!silverfish::native_enemy_loot::count_save_passive(detached, schema.mindful, count) ||
+        !silverfish::native_enemy_loot::count_save_passive(detached, schema.bad_aura, count) ||
+        !silverfish::native_enemy_loot::count_save_passive(detached, schema.trauma, count)) return false;
+    if (!apply) return true;
+    Entry scope{pawn, detached, stock, object(pawn, STR("As Game Instance FP")),
+        Clock::now() + lease, {}, generation.load(std::memory_order_acquire)};
+    struct Restore { ~Restore() { barter_psy_scope = nullptr; } } restore;
+    barter_psy_scope = &scope;
+    pawn->ProcessEvent(effect, &amount);
+    return true;
+}
+
 void silverfish::native_guest_sickness::install_hooks()
 {
     if (callback != Hook::ERROR_ID) return;
     sickness_routing = enabled();
     shadow_routing = shadow_enabled();
-    if (!sickness_routing && !shadow_routing) return;
+    // Default Crossroads Flayers can infect a guest through the shared GameInstance.
+    crossroads_routing = shadow_routing && opt_in("SILVERFISH_COOP_NATIVE_CROSSROADS_ROSTER");
+    const bool food = opt_in("SILVERFISH_COOP_NATIVE_GUEST_SAVE") && opt_in("SILVERFISH_COOP_NATIVE_GUEST_MRE");
+    if (!sickness_routing && !shadow_routing && !food) return;
     callback = Hook::RegisterProcessLocalScriptFunctionPreCallback(
         redirect, {false, false, owner, STR("Redirect exact guest Sickness flag effects")});
     if (shadow_routing)

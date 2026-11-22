@@ -1,5 +1,6 @@
 local inventory = {}
 local guest_save = require("guest_save")
+local host_save = require("native_host_save")
 local weapon_profiles = require("guest_weapon_registry")
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local observation, split, unloaded, sorted, stored
@@ -101,17 +102,40 @@ function inventory.command(fields, state, phase)
         stored = { map = state.map, pawn = name, guid = item, slot = slot, class = class, displaced = displaced }
         return "native guest equipment slot verified"
     end
-    if fields[2] ~= "native-inventory-census" then return end
+    local live = fields[2] == "native-inventory-live-census"
+    if not live and fields[2] ~= "native-inventory-census" then return end
     observation = nil
-    local slot, offset = fields[3], math.tointeger(tonumber(fields[4]))
-    if #fields ~= 4 or phase ~= "hosting" or not slot or #slot ~= 39 or not slot:match("^SFCoop_[0-9a-f]+$")
-        or not offset or offset < 0 or offset > 8194 or type(SilverfishReadNativeInventoryCensus) ~= "function" then
-        error("The stock inventory census requires a qualified isolated generation", 0)
+    local selector, offset = fields[3], math.tointeger(tonumber(fields[4]))
+    if phase ~= "hosting" or not offset or offset < 0 or offset > 8194 then
+        error("The stock inventory census requires a valid page in an active campaign", 0)
     end
-    local statics = StaticFindObject(statics_path)
-    local snapshot = statics and statics:IsValid() and statics:LoadGameFromSlot(slot, 0)
-    if not snapshot or not snapshot:IsValid() then error("The stock inventory census generation is unavailable", 0) end
-    local ok, status, source, total = SilverfishReadNativeInventoryCensus(snapshot:GetAddress())
+    local ok, status, source, total
+    if live then
+        if #fields ~= 5 or not state.listening or state.server ~= false or type(SilverfishReadLiveNativeInventoryCensus) ~= "function" then
+            error("The live inventory census requires the co-op host", 0)
+        end
+        local pawn, save
+        if fields[5] == "host" then
+            local instance, player = host_save.canonical_host(state, phase)
+            if instance then pawn, save = player, instance.SaveSlot_Ref end
+        elseif fields[5] == "guest" then
+            local qualified, player, detached = pcall(guest_save.exact_item_context, state, phase, selector)
+            if qualified then pawn, save = player, detached end
+        end
+        if not pawn or not save or not pawn:IsValid() or not save:IsValid() or pawn:GetFullName() ~= selector then
+            error("The live inventory census requires the exact enrolled character", 0)
+        end
+        ok, status, source, total = SilverfishReadLiveNativeInventoryCensus(pawn:GetAddress(), save:GetAddress())
+    else
+        if #fields ~= 4 or not selector or #selector ~= 39 or not selector:match("^SFCoop_[0-9a-f]+$")
+            or type(SilverfishReadNativeInventoryCensus) ~= "function" then
+            error("The stock inventory census requires a qualified isolated generation", 0)
+        end
+        local statics = StaticFindObject(statics_path)
+        local snapshot = statics and statics:IsValid() and statics:LoadGameFromSlot(selector, 0)
+        if not snapshot or not snapshot:IsValid() then error("The stock inventory census generation is unavailable", 0) end
+        ok, status, source, total = SilverfishReadNativeInventoryCensus(snapshot:GetAddress())
+    end
     if not ok or status ~= "complete" or type(source) ~= "string" or type(total) ~= "number"
         or total < 0 or total > 8194 then
         error("The stock inventory census could not read the exact generation (" .. tostring(status) .. ")", 0)
@@ -127,8 +151,9 @@ function inventory.command(fields, state, phase)
         end
     end
     if seen ~= total then error("The stock inventory census row count did not verify", 0) end
-    observation = { slot = slot, total = total, offset = offset, rows = rows, map = state.map }
-    return "isolated stock inventory census verified"
+    observation = { slot = not live and selector or "-", pawn = live and selector or nil,
+        total = total, offset = offset, rows = rows, map = state.map }
+    return "stock inventory census verified"
 end
 
 function inventory.reset()
@@ -138,6 +163,9 @@ end
 function inventory.rows(state, phase, status_row)
     if phase ~= "hosting" then return {} end
     local rows = {}
+    if type(SilverfishReadLiveNativeInventoryCensus) == "function" then
+        rows[#rows + 1] = status_row("native-live-inventory-census", 1)
+    end
     if type(SilverfishSplitNativeGuestAmmoStack) == "function" then
         rows[#rows + 1] = status_row("native-inventory-split-capability", 1)
     end
@@ -167,7 +195,8 @@ function inventory.rows(state, phase, status_row)
     end
     local report = observation
     if not report or report.map ~= state.map then return rows end
-    rows[#rows + 1] = status_row("native-inventory-census", report.slot, report.map, report.total, report.offset, #report.rows)
+    rows[#rows + 1] = status_row("native-inventory-census", report.slot, report.map, report.total, report.offset, #report.rows,
+        table.unpack(report.pawn and {report.pawn} or {}))
     for _, row in ipairs(report.rows) do rows[#rows + 1] = status_row("native-inventory-census-item", table.unpack(row)) end
     return rows
 end

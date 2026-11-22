@@ -369,7 +369,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                    require_client_denial: bool, approach: bool = False, family: str = "husk",
                    flayer_veto: bool = False, join_only: bool = False, combat: bool = False,
                    stock_refresh: bool = False, antfarm_replay: Path | None = None,
-                   projectile_tap: bool = False) -> None:
+                   projectile_tap: bool = False, flayer_defaults: bool = False) -> None:
     if os.name != "nt":
         raise OSError("The live canary requires the staged Windows game")
     name = "campaign-npc-" + uuid.uuid4().hex[:8]
@@ -395,15 +395,18 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT"] = "1"
     if stock_refresh:
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH"] = "1"
-    if family == "flayer":
+    if family == "flayer" and not flayer_defaults:
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW"] = family
         if replicate:
             environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_PUBLISH"] = "1"
         if flayer_veto:
             environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO"] = "1"
     default_not_deer = family == "notdeer" and not combat
-    if default_not_deer:
+    if default_not_deer or flayer_defaults:
         environment.pop("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC")
+        environment.pop("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE", None)
+        if flayer_defaults and combat:
+            environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW"] = "flayer"
     elif family == "notdeer":
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW"] = family
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER"] = "1"
@@ -416,7 +419,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                                        else "projectile_tap" if projectile_tap else "encounter"), "approach_requested": approach,
                 "flayer_publication": family == "flayer" and replicate, "flayer_spawn_veto": flayer_veto,
                 "stock_refresh_requested": stock_refresh, "detached_sickness_required": flayer_combat,
-                "stock_not_deer_launch_defaults": default_not_deer}
+                "stock_not_deer_launch_defaults": default_not_deer, "stock_flayer_launch_defaults": flayer_defaults}
     replay_key = family + "_replay"
     if prepared:
         evidence[replay_key] = {"prepared": prepared}
@@ -628,7 +631,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
 
     try:
         fixture_flags = ("--fixtures",) if approach or projectile_tap else ()
-        if flayer_combat:
+        if flayer_combat and not flayer_defaults:
             fixture_flags += ("--native-guest-sickness",)
         await start("host", host, primary, "--port", "0", "--headless", "--native-zones",
                     "--native-events", "--native-guest", "--start-zone", MAP, *fixture_flags)
@@ -778,6 +781,7 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True, help="root of an already prepared stage")
     parser.add_argument("--vanilla-saved", type=Path, help="optional original Saved directory to hash")
     parser.add_argument("--cohort", choices=tuple(DATA), default="husk", help="stock encounter family to verify")
+    parser.add_argument("--flayer-defaults", action="store_true", help="verify stock Flayer combat and reconnect under ordinary campaign defaults")
     parser.add_argument("--flayer-veto", action="store_true", help="also enable the experimental guest Flayer spawn veto")
     parser.add_argument("--flayer-replay", type=Path, help="replay the verified d474f2cf CrossRoads campaign directory")
     parser.add_argument("--notdeer-replay", type=Path, help="replay the original stock CrossRoads Antfarm frame from validation-ec15ee08")
@@ -800,6 +804,11 @@ if __name__ == "__main__":
         options.replicate = True
     elif options.notdeer_replay:
         parser.error("--notdeer-replay requires --cohort notdeer")
+    if options.flayer_defaults:
+        if (options.cohort != "flayer" or not options.flayer_replay
+                or options.flayer_veto or options.approach or options.projectile_tap or options.join_only):
+            parser.error("--flayer-defaults requires --cohort flayer and --flayer-replay")
+        options.combat = True
     if options.combat or options.stock_refresh:
         if options.join_only:
             parser.error("--combat and --stock-refresh require full encounter verification")
@@ -831,4 +840,5 @@ if __name__ == "__main__":
                          timeout=options.timeout, require_client_denial=options.require_client_denial,
                          approach=options.approach, family=options.cohort, flayer_veto=options.flayer_veto,
                          join_only=options.join_only, combat=options.combat, stock_refresh=options.stock_refresh,
-                         antfarm_replay=options.flayer_replay or options.notdeer_replay, projectile_tap=options.projectile_tap))
+                         antfarm_replay=options.flayer_replay or options.notdeer_replay,
+                         projectile_tap=options.projectile_tap, flayer_defaults=options.flayer_defaults))

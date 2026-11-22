@@ -1,6 +1,8 @@
 """Qualify a stock NPC trader and settle authenticated exchanges against the host save."""
 
 import asyncio
+import hashlib
+import json
 import math
 import re
 import time
@@ -13,15 +15,19 @@ from .native_gold import valid_guid
 OPEN = "native-npc-barter-open"
 EXCHANGE = "native-npc-barter-exchange"
 PROJECT = "native-npc-barter-project"
+REFRESH = "native-npc-barter-refresh"
 CLOSE = "native-npc-barter-close"
 STOCK = "native_npc_barter"
 VIEW = "native_npc_barter_view"
+STOCK_VERSION = "native_npc_barter_stock_version"
+REFRESH_SECONDS = 3
 MAX_ITEMS = 128
 MAX_CASH = 2**31 - 1
 REPUTATION_FLAG = re.compile(r"Rep_[A-Za-z0-9_ -]{1,120}")
 ITEM = re.compile(r"/Game/Classes/[A-Za-z0-9_./-]+_C")
 MAP = re.compile(r"/Game/Classes/Maps(?:/[A-Za-z0-9_-]+)+")
 PAWN_SUFFIX = re.compile(r"[0-9]+")
+STOCK_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
 def pawn_in_map(pawn: str, area: str) -> bool:
@@ -68,13 +74,23 @@ def parse(frame: list[str], items: list[list[str]], moved: list[list[str]], pref
         available.append({"guid": guid, "class_path": path, "ammo": integer(ammo, -(2**31), 2**31 - 1),
                           "weight": weight, "value": integer(value, 0, 2**31 - 1), "never_drop": never_drop == "1",
                           "quote": quote})
-    transfers, changed = [], set()
+    transfers, changed, sources = [], set(), set()
     for row in moved:
-        if (len(row) != 5 or row[1] not in {"give", "receive"} or not item_key(row[3], row[2])
-                or row[2] in changed or (row[2] in seen) != (row[1] == "give")):
+        if len(row) not in {5, 6}:
             raise ValueError("Invalid native NPC barter transfer")
-        changed.add(row[2])
-        transfers.append({"direction": row[1], "guid": row[2], "class_path": row[3], "quantity": integer(row[4], 1, 1000000)})
+        _, direction, source, *transfer_data = row
+        partial = len(transfer_data) == 3
+        guid, path, amount = transfer_data if partial else (source, *transfer_data)
+        if (direction not in {"give", "receive"} or not item_key(path, guid) or not valid_guid(source)
+                or source in sources or guid in changed or (guid in seen) != (direction == "give")
+                or (partial and (source == guid or (source in seen) != (direction == "receive")))):
+            raise ValueError("Invalid native NPC barter transfer")
+        changed.add(guid)
+        sources.add(source)
+        transfer = {"direction": direction, "guid": guid, "class_path": path, "quantity": integer(amount, 1, 1000000)}
+        if partial:
+            transfer["source_guid"] = source
+        transfers.append(transfer)
     taste = {}
     if len(preferences) > 256:
         raise ValueError("The NPC barter preference list is too large")
@@ -153,6 +169,11 @@ async def _report(host, bridge, command: str, area: str, pawn: str, trader: str,
     return report
 
 
+def stock_version(report: dict) -> str:
+    fields = [report[key] for key in ("stock", "cash", "accepts_cash", "seed", "preferences", "minimum_weapon_value")]
+    return hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 async def perform(host, bridge, character: str, action: str, target: str | None, operation: str) -> dict:
     scope = _scope(host, character)
     if not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
@@ -160,11 +181,16 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     if not isinstance(target, str) or len(target) > 1150:
         raise party.RuleError("native_npc_barter_invalid_trader")
     parts = target.split("@")
-    if len(parts) != (2 if action == OPEN else 5) or parts[0] != scope[0] or not valid_guid(parts[1]):
+    if len(parts) not in ((2, 3) if action == OPEN else (5,)) or parts[0] != scope[0] or not valid_guid(parts[1]):
         raise party.RuleError("native_npc_barter_invalid_trader")
     _, trader, *proposal = parts
     if action == OPEN:
-        return {STOCK: await _report(host, bridge, OPEN, scope[1], scope[2], trader)}
+        known = proposal[0] if proposal else None
+        if known is not None and not STOCK_DIGEST.fullmatch(known):
+            raise party.RuleError("native_npc_barter_invalid_stock_version")
+        report = await _report(host, bridge, OPEN, scope[1], scope[2], trader)
+        version = stock_version(report)
+        return {STOCK_VERSION: version} if version == known else {STOCK: report, STOCK_VERSION: version}
     payment, offered, wanted = proposal
     cash = integer(payment, 0, MAX_CASH)
     expected = {"give": selection(offered), "receive": selection(wanted)}
@@ -176,7 +202,11 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
             if receipt["request"] != fingerprint:
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
-    await host.checkpoint_native(bridge)
+    from .native_inventory import retain_guest_save
+
+    defer_save = await retain_guest_save(host, bridge, character, scope[2])
+    if not defer_save:
+        await host.checkpoint_native(bridge)
     if _scope(host, character) != scope:
         raise party.RuleError("native_npc_barter_guest_scope_changed")
     host.native_checkpoint_unsafe = True
@@ -186,22 +216,27 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         except party.RuleError:
             host.native_checkpoint_unsafe = False
             raise
-        moved = {direction: {row["guid"]: row["quantity"] for row in result["transfers"] if row["direction"] == direction}
+        moved = {direction: {row.get("source_guid", row["guid"]): row["quantity"]
+                             for row in result["transfers"] if row["direction"] == direction}
                  for direction in expected}
         if moved != expected or result["cash_before"] != result["cash"] + cash:
             raise RuntimeError("The NPC barter did not verify the exact transfer and shared funds")
         before = party.load_party(host.party)
         inventory = before["players"][character].get("native_inventory", {})
-        for row in result["transfers"]:
-            inventory.pop(row["guid"], None)
+        detached = {row.get("source_guid", row["guid"]) if row["direction"] == "give" else row["guid"]
+                    for row in result["transfers"]}
+        for guid in detached:
+            inventory.pop(guid, None)
         recorded = before["receipts"].setdefault(character, [])
         proof = {STOCK: result}
         recorded.append({"id": operation, "request": fingerprint, "result": proof})
         del recorded[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, before, require_guest_frames=frozenset({character}))
+        revision = None
+        if not defer_save:
+            revision = await host.checkpoint_native(bridge, before, require_guest_frames=frozenset({character}))
         host.party = before
-        for row in result["transfers"]:
-            host.native_pickup.forget_committed_row(character, row["guid"])
+        for guid in detached:
+            host.native_pickup.forget_committed_row(character, guid)
         host.native_checkpoint_unsafe = False
     except (OSError, RuntimeError, ValueError, KeyError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
@@ -214,22 +249,70 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
 class View:
     def __init__(self):
         self.latest = 0
+        self.scope = None
+        self.version = None
+        self.next_refresh = 0.0
+        self.refresh_task = None
+
+    def cancel_refresh(self):
+        if self.refresh_task is not None:
+            self.refresh_task.cancel()
+            self.refresh_task = None
+
+    async def read_stock(self, client, target):
+        try:
+            return await client.gameplay_action(OPEN, uuid.uuid4().hex, target)
+        except (OSError, RuntimeError, ValueError):
+            return None
 
     async def sync(self, client, active: bool):
         state = client.last_game.get(VIEW, {})
         sequence = state.get("sequence", 0)
-        action = {"opening": OPEN, "confirming": EXCHANGE}.get(state.get("state"))
-        if (not active or not action or sequence <= self.latest or not client.host_session or not client.zone_epoch
+        mode = state.get("state")
+        if (not active or not mode or not client.host_session or not client.zone_epoch
                 or state.get("map") != client.last_game.get("map") or not valid_guid(state.get("trader"))
                 or state.get("pawn") != client.last_game.get("pawns", {}).get("local", {}).get("name")):
+            self.cancel_refresh()
+            self.version = None
             return
-        self.latest = sequence
         epoch = client.zone_epoch
         trader = state["trader"]
-        target = f"{epoch}@{trader}" if action == OPEN else "@".join((epoch, trader, str(state["cash"]), state["give"], state["receive"]))
-        operation = uuid.uuid5(client.bridge.input_namespace, f"{client.host_session}:{epoch}:{trader}:{sequence}").hex
+        scope = client.host_session, epoch, client.bridge.input_namespace
+        if self.scope != scope:
+            self.cancel_refresh()
+            self.scope, self.latest, self.version = scope, 0, None
+        refresh = mode == "ready"
+        action = {"opening": OPEN, "confirming": EXCHANGE}.get(mode)
+        target = f"{epoch}@{trader}"
+        if refresh:
+            if self.refresh_task is None:
+                if self.version and time.monotonic() >= self.next_refresh:
+                    self.next_refresh = time.monotonic() + REFRESH_SECONDS
+                    self.refresh_task = asyncio.create_task(self.read_stock(client, f"{target}@{self.version}"))
+                return
+            if not self.refresh_task.done():
+                return
+            reply = self.refresh_task.result()
+            self.refresh_task = None
+            if reply is None:
+                return
+        else:
+            self.cancel_refresh()
+            if not action or sequence <= self.latest:
+                return
+            self.latest = sequence
+            if action == EXCHANGE:
+                target = "@".join((target, str(state["cash"]), state["give"], state["receive"]))
+            operation = uuid.uuid5(client.bridge.input_namespace, f"{client.host_session}:{epoch}:{trader}:{sequence}").hex
+            self.next_refresh = time.monotonic() + REFRESH_SECONDS
         try:
-            reply = await client.gameplay_action(action, operation, target)
+            if not refresh:
+                reply = await client.gameplay_action(action, operation, target)
+            version = reply.get(STOCK_VERSION)
+            if version is not None and (not isinstance(version, str) or not STOCK_DIGEST.fullmatch(version)):
+                raise ValueError("The host NPC returned an invalid stock version")
+            if refresh and version == self.version and STOCK not in reply:
+                return
             catalog = reply[STOCK]
             if catalog["trader"] != trader or catalog["map"] != state["map"] or len(catalog["stock"]) > MAX_ITEMS:
                 raise ValueError("The host NPC returned invalid barter stock")
@@ -239,10 +322,17 @@ class View:
                 client.guest_ui.digest = "-"
                 await client.guest_ui.refresh(client)
             preferences = [f"p|{path}|{weight}" for path, weight in catalog["preferences"].items()]
-            client.last_game = await client.bridge.command(PROJECT, str(sequence), trader, str(catalog["cash"]),
-                                                           str(catalog["seed"]), str(catalog["minimum_weapon_value"]),
-                                                           *items, *preferences, timeout=4)
+            client.last_game = await client.bridge.command(
+                REFRESH if refresh else PROJECT, str(sequence), trader, str(catalog["cash"]), str(catalog["seed"]),
+                str(catalog["minimum_weapon_value"]), str(int(catalog["accepts_cash"])), *items, *preferences, timeout=4)
+            if not refresh or client.last_game.get("ack", {}).get("message") == "exact stock NPC barter screen shown":
+                self.version = version or stock_version(catalog)
+                if refresh:
+                    client.control.event("native_npc_barter_stock_refreshed", trader=trader, entries=len(items), cash=catalog["cash"])
         except (OSError, RuntimeError, ValueError, KeyError) as error:
+            if refresh:
+                return
+            self.version = None
             client.guest_ui.digest = "-"
             client.control.event("native_npc_barter_refused", action=action, sequence=sequence, reason=str(error))
             try:

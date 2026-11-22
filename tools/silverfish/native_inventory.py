@@ -99,6 +99,22 @@ def valid_take_ammo_result(weapon, ammo, rounds):
             and type(rounds) is int and 1 <= rounds <= magazine.capacity)
 
 
+async def retain_guest_save(host, bridge, character: str, pawn: str) -> bool:
+    """Keep the exact working inventory until a paired save is requested."""
+    if host.last_game.get("native_guest_save_retention") is not True:
+        return False
+    retained = host.pending_guest_saves.get(character)
+    if retained and retained[0] == pawn:
+        return True
+    area = host.last_game["map"]
+    snapshot = await bridge.command("native-guest-save-retain", pawn, character, timeout=3)
+    if (snapshot.get("state"), snapshot.get("map")) != ("hosting", area):
+        raise party.RuleError("native_guest_save_scope_changed")
+    host.last_game, host.last_seen = snapshot, time.monotonic()
+    host.queue_guest_save(character, pawn)
+    return True
+
+
 async def split_stack(host, bridge, character: str, target, operation: str, *, unload=False) -> dict:
     action, key, capability = ((TAKE_AMMO, TAKE_AMMO_KEY, TAKE_AMMO_CAPABILITY) if unload
                                else (SPLIT, SPLIT_KEY, SPLIT_CAPABILITY))
@@ -128,6 +144,7 @@ async def split_stack(host, bridge, character: str, target, operation: str, *, u
     campaign = host.store.status()["campaign_id"]
     created = uuid.uuid5(uuid.NAMESPACE_OID, f"{action}:{campaign}:{character}:{operation}").hex.upper()
     amounts = (str(expected),) if unload else (str(take), str(expected))
+    deferred = await retain_guest_save(host, bridge, character, pawn)
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -152,13 +169,15 @@ async def split_stack(host, bridge, character: str, target, operation: str, *, u
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+        revision = None
+        if not deferred:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
     except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
         raise
     host.party, host.native_checkpoint_unsafe = candidate, False
-    event = "native_guest_inventory_take_ammo_committed" if unload else "native_guest_inventory_split_committed"
+    event = f"native_guest_inventory_{'take_ammo' if unload else 'split'}_{'accepted' if deferred else 'committed'}"
     host.control.event(event, operation_id=operation, revision=revision, **result[key])
     return result
 
@@ -185,6 +204,7 @@ async def sort_backpack(host, bridge, character: str, target, operation: str) ->
         raise party.RuleError("native_inventory_sort_refused_downed_or_respawning")
 
     area, pawn = game["map"], owner["pawn"]
+    deferred = await retain_guest_save(host, bridge, character, pawn)
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -206,13 +226,16 @@ async def sort_backpack(host, bridge, character: str, target, operation: str) ->
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+        revision = None
+        if not deferred:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
     except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
         raise
     host.party, host.native_checkpoint_unsafe = candidate, False
-    host.control.event("native_guest_inventory_sort_committed", operation_id=operation, revision=revision, **result[SORT_KEY])
+    event = "native_guest_inventory_sort_accepted" if deferred else "native_guest_inventory_sort_committed"
+    host.control.event(event, operation_id=operation, revision=revision, **result[SORT_KEY])
     return result
 
 
@@ -238,6 +261,7 @@ async def store_equipment(host, bridge, character: str, item, operation: str) ->
         raise party.RuleError("native_inventory_equip_refused_downed_or_respawning")
 
     area, pawn = game["map"], owner["pawn"]
+    deferred = await retain_guest_save(host, bridge, character, pawn)
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -257,13 +281,16 @@ async def store_equipment(host, bridge, character: str, item, operation: str) ->
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+        revision = None
+        if not deferred:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
     except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
         raise
     host.party, host.native_checkpoint_unsafe = candidate, False
-    host.control.event("native_guest_inventory_equip_committed", operation_id=operation, revision=revision, **result[STORE_KEY])
+    event = "native_guest_inventory_equip_accepted" if deferred else "native_guest_inventory_equip_committed"
+    host.control.event(event, operation_id=operation, revision=revision, **result[STORE_KEY])
     return result
 
 
@@ -321,10 +348,15 @@ async def read_page(host, bridge, frame: dict, offset: int) -> dict:
         await asyncio.to_thread(native_host_save.guest_record, host.native_profile, frame, character)
     slot = frame["slot"]
     snapshot = await bridge.command("native-inventory-census", slot, str(offset), timeout=6)
+    return _verified_page(host, snapshot, slot, offset)
+
+
+def _verified_page(host, snapshot: dict, slot: str, offset: int, *, pawn: str | None = None) -> dict:
     report = snapshot.get("native_inventory_census", {})
     total, count, items = (report.get(key) for key in ("total", "count", "items"))
     if (snapshot.get("state") != "hosting" or snapshot.get("map") != host.last_game.get("map")
             or report.get("map") != snapshot.get("map") or report.get("slot") != slot or report.get("offset") != offset
+            or report.get("pawn") != pawn
             or type(total) is not int or not 0 <= total <= MAX_ITEMS or type(items) is not list
             or count != len(items) or count != min(PAGE_SIZE, max(0, total - offset))):
         raise RuntimeError("The isolated stock inventory census returned an incomplete page")
@@ -349,13 +381,16 @@ async def inspect(host, bridge, character: str, offset: int) -> dict:
             or host.native_checkpoint_unsafe or host.last_game.get("state") != "hosting"
             or character not in host.roles().values()):
         raise party.RuleError("native_inventory_scope_unavailable")
-    if character != "host" and character not in host.native_recipients():
+    if character == "host":
+        pawn = host.last_game.get("pawns", {}).get("local", {}).get("name")
+        role = "host"
+    else:
+        pawn = host.native_recipients().get(character, {}).get("pawn")
+        role = "guest"
+    if not pawn or host.last_game.get("native_live_inventory_census") is not True:
         raise party.RuleError("native_inventory_scope_unavailable")
-    await host.checkpoint_native(bridge, require_guest_frames=frozenset({character} - {"host"}))
-    frame = saved_frame(host, host.store.status(), character)
-    if not frame or frame["map"] != host.last_game.get("map"):
-        raise RuntimeError("The exact character inventory frame is unavailable")
-    return {"native_inventory": {"owner": character, **await read_page(host, bridge, frame, offset)}}
+    snapshot = await bridge.command("native-inventory-live-census", pawn, str(offset), role, timeout=6)
+    return {"native_inventory": {"owner": character, **_verified_page(host, snapshot, "-", offset, pawn=pawn)}}
 
 
 def saved_frame(host, campaign: dict, character: str) -> dict | None:

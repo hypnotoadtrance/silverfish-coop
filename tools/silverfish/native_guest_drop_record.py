@@ -3,6 +3,7 @@
 import math
 import re
 
+from .authored_loot import valid_item_transform
 from .authored_routes import MAPS as NORMAL_CAMPAIGN_MAPS
 from .guest_weapon_profiles import MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL, STOCK_AMMO
 from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULTS
@@ -142,6 +143,10 @@ def active_frames(data: dict, members) -> list[dict]:
             raise ValueError("Invalid stock stack drop identity or owner")
         owner, claim_id = row["owner"], row.get("claim_id")
         fields = _RECORD_FIELDS | ({"escrow"} if claim_id is None else set())
+        if "transform" in row:
+            if not valid_item_transform(row["transform"]):
+                raise ValueError("Invalid stock stack drop settled transform")
+            fields |= {"transform"}
         if claim_id is not None and "claimed_by" in row:
             fields |= {"claimed_by"}
         if claim_id is not None and _MERGE_FIELDS.intersection(row):

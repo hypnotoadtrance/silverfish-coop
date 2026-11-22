@@ -254,13 +254,8 @@ namespace
         }
     };
 
-    int read_census(const Lua& lua)
+    int emit_census(const Lua& lua, Unreal::UObject* snapshot)
     {
-        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1))
-            return result(lua, false, "native_inventory_census_scope_unavailable");
-        const auto input = lua.get_integer();
-        auto* snapshot = input > 0 ? isolated_snapshot(static_cast<Address>(input)) : nullptr;
-        if (!snapshot) return result(lua, false, "native_inventory_census_exact_isolated_save_required");
         Inventory inventory;
         if (!inventory.bind(snapshot)) return result(lua, false, "native_inventory_census_stock_schema_unavailable");
 
@@ -275,6 +270,16 @@ namespace
         lua.set_string(census.lines);
         lua.set_integer(static_cast<std::int64_t>(census.seen.size()));
         return 4;
+    }
+
+    int read_census(const Lua& lua)
+    {
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1))
+            return result(lua, false, "native_inventory_census_scope_unavailable");
+        const auto input = lua.get_integer();
+        auto* snapshot = input > 0 ? isolated_snapshot(static_cast<Address>(input)) : nullptr;
+        if (!snapshot) return result(lua, false, "native_inventory_census_exact_isolated_save_required");
+        return emit_census(lua, snapshot);
     }
 
     Guid stash_identity(std::string_view hex)
@@ -380,25 +385,45 @@ namespace
         return matched;
     }
 
-    Unreal::UObject* authoritative_save(Address address, bool combined)
+    Unreal::UObject* live_pawn_save(Unreal::UObject* pawn, Unreal::UObject*& stock)
     {
-        auto* pawn = live_exact(address, find<Unreal::UClass>(pawn_path));
         auto* role = field<Unreal::FByteProperty>(pawn, STR("Role"));
-        auto* dead = field<Unreal::FBoolProperty>(pawn, STR("Dead"));
-        if (!role || role->GetPropertyValueInContainer(pawn) != 3 || !dead || dead->GetPropertyValueInContainer(pawn))
-            return nullptr;
+        if (!role || role->GetPropertyValueInContainer(pawn) != 3) return nullptr;
         auto* world = static_cast<Unreal::AActor*>(pawn)->GetWorld();
         auto* instance = object_field(world, STR("OwningGameInstance"));
-        auto* stock = object_field(instance, STR("SaveSlot_Ref"));
+        stock = object_field(instance, STR("SaveSlot_Ref"));
         auto* save = object_field(pawn, STR("Save"));
-        auto* setting = field<Unreal::FBoolProperty>(stock, STR("CombineStashes"));
         auto* driver = object_field(world, STR("NetDriver"));
         auto* save_type = find<Unreal::UClass>(save_path);
         if (!live(driver) || object_field(driver, STR("World")) != world ||
             object_field(driver, STR("ServerConnection")) || !live(save) || !live(stock) ||
-            save->GetClassPrivate() != save_type || stock->GetClassPrivate() != save_type ||
-            !setting || setting->GetPropertyValueInContainer(stock) != combined) return nullptr;
+            save->GetClassPrivate() != save_type || stock->GetClassPrivate() != save_type) return nullptr;
         return save;
+    }
+
+    Unreal::UObject* authoritative_save(Address address, bool combined)
+    {
+        auto* pawn = live_exact(address, find<Unreal::UClass>(pawn_path));
+        auto* dead = field<Unreal::FBoolProperty>(pawn, STR("Dead"));
+        if (!dead || dead->GetPropertyValueInContainer(pawn)) return nullptr;
+        Unreal::UObject* stock{};
+        auto* save = live_pawn_save(pawn, stock);
+        auto* setting = save ? field<Unreal::FBoolProperty>(stock, STR("CombineStashes")) : nullptr;
+        return setting && setting->GetPropertyValueInContainer(stock) == combined ? save : nullptr;
+    }
+
+    int read_live_census(const Lua& lua)
+    {
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 2 ||
+            !lua.is_integer(1) || !lua.is_integer(2)) return result(lua, false, "native_live_inventory_scope_unavailable");
+        const auto address = static_cast<Address>(lua.get_integer());
+        const auto owner_save = static_cast<Address>(lua.get_integer());
+        auto* pawn = live_exact(address, find<Unreal::UClass>(pawn_path));
+        Unreal::UObject* stock{};
+        auto* save = live_pawn_save(pawn, stock);
+        if (!save || reinterpret_cast<Address>(save) != owner_save)
+            return result(lua, false, "native_live_inventory_owner_unavailable");
+        return emit_census(lua, save);
     }
 
     int locate(const Inventory& inventory, Unreal::FScriptArrayHelper& rows, const Guid& id, int& found)
@@ -414,6 +439,7 @@ namespace
         return count;
     }
 
+    template <bool Live>
     int move_stash(const Lua& lua)
     {
         if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 6 ||
@@ -427,20 +453,23 @@ namespace
         const auto id = stash_identity(lua.get_string());
         const bool deposit = lua.get_bool();
         auto* save = authoritative_save(pawn, combined);
-        auto* snapshot = isolated_snapshot(frame);
-        if (!save || !snapshot || site == Guid{} || id == Guid{})
+        auto* snapshot = Live ? nullptr : isolated_snapshot(frame);
+        if (!save || (Live ? frame != 0 : !snapshot) || site == Guid{} || id == Guid{})
             return result(lua, false, "native_stash_move_exact_save_and_site_required");
         Inventory inventory;
         StashStorage storage;
         if (!inventory.bind(save) || !storage.bind(save, inventory))
             return result(lua, false, "native_stash_move_schema_unavailable");
-        const std::array<Unreal::FProperty*, 5> stores{
-            inventory.backpack, inventory.equipment, inventory.armor, inventory.helmet, storage.array};
-        for (auto* property : stores)
+        if constexpr (!Live)
         {
-            if (!property->Identical(property->ContainerPtrToValuePtr<void>(save),
-                                     property->ContainerPtrToValuePtr<void>(snapshot)))
-                return result(lua, false, "native_stash_move_stale_frame");
+            const std::array<Unreal::FProperty*, 5> stores{
+                inventory.backpack, inventory.equipment, inventory.armor, inventory.helmet, storage.array};
+            for (auto* property : stores)
+            {
+                if (!property->Identical(property->ContainerPtrToValuePtr<void>(save),
+                                         property->ContainerPtrToValuePtr<void>(snapshot)))
+                    return result(lua, false, "native_stash_move_stale_frame");
+            }
         }
         if (inventory.identity(inventory.armor->ContainerPtrToValuePtr<void>(save)) == id ||
             inventory.identity(inventory.helmet->ContainerPtrToValuePtr<void>(save)) == id)
@@ -543,9 +572,11 @@ namespace silverfish::inventory_census
     {
         if (!enabled()) return;
         lua.register_function("SilverfishReadNativeInventoryCensus", read_census);
+        lua.register_function("SilverfishReadLiveNativeInventoryCensus", read_live_census);
         lua.register_function("SilverfishReadNativeStashCensus", read_stash);
         lua.register_function("SilverfishReadLiveNativeStashCensus", read_live_stash);
-        lua.register_function("SilverfishMoveNativeStashItem", move_stash);
+        lua.register_function("SilverfishMoveNativeStashItem", move_stash<false>);
+        lua.register_function("SilverfishMoveLiveNativeStashItem", move_stash<true>);
         lua.register_function("SilverfishVerifyNativeStashSave", verify_stash_save);
     }
 }

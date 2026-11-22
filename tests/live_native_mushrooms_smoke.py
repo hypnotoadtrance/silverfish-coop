@@ -98,7 +98,7 @@ async def verify(work: Path, unchanged: Path, area: str):
         await wait(grun, lambda state: guest_pick not in rendered(state))
         transfer = receipt()
         source = active(first)[guest_pick]
-        assert transfer["patch_guid"] == source["patch_guid"] and transfer["revision"] > 0, transfer
+        assert transfer["patch_guid"] == source["patch_guid"] and transfer["revision"] is None, transfer
         replay = await command("action", *guest, mushrooms.CLAIM, "--target", guest_pick,
                                "--operation-id", transfer["operation_id"])
         assert replay[mushrooms.PROOF]["guid"] == transfer["guid"], replay

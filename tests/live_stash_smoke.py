@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from hashlib import sha256
 import json
 from pathlib import Path
 import subprocess
@@ -29,6 +30,11 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
                  "--native-zones", "--native-expanded-zones")
     original_saves = saved_hashes(vanilla_saved)
     jobs, evidence = [], {}
+
+    def save_hashes():
+        paths = list((run.parent / "save").glob("campaign*.json"))
+        paths.extend((run.parent / "game-user").rglob("*.sav"))
+        return {path.relative_to(run.parent): sha256(path.read_bytes()).hexdigest() for path in paths}
 
     async def launch(label, directory, *args):
         with (run / f"{label}.txt").open("wb") as log:
@@ -128,6 +134,7 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
         await approach("guest", first)
         item = uuid.uuid4().hex.upper()
         await ask(run, "native-guest-weapon-seed", target="guest", item_guid=item, kind="light-pistol-suppressed")
+        before_deposit = save_hashes()
         deposit = await move_by_screen(first, item, "backpack", "deposit")
         assert (deposit["owner"], deposit["combined"], deposit["guid"], deposit["quantity"]) == (
             invite["character_id"], False, item, 1,
@@ -146,6 +153,7 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
         assert denied["error"] in {"native_stash_move_source_or_capacity", "native_stash_move_stored_identity"}
         await approach("guest", second)
         assert await stash_items(guest_run, second) == []
+        assert save_hashes() == before_deposit, "Opening stashes or depositing an item wrote a campaign save"
         destination, destination_site = DEAD_BRIDGE, second
         if not same_map:
             await travel(DEAD_BRIDGE, CROSSROADS)
@@ -177,6 +185,7 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
             restored_page = (await ask(guest_run, native_stash.LIST, target=destination_site))[native_stash.RESULT]
             assert restored_page["items"][0]["ammo"] == 7
             evidence["live_census"]["restored"] = restored_page["items"][0]
+        before_withdrawal = save_hashes()
         withdrawal = await move_by_screen(destination_site, item, "stash", "withdraw")
         assert (withdrawal["owner"], withdrawal["combined"], withdrawal["guid"], withdrawal["quantity"]) == (
             invite["character_id"], True, item, 1,
@@ -184,9 +193,11 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
         assert await stash_items(guest_run, destination_site) == []
         weapon = (await ask(guest_run, "native-guest-weapon-inspect", target=item))["native_guest_weapon"]
         assert weapon["stored_ammo"] == 7
+        assert save_hashes() == before_withdrawal, "Withdrawing from a stash wrote a campaign save"
         evidence.update(deposit=deposit, withdrawal=withdrawal, magazine=weapon["stored_ammo"],
                         deposit_map=DEAD_BRIDGE, withdrawal_map=destination, combined_host_empty=True,
-                        host_withdraw_refused=denied["error"], per_site_other_empty=True, stock_drag=drag, verified=True)
+                        host_withdraw_refused=denied["error"], per_site_other_empty=True, stock_drag=drag,
+                        no_save_on_stash_interaction=True, verified=True)
     finally:
         for process, directory in reversed(jobs):
             if process.returncode is None:

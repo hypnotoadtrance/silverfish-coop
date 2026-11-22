@@ -1,11 +1,15 @@
 local actions = {}
 local loot = require("native_loot")
+local guest_save = require("guest_save")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_LOOT") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local observation, placement, daily_update
+local escrow_cache, escrow_order = {}, {}
+local pending_escrows = {}
+local max_cached_escrows = 16
 local statics = "/Script/Engine.Default__GameplayStatics"
 local save = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 
@@ -17,13 +21,54 @@ local function valid_object(value)
     return value and value:IsValid()
 end
 
-local function capture(scope, slot, outputs, items)
+local function remember_escrow(slot, pool)
+    for index, cached in ipairs(escrow_order) do
+        if cached == slot then table.remove(escrow_order, index); break end
+    end
+    escrow_cache[slot] = pool
+    escrow_order[#escrow_order + 1] = slot
+    if #escrow_order > max_cached_escrows then escrow_cache[table.remove(escrow_order, 1)] = nil end
+end
+
+local function save_escrow(api, slot, pool, source)
+    if not api:SaveGameToSlot(pool, slot, 0) then error("native_loot_escrow_write_failed", 0) end
+    local restored = api:LoadGameFromSlot(slot, 0)
+    local verified
+    if valid_object(restored) then
+        if source then
+            verified = SilverfishVerifyNativeLootEscrow(pool:GetAddress(), restored:GetAddress(), table.unpack(source))
+        else
+            verified = SilverfishVerifyNativeStashSave(pool:GetAddress(), restored:GetAddress())
+        end
+    end
+    if not verified then
+        error("native_loot_escrow_typed_roundtrip_unverified", 0)
+    end
+    return restored
+end
+
+local function capture(scope, slot, outputs, items, pending)
     local api, class = StaticFindObject(statics), StaticFindObject(save)
-    if not valid_object(api) or not valid_object(class) or api:DoesSaveGameExist(slot, 0) then
+    if not valid_object(api) or not valid_object(class) or pending_escrows[slot]
+        or not pending and api:DoesSaveGameExist(slot, 0) then
         error("native_loot_escrow_slot_unavailable", 0)
     end
-    local pool = api:CreateSaveGameObject(class)
+    local pool
+    if pending then
+        local transient = StaticFindObject("/Engine/Transient")
+        if not valid_object(transient) then error("native_loot_transient_package_unavailable", 0) end
+        pool = StaticConstructObject(class, transient, 0, EObjectFlags.RF_Transient | EObjectFlags.RF_MarkAsRootSet)
+    else
+        pool = api:CreateSaveGameObject(class)
+    end
     if not valid_object(pool) then error("native_loot_escrow_could_not_create_save", 0) end
+    if pending then
+        local retained, reason = SilverfishReferenceNativeDetachedSave(scope.stock:GetAddress(), pool:GetAddress(), true, true)
+        if not retained then
+            error("native_loot_escrow_memory_" .. tostring(reason), 0)
+        end
+        pending_escrows[slot] = {pool = pool, owner = scope.instance, world = scope.world:GetAddress()}
+    end
     local captured = table.pack(SilverfishCaptureNativeLootEscrow(
         scope.crate:GetAddress(), pool:GetAddress(), table.unpack(outputs)))
     if captured[1] ~= true or captured[3] ~= #items or captured.n ~= 3 + #outputs then
@@ -45,12 +90,10 @@ local function capture(scope, slot, outputs, items)
         end
     end
     if index - 1 ~= #items then error("native_loot_escrow_item_identity_count_unverified", 0) end
-    if not api:SaveGameToSlot(pool, slot, 0) then error("native_loot_escrow_write_failed", 0) end
-    local restored = api:LoadGameFromSlot(slot, 0)
-    local source = scope.profile.capacity ~= 2 and {scope.crate:GetAddress()} or {}
-    if not valid_object(restored) or not SilverfishVerifyNativeLootEscrow(
-        pool:GetAddress(), restored:GetAddress(), table.unpack(source)) then
-        error("native_loot_escrow_typed_roundtrip_unverified", 0)
+    local restored
+    if not pending then
+        local source = scope.profile.capacity ~= 2 and {scope.crate:GetAddress()} or {}
+        restored = save_escrow(api, slot, pool, source)
     end
     for _, item in ipairs(items) do
         item.object:SetActorEnableCollision(false)
@@ -60,9 +103,49 @@ local function capture(scope, slot, outputs, items)
         end
         item.object:K2_DestroyActor()
     end
+    if restored and #items > 0 then remember_escrow(slot, restored) end
+end
+
+local function release_escrow(slot)
+    local escrow = pending_escrows[slot]
+    if not escrow then return end
+    if valid_object(escrow.owner) and valid_object(escrow.pool) then
+        local stock = escrow.owner.SaveSlot_Ref
+        if not valid_object(stock) or not SilverfishReferenceNativeDetachedSave(stock:GetAddress(), escrow.pool:GetAddress(), false) then
+            error("native_loot_escrow_release_failed", 0)
+        end
+    end
+    pending_escrows[slot] = nil
+end
+
+function actions.release_pending()
+    for slot in pairs(pending_escrows) do release_escrow(slot) end
 end
 
 function actions.command(fields, state, phase)
+    if fields[2] == "native-loot-flush-escrows" or fields[2] == "native-loot-release-escrows" then
+        if not enabled or phase ~= "hosting" or #fields < 3 or #fields > 18 then
+            error("native_loot_escrow_save_scope_unavailable", 0)
+        end
+        local api = StaticFindObject(statics)
+        for index = 3, #fields do
+            local slot = fields[index]
+            local escrow = pending_escrows[slot]
+            if not valid_slot(slot) then error("native_loot_escrow_save_slot_invalid", 0) end
+            if fields[2] == "native-loot-release-escrows" then
+                release_escrow(slot)
+            else
+                if not escrow then error("native_loot_escrow_not_pending", 0) end
+                if not valid_object(api) then error("native_loot_escrow_save_api_unavailable", 0) end
+                if not valid_object(escrow.pool) then error("native_loot_escrow_object_unavailable", 0) end
+                if not valid_object(state.world) or escrow.world ~= state.world:GetAddress() then
+                    error("native_loot_escrow_save_world_changed", 0)
+                end
+                save_escrow(api, slot, escrow.pool)
+            end
+        end
+        return "native loot escrow save command complete"
+    end
     if fields[2] == "native-loot-replenishment-fixture" then
         if not enabled or not fixtures or os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1"
             or #fields ~= 3 or phase ~= "hosting" or not loot.profile(state.map, fields[3]) then
@@ -87,10 +170,13 @@ function actions.command(fields, state, phase)
     local fixture_nonempty = action == "open" and fields[6] == "fixture-nonempty"
     local pried = action == "open" and fields[6] == "stock-vehicle-pried"
     local powered = action == "open" and fields[6] == "stock-electronic-powered"
-    local count = action == "open" and ((fixture_nonempty or pried) and 6 or 5) or action == "claim" and 6 or 4
+    local pending = action == "open" and fields[6] == "memory-escrow"
+    local count = action == "open" and ((fixture_nonempty or pried or pending) and 6 or 5) or action == "claim" and 6 or 4
     if powered then count = 7 end
-    local positioned_claim = action == "claim" and #fields == 9
+    local retain = action == "claim" and fields[#fields] == "defer-save"
+    local positioned_claim = action == "claim" and #fields == (retain and 10 or 9)
     if positioned_claim then count = 9 end
+    if retain then count = count + 1 end
     if not enabled or phase ~= "hosting" or #fields ~= count or not crate or not loot.profile(state.map, crate) then
         error("The exact stock crate operation is unavailable", 0)
     end
@@ -114,14 +200,26 @@ function actions.command(fields, state, phase)
             result.status = tostring(scope)
             return "stock loot claim scope unavailable"
         end
-        local api = StaticFindObject(statics)
-        local pool = valid_object(api) and api:LoadGameFromSlot(slot, 0)
+        local pool = pending_escrows[slot] and pending_escrows[slot].pool or escrow_cache[slot]
+        if not valid_object(pool) then
+            local api = StaticFindObject(statics)
+            pool = valid_object(api) and api:LoadGameFromSlot(slot, 0)
+        end
         if not valid_object(pool) then
             result.status = "native_loot_escrow_generation_missing"
             return "stock loot escrow missing"
         end
+        remember_escrow(slot, pool)
         result.distance, result.escrow_slot = scope.distance, slot
         local source = scope.profile.capacity ~= 2 and {scope.crate:GetAddress()} or {}
+        local retained, new_retention
+        if retain then
+            retained, new_retention = guest_save.retain(state, phase, pawn)
+            if not retained then
+                result.status = "native_guest_save_retention_unavailable"
+                return "stock loot claim unavailable"
+            end
+        end
         local ok, status, amount, before, after, inventory_guid = SilverfishClaimNativeLootEscrow(scope.pawn:GetAddress(),
             scope.save:GetAddress(), scope.stock:GetAddress(), pool:GetAddress(), guid, table.unpack(source))
         result.ok, result.status = ok, status
@@ -131,6 +229,8 @@ function actions.command(fields, state, phase)
             result.merge = { guid = guid, inventory_guid = inventory_guid, amount = amount, before = before, after = after }
         end
         result.invoked = result.ok or tostring(result.status):match("^mutation_unverified_") ~= nil
+        if result.invoked then result.retained = retained
+        else guest_save.cancel_retention(new_retention) end
         return "stock loot claim reported"
     end
     local inspect = action == "approach" and loot.approach_fixture or loot.qualify
@@ -207,11 +307,13 @@ function actions.command(fields, state, phase)
             return loot.results(state, phase, scope, addresses)
         end)
         local saved, problem = false, items
-        if verified then saved, problem = pcall(capture, scope, slot, outputs, items) end
+        if verified then saved, problem = pcall(capture, scope, slot, outputs, items, pending) end
         if verified and saved then
             result.items = items
             result.escrow_slot = slot
+            result.memory_escrow = pending
         else
+            if pending then release_escrow(slot) end
             result.ok, result.status = false, "mutation_unverified_" .. tostring(problem)
         end
     end
@@ -220,6 +322,7 @@ end
 
 function actions.reset()
     observation, placement, daily_update = nil, nil, nil
+    escrow_cache, escrow_order = {}, {}
 end
 
 function actions.rows(state, phase, status_row)
@@ -239,7 +342,8 @@ function actions.rows(state, phase, status_row)
     if not row or row.map ~= state.map then return records end
     records[#records + 1] = status_row("native-loot", row.action, row.map, row.crate, row.pawn, row.ok and 1 or 0,
         row.status or "", row.looted and 1 or 0, row.lucky and 1 or 0, row.trait or "", row.calls,
-        row.distance or "-", #row.items, row.invoked and 1 or 0, row.escrow_slot or "-")
+        row.distance or "-", #row.items, row.invoked and 1 or 0, row.escrow_slot or "-",
+        row.retained and 1 or 0, row.memory_escrow and 1 or 0)
     if row.cash then
         local cash = row.cash
         records[#records + 1] = status_row("native-loot-cash", cash.guid, cash.amount, cash.before, cash.after)

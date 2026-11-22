@@ -32,6 +32,7 @@ class Meal:
     food: float
     gain: int
     unit_value: int
+    infection: int = 0
 
 
 MEALS = {
@@ -39,6 +40,20 @@ MEALS = {
     CANNED_PEACHES: Meal(CANNED_PEACHES_CLASS, 12, 0, 8),
     CANNED_BEANS: Meal(CANNED_BEANS_CLASS, 14, 0, 14),
     BROWN_MUSHROOM: Meal(BROWN_MUSHROOM_CLASS, 3.5, 0, 1),
+    **{
+        f"native-guest-{kind}": Meal(f"/Game/Classes/Items/Item_{asset}.Item_{asset}_C", food, 0, value, infection)
+        for kind, asset, food, value, infection in (
+            ("canned-beef", "CannedBeef", 16, 30, 8),
+            ("canned-soup", "CannedSoup", 10, 12, 3),
+            ("canned-tuna", "CannedTuna", 6, 9, 4),
+            ("dead-beetle", "DeadBeetle", 3, 2, 3),
+            ("dog-meat", "DogMeat", 5, 3, 40),
+            ("milk-bites", "MilkBites", 4, 3, 0),
+            ("pork-ribs", "PorkRibs", 22, 70, 25),
+            ("sausage", "Sausage", 10, 7, 20),
+            ("venison", "Venison", 13, 40, 25),
+        )
+    },
 }
 COMMANDS = {BANDAGE_CLASS: ACTION, **{profile.class_path: action for action, profile in MEALS.items()},
             **dict.fromkeys(STARTER_BAGS.values(), STARTER_BAG)}
@@ -46,10 +61,10 @@ RESULT = {action: action.replace("-", "_") for action in COMMANDS.values()}
 
 
 def parse_meal(fields: list[str]) -> dict:
-    if len(fields) != 17:
+    if len(fields) not in (17, 19, 22):
         raise ValueError("Invalid stock food report size")
     (tag, status, area, pawn, guid, initial, remaining, food_before, food_after,
-     regen_before, regen_after, hp, maximum, intox_before, intox_after, host_intox, hemophilia) = fields
+     regen_before, regen_after, hp, maximum, intox_before, intox_after, host_intox, hemophilia, *food_traits) = fields
     meal = MEALS.get(tag)
     if (meal is None or status != "used" or not valid_guid(guid) or len(pawn) > 512
             or not pawn.startswith("Player_FP_C " + area + ".") or hemophilia not in ("0", "1")):
@@ -58,20 +73,38 @@ def parse_meal(fields: list[str]) -> dict:
     food, restored, regen, buffered, health, max_health = map(float, (food_before, food_after, regen_before, regen_after, hp, maximum))
     intox_start, intox_end, shared_intox = map(int, (intox_before, intox_after, host_intox))
     trait = hemophilia == "1"
-    gain = meal.gain * (0.6 if trait else 1)
-    detox = meal.food // 10
+    gourmand, healthy_eating = map(int, food_traits[:2]) if food_traits else (0, 0)
+    infection = {}
+    if len(food_traits) == 5:
+        sick_before, sick_after, dose = map(int, food_traits[2:])
+        if (not all(-2**31 <= value < 2**31 for value in (sick_before, sick_after))
+                or dose not in (0, meal.infection)
+                or (not 1 <= sick_after - sick_before <= dose if dose else sick_before != sick_after)):
+            raise ValueError("Invalid stock food infection proof")
+        infection = {"sickness_before": sick_before, "sickness_after": sick_after, "infection_dose": dose}
+    elif meal.infection:
+        raise ValueError("Missing stock food infection proof")
+    if not (0 <= gourmand <= 1025 and 0 <= healthy_eating <= 1025):
+        raise ValueError("Invalid stock food traits")
+    appetite = meal.food * (1 - gourmand * 0.2)
+    gain = meal.gain + healthy_eating * appetite * 0.3
+    if trait and gain > 0:
+        gain *= 0.6
+    intoxication_delta = math.trunc(appetite * -0.1)
     if (not 1 <= count <= (2**31 - 1) // meal.unit_value or after != count - 1
             or not all(math.isfinite(value) for value in (food, restored, regen, buffered, health, max_health))
             or not 25 <= max_health <= 10_000 or not 0 < health <= max_health
-            or not 0 <= food <= 200 or restored != min(food + meal.food, 200)
+            or not 0 <= food <= 200 or restored != min(max(food + appetite, 0), 200)
             or not 0 <= regen <= max_health or buffered != min(max(regen + gain, 25), max_health)
-            or not 0 <= intox_start <= 100 or intox_end != max(intox_start - detox, 0) or not 0 <= shared_intox <= 100):
+            or not 0 <= intox_start <= 100 or intox_end != min(max(intox_start + intoxication_delta, 0), 100)
+            or not 0 <= shared_intox <= 100):
         raise ValueError("Invalid stock food effect proof")
     return {"state": status, "map": area, "pawn": pawn, "guid": guid, "class_path": meal.class_path,
             "quantity_before": count, "quantity_after": after, "food_before": food, "food_after": restored,
             "regen_before": regen, "regen_after": buffered, "health_before": health, "health_after": health,
-            "max_health": max_health, "hemophilia": trait, "intox_before": intox_start, "intox_after": intox_end,
-            "host_intox_before": shared_intox, "host_intox_after": shared_intox}
+            "max_health": max_health, "hemophilia": trait, "gourmand": gourmand, "healthy_eating": healthy_eating,
+            "intox_before": intox_start, "intox_after": intox_end,
+            "host_intox_before": shared_intox, "host_intox_after": shared_intox, **infection}
 
 
 def starter_awards(guid, awards) -> bool:
@@ -94,6 +127,8 @@ def parse_starter_bag(fields: list[str]) -> dict:
 
 
 async def use(host, bridge, character: str, guid: str, operation_id: str, *, action: str = ACTION) -> dict:
+    from .native_inventory import retain_guest_save
+
     if action not in RESULT:
         raise party.RuleError("native_guest_consumable_unavailable")
     key = RESULT[action]
@@ -123,7 +158,9 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
     if starter and host.last_game.get("native_paired_save_capture") is not True:
         raise party.RuleError("guest_starter_bag_refused_checkpoint")
     area, pawn = host.last_game["map"], owner["pawn"]
-    await host.checkpoint_native(bridge)
+    deferred = await retain_guest_save(host, bridge, character, pawn)
+    if not deferred:
+        await host.checkpoint_native(bridge)
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -162,7 +199,9 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
         recent.append({"id": operation_id, "request": fingerprint, "result": result})
         del recent[:-party.RECENT_ACTIONS]
         capture = {"typed_inventory": True} if starter else {}
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}), **capture)
+        revision = None
+        if not deferred:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}), **capture)
     except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
@@ -174,6 +213,6 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
     details = {"awarded_guids": proof["awarded_guids"]} if starter else {"regen": regen}
     if meal is not None:
         details.update(food=proof["food_after"], intoxication=proof["intox_after"])
-    host.control.event(f"{key}_committed", character_id=character, operation_id=operation_id,
+    host.control.event(f"{key}_{'accepted' if deferred else 'committed'}", character_id=character, operation_id=operation_id,
                        guid=guid, revision=revision, quantity=after, **details)
     return result

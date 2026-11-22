@@ -553,6 +553,7 @@ local function run_command(fields, state, current_phase)
         error("stock_live_dig_checkpoint_pending", 0)
     end
     if command == "native-guest-clear" or command == "travel" or command == "leave" then
+        if command == "native-guest-clear" and not argument then native_loot_actions.release_pending() end
         if command ~= "native-guest-clear" then native_mindcore_carry.clear() end
         native_hazard.clear("co-op session is changing")
         native_guest_consumable.reset()
@@ -706,6 +707,7 @@ local function run_command(fields, state, current_phase)
             end
             native_dream.prepare_duration(state.controller, fields[4])
         end
+        native_loot_actions.release_pending()
         guest_save.clear()
         vitals.reset()
         native_world.prepare_travel_seed(state, current_phase, argument)
@@ -995,6 +997,7 @@ local function run_command(fields, state, current_phase)
         native_death.clear_client()
         if destination then native_zone_loading.begin(state, destination) else native_zone_loading.clear() end
         native_anomaly_fields.guest(false)
+        native_loot_actions.release_pending()
         guest_save.clear()
         vitals.reset()
         if state.map ~= main_menu or state.listening or role == "client" then
@@ -1202,6 +1205,9 @@ local function write_status(state, current_phase, failure, fields, pending)
     end
     if role == "host" and current_phase == "hosting" and type(guest_save.capture) == "function" then
         rows[#rows + 1] = status_row("native-paired-save-capture", 1)
+        if type(SilverfishReferenceNativeDetachedSave) == "function" then
+            rows[#rows + 1] = status_row("native-guest-save-retention", 1)
+        end
     end
     if world_view_enabled and current_phase == "hosting" then
         if not same_object(state.world, host_world_view_world) or host_world_view_check ~= os.time() then
@@ -1482,7 +1488,7 @@ local function observe_session()
         local cleared, failure = pcall(function()
             native_hazard.clear("game bridge observation failed")
             native_guest_sickness.clear()
-            guest_save.clear()
+            guest_save.clear_bindings()
         end)
         if not cleared then diagnostic = diagnostic .. " / " .. tostring(failure) end
         write_status({ map = "", clients = 0, server = false, pawns = {} }, "opening", diagnostic)

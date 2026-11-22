@@ -70,14 +70,15 @@ namespace
     {
         const Unreal::TCHAR* equipment;
         const Unreal::TCHAR* projectile;
+        std::string_view fixture_kind;
     };
     constexpr FlareProfile flares[]{
         {STR("/Game/Classes/Equipment/Eqp_Flare.Eqp_Flare_C"),
-         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Flare_Projectile_BP.Flare_Projectile_BP_C")},
+         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Flare_Projectile_BP.Flare_Projectile_BP_C"), "stock-flare"},
         {STR("/Game/Classes/Equipment/Eqp_Flare_Blue.Eqp_Flare_Blue_C"),
-         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Blue_Flare_Projectile_BP.Blue_Flare_Projectile_BP_C")},
+         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Blue_Flare_Projectile_BP.Blue_Flare_Projectile_BP_C"), "stock-flare-blue"},
         {STR("/Game/Classes/Equipment/Eqp_Flare_Yellow.Eqp_Flare_Yellow_C"),
-         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Yellow_Flare_Projectile_BP.Yellow_Flare_Projectile_BP_C")},
+         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Yellow_Flare_Projectile_BP.Yellow_Flare_Projectile_BP_C"), "stock-flare-yellow"},
     };
     constexpr auto old_pipe_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C");
     constexpr auto weapon_base_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
@@ -348,7 +349,8 @@ namespace
             const auto kind = lua.get_string();
             if (kind == "blowtorch") seed_selection->path = blowtorch_path;
             else if (kind == "crowbar") seed_selection->path = crowbar_path;
-            else if (kind == "stock-flare") seed_selection->path = flares[0].equipment;
+            else if (const auto flare = std::ranges::find(flares, kind, &FlareProfile::fixture_kind); flare != std::end(flares))
+                seed_selection->path = flare->equipment;
             else
             {
                 seed_selection->full_magazine = kind == "smg-standard-full";
@@ -731,7 +733,8 @@ namespace
         auto* source = item_class->GetClassDefaultObject().Get();
         const bool blowtorch = item_class == find<Unreal::UClass>(blowtorch_path);
         const bool crowbar = item_class == find<Unreal::UClass>(crowbar_path);
-        const bool flare = item_class->GetPathName() == flares[0].equipment;
+        const auto class_path = item_class->GetPathName();
+        const bool flare = std::ranges::any_of(flares, [&](const auto& profile) { return class_path == profile.equipment; });
         auto* quantity = field<Unreal::FIntProperty>(source, ammo_fixture || blowtorch || crowbar || flare ? STR("Ammo") : STR("MagSize"));
         const auto capacity = quantity ? quantity->GetPropertyValueInContainer(source) : -1;
         const auto* magazine = ammo_fixture ? nullptr : stock_magazine(item_class);
@@ -1942,7 +1945,8 @@ namespace
             !boolean(actor, STR("Stacks"), true) || !ammo || before < 1 ||
             ammo->GetPropertyValueInContainer(actor) != before) return refuse("native_guest_flare_refused_equipment");
         FlareCall call{grenade_spawn_path};
-        if (!call.valid()) return refuse("native_guest_flare_refused_schema");
+        auto* equipped_property = field<Unreal::FObjectProperty>(context.pawn, STR("EquipedItem"));
+        if (!call.valid() || !equipped_property) return refuse("native_guest_flare_refused_schema");
         const auto slot = inventory.equipment_index;
         auto* previous = object(actor, STR("ThrownNade"));
 
@@ -1965,6 +1969,15 @@ namespace
             static_cast<Unreal::AActor*>(spawned)->GetWorld() != context.world ||
             object(spawned, STR("Owner")) != context.pawn || object(spawned, STR("Instigator")) != context.pawn)
             return refuse("mutation_unverified_native_guest_flare_throw");
+        if (before == 1 && object(context.pawn, STR("EquipedItem")) == actor)
+        {
+            // Stock depletion can leave the retired hand actor in an empty detached slot.
+            // Keep any replacement that stock equipment selection already installed.
+            if (live(actor)) static_cast<Unreal::AActor*>(actor)->K2_DestroyActor();
+            auto* held = equipped_property->ContainerPtrToValuePtr<void>(context.pawn);
+            if (equipped_property->GetObjectPropertyValue(held) == actor)
+                equipped_property->SetObjectPropertyValue(held, nullptr);
+        }
         result(lua, true, "thrown");
         lua.set_integer(before);
         lua.set_integer(before - 1);
@@ -2444,6 +2457,63 @@ namespace
             ? property : nullptr;
     }
 
+    struct StockSplit
+    {
+        Unreal::UObject* library{};
+        Unreal::UFunction* function{};
+        Unreal::FStructProperty* item{};
+        Unreal::FIntProperty* amount{};
+        Unreal::FObjectProperty* world{};
+        Unreal::FStructProperty* portion{};
+        Unreal::FStructProperty* remainder{};
+        Unreal::FBoolProperty* entire{};
+        Unreal::FBoolProperty* success{};
+        alignas(std::max_align_t) std::array<std::byte, 0x108> buffer{};
+        bool initialized{};
+
+        ~StockSplit()
+        {
+            if (initialized)
+                for (auto* row : {item, portion, remainder}) row->DestroyValue_InContainer(buffer.data());
+        }
+
+        bool bind(Unreal::UObject* context, const Unreal::UScriptStruct* row_type)
+        {
+            library = find<Unreal::UObject>(STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"));
+            function = find<Unreal::UFunction>(STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:SplitStack"));
+            if (!library || !library->HasAnyFlags(Unreal::RF_ClassDefaultObject) || !function
+                || function->GetOuterPrivate() != library->GetClassPrivate() || function->GetNumParms() != 7
+                || function->GetReturnProperty() || function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)
+                || function->GetParmsSize() < 0x102 || function->GetParmsSize() > 0x108) return false;
+            item = split_parameter<Unreal::FStructProperty>(function, STR("Item"), 0);
+            amount = split_parameter<Unreal::FIntProperty>(function, STR("AmountToTake"), 0x50);
+            world = split_parameter<Unreal::FObjectProperty>(function, STR("__WorldContext"), 0x58);
+            portion = split_parameter<Unreal::FStructProperty>(function, STR("NewItem"), 0x60, true);
+            remainder = split_parameter<Unreal::FStructProperty>(function, STR("RemainingStack"), 0xB0, true);
+            entire = split_parameter<Unreal::FBoolProperty>(function, STR("EntireStack"), 0x100, true);
+            success = split_parameter<Unreal::FBoolProperty>(function, STR("Success"), 0x101, true);
+            const auto shape = [row_type](Unreal::FStructProperty* property) {
+                return property && property->GetSize() == 0x50 && property->GetStruct().Get() == row_type;
+            };
+            return shape(item) && shape(portion) && shape(remainder) && amount && world && world->GetPropertyClass().Get()
+                && context->IsA(world->GetPropertyClass().Get()) && entire && success;
+        }
+
+        bool run(Unreal::UObject* context, const void* source, int count)
+        {
+            for (auto* row : {item, portion, remainder}) row->InitializeValue_InContainer(buffer.data());
+            initialized = true;
+            item->CopyCompleteValue(item->ContainerPtrToValuePtr<void>(buffer.data()), source);
+            amount->SetPropertyValueInContainer(buffer.data(), count);
+            world->SetObjectPropertyValue(world->ContainerPtrToValuePtr<void>(buffer.data()), context);
+            library->ProcessEvent(function, buffer.data());
+            return success->GetPropertyValueInContainer(buffer.data()) && !entire->GetPropertyValueInContainer(buffer.data());
+        }
+
+        void* moved() { return portion->ContainerPtrToValuePtr<void>(buffer.data()); }
+        void* left() { return remainder->ContainerPtrToValuePtr<void>(buffer.data()); }
+    };
+
     int take_ammo(const Lua& lua)
     {
         const auto refuse = [&](std::string_view reason) { return result(lua, false, reason); };
@@ -2481,25 +2551,8 @@ namespace
         if (!flags || Unreal::FScriptArrayHelper(property, live_array).Num() >= max_inventory)
             return refuse("native_inventory_take_ammo_refused_backpack");
 
-        auto* stock_library = find<Unreal::UObject>(STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"));
-        auto* split = find<Unreal::UFunction>(STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:SplitStack"));
-        if (!stock_library || !stock_library->HasAnyFlags(Unreal::RF_ClassDefaultObject) || !split
-            || split->GetOuterPrivate() != stock_library->GetClassPrivate() || split->GetNumParms() != 7
-            || split->GetReturnProperty() || split->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)
-            || split->GetParmsSize() < 0x102 || split->GetParmsSize() > 0x108)
-            return refuse("native_inventory_take_ammo_refused_stock_schema");
-        auto* item = split_parameter<Unreal::FStructProperty>(split, STR("Item"), 0);
-        auto* amount = split_parameter<Unreal::FIntProperty>(split, STR("AmountToTake"), 0x50);
-        auto* world = split_parameter<Unreal::FObjectProperty>(split, STR("__WorldContext"), 0x58);
-        auto* rounds = split_parameter<Unreal::FStructProperty>(split, STR("NewItem"), 0x60, true);
-        auto* empty = split_parameter<Unreal::FStructProperty>(split, STR("RemainingStack"), 0xB0, true);
-        auto* entire = split_parameter<Unreal::FBoolProperty>(split, STR("EntireStack"), 0x100, true);
-        auto* success = split_parameter<Unreal::FBoolProperty>(split, STR("Success"), 0x101, true);
-        const auto shape = [&](Unreal::FStructProperty* field) {
-            return field && field->GetSize() == 0x50 && field->GetStruct().Get() == row_type;
-        };
-        if (!shape(item) || !shape(rounds) || !shape(empty) || !amount || !world || !world->GetPropertyClass().Get()
-            || !context.pawn->IsA(world->GetPropertyClass().Get()) || !entire || !success)
+        StockSplit split;
+        if (!split.bind(context.pawn, row_type))
             return refuse("native_inventory_take_ammo_refused_stock_parameters");
 
         using Value = std::unique_ptr<void, PropertyDeleter>;
@@ -2520,24 +2573,13 @@ namespace
                 && flags->Identical(flags_before.get(), host_flags);
         };
 
-        alignas(std::max_align_t) std::array<std::byte, 0x108> params{};
-        struct ParameterRows
-        {
-            void* data;
-            std::array<Unreal::FStructProperty*, 3> rows;
-            ~ParameterRows() { for (auto* row : rows) row->DestroyValue_InContainer(data); }
-        } parameters{params.data(), {item, rounds, empty}};
-        for (auto* row : parameters.rows) row->InitializeValue_InContainer(parameters.data);
-        item->CopyCompleteValue(item->ContainerPtrToValuePtr<void>(parameters.data), inventory.item);
-        amount->SetPropertyValueInContainer(parameters.data, 1);
-        world->SetObjectPropertyValue(world->ContainerPtrToValuePtr<void>(parameters.data), context.pawn);
-        stock_library->ProcessEvent(split, parameters.data);
+        const auto did_split = split.run(context.pawn, inventory.item, 1);
         if (!host_unchanged() || !property->Identical(original.get(), live_array))
             return refuse("mutation_unverified_native_inventory_take_ammo_stock_call");
-        auto* extracted = rounds->ContainerPtrToValuePtr<void>(parameters.data);
-        auto* unloaded = empty->ContainerPtrToValuePtr<void>(parameters.data);
+        auto* extracted = split.moved();
+        auto* unloaded = split.left();
         const auto empty_weight = weight->GetPropertyValueInContainer(unloaded);
-        if (!success->GetPropertyValueInContainer(parameters.data) || entire->GetPropertyValueInContainer(parameters.data)
+        if (!did_split
             || inventory.identity(extracted) == Guid{} || inventory.identity(extracted) == context.guid
             || inventory.row_class(extracted) != ammo_class || inventory.row_class(unloaded) != weapon
             || inventory.ammo->GetPropertyValueInContainer(extracted) != selection.expected
@@ -2649,6 +2691,16 @@ namespace
 bool silverfish::native_guest_item::take_ammo_supported(Unreal::UObject* item_class, int rounds)
 {
     return unload_profile(item_class, rounds) != nullptr;
+}
+
+bool silverfish::native_guest_item::split_stock_stack(Unreal::UObject* context, Unreal::FStructProperty* row_type,
+                                                     const void* input, int amount, void* portion, void* remainder)
+{
+    StockSplit split;
+    if (!split.bind(context, row_type->GetStruct().Get()) || !split.run(context, input, amount)) return false;
+    row_type->CopyCompleteValue(portion, split.moved());
+    row_type->CopyCompleteValue(remainder, split.left());
+    return true;
 }
 
 void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)

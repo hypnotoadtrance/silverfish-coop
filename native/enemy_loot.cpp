@@ -1240,6 +1240,42 @@ namespace silverfish::native_enemy_loot
         return true;
     }
 
+    void apply_stock_guest_bounty(U::FFrame& frame, U::FFrame& loot, U::UObject* npc,
+                                  U::UObject* instance, const shared_loot::EscrowOwner& killer)
+    {
+        if (!npc || !instance || !killer.save || killer.save == killer.stock ||
+            frame.Object() != instance || !frame.Locals() ||
+            object(npc, STR("LastDamagedMe")) != killer.pawn) return;
+        auto* chance = frame.PreviousFrame();
+        if (!chance || chance->PreviousFrame() != &loot || chance->Object() != npc ||
+            chance->Node() != find<U::UFunction>(
+                STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:LootItem_SpawnChance"))) return;
+
+        // An already armed shell roll owns this exact frame and records its own Bounty proof.
+        if (available() && std::ranges::any_of(scopes(), [&](const auto* scope) {
+                return scope->npc.Get() == npc && scope->loot_frame == &loot;
+            })) return;
+
+        auto* passive = frame.Node();
+        if (!passive || passive != script(instance->GetClassPrivate(), instance_path, STR("FindPassiveEffect"), 4) ||
+            passive->GetParmsSize() != 16) return;
+        auto* effect = parameter<U::FNameProperty>(passive, STR("EffectName"), 0, false);
+        auto* count = parameter<U::FBoolProperty>(passive, STR("CountInstances"), 8, false);
+        auto* active = parameter<U::FBoolProperty>(passive, STR("EffectActive"), 9, true);
+        auto* instances = parameter<U::FIntProperty>(passive, STR("Instances"), 12, true);
+        static const U::FName bounty{STR("Bounty")};
+        if (!effect || !count || !active || !instances ||
+            effect->GetPropertyValueInContainer(frame.Locals()) != bounty ||
+            !count->GetPropertyValueInContainer(frame.Locals())) return;
+        auto* enabled = output(frame, active);
+        auto* value = output(frame, instances);
+        std::int32_t total{};
+        if (!enabled || !value || enabled == value || reinterpret_cast<Address>(value) % alignof(std::int32_t) != 0 ||
+            !count_save_passive(killer.save, bounty, total)) return;
+        active->SetPropertyValue(enabled, total > 0);
+        instances->SetPropertyValue(value, total);
+    }
+
     bool qualify_escrow_claimant(Address pawn, Address save, Address stock, shared_loot::EscrowOwner& claimant)
     {
         if (!available()) return false;

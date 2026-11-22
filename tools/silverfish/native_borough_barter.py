@@ -112,7 +112,11 @@ async def trade(host, bridge, character: str, payment: str, operation: str, *, a
             raise party.RuleError("operation_id_conflict")
         return receipt["result"]
 
-    await host.checkpoint_native(bridge)
+    from .native_inventory import retain_guest_save
+
+    defer_save = await retain_guest_save(host, bridge, character, scope[3])
+    if not defer_save:
+        await host.checkpoint_native(bridge)
     if sessions.member_scope(host, character) != scope:
         raise party.RuleError(f"{proof_key}_scope_changed")
     pawn = scope[3]
@@ -136,7 +140,9 @@ async def trade(host, bridge, character: str, payment: str, operation: str, *, a
         receipts = proposed["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, proposed, require_guest_frames=frozenset({character}))
+        revision = None
+        if not defer_save:
+            revision = await host.checkpoint_native(bridge, proposed, require_guest_frames=frozenset({character}))
         host.party = proposed
         host.native_pickup.forget_committed_row(character, payment)
         host.native_checkpoint_unsafe = False

@@ -4,7 +4,7 @@ import math
 import re
 import time
 
-from . import party
+from . import native_inventory, party
 from .native_gold import valid_guid
 
 
@@ -202,6 +202,7 @@ async def pry(host, bridge, character, requested, operation, kind):
     if host.smg_holds is not None and host.smg_holds.strokes:
         raise party.RuleError("stock_door_pry_busy")
 
+    deferred = await native_inventory.retain_guest_save(host, bridge, character, member["pawn"])
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -227,7 +228,8 @@ async def pry(host, bridge, character, requested, operation, kind):
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+        if not deferred:
+            await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
         host.party = candidate
         host.native_checkpoint_unsafe = False
         return result

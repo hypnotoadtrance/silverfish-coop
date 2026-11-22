@@ -866,7 +866,7 @@ function inventory_view.command(fields, state, phase)
     if operation == "native-inventory-stock-use-click-fixture"
         and (#fields == 3 or #fields == 4 and (fields[4] == "drag" or fields[4] == "take-ammo"))
         and headless and stock_session and not stock_drop
-        and (os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" or fields[4] == "take-ammo"
+        and (os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" or (mre_enabled and #fields == 3) or fields[4] == "take-ammo"
             and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1") then
         local screen = stock_session.screen
         local cards, manager = screen.BackpackPanel.Cards, screen.ItemManager
@@ -910,7 +910,7 @@ function inventory_view.command(fields, state, phase)
         end
     end
     if operation == "native-inventory-view-fixture" and #fields == 6 and fields[3] == "stock-split"
-        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" and #fields[4] == 32 and fields[4]:match("^[0-9a-f]+$")
+        and headless and #fields[4] == 32 and fields[4]:match("^[0-9a-f]+$")
         and #fields[5] == 32 and fields[5]:match("^[0-9A-F]+$") and fields[5]:find("[^0]") then
         local amount = integer(fields[6], 2147483647)
         if amount and amount > 0 then return fixture(current, state, phase, true, fields[4], fields[5], false, amount) end

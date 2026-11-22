@@ -1,5 +1,4 @@
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,7 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import native_host_save
 from tools.silverfish.campaign import CampaignFormatError, CampaignStore
-from tools.silverfish.service import CHECKPOINT_INTERVAL, Host
+from tools.silverfish.service import Host
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
@@ -70,7 +69,9 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.host = object.__new__(Host)
         self.host.native_profile = root / "game-user"
-        self.host.next_save = 0.0
+        self.host.pending_host_save = None
+        self.host.pending_guest_saves = {}
+        self.host.party = {}
         native_host_save.directory(self.host.native_profile).mkdir(parents=True)
         self.host.allowed_maps = {CROSSROADS}
         self.host.last_game = {"state": "hosting", "map": CROSSROADS,
@@ -83,7 +84,9 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.bridge = SimpleNamespace(command=AsyncMock(side_effect=self.capture))
 
     async def capture(self, action, host_slot, dig_token, first, first_slot, second, second_slot, *, timeout):
-        self.assertEqual(action, "native-host-save-capture")
+        typed = self.host.pending_host_save or self.host.pending_guest_saves
+        expected = "native-host-save-capture-typed" if typed else "native-host-save-capture"
+        self.assertEqual(action, expected)
         self.assertIn(dig_token, ("-", "dig-token"))
         self.assertEqual((first, second), ("first-pawn", "second-pawn"))
         self.assertEqual(len({host_slot, first_slot, second_slot}), 3)
@@ -114,11 +117,55 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
             await self.host.checkpoint_native(self.bridge)
         self.host.commit_checkpoint.assert_not_awaited()
 
+    async def test_ordinary_party_update_cannot_save_a_half_persisted_pickup(self):
+        self.host.pending_host_save = True
+        self.host.store.revision = 18
+        self.host.store.checkpoint = Mock()
+        candidate = {"queued": True}
+        self.assertEqual(self.host.checkpoint(candidate), 18)
+        self.host.store.checkpoint.assert_not_called()
+        self.host.commit_checkpoint.side_effect = OSError("failed write")
+        with self.assertRaisesRegex(OSError, "failed write"):
+            await self.host.checkpoint_native(self.bridge, candidate)
+        self.assertTrue(self.host.pending_host_save)
+        self.host.commit_checkpoint.side_effect = None
+        self.assertEqual(await self.host.checkpoint_native(self.bridge, candidate), 19)
+        self.assertIsNone(self.host.pending_host_save)
+        self.assertIs(self.host.commit_checkpoint.await_args.args[0], candidate)
+
     async def test_missing_generation_never_publishes_campaign(self):
         self.missing_file = True
         with self.assertRaisesRegex(CampaignFormatError, "Cannot read the isolated Unreal save"):
             await self.host.checkpoint_native(self.bridge)
         self.host.commit_checkpoint.assert_not_awaited()
+
+    async def test_explicit_save_captures_a_retained_inventory_after_its_lease_expires(self):
+        guest = "departed-character"
+        pawn = "departed-pawn"
+        self.host.pending_guest_saves[guest] = (pawn, {"map": CROSSROADS, "location": [1, 2, 3], "health": 20})
+        self.host.store.status = Mock(return_value={"leases": []})
+        self.host.guest_lease_ids = Mock(return_value={})
+
+        async def command(action, *arguments, **options):
+            if action == "native-guest-save-release-retained":
+                self.host.commit_checkpoint.assert_awaited_once()
+                self.assertEqual(arguments[0], guest)
+                return self.host.last_game
+            if action == "native-guest-save-capture-retained":
+                character, slot = arguments
+                self.assertEqual(character, guest)
+                native_host_save.slot_path(self.host.native_profile, slot).write_bytes(b"GVAS" + bytes(32))
+                proof = {"map": CROSSROADS, "pawn": pawn, "slot": slot, "health": 19}
+                return {**self.host.last_game, "native_guest_save_retained_frames": {guest: proof}}
+            return await self.capture(action, *arguments, **options)
+
+        self.bridge.command.side_effect = command
+        self.assertEqual(await self.host.checkpoint_native(self.bridge), 19)
+        recorded = self.host.commit_checkpoint.await_args.kwargs
+        self.assertEqual(recorded["require_guest_frames"], {guest})
+        state = recorded["unleased_states"][guest]
+        self.assertEqual((state["health"], state["native_guest_save"]["character_id"]), (19, guest))
+        self.assertFalse(self.host.pending_guest_saves)
 
     async def test_checkpoint_pruning_preserves_both_revisions_and_failure_is_deferred(self):
         profile = self.host.native_profile
@@ -145,19 +192,3 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await Host.commit_checkpoint(self.host, None, native_record=next_frame), 3)
         self.assertEqual(store.status()["revision"], 3)
         self.host.control.event.assert_called_once_with("native_host_save_prune_deferred", reason="busy")
-
-    async def test_completed_transaction_postpones_periodic_capture_and_preserves_forced_capture(self):
-        self.host.store = SimpleNamespace(wait_for_checkpoint=AsyncMock(), checkpoint_async=AsyncMock(return_value=2))
-        self.host.checkpoint_contents = Mock(return_value=({}, {}))
-        start = time.monotonic()
-        self.host.next_save = start + 0.1
-        self.assertEqual(await Host.commit_checkpoint(self.host, None), 2)
-        self.assertGreaterEqual(self.host.next_save, start + CHECKPOINT_INTERVAL)
-
-        async def disconnect_during_commit(*args, **kwargs):
-            self.host.next_save = 0.0
-            return 3
-
-        self.host.store.checkpoint_async.side_effect = disconnect_during_commit
-        self.assertEqual(await Host.commit_checkpoint(self.host, None), 3)
-        self.assertEqual(self.host.next_save, 0.0)

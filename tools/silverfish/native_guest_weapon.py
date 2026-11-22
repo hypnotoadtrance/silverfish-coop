@@ -4,7 +4,7 @@ import re
 import time
 import uuid
 
-from . import guest_weapon_profiles, native_guest_melee, party
+from . import guest_weapon_profiles, native_guest_melee, native_inventory, party
 
 GUEST_ACTIONS = ("native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
                  "native-guest-weapon-reload")
@@ -23,7 +23,7 @@ FIRE_CLASSES = {firearm.kind: firearm.path for firearm in guest_weapon_profiles.
 CLASS_PATHS = {*FIRE_CLASSES.values(), CAMERA_PATH, OLD_PIPE, BLOWTORCH_PATH, CROWBAR_PATH}
 PRIMARY_KINDS = frozenset((*FIRE_CLASSES, "camera", "blowtorch", "crowbar", native_guest_melee.KIND))
 SEED_KINDS = frozenset(firearm.kind for firearm in guest_weapon_profiles.FIREARMS if firearm.headless_seed) | {
-    "blowtorch", "crowbar", "smg-standard-full", "stock-flare",
+    "blowtorch", "crowbar", "smg-standard-full", "stock-flare", "stock-flare-blue", "stock-flare-yellow",
 }
 PROJECTILES_PER_ROUND = {
     firearm.kind: firearm.magazine.ammo.projectile_count
@@ -47,6 +47,7 @@ async def select_equipment(host, bridge, character: str, target: str | None) -> 
     if not scope.get("connected") or not (pawn := scope.get("pawn")):
         raise party.RuleError("native_guest_selection_unavailable")
 
+    await native_inventory.retain_guest_save(host, bridge, character, pawn)
     host.native_checkpoint_unsafe = True
     try:
         snapshot = await bridge.command(SELECT_EQUIPMENT, pawn, guid, timeout=3)
@@ -126,6 +127,7 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
             raise party.RuleError("respawn_in_progress")
 
     source, pawn = host.last_game["map"], scope["pawn"]
+    deferred = mutates and not fixture and await native_inventory.retain_guest_save(host, bridge, character, pawn)
     if mutates:
         host.native_checkpoint_unsafe = True
     try:
@@ -238,7 +240,8 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
             receipts = candidate["receipts"].setdefault(character, [])
             receipts.append({"id": operation_id, "request": fingerprint, "result": result})
             del receipts[:-party.RECENT_ACTIONS]
-            await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+            if not deferred:
+                await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
             host.party = candidate
             host.native_checkpoint_unsafe = False
         return result

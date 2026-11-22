@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import math
 import time
 
-from . import party
+from . import native_inventory, party
 from .enemy_loot_profiles import BY_MAP
 from .native_gold import valid_guid
 from .travel import DEAD_BRIDGE
@@ -200,6 +200,7 @@ async def perform(host, bridge, character, operation_id, action, guid, *, seed_k
         raise party.RuleError("respawn_in_progress")
 
     source, pawn = host.last_game["map"], scope["pawn"]
+    deferred = not seed and await native_inventory.retain_guest_save(host, bridge, character, pawn)
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -243,7 +244,8 @@ async def perform(host, bridge, character, operation_id, action, guid, *, seed_k
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation_id, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+        if not deferred:
+            await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
         host.party = candidate
         host.native_checkpoint_unsafe = False
         return result

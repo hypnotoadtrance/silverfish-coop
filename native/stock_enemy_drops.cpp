@@ -1,4 +1,5 @@
 #include "stock_enemy_drops.hpp"
+#include "enemy_loot.hpp"
 #include "shared_loot.hpp"
 
 #include <algorithm>
@@ -47,7 +48,7 @@ namespace
     struct Observation
     {
         U::FFrame* frame{};
-        U::FWeakObjectPtr npc, world;
+        U::FWeakObjectPtr npc, world, killer_pawn, killer_save;
         std::array<U::FObjectProperty*, 5> deferred{};
         std::vector<U::FWeakObjectPtr> items;
         std::string killer;
@@ -129,6 +130,25 @@ namespace
         return live(value) && item && value->IsA(item) && authority_in_level(static_cast<U::AActor*>(value), world);
     }
 
+    bool begin_roll(U::UWorld* world)
+    {
+        if (sequence > max_sequence - max_roll || roll >= max_sequence) return false;
+        if (reported_world.Get() != world)
+        {
+            recent.clear();
+            reported_world = world;
+        }
+        ++roll;
+        return true;
+    }
+
+    void record_drop(U::UObject* actor, const std::string& source, const std::string& killer)
+    {
+        if (recent.size() == max_recent_drops) recent.pop_front();
+        recent.push_back({actor, ++sequence, roll, source, killer, RC::to_utf8_string(actor->GetFullName()),
+            RC::to_utf8_string(actor->GetClassPrivate()->GetPathName())});
+    }
+
     void collect(U::UObject* value)
     {
         if (!observing.frame || !item_in_world(value, static_cast<U::UWorld*>(observing.world.Get())) ||
@@ -194,7 +214,14 @@ namespace
         if (live(killer) && killer->GetClassPrivate() == find<U::UClass>(pawn_path) &&
             silverfish::shared_loot::qualify_escrow_owner_in_world(world, address(killer),
                 address(object(killer, STR("Save"))), address(stock), participant))
+        {
             next.killer = RC::to_utf8_string(killer->GetFullName());
+            if (participant.save != participant.stock)
+            {
+                next.killer_pawn = participant.pawn;
+                next.killer_save = participant.save;
+            }
+        }
         next.frame = &frame;
         next.npc = npc;
         next.world = world;
@@ -206,6 +233,22 @@ namespace
         if (!available() || !observing.frame) return;
         if (&frame != observing.frame)
         {
+            static const U::FName passive_name{STR("FindPassiveEffect")};
+            auto* killer = observing.killer_pawn.Get();
+            if (killer && frame.Node() && frame.Node()->GetFName() == passive_name &&
+                frame.PreviousFrame() && frame.PreviousFrame()->PreviousFrame() == observing.frame &&
+                !call.OriginalFunctionCallPrevented())
+            {
+                auto* world = static_cast<U::UWorld*>(observing.world.Get());
+                auto* instance = listen_instance(world);
+                silverfish::shared_loot::EscrowOwner participant{};
+                if (instance && receiver == instance && silverfish::shared_loot::qualify_escrow_owner_in_world(
+                        world, address(killer), address(observing.killer_save.Get()),
+                        address(object(instance, STR("SaveSlot_Ref"))), participant))
+                    silverfish::native_enemy_loot::apply_stock_guest_bounty(frame, *observing.frame,
+                        observing.npc.Get(), instance, participant);
+                return;
+            }
             if (!call.OriginalFunctionCallPrevented() && frame.PreviousFrame() == observing.frame &&
                 frame.Node() == find<U::UFunction>(spawn_item) &&
                 receiver == listen_instance(static_cast<U::UWorld*>(observing.world.Get())))
@@ -225,22 +268,13 @@ namespace
         auto finished = std::exchange(observing, {});
         auto* world = static_cast<U::UWorld*>(finished.world.Get());
         if (call.OriginalFunctionCallPrevented() || finished.overflow || finished.npc.Get() != receiver ||
-            !listen_instance(world) || finished.items.empty() || sequence > max_sequence - max_roll || roll >= max_sequence)
+            !listen_instance(world) || finished.items.empty() || !begin_roll(world))
             return;
-        if (reported_world.Get() != world)
-        {
-            recent.clear();
-            reported_world = world;
-        }
-        ++roll;
         const auto source = RC::to_utf8_string(receiver->GetFullName());
         for (const auto& item : finished.items)
         {
             auto* actor = item.Get();
-            if (!item_in_world(actor, world)) continue;
-            if (recent.size() == max_recent_drops) recent.pop_front();
-            recent.push_back({item, ++sequence, roll, source, finished.killer, RC::to_utf8_string(actor->GetFullName()),
-                RC::to_utf8_string(actor->GetClassPrivate()->GetPathName())});
+            if (item_in_world(actor, world)) record_drop(actor, source, finished.killer);
         }
     }
 
@@ -271,6 +305,18 @@ namespace
 
 namespace silverfish::stock_enemy_drops
 {
+    bool track_observer_reward(U::UObject* observer, U::UObject* reward)
+    {
+        const auto* type = live(observer) ? observer->GetClassPrivate() : nullptr;
+        if (!available() || !type || type->GetPathName() != STR("/Game/Classes/Anomalies/Observers_BP.Observers_BP_C"))
+            return false;
+        auto* world = static_cast<U::AActor*>(observer)->GetWorld();
+        if (!listen_instance(world) || !authority_in_level(static_cast<U::AActor*>(observer), world) ||
+            !item_in_world(reward, world) || !begin_roll(world)) return false;
+        record_drop(reward, RC::to_utf8_string(observer->GetFullName()), {});
+        return true;
+    }
+
     bool verify_live_drop(Address host, Address actor, std::uint64_t requested,
                           shared_loot::EscrowOwner& context, U::UObject*& drop)
     {

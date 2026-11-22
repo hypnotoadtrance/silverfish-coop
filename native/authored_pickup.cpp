@@ -431,6 +431,7 @@ namespace
         Observation observed{};
         Guid merged_source{};
         std::optional<U::FVector> hidden_at;
+        bool restore_simulation{};
     };
 
     std::array<Scope, profiles.size()> scopes{};
@@ -623,11 +624,25 @@ namespace
         return mode && mode->GetPropertyValueInContainer(actor) <= 2 ? mode : nullptr;
     }
 
+    bool carryable_placed_item(U::UObject* actor)
+    {
+        return actor && actor->HasAnyFlags(U::RF_WasLoaded) && boolean(actor, STR("Physics"), true)
+            && boolean(actor, STR("bNetLoadOnClient"), true);
+    }
+
+    bool remotely_hidden_loose(U::UObject* actor)
+    {
+        return role(actor) == 1 && carryable_placed_item(actor)
+            && boolean(actor, STR("bReplicateMovement"), true) && boolean(actor, STR("bHidden"), true);
+    }
+
     const char* generic_payload_fault(U::UObject* actor, bool cash)
     {
         auto* base = find<U::UClass>(base_class);
         if (!base || !actor->IsA(base) || !actor->HasAnyFlags(U::RF_WasLoaded)) return "not_placed_stock_item";
-        if (!boolean(actor, STR("bReplicates"), false)) return "replicated_item";
+        if (!boolean(actor, STR("bReplicates"), false) &&
+            (cash || !carryable_placed_item(actor) || !boolean(actor, STR("bReplicateMovement"), true)))
+            return "replicated_item";
         auto* held = field<U::FBoolProperty>(actor, STR("HeldByPlayer"));
         if ((held && held->GetPropertyValueInContainer(actor)) || exact(object(actor, STR("Owner")), pawn_path))
             return "held_item";
@@ -893,20 +908,59 @@ namespace
         return true;
     }
 
+    std::optional<bool> loose_simulating(const Scope& scope)
+    {
+        static auto* query = find<U::UFunction>(STR("/Script/Engine.SceneComponent:IsAnySimulatingPhysics"));
+        static auto* result = field<U::FBoolProperty>(query, STR("ReturnValue"));
+        auto* box = scope.box.Get();
+        if (!live(box) || !result || query->GetNumParms() != 1 || query->GetParmsSize() != 1 ||
+            result->GetOffset_Internal() != 0 || !result->HasAnyPropertyFlags(U::CPF_ReturnParm) ||
+            !query->HasAnyFunctionFlags(U::FUNC_Native)) return {};
+        std::uint8_t value{};
+        box->ProcessEvent(query, &value);
+        return result->GetPropertyValueInContainer(&value);
+    }
+
+    bool set_loose_simulation(Scope& scope, bool simulate)
+    {
+        static auto* function = find<U::UFunction>(STR("/Script/Engine.PrimitiveComponent:SetSimulatePhysics"));
+        static auto* enabled = parameter<U::FBoolProperty>(function, STR("bSimulate"), 0);
+        auto* box = scope.box.Get();
+        if (!live(box) || !enabled || function->GetNumParms() != 1 || function->GetParmsSize() != 1 ||
+            !function->HasAnyFunctionFlags(U::FUNC_Native)) return false;
+        std::uint8_t value{};
+        enabled->SetPropertyValueInContainer(&value, simulate);
+        box->ProcessEvent(function, &value);
+        return loose_simulating(scope) == simulate;
+    }
+
     bool set_visibility(Scope& scope, bool claimed)
     {
         auto* actor = static_cast<U::AActor*>(scope.actor.Get());
         if (!local_scope(scope) || (scope.profile->dead_drop && (!scope.host || !claimed || !drop_gate(scope))) ||
             !exact_source(actor, scope.world.Get(), *scope.profile, !scope.claimed || !claimed))
             return false;
-        if (claimed && !scope.claimed && !scope.host && scope.profile->discovered)
-            scope.hidden_at = actor->K2_GetActorLocation();
+        if (claimed && !scope.claimed && scope.profile->discovered)
+        {
+            if (carryable_placed_item(actor))
+            {
+                const auto simulating = loose_simulating(scope);
+                if (!simulating || (*simulating && !set_loose_simulation(scope, false))) return false;
+                scope.restore_simulation = *simulating;
+            }
+            if (!scope.host || scope.restore_simulation) scope.hidden_at = actor->K2_GetActorLocation();
+        }
         if (!claimed && !restore_loose_location(scope, actor)) return false;
         const bool hidden = claimed || scope.original_hidden;
         const bool collision = !claimed && scope.original_collision;
         actor->SetActorHiddenInGame(hidden);
         actor->SetActorEnableCollision(collision);
         if (actor->GetActorEnableCollision() != collision || !boolean(actor, STR("bHidden"), hidden)) return false;
+        if (!claimed && scope.restore_simulation)
+        {
+            if (!set_loose_simulation(scope, true)) return false;
+            scope.restore_simulation = false;
+        }
         scope.claimed = claimed;
         if (claimed) scope.observed = {};
         return true;
@@ -921,6 +975,7 @@ namespace
             restore_loose_location(scope, actor);
             actor->SetActorHiddenInGame(scope.original_hidden);
             actor->SetActorEnableCollision(scope.original_collision);
+            if (scope.restore_simulation) set_loose_simulation(scope, true);
         }
         if (fixture_scope == &scope) fixture_scope = nullptr;
         scope = {};
@@ -1984,6 +2039,7 @@ namespace
             loose_host = host;
             loose_rescan = {};
         }
+        std::string carry_paths;
         const auto now = Clock::now();
         if (now >= loose_rescan)
         {
@@ -1999,7 +2055,8 @@ namespace
                     !actor->HasAnyFlags(U::RF_WasLoaded) || !boolean(actor, STR("bActorIsBeingDestroyed"), false))
                     continue;
                 auto* box = source_box(actor);
-                if (!box || !actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false))
+                if (!box || ((!actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false)) &&
+                             (host || !remotely_hidden_loose(actor))))
                     continue;
                 const auto path = actor->GetPathName();
                 const auto class_path = actor->GetClassPrivate()->GetPathName();
@@ -2007,6 +2064,11 @@ namespace
                     continue;
                 const bool cash = silverfish::stock_cash::is_family(actor->GetClassPrivate());
                 if (generic_payload_fault(actor, cash)) continue;
+                if (host && !cash && carryable_placed_item(actor))
+                {
+                    carry_paths += RC::to_utf8_string(path);
+                    carry_paths += '\n';
+                }
                 auto [entry, inserted] = loose_sources.try_emplace(RC::to_utf8_string(path));
                 if (!inserted && entry->second.scope.actor.Get() == actor)
                     continue;
@@ -2022,17 +2084,21 @@ namespace
         }
 
         lua.set_integer(static_cast<std::int64_t>(loose_sources.size()));
-        return 1;
+        lua.set_string(carry_paths);
+        return 2;
     }
 
     int describe_loose(const Lua& lua)
     {
-        if (!ready() || lua.get_stack_size() != 1) return 0;
+        const auto arguments = lua.get_stack_size();
+        if (!ready() || (arguments != 1 && (arguments != 2 || !lua.is_bool(2)))) return 0;
+        const bool projecting_hidden = arguments == 2 && lua.get_bool(2);
         auto* scope = select_source(lua);
         if (!scope || !scope->profile || !scope->profile->discovered || !local_scope(*scope)) return 0;
         auto* actor = scope->actor.Get();
         auto* mode = loose_respawn_mode(actor);
-        if (!mode || (!scope->claimed && !available(*scope))) return 0;
+        if (!mode || (!scope->claimed && !available(*scope) &&
+                      (!projecting_hidden || scope->host || !remotely_hidden_loose(actor)))) return 0;
         lua.set_string(RC::to_utf8_string(scope->profile->item_class));
         lua.set_integer(mode->GetPropertyValueInContainer(actor));
         lua.set_bool(scope->claimed);
@@ -2093,7 +2159,10 @@ namespace
             auto* mode = loose_respawn_mode(actor);
             if (!mode) continue;
             if (remaining-- == 0) break;
-            if (!scope->claimed && !available(*scope)) continue;
+            // Unreal can deliver the host's hidden flag ahead of the pickup ledger.
+            // Keep the registered replica eligible for the local visibility update.
+            const bool awaiting_claim = !scope->host && remotely_hidden_loose(actor);
+            if (!scope->claimed && !available(*scope) && !awaiting_claim) continue;
             rows += std::format("{}|{}|{}|{}|{:.3f}|{:.3f}|{:.3f}\n", scope->profile->source,
                 RC::to_utf8_string(scope->profile->item_class), mode->GetPropertyValueInContainer(actor),
                 scope->claimed ? "claimed" : "available", at.GetX(), at.GetY(), at.GetZ());

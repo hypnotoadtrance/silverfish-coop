@@ -1,18 +1,22 @@
 local carry = {}
 local corpses = require("native_corpse_view")
 local guest_save = require("guest_save")
+local observers = require("native_observer_target")
 local players = require("players")
+local loot = require("native_guest_drop_projection")
 
 local prop_path = "/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C"
+local item_path = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
 local core_path = "/Game/Classes/Actors/MindCore_BP.MindCore_BP_C"
 local grab_path = "/Game/Classes/Player/Player_FP.Player_FP_C:Grab_Release_Object"
 local color = {R = 0, G = 0, B = 0, A = 0}
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local world, state, phase, hook, mailbox, sequence, next_read
 local enrolled, holdings, edges, local_hold, latest = {}, {}, {}, nil, nil
-local fixture_actor
+local fixture_actor, loose_fixtures = nil, {}
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local fixtures = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local offering_fixture = headless and observers.enabled and os.getenv("SILVERFISH_COOP_OBSERVER_THROW_FIXTURE") == "1"
 
 local function valid(value) return value and value ~= false and value:IsValid() end
 local function same(left, right) return valid(left) and valid(right) and left:GetAddress() == right:GetAddress() end
@@ -31,10 +35,29 @@ local function actor_class(actor)
     return actor:GetClass():GetFullName():match("^%S+ (/Game/[%w_./%-]+)$")
 end
 
+local function item_box(actor)
+    if not valid(actor) or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return end
+    local base = StaticFindObject(item_path)
+    if not valid(base) or not actor:IsA(base) then return end
+    local box = actor.Box
+    if same(box, actor.RootComponent) and same(box:GetOwner(), actor) then return box end
+end
+
+local function placed_item(actor)
+    return actor.Physics == true and actor.bNetLoadOnClient == true and actor:HasAnyFlags(EObjectFlags.RF_WasLoaded)
+        and same(actor:GetOuter(), world.PersistentLevel)
+end
+
+local function item_body(actor)
+    local box = item_box(actor)
+    if box and actor.bReplicateMovement == true and (placed_item(actor) or offering_fixture) then return box end
+    if box and actor.Physics == true then return loot.carry_body(actor) end
+end
+
 local function mesh(actor)
     local base = StaticFindObject(prop_path)
     if not valid(base) or not valid(actor) or not actor:IsA(base) or actor_class(actor) == core_path
-        or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return end
+        or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return item_body(actor) end
     local root = actor.PropMesh
     if same(root, actor.RootComponent) and same(root:GetOwner(), actor) then return root end
 end
@@ -45,10 +68,12 @@ local function handle(pawn)
 end
 
 local function held(pawn, actor, grip, corpse)
-    local part = corpse and corpse.part or mesh(actor)
+    local item = not corpse and item_body(actor)
+    local part = corpse and corpse.part or item or mesh(actor)
     return valid(pawn) and valid(actor) and not actor:IsActorBeingDestroyed()
         and valid(part) and valid(grip) and same(grip:GetGrabbedComponent(), part) and same(pawn.HeldObject, actor)
-        and (corpse and actor.Alive == false or not corpse and actor.BeingHeld == true and same(actor["Holding Actor"], pawn))
+        and (corpse and actor.Alive == false
+            or not corpse and (item ~= nil or actor.BeingHeld == true and same(actor["Holding Actor"], pawn)))
 end
 
 local function bone_name(value)
@@ -81,13 +106,19 @@ local function stock_target(pawn)
         {Pitch = 0, Yaw = rotation.Yaw, Roll = 0}
 end
 
-local function emit(pawn, kind, class, position, pitch, yaw, corpse)
+local function emit(pawn, kind, class, position, pitch, yaw, corpse, placement, loot_id)
     if not point(position) or not class or not pitch or not yaw then return end
     sequence = (sequence or 0) + 1
     edges[#edges + 1] = {sequence, pawn:GetFullName(), kind, class, position.X, position.Y, position.Z, pitch, yaw}
     if corpse then
         local edge = edges[#edges]
         edge[#edge + 1], edge[#edge + 2] = corpse.number, corpse.name
+    elseif placement then
+        local edge = edges[#edges]
+        edge[#edge + 1] = placement
+    elseif loot_id then
+        local edge = edges[#edges]
+        edge[#edge + 1] = "loot:" .. loot_id
     end
     if #edges > 6 then table.remove(edges, 1) end
     return sequence
@@ -99,11 +130,12 @@ local function observe(pawn, throwing, dropping)
         -- Stock props mark themselves as held; the dead NPC Blueprint does not.
         -- Discard a competing local grip before the next physics step.
         for _, entry in pairs(holdings) do
-            if entry.corpse and same(pawn.HeldObject, entry.actor) then
+            if (entry.corpse or item_body(entry.actor)) and same(pawn.HeldObject, entry.actor) then
                 pawn:Grab_Release_Object(false, true, false)
                 return
             end
         end
+        if valid(pawn.HeldObject) then loot.start_carry(pawn, pawn.HeldObject) end
     end
     if phase ~= "connected" or not state.listening or state.server ~= true or not same(pawn, local_pawn)
         or not pawn:IsLocallyControlled() or pawn:HasAuthority() or pawn.Dead ~= false then return end
@@ -112,9 +144,12 @@ local function observe(pawn, throwing, dropping)
         local pitch, yaw = camera_aim(pawn)
         emit(pawn, throwing and "throw" or "drop", local_hold.class,
             pawn:K2_GetActorLocation(), pitch, yaw)
+        if local_hold.loot_id then loot.stop_carry(pawn, local_hold.actor) end
         local_hold = nil
     end
-    if local_hold or not valid(actor) or actor:HasAuthority() then return end
+    if local_hold or not valid(actor) then return end
+    local loot_id = actor:HasAuthority() and loot.start_carry(pawn, actor) or nil
+    if not loot_id and actor:HasAuthority() then return end
     local number, part = corpses.binding(actor, true)
     local corpse
     if number then
@@ -123,12 +158,16 @@ local function observe(pawn, throwing, dropping)
         if not name or part:GetBoneIndex(bone) < 0 or not part:IsSimulatingPhysics(bone) then return end
         corpse = {number = number, part = part, name = name, bone = bone}
     end
-    if not held(pawn, actor, grip, corpse) or not corpse and actor.bReplicateMovement ~= true then return end
+    if not held(pawn, actor, grip, corpse) or not loot_id and not corpse and actor.bReplicateMovement ~= true then return end
     -- The stock call has bound the grip and the physics step has yet to move its root.
     local class, pitch, yaw = actor_class(actor), camera_aim(pawn)
     local position = corpse and part:GetSocketLocation(corpse.bone) or actor:K2_GetActorLocation()
-    local birth = emit(pawn, "grab", class, position, pitch, yaw, corpse)
-    if birth then local_hold = {actor = actor, pawn = pawn, class = class, serial = birth, corpse = corpse} end
+    local placement
+    if not corpse and actor:HasAnyFlags(EObjectFlags.RF_WasLoaded) and same(actor:GetOuter(), world.PersistentLevel) then
+        placement = actor:GetFullName():match("^%S+ (/Game/Classes/Maps/[%w_/]+%.[%w_]+:PersistentLevel%.[%w_]+)$")
+    end
+    local birth = emit(pawn, "grab", class, position, pitch, yaw, corpse, placement, loot_id)
+    if birth then local_hold = {actor = actor, pawn = pawn, class = class, serial = birth, corpse = corpse, loot_id = loot_id} end
 end
 
 function carry.enroll(actor)
@@ -137,7 +176,36 @@ function carry.enroll(actor)
     return true
 end
 
-local function trace(pawn, pitch, yaw, number, expected_bone, claimed)
+function carry.enroll_loose(actor)
+    local box = phase == "hosting" and item_box(actor)
+    if not box or not placed_item(actor) or not actor:HasAuthority()
+        or not box:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)) then return end
+    if same(actor, enrolled[actor:GetAddress()]) then return true end
+    actor.NetUpdateFrequency = math.min(actor.NetUpdateFrequency, 15)
+    if not actor.bReplicates then actor:SetReplicates(true) end
+    if not actor.bReplicateMovement then actor:SetReplicateMovement(true) end
+    actor:ForceNetUpdate()
+    if not carry.enroll(actor) then return end
+    if fixtures then
+        local mass, class = box:GetMass(), actor_class(actor)
+        if class and mass > 0 and mass <= 10000 then
+            loose_fixtures[actor:GetAddress()] = {actor = actor, name = actor:GetFullName(), class = class, mass = mass}
+        end
+    end
+    return true
+end
+
+function carry.item_is_held(actor)
+    if not item_body(actor) then return false end
+    local pawn = state and state.local_pawn and state.local_pawn.pawn
+    if valid(pawn) and same(pawn.HeldObject, actor) then return true end
+    for _, entry in pairs(holdings) do
+        if same(entry.actor, actor) then return true end
+    end
+    return false
+end
+
+local function trace(pawn, pitch, yaw, number, expected_bone, claimed, expected_class, placement)
     local trace_api = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local camera = pawn.Camera
     local origin = valid(camera) and camera:K2_GetComponentLocation()
@@ -149,18 +217,41 @@ local function trace(pawn, pitch, yaw, number, expected_bone, claimed)
     local function along(distance)
         return {X = origin.X + ray.X * distance, Y = origin.Y + ray.Y * distance, Z = origin.Z + ray.Z * distance}
     end
-    local function impact(target)
+    local function impact(target, channel)
         local hit = {}
-        if trace_api:LineTraceSingle(pawn, origin, target, 1, true, {pawn}, 0, hit, true, color, color, 0) then
+        if trace_api:LineTraceSingle(pawn, origin, target, channel or 1, channel ~= 4, {pawn}, 0, hit, true, color, color, 0) then
             hit = hit.OutHit or hit
             return hit.Component and hit.Component:Get(), hit.ImpactPoint
         end
     end
     if not number then
+        local selected = placement and StaticFindObject(placement)
         local part, collision = impact(along(range))
         local actor = valid(part) and part:GetOwner()
-        if valid(actor) and same(actor, enrolled[actor:GetAddress()]) and same(part, mesh(actor)) and point(collision) then
+        if valid(actor) and (not placement or same(actor, selected))
+            and same(actor, enrolled[actor:GetAddress()]) and same(part, mesh(actor)) and point(collision) then
             return actor, math.sqrt(dist2(origin, collision))
+        end
+        if expected_class and expected_class:match("^/Game/Classes/") and point(claimed) then
+            local matched, center
+            for _, candidate in pairs(enrolled) do
+                if (not placement or same(candidate, selected)) and item_body(candidate) and actor_class(candidate) == expected_class then
+                    local at = candidate:K2_GetActorLocation()
+                    if point(at) and dist2(at, claimed) <= 35^2 then
+                        if matched then return nil, "ambiguous loose item" end
+                        matched, center = candidate, at
+                    end
+                end
+            end
+            if matched and dist2(origin, center) < range^2 and not impact(center, 1) then
+                -- A remote pawn's camera is evaluated on a different frame. Verify
+                -- the matching item's native interaction component from the current eye.
+                local box, item_impact = impact(center, 4)
+                if same(box, item_body(matched)) and point(item_impact) then
+                    return matched, math.sqrt(dist2(origin, item_impact))
+                end
+            end
+            return nil, "loose item interaction unavailable"
         end
         return
     end
@@ -195,6 +286,8 @@ local function stock(pawn, kind, actor, range, pitch, yaw, corpse)
     if not valid(camera) or not pose(camera.RelativeRotation) then return false end
     local previous_angle = copy_rot(camera.RelativeRotation)
     local previous_actor, previous_distance = pawn.ActorBeingLookedAt, pawn.ActorLookedAt_Distance
+    local pickup_body = kind == "grab" and item_body(actor)
+    local previous_component = pickup_body and pawn.InteractionTarget_Component
     local previous_bone, previous_point
     if corpse then
         previous_bone, previous_point = pawn["Hit Bone Name"], pawn["WhereI'mLooking"]
@@ -203,13 +296,18 @@ local function stock(pawn, kind, actor, range, pitch, yaw, corpse)
     local invoked = pcall(function()
         camera:K2_SetWorldRotation({Pitch = pitch, Yaw = yaw, Roll = 0}, false, {}, true)
         if kind == "grab" then pawn.ActorBeingLookedAt, pawn.ActorLookedAt_Distance = actor, range end
+        if pickup_body then pawn.InteractionTarget_Component = pickup_body end
         if corpse then pawn["Hit Bone Name"], pawn["WhereI'mLooking"] = corpse.bone, corpse.location end
-        pawn:Grab_Release_Object(kind == "throw", kind == "drop", false)
+        pawn:Grab_Release_Object(kind == "throw", kind == "drop", pickup_body and true or false)
+        if kind == "throw" and item_body(actor) and not loot.carry_body(actor) and not same(pawn.HeldObject, actor) then
+            observers.catch_offering(state, pawn, actor, camera:GetForwardVector())
+        end
     end)
     local restored = pcall(function()
         camera:K2_SetRelativeRotation(previous_angle, false, {}, true)
         pawn.ActorBeingLookedAt = valid(previous_actor) and previous_actor or nil
         pawn.ActorLookedAt_Distance = previous_distance
+        if pickup_body then pawn.InteractionTarget_Component = valid(previous_component) and previous_component or nil end
         if corpse then pawn["Hit Bone Name"], pawn["WhereI'mLooking"] = previous_bone, previous_point end
     end)
     return invoked and restored
@@ -218,17 +316,18 @@ end
 local function remove(entry, kind, pitch, yaw)
     local pawn, actor, grip = entry.pawn, entry.actor, entry.grip
     if held(pawn, actor, grip, entry.corpse) then stock(pawn, kind, actor, 0, pitch, yaw) end
-    if entry.corpse and not valid(pawn) and valid(grip) and same(grip:GetGrabbedComponent(), entry.corpse.part) then
+    local part = entry.corpse and entry.corpse.part or mesh(actor)
+    if not valid(pawn) and valid(grip) and same(grip:GetGrabbedComponent(), part) then
         grip:ReleaseComponent()
     end
-    if not entry.corpse and not valid(pawn) and mesh(actor) and actor:HasAuthority() and actor.BeingHeld == true
+    if not entry.corpse and not item_body(actor) and not valid(pawn) and mesh(actor) and actor:HasAuthority() and actor.BeingHeld == true
         and not valid(actor["Holding Actor"]) then
         actor:PickUp_Object(false, nil)
         if actor.BeingHeld ~= false then return false end
     end
-    if valid(grip) and same(grip:GetGrabbedComponent(), entry.corpse and entry.corpse.part or mesh(actor)) then return false end
+    if valid(grip) and same(grip:GetGrabbedComponent(), part) then return false end
     if valid(pawn) and same(pawn.HeldObject, actor) then return false end
-    if not entry.corpse and valid(actor) and same(actor["Holding Actor"], pawn) then return false end
+    if not entry.corpse and not item_body(actor) and valid(actor) and same(actor["Holding Actor"], pawn) then return false end
     holdings[entry.lease] = nil
     if valid(actor) then actor:ForceNetUpdate() end
     return true
@@ -248,6 +347,7 @@ local function fixture(fields, current, seat)
     end
     if seat == "hosting" and mode == "select" and #fields == 4 and not valid(fixture_actor) then
         local actor = StaticFindObject(fields[4])
+        if item_body(actor) and valid(actor.Instigator) and guest_save.matches(actor.Instigator) then carry.enroll(actor) end
         if not mesh(actor) or not same(actor, enrolled[actor:GetAddress()]) then
             error("native_prop_carry_fixture_authored_prop_unavailable", 0)
         end
@@ -336,6 +436,7 @@ local function fixture(fields, current, seat)
         api:GetAllActorsOfClass(world, class, output)
         local candidates = output.OutActors or output
         local expected = (mode == "pickup" or mode == "grab") and math.tointeger(fields[5])
+        local selected = expected and fields[6] or fields[5]
         if expected and #candidates ~= expected then
             error("native_prop_carry_fixture_actor_count:" .. #candidates .. ":" .. expected, 0)
         end
@@ -343,7 +444,7 @@ local function fixture(fields, current, seat)
         for _, candidate in ipairs(candidates) do
             if candidate and type(candidate.type) == "function" and candidate:type() == "RemoteUnrealParam" then candidate = candidate:get() end
             if mesh(candidate) and candidate.bReplicateMovement == true
-                and (not expected or candidate:GetFullName() == fields[6]) then
+                and (not selected or candidate:GetFullName() == selected) then
                 local distance = dist2(origin, candidate:K2_GetActorLocation())
                 if distance < best then best, picked = distance, candidate end
             end
@@ -372,13 +473,26 @@ local function fixture(fields, current, seat)
             return "normal stock Interact submitted the lantern action"
         end
         aim(picked:K2_GetActorLocation())
-        if not same(pawn.ActorBeingLookedAt, picked) then
+        local item = item_body(picked)
+        if not (item and mode == "pickup") and not same(pawn.ActorBeingLookedAt, picked) then
             local target = pawn.ActorBeingLookedAt
             error("native_prop_carry_fixture_focus:" .. (valid(target) and target:GetFullName() or "none"), 0)
         end
         local reason = "stock_pickup_function"
         if mode == "pickup" then
-            pawn:Grab_Release_Object(false, false, true)
+            local distance = pawn.ActorLookedAt_Distance
+            local component = item and pawn.InteractionTarget_Component
+            if item then
+                -- The fixture supplies the selected actor's focus while it is staged in midair.
+                pawn.InteractionTarget_Component = item
+                pawn.ActorLookedAt_Distance = math.sqrt(dist2(pawn.Camera:K2_GetComponentLocation(), item:K2_GetComponentLocation()))
+            end
+            local invoked = pcall(pawn.Grab_Release_Object, pawn, false, false, true)
+            if item then
+                pawn.InteractionTarget_Component = valid(component) and component or nil
+                pawn.ActorLookedAt_Distance = distance
+            end
+            if not invoked then error("native_prop_carry_fixture_stock_pickup_unavailable", 0) end
         else
             local _, status = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
             reason = status
@@ -394,6 +508,12 @@ local function fixture(fields, current, seat)
             pawn:K2_SetActorRotation({Pitch = 0, Yaw = angle.Yaw, Roll = 0}, true)
             pawn.Camera:K2_SetWorldRotation(angle, false, {}, true)
         else
+            if mode == "throw" and fields[4] == "up" then
+                local angle = copy_rot(pawn.Controller:GetControlRotation())
+                angle.Pitch = 26
+                pawn.Controller:SetControlRotation(angle)
+                pawn.Camera:K2_SetWorldRotation(angle, false, {}, true)
+            end
             pawn:Grab_Release_Object(mode == "throw", mode == "drop", false)
         end
         return "stock prop carry fixture dispatched"
@@ -406,13 +526,14 @@ function carry.command(fields, current, seat)
     if fields[2] == "native-prop-carry-refuse" and enabled and seat == "connected" and current.server
         and same(world, current.world) and #fields == 3 then
         local pawn = current.local_pawn and current.local_pawn.pawn
-        if local_hold and local_hold.corpse and math.tointeger(fields[3]) == local_hold.serial
+        if local_hold and math.tointeger(fields[3]) == local_hold.serial
             and same(pawn, local_hold.pawn) and pawn:IsLocallyControlled() and not pawn:HasAuthority() then
             local refused = local_hold
             local_hold = nil
             if held(pawn, refused.actor, handle(pawn), refused.corpse) then pawn:Grab_Release_Object(false, true, false) end
+            if refused.loot_id then loot.stop_carry(pawn, refused.actor) end
         end
-        return "stale corpse grip cleared"
+        return "stale stock grip cleared"
     end
     if fields[2] ~= "native-prop-carry" then return end
     local lease, name, kind, serial = fields[3], fields[4], fields[5], math.tointeger(fields[6])
@@ -426,22 +547,38 @@ function carry.command(fields, current, seat)
         error("native_prop_carry_guest_unavailable", 0)
     end
     local entry = holdings[lease]
-    if kind == "grab" and (#fields == 12 or #fields == 14) then
+    if kind == "grab" and (#fields == 12 or #fields == 13 or #fields == 14) then
         local position = {X = tonumber(fields[10]), Y = tonumber(fields[11]), Z = tonumber(fields[12])}
-        local number = math.tointeger(fields[13])
+        local number = #fields == 14 and math.tointeger(fields[13]) or nil
+        local placement = #fields == 13 and fields[13] or nil
+        local loot_id = placement and placement:match("^loot:([0-9a-f]+)$")
         if #fields == 14 and (not number or number < 1 or number > 65535) then
             error("native_prop_carry_stock_target_unavailable", 0)
         end
-        local actor, distance, corpse = trace(pawn, pitch, yaw, number, fields[14], position)
+        local actor, distance, corpse
+        if loot_id then
+            actor = guid(loot_id) and loot.carry_actor(loot_id)
+            local center = valid(actor) and actor:K2_GetActorLocation()
+            local eye = valid(pawn.Camera) and pawn.Camera:K2_GetComponentLocation()
+            if point(center) and point(eye) and point(position) and dist2(center, position) <= 35^2
+                and loot.authority_sight(current, seat, pawn, loot_id, center) then
+                distance = math.sqrt(dist2(center, eye))
+            else
+                actor = nil
+            end
+        else
+            actor, distance, corpse = trace(pawn, pitch, yaw, number, fields[14], position, fields[9], placement)
+        end
         local grip = handle(pawn)
         if entry or not actor or not point(position) or actor_class(actor) ~= fields[9]
             or not valid(grip) or valid(pawn.HeldObject) or valid(grip:GetGrabbedComponent()) then
-            if fixtures and number then
+            if fixtures and (number or offering_fixture) then
                 error("native_prop_carry_stock_target_unavailable:" .. (not actor and tostring(distance) or "grip or class"), 0)
             end
             error("native_prop_carry_stock_target_unavailable", 0)
         end
-        if corpse then
+        local item = loot_id and item_box(actor) or item_body(actor)
+        if corpse or item then
             local host = current.local_pawn and current.local_pawn.pawn
             if valid(host) and same(host.HeldObject, actor) then
                 if fixtures then error("native_prop_carry_stock_target_unavailable:host grip", 0) end
@@ -450,15 +587,23 @@ function carry.command(fields, current, seat)
             for _, holder in pairs(holdings) do
                 if same(holder.actor, actor) then error("native_prop_carry_wrong_holder", 0) end
             end
-        elseif dist2(position, actor:K2_GetActorLocation()) > 35^2 or actor.BeingHeld ~= false then
+        end
+        if not corpse and (dist2(position, actor:K2_GetActorLocation()) > 35^2
+            or not item and actor.BeingHeld ~= false) then
+            if fixtures and item then
+                error(("native_prop_carry_stock_target_unavailable: item moved %.1f cm"):format(
+                    math.sqrt(dist2(position, actor:K2_GetActorLocation()))), 0)
+            end
             error("native_prop_carry_stock_target_unavailable", 0)
         end
+        if loot_id and not loot.arm_carry(pawn, actor) then error("native_prop_carry_wrong_holder", 0) end
         if not stock(pawn, kind, actor, distance, pitch, yaw, corpse) or not held(pawn, actor, grip, corpse) then
             if same(pawn.HeldObject, actor) then stock(pawn, "drop", actor, 0, pitch, yaw) end
+            if loot_id then loot.stop_carry(pawn, actor) end
             error("native_prop_carry_stock_grab_unverified", 0)
         end
-        entry = {lease = lease, pawn = pawn, actor = actor, grip = grip, serial = serial, deadline = os.clock() + 1.5,
-            corpse = corpse}
+        entry = {lease = lease, pawn = pawn, actor = actor, actor_name = actor:GetFullName(), grip = grip,
+            serial = serial, deadline = os.clock() + 1.5, corpse = corpse, loot_id = loot_id}
         holdings[lease] = entry
     elseif (kind == "drop" or kind == "throw") and #fields == 8 and entry and same(pawn, entry.pawn)
         and serial > entry.serial then
@@ -466,8 +611,9 @@ function carry.command(fields, current, seat)
     else
         error("native_prop_carry_wrong_holder", 0)
     end
-    latest = {lease, serial, kind, name, entry.actor:GetFullName()}
+    latest = {lease, serial, kind, name, entry.actor_name}
     if entry.corpse then latest[6], latest[7] = entry.corpse.number, entry.corpse.name end
+    if entry.loot_id then latest[6] = "loot:" .. entry.loot_id end
     return "stock physics prop action verified"
 end
 
@@ -506,19 +652,29 @@ end
 function carry.rows(current, seat, row)
     local rows = {}
     if not enabled or not same(world, current.world) then return rows end
-    if seat == "hosting" and fixtures and mesh(fixture_actor) then
+    if seat == "hosting" and fixtures then
+        for address, entry in pairs(loose_fixtures) do
+            if same(enrolled[address], entry.actor) and not entry.actor:IsActorBeingDestroyed() then
+                rows[#rows + 1] = row("native-authored-physics-prop", current.map, entry.name, entry.class, entry.mass)
+            end
+        end
+    end
+    local fixture_mesh = seat == "hosting" and fixtures and mesh(fixture_actor)
+    if fixture_mesh then
         local position = fixture_actor:K2_GetActorLocation()
-        local velocity = fixture_actor.PropMesh:GetPhysicsLinearVelocity(FName("None", EFindName.FNAME_Find))
-        local grip = {}
+        local velocity = fixture_mesh:GetPhysicsLinearVelocity(FName("None", EFindName.FNAME_Find))
+        local item = item_body(fixture_actor)
+        local grip, carrying = {}, not item and fixture_actor.BeingHeld == true
         for _, entry in pairs(holdings) do
-            if same(entry.actor, fixture_actor) and entry.target then
-                grip = {entry.sample, entry.target.X, entry.target.Y, entry.target.Z}
+            if same(entry.actor, fixture_actor) then
+                if item then carrying = held(entry.pawn, fixture_actor, entry.grip, entry.corpse) end
+                if entry.target then grip = {entry.sample, entry.target.X, entry.target.Y, entry.target.Z} end
                 break
             end
         end
         rows[#rows + 1] = row("native-prop-carry-fixture", current.map, actor_class(fixture_actor),
             fixture_actor:GetFullName(), position.X, position.Y, position.Z, velocity.X, velocity.Y, velocity.Z,
-            fixture_actor.BeingHeld == true and 1 or 0, table.unpack(grip))
+            carrying and 1 or 0, table.unpack(grip))
     end
     if seat == "hosting" and latest then rows[#rows + 1] = row("native-prop-carry", current.map, table.unpack(latest)) end
     if seat ~= "connected" then return rows end
@@ -537,7 +693,7 @@ function carry.sync(current, seat, bridge)
     if not enabled then return end
     if not same(world, current.world) then
         world, enrolled, holdings, edges, local_hold, latest = current.world, {}, {}, {}, nil, nil
-        fixture_actor, next_read = nil, nil
+        fixture_actor, loose_fixtures, next_read = nil, {}, nil
     end
     state, phase, mailbox = current, seat, bridge and bridge .. "/native-prop-carry-poses"
     if not hook and type(RegisterHook) == "function" and valid(StaticFindObject(grab_path)) then

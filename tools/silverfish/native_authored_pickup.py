@@ -105,6 +105,7 @@ MAP_SOURCES: dict[str, list[str]] = {}
 for source, (area, _, _) in SOURCES.items():
     MAP_SOURCES.setdefault(area, []).append(source)
 ACTION = "native-authored-pickup-claim"
+MEMORY_CAPABILITY = "native_authored_pickup_memory"
 STATE_KEY = "native_authored_pickups"
 SOURCES_KEY = "native_authored_pickup_sources"
 INTERACTIONS_KEY = "native_authored_pickup_interactions"
@@ -325,7 +326,14 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
     pawn = _current_pawn(host, character)
     if not pawn:
         raise party.RuleError("native_authored_pickup_owner_unavailable")
-    await host.checkpoint_native(bridge)
+    defer_save = host.last_game.get(MEMORY_CAPABILITY) is True
+    if defer_save and character != "host":
+        from .native_inventory import retain_guest_save
+
+        if not await retain_guest_save(host, bridge, character, pawn):
+            raise party.RuleError("native_guest_save_retention_unavailable")
+    if not defer_save:
+        await host.checkpoint_native(bridge)
     if bound_epoch:
         if epoch != host.zone_epoch or host.transitioning or host.stopping or host.native_checkpoint_unsafe or (
                 host.last_game.get("state"), host.last_game.get("map")) != ("hosting", area):
@@ -351,6 +359,8 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
         if not report["ok"] and not report["applied"]:
             host.native_checkpoint_unsafe = False
             raise party.RuleError(report["status"])
+        if defer_save and report.get("memory") is not True:
+            raise RuntimeError("The authored pickup did not verify its in-memory transaction")
         credit = snapshot.get(CASH_KEY)
         if is_cash:
             if (not isinstance(credit, dict) or not _matches_cash(report, credit)
@@ -374,7 +384,7 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
                 raise RuntimeError("The authored supply merge did not verify its stock stack and quantity")
         elif merge is not None:
             raise RuntimeError("The authored pickup append reported an unexpected stack merge")
-        if not is_cash:
+        if not is_cash and not defer_save:
             await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True)
         host.last_game, host.last_seen = snapshot, time.monotonic()
         row = {"source": target, "map": area, "actor": actor, "class_path": item_class, "owner": character}
@@ -397,7 +407,11 @@ async def claim(host, bridge, character: str, target: str | None, operation_id: 
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation_id, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
+        revision = None
+        if defer_save:
+            host.pending_host_save = bool(host.pending_host_save or character == "host" and not is_cash)
+        else:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
     except (OSError, RuntimeError, ValueError, KeyError):
         if host.native_checkpoint_unsafe:
             host.stopping = True

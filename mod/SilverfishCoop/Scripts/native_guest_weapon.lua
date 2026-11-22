@@ -13,6 +13,11 @@ local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local blowtorch_path = "/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"
 local crowbar_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C"
 local pry_tool_paths = {blowtorch = blowtorch_path, crowbar = crowbar_path}
+local flare_fixture_paths = {
+    ["stock-flare"] = "/Game/Classes/Equipment/Eqp_Flare.Eqp_Flare_C",
+    ["stock-flare-blue"] = "/Game/Classes/Equipment/Eqp_Flare_Blue.Eqp_Flare_Blue_C",
+    ["stock-flare-yellow"] = "/Game/Classes/Equipment/Eqp_Flare_Yellow.Eqp_Flare_Yellow_C",
+}
 local old_pipe_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local observation
@@ -78,8 +83,7 @@ function guest_weapon.command(fields, state, phase)
     local fixture = action == "seed" or action == "seed-ammo"
     local fixture_kind = fields[5] == "smg-standard-full" and "smg-standard" or fields[5]
     local seed_profile = action == "seed" and #fields == 5 and fixtures and headless
-        and (pry_tool_paths[fixture_kind] or weapon_profiles.seeds[fixture_kind]
-            or fixture_kind == "stock-flare" and "/Game/Classes/Equipment/Eqp_Flare.Eqp_Flare_C")
+        and (pry_tool_paths[fixture_kind] or weapon_profiles.seeds[fixture_kind] or flare_fixture_paths[fixture_kind])
     local equipped_target = action == "reload" and guid == "equipped"
     observation = nil
     if not enabled or (#fields ~= 4 and not seed_profile) or phase ~= "hosting"

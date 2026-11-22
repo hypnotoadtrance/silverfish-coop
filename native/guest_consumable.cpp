@@ -1,5 +1,8 @@
 #include "guest_consumable.hpp"
+#include "enemy_loot.hpp"
+#include "guest_meal_profiles.hpp"
 #include "guest_regen.hpp"
+#include "guest_sickness.hpp"
 #include "loot_escrow.hpp"
 
 #include <algorithm>
@@ -40,35 +43,18 @@ namespace
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
-    constexpr auto character_path = STR("/Game/Classes/Libraries/Structs/PlayerCharacter_Struct.PlayerCharacter_Struct");
     constexpr auto item_base_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto health_item_path = STR("/Game/Classes/Items/HealthItem_Master_BP.HealthItem_Master_BP_C");
     constexpr auto bandage_path = STR("/Game/Classes/Items/Item_Bandage.Item_Bandage_C");
-    constexpr auto mre_path = STR("/Game/Classes/Items/Item_MRE.Item_MRE_C");
-    constexpr auto canned_peaches_path = STR("/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C");
-    constexpr auto canned_beans_path = STR("/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C");
-    constexpr auto brown_mushroom_path = STR("/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C");
     constexpr auto starter_bag_path = STR("/Game/Classes/Items/Random_GearBag_Starter.Random_GearBag_Starter_C");
     constexpr auto hyper_bag_path = STR("/Game/Classes/Items/HyperRandom_GearBag_Starter.HyperRandom_GearBag_Starter_C");
-    constexpr auto gain_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:GainHealth");
     constexpr auto boost_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:GiveRegenBoost");
     constexpr auto intox_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Apply_PlayerIntox");
     constexpr std::array guid_component{STR("A"), STR("B"), STR("C"), STR("D")};
     constexpr int max_clients = 4;
     constexpr int max_inventory = 4096;
-    constexpr int max_effects = 256;
-    struct Consumable
-    {
-        const Unreal::TCHAR* path;
-        int value;
-        double weight, regen_gain, food;
-        bool can_cook{};
-    };
+    using silverfish::native_guest_consumable::Consumable;
     constexpr Consumable bandage{bandage_path, 15, 0.05, 45.0, 0.0};
-    constexpr Consumable mre{mre_path, 25, 0.65, 10.0, 30.0};
-    constexpr Consumable canned_peaches{canned_peaches_path, 8, 0.4, 0.0, 12.0};
-    constexpr Consumable canned_beans{canned_beans_path, 14, 0.4, 0.0, 14.0, true};
-    constexpr Consumable brown_mushroom{brown_mushroom_path, 1, 0.05, 0.0, 3.5, true};
 
     bool opt_in(const char* name)
     {
@@ -297,39 +283,6 @@ namespace
             return result;
         }
 
-        bool has_no_gear_effect(const void* row) const
-        {
-            auto* item = read_class(row);
-            if (!item) return true;
-            auto* item_type = Unreal::Cast<Unreal::UClass>(item);
-            if (!live(item_type) || !item_type->IsChildOf(item_base)) return false;
-            auto* defaults = item_type->GetClassDefaultObject().Get();
-            auto* passives = field<Unreal::FArrayProperty>(defaults, STR("PassiveEffects"));
-            if (!defaults || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
-                defaults->GetClassPrivate() != item_type || !passives ||
-                !Unreal::CastField<Unreal::FStrProperty>(passives->GetInner())) return false;
-            Unreal::FScriptArrayHelper entries(passives, passives->ContainerPtrToValuePtr<void>(defaults));
-            return entries.Num() == 0;
-        }
-
-        bool read_hemophilia(const void* row, const Unreal::FName& trait, bool& present) const
-        {
-            auto* item = Unreal::Cast<Unreal::UClass>(read_class(row));
-            if (!item) return true;
-            auto* defaults = item->GetClassDefaultObject().Get();
-            auto* passives = field<Unreal::FArrayProperty>(defaults, STR("PassiveEffects"));
-            auto* passive = passives ? Unreal::CastField<Unreal::FStrProperty>(passives->GetInner()) : nullptr;
-            if (!defaults || !item->IsChildOf(item_base) || !passive || passive->GetOffset_Internal() != 0) return false;
-            Unreal::FScriptArrayHelper entries(passives, passives->ContainerPtrToValuePtr<void>(defaults));
-            if (entries.Num() < 0 || entries.Num() > max_effects) return false;
-            for (int index = 0; index < entries.Num(); ++index)
-            {
-                const auto& text = *passive->ContainerPtrToValuePtr<Unreal::FString>(entries.GetRawPtr(index));
-                if (Unreal::FName{*text, Unreal::FNAME_Find} == trait) present = true;
-            }
-            return true;
-        }
-
         bool stock_consumable(const void* row, int units, const Consumable& profile) const
         {
             auto* type = find<Unreal::UClass>(profile.path);
@@ -347,7 +300,7 @@ namespace
                 !number_is<Unreal::FDoubleProperty>(defaults, STR("Instant_Health"), 0.0) ||
                 !number_is<Unreal::FDoubleProperty>(defaults, STR("Regen_Boost"), profile.food) ||
                 !number_is<Unreal::FDoubleProperty>(defaults, STR("Regen_SpeedStim"), 0.0) ||
-                !number_is<Unreal::FIntProperty>(defaults, STR("Infection"), 0) ||
+                !number_is<Unreal::FIntProperty>(defaults, STR("Infection"), profile.infection) ||
                 !effect_map || effect_map->ContainerPtrToValuePtr<Unreal::FScriptMap>(defaults)->Num() != 0 ||
                 !default_tag || !matches_payload(default_payload)) return false;
             if (profile.food > 0.0 && !read_bool(defaults, STR("CanCook"), profile.can_cook)) return false;
@@ -391,7 +344,6 @@ namespace
             {
                 const auto* item = worn->ContainerPtrToValuePtr<void>(scope.guest);
                 if (row.identity(item) == requested) return "guest_bandage_refused_guid_conflict";
-                if (&profile != &bandage && !row.has_no_gear_effect(item)) return "guest_bandage_refused_gear_passives";
             }
 
             Unreal::FScriptArrayHelper bag(backpack, bag_data(scope.guest));
@@ -405,17 +357,15 @@ namespace
             {
                 const auto* item = equipped.GetRawPtr(index);
                 if (row.identity(item) == requested) return "guest_bandage_refused_guid_conflict";
-                if (&profile != &bandage && !row.has_no_gear_effect(item)) return "guest_bandage_refused_gear_passives";
             }
             for (int index = 0; index < bag.Num(); ++index)
             {
                 const auto* item = bag.GetRawPtr(index);
-                if (&profile != &bandage && !row.has_no_gear_effect(item)) return "guest_bandage_refused_gear_passives";
                 if (row.identity(item) != requested) continue;
                 if (selected != -1) return "guest_bandage_refused_guid_conflict";
                 selected = index;
                 units = row.quantity->GetPropertyValueInContainer(item);
-                if (&profile == &mre && units == 0) units = 1;
+                if (&profile != &bandage && units == 0) units = 1;
                 if (!row.stock_consumable(item, units, profile)) return "guest_bandage_refused_stock_stack";
             }
             return selected >= 0 ? "" : "guest_bandage_refused_owned_guid";
@@ -423,44 +373,6 @@ namespace
 
         void* bag_data(Unreal::UObject* save) const { return backpack->ContainerPtrToValuePtr<void>(save); }
     };
-
-    bool contains_name(Unreal::FArrayProperty* property, const void* container, const Unreal::FName& wanted,
-                       bool& present)
-    {
-        auto* value = property ? Unreal::CastField<Unreal::FNameProperty>(property->GetInner()) : nullptr;
-        if (!value || !container || value->GetArrayDim() != 1 || value->GetOffset_Internal() != 0) return false;
-        Unreal::FScriptArrayHelper entries(property, property->ContainerPtrToValuePtr<void>(container));
-        const auto count = entries.Num();
-        if (count < 0 || count > max_effects) return false;
-        for (int index = 0; index < count; ++index)
-            present |= value->GetPropertyValue(entries.GetRawPtr(index)) == wanted;
-        return true;
-    }
-
-    bool temporary_trait(Unreal::UObject* save, const Unreal::FName& wanted, bool& present)
-    {
-        auto* property = field<Unreal::FMapProperty>(save, STR("PlayerTempEffects"));
-        auto* key = property ? Unreal::CastField<Unreal::FNameProperty>(property->GetKeyProp()) : nullptr;
-        auto* value = property ? Unreal::CastField<Unreal::FStructProperty>(property->GetValueProp()) : nullptr;
-        auto* timespan = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.Timespan"));
-        if (!key || key->GetSize() != sizeof(Unreal::FName) || key->GetOffset_Internal() != 0 ||
-            !value || !timespan || value->GetStruct().Get() != timespan) return false;
-        const auto layout = Unreal::FScriptMap::GetScriptLayout(
-            key->GetSize(), key->GetMinAlignment(), value->GetSize(), value->GetMinAlignment());
-        if (value->GetOffset_Internal() != layout.ValueOffset) return false;
-        const auto* map = property->ContainerPtrToValuePtr<Unreal::FScriptMap>(save);
-        const int count = map->Num();
-        const int extent = map->GetMaxIndex();
-        if (count < 0 || count > extent || extent > max_effects) return false;
-        for (int index = 0; index < extent; ++index)
-        {
-            if (!map->IsValidIndex(index)) continue;
-            const auto* entry = map->GetData(index, layout);
-            if (!entry) return false;
-            present |= key->GetPropertyValue(entry) == wanted;
-        }
-        return true;
-    }
 
     struct Vitals
     {
@@ -485,7 +397,6 @@ namespace
         Unreal::FDoubleProperty* stim{};
         Unreal::FDoubleProperty* maximum{};
         Unreal::FArrayProperty* cache{};
-        Unreal::UFunction* gain{};
         Vitals before{};
         double max_health{};
         bool hemophilia{};
@@ -498,23 +409,17 @@ namespace
             };
         }
 
-        std::string_view bind(const Scope& scope, const RowLayout* detached_bandage = nullptr)
+        std::string_view bind(const Scope& scope)
         {
             health = field<Unreal::FDoubleProperty>(scope.guest, STR("PlayerHealth"));
             regen = field<Unreal::FDoubleProperty>(scope.guest, STR("PlayerRegen"));
             food = field<Unreal::FDoubleProperty>(scope.guest, STR("PlayerFood"));
             stim = field<Unreal::FDoubleProperty>(scope.guest, STR("PlayerStim"));
             maximum = field<Unreal::FDoubleProperty>(scope.pawn, STR("MaxHealth"));
-            gain = find<Unreal::UFunction>(gain_path);
-            auto* amount = field<Unreal::FDoubleProperty>(gain, STR("Ammount"));
-            const bool native_gain = amount &&
-                gain->GetOuterPrivate() == scope.pawn->GetClassPrivate() && gain->GetNumParms() == 1 &&
-                !gain->GetReturnProperty() && gain->GetParmsSize() == sizeof(double) &&
-                !gain->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) &&
-                amount->GetOffset_Internal() == 0 && amount->HasAnyPropertyFlags(Unreal::CPF_Parm) &&
-                !amount->HasAnyPropertyFlags(Unreal::CPF_OutParm | Unreal::CPF_ReturnParm);
-            if (!health || !regen || !food || !stim || !maximum || (!detached_bandage && !native_gain))
-                return "guest_bandage_refused_health_schema";
+            cache = field<Unreal::FArrayProperty>(scope.instance, STR("PassiveEffects"));
+            auto* names = cache ? Unreal::CastField<Unreal::FNameProperty>(cache->GetInner()) : nullptr;
+            if (!health || !regen || !food || !stim || !maximum || !names || names->GetArrayDim() != 1 ||
+                names->GetOffset_Internal() != 0) return "guest_bandage_refused_health_schema";
 
             before = read(scope.guest);
             max_health = maximum->GetPropertyValueInContainer(scope.pawn);
@@ -526,49 +431,18 @@ namespace
                 !read_bool(scope.pawn, STR("HeadUnderWater"), false))
                 return "guest_bandage_refused_guest_vitals";
 
-            const Unreal::FName trait{STR("Hemophilia"), Unreal::FNAME_Find};
-            auto* character = field<Unreal::FStructProperty>(scope.guest, STR("Character"));
-            auto* type = find<Unreal::UScriptStruct>(character_path);
-            auto* effects = field<Unreal::FArrayProperty>(type, STR("PermanentEffects_42_E298D351429CF6DCAE0911A4D1EEDB00"));
-            cache = field<Unreal::FArrayProperty>(scope.instance, STR("PassiveEffects"));
-            bool cached = false;
-            if (trait.IsNone() || trait.ToString() != STR("Hemophilia") || !character || !type ||
-                character->GetStruct().Get() != type ||
-                !contains_name(effects, character->ContainerPtrToValuePtr<void>(scope.guest), trait, hemophilia) ||
-                !temporary_trait(scope.guest, trait, hemophilia) || !contains_name(cache, scope.instance, trait, cached))
+            std::int32_t count{};
+            if (!silverfish::native_enemy_loot::count_save_passive(
+                    scope.guest, Unreal::FName{STR("Hemophilia"), Unreal::FNAME_Find}, count))
                 return "guest_bandage_refused_trait_schema";
-
-            if (detached_bandage)
-            {
-                // The shared GameInstance cache describes the host. Evaluate the
-                // same trait against this character and its own inventory instead.
-                for (auto* name : {STR("PlayerArmor"), STR("PlayerHelmet")})
-                {
-                    auto* property = field<Unreal::FStructProperty>(scope.guest, name);
-                    if (!detached_bandage->matches_type(property) ||
-                        !detached_bandage->read_hemophilia(property->ContainerPtrToValuePtr<void>(scope.guest), trait, hemophilia))
-                        return "guest_bandage_refused_trait_schema";
-                }
-                for (auto* name : {STR("PlayerEquipment"), STR("PlayerBackpack")})
-                {
-                    auto* property = field<Unreal::FArrayProperty>(scope.guest, name);
-                    if (!detached_bandage->matches_array(property)) return "guest_bandage_refused_trait_schema";
-                    Unreal::FScriptArrayHelper rows(property, property->ContainerPtrToValuePtr<void>(scope.guest));
-                    if (rows.Num() < 0 || rows.Num() > max_inventory) return "guest_bandage_refused_trait_schema";
-                    for (int index = 0; index < rows.Num(); ++index)
-                        if (!detached_bandage->read_hemophilia(rows.GetRawPtr(index), trait, hemophilia))
-                            return "guest_bandage_refused_trait_schema";
-                }
-                return {};
-            }
-            // Food still invokes GainHealth, so its detached trait must match the shared cache.
-            return cached == hemophilia ? "" : "guest_bandage_refused_shared_trait_mismatch";
+            hemophilia = count > 0;
+            return {};
         }
 
         Vitals expected(double regen_gain) const
         {
             auto result = before;
-            const double amount = hemophilia ? regen_gain * 0.6 : regen_gain;
+            const double amount = hemophilia && regen_gain > 0.0 ? regen_gain * 0.6 : regen_gain;
             result.regen = std::clamp(before.regen + amount, 25.0, max_health);
             return result;
         }
@@ -580,22 +454,6 @@ namespace
             return current == before;
         }
 
-        bool no_food_traits(Unreal::UObject* save) const
-        {
-            auto* character = field<Unreal::FStructProperty>(save, STR("Character"));
-            auto* type = find<Unreal::UScriptStruct>(character_path);
-            auto* effects = field<Unreal::FArrayProperty>(type, STR("PermanentEffects_42_E298D351429CF6DCAE0911A4D1EEDB00"));
-            if (!character || !type || character->GetStruct().Get() != type) return false;
-            for (auto* name : {STR("Gourmand"), STR("HealthyEating")})
-            {
-                const Unreal::FName key{name, Unreal::FNAME_Find};
-                bool present = false;
-                if (key.IsNone() || key.ToString() != name ||
-                    !contains_name(effects, character->ContainerPtrToValuePtr<void>(save), key, present) ||
-                    !temporary_trait(save, key, present) || present) return false;
-            }
-            return true;
-        }
     };
 
     struct ValueDelete
@@ -631,7 +489,7 @@ namespace
         Inventory inventory;
         if (const auto error = inventory.locate(scope, guid, bandage); !error.empty()) return refuse(error);
         Health health;
-        if (const auto error = health.bind(scope, &inventory.row); !error.empty()) return refuse(error);
+        if (const auto error = health.bind(scope); !error.empty()) return refuse(error);
 
         auto* bag = inventory.backpack;
         auto* source = inventory.bag_data(scope.guest);
@@ -962,30 +820,37 @@ namespace
         auto hash() const { return [this](const void* raw) { return key->GetValueTypeHash(raw); }; }
         auto identical_key() const { return [this](const void* a, const void* b) { return key->Identical(a, b); }; }
 
-        void* find_value(Unreal::FScriptMap* entries) const
+        void* find_value(Unreal::FScriptMap* entries, const Unreal::FName& name) const
         {
-            return entries->FindValue(&flag, layout, hash(), identical_key());
+            return entries->FindValue(&name, layout, hash(), identical_key());
         }
 
-        int read(Unreal::FScriptMap* entries) const
+        int read(Unreal::FScriptMap* entries, const Unreal::FName& name) const
         {
-            const auto* value = find_value(entries);
+            const auto* value = find_value(entries, name);
             return value ? number->GetPropertyValue(value) : 0;
         }
 
-        bool write(Unreal::FScriptMap* entries, int expected) const
+        int read(Unreal::FScriptMap* entries) const { return read(entries, flag); }
+
+        bool write(Unreal::FScriptMap* entries, const Unreal::FName& name, int expected) const
         {
-            if (!usable(entries) || expected < 0 || expected > 100) return false;
+            if (!usable(entries) || name.IsNone()) return false;
             const int count = entries->Num();
-            const bool existed = find_value(entries) != nullptr;
-            auto* value = entries->FindOrAdd(&flag, layout, hash(), identical_key(), [&](void* name, void* data) {
-                key->InitializeValue(name);
-                key->SetPropertyValue(name, flag);
+            const bool existed = find_value(entries, name) != nullptr;
+            auto* value = entries->FindOrAdd(&name, layout, hash(), identical_key(), [&](void* destination, void* data) {
+                key->InitializeValue(destination);
+                key->SetPropertyValue(destination, name);
                 number->InitializeValue(data);
             });
             if (!value) return false;
             number->SetPropertyValue(value, expected);
-            return entries->Num() == count + !existed && read(entries) == expected;
+            return entries->Num() == count + !existed && read(entries, name) == expected;
+        }
+
+        bool write(Unreal::FScriptMap* entries, int expected) const
+        {
+            return expected >= 0 && expected <= 100 && write(entries, flag, expected);
         }
     };
 
@@ -1052,11 +917,10 @@ namespace
         iteration.PreventOriginalFunctionCall();
         if (!iteration.OriginalFunctionCallPrevented()) return;
         const int delta = food_functions.difference->GetPropertyValueInContainer(frame.Locals());
-        // In the cooked Apply_PlayerIntox graph, positive input can also grant DrunkPower.
-        // The co-op MRE option handles the exact neutral/negative branches without a global Save write.
-        if (delta > 0 || delta < -100) return;
         auto* caller = frame.PreviousFrame();
         auto* active = meal && pawn == meal->pawn ? meal : nullptr;
+        // A prepared meal has already checked the guest's positive intoxication branch.
+        if (!active && (delta > 0 || delta < -100)) return;
         if (active && (++active->call_count != 1 || !caller || caller->Node() != food_functions.effect ||
             caller->Object() != pawn || delta != active->expected_delta)) return;
 
@@ -1139,15 +1003,23 @@ namespace
         return 5;
     }
 
-    int use_meal(const Lua& lua, const Consumable& profile, std::string_view kind)
+    int use_meal(const Lua& lua)
     {
+        if (lua.get_stack_size() != 5 || !lua.is_string(5)) return result(lua, false, "guest_meal_refused_arguments");
+        const auto entry = lua.get_string(5);
+        const auto& meals = silverfish::native_guest_consumable::meals;
+        const auto found = std::ranges::find(meals, entry, &Consumable::entry);
+        if (found == meals.end()) return result(lua, false, "guest_meal_refused_profile");
+        const auto& profile = *found;
+        std::string kind(profile.entry.substr(4));
+        std::ranges::replace(kind, '-', '_');
         const auto refuse = [&](std::string_view reason) {
             return result(lua, false, std::string("guest_").append(kind).append("_refused_").append(reason));
         };
         const auto unverified = [&](std::string_view reason) {
             return result(lua, false, std::string("mutation_unverified_guest_").append(kind).append("_").append(reason));
         };
-        if (!food_available() || lua.get_stack_size() != 4 || !lua.is_integer(1) || !lua.is_integer(2) ||
+        if (!food_available() || !lua.is_integer(1) || !lua.is_integer(2) ||
             !lua.is_integer(3) || !lua.is_string(4) || meal) return refuse("arguments");
         const auto pawn_address = lua.get_integer(), guest_address = lua.get_integer(), stock_address = lua.get_integer();
         Guid guid{};
@@ -1158,14 +1030,53 @@ namespace
         Inventory inventory;
         if (!inventory.locate(scope, guid, profile).empty()) return refuse("stock_owned_stack");
         Health health;
-        if (!health.bind(scope).empty() || health.max_health > 10'000 || !health.no_food_traits(scope.guest))
+        if (!health.bind(scope).empty() || health.max_health > 10'000)
             return refuse("vitals_or_traits");
+
+        std::int32_t gourmand{}, healthy_eating{}, bonus{};
+        if (!silverfish::native_enemy_loot::count_save_passive(
+                scope.guest, Unreal::FName{STR("Gourmand"), Unreal::FNAME_Find}, gourmand) ||
+            !silverfish::native_enemy_loot::count_save_passive(
+                scope.guest, Unreal::FName{STR("HealthyEating"), Unreal::FNAME_Find}, healthy_eating) ||
+            ((gourmand || healthy_eating) &&
+                !silverfish::native_guest_sickness::read_passive_amplification(scope.guest, bonus)))
+            return refuse("food_traits");
+        gourmand += gourmand > 0 ? bonus : 0;
+        healthy_eating += healthy_eating > 0 ? bonus : 0;
+        // The stock HealthItem graph uses the effective food amount for HealthyEating.
+        const double appetite = profile.food * (1.0 - static_cast<double>(gourmand) * 0.2);
+        const double regen = profile.regen_gain + static_cast<double>(healthy_eating) * appetite * 0.3;
+        const int delta = static_cast<int>(appetite * -0.1);
+        if (delta > 0)
+        {
+            std::int32_t drunk_power{};
+            if (!silverfish::native_enemy_loot::count_save_passive(
+                    scope.guest, Unreal::FName{STR("DrunkPower"), Unreal::FNAME_Find}, drunk_power) || drunk_power)
+                return refuse("positive_intoxication_effect");
+        }
 
         Intoxication personal, canonical;
         if (!personal.bind(scope.guest) || !canonical.bind(scope.stock) || personal.map != canonical.map)
             return refuse("intoxication_schema");
         auto* guest_flags = personal.data(scope.guest);
         auto* host_flags = canonical.data(scope.stock);
+        const Unreal::FName sickness{STR("Sickness"), Unreal::FNAME_Find};
+        if (sickness.IsNone()) return refuse("sickness_schema");
+        const auto sickness_before = personal.read(guest_flags, sickness);
+        std::int32_t sickness_after = sickness_before;
+        int dose = profile.infection;
+        if (dose)
+        {
+            std::int32_t iron_gut{};
+            if (!silverfish::native_enemy_loot::count_save_passive(
+                    scope.guest, Unreal::FName{STR("IronGut"), Unreal::FNAME_Find}, iron_gut))
+                return refuse("infection_passive");
+            if (iron_gut) dose = 0;
+            if (dose && (!silverfish::native_guest_sickness::food_infection(
+                    scope.pawn, scope.guest, scope.stock, dose, sickness_after, false) || sickness_after != sickness_before))
+                return refuse("infection_schema");
+        }
+
         auto* bag = inventory.backpack;
         auto* guest_rows = inventory.bag_data(scope.guest);
         auto* host_rows = inventory.bag_data(scope.stock);
@@ -1185,9 +1096,8 @@ namespace
         if (!backup_flags || !expected_flags || !stock_flags || !backup_bag || !expected_bag || !stock_bag || !cache)
             return refuse("snapshot");
 
-        auto expected = health.expected(profile.regen_gain);
-        expected.food = std::clamp(health.before.food + profile.food, 0.0, 200.0);
-        const int delta = static_cast<int>(profile.food * -0.1);
+        auto expected = health.expected(regen);
+        expected.food = std::clamp(health.before.food + appetite, 0.0, 200.0);
         const int intox_after = std::clamp(intox_before + delta, 0, 100);
         if (!personal.write(static_cast<Unreal::FScriptMap*>(expected_flags.get()), intox_after))
             return refuse("prepared_intoxication");
@@ -1221,7 +1131,7 @@ namespace
         DuringMeal receipt{scope.pawn, delta};
         {
             ScopedMeal scope_call{receipt};
-            double food = profile.food;
+            double food = appetite;
             scope.pawn->ProcessEvent(food_functions.effect, &food);
         }
 
@@ -1229,10 +1139,17 @@ namespace
         only_food.food = expected.food;
         if (receipt.call_count != 1 || !receipt.applied || !prove(backup_bag.get(), only_food))
             return rollback(false, only_food) ? refuse("food_rolled_back") : unverified("food");
-        double gain = profile.regen_gain;
-        scope.pawn->ProcessEvent(health.gain, &gain);
+        health.regen->SetPropertyValueInContainer(scope.guest, expected.regen);
         if (!prove(backup_bag.get(), expected))
             return rollback(false, only_food) ? refuse("regen_rolled_back") : unverified("regen");
+        if (dose)
+        {
+            // Keep the stock infection roll and update the expected copy used for the atomic readback.
+            if (!silverfish::native_guest_sickness::food_infection(
+                    scope.pawn, scope.guest, scope.stock, dose, sickness_after, true) ||
+                !personal.write(static_cast<Unreal::FScriptMap*>(expected_flags.get()), sickness, sickness_after) ||
+                !prove(backup_bag.get(), expected)) return unverified("infection");
+        }
         bag->CopyCompleteValue(guest_rows, expected_bag.get());
         if (!prove(expected_bag.get(), expected))
             return rollback(true, expected) ? refuse("debit_rolled_back") : unverified("debit");
@@ -1250,13 +1167,14 @@ namespace
         lua.set_integer(intox_after);
         lua.set_integer(host_intox);
         lua.set_bool(health.hemophilia);
-        return 14;
+        lua.set_integer(gourmand);
+        lua.set_integer(healthy_eating);
+        lua.set_integer(sickness_before);
+        lua.set_integer(sickness_after);
+        lua.set_integer(dose);
+        return 19;
     }
 
-    int use_mre(const Lua& lua) { return use_meal(lua, mre, "mre"); }
-    int use_canned_peaches(const Lua& lua) { return use_meal(lua, canned_peaches, "canned_peaches"); }
-    int use_canned_beans(const Lua& lua) { return use_meal(lua, canned_beans, "canned_beans"); }
-    int use_brown_mushroom(const Lua& lua) { return use_meal(lua, brown_mushroom, "brown_mushroom"); }
 }
 
 void silverfish::native_guest_consumable::install_hooks()
@@ -1283,10 +1201,7 @@ void silverfish::native_guest_consumable::register_lua(RC::LuaMadeSimple::Lua& l
     if (mre_enabled())
     {
         lua.register_function("SilverfishPrepareNativeGuestMre", prepare_food);
-        lua.register_function("SilverfishUseNativeGuestMre", use_mre);
-        lua.register_function("SilverfishUseNativeGuestCannedPeaches", use_canned_peaches);
-        lua.register_function("SilverfishUseNativeGuestCannedBeans", use_canned_beans);
-        lua.register_function("SilverfishUseNativeGuestBrownMushroom", use_brown_mushroom);
+        lua.register_function("SilverfishUseNativeGuestMeal", use_meal);
         if (opt_in("SILVERFISH_COOP_HEADLESS") && opt_in("SILVERFISH_COOP_NATIVE_FIXTURES"))
             lua.register_function("SilverfishSeedNativeGuestMreFixture", seed_mre_test);
     }

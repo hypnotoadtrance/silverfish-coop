@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from hashlib import sha256
 import json
 from pathlib import Path
 import subprocess
@@ -14,6 +15,7 @@ from live_multi_smoke import saved_hashes
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.silverfish.guest_weapon_profiles import FIREARMS, NINE_MM_BALL, STOCK_AMMO
+from tools.silverfish.control import submit
 from tools.silverfish import native_authored_pickup as pickup
 from tools.silverfish import native_guest_stack_drop as stack_drop
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as drop_record, native_host_save
@@ -303,6 +305,13 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
                             resumed_exact_inventory=True, verified=True)
             return
         if sort_backpack:
+            def save_hashes():
+                paths = list((run.parent / "save").glob("campaign*.json"))
+                paths.extend((run.parent / "game-user").rglob("*.sav"))
+                return {path.relative_to(run.parent): sha256(path.read_bytes()).hexdigest() for path in paths}
+
+            before_mutations = save_hashes()
+            assert before_mutations
             assert [row["guid"] for row in rows] == [weapon, source], rows
             sort_request = ("action", *guest, "native-inventory-sort", "--operation-id", uuid.uuid4().hex)
             sorted_receipt = (await ask(*sort_request))["native_inventory_sort"]
@@ -331,35 +340,23 @@ async def verify(work: Path, vanilla_saved: Path, sort_backpack: bool = False, s
         quantities(rows, {source: 5, created: 4})
         evidence.update(structured=receipt, stale_refusal=refused["error"], conflicting_replay=conflict["error"])
 
-        await ask("action", *guest, "native-inventory-view-fixture")
-        await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
-        key = ("action", *guest, "native-inventory-view-key-fixture", "--target")
-        index = next(index for index, row in enumerate(rows) if row["guid"] == source)
-        for _ in range(index):
-            await ask(*key, "down")
-        confirmed = (await ask(*key, "confirm"))["native_guest_inventory_split_view"]
-        assert (confirmed["state"], confirmed["guid"], confirmed["count"]) == ("confirming", source, 5), confirmed
-        await ask(*key, "back")
-        quantities(await page(guest, character), {source: 5, created: 4})
-        assert (await ask(*key, "confirm"))["native_guest_inventory_split_view"] == confirmed
-        requested = (await ask(*key, "confirm"))["native_guest_inventory_split_view"]
-        assert requested == dict(confirmed, state="splitting"), requested
-        await wait(guest_run, lambda state: state.get("game", {}).get("native_guest_inventory_split_view") ==
-                   dict(requested, state="split"))
-        events = (await ask("events", *guest, "--tail", "100"))["events"]
-        applied = next(row for row in events if row.get("event") == "native_guest_inventory_stack_split"
-                       and row.get("view_sequence") == requested["sequence"])
-        ui_created = applied["new_guid"]
+        stock = await submit(guest_run, drop.STOCK_SPLIT_FIXTURE, target=f"{source}|2|5")
+        assert stock["ok"] and stock.get("stock_inventory_proof", "").startswith("verified two stock stacks"), stock
+        ui_created = stock["native_inventory_split"]["new_guid"]
+        events = (await ask("events", *host, "--tail", "100"))["events"]
+        applied = next(row for row in events if row.get("event") == "native_guest_inventory_split_accepted"
+                       and row.get("new_guid") == ui_created)
         assert ui_created not in {source, created}, applied
         assert (applied["owner"], applied["source_guid"], applied["remaining"], applied["split"]) == (character, source, 3, 2), applied
         expected = {source: 3, created: 4, ui_created: 2}
         quantities(await page(guest, character), expected)
-        await ask(*key, "back")
         assert await page(host, "host") == host_before
         evidence["stock_inventory_controls"] = applied
         evidence["host_inventory_unchanged"] = True
         if sort_backpack:
             latest_inventory = await page(guest, character)
+            assert save_hashes() == before_mutations, "Stock sorting or splitting wrote a campaign save"
+            evidence["no_save_on_sort_or_split"] = True
 
         await stop(host, authority)
         await stop(guest, client)

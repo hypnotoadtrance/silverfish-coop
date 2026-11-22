@@ -9,6 +9,7 @@ local item_count = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local factory_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local previous, seeded
+local carry = require("world_loot_carry_probe")
 
 local function valid(value) return value and value:IsValid() end
 
@@ -22,6 +23,9 @@ local function guid(row)
 end
 
 local function witness(world, pawn, mode, value)
+    if mode == "grip" then return carry.grip(pawn, value) end
+    if mode == "drop" or mode == "throw" then return carry.release(pawn, mode == "throw") end
+    if mode == "pose" then return carry.pose(world, value) end
     if mode == "actor" then
         local prefix = area .. ":PersistentLevel.Item_Bandage_C_"
         assert(value:sub(1, #prefix) == prefix and value:sub(#prefix + 1):match("^%d+$"))

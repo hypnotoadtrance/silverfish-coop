@@ -7,14 +7,20 @@ local saves = require("guest_save")
 local zone = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
 local npc_name = zone .. ".Observitory_P:PersistentLevel.NPC_LoneStalker_C_0"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
+local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local jewelry = "/Game/Classes/Items/Item_Jewely.Item_Jewely_C"
 local peaches = "/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"
+local bandage = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
 local mode = os.getenv("SILVERFISH_COOP_BARTER_PROBE")
-local donation, high_value = mode == "donation", mode == "high-value"
-local payment = donation and jewelry or high_value and peaches or nil
+local skinflint = mode == "skinflint"
+local partial = mode == "partial"
+local donation, high_value = mode == "donation", mode == "high-value" or skinflint or partial
+local refresh_test = mode == "refresh"
+local simultaneous = mode == "simultaneous"
+local payment = partial and bandage or donation and jewelry or high_value and peaches or nil
 local money = high_value and 20000 or 1200
-local next_attempt, armed, committed, pending_confirmation = 0, false, false, false
+local next_attempt, armed, committed, pending_confirmation, refreshed = 0, false, false, false, false
 
 local function valid(value) return value and value:IsValid() end
 
@@ -45,6 +51,11 @@ local function place_guest(pawn, actor)
     pawn:ForceNetUpdate()
 end
 
+local function fatigue(save)
+    local flag = FName("Player_Fatigue")
+    return save.Flags:Contains(flag) and save.Flags:Find(flag):get() or 0
+end
+
 local function prepare(state, phase, actor)
     local guest = state.guests[1]
     if not guest then return end
@@ -53,7 +64,41 @@ local function prepare(state, phase, actor)
     place_guest(pawn, actor)
     state.world.OwningGameInstance:Give_PlayerCash(money, false)
     if high_value then seed(actor, actor.Inventory, jewelry, 8) end
-    if payment then seed(actor, save.PlayerBackpack, payment, donation and 12 or 1) end
+    if payment then seed(actor, save.PlayerBackpack, payment, partial and 4 or donation and 12 or 1) end
+    if simultaneous then
+        seed(actor, actor.Inventory, bandage, 1)
+        local host = state.local_pawn.pawn
+        actor:SendInteractionToActor(host, actor.Box)
+        local screen = state.controller.MenuStack[1]
+        assert(valid(screen) and valid(screen.TraderInventoryPanel) and screen.Trader:GetAddress() == actor:GetAddress(),
+            "host stock barter screen did not open")
+        local address = screen.TraderInventoryPanel:GetAddress()
+        local before = actor.Inventory:GetArrayNum()
+        proof("host_browsing", before, money)
+        RegisterHook("/Game/Classes/GUI/New/Components/InventoryPanel.InventoryPanel_C:FullRefresh", function(context)
+            local panel = context:get()
+            if valid(panel) and panel:GetAddress() == address and actor.Inventory:GetArrayNum() == before - 1 then
+                local funds = host.Save.Flags:Find(FName("Player_Cash")):get()
+                proof("host_stock_changed", actor.Inventory:GetArrayNum(), funds, screen:GetIsEnabled())
+            end
+        end)
+    end
+    if skinflint then
+        local character = save.Character
+        local key = "PermanentEffects_42_E298D351429CF6DCAE0911A4D1EEDB00"
+        character[key] = {FName("Skinflint")}
+        save.Character = character
+        assert(save.Character[key][1]:ToString() == "Skinflint", "Stock Skinflint trait was not stored on the guest")
+        local host = state.local_pawn.pawn
+        local guest_fatigue, host_fatigue = fatigue(save), fatigue(host.Save)
+        RegisterHook("/Game/Classes/Player/Player_FP.Player_FP_C:PsyAttack", function(context, amount)
+            local attacked = context:get()
+            if valid(attacked) and attacked:GetAddress() == pawn:GetAddress() then
+                proof("skinflint", attacked:GetFullName(), amount:get(), guest_fatigue, fatigue(save),
+                    host_fatigue, fatigue(host.Save))
+            end
+        end)
+    end
     armed = true
     proof("ready", guest.name, actor.Inventory:GetArrayNum())
 end
@@ -62,15 +107,33 @@ local function confirm(state, screen, actor, payment_row)
     local minimum = screen.MinBalance + .020
     local factor = actor.MerchantData.CashValueMod
     local bid, row, cash = {}, nil, 0
-    if payment_row then actor:ValueItem(payment_row, bid) end
+    local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    local save_class = StaticFindObject("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C")
+    local staged = api:CreateSaveGameObject(save_class)
+    local instance = state.world.OwningGameInstance
+    if partial then
+        local portion, remainder, split = {}, {}, {}
+        instance:SplitStack(payment_row[item_guid], 2, 0, portion, remainder, split, split)
+        assert(split.Success and not split.TookEntireStack and portion[item_ammo] == 2 and remainder[item_ammo] == 2,
+            "stock backpack did not split the payment")
+        staged.PlayerBackpack[1] = portion
+        actor:ValueItem(staged.PlayerBackpack[1], bid)
+    elseif payment_row then
+        actor:ValueItem(payment_row, bid)
+    end
+    local function price_for(item)
+        local quote = {}
+        actor:ValueItem(item, quote)
+        return math.ceil((quote.TraderValue * minimum / (1 - minimum) - (bid.TraderValue or 0)) / factor)
+    end
     if not donation then
         for index = 1, actor.Inventory:GetArrayNum() do
             local item = actor.Inventory[index]
             local path = item[item_class]:GetFullName()
-            if (high_value and path:find(jewelry, 1, true)) or (not high_value and not path:find("/Weapons/", 1, true)) then
-                local quote = {}
-                actor:ValueItem(item, quote)
-                local price = math.ceil((quote.TraderValue * minimum / (1 - minimum) - (bid.TraderValue or 0)) / factor)
+            if (high_value and path:find(jewelry, 1, true))
+                or (simultaneous and path:find(bandage, 1, true))
+                or (not high_value and not simultaneous and not path:find("/Weapons/", 1, true)) then
+                local price = price_for(item)
                 if (high_value and price > 1000 and price <= money) or (not high_value and price > 0 and price <= 1000) then
                     row, cash = item, price
                     break
@@ -79,24 +142,37 @@ local function confirm(state, screen, actor, payment_row)
         end
         assert(row, "no qualified stock barter item")
     end
-    local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-    local save_class = StaticFindObject("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C")
-    local staged = api:CreateSaveGameObject(save_class)
+    local stock_slot = partial and 2 or 1
     if row then
-        staged.PlayerBackpack[1] = row
         local before = actor.Inventory:GetArrayNum()
-        local removed, offered = {}, {}
-        actor:RemoveItem(row[item_guid], 0, removed, removed)
-        assert(removed.Success and actor.Inventory:GetArrayNum() == before - 1, "stock trader did not stage its item")
-        screen:AddItem(staged.PlayerBackpack[1], 1, -1, offered, offered, offered)
+        local offered = {}
+        if partial then
+            local portion, remainder, split = {}, {}, {}
+            actor:SplitStack(row[item_guid], 3, 0, portion, remainder, split, split)
+            assert(split.Success and not split.TookEntireStack and actor.Inventory:GetArrayNum() == before,
+                "stock trader did not split the item")
+            assert(portion[item_ammo] == 3 and remainder[item_ammo] == 5, "stock trader split the wrong quantity")
+            staged.PlayerBackpack[stock_slot] = portion
+            cash = price_for(staged.PlayerBackpack[stock_slot])
+            proof("partial", portion[item_ammo], remainder[item_ammo], cash)
+        else
+            staged.PlayerBackpack[stock_slot] = row
+            local removed = {}
+            actor:RemoveItem(row[item_guid], 0, removed, removed)
+            assert(removed.Success and actor.Inventory:GetArrayNum() == before - 1, "stock trader did not stage its item")
+        end
+        screen:AddItem(staged.PlayerBackpack[stock_slot], 1, -1, offered, offered, offered)
         assert(offered.Success and screen.TraderOffer:GetArrayNum() == 1, "stock trade screen did not stage its item")
     end
     if payment_row then
-        local slot = staged.PlayerBackpack:GetArrayNum() + 1
-        staged.PlayerBackpack[slot] = payment_row
-        local removed, offered = {}, {}
-        state.world.OwningGameInstance:RemoveItem(payment_row[item_guid], 0, removed, removed)
-        assert(removed.Success, "stock backpack did not stage payment")
+        local slot = partial and 1 or staged.PlayerBackpack:GetArrayNum() + 1
+        local offered = {}
+        if not partial then
+            staged.PlayerBackpack[slot] = payment_row
+            local removed = {}
+            instance:RemoveItem(payment_row[item_guid], 0, removed, removed)
+            assert(removed.Success, "stock backpack did not stage payment")
+        end
         screen:AddItem(staged.PlayerBackpack[slot], 0, -1, offered, offered, offered)
         assert(offered.Success and screen.PlayerOffer:GetArrayNum() == 1, "stock screen did not stage payment")
     end
@@ -124,6 +200,14 @@ function probe.sample(state, phase)
     local ok, error_message = pcall(function()
         if phase == "hosting" and not armed then
             prepare(state, phase, actor)
+        elseif phase == "hosting" and refresh_test and not refreshed then
+            local signal = io.open(box .. "/npc-barter-flow-refresh", "r")
+            if not signal then return end
+            signal:close()
+            state.world.OwningGameInstance:Give_PlayerCash(175, false)
+            seed(actor, actor.Inventory, jewelry, 8)
+            refreshed = true
+            proof("restocked", actor.Inventory:GetArrayNum(), 1375)
         elseif phase == "hosting" and payment then
             local guest = state.guests[1]
             local pawn = guest and saves.exact_item_context(state, phase, guest.name)
@@ -160,7 +244,14 @@ function probe.sample(state, phase)
                 actor:SendInteractionToActor(pawn, actor.Box)
                 proof("interact", valid(menus[1]) and menus[1]:GetFullName() or "-")
             elseif view and view[5] == "ready" and menus:GetArrayNum() == 1 then
-                confirm(state, menus[1], actor, payment_row)
+                if refresh_test then
+                    local flag = FName("Player_Cash")
+                    if pawn.Save.Flags:Contains(flag) then
+                        proof("visible", actor.Inventory:GetArrayNum(), pawn.Save.Flags:Find(flag):get())
+                    end
+                else
+                    confirm(state, menus[1], actor, payment_row)
+                end
             end
         end
     end)

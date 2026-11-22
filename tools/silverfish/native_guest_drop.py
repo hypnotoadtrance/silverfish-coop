@@ -31,7 +31,8 @@ _SELECTION = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,2})\Z")
 
 
 def visible_drops(state: dict, area: str | None) -> dict:
-    return {drop_id: record.visible(row, drop_id) for drop_id, row in state.get(record.STATE, {}).items()
+    return {drop_id: {**record.visible(row, drop_id), **({"transform": row["transform"]} if "transform" in row else {})}
+            for drop_id, row in state.get(record.STATE, {}).items()
             if row["map"] == area and row["claim_id"] is None}
 
 
@@ -59,10 +60,14 @@ def _participant(host, character: str) -> str:
     return probe.standing_pawn(host, character)
 
 
+def _position(row: dict):
+    return row.get("transform", {}).get("position", row["location"])
+
+
 def _near(host, character: str, row: dict) -> bool:
     origin = host.authoritative_pawns(host.roles()).get(character, {})
     return (origin.get("map") == row["map"] and record.valid_position(origin.get("location"))
-            and math.dist(origin["location"], row["location"]) <= party.INTERACT_RANGE)
+            and math.dist(origin["location"], _position(row)) <= party.INTERACT_RANGE)
 
 
 def _qualified_item(row: dict, guid: str, count: int, item: str) -> bool:
@@ -301,7 +306,7 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
     try:
         try:
             snapshot = await bridge.command(probe.SETTLE, verb, pawn, drop_id, source["slot"], replacement or "-",
-                                            *(str(axis) for axis in row["location"]), area, *merge_source, timeout=7)
+                                            *(str(axis) for axis in _position(row)), area, *merge_source, timeout=7)
         except RuntimeError as error:
             if str(error).startswith(probe.REFUSAL):
                 host.native_checkpoint_unsafe = False
@@ -377,6 +382,10 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
             raise party.RuleError("native_guest_stack_drop_unavailable")
         if original["claim_id"] is not None:
             raise party.RuleError("native_guest_stack_drop_already_reclaimed")
+        from .native_world_loot import item_is_moving, player_drop_identity
+
+        if item_is_moving(host, player_drop_identity(target)):
+            raise party.RuleError("native_world_loot_item_in_motion")
         if not _near(host, character, original):
             raise party.RuleError("native_guest_stack_drop_out_of_range")
         escrow = original["escrow"]

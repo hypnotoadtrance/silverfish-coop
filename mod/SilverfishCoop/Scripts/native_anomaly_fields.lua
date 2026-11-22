@@ -6,6 +6,7 @@ local fixed = require("native_fixed_explosives")
 local pyrogeist = require("native_pyrogeist_view")
 local shadows = require("native_shadow_sphere_view")
 local lamps = require("native_angler_lamp_view")
+local observers = require("native_observer_target")
 
 local classes = {
     starburst = "/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C",
@@ -20,11 +21,12 @@ for kind, path in pairs(classes) do kinds["BlueprintGeneratedClass " .. path] = 
 local fire_jet = "BlueprintGeneratedClass /Game/Classes/Anomalies/Fire_Jet_BP.Fire_Jet_BP_C"
 local overlap = "BndEvt__Starburst_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature"
 local electrode_overlap = "BndEvt__Electrode_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature"
+local wandering_overlap = "BndEvt__Wandering_Teleport_BP_Capsule_K2Node_ComponentBoundEvent_1_ComponentBeginOverlapSignature__DelegateSignature"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local pending, active, pending_fires, fires, fixtures = {}, {}, {}, {}, {}
-local world, world_map, fixture_kind
+local world, world_map, fixture_kind, wandering_hook, wandering_probe
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -38,13 +40,31 @@ local function in_world(actor, current)
     return valid(actor) and not actor:IsActorBeingDestroyed() and same(actor:GetWorld(), current)
 end
 
+local function bind_wandering_effect()
+    if wandering_hook or type(RegisterHook) ~= "function" then return end
+    local path = classes["wandering-teleport"] .. ":Tele_FX"
+    if not valid(StaticFindObject(path)) then return end
+    RegisterHook(path, function(context, position)
+        local actor = context:get()
+        if not in_world(actor, world) or not actor:HasAuthority() then return end
+        local entry = active[actor:GetAddress()]
+        local driver = actor:GetWorld().NetDriver
+        if entry and entry.kind == "wandering-teleport" and same(entry.actor, actor)
+            and valid(driver) and same(driver.World, world) and not valid(driver.ServerConnection) then
+            effects.observe_wandering_teleport(position:get())
+        end
+    end)
+    wandering_hook = true
+end
+
 local function trap_kind(actor, class)
     if class == gravity or class == pyrogeist.body or shadows.enabled and class == shadows.class
-        or lamps.enabled and class == lamps.class then
+        or lamps.enabled and class == lamps.class or observers.enabled and class == observers.class then
         local at = actor:GetWorld()
         if valid(at) and at:GetFullName() == "World " .. crossroads .. ".CrossRoads_P" then
             if class == gravity then return "gravity" end
             if class == pyrogeist.body then return "pyrogeist" end
+            if class == observers.class then return "observer" end
             return class == shadows.class and "shadow-sphere" or "angler-lamp"
         end
         return
@@ -53,7 +73,7 @@ local function trap_kind(actor, class)
 end
 
 local function disables_replica_tick(kind)
-    return kind == "gravity" or kind == "pyrogeist" or kind == "shadow-sphere" or kind == "angler-lamp"
+    return kind == "gravity" or kind == "pyrogeist" or kind == "shadow-sphere" or kind == "angler-lamp" or kind == "observer"
 end
 
 local function replica(actor)
@@ -139,6 +159,7 @@ function fields.start(role)
     if type(SilverfishSetNativeAnomalyGuest) ~= "function" or type(RegisterBeginPlayPreHook) ~= "function"
         or type(RegisterBeginPlayPostHook) ~= "function" then return end
     lamps.start()
+    observers.start()
     RegisterBeginPlayPreHook(function(context)
         local seat = role()
         if seat ~= "host" and seat ~= "client" then return end
@@ -222,6 +243,7 @@ end
 function fields.command(args, state, phase)
     if args[2] == "native-vortex-apply-sensors" then return project_placed_sensors(args, state, phase) end
     if args[2] == "native-angler-apply-colors" then return lamps.apply_colors(args, state, phase, active) end
+    if args[2] == "native-observer-apply-opacity" then return observers.apply_opacity(args, state, phase, active) end
     local electrode = electrodes.command(args, state, phase, world, active)
     if electrode ~= nil then return electrode end
     local canister = canisters.command(args, state, phase)
@@ -230,6 +252,20 @@ function fields.command(args, state, phase)
     if explosive ~= nil then return explosive end
     local effect = effects.command(args, state, phase, animate_vortex)
     if effect ~= nil then return effect end
+    if args[2] == "native-anomaly-trigger-fixture" and args[3] == "restore-wandering-probe" then
+        local guest = #state.guests == 1 and state.guests[1].pawn
+        if #args ~= 3 or not host_fixture or phase ~= "hosting" or not wandering_probe
+            or not same(wandering_probe.world, state.world) or not in_world(guest, state.world)
+            or not same(wandering_probe.guest, guest) or not guest:HasAuthority() or guest:IsLocallyControlled() then
+            error("Wandering teleport restore probe unavailable", 0)
+        end
+        if not guest:K2_TeleportTo(wandering_probe.origin, guest:K2_GetActorRotation()) then
+            error("The wandering teleport probe could not restore the guest", 0)
+        end
+        guest:ForceNetUpdate()
+        wandering_probe = nil
+        return "The test guest returned to the party"
+    end
     if args[2] == "native-anomaly-trigger-fixture" or args[2] == "native-placed-anomaly-guest-fixture"
         or args[2] == "native-electrode-retire-fixture" then
         local guest_probe = args[2] == "native-placed-anomaly-guest-fixture"
@@ -240,7 +276,8 @@ function fields.command(args, state, phase)
                 if entry.placed == args[3] then trap, kind = entry.actor, entry.kind; break end
             end
         end
-        local trigger = in_world(trap, state.world) and (kind == "vortex" and vortex_sensor(trap) or trap.Sphere)
+        local trigger = in_world(trap, state.world) and (kind == "vortex" and vortex_sensor(trap)
+            or kind == "wandering-teleport" and trap.Capsule or trap.Sphere)
         if #args ~= 3 or not headless or not valid(trigger) then
             error("Trap trigger probe unavailable", 0)
         end
@@ -250,7 +287,9 @@ function fields.command(args, state, phase)
                 or not valid(pawn.CapsuleComponent) or trap:GetActorEnableCollision() ~= false then
                 error("Placed trap guest overlap probe unavailable", 0)
             end
-            trap[kind == "electrode" and electrode_overlap or overlap](trap, trigger, pawn, pawn.CapsuleComponent, 0, false, {})
+            local callback = kind == "electrode" and electrode_overlap
+                or kind == "wandering-teleport" and wandering_overlap or overlap
+            trap[callback](trap, trigger, pawn, pawn.CapsuleComponent, 0, false, {})
             if kind == "electrode" then
                 trap:ReceiveBeginPlay()
                 trap:Burst(2)
@@ -267,6 +306,13 @@ function fields.command(args, state, phase)
         local guest = #state.guests == 1 and state.guests[1].pawn
         if not host_fixture or phase ~= "hosting" or not in_world(guest, state.world)
             or not guest:HasAuthority() or guest:IsLocallyControlled() then error("Trap trigger probe unavailable", 0) end
+        if kind == "wandering-teleport" then
+            if #trap.Waypoints < 1 or not trap:HasAuthority() then error("Stock teleport waypoints unavailable", 0) end
+            local original = guest:K2_GetActorLocation()
+            wandering_probe = {world = state.world, guest = guest, origin = {X = original.X, Y = original.Y, Z = original.Z}}
+            trap[wandering_overlap](trap, trigger, guest, guest.CapsuleComponent, 0, false, {})
+            return "Stock wandering teleport overlap invoked on the host"
+        end
         local center = trigger:K2_GetComponentLocation()
         if not guest:K2_TeleportTo({X = center.X, Y = center.Y, Z = center.Z + 45}, guest:K2_GetActorRotation()) then
             error("The stock guest could not enter the trap trigger", 0)
@@ -306,17 +352,23 @@ function fields.command(args, state, phase)
 end
 
 function fields.rows(state, phase, row)
-    if phase ~= "hosting" and phase ~= "connected" or not valid(state.world) then lamps.clear(); return {} end
+    if phase ~= "hosting" and phase ~= "connected" or not valid(state.world) then
+        lamps.clear()
+        observers.clear_visuals()
+        return {}
+    end
     if not same(world, state.world) or world_map ~= state.map then
         active, fires, fixtures, world, world_map = {}, {}, {}, state.world, state.map
         effects.clear()
         electrodes.clear()
         lamps.clear()
+        observers.clear_visuals()
         -- Initial replicated actors can finish BeginPlay while the new driver is still pending.
         if phase == "connected" and state.map == crossroads then
             local names = {"GravityAnomaly_BP_C", "Pyrogeist_BP_C"}
             if shadows.enabled then names[#names + 1] = "ShadowSphere_BP_C" end
             if lamps.enabled then names[#names + 1] = "AnglerLamp_BP_C" end
+            if observers.enabled then names[#names + 1] = "Observers_BP_C" end
             for _, name in ipairs(names) do
                 for _, actor in ipairs(FindAllOf(name) or {}) do
                     if in_world(actor, world) and replica(actor) then
@@ -360,6 +412,8 @@ function fields.rows(state, phase, row)
     pyrogeist.apply(world, phase, active, replica)
     shadows.project(active, state, phase)
     lamps.project(active, state, phase)
+    observers.target(active, state, phase)
+    observers.publish_rewards(state, phase)
     for address, fire in pairs(pending_fires) do
         if in_world(fire, world) then
             if phase == "hosting" then
@@ -379,6 +433,9 @@ function fields.rows(state, phase, row)
         local actor = entry.actor
         if valid(actor) and not actor:IsActorBeingDestroyed() and valid(actor.RootComponent) then
             if phase == "hosting" and entry.kind == "starburst" then effects.observe_charge(entry) end
+            if phase == "hosting" and entry.kind == "wandering-teleport" and not wandering_hook then
+                bind_wandering_effect()
+            end
             if phase == "connected" and entry.placed and actor:GetActorEnableCollision() then
                 actor:SetActorEnableCollision(false)
             end
@@ -401,6 +458,8 @@ function fields.rows(state, phase, row)
                 rows[#rows + 1] = electrodes.observe(entry, phase, row, position)
             elseif entry.kind == "angler-lamp" then
                 rows[#rows + 1] = lamps.color_row(actor, row)
+            elseif entry.kind == "observer" then
+                rows[#rows + 1] = observers.opacity_row(actor, phase, row, position)
             end
         else
             if phase == "hosting" and entry.kind == "electrode" then electrodes.retire(entry) end

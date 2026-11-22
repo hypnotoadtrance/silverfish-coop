@@ -604,6 +604,7 @@ namespace
     bool veto_flayer_spawns{};
     bool operate_not_deer{};
     bool watch_combat{};
+    bool watch_flayer_projectiles{};
     bool refresh_fixture{};
 
     void update_scope(const Network& active)
@@ -1152,7 +1153,8 @@ namespace
             || function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)
             || byte_field(receiver, STR("Role")) != 1 || !bool_field(receiver, STR("bReplicates"), true)) return false;
         const auto family = npc_family(receiver);
-        if (family != NpcFamily::Husk && family != NpcFamily::Boar) return false;
+        if (!publishes(family) ||
+            (family == NpcFamily::NotDeer && byte_field(receiver, STR("Faction")) != not_deer_profile.faction)) return false;
         const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld());
         if (active.seat != Seat::Client || !in_level(receiver, active.world) ||
             (frame && frame->Object() != receiver)) return false;
@@ -1255,7 +1257,7 @@ namespace
         if (name == damage_name)
         {
             if (watch_combat) before_stock_melee(receiver, frame);
-            if (publish_flayers && veto_flayer_spawns) before_flayer_projectile(receiver, frame);
+            if (watch_flayer_projectiles) before_flayer_projectile(receiver, frame);
             return;
         }
         if (name != spawn_name && name != load_name && name != init_name && name != perceive_name) return;
@@ -1466,10 +1468,6 @@ namespace
         scope.not_deer.counts = {};
         scope.boars.counts = {};
         scope.not_deer_replica.Reset();
-        auto* husk = find<U::UClass>(npc_class);
-        auto* flayer = find<U::UClass>(flayer_class);
-        auto* not_deer = operate_not_deer ? find<U::UClass>(not_deer_class) : nullptr;
-        auto* boar = operate_boars ? find<U::UClass>(boar_class) : nullptr;
         auto* antfarm = find<U::UClass>(antfarm_class);
 
         if (auto* base = find<U::UClass>(npc_base))
@@ -1478,13 +1476,13 @@ namespace
             U::UGameplayStatics::GetAllActorsOfClass(active.world, base, npcs);
             for (auto* actor : npcs)
             {
-                if (!actor) continue;
-                auto* type = actor->GetClassPrivate();
-                if ((type != husk && type != flayer && type != not_deer && type != boar) || !in_level(actor, active.world))
-                    continue;
-                auto& counts = type == flayer ? scope.flayers.counts : type == not_deer ? scope.not_deer.counts :
-                    type == boar ? scope.boars.counts : scope.counts;
-                if (type == not_deer && byte_field(actor, STR("Faction")) != not_deer_profile.faction)
+                // Identify loaded classes from the actors. Looking up an unloaded optional class can scan the object array.
+                const auto family = npc_family(actor);
+                if (family == NpcFamily::Unknown || (family == NpcFamily::NotDeer && !operate_not_deer) ||
+                    !in_level(actor, active.world)) continue;
+                auto* cohort = antfarm_cohort(family);
+                auto& counts = cohort ? cohort->counts : scope.counts;
+                if (family == NpcFamily::NotDeer && byte_field(actor, STR("Faction")) != not_deer_profile.faction)
                 {
                     ++counts.other;
                     continue;
@@ -1501,7 +1499,7 @@ namespace
                 {
                     ++counts.simulated;
                     if (live(object(actor, STR("Controller")))) ++counts.simulated_controllers;
-                    if (type == not_deer)
+                    if (family == NpcFamily::NotDeer)
                     {
                         if (counts.simulated == 1) scope.not_deer_replica = actor;
                         else scope.not_deer_replica.Reset();
@@ -1522,7 +1520,7 @@ namespace
                     continue;
                 ++scope.counts.antfarm_initialized;
                 ++scope.flayers.counts.antfarm_initialized;
-                if (not_deer) ++scope.not_deer.counts.antfarm_initialized;
+                if (operate_not_deer) ++scope.not_deer.counts.antfarm_initialized;
             }
         }
     }
@@ -1930,12 +1928,13 @@ namespace silverfish::campaign_npc
         if (!env("SILVERFISH_COOP_NATIVE_ZONE") || !env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC") ||
             installed.load(std::memory_order_acquire)) return;
         operate = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE");
-        publish_flayers = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_PUBLISH");
-        veto_flayer_spawns = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO");
-        operate_not_deer = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER");
         production_roster = env("SILVERFISH_COOP_NATIVE_CROSSROADS_ROSTER");
+        publish_flayers = production_roster || env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_PUBLISH");
+        veto_flayer_spawns = production_roster || env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO");
+        operate_not_deer = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER");
         operate_boars = production_roster || (env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_NATIVE_BOAR_FIXTURE"));
         const bool headless_fixture = env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_NATIVE_FIXTURES");
+        watch_flayer_projectiles = headless_fixture && publish_flayers && veto_flayer_spawns;
         watch_combat = headless_fixture && env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT");
         refresh_fixture = headless_fixture && env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH");
         callbacks[0] = Hook::RegisterProcessLocalScriptFunctionPreCallback(
@@ -2027,7 +2026,7 @@ namespace silverfish::campaign_npc
         lua.register_function("SilverfishReadCampaignNpc", report);
         lua.register_function("SilverfishClearCampaignNpc", reset);
         if (production_roster) lua.register_function("SilverfishReadCampaignNpcHostRoster", report_host_roster);
-        if (publish_flayers && veto_flayer_spawns)
+        if (watch_flayer_projectiles)
             lua.register_function("SilverfishReadCampaignFlayerProjectile", read_flayer_projectile);
         if (refresh_fixture) lua.register_function("SilverfishStockCampaignNpcRefresh", stock_refresh);
         if (watch_combat)

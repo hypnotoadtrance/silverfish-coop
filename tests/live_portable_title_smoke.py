@@ -71,6 +71,10 @@ def fingerprint(path: Path) -> str | None:
 
 
 def qualify_release(game: Path, legacy_work: Path | None) -> PortableRelease:
+    for name in runtime.STOCK_PACKAGES:
+        package = game / runtime.PAKS / name
+        if not package.is_file() or not install_stage._ordinary(package).st_size:
+            raise ValueError(f"Stock content is missing from the portable test replica: {package}")
     mods = game / runtime.SHIPPING.parent / "ue4ss" / "Mods"
     embedded = mods / install_stage.MOD
     marker = embedded / "resident-portable.json"
@@ -411,7 +415,7 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str) -> dict:
     await wait(host_run, settled)
     await wait(guest_run, settled)
     events = (json.loads(line) for line in (host_run / "events.jsonl").read_text(encoding="utf-8").splitlines())
-    claim, = [event for event in events if event["event"] == "native_loot_claim_committed" and event.get("guid") == item["guid"]]
+    claim, = [event for event in events if event["event"] == "native_loot_claim_accepted" and event.get("guid") == item["guid"]]
     inventory_guid = claim.get("inventory_guid", item["guid"])
     display = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=f"{actor}@{inventory_guid}")
     assert display["ok"] and display["proof"] == "verified stock Nearby Items transfer", display
@@ -425,6 +429,8 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str) -> dict:
     assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before
     duplicate = await submit(host_run, "native-loot-claim", target=f"{item['guid']}@{crate}")
     assert duplicate.get("error") == "native_loot_already_claimed", duplicate
+    checkpoint = await submit(host_run, "checkpoint")
+    assert checkpoint["ok"], checkpoint
     saved = json.loads((host.campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
     native_host_save.verify_checkpoint(host.profile, saved)
     durable = saved["world"]["party"][native_loot.STATE_KEY][crate]
@@ -438,6 +444,13 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str) -> dict:
 
 async def verify_stock_use(host: Seat, guest: Seat, pawn: str, *, starter: bool) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
+    campaign_file = host.campaign / "save" / "campaign.json"
+
+    def save_hashes():
+        paths = [campaign_file, *host.profile.rglob("*.sav")]
+        return {path: sha256(path.read_bytes()).hexdigest() for path in paths}
+
+    before_saves = save_hashes()
     before = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
     host_before = (await submit(host_run, "native-inventory-list"))["native_inventory"]
     classes = ({native_guest_consumable.STARTER_BAGS["hyperrandom"]} if starter
@@ -490,8 +503,10 @@ async def verify_stock_use(host: Seat, guest: Seat, pawn: str, *, starter: bool)
     replay = await submit(guest_run, action, target=item["guid"], operation_id=event["operation_id"])
     assert replay["ok"] and replay[key] == receipt, replay
     assert (await submit(guest_run, "native-inventory-list"))["native_inventory"] == after
-    native_host_save.verify_checkpoint(host.profile, json.loads(
-        (host.campaign / "save" / "campaign.json").read_text(encoding="utf-8")))
+    assert save_hashes() == before_saves, "Using a stock item wrote a campaign save"
+    saved = await submit(host_run, "checkpoint")
+    assert saved["ok"], saved
+    native_host_save.verify_checkpoint(host.profile, json.loads(campaign_file.read_text(encoding="utf-8")))
     assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
     evidence = {"gesture": gesture, "receipt": receipt}

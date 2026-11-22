@@ -66,7 +66,6 @@ async def perform(host, bridge, operation_id: str, hours: int, *, insomnia: bool
     if not insomnia and not inspected["eligible"]:
         raise party.RuleError(inspected["reason"] or "native_rest_denied")
 
-    await host.checkpoint_native(bridge)
     host.native_checkpoint_unsafe = True
     try:
         selection = (str(hours), "insomnia") if insomnia else (str(hours),)

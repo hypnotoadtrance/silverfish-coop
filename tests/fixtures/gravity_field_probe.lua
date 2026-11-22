@@ -2,13 +2,14 @@ local box = os.getenv("SILVERFISH_COOP_BRIDGE")
 local pyrogeist = box and box:find("pyrogeist%-proof%-%x+") ~= nil
 local shadow = box and box:find("shadow%-sphere%-proof%-%x+") ~= nil
 local angler = box and box:find("angler%-lamp%-proof%-%x+") ~= nil
+local observer = box and box:find("observer%-proof%-%x+") ~= nil
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not box
-    or not (pyrogeist or shadow or angler or box:find("gravity%-proof%-%x+")) then return end
+    or not (pyrogeist or shadow or angler or observer or box:find("gravity%-proof%-%x+")) then return end
 
 local level = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local director_path = level .. ":PersistentLevel.DynaimicSpawnControler_BP_C_1"
 local class = pyrogeist and "Pyrogeist_BP_C" or shadow and "ShadowSphere_BP_C"
-    or angler and "AnglerLamp_BP_C" or "GravityAnomaly_BP_C"
+    or angler and "AnglerLamp_BP_C" or observer and "Observers_BP_C" or "GravityAnomaly_BP_C"
 local particle_name = pyrogeist and "NI_Pyrogeist_Center" or "NI_GravityDistortion"
 local particle = "NiagaraSystem /Game/Assets/PFX/" .. particle_name .. "." .. particle_name
 local jet_particle = "NiagaraSystem /Game/Assets/PFX/NI_FireJet_Continuous_2.NI_FireJet_Continuous_2"
@@ -20,9 +21,18 @@ local weights = "Anomalies_WtWeights_41_BDF2F049400F5C73E9FF86B6B2B4E19F"
 local test_lane = {X = 13850, Y = -200, Z = 132}
 local previous, lift, hooked, selected
 local watched, damage_hooked
+local gaze_hooked
+local reward_camera
 
 local function valid(object)
     return object and object:IsValid()
+end
+
+local function clear_offering_lane(observer_, start, target, ignore)
+    local kismet = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local color = {R = 0, G = 0, B = 0, A = 0}
+    return not kismet:SphereTraceSingleForObjects(observer_, start, target, 70, {0, 1, 2, 3, 4, 5},
+        false, ignore, 0, {}, true, color, color, 0)
 end
 
 local function same(left, right)
@@ -55,7 +65,8 @@ local function stock_roll(world)
     local cap = director.Max_AnomalyFields
     local ok, issue = pcall(function()
         map:Empty()
-        map:Add(FName(pyrogeist and "Pyrogiest" or shadow and "ShadowSwarm" or angler and "AnglerLamp" or "GravityWell"), 1)
+        map:Add(FName(pyrogeist and "Pyrogiest" or shadow and "ShadowSwarm" or angler and "AnglerLamp"
+            or observer and "Observers" or "GravityWell"), 1)
         director.Max_AnomalyFields = 2
         director:SpawnAnomalies()
     end)
@@ -119,14 +130,15 @@ local function command(operation, world, driver, host, local_pawn, argument)
         for _, well in ipairs(current) do
             local at = well:K2_GetActorLocation()
             local fx = pyrogeist and well.NI_StarburstHint or shadow and well.PostProcess_CreepingShadows
-                or angler and well.PostProcessLure or well.NI_GravityDistortion
+                or angler and well.PostProcessLure or observer and well.Sphere1 or well.NI_GravityDistortion
             local post = shadow or angler
-            local available = valid(fx) and same(fx:GetOwner(), well) and (post or valid(fx.Asset) and fx.Asset:GetFullName() == particle)
-            assert(pyrogeist or post or available)
+            local available = valid(fx) and same(fx:GetOwner(), well)
+                and (post or observer or valid(fx.Asset) and fx.Asset:GetFullName() == particle)
+            assert(pyrogeist or post or observer or available)
             if available then
                 rows[#rows + 1] = ("%.2f|%.2f|%.2f|%d|%s|%s|%s"):format(at.X, at.Y, at.Z, well:GetLocalRole(),
                     tostring(well:GetActorEnableCollision()), tostring(well:IsActorTickEnabled()),
-                    tostring(post and fx.bEnabled or not post and fx:IsActive()))
+                    tostring(not observer and (post and fx.bEnabled or not post and fx:IsActive())))
             end
         end
         return table.concat(rows, ";")
@@ -134,6 +146,16 @@ local function command(operation, world, driver, host, local_pawn, argument)
         assert(not host and #current > 0)
         local well = current[1]
         assert(well:GetLocalRole() == 1 and not well:GetActorEnableCollision() and not well:IsActorTickEnabled())
+        if observer then
+            local opacity = well.OpacityTarget
+            well:ReceiveBeginPlay()
+            well:CheckPlayerLooking()
+            well:Rage()
+            well:TryCatchItem(local_pawn, {X = 1, Y = 0, Z = 0})
+            well:AbsorbItem(local_pawn)
+            assert(well.OpacityTarget == opacity)
+            return "0"
+        end
         if angler then
             well:ReceiveBeginPlay()
             well:ReceiveTick(.2)
@@ -169,7 +191,7 @@ local function command(operation, world, driver, host, local_pawn, argument)
         well:ReceiveTick(.2)
         assert(#well.Characters == characters and #well.PhysActors == bodies)
         return tostring(characters) .. "|" .. tostring(bodies)
-    elseif (shadow or angler) and operation == "prepare" then
+    elseif (shadow or angler or observer) and operation == "prepare" then
         assert(host and #current > 0 and #driver.ClientConnections == 0)
         local body = current[1]
         assert(body:HasAuthority() and body.bReplicates and body:GetActorEnableCollision())
@@ -177,11 +199,15 @@ local function command(operation, world, driver, host, local_pawn, argument)
         -- Scope this lane above the roaming NPCs so unrelated attacks cannot alter either save during the proof.
         local_pawn.CharacterMovement:StopMovementImmediately()
         local_pawn.CharacterMovement:SetMovementMode(0, 0)
-        assert(local_pawn:K2_SetActorLocation({X = anchor.X + 1050, Y = anchor.Y, Z = anchor.Z}, false, {}, true))
+        assert(local_pawn:K2_SetActorLocation({X = anchor.X + (observer and 2800 or 1050), Y = anchor.Y, Z = anchor.Z}, false, {}, true))
         assert(body:K2_SetActorLocation(anchor, false, {}, true))
+        if observer then
+            body.FloatingPawnMovement:StopMovementImmediately()
+            body.FloatingPawnMovement:SetComponentTickEnabled(false)
+        end
         body:ForceNetUpdate()
         local_pawn:ForceNetUpdate()
-        selected = {well = body, entry = {X = anchor.X + 120, Y = anchor.Y, Z = anchor.Z}}
+        selected = {well = body, entry = {X = anchor.X + 120, Y = anchor.Y, Z = anchor.Z}, anchor = anchor}
         return ("%.2f|%.2f|%.2f"):format(anchor.X, anchor.Y, anchor.Z)
     elseif pyrogeist and operation == "prepare" then
         assert(host and #current > 0 and #driver.ClientConnections == 0)
@@ -267,6 +293,37 @@ local function command(operation, world, driver, host, local_pawn, argument)
         local camera = local_pawn.Camera
         local point, ahead = camera:K2_GetComponentLocation(), camera:GetForwardVector()
         return ("%.3f|%.3f|%.3f|%.5f|%.5f|%.5f"):format(point.X, point.Y, point.Z, ahead.X, ahead.Y, ahead.Z)
+    elseif angler and operation == "anglernpc" then
+        assert(host and selected and valid(selected.well) and not selected.home)
+        local lamp = selected.well
+        local original = lamp:K2_GetActorLocation()
+        local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        local npc_class = StaticFindObject("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C")
+        local list = {}
+        assert(valid(npc_class) and valid(api))
+        api:GetAllActorsOfClass(world, npc_class, list)
+        local proved
+        for _, npc in ipairs(list.OutActors or list) do
+            if npc and type(npc.type) == "function" and npc:type() == "RemoteUnrealParam" then npc = npc:get() end
+            if valid(npc) and same(npc:GetWorld(), world) and npc:HasAuthority() and npc.Alive and not npc.Agro
+                and valid(npc.Controller) then
+                local start = npc:K2_GetActorLocation()
+                local where = {X = start.X + 260, Y = start.Y, Z = start.Z + 50}
+                local old = npc.LastSpottedPoint
+                if math.abs(old.X - where.X) > 50 and lamp:K2_SetActorLocation(where, false, {}, true) then
+                    lamp:Attract_NPCs(npc)
+                    local spot = npc.LastSpottedPoint
+                    if npc.Alert and math.abs(spot.X - where.X) < 1 and math.abs(spot.Y - where.Y) < 1
+                        and math.abs(spot.Z - where.Z) < 1 then
+                        proved = ("%s|%.3f|%.3f|%.3f|%.3f"):format(npc:GetFullName(), spot.X, spot.Y, spot.Z, npc.AllertDurration)
+                        break
+                    end
+                end
+            end
+        end
+        assert(lamp:K2_SetActorLocation(original, false, {}, true))
+        assert(proved, "No stock NPC accepted the AnglerLamp's alert")
+        return proved
     elseif angler and operation == "anglerpresent" then
         assert(host and selected and valid(selected.well) and not selected.home)
         local x, y, z, ax, ay, az = argument:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
@@ -347,7 +404,7 @@ local function command(operation, world, driver, host, local_pawn, argument)
             end
         end
         return table.concat(rows, ";")
-    elseif shadow and operation == "shadowstate" then
+    elseif (shadow or observer) and operation == "shadowstate" then
         assert(host and #driver.ClientConnections == 1)
         local guest = driver.ClientConnections[1].PlayerController.Pawn
         local name = FName("Player_Fatigue")
@@ -357,6 +414,244 @@ local function command(operation, world, driver, host, local_pawn, argument)
         end
         return ("%d|%.3f|%d|%.3f"):format(fatigue(local_pawn), local_pawn.Save.PlayerHealth,
             fatigue(guest), guest.Save.PlayerHealth)
+    elseif observer and operation == "observerpose" then
+        assert(host and selected and valid(selected.well) and #driver.ClientConnections == 1)
+        local guest = driver.ClientConnections[1].PlayerController.Pawn
+        assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled())
+        local use_host = argument == "host"
+        local distance = argument == "far" and 2500 or 600
+        local away = argument == "away"
+        assert(use_host or argument == "far" or argument == "away" or argument == "guest")
+        local point = selected.anchor
+        local target, other = use_host and local_pawn or guest, use_host and guest or local_pawn
+        local function place(pawn, x, y, rotation)
+            pawn.CharacterMovement:StopMovementImmediately()
+            pawn.CharacterMovement:SetMovementMode(0, 0)
+            assert(pawn:K2_SetActorLocation({X = x, Y = y, Z = point.Z}, false, {}, true))
+            pawn.Controller:SetControlRotation(rotation)
+            pawn.Camera:K2_SetWorldRotation(rotation, false, {}, true)
+            pawn:ForceNetUpdate()
+        end
+        place(other, point.X + 2800, point.Y + 320, {Pitch = 0, Yaw = 0, Roll = 0})
+        place(target, point.X + distance, point.Y, {Pitch = 0, Yaw = away and 0 or 180, Roll = 0})
+        if not gaze_hooked then
+            RegisterHook("/Game/Classes/Player/Player_FP.Player_FP_C:PsyAttack", function(context, amount)
+                local pawn = context:get()
+                if (same(pawn, local_pawn) or same(pawn, guest)) and amount:get() == 4 then
+                    write("observer-gaze", (same(pawn, local_pawn) and "host" or "guest") .. "|" .. pawn:GetFullName(),
+                        "ab")
+                end
+            end)
+            gaze_hooked = true
+        end
+        local eye, look = target.Camera:K2_GetComponentLocation(), target.Camera:GetForwardVector()
+        return ("%.1f|%.1f|%.1f|%.3f|%.3f|%.3f"):format(eye.X, eye.Y, eye.Z, look.X, look.Y, look.Z)
+    elseif observer and operation == "observercheck" then
+        assert(host and selected and valid(selected.well) and same(selected.well["As Player FP"], local_pawn))
+        selected.well:CheckPlayerLooking()
+        assert(same(selected.well["As Player FP"], local_pawn), "Observer retained the temporary target")
+        return local_pawn:GetFullName()
+    elseif observer and operation == "observeroffering" then
+        assert(host and selected and valid(selected.well) and not selected.offering and #driver.ClientConnections == 1)
+        local path = "/Game/Classes/Items/Item_Jewely.Item_Jewely_C"
+        local kind = StaticFindObject(path)
+        if not valid(kind) then LoadAsset(path); kind = StaticFindObject(path) end
+        local body, guest = selected.well, driver.ClientConnections[1].PlayerController.Pawn
+        local point = body:K2_GetActorLocation()
+        local start = {X = point.X + 265, Y = point.Y, Z = point.Z}
+        if argument == "flight" or argument == "loot" or argument == "input" then
+            local clear
+            local heights = argument == "flight" and {3000, 2500, 2000, 1500, 1000, 700} or {700, 1000, 1500}
+            for _, height in ipairs(heights) do
+                local target = {X = point.X, Y = point.Y, Z = test_lane.Z + height}
+                start = {X = target.X + 265, Y = target.Y, Z = target.Z}
+                local ignore = {body, local_pawn, guest}
+                local guest_eye = {X = target.X + 385, Y = target.Y, Z = target.Z + 30}
+                if clear_offering_lane(body, start, target, ignore)
+                    and (argument ~= "input" or clear_offering_lane(body, guest_eye, start, ignore)) then
+                    assert(body:K2_SetActorLocation(target, false, {}, true))
+                    if argument == "loot" or argument == "input" then
+                        for index, pawn in ipairs({local_pawn, guest}) do
+                            local guest_throw = argument == "input" and index == 2
+                            local parked = {X = target.X + (guest_throw and 385 or 600),
+                                Y = target.Y + (guest_throw and 0 or 100 * index), Z = target.Z}
+                            assert(pawn:K2_SetActorLocation(parked, false, {}, true))
+                            if guest_throw then
+                                pawn.Camera:K2_SetWorldLocation({X = parked.X, Y = parked.Y, Z = parked.Z + 30}, false, {}, true)
+                            end
+                            pawn:ForceNetUpdate()
+                        end
+                    end
+                    clear = true
+                    break
+                end
+            end
+            assert(clear, "No clear stock throw lane")
+        end
+        local item = world:SpawnActor(kind, start, {Pitch = 0, Yaw = 0, Roll = 0})
+        assert(valid(item) and item:HasAuthority() and valid(item.Box))
+        -- A high-value item guarantees an ordinary stock reward without choosing its tier.
+        item.Value = 2500
+        item.Instigator = guest
+        item.Box:SetSimulatePhysics(true)
+        item.Box:SetEnableGravity(false)
+        item:SetReplicates(true)
+        item:SetReplicateMovement(true)
+        item:ForceNetUpdate()
+        selected.offering = item
+        selected.absorptions = 0
+        RegisterHook("/Game/Classes/Anomalies/Observers_BP.Observers_BP_C:AbsorbItem", function(context, input)
+            local observer_ = context:get()
+            if not same(observer_, selected.well) then return end
+            local offering = input:get()
+            if same(offering, item) and observer_.ResultIndex > 0 then selected.absorptions = selected.absorptions + 1 end
+            write("observer-stock-absorb", ("%s|%s"):format(
+                valid(offering) and offering:GetFullName() or "-", tostring(observer_.ResultIndex)), "ab")
+        end)
+        return item:GetFullName()
+    elseif observer and operation == "observerimpact" then
+        assert(host and selected and valid(selected.offering) and valid(selected.well))
+        local item = selected.offering
+        local point, target = item:K2_GetActorLocation(), selected.well:K2_GetActorLocation()
+        assert(math.abs(point.Y - target.Y) < 35 and math.abs(point.Z - target.Z) < 35 and point.X > target.X)
+        item.Value = 2500
+        assert(item:K2_SetActorLocation(target, false, {}, true))
+        return "entered stock capsule"
+    elseif observer and operation == "observerlaunch" then
+        assert(host and selected and valid(selected.offering) and valid(selected.well) and #driver.ClientConnections == 1)
+        local item, body = selected.offering, selected.well
+        local guest = driver.ClientConnections[1].PlayerController.Pawn
+        assert(same(item.Instigator, guest) and valid(guest.Camera) and valid(item.RootComponent))
+        local source, target = item:K2_GetActorLocation(), body:K2_GetActorLocation()
+        local offset = {X = target.X - source.X, Y = target.Y - source.Y, Z = target.Z - source.Z}
+        local length = math.sqrt(offset.X^2 + offset.Y^2 + offset.Z^2)
+        local direction = {X = offset.X / length, Y = offset.Y / length, Z = offset.Z / length}
+        local angle = {Pitch = math.deg(math.asin(direction.Z)), Yaw = math.deg(math.atan(direction.Y, direction.X)), Roll = 0}
+        guest.Controller:SetControlRotation(angle)
+        guest.Camera:K2_SetWorldRotation(angle, false, {}, true)
+        direction = guest.Camera:GetForwardVector()
+        local dot = (offset.X * direction.X + offset.Y * direction.Y + offset.Z * direction.Z) / length
+        assert(dot > .95, ("guest aim does not align with throw %.2f"):format(dot))
+        item.Value = 2500
+        assert(clear_offering_lane(body, source, target, {body, item, guest, local_pawn}),
+            "The fixture throw path became obstructed")
+        body:TryCatchItem(item, direction)
+        local grabbed = same(body.GrabbedComponent, item.RootComponent)
+        item.Box:AddImpulse({X = 600 * direction.X, Y = 600 * direction.Y, Z = 600 * direction.Z},
+            FName("None"), true)
+        return ("%s|%.3f|%.2f"):format(tostring(grabbed), dot, length)
+    elseif observer and operation == "observerabsorptions" then
+        assert(host and selected and selected.absorptions)
+        return tostring(selected.absorptions)
+    elseif observer and operation == "observerofferpoint" then
+        assert(host and selected and valid(selected.offering))
+        local at = selected.offering:K2_GetActorLocation()
+        return ("%.3f|%.3f|%.3f"):format(at.X, at.Y, at.Z)
+    elseif observer and operation == "observerofferidentity" then
+        assert(not host)
+        local candidates = FindAllOf("Item_Jewely_C") or {}
+        for _, item in ipairs(candidates) do
+            if valid(item) and same(item:GetWorld(), world) and item:GetLocalRole() == 1 and not item:IsActorBeingDestroyed() then
+                local at = item:K2_GetActorLocation()
+                if (at.X - test_lane.X)^2 + (at.Y - test_lane.Y)^2 < 450^2 then
+                    local x, y, z = argument:match("^([^,]+),([^,]+),([^,]+)$")
+                    x, y, z = tonumber(x), tonumber(y), tonumber(z)
+                    assert(x and y and z and math.abs(x - at.X) < 60 and math.abs(y - at.Y) < 60 and math.abs(z - at.Z) < 220)
+                    item.Box:SetEnableGravity(false)
+                    item.Box:SetPhysicsLinearVelocity({X = 0, Y = 0, Z = 0}, false, FName("None"))
+                    assert(item:K2_SetActorLocation({X = x, Y = y, Z = z}, false, {}, true))
+                    return ("%d|%s"):format(#candidates, item:GetFullName())
+                end
+            end
+        end
+        return ""
+    elseif observer and operation == "observerthrowaim" then
+        if host then
+            assert(selected and valid(selected.offering) and #driver.ClientConnections == 1
+                and same(driver.ClientConnections[1].PlayerController.Pawn.HeldObject, selected.offering))
+            selected.offering.Box:SetEnableGravity(true)
+            return "ready"
+        end
+        assert(valid(local_pawn.HeldObject) and local_pawn:IsLocallyControlled())
+        local_pawn.HeldObject.Box:SetEnableGravity(true)
+        local angle = {Pitch = -8, Yaw = 180, Roll = 0}
+        local_pawn.Controller:SetControlRotation(angle)
+        local_pawn.Camera:K2_SetWorldRotation(angle, false, {}, true)
+        return "aimed"
+    elseif observer and operation == "observerlootcamera" then
+        assert(not host and local_pawn:IsLocallyControlled() and valid(local_pawn.Camera))
+        local camera = local_pawn.Camera
+        if argument == "reset" then
+            assert(reward_camera and same(reward_camera.camera, camera))
+            camera:K2_SetRelativeLocation(reward_camera.location, false, {}, true)
+            reward_camera = nil
+            return "restored"
+        end
+        assert((argument == "position" or argument:match("^position:%d+$")) and not reward_camera)
+        local at, relative = local_pawn:K2_GetActorLocation(), camera.RelativeLocation
+        reward_camera = {camera = camera, location = {X = relative.X, Y = relative.Y, Z = relative.Z}}
+        -- The suspended test pawn's normal camera remains at the pre-teleport point.
+        local height = tonumber(argument:match("^position:(%d+)$")) or 52
+        assert(height <= 70)
+        camera:K2_SetWorldLocation({X = at.X, Y = at.Y, Z = at.Z + height}, false, {}, true)
+        local eye = camera:K2_GetComponentLocation()
+        return ("%.3f|%.3f|%.3f"):format(eye.X, eye.Y, eye.Z)
+    elseif observer and operation == "observerofferingprobe" then
+        assert(host and selected and selected.absorptions)
+        local record = io.open(box .. "/observer-native-reward", "r")
+        local native = record and record:read("*l") or "unavailable"
+        if record then record:close() end
+        local found = {}
+        for _, tier in ipairs({"Red", "Green", "Blue", "Purple", "Gold"}) do
+            local stem = "Art_Tesseract_" .. tier
+            local type_ = StaticFindObject("/Game/Classes/Items/Artifacts/" .. stem .. "." .. stem .. "_C")
+            local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+            if valid(type_) then
+                local result = {}
+                api:GetAllActorsOfClass(world, type_, result)
+                for _, actor in ipairs(result.OutActors or result) do
+                    if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+                    if valid(actor) and same(actor:GetWorld(), world) then
+                        local at = actor:K2_GetActorLocation()
+                        found[#found + 1] = ("%s:%.1f/%.1f/%.1f"):format(tier, at.X, at.Y, at.Z)
+                    end
+                end
+            end
+        end
+        return ("%d:%s|%s"):format(selected.absorptions, native, table.concat(found, ";"))
+    elseif observer and operation == "observerrewards" then
+        local function near(actor)
+            if not valid(actor) or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return false end
+            local point = actor:K2_GetActorLocation()
+            return (point.X - test_lane.X)^2 + (point.Y - test_lane.Y)^2 < 450^2
+        end
+        local offers, rewards = 0, {}
+        for _, actor in ipairs(FindAllOf("Item_Jewely_C") or {}) do
+            if near(actor) then offers = offers + 1 end
+        end
+        for _, tier in ipairs({"Red", "Green", "Blue", "Purple", "Gold"}) do
+            for _, actor in ipairs(FindAllOf("Art_Tesseract_" .. tier .. "_C") or {}) do
+                if near(actor) then
+                    rewards[#rewards + 1] = ("%s,%d,%s"):format(tier, actor:GetLocalRole(), tostring(actor.bReplicateMovement))
+                end
+            end
+        end
+        return tostring(offers) .. "|" .. table.concat(rewards, ";")
+    elseif observer and operation == "observervisual" then
+        for _, actor in ipairs(current) do
+            local point = actor:K2_GetActorLocation()
+            local material = actor.DynamicMat
+            if (point.X - test_lane.X)^2 + (point.Y - test_lane.Y)^2 < 30^2 and valid(material) then
+                local meshes = {actor.Sphere1, actor.Sphere2, actor.Sphere3}
+                local matching = 0
+                for _, mesh in ipairs(meshes) do
+                    if valid(mesh) and same(mesh:GetOwner(), actor) and same(mesh:GetMaterial(0), material)
+                        and mesh:IsVisible() then matching = matching + 1 end
+                end
+                return ("%.5f|%d"):format(material:K2_GetScalarParameterValue(FName("Opacity")), matching)
+            end
+        end
+        return ""
     elseif shadow and operation == "shadowhit" then
         assert(host and selected and valid(selected.well) and #driver.ClientConnections == 1)
         local guest = driver.ClientConnections[1].PlayerController.Pawn

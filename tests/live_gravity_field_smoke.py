@@ -121,6 +121,189 @@ def angler_rows(raw):
     return result
 
 
+async def verify_observer(guest, host_box, guest_box, probe):
+    vetoes = blocked_triggers(status(guest))
+    assert await probe(guest_box, "guestguard") == "0"
+    guarded = await wait(guest, lambda view: blocked_triggers(view) >= vetoes + 5, timeout=5)
+
+    async def visible_pair(is_expected):
+        async with asyncio.timeout(8):
+            while True:
+                first, second = await asyncio.gather(
+                    probe(host_box, "observervisual"), probe(guest_box, "observervisual"))
+                if first and second:
+                    authority, host_parts = map(float, first.split("|"))
+                    replica, guest_parts = map(float, second.split("|"))
+                    if host_parts == guest_parts == 3 and is_expected(authority) and is_expected(replica):
+                        return {"host_opacity": authority, "guest_opacity": replica,
+                                "host_meshes": int(host_parts), "guest_meshes": int(guest_parts)}
+                await asyncio.sleep(.1)
+
+    async def check_pose(pose):
+        facing = await probe(host_box, "observerpose", pose)
+        await asyncio.sleep(.6)
+        stock_target = await probe(host_box, "observercheck")
+        current = list(map(float, (await probe(host_box, "shadowstate")).split("|")))
+        return facing, stock_target, current
+
+    initial = list(map(float, (await probe(host_box, "shadowstate")).split("|")))
+    visible = await visible_pair(lambda opacity: opacity >= .95)
+    far = await check_pose("far")
+    away = await check_pose("away")
+    assert far[2] == initial and away[2] == initial, (initial, far, away)
+    face = await check_pose("guest")
+    assert face[2][:2] == initial[:2] and face[2][2] > initial[2] and face[2][3] < initial[3], (initial, face)
+    attack_log = host_box / "observer-gaze"
+    guest_hits = attack_log.read_text().splitlines()
+    assert guest_hits and all(row.startswith("guest|") for row in guest_hits), guest_hits
+    await probe(host_box, "observerpose", "far")
+    await asyncio.sleep(1)
+    faded = await visible_pair(lambda opacity: opacity <= .06)
+    retreated = list(map(float, (await probe(host_box, "shadowstate")).split("|")))
+    await asyncio.sleep(8.2)
+    host_looks = await check_pose("host")
+    assert host_looks[2][0] > retreated[0] and host_looks[2][1] < retreated[1], (retreated, host_looks)
+    assert host_looks[2][2:] == retreated[2:] and far[1] == away[1] == face[1] == host_looks[1], (retreated, host_looks)
+    return {"guest_native_vetoes": blocked_triggers(guarded) - vetoes, "initial": initial,
+            "out_of_range": far, "facing_away": away, "guest_gaze": face, "retreated": retreated, "host_gaze": host_looks,
+            "before_gaze": visible, "after_gaze": faded,
+            "stock_psy_attack_recipients": attack_log.read_text().splitlines()}
+
+
+async def verify_observer_offering(host, guest, host_box, guest_box, probe, approach, character):
+    await probe(host_box, "observerpose", "guest" if approach in ("flight", "loot") else "far")
+    source = await probe(host_box, "observeroffering", approach)
+    assert source.startswith("Item_Jewely_C ")
+    async with asyncio.timeout(8):
+        while await probe(guest_box, "observerrewards") != "1|":
+            await asyncio.sleep(.15)
+    assert await probe(host_box, "observerrewards") == "1|"
+    if approach == "input":
+        launch = await stock_observer_throw(host, guest, host_box, guest_box, probe, source)
+    elif approach != "contact":
+        launch = await probe(host_box, "observerlaunch")
+        assert launch.startswith("true|"), launch
+    else:
+        launch = await probe(host_box, "observerimpact")
+        assert launch == "entered stock capsule"
+    if approach in ("loot", "input"):
+        return await verify_observer_reward_pickup(host, guest, host_box, guest_box, probe, character, source, launch)
+    host_result = guest_result = ""
+    try:
+        async with asyncio.timeout(10):
+            while True:
+                host_result, guest_result = await asyncio.gather(
+                    probe(host_box, "observerrewards"), probe(guest_box, "observerrewards"))
+                head, _, tail = host_result.partition("|")
+                if head == "0" and tail.endswith(",3,true") and ";" not in tail:
+                    tier = tail.split(",", 1)[0]
+                    if guest_result == f"0|{tier},1,true":
+                        await asyncio.sleep(.6)
+                        assert await probe(host_box, "observerabsorptions") == "1"
+                        assert await probe(host_box, "observerrewards") == host_result
+                        assert await probe(guest_box, "observerrewards") == guest_result
+                        return {"offering": source, "launch": launch, "reward": tier, "host": host_result, "guest": guest_result,
+                                "stock_reward_count": 1}
+                await asyncio.sleep(.15)
+    except TimeoutError as error:
+        extra = await probe(host_box, "observerofferingprobe")
+        raise RuntimeError(f"Stock offering did not settle on both peers. Host {host_result!r}. Guest {guest_result!r}. Stock {extra}.") from error
+
+
+async def stock_observer_throw(host, guest, host_box, guest_box, probe, source):
+    from tools.silverfish import native_prop_carry
+    from tools.silverfish.control import submit
+
+    async def fixture(run, target):
+        reply = await submit(run, native_prop_carry.FIXTURE, target=target)
+        if not reply.get("ok"):
+            raise RuntimeError(f"{target}: {reply.get('error')}")
+        return reply
+
+    def carries():
+        return [entry for entry in events(host, "native_prop_carry_action") if entry.get("actor") == source]
+
+    await fixture(host, "select@" + source.partition(" ")[2])
+    coordinates = await probe(host_box, "observerofferpoint")
+    location = list(map(float, coordinates.split("|")))
+    await wait(guest, lambda view: math.dist(view["game"]["pawns"]["local"]["location"], location) < 175, timeout=7)
+    count, name = (await probe(guest_box, "observerofferidentity", coordinates.replace("|", ","))).split("|")
+    await probe(guest_box, "observerlootcamera", "position:30")
+    try:
+        await fixture(guest, f"pickup@/Game/Classes/Items/Item_Jewely.Item_Jewely_C|{count}|{name}")
+        await wait(host, lambda _: any(entry["edge"] == "grab" for entry in carries()), timeout=8)
+        assert await probe(host_box, "observerthrowaim") == "ready"
+        assert await probe(guest_box, "observerthrowaim") == "aimed"
+        await fixture(guest, "throw")
+        await wait(host, lambda _: any(entry["edge"] == "throw" for entry in carries()), timeout=8)
+    finally:
+        assert await probe(guest_box, "observerlootcamera", "reset") == "restored"
+    return carries()
+
+
+async def verify_observer_reward_pickup(host, guest, host_box, guest_box, probe, character, source, launch):
+    from tools.silverfish import native_stock_enemy_drops, native_world_loot
+    from tools.silverfish.control import submit
+
+    def banked():
+        return [entry for entry in events(host, "native_stock_enemy_loot_banked") if ".Observers_BP_C_" in entry["source"]]
+
+    async def action(run, command, target=None):
+        reply = await submit(run, command, target=target)
+        if not reply.get("ok"):
+            raise RuntimeError(f"{command}: {reply.get('error')}")
+        return reply
+
+    try:
+        async with asyncio.timeout(15):
+            while not (rewards := banked()):
+                await asyncio.sleep(.15)
+    except TimeoutError as error:
+        extra = await probe(host_box, "observerofferingprobe")
+        raise RuntimeError(f"The stock Observer reward was not banked. Stock {extra}.") from error
+    reward, = rewards
+    guid, kind = reward["guid"], reward["class_path"]
+    assert "/Artifacts/Art_Tesseract_" in kind, reward
+    cue_kind = "observer" + kind.rsplit(".", 1)[0].rsplit("_", 1)[1].lower()
+    await wait(guest, lambda _: events(guest, "native_observer_absorb_played"), timeout=5)
+    cue, = events(guest, "native_observer_absorb_played")
+    assert cue["cue"] == cue_kind and cue["particles"], cue
+    identity = native_world_loot.stock_enemy_identity(guid, reward.get("visual_id"))
+
+    def projected(view):
+        return view.get("game", {}).get(native_world_loot.KEY, {}).get(identity, {})
+
+    for run in (host, guest):
+        await wait(run, lambda view: projected(view).get("class_path") == kind, timeout=12)
+    await action(host, native_world_loot.APPROACH, f"guest@{identity}")
+    await wait(guest, lambda view: math.dist(
+        view["game"]["pawns"]["local"]["location"], reward["transform"]["position"]) < 180, timeout=7)
+    eye = list(map(float, (await probe(guest_box, "observerlootcamera", "position")).split("|")))
+    try:
+        assert math.dist(eye, reward["transform"]["position"]) < 210
+        press = (await action(guest, native_world_loot.FIXTURE, identity))[native_world_loot.KEY][identity]
+    finally:
+        assert await probe(guest_box, "observerlootcamera", "reset") == "restored"
+    assert press["sequence"] > 0
+
+    def claim():
+        return next((entry for entry in events(host, "native_stock_enemy_loot_claimed") if entry.get("guid") == guid), None)
+
+    await wait(host, lambda _: claim(), timeout=12)
+    assert claim()["claimed_by"] == character
+    for run in (host, guest):
+        await wait(run, lambda view: not projected(view), timeout=12)
+    rival = await submit(host, native_stock_enemy_drops.CLAIM, target=guid)
+    assert rival.get("error") == "stock_enemy_loot_already_claimed", rival
+    inventory = (await action(guest, "native-inventory-list"))["native_inventory"]["items"]
+    item, = [item for item in inventory if item["guid"] == guid and item["class_path"] == kind]
+    assert await probe(host_box, "observerabsorptions") == "1"
+    assert len(banked()) == 1 and events(guest, "native_observer_absorb_played") == [cue]
+    assert (await probe(guest_box, "observerrewards")).startswith("0|")
+    return {"offering": source, "launch": launch, "stock_reward_count": 1, "reward": reward, "claim": claim(), "absorb_cue": cue,
+            "guest_inventory_item": item, "competing_claim": rival["error"]}
+
+
 async def verify_angler(guest, host_box, guest_box, probe):
     parking = list(map(float, (await probe(host_box, "anglerholdguest")).split("|")))
     await wait(guest, lambda view: math.dist(
@@ -147,8 +330,11 @@ async def verify_angler(guest, host_box, guest_box, probe):
     async with asyncio.timeout(6):
         while any(row["lure"] for row in angler_rows(await probe(guest_box, "anglervisual"))):
             await asyncio.sleep(.1)
+    npc, x, y, z, duration = (await probe(host_box, "anglernpc")).split("|")
+    assert float(duration) >= 3
     return {"host_lamp": host_lamp, "guest_lamp": replica, "guest_aim_before": aim, "lure_cleared": True,
-            "guest_native_vetoes": blocked_triggers(guarded) - vetoes}
+            "guest_native_vetoes": blocked_triggers(guarded) - vetoes,
+            "host_npc_alert": {"actor": npc, "position": [float(axis) for axis in (x, y, z)], "duration": float(duration)}}
 
 
 async def verify_shadow(guest, host_box, guest_box, probe):
@@ -193,7 +379,7 @@ async def verify_shadow(guest, host_box, guest_box, probe):
             "guest_stock_psychic_feedback": True, "guest_darkness_cleared": True}
 
 
-async def verify(work, family):
+async def verify(work, family, observer_offering=None):
     profile = f"{family}-proof-" + uuid.uuid4().hex[:8]
     host, guest = [work / role / profile / "run" for role in ("campaigns", "clients")]
     host.mkdir(parents=True)
@@ -207,6 +393,13 @@ async def verify(work, family):
             env["SILVERFISH_COOP_SHADOW_SPHERE_FIXTURE"] = "1"
         if family == "angler-lamp" and args[0] == "join":
             env["SILVERFISH_COOP_ANGLER_LAMP_FIXTURE"] = "1"
+        if family == "observer":
+            if observer_offering in ("contact", "flight", "input"):
+                env["SILVERFISH_COOP_OBSERVER_FIXTURE"] = "1"
+            if observer_offering in ("contact", "flight"):
+                env["SILVERFISH_COOP_OBSERVER_REWARD_REPLICATION_FIXTURE"] = "1"
+            if observer_offering == "input":
+                env["SILVERFISH_COOP_OBSERVER_THROW_FIXTURE"] = "1"
         with (host / f"{args[0]}.log").open("wb") as log:
             child = await asyncio.create_subprocess_exec(*cli, *args, stdout=log, stderr=log,
                 creationflags=flags, env=env)
@@ -250,8 +443,9 @@ async def verify(work, family):
                     if attempt == 5:
                         raise
             anchor = list(map(float, (await probe(host_box, "prepare")).split("|")))
+            spawn_limit = 3100 if family == "observer" else 1500
             await wait(host, lambda view: math.dist(
-                view.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), anchor) < 1500)
+                view.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), anchor) < spawn_limit)
             invite = await command("invite", "--campaign", profile, "--name", "Anomaly observer", "--character", "Observer")
             await start(guest, "join", "--profile", profile, "--invite", invite["invite_file"], "--headless", "--native-zones")
             guest_state = await wait(guest, lambda view: view.get("state") == "connected" and view.get("gameplay_fresh"))
@@ -299,6 +493,19 @@ async def verify(work, family):
                 evidence.write_text(json.dumps(common, indent=2), encoding="utf-8")
                 print(evidence, flush=True)
                 return
+            if family == "observer":
+                if observer_offering:
+                    if observer_offering == "loot":
+                        common["gaze"] = await verify_observer(guest, host_box, guest_box, probe)
+                    common.update(await verify_observer_offering(
+                        host, guest, host_box, guest_box, probe, observer_offering, invite["character_id"]))
+                    evidence = host / "live-observer-offering.json"
+                else:
+                    common.update(await verify_observer(guest, host_box, guest_box, probe))
+                    evidence = host / "live-observer-gaze.json"
+                evidence.write_text(json.dumps(common, indent=2), encoding="utf-8")
+                print(evidence, flush=True)
+                return
             local_effects = await probe(guest_box, "guestguard")
             assert local_effects == "0|0"
             launch_origin = await probe(host_box, "lift")
@@ -336,6 +543,9 @@ async def verify(work, family):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
-    parser.add_argument("--family", choices=("gravity", "pyrogeist", "shadow-sphere", "angler-lamp"), default="gravity")
+    parser.add_argument("--family", choices=("gravity", "pyrogeist", "shadow-sphere", "angler-lamp", "observer"), default="gravity")
+    parser.add_argument("--observer-offering", nargs="?", const="contact", choices=("contact", "flight", "loot", "input"))
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(), args.family))
+    if args.observer_offering and args.family != "observer":
+        parser.error("--observer-offering requires --family observer")
+    asyncio.run(verify(args.work.resolve(), args.family, args.observer_offering))

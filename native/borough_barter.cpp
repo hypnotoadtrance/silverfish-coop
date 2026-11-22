@@ -1,5 +1,6 @@
 #include "borough_barter.hpp"
 #include "guest_armor.hpp"
+#include "guest_item.hpp"
 #include "guest_sickness.hpp"
 #include "enemy_loot.hpp"
 #include "loot_escrow.hpp"
@@ -1260,9 +1261,20 @@ namespace
                             const std::vector<BarterSelection>& selections, bool outbound, double& total, std::string& receipt)
     {
         const auto& inventory = barter.layout;
-        auto* row = inventory.backpack->GetInner();
+        auto* row = U::CastField<U::FStructProperty>(inventory.backpack->GetInner());
         auto* weapon = find<U::UClass>(STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"));
-        if (!weapon) return false;
+        if (!weapon || !row) return false;
+        const auto contains = [&](U::FScriptArrayHelper& rows, const Guid& id) {
+            for (int index = 0; index < rows.Num(); ++index)
+                if (inventory.identity(rows.GetRawPtr(index)) == id) return true;
+            return false;
+        };
+        const auto new_identity = [&](const Guid& id, bool check_guest) {
+            bool duplicate = id == Guid{} || contains(destination, id);
+            const auto compare = [&](const void* entry, int) { duplicate |= inventory.identity(entry) == id; };
+            return inventory.rows(barter.owner.stock, compare)
+                && (!check_guest || inventory.rows(barter.owner.save, compare)) && !duplicate;
+        };
         for (const auto& choice : selections)
         {
             int selected = -1;
@@ -1273,26 +1285,46 @@ namespace
                 selected = index;
             }
             if (selected < 0 || destination.Num() >= capacity) return false;
-            const auto* value = source.GetRawPtr(selected);
+            auto* source_row = source.GetRawPtr(selected);
+            const void* value = source_row;
             auto* item = U::Cast<U::UClass>(inventory.klass(value));
+            const auto available = barter_units(inventory, value);
             if (!item || item->IsUnreachable() || inventory.never->GetPropertyValueInContainer(value) ||
-                barter_units(inventory, value) != choice.units || (outbound && item->IsChildOf(weapon))) return false;
-            bool duplicate{};
-            for (int index = 0; index < destination.Num(); ++index)
-                duplicate |= inventory.identity(destination.GetRawPtr(index)) == choice.id;
-            if (!inventory.rows(barter.owner.stock, [&](const void* row, int) { duplicate |= inventory.identity(row) == choice.id; }) ||
-                (!outbound && !inventory.rows(barter.owner.save, [&](const void* row, int) { duplicate |= inventory.identity(row) == choice.id; })) ||
-                duplicate) return false;
+                available < choice.units || (outbound && item->IsChildOf(weapon)) ||
+                !new_identity(choice.id, !outbound)) return false;
+            const auto partial = choice.units < available;
+            Value portion(nullptr, {row}), remainder(nullptr, {row});
+            auto transferred = choice.id;
+            if (partial)
+            {
+                portion.reset(row->AllocateAndInitializeValue());
+                remainder.reset(row->AllocateAndInitializeValue());
+                if (!portion || !remainder || !silverfish::native_guest_item::split_stock_stack(
+                    barter.owner.pawn, row, value, choice.units, portion.get(), remainder.get())) return false;
+                transferred = inventory.identity(portion.get());
+                if (inventory.klass(portion.get()) != item || inventory.klass(remainder.get()) != item ||
+                    inventory.identity(remainder.get()) != choice.id || contains(source, transferred) ||
+                    !new_identity(transferred, true) || barter_units(inventory, portion.get()) != choice.units ||
+                    barter_units(inventory, remainder.get()) != available - choice.units) return false;
+                value = portion.get();
+            }
             const auto price = barter.quote(value);
             if (!std::isfinite(price) || price <= 0 || price > 1000000) return false;
             total += price;
             const auto type = stock_class(item);
             if (type.empty()) return false;
-            receipt += std::format("{}|{}|{}|{}\n", outbound ? "give" : "receive", guid_string(choice.id), type, choice.units);
+            receipt += std::format("{}|{}|", outbound ? "give" : "receive", guid_string(choice.id));
+            if (partial) receipt += guid_string(transferred) + "|";
+            receipt += std::format("{}|{}\n", type, choice.units);
             auto* target = destination.GetRawPtr(destination.AddValue());
             row->CopyCompleteValue(target, value);
             if (!row->Identical(target, value)) return false;
-            source.RemoveValues(selected);
+            if (partial)
+            {
+                row->CopyCompleteValue(source_row, remainder.get());
+                if (!row->Identical(source_row, remainder.get())) return false;
+            }
+            else source.RemoveValues(selected);
         }
         return true;
     }
@@ -1398,11 +1430,25 @@ namespace
         const auto funds = barter.money();
         if (cash < 0 || cash > funds || (cash && !bool_value(barter.actor, STR("AcceptCash"), barter.actor, true)))
             return reply(false, "barter_refused_wallet");
+        int psychic_amount{};
         if (cash > 1000)
         {
-            std::int32_t skinflint{};
-            if (!silverfish::native_enemy_loot::count_save_passive(barter.owner.save, U::FName{STR("Skinflint")}, skinflint) ||
-                skinflint != 0) return reply(false, "barter_refused_skinflint_cash_effect");
+            int count{}, intensity{};
+            if (!npc_barter_passive(barter, STR("Skinflint"), count, intensity))
+                return reply(false, "barter_refused_skinflint_cash_effect");
+            if (count)
+            {
+                auto* screen = find<U::UClass>(STR("/Game/Classes/GUI/New/BarterScreen.BarterScreen_C"));
+                auto* defaults = screen ? screen->GetClassDefaultObject().Get() : nullptr;
+                auto* maximum = field<U::FIntProperty>(defaults, STR("Max Skin Flint Psy Dmg"));
+                const auto cap = maximum ? maximum->GetPropertyValueInContainer(defaults) : 0;
+                if (cap < 1 || cap > 100) return reply(false, "barter_refused_skinflint_cash_effect");
+                psychic_amount = static_cast<int>(std::clamp(static_cast<std::int64_t>(cash / 1000) * intensity,
+                    std::int64_t{1}, static_cast<std::int64_t>(cap)));
+                if (!silverfish::native_guest_sickness::barter_psy(
+                    barter.owner.pawn, barter.owner.save, barter.owner.stock, psychic_amount, false))
+                    return reply(false, "barter_refused_skinflint_cash_effect");
+            }
         }
         std::vector<BarterSelection> give, receive;
         if (!selections(player_selection, give) || !selections(trader_selection, receive) ||
@@ -1482,7 +1528,9 @@ namespace
         if (cash) barter.wallet.change(barter.instance, static_cast<int>(cash), true);
         barter.actor->ProcessEvent(barter.save_inventory, nullptr);
         if (bag->Identical(bag_list, new_bag.get()) && barter.inventory->Identical(stock_list, new_stock.get()) &&
-            barter.money() == funds - cash && reputation.verified(barter) && barter.saved_matches())
+            barter.money() == funds - cash && reputation.verified(barter) && barter.saved_matches() &&
+            (!psychic_amount || silverfish::native_guest_sickness::barter_psy(
+                barter.owner.pawn, barter.owner.save, barter.owner.stock, psychic_amount, true)))
             return reply(true, "exchanged", receipt + reputation.receipt(), funds, barter.money());
         bag->CopyCompleteValue(bag_list, old_bag.get());
         barter.inventory->CopyCompleteValue(stock_list, old_stock.get());

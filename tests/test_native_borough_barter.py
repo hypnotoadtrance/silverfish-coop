@@ -20,6 +20,7 @@ class BoroughBarterTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.party = {"receipts": {}, "players": {"guest": {"native_inventory": {PAYMENT: {}}}}}
         self.host = SimpleNamespace(
+            last_game={},
             dialogue_sessions=SimpleNamespace(
                 maps={dialogue.BOROUGH}, member_scope=Mock(return_value=("boot", "visit", dialogue.BOROUGH, PAWN))),
             party=self.party, checkpoint_native=AsyncMock(return_value=9), native_checkpoint_unsafe=False, stopping=False,
@@ -77,6 +78,7 @@ class CraftingBenchTests(unittest.IsolatedAsyncioTestCase):
                       PAYMENT, barter.BOARD, "1", REWARD, barter.SCRAP, "1", "60", "60", "0", "C" * 32]
         self.proof = barter.parse_crafting(self.frame)
         self.host = SimpleNamespace(
+            last_game={},
             dialogue_sessions=SimpleNamespace(maps={dialogue.OBSERVATORY}, member_scope=Mock(
                 return_value=("boot", "visit", dialogue.OBSERVATORY, self.pawn))),
             party={"receipts": {}, "players": {"guest": {"native_inventory": {PAYMENT: {}}}}},

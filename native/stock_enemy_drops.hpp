@@ -11,6 +11,7 @@ namespace silverfish::stock_enemy_drops
     void install_hooks();
     void uninstall_hooks();
     void register_lua(RC::LuaMadeSimple::Lua& lua);
+    bool track_observer_reward(RC::Unreal::UObject* observer, RC::Unreal::UObject* reward);
     bool verify_live_drop(std::uintptr_t host, std::uintptr_t actor, std::uint64_t sequence,
                           shared_loot::EscrowOwner& context, RC::Unreal::UObject*& drop);
 }

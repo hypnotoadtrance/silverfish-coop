@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from hashlib import sha256
 import json
 from pathlib import Path
 import subprocess
@@ -23,7 +24,7 @@ from tools.silverfish.travel import OBSERVATORY
 KIND = "smg-standard"
 EQUIPPED = "native_guest_weapon"
 FIXTURE = "native_guest_held_fire_fixture"
-COMMIT = "native_guest_smg_hold_committed"
+TERMINAL = "native_guest_smg_hold_accepted"
 INPUT_EVENT = "native_guest_held_fire_input"
 
 
@@ -72,6 +73,10 @@ async def verify(work: Path, originals_path: Path):
     paths_before = saved_hashes(originals_path)
     jobs = []
     evidence = {"guests": {}}
+
+    def save_hashes():
+        paths = list((campaign / "save").glob("campaign*.json")) + list((campaign / "game-user").rglob("*.sav"))
+        return {path.relative_to(campaign): sha256(path.read_bytes()).hexdigest() for path in paths}
 
     async def cli_call(*arguments):
         process = await asyncio.create_subprocess_exec(
@@ -122,6 +127,7 @@ async def verify(work: Path, originals_path: Path):
 
     async def reload_stock(index, guid, before, after):
         await action(run, "native-guest-weapon-seed-ammo", target=roles[index], item_guid=uuid.uuid4().hex.upper())
+        baseline = save_hashes()
         # The headless fixture refuses to overwrite a still-live native reload receipt.
         # Wait for that receipt to expire before staging a second synthetic tap.
         async with asyncio.timeout(5):
@@ -137,6 +143,7 @@ async def verify(work: Path, originals_path: Path):
                                    lambda row: row.get("sequence") == input_proof["sequence"])
         loaded = receipt[EQUIPPED]
         assert (loaded["guid"], loaded["before"], loaded["after"]) == (guid, before, after), loaded
+        assert save_hashes() == baseline, "The stock reload wrote a campaign save"
         return input_proof, loaded
 
     async def edge(index, kind, milliseconds=None):
@@ -175,12 +182,12 @@ async def verify(work: Path, originals_path: Path):
             await asyncio.sleep(0.03)
         raise RuntimeError(f"The native SMG cycles did not reach the requested state: {last}")
 
-    async def committed(index, serial):
+    async def terminal(index, serial):
         member = members[index]
-        row = await wait_event(run, COMMIT, lambda event: event.get("serial") == serial and event.get("guid") == member["guid"])
+        row = await wait_event(run, TERMINAL, lambda event: event.get("serial") == serial and event.get("guid") == member["guid"])
         assert (row["character_id"], row["pawn"], row["map"]) == (member["character_id"], member["host_pawn"], OBSERVATORY), row
         assert row["status"] in FINISHED and row["rounds"] == row["projectiles"] == row["before"] - row["after"] >= 1, row
-        assert row["revision"] > 0, row
+        assert row["revision"] is None, row
         return row
 
     async def relayed(index, fixture):
@@ -227,6 +234,7 @@ async def verify(work: Path, originals_path: Path):
             await wait(client_runs[index], lambda state: state.get("gameplay_fresh") and
                        state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == member["guid"])
 
+        baseline = save_hashes()
         pressed = await asyncio.gather(edge(0, "press", 725), edge(1, "press", 1450))
         evidence["press_fixtures"] = pressed
         ongoing = await stock_cycle(lambda rows: all(row.get("status") == "active" and row.get("rounds", 0) >= 1 for row in rows))
@@ -239,7 +247,7 @@ async def verify(work: Path, originals_path: Path):
         left_release, right_release = await asyncio.gather(*(
             scheduled_release(index, press) for index, press in enumerate(pressed)
         ))
-        first_ends = await asyncio.gather(*(committed(index, row["serial"]) for index, row in enumerate(ongoing)))
+        first_ends = await asyncio.gather(*(terminal(index, row["serial"]) for index, row in enumerate(ongoing)))
         assert first_ends[0]["status"] == "released" and first_ends[1]["rounds"] > right_after_left["rounds"], first_ends
         evidence["independent_terminal_frames"] = first_ends
         evidence["second_hold_continued_after_first_release"] = right_after_left
@@ -247,6 +255,8 @@ async def verify(work: Path, originals_path: Path):
                                               for index, fixture in ((0, pressed[0]), (1, pressed[1]), (0, left_release))]
         if first_ends[1]["status"] == "released":
             evidence["relayed_press_release"].append(await relayed(1, right_release))
+        assert save_hashes() == baseline, "Completing the two held triggers wrote a campaign save"
+        evidence["no_save_on_stock_reload_or_trigger_release"] = True
 
         right_guid = members[1]["guid"]
         count = first_ends[1]["after"]
@@ -254,13 +264,14 @@ async def verify(work: Path, originals_path: Path):
             new = min(30, count + 9)
             await reload_stock(1, right_guid, count, new)
             count = new
+        baseline = save_hashes()
         interrupted = await edge(1, "press")
         started = await wait(run, lambda state: hold(state, 1).get("status") == "active"
                              and hold(state, 1).get("serial") != ongoing[1]["serial"], timeout=4)
         interrupted_frame = hold(started, 1)
         dropped = await action(client_runs[1], "drop-link")
         assert dropped["link_connected"] is False, dropped
-        ended = await committed(1, interrupted_frame["serial"])
+        ended = await terminal(1, interrupted_frame["serial"])
         assert ended["status"] != "empty" and ended["before"] == count and ended["after"] > 0, ended
         await asyncio.sleep(0.75)
         stopped = status(run)
@@ -271,7 +282,8 @@ async def verify(work: Path, originals_path: Path):
         assert resumed["link_connected"] and resumed["resumed"], resumed
         await wait(client_runs[1], lambda state: state.get("gameplay_fresh") and LOCAL not in state.get("game", {}))
         await wait(run, lambda state: enrolled(state, 2))
-        evidence["link_loss_stopped_and_committed"] = {"fixture": interrupted, "native": ended, "stable": True}
+        assert save_hashes() == baseline, "Stopping a held trigger on link loss wrote a campaign save"
+        evidence["link_loss_stopped_without_saving"] = {"fixture": interrupted, "native": ended, "stable": True}
         expected_ammo = (first_ends[0]["after"], ended["after"])
         for index, ammunition in enumerate(expected_ammo):
             inspected = (await action(client_runs[index], "native-guest-weapon-inspect", target=members[index]["guid"]))[EQUIPPED]

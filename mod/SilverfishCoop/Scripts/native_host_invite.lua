@@ -25,6 +25,8 @@ local handoff_maps = {
 }
 local handoff_screens = {package_choosing = "choosing", package_submitting = "submitting",
     package_transferred = "transferred", package_refused = "refused"}
+local journal_fixture = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+    and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local bridge, offer_path, request_path, response_path, current, session, fixture_menu
 local dispatch
 
@@ -214,9 +216,10 @@ end
 
 local function scope(state, phase)
     if not bridge then return end
+    if not journal_fixture and not handoff_maps[state.map] then reset(); return end
     local context = journal(state, phase)
     if not context then reset(); return end
-    local offer = read_offer()
+    local offer = journal_fixture and read_offer() or nil
     if not session or not same_journal(session.context, context) then
         reset()
         session = {context = context, offer = offer, values = {}}
@@ -464,10 +467,6 @@ local function report(active)
     return "editing"
 end
 
-local function fixture_enabled()
-    return os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
-end
-
 local function fixture_open(state, phase)
     local context, failure = host(state, phase)
     if not context then error("native_host_invite_" .. failure, 0) end
@@ -507,7 +506,7 @@ function invite.command(arguments, state, phase)
     if verb == "native-package-handoff-offer" or verb == "native-package-handoff-result"
         or verb == "native-package-handoff-clear" then return handoff_command(verb, arguments, state, phase) end
     if verb ~= "native-host-invite-fixture" then return end
-    if not fixture_enabled() or not bridge then error("native_host_invite_fixture_unavailable", 0) end
+    if not journal_fixture or not bridge then error("native_host_invite_fixture_unavailable", 0) end
     local operation, value = arguments[3], arguments[4]
     local expected = operation == "participant" or operation == "starter" or operation == "address" and value ~= nil
     if #arguments ~= (expected and 4 or 3) then error("native_host_invite_fixture_arguments", 0) end
@@ -557,6 +556,7 @@ function invite.command(arguments, state, phase)
 end
 
 function invite.rows(state, phase, status_row)
+    if not journal_fixture and not handoff_maps[state.map] then return {} end
     local context = journal(state, phase)
     if not context then return {} end
     local active = session and same_journal(session.context, context) and session or nil

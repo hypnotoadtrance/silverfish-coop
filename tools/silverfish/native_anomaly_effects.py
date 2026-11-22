@@ -11,13 +11,17 @@ VORTEX_SENSORS = "native_vortex_sensors"
 ELECTRODE_PHASES = "native_electrode_phases"
 ANGLER_COLORS = "native_angler_colors"
 ANGLER_MAP = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+OBSERVER_OPACITY = "native_observer_opacity"
 CANISTERS = "native_explosive_canisters"
 FIXED_EXPLOSIVES = "native_fixed_explosives"
 FIXED_CUES = ("powerbox", "fixedtank", "fixedfire")
-KINDS = {"charge": 4000, "blast": 500100, "vortex": 500100, "electrode": 8100, "canister": 500100,
-         **dict.fromkeys(FIXED_CUES, 500100)}
+OBSERVER_CUES = ("observersparks", "observerred", "observergreen", "observerblue", "observerpurple", "observergold")
+KINDS = {"charge": 4000, "blast": 500100, "vortex": 500100, "electrode": 8100, "canister": 500100, "wandering": 500100,
+         **dict.fromkeys((*FIXED_CUES, *OBSERVER_CUES), 500100)}
 CUE_EVENTS = {"vortex": "native_vortex_effect_played", "electrode": "native_electrode_effect_played",
-              "canister": "native_canister_effect_played", **dict.fromkeys(FIXED_CUES, "native_fixed_explosive_effect_played")}
+              "wandering": "native_wandering_teleport_effect_played",
+              "canister": "native_canister_effect_played", **dict.fromkeys(FIXED_CUES, "native_fixed_explosive_effect_played"),
+              **dict.fromkeys(OBSERVER_CUES, "native_observer_absorb_played")}
 MAX_CUES = 12
 MAX_SENSORS = 256
 MAX_ANGLER_LAMPS = 32
@@ -29,16 +33,30 @@ def valid_angler_colors(row):
             and all(type(channel) in (int, float) and 0 <= channel <= 1 for channel in row[1]))
 
 
-def angler_frame(game, epoch, pawn):
+def valid_observer_opacity(row):
+    return (isinstance(row, list) and len(row) == 3 and valid_position(row[0])
+            and all(type(value) in (int, float) and 0 <= value <= 1 for value in row[1:]))
+
+
+def nearby_stock_frame(game, epoch, pawn, key, validator):
     if game.get("state") != "hosting" or game.get("map") != ANGLER_MAP or not valid_id(epoch):
         return None
     target = next((entry.get("location") for entry in game.get("pawns", {}).values() if entry.get("name") == pawn), None)
     if not valid_position(target):
         return None
-    nearby = [row for row in game.get(ANGLER_COLORS, ()) if valid_angler_colors(row) and math.dist(row[0], target) <= 15500]
+    nearby = [row for row in game.get(key, ()) if validator(row) and math.dist(row[0], target) <= 15500]
     if not nearby:
         return None
-    return {"map": ANGLER_MAP, "epoch": epoch, "lights": nearby[:MAX_ANGLER_LAMPS]}
+    return {"map": ANGLER_MAP, "epoch": epoch, "actors": nearby[:MAX_ANGLER_LAMPS]}
+
+
+def angler_frame(game, epoch, pawn):
+    frame = nearby_stock_frame(game, epoch, pawn, ANGLER_COLORS, valid_angler_colors)
+    return {"map": frame["map"], "epoch": frame["epoch"], "lights": frame["actors"]} if frame else None
+
+
+def observer_frame(game, epoch, pawn):
+    return nearby_stock_frame(game, epoch, pawn, OBSERVER_OPACITY, valid_observer_opacity)
 
 
 async def project_angler_colors(bridge, game, frame, epoch):
@@ -59,6 +77,31 @@ async def project_angler_colors(bridge, game, frame, epoch):
     if not arguments:
         return game
     return await bridge.command("native-angler-apply-colors", ANGLER_MAP, epoch, *arguments, timeout=1.5)
+
+
+async def project_observer_opacity(bridge, game, frame, epoch):
+    if not isinstance(frame, dict) or not valid_id(epoch) or (game.get("state"), game.get("map")) != ("connected", ANGLER_MAP):
+        return game
+    actors = frame.get("actors")
+    if (frame.get("map"), frame.get("epoch")) != (ANGLER_MAP, epoch) or not isinstance(actors, list) or len(actors) > MAX_ANGLER_LAMPS:
+        return game
+    local = [entry["location"] for entry in game.get("native_anomaly_positions", ()) if entry.get("kind") == "observer"
+             and valid_position(entry.get("location"))]
+    projected = [row for row in game.get(OBSERVER_OPACITY, ()) if valid_observer_opacity(row)]
+    arguments = []
+    for row in actors:
+        if not valid_observer_opacity(row):
+            continue
+        point, opacity, target = row
+        if sum(math.dist(candidate, point) < 180 for candidate in local) != 1:
+            continue
+        matches = [entry for entry in projected if math.dist(entry[0], point) < 180]
+        if len(matches) == 1 and abs(matches[0][2] - target) <= .001 and abs(matches[0][1] - opacity) <= .18:
+            continue
+        arguments.append("|".join(f"{value:.5f}" for value in [*point, opacity, target]))
+    if not arguments:
+        return game
+    return await bridge.command("native-observer-apply-opacity", ANGLER_MAP, epoch, *arguments, timeout=1.5)
 
 
 async def project_sensors(bridge, game, frame, epoch):
@@ -199,17 +242,21 @@ class Playback:
         except (OSError, RuntimeError, TimeoutError) as error:
             control.event("native_anomaly_effect_unavailable", reason=str(error))
             return game
-        self.seen.extend(selected)
         for receipt in snapshot.get("ack", {}).get("message", "").split(","):
-            parts = receipt.split(":")
-            if len(parts) != 3:
+            number, *result = receipt.split(":")
+            if not number.isascii() or not number.isdecimal() or len(number) > 15:
                 continue
-            number, particles, animated = parts
-            if number.isascii() and number.isdecimal() and len(number) <= 15 and {particles, animated} <= {"0", "1"}:
-                serial = int(number)
-                if serial in selected:
-                    kind, position, scale, volume = selected.pop(serial)
-                    control.event(CUE_EVENTS.get(kind, "native_starburst_effect_played"),
-                                  cue=kind, serial=serial, location=position, map=area, particles=particles == "1",
-                                  animated=animated == "1", scale=scale, volume=volume)
+            serial = int(number)
+            if serial not in selected:
+                continue
+            if result == ["already"]:
+                self.seen.append(serial)
+                selected.pop(serial)
+            elif len(result) == 2 and set(result) <= {"0", "1"}:
+                self.seen.append(serial)
+                kind, position, scale, volume = selected.pop(serial)
+                particles, animated = result
+                control.event(CUE_EVENTS.get(kind, "native_starburst_effect_played"),
+                              cue=kind, serial=serial, location=position, map=area, particles=particles == "1",
+                              animated=animated == "1", scale=scale, volume=volume)
         return snapshot

@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from hashlib import sha256
 import json
 import math
 from pathlib import Path
@@ -101,6 +102,13 @@ async def verify(work, original, actor, restart=False, held_pistol=False, nearby
         assert visible[0]["class_path"] == visible[1]["class_path"]
         claimant, other = (hrun, grun) if nearby else (grun, hrun)
         owner = "host" if nearby else invitation["character_id"]
+        campaign = hrun.parent
+
+        def save_hashes():
+            paths = list((campaign / "save").glob("campaign*.json")) + list((campaign / "game-user").rglob("*.sav"))
+            return {path.relative_to(campaign): sha256(path.read_bytes()).hexdigest() for path in paths}
+
+        before = save_hashes()
         await action(claimant, loose.NEARBY_FIXTURE if nearby else loose.FIXTURE, target=target)
         await wait(hrun, lambda state: item(state).get("state") == "claimed", timeout=10)
         await wait(grun, lambda state: item(state).get("state") == "claimed", timeout=10)
@@ -116,14 +124,16 @@ async def verify(work, original, actor, restart=False, held_pistol=False, nearby
         inventory = await action(claimant, "native-inventory-list")
         row, = [item for item in inventory["native_inventory"]["items"] if item["guid"] == applied["guid"]]
         assert row["class_path"] == visible[0]["class_path"], row
-        campaign = hrun.parent
+        if memory_escrow:
+            assert applied["revision"] is None and save_hashes() == before
+        await action(hrun, "checkpoint")
         saved = json.loads((campaign / "save" / "campaign.json").read_bytes())
         native_host_save.verify_checkpoint(campaign / "game-user", saved)
         assert saved["world"]["party"][loose.STATE][actor] == replay[loose.PROOF]
         assert saved_hashes(original) == originals
         proof = dict(visible=visible, ownership=replay[loose.PROOF], duplicate=second["error"], backpack=row,
                      original_files_verified=len(originals), out_of_reach=out_of_reach, held_pistol=held_pistol,
-                     nearby=nearby, escrow=applied.get("escrow"))
+                     nearby=nearby, escrow=applied.get("escrow"), no_save_on_pickup=memory_escrow)
         if restart:
             assert applied["mode"] in (1, 2)
             old = status(hrun)

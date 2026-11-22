@@ -4,7 +4,7 @@ import re
 import time
 import uuid
 
-from . import native_loot, native_pickup_audio, party
+from . import native_inventory, native_loot, native_pickup_audio, party
 from .authored_loot import valid_item_transform
 from .native_gold import valid_guid
 
@@ -110,6 +110,7 @@ async def claim(host, bridge, character, requested, operation):
     member = host.party["players"].get(character)
     if not pawn or not member or member["downed"] or host.party["wipe"] or character in host.party["pending_spawns"]:
         raise party.RuleError("native_mushroom_claimant_unavailable")
+    deferred = character == "host" or await native_inventory.retain_guest_save(host, bridge, character, pawn)
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -132,8 +133,12 @@ async def claim(host, bridge, character, requested, operation):
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
         host.last_game, host.last_seen = snapshot, time.monotonic()
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}),
-                                                typed_inventory=True)
+        revision = None
+        if not deferred:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}),
+                                                    typed_inventory=True)
+        if character == "host":
+            host.pending_host_save = True
         host.party = candidate
         host.native_checkpoint_unsafe = False
         host.control.event("native_mushroom_claimed", revision=revision, operation_id=operation, **result[PROOF])

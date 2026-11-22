@@ -4,7 +4,7 @@ import math
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import chain
 
 from . import native_enemy_shells, native_guest_drop_record, native_loot, native_mushrooms, native_stock_enemy_drops, party
@@ -17,6 +17,9 @@ KEY = "native_world_loot_items"
 ROW = "native-world-loot-item"
 ERROR_KEY = "native_world_loot_projection_errors"
 ERROR_ROW = "native-world-loot-projection-error"
+PHYSICS_ROW = "native-world-loot-physics"
+PHYSICS = "native_world_loot_physics"
+MOVING = "native_world_loot_moving"
 FRAME = "native-world-loot-frame"
 RETIRE = "native-world-loot-retire"
 FIXTURE = "native-world-loot-fixture"
@@ -53,9 +56,10 @@ def pawn_matches(area, pawn):
 
 
 def parse(fields, phase, area):
-    if len(fields) != 8 or phase not in {"hosting", "connected"}:
+    if (len(fields) not in {8, 9} or phase not in {"hosting", "connected"}
+            or (len(fields) == 9 and (phase != "connected" or fields[8] != "moving"))):
         raise ValueError("Unexpected stock world loot report")
-    _, world, epoch, identity, pawn, actor, press, item_class = fields
+    _, world, epoch, identity, pawn, actor, press, item_class = fields[:8]
     match = _CLASS.fullmatch(item_class)
     if (world != area or not pawn_matches(area, pawn) or not match or len(item_class) > 256
             or not party.REQUEST_ID.fullmatch(epoch) or not party.REQUEST_ID.fullmatch(identity)
@@ -65,8 +69,10 @@ def parse(fields, phase, area):
     prefix = f"{class_name} {area}.{area.rsplit('/', 1)[-1]}:PersistentLevel.{class_name}_"
     if not actor.startswith(prefix) or not re.fullmatch(r"[0-9]{1,10}", actor[len(prefix):]):
         raise ValueError("Invalid projected stock loot actor")
-    return dict(map=area, epoch=epoch, id=identity, pawn=pawn, actor=actor,
-                class_path=item_class, sequence=int(press))
+    report = dict(map=area, epoch=epoch, id=identity, pawn=pawn, actor=actor, class_path=item_class, sequence=int(press))
+    if len(fields) == 9:
+        report["moving"] = True
+    return report
 
 
 def parse_projection_error(fields, phase, area):
@@ -80,15 +86,37 @@ def parse_projection_error(fields, phase, area):
     return dict(map=area, epoch=epoch, id=identity, class_path=item_class, reason=reason)
 
 
+def parse_physics(fields, phase, area):
+    _, world, epoch, identity, item_class, state, *values = fields
+    if (phase != "hosting" or world != area or len(values) != 9
+            or state not in {"moving", "settled"} or len(item_class) > 256 or not _CLASS.fullmatch(item_class)
+            or not party.REQUEST_ID.fullmatch(epoch) or not party.REQUEST_ID.fullmatch(identity)):
+        raise ValueError("Invalid stock world loot physics report")
+    pose = list(map(float, values))
+    transform = dict(position=pose[:3], rotation=pose[3:6], scale=pose[6:])
+    if not valid_item_transform(transform):
+        raise ValueError("Invalid stock world loot physics transform")
+    return dict(id=identity, epoch=epoch, class_path=item_class, state=state, transform=transform)
+
+
 @dataclass(frozen=True)
 class Item:
     identity: str
     class_path: str
     transform: dict
-    claim_action: str
-    claim_target: str
+    claim_action: str | None
+    claim_target: str | None
     stack_count: int
     ground_snap: bool = False
+    carried_motion: bool = False
+
+    @property
+    def carryable(self):
+        return self.claim_action in {CRATE_CLAIM, native_guest_drop_record.PICKUP_ACTION, native_stock_enemy_drops.CLAIM}
+
+
+def crate_identity(roll_id, guid):
+    return uuid.uuid5(uuid.NAMESPACE_OID, f"{roll_id}:{guid}").hex
 
 
 def _crate_items(rolls, area):
@@ -99,7 +127,7 @@ def _crate_items(rolls, area):
         for row in roll["items"]:
             guid = row.get("guid")
             if valid_guid(guid) and not row.get("claimed_by"):
-                identity = uuid.uuid5(uuid.NAMESPACE_OID, f"{roll_id}:{guid}").hex
+                identity = crate_identity(roll_id, guid)
                 yield Item(identity, row.get("class_path"), row.get("transform"), CRATE_CLAIM, f"{guid}@{crate}",
                            _display_count(row.get("ammo")))
 
@@ -128,6 +156,10 @@ def player_drop_identity(drop_id):
     return uuid.uuid5(uuid.NAMESPACE_OID, f"player-drop:{drop_id}").hex
 
 
+def item_is_moving(host, identity):
+    return host.last_game.get(PHYSICS, {}).get(identity, {}).get("state") == "moving"
+
+
 def _player_items(drops, area):
     if not isinstance(drops, dict):
         return
@@ -137,13 +169,13 @@ def _player_items(drops, area):
                 or row.get("claimed_by") or not valid_guid(row.get("guid"))
                 or not native_guest_drop_record.valid_quantity(row.get("class_path"), row.get("quantity"))):
             continue
-        transform = {"position": row.get("location"), "rotation": [0, 0, 0], "scale": [1, 1, 1]}
+        transform = row.get("transform") or {"position": row.get("location"), "rotation": [0, 0, 0], "scale": [1, 1, 1]}
         yield Item(player_drop_identity(drop_id), row["class_path"], transform,
-                   native_guest_drop_record.PICKUP_ACTION, drop_id, row["quantity"], ground_snap=True)
+                   native_guest_drop_record.PICKUP_ACTION, drop_id, row["quantity"], ground_snap="transform" not in row)
 
 
-def stock_enemy_identity(guid):
-    return uuid.uuid5(uuid.NAMESPACE_OID, f"stock-enemy-loot:{guid}").hex
+def stock_enemy_identity(guid, visual_id=None):
+    return visual_id or uuid.uuid5(uuid.NAMESPACE_OID, f"stock-enemy-loot:{guid}").hex
 
 
 def _stock_enemy_items(drops, area):
@@ -151,9 +183,24 @@ def _stock_enemy_items(drops, area):
         return
     for guid, row in drops.items():
         if valid_guid(guid) and isinstance(row, dict) and row.get("map") == area:
-            yield Item(stock_enemy_identity(guid), row.get("class_path"), row.get("transform"),
+            identity = stock_enemy_identity(guid, row.get("visual_id"))
+            if not isinstance(identity, str) or not party.REQUEST_ID.fullmatch(identity):
+                continue
+            yield Item(identity, row.get("class_path"), row.get("transform"),
                        native_stock_enemy_drops.CLAIM, guid, _display_count(row.get("ammo")),
                        ground_snap=not row.get("settled"))
+
+
+def _moving_enemy_items(frame, area, zone):
+    if not isinstance(frame, dict) or (frame.get("map"), frame.get("epoch")) != (area, zone):
+        return
+    items = frame.get("items")
+    if not isinstance(items, dict) or len(items) > native_stock_enemy_drops.MOTION_LIMIT:
+        return
+    for identity, row in items.items():
+        if isinstance(identity, str) and party.REQUEST_ID.fullmatch(identity) and isinstance(row, dict):
+            yield Item(identity, row.get("class_path"), row.get("transform"), None, None, 0,
+                       carried_motion=row.get("carried") is True)
 
 
 def _display_count(value):
@@ -167,24 +214,40 @@ def _mushroom_items(frame, area, zone):
 
 
 def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drops=None, stock_enemy_drops=None,
-           mushroom_frame=None):
+           mushroom_frame=None, enemy_motion=None, carried=None, pinned=()):
     area = game.get("map")
     pawn = game.get("pawns", {}).get("local", {})
     origin = pawn.get("location")
     if not pawn_matches(area, pawn.get("name")) or not valid_position(origin):
         return {}
-    visible = []
+    other_origins = tuple(row["location"] for name, row in game.get("pawns", {}).items()
+                          if game.get("state") == "hosting" and name != "local" and valid_position(row.get("location")))
+    visible = {}
+    moves = {item.identity: item for item in _moving_enemy_items(enemy_motion, area, zone)}
+    carried_ids = {key for key in carried if isinstance(key, str) and party.REQUEST_ID.fullmatch(key)} if (
+        isinstance(carried, list) and len(carried) <= _MAX_VISIBLE) else set()
     for item in chain(_crate_items(rolls, area), _enemy_items(enemy_frame, enemy_rolls or {}, area, zone),
                       _player_items(player_drops or {}, area), _stock_enemy_items(stock_enemy_drops, area),
-                      _mushroom_items(mushroom_frame, area, zone)):
-        if (not isinstance(item.class_path, str) or len(item.class_path) > 256
+                      _mushroom_items(mushroom_frame, area, zone), moves.values()):
+        if item.carryable and item.identity in carried_ids:
+            latest = moves.get(item.identity)
+            transform = latest.transform if latest and latest.carried_motion and latest.class_path == item.class_path else item.transform
+            item = replace(item, transform=transform, claim_action=None, claim_target=None, ground_snap=False)
+        elif item.carried_motion:
+            # Such a frame needs a matching stock ledger item from this campaign.
+            continue
+        if (item.identity in visible or not isinstance(item.class_path, str) or len(item.class_path) > 256
                 or not _CLASS.fullmatch(item.class_path) or not valid_item_transform(item.transform)):
             continue
-        distance = math.dist(origin, item.transform["position"])
-        if distance <= _VISIBILITY_RADIUS:
-            visible.append((distance, item))
-    visible.sort(key=lambda entry: (entry[0], entry[1].identity))
-    return {item.identity: item for _, item in visible[:_MAX_VISIBLE]}
+        position = item.transform["position"]
+        distance = math.dist(origin, position)
+        if item.carryable and distance > _VISIBILITY_RADIUS and other_origins:
+            distance = min(math.dist(other, position) for other in other_origins)
+        held = item.identity in pinned
+        if held or distance <= _VISIBILITY_RADIUS:
+            visible[item.identity] = (not held, distance, item)
+    ordered = sorted(visible.values(), key=lambda entry: (entry[0], entry[1], entry[2].identity))
+    return {item.identity: item for _, _, item in ordered[:_MAX_VISIBLE]}
 
 
 class Projection:
@@ -197,28 +260,78 @@ class Projection:
         self.last_error = None
         self.items = {}
         self.retired = set()
+        self.moving = {}
+        self.settled = {}
+
+    def observe_physics(self, state, game):
+        latest = {}
+        for identity, physics in game.get(PHYSICS, {}).items():
+            item = self.items.get(identity)
+            if not item or not item.carryable or physics["epoch"] != self.epoch or physics["class_path"] != item.class_path:
+                continue
+            if physics["state"] == "moving":
+                latest[identity] = physics
+                self.settled.pop(identity, None)
+            elif self.settled.get(identity) != physics["transform"]:
+                if self._settle(state, identity, item, physics["transform"]):
+                    self.settled[identity] = physics["transform"]
+        self.moving = latest
+
+    @staticmethod
+    def _settle(state, identity, item, transform):
+        target = item.claim_target
+        if item.claim_action == CRATE_CLAIM:
+            guid, crate = target.split("@", 1)
+            roll = state.get(native_loot.STATE_KEY, {}).get(crate, {})
+            if crate_identity(roll.get("id"), guid) != identity:
+                return False
+            row = next((row for row in roll.get("items", ()) if row["guid"] == guid), None)
+        elif item.claim_action == native_stock_enemy_drops.CLAIM:
+            row = state.get(native_stock_enemy_drops.STATE, {}).get(target)
+            if row and stock_enemy_identity(target, row.get("visual_id")) != identity:
+                return False
+        else:
+            row = state.get(native_guest_drop_record.STATE, {}).get(target)
+        if not row or row.get("claimed_by") or row.get("claim_id") or row["class_path"] != item.class_path:
+            return False
+        row["transform"] = transform
+        if item.claim_action == native_stock_enemy_drops.CLAIM:
+            row["settled"] = True
+        return True
 
     async def sync(self, bridge, game, rolls, generation, zone, *, active, enemy_frame=None, enemy_rolls=None,
-                   player_drops=None, stock_enemy_drops=None, mushroom_frame=None):
+                   player_drops=None, stock_enemy_drops=None, mushroom_frame=None, enemy_motion=None, carried=None):
         phase = game.get("state")
         if phase not in {"hosting", "connected"} or not isinstance(zone, str):
             self.previous = None
             self.seat = None
             self.items = {}
+            self.moving.clear()
             return game
         area = game.get("map")
         epoch = uuid.uuid5(uuid.NAMESPACE_OID, f"{generation}:{zone}:{area}:world-loot").hex
         if epoch != self.epoch:
             self.retired.clear()
             self.presses.clear()
+            self.moving.clear()
+            self.settled.clear()
         self.items = nearby(game, rolls, zone, enemy_frame=enemy_frame, enemy_rolls=enemy_rolls,
                             player_drops=player_drops, stock_enemy_drops=stock_enemy_drops,
-                            mushroom_frame=mushroom_frame) if active else {}
+                            mushroom_frame=mushroom_frame, enemy_motion=enemy_motion, carried=carried,
+                            pinned=self.moving) if active else {}
         for identity in self.retired:
             self.items.pop(identity, None)
-        args = tuple("|".join((identity, item.class_path, *(("ground",) if item.ground_snap else ()), *(str(axis)
-            for field in ("position", "rotation", "scale") for axis in item.transform[field]), str(item.stack_count)))
-            for identity, item in sorted(self.items.items()))
+        def encode(identity, item):
+            if item.claim_action is None:
+                mode = ("moving",)
+            elif item.carryable:
+                mode = ("carry-ground" if item.ground_snap else "carry",)
+            else:
+                mode = ("ground",) if item.ground_snap else ()
+            pose = (str(axis) for field in ("position", "rotation", "scale") for axis in item.transform[field])
+            return "|".join((identity, item.class_path, *mode, *pose, str(item.stack_count)))
+
+        args = tuple(encode(identity, item) for identity, item in sorted(self.items.items()))
         seat = (phase, area, game.get("pawns", {}).get("local", {}).get("name"))
         signature = (epoch, seat, args)
         now = time.monotonic()
@@ -239,8 +352,10 @@ class Projection:
         item = self.items.get(identity)
         pawn = game.get("pawns", {}).get("local", {}).get("name")
         seat = (game.get("state"), game.get("map"), pawn)
-        if epoch != self.epoch or not item or not pawn or seat != self.seat:
+        if epoch != self.epoch or not item or item.claim_action is None or not pawn or seat != self.seat:
             raise party.RuleError("native_world_loot_intent_stale")
+        if identity in self.moving:
+            raise party.RuleError("native_world_loot_item_in_motion")
         if len(target) == 3:
             # The game thread sends the native receipt with the press. The next
             # status snapshot can arrive after the input stream wakes the worker.

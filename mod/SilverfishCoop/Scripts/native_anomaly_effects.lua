@@ -15,12 +15,27 @@ local assets = {
     canister = {"/Game/Assets/PFX/FX_Blast_FragGrenade_Converted.FX_Blast_FragGrenade_Converted",
         "/Game/Assets/Sounds/MetaSounds/MS_Blast_Pop.MS_Blast_Pop",
         "/Game/Assets/Sounds/SoundClasses/Blast_Attenuation.Blast_Attenuation"},
+    wandering = {"/Game/Assets/PFX/NI_Singularity_01.NI_Singularity_01",
+        "/Game/Assets/Sounds/CUEs/Blast_Cues/Teleport_Cue.Teleport_Cue"},
 }
 assets.fixedtank = assets.blast
 assets.powerbox = {assets.electrode[1], assets.electrode[2], assets.blast[3]}
 assets.fixedfire = {assets.blast[1], "/Game/Assets/Sounds/MetaSounds/MS_Blast_Firey.MS_Blast_Firey", assets.blast[3]}
-local audio_range = {charge = 4000, blast = 500100, vortex = 500100, electrode = 8100, canister = 500100,
+local audio_range = {charge = 4000, blast = 500100, vortex = 500100, electrode = 8100, canister = 500100, wandering = 500100,
     powerbox = 500100, fixedtank = 500100, fixedfire = 500100}
+local observer_blasts = {
+    [0] = {kind = "observersparks", particle = "NI_Sparks"},
+    {kind = "observerred", particle = "FX_Blast_Pulse_Red"},
+    {kind = "observergreen", particle = "FX_Blast_Pulse_Green"},
+    {kind = "observerblue", particle = "FX_Blast_PulseGrenade_Converted"},
+    {kind = "observerpurple", particle = "FX_Blast_Pulse_Purple"},
+    {kind = "observergold", particle = "FX_Blast_Pulse_Gold"},
+}
+for _, spec in pairs(observer_blasts) do
+    assets[spec.kind] = {"/Game/Assets/PFX/" .. spec.particle .. "." .. spec.particle,
+        assets.vortex[2], assets.blast[3]}
+    audio_range[spec.kind] = audio_range.blast
+end
 local blasts = {starburst = "blast", vortex = "vortex", electrode = "electrode"}
 effects.blast_class = "BlueprintGeneratedClass /Game/Classes/Actors/ExplosionActor_BP.ExplosionActor_BP_C"
 local history, pending, serial, seen, visit = {}, {}, 0, {}, nil
@@ -80,6 +95,13 @@ function effects.observe_charge(entry)
     entry.charged = charged
 end
 
+function effects.observe_wandering_teleport(point)
+    if point and type(point.X) == "number" and type(point.Y) == "number" and type(point.Z) == "number"
+        and math.abs(point.X) <= 1e7 and math.abs(point.Y) <= 1e7 and math.abs(point.Z) <= 1e7 then
+        record("wandering", point, 1, .6)
+    end
+end
+
 local function stock_blast(cue, point, pfx, sfx, scale, volume)
     if not valid(pfx) or not valid(sfx)
         or type(scale) ~= "number" or not (scale > 0 and scale <= 10)
@@ -118,6 +140,13 @@ function effects.observe_blast(actor, active, registered_canister)
         local source = ignored[index]
         local entry = valid(source) and active[source:GetAddress()]
         local cue = entry and blasts[entry.kind]
+        if entry and entry.kind == "observer" then
+            local spec = observer_blasts[source.ResultIndex]
+            local attenuation = actor["Attenuation Settings"]
+            if spec and valid(attenuation) and attenuation:GetFullName() == "SoundAttenuation " .. assets[spec.kind][3] then
+                cue = spec.kind
+            end
+        end
         if cue and entry.actor:GetAddress() == source:GetAddress()
             and stock_blast(cue, actor:K2_GetActorLocation(), actor.PFX, actor.SFX, actor["PFX Scale"], actor["SFX Vol"]) then
             if cue == "blast" then entry.charged = true end
@@ -145,7 +174,7 @@ local function play(pawn, origin, kind, point, scale, volume)
     local niagara = StaticFindObject("/Script/Niagara.Default__NiagaraFunctionLibrary")
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     if not valid(niagara) or not valid(statics) or not valid(particle) or not valid(sound)
-        or kind ~= "charge" and not valid(attenuation) then return false end
+        or profile[3] and not valid(attenuation) then return false end
     if kind == "charge" or kind == "blast" then effects.retire_charges(point) end
     local rotation = {Pitch = 0, Yaw = 0, Roll = 0}
     local component = niagara:SpawnSystemAtLocation(pawn, particle, point, rotation,
@@ -155,7 +184,9 @@ local function play(pawn, origin, kind, point, scale, volume)
             if #charging >= 12 then remove_charge(1) end
             charging[#charging + 1] = {component = component, point = point, expires = os.clock() + 3}
         end
-        statics:PlaySoundAtLocation(pawn, sound, point, rotation, 1, 1, 0, nil, nil, nil, nil)
+    end
+    if not profile[3] then
+        statics:PlaySoundAtLocation(pawn, sound, point, rotation, volume, 1, 0, nil, nil, nil, nil)
     else
         local audio = statics:SpawnSoundAtLocation(pawn, sound, point, rotation, volume, 1, 0, attenuation, nil, true)
         if valid(audio) then
@@ -180,7 +211,9 @@ function effects.command(args, state, phase, animate_vortex)
     for index = 5, #args do
         local id, kind, x, y, z, scale, volume = args[index]:match("^(%d+)|(%l+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
         x, y, z, scale, volume = tonumber(x), tonumber(y), tonumber(z), tonumber(scale), tonumber(volume)
-        if id and #id <= 15 and not seen[id] and assets[kind] and x and y and z and scale and scale > 0 and scale <= 10
+        if id and #id <= 15 and seen[id] then
+            played[#played + 1] = id .. ":already"
+        elseif id and #id <= 15 and assets[kind] and x and y and z and scale and scale > 0 and scale <= 10
             and volume and volume >= 0 and volume <= 10
             and (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= audio_range[kind]^2 then
             local point = {X = x, Y = y, Z = z}

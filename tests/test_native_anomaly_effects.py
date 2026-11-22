@@ -2,13 +2,34 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish.native_anomaly_effects import (
-    ANGLER_COLORS, ANGLER_MAP, CANISTERS, ELECTRODE_PHASES, FIXED_EXPLOSIVES, Playback, VORTEX_SENSORS,
-    angler_frame, project_angler_colors, project_canisters, project_electrodes, project_fixed_explosives, project_sensors,
+    ANGLER_COLORS, ANGLER_MAP, CANISTERS, ELECTRODE_PHASES, FIXED_EXPLOSIVES, OBSERVER_OPACITY, Playback, VORTEX_SENSORS,
+    angler_frame, observer_frame, project_angler_colors, project_canisters, project_electrodes,
+    project_fixed_explosives, project_observer_opacity, project_sensors,
 )
 from tools.silverfish.native_damage_feedback import Playback as HurtPlayback
+from tools.silverfish.native_weather_view import SirenPlayback
 
 
 class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_observer_opacity_waits_for_a_unique_replica_and_updates_its_fade(self):
+        epoch = "d" * 32
+        host = {"state": "hosting", "map": ANGLER_MAP,
+                "pawns": {"guest": {"name": "Guest", "location": [0, 0, 0]}},
+                OBSERVER_OPACITY: [[[100, 0, 0], .8, 0], [[350, 0, 0], float("nan"), 1], [[20000, 0, 0], 1, 1]]}
+        frame = observer_frame(host, epoch, "Guest")
+        self.assertEqual(frame["actors"], [host[OBSERVER_OPACITY][0]])
+        game = {"state": "connected", "map": ANGLER_MAP,
+                "native_anomaly_positions": [{"kind": "observer", "location": [100, 0, 0]},
+                                               {"kind": "observer", "location": [120, 0, 0]}]}
+        bridge = Mock(command=AsyncMock(return_value=game))
+        await project_observer_opacity(bridge, game, frame, epoch)
+        bridge.command.assert_not_awaited()
+        game["native_anomaly_positions"].pop()
+        game[OBSERVER_OPACITY] = [[[100, 0, 0], .85, 1]]
+        await project_observer_opacity(bridge, game, frame, epoch)
+        bridge.command.assert_awaited_once_with(
+            "native-observer-apply-opacity", ANGLER_MAP, epoch, "100.00000|0.00000|0.00000|0.80000|0.00000", timeout=1.5)
+
     async def test_angler_colors_require_nearby_unambiguous_replica_and_current_visit(self):
         epoch = "c" * 32
         old, changed = [0, 0, 0, 0, 0, 0], [1, .1, .2, .3, .4, .5]
@@ -72,6 +93,47 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         await playback.sync(bridge, control, game, frame, epoch, "host")
         await playback.sync(bridge, control, game, frame, "b" * 32, "host")
         self.assertEqual(bridge.command.await_count, 1)
+
+    async def test_partial_anomaly_acknowledgment_retries_only_the_missing_cue(self):
+        playback = Playback()
+        epoch = "a" * 32
+        game = {"state": "connected", "map": "Crossroads", "pawns": {"local": {"location": [0, 0, 0]}}}
+        frame = {"map": game["map"], "epoch": epoch, "cues": [
+            [1, "charge", [100, 0, 0], 1], [2, "blast", [100, 0, 0], 1],
+        ]}
+        bridge = Mock(command=AsyncMock(side_effect=[
+            {**game, "ack": {"message": "1:1:0"}},
+            {**game, "ack": {"message": "2:already"}},
+        ]))
+        control = Mock()
+        for _ in range(3):
+            await playback.sync(bridge, control, game, frame, epoch, "host")
+        self.assertEqual(bridge.command.await_count, 2)
+        bridge.command.assert_awaited_with(
+            "native-anomaly-play-cues", game["map"], epoch, "2|blast|100|0|0|1|1", timeout=1.5)
+        self.assertEqual([call.kwargs["serial"] for call in control.event.call_args_list], [1])
+
+    async def test_active_weather_warnings_retry_by_source_without_replaying_an_older_cue(self):
+        playback = SirenPlayback()
+        epoch = "a" * 32
+        game = {"state": "connected", "map": "Crossroads",
+                "native_world_view": {"mode": "applied", "map": "Crossroads", "epoch": epoch}}
+        first, second = "/Game/Crossroads:Siren_1", "/Game/Crossroads:Siren_2"
+        warnings = [[1, first, 1, 20], [2, second, 3, 20], [3, first, 2, 20]]
+        bridge = Mock(command=AsyncMock(side_effect=[
+            TimeoutError("no receipt"),
+            {**game, "ack": {"message": "stock weather siren played"}},
+            {**game, "ack": {"message": "weather siren already played"}},
+        ]))
+        control = Mock()
+        for _ in range(3):
+            await playback.sync(bridge, control, game, warnings, epoch)
+        self.assertEqual([call.args[2:5] for call in bridge.command.await_args_list],
+                         [("3", first, "2"), ("2", second, "3"), ("3", first, "2")])
+        self.assertEqual([call.kwargs["serial"] for call in control.event.call_args_list
+                          if call.args == ("native_weather_siren_played",)], [2])
+        await playback.sync(bridge, control, game, [[4, first, 4, 3]], epoch, snapshot_age=4)
+        self.assertEqual(bridge.command.await_count, 3)
 
     async def test_sensor_projection_only_updates_changed_placed_actors_in_the_current_visit(self):
         epoch = "b" * 32

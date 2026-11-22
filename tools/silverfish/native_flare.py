@@ -4,7 +4,7 @@ import re
 import time
 import uuid
 
-from . import native_gold, party
+from . import native_gold, native_inventory, party
 
 
 ACTION = "native-guest-flare-throw"
@@ -67,6 +67,7 @@ async def perform(host, bridge, character, selection, operation):
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
     area = host.last_game.get("map")
+    deferred = await native_inventory.retain_guest_save(host, bridge, character, pawn)
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -86,14 +87,17 @@ async def perform(host, bridge, character, selection, operation):
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
         host.last_game, host.last_seen = snapshot, time.monotonic()
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}),
-                                                typed_inventory=True)
+        revision = None
+        if not deferred:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}),
+                                                    typed_inventory=True)
         host.party = candidate
         host.native_checkpoint_unsafe = False
     finally:
         if host.native_checkpoint_unsafe:
             host.stopping = True
-    host.control.event("native_guest_flare_committed", operation_id=operation, revision=revision, **result[PROOF])
+    event = "native_guest_flare_accepted" if deferred else "native_guest_flare_committed"
+    host.control.event(event, operation_id=operation, revision=revision, **result[PROOF])
     return result
 
 

@@ -14,6 +14,7 @@ from .native_gold import valid_guid
 LIST = "native-stash-list"
 CENSUS = "native-stash-census"
 LIVE_CENSUS = "native_stash_live_census"
+LIVE_MOVE = "native_stash_live_move"
 MOVE = "native-stash-move"
 MOVED = "native_stash_move"
 RESULT = "native_stash"
@@ -121,11 +122,13 @@ async def move(host, bridge, character, target, operation):
     site, direction, item = selected.groups()
     scope = _scope(host, character, site)
     area, _, combined, pawn = scope
-    frame = await _frame(host, bridge, character, site, scope)
+    live = host.last_game.get(LIVE_MOVE) is True and (
+        character == "host" or await native_inventory.retain_guest_save(host, bridge, character, pawn))
+    slot = "-" if live else (await _frame(host, bridge, character, site, scope))["slot"]
     host.native_checkpoint_unsafe = True
     try:
         try:
-            snapshot = await bridge.command(MOVE, pawn, frame["slot"], site, item, direction, str(int(combined)), timeout=6)
+            snapshot = await bridge.command(MOVE, pawn, slot, site, item, direction, str(int(combined)), timeout=6)
         except RuntimeError as error:
             if str(error).startswith(("native_stash_move_", "native_stash_exact_site_",
                                       "native_stash_participant_", "native_stash_census_save_")):
@@ -135,7 +138,7 @@ async def move(host, bridge, character, target, operation):
         proof = snapshot.get(MOVED, {})
         if ((snapshot.get("state"), snapshot.get("map"), snapshot.get(SETTING)) != ("hosting", area, combined)
                 or tuple(proof.get(key) for key in ("map", "pawn", "slot", "site", "guid", "direction", "combined")) !=
-                (area, pawn, frame["slot"], site, item, direction, combined)
+                (area, pawn, slot, site, item, direction, combined)
                 or not proof.get("class_path") or type(proof.get("quantity")) is not int or proof["quantity"] < 1):
             raise RuntimeError("The authoritative stash transfer did not verify")
         host.last_game, host.last_seen = snapshot, time.monotonic()
@@ -145,7 +148,11 @@ async def move(host, bridge, character, target, operation):
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": request, "result": response})
         del receipts[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
+        revision = None
+        if not live:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
+        elif character == "host":
+            host.pending_host_save = True
     except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True

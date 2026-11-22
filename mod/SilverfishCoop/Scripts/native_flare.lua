@@ -11,6 +11,9 @@ for _, name in ipairs({"Eqp_Flare", "Eqp_Flare_Blue", "Eqp_Flare_Yellow"}) do
     flare.equipment["/Game/Classes/Equipment/" .. name .. "." .. name .. "_C"] = true
 end
 local intent, receipt
+local projectiles = {}
+local next_flare_check = 0
+local replica_fuse = 24 * 60 * 60
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo_field = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
@@ -48,7 +51,12 @@ function flare.start(role)
     RegisterBeginPlayPreHook(function(context)
         if role() ~= "client" then return end
         local actor = qualified(context, true)
-        if actor then actor:SetActorEnableCollision(false) end
+        if actor then
+            actor:SetActorEnableCollision(false)
+            -- FuseTime is supplied by the equipped flare and is not replicated.
+            -- The host retires this actor after the real stock fuse and fade.
+            actor.FuseTime = replica_fuse
+        end
     end)
     RegisterBeginPlayPostHook(function(context)
         local current = role()
@@ -67,11 +75,34 @@ function flare.start(role)
             actor:SetReplicates(true)
             actor:SetReplicateMovement(true)
             actor:ForceNetUpdate()
+            projectiles[actor:GetAddress()] = actor
         end
     end)
 end
 
+local function faded(light)
+    return not valid(light) or type(light.Intensity) == "number" and light.Intensity <= .001
+end
+
+local function retire_spent(state)
+    if not valid(state.world) or not state.listening or state.server ~= false or not next(projectiles) then return end
+    local now = os.clock()
+    if now < next_flare_check then return end
+    next_flare_check = now + .25
+    for key, actor in pairs(projectiles) do
+        if not valid(actor) or actor:IsActorBeingDestroyed() or not same(actor:GetWorld(), state.world) then
+            projectiles[key] = nil
+        elseif actor.Lit == false and faded(actor.PointLight) and faded(actor.PointLight1) then
+            -- A newly replicated stock actor starts its own burn timer in BeginPlay.
+            -- Keep the stock fade and remove the spent projectile from the network.
+            actor:K2_DestroyActor()
+            if not valid(actor) or actor:IsActorBeingDestroyed() then projectiles[key] = nil end
+        end
+    end
+end
+
 function flare.sync(state, phase)
+    if phase == "hosting" then retire_spent(state) end
     if phase ~= "connected" or not state.server or not state.listening or type(SilverfishTakeLocalGuestFlare) ~= "function" then
         intent = nil
         return

@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPO))
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, native_guest_stack_drop as probe
 from tools.silverfish import native_host_save, native_world_loot as projection
 from tools.silverfish import native_host_stack_drop as host_drop_input, native_lantern as lantern
+from tools.silverfish import native_prop_carry
 from tools.silverfish.authored_supply import BANDAGE_CLASS
 from tools.silverfish.native_guest_weapon import FIRE_CLASSES
 
@@ -32,14 +33,19 @@ def staged_bandage_probe(work):
     scripts = work / "stage/SilverFish/Binaries/Win64/ue4ss/Mods/SilverfishCoop/Scripts"
     main, fixture = scripts / "main.lua", scripts / "host_bandage_split_probe.lua"
     original = main.read_bytes()
-    with fixture.open("xb") as stream:
-        stream.write((Path(__file__).with_name("fixtures") / fixture.name).read_bytes())
+    carry = scripts / "world_loot_carry_probe.lua"
+    copied = []
     try:
+        for target in (fixture, carry):
+            with target.open("xb") as stream:
+                copied.append(target)
+                stream.write((Path(__file__).with_name("fixtures") / target.name).read_bytes())
         main.write_bytes(original + b'\nrequire("host_bandage_split_probe")\n')
         yield
     finally:
         main.write_bytes(original)
-        fixture.unlink()
+        for target in copied:
+            target.unlink()
 
 
 async def bandage_probe(run, verb, value=""):
@@ -60,7 +66,8 @@ async def bandage_probe(run, verb, value=""):
 
 
 async def verify(work: Path, originals_path: Path, *, visible_projection=False, claimant="owner", host_origin=False,
-                 host_origin_menu=None, pistol_kind=None, probe_lantern=False, bandage=False):
+                 host_origin_menu=None, pistol_kind=None, probe_lantern=False, bandage=False, guest_carry=False,
+                 throw=False):
     host_origin = host_origin or host_origin_menu is not None
     claimant = "teammate" if pistol_kind and not host_origin else claimant
     mode = (f"host-menu-{host_origin_menu}" if host_origin_menu else
@@ -305,6 +312,39 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
                       clients[recipient]: unclaimed["actor"].split(" ", 1)[1]}
             for directory, actor in actors.items():
                 assert await bandage_probe(directory, "actor", actor) == "present"
+            guest_run = clients[recipient]
+            carrier_run = guest_run if guest_carry else run
+            guest_before = (await bandage_probe(guest_run, "pose", actors[guest_run])).split(",")
+            host_before = (await bandage_probe(run, "pose", actors[run])).split(",")
+            address = await bandage_probe(carrier_run, "grip", identity)
+            assert address == (guest_before[0] if guest_carry else host_before[0])
+            if guest_carry:
+                await wait(run, lambda state: (proof := state.get("game", {}).get(native_prop_carry.PROOF, {}))
+                           .get("loot_id") == identity and proof.get("edge") == "grab")
+            await wait(guest_run, lambda state: identity in state.get("gameplay", {}).get(projection.MOVING, []))
+            await wait(guest_run, lambda state: state.get("game", {}).get(projection.KEY, {}).get(identity, {}).get("moving"))
+            edge = "throw" if throw else "drop"
+            release = list(map(float, (await bandage_probe(carrier_run, edge)).split(",")))
+            if guest_carry:
+                await wait(run, lambda state: (proof := state.get("game", {}).get(native_prop_carry.PROOF, {}))
+                           .get("loot_id") == identity and proof.get("edge") == edge)
+            watched = await wait(guest_run, lambda state: identity not in state.get("gameplay", {}).get(projection.MOVING, [])
+                                  and state.get("gameplay", {}).get(record.STATE, {}).get(drop_id, {}).get("transform"))
+            transform = watched["gameplay"][record.STATE][drop_id]["transform"]
+            await wait(guest_run, lambda state: state.get("game", {}).get(projection.KEY, {}).get(identity) == unclaimed)
+            host_pose = (await bandage_probe(run, "pose", actors[run])).split(",")
+            guest_pose = (await bandage_probe(guest_run, "pose", actors[guest_run])).split(",")
+            assert host_pose[0] == host_before[0] and guest_before[0] == guest_pose[0]
+            assert release[2] - transform["position"][2] >= 12
+            assert math.dist(transform["position"], list(map(float, host_pose[1:]))) <= 2
+            assert math.dist(transform["position"], list(map(float, guest_pose[1:]))) <= 2
+            committed = {**committed, "transform": transform}
+            evidence["shared_stock_physics_body"] = {
+                "identity": identity, "carrier": "guest" if guest_carry else "host", "host": host_pose, "guest": guest_pose,
+                "edge": edge, "release": release, "settled_transform": transform,
+            }
+            await projected(host, "host", drop_id, dropped["owner"])
+            await action(host, projection.APPROACH, "--target", f"{role}@{identity}")
         if recipient == host:
             assert unclaimed["pawn"] == near["pawn"], unclaimed
         press = (await action(recipient, projection.FIXTURE, "--target", identity))[projection.KEY][identity]
@@ -638,6 +678,8 @@ if __name__ == "__main__":
     pistol.add_argument("--suppressed-pistol", dest="pistol_kind", action="store_const", const="light-pistol-suppressed",
                         help="verify the same workflow for the suppressed pistol")
     parser.add_argument("--bandage", action="store_true", help="use a stock Bandage stack in the host split-and-drag trial")
+    parser.add_argument("--guest-carry", action="store_true", help="have the guest carry the stock Bandage before pickup")
+    parser.add_argument("--throw", action="store_true", help="throw the carried Bandage using the stock action")
     parser.add_argument("--probe-lantern", action="store_true", help="verify stock Observatory lantern light and physics")
     settings = parser.parse_args()
     if (settings.host_origin or settings.host_origin_menu) and (settings.visible_projection or settings.claimant != "owner"):
@@ -648,9 +690,12 @@ if __name__ == "__main__":
         parser.error("Loaded pistol tests use a second guest or a host-to-guest round trip")
     if settings.bandage and (settings.host_origin_menu != "split_drag_to_floor" or settings.pistol_kind):
         parser.error("--bandage requires --host-origin-menu split_drag_to_floor and a stackable item")
+    if (settings.guest_carry or settings.throw) and not settings.bandage:
+        parser.error("--guest-carry and --throw require --bandage")
     work = settings.work.resolve()
     with staged_bandage_probe(work) if settings.bandage else nullcontext():
         asyncio.run(verify(work, settings.vanilla_saved.resolve(),
                            visible_projection=settings.visible_projection, claimant=settings.claimant,
                            host_origin=settings.host_origin, host_origin_menu=settings.host_origin_menu,
-                           pistol_kind=settings.pistol_kind, probe_lantern=settings.probe_lantern, bandage=settings.bandage))
+                           pistol_kind=settings.pistol_kind, probe_lantern=settings.probe_lantern, bandage=settings.bandage,
+                           guest_carry=settings.guest_carry, throw=settings.throw))

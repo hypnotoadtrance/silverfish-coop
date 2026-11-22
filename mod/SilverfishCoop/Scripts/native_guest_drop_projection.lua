@@ -9,6 +9,7 @@ local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
 local color = { R = 0, G = 0, B = 0, A = 1 }
 local current
 local world_items, slot_count = {}, 64
+local carry_physics = type(SilverfishSetNativeWorldLootPhysics) == "function"
 
 local function valid(object)
     return object ~= nil and object:IsValid()
@@ -124,6 +125,104 @@ function projection.authority_sight(state, phase, pawn, id, position)
     return pickup_fixture.stock_item_sight(pawn, actor)
 end
 
+local function projected_item(actor)
+    if not carry_physics or not valid(actor) or not actor:HasAnyFlags(EObjectFlags.RF_Transient) then return end
+    local name = actor:GetFullName()
+    for id, entry in pairs(world_items) do
+        if entry.actor_name == name and same(actor:GetWorld(), entry.world) then return id, entry end
+    end
+end
+
+function projection.carry_actor(id)
+    local entry = world_items[id]
+    if not carry_physics or not entry or not entry.carryable or entry.moving then return end
+    local active, epoch, exact, name = SilverfishReadNativeGuestDropProjection(entry.slot)
+    local path = active and epoch == entry.epoch and exact == id and name:match("^%S+ (.+)$")
+    local actor = path and StaticFindObject(path)
+    if valid(actor) and actor:GetFullName() == name and same(actor:GetWorld(), entry.world) then return actor end
+end
+
+function projection.arm_carry(pawn, actor)
+    local id, entry = projected_item(actor)
+    if not entry or not entry.carryable or entry.moving or not same(pawn:GetWorld(), entry.world) then return end
+    if entry.motion and entry.motion.holder then return same(entry.motion.holder, pawn) and id or nil end
+    local active, epoch, exact, observed = SilverfishReadNativeGuestDropProjection(entry.slot)
+    if not active or epoch ~= entry.epoch or exact ~= id or observed ~= entry.actor_name then return end
+    if SilverfishSetNativeWorldLootPhysics(entry.slot, epoch, id, true) then
+        entry.motion = {actor = actor, holder = pawn, quiet = 0}
+        return id
+    end
+end
+
+function projection.stop_carry(pawn, actor)
+    local id, entry = projected_item(actor)
+    if not entry or not entry.motion or not same(entry.motion.holder, pawn) then return end
+    if SilverfishSetNativeWorldLootPhysics(entry.slot, entry.epoch, id, false) then entry.motion = nil end
+end
+
+function projection.carry_body(actor)
+    local _, entry = projected_item(actor)
+    if entry and entry.motion and not entry.motion.settled and actor.Physics == true then return actor.Box end
+end
+
+function projection.start_carry(pawn, actor)
+    if not valid(pawn) or not valid(actor) or not same(pawn.HeldObject, actor)
+        or not same(pawn.PhysicsHandle:GetGrabbedComponent(), actor.Box) then return end
+    local id = projection.arm_carry(pawn, actor)
+    if not id then return end
+    local arrow = pawn.Prop_Arrow:K2_GetComponentRotation()
+    local pivot = actor.Box:K2_GetComponentLocation()
+    pawn.PhysicsHandle:ReleaseComponent()
+    pawn.PhysicsHandle:GrabComponentAtLocationWithRotation(actor.Box, FName("None", EFindName.FNAME_Find),
+        pivot, { Pitch = 0, Yaw = arrow.Yaw, Roll = 0 })
+    if not same(pawn.PhysicsHandle:GetGrabbedComponent(), actor.Box) then
+        projection.stop_carry(pawn, actor)
+        return
+    end
+    return id
+end
+
+local function motion_pose(actor)
+    local point, rotation, scale = actor:K2_GetActorLocation(), actor:K2_GetActorRotation(), actor:GetActorScale3D()
+    local pose = {point.X, point.Y, point.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, scale.X, scale.Y, scale.Z}
+    for _, axis in ipairs(pose) do if not coordinate(axis) then return end end
+    return pose
+end
+
+local function motion_row(item, id, row)
+    local motion = item.motion
+    if not motion or not valid(motion.actor) or motion.actor:IsActorBeingDestroyed() then return end
+    local actor, holder = motion.actor, motion.holder
+    local now = os.clock()
+    if not motion.settled and now >= (motion.next_sample or 0) then
+        motion.next_sample = now + .07
+        motion.pose = motion_pose(actor)
+        if valid(holder) and same(holder.HeldObject, actor) then
+            motion.quiet, motion.released = 0, nil
+        else
+            motion.holder = nil
+            motion.released = motion.released or now
+            local bone = FName("None", EFindName.FNAME_Find)
+            local speed = actor.Box:GetPhysicsLinearVelocity(bone)
+            local spin = actor.Box:GetPhysicsAngularVelocityInDegrees(bone)
+            local still = speed.X^2 + speed.Y^2 + speed.Z^2 < 9 and spin.X^2 + spin.Y^2 + spin.Z^2 < 25
+            motion.quiet = still and motion.quiet + 1 or 0
+            if motion.pose and (motion.quiet >= 3 or now - motion.released >= 5) then
+                motion.settled = SilverfishSetNativeWorldLootPhysics(item.slot, item.epoch, id, false) == true
+            end
+        end
+    end
+    if motion.pose then
+        return row("native-world-loot-physics", item.map, item.epoch, id, item.class,
+            motion.settled and "settled" or "moving", table.unpack(motion.pose))
+    end
+end
+
+local function same_pose(first, second)
+    for i = 1, 9 do if math.abs(first[i] - second[i]) > .001 then return false end end
+    return true
+end
+
 function projection.rows(state, phase, row)
     local rows, pawn = {}, local_pawn(state, phase)
     if pawn and type(SilverfishSyncNativeWorldLootItem) == "function" then
@@ -146,7 +245,13 @@ function projection.rows(state, phase, row)
         else
             local active, epoch, observed, name, press = SilverfishReadNativeGuestDropProjection(item.slot)
             if active and epoch == item.epoch and observed == id then
-                rows[#rows + 1] = row("native-world-loot-item", item.map, epoch, id, pawn:GetFullName(), name, press, item.class)
+                if item.carryable then item.actor_name = name end
+                local fields = {"native-world-loot-item", item.map, epoch, id, pawn:GetFullName(), name, press, item.class}
+                if item.moving then fields[#fields + 1] = "moving" end
+                rows[#rows + 1] = row(table.unpack(fields))
+                if phase == "hosting" and item.motion then
+                    rows[#rows + 1] = motion_row(item, id, row)
+                end
             end
         end
     end
@@ -165,25 +270,28 @@ local function item_frame(fields, state, phase)
         local values = {}
         for value in fields[index]:gmatch("[^|]+") do values[#values + 1] = value end
         local id, class = values[1], values[2]
-        local snap = #values == 13 and values[3] == "ground"
+        local mode = #values == 13 and values[3]
+        local snap, moving = mode == "ground" or mode == "carry-ground", mode == "moving"
+        local carryable = mode == "carry" or mode == "carry-ground"
         local stack_count = math.tointeger(values[#values])
-        if (#values ~= 12 and not snap) or not identifier(id) or incoming[id] or #class > 256
+        if (#values ~= 12 and not snap and not moving and not carryable) or not identifier(id) or incoming[id] or #class > 256
             or not stack_count or stack_count < 0 or stack_count > 2147483647
             or not class:match("^/Game/Classes/[%w_./%-]+_C$") then error("world_loot_item_identity_invalid", 0) end
         local transform = {}
-        for axis = snap and 4 or 3, #values - 1 do
+        for axis = mode and 4 or 3, #values - 1 do
             local value = tonumber(values[axis])
             if not coordinate(value) then error("world_loot_item_transform_invalid", 0) end
             transform[#transform + 1] = value
         end
-        incoming[id] = { class = class, transform = transform, snap = snap, stack_count = stack_count }
+        incoming[id] = { class = class, transform = transform, snap = snap, moving = moving,
+            carryable = carryable, stack_count = stack_count }
     end
     local changed = false
     for id, entry in pairs(world_items) do
         if not incoming[id] or entry.epoch ~= epoch or not same(entry.pawn, pawn) then
             if SilverfishClearNativeGuestDropProjection(entry.slot) then
                 world_items[id] = nil
-                changed = changed or not entry.error
+                changed = changed or not entry.error and not entry.moving
             end
         end
         if world_items[id] then occupied[entry.slot] = true end
@@ -200,16 +308,25 @@ local function item_frame(fields, state, phase)
         if slot then
             occupied[slot] = true
             if not valid(StaticFindObject(item.class)) then LoadAsset(item.class) end
-            local t = item.transform
-            local visual_z = previous and previous.visual_z
-            if not visual_z then visual_z = item.snap and projection.floor_z(state, t) or t[3] end
+            local motion = previous and previous.motion
+            if motion and motion.settled and not item.snap and same_pose(motion.pose, item.transform) then motion = nil end
+            local t = motion and motion.pose or item.transform
+            local visual_z = t[3]
+            if item.snap and not motion then
+                local same_origin = previous and t[1] == previous.x and t[2] == previous.y and t[3] == previous.z
+                visual_z = same_origin and previous.visual_z or projection.floor_z(state, t)
+            end
             local ok, reason = SilverfishSyncNativeWorldLootItem(pawn:GetAddress(), epoch, id,
-                t[1], t[2], visual_z, visual_z, item.class, t[4], t[5], t[6], t[7], t[8], t[9], item.stack_count, slot)
+                t[1], t[2], visual_z, visual_z, item.class, t[4], t[5], t[6], t[7], t[8], t[9], item.stack_count,
+                not item.moving, slot)
             world_items[id] = { map = area, epoch = epoch, pawn = pawn, world = state.world,
-                class = item.class, slot = slot, visual_z = visual_z,
-                stack_count = item.stack_count,
+                class = item.class, slot = slot, visual_z = visual_z, x = t[1], y = t[2], z = t[3],
+                stack_count = item.stack_count, moving = item.moving, carryable = item.carryable, motion = motion,
+                actor_name = previous and previous.actor_name,
                 error = not ok and (reason or "stock_drop_projection_unavailable") or nil }
-            changed = changed or (ok and (not previous or previous.error ~= nil or previous.stack_count ~= item.stack_count))
+            local was_pickable = previous ~= nil and not previous.error and not previous.moving
+            local pickable = ok and not item.moving
+            changed = changed or was_pickable ~= pickable or (was_pickable and previous.stack_count ~= item.stack_count)
             if not ok then errors = errors + 1 end
         end
     end

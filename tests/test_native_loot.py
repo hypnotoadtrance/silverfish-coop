@@ -62,7 +62,7 @@ class AuthoredCrateRegistryTests(unittest.TestCase):
 
 
 class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
-    async def test_transient_award_requires_typed_checkpoint_without_escrow_io(self):
+    async def test_transient_award_queues_a_typed_save_without_escrow_io(self):
         loose = native_loose_pickup
         path = f"{OBSERVATORY}.Observitory_P:PersistentLevel.Item_Bandage_C_1"
         slot, epoch = "SFCoop_" + "b" * 32, "d" * 32
@@ -79,15 +79,19 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
                 host = SimpleNamespace(last_game=scene, zone_epoch=epoch, native_profile=Path("fixture"),
                                        stopping=False, transitioning=False, native_checkpoint_unsafe=False,
                                        party=state, control=Mock(), checkpoint_native=AsyncMock(return_value=2),
-                                       loose_pickups=loose.Visibility())
+                                       loose_pickups=loose.Visibility(), pending_host_save=None)
                 with patch.object(native_host_save, "new_slot", return_value=slot), patch.object(native_host_save, "record") as saved:
                     result = await loose.claim(host, bridge, "host", f"loose:{path}", OPERATION)
                 self.assertEqual(result[loose.PROOF]["guid"], ITEM["guid"])
-                self.assertEqual(host.checkpoint_native.await_args.kwargs["typed_inventory"], bool(mode))
+                if mode:
+                    host.checkpoint_native.assert_not_awaited()
+                    self.assertIs(host.pending_host_save, True)
+                else:
+                    self.assertFalse(host.checkpoint_native.await_args.kwargs["typed_inventory"])
                 self.assertEqual(saved.call_count, int(not mode))
                 self.assertFalse(host.native_checkpoint_unsafe)
 
-    async def test_placed_stack_merge_keeps_source_and_checkpoints_exact_recipient(self):
+    async def test_placed_stack_merge_keeps_source_and_queues_typed_save(self):
         loose = native_loose_pickup
         path = f"{OBSERVATORY}.Observitory_P:PersistentLevel.Item_Bandage_C_1"
         slot, epoch, destination = "SFCoop_" + "b" * 32, "d" * 32, "B" * 32
@@ -104,7 +108,7 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
         host = SimpleNamespace(last_game=scene, zone_epoch=epoch, native_profile=Path("fixture"),
                                stopping=False, transitioning=False, native_checkpoint_unsafe=False,
                                party=state, control=Mock(), checkpoint_native=AsyncMock(return_value=2),
-                               loose_pickups=loose.Visibility())
+                               loose_pickups=loose.Visibility(), pending_host_save=None)
         with patch.object(native_host_save, "new_slot", return_value=slot), patch.object(native_host_save, "record") as saved:
             result = await loose.claim(host, bridge, "host", f"loose:{path}", OPERATION)
         row = result[loose.PROOF]
@@ -114,7 +118,8 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(path, host.loose_pickups.hidden(host))
         self.assertEqual(await loose.claim(host, bridge, "host", f"loose:{path}", OPERATION), result)
         bridge.command.assert_awaited_once()
-        self.assertTrue(host.checkpoint_native.await_args.kwargs["typed_inventory"])
+        host.checkpoint_native.assert_not_awaited()
+        self.assertIs(host.pending_host_save, True)
         saved.assert_not_called()
 
     async def test_temporary_item_reappears_only_after_stock_item_returns(self):
@@ -176,7 +181,7 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         return SimpleNamespace(last_game=self.game(area), last_seen=time.monotonic(), native_zones=True,
                                native_loot_input=True, fixtures=False, native_profile=self.root, stopping=False,
                                transitioning=False, native_checkpoint_unsafe=False, party=state, control=Mock(),
-                               checkpoint_native=AsyncMock(return_value=2))
+                               checkpoint_native=AsyncMock(return_value=2), pending_host_save=None)
 
     def frame(self, area, slot=None):
         slot = slot or native_host_save.new_slot()
@@ -226,7 +231,8 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         expected = {**roll, "items": [roll["items"][0], dict(unclaimed, transform=restored)]}
         self.assertEqual(host.party[native_loot.STATE_KEY][OTHER_CRATE], expected)
         bridge.command.assert_awaited_once_with(native_loot.PLACEMENT, OTHER_CRATE, timeout=3)
-        host.checkpoint_native.assert_awaited_once_with(bridge, host.party)
+        host.checkpoint_native.assert_not_awaited()
+        self.assertIs(host.pending_host_save, False)
         await native_loot.restore_legacy_placement(host, bridge)
         bridge.command.assert_awaited_once()
 
@@ -250,7 +256,8 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         await native_loot.retire_replenished(host, bridge)
         self.assertEqual(host.party[native_loot.STATE_KEY], {LEGACY_CRATE: untouched})
         self.assertEqual(host.party[native_loot.RETIRED], {"1" * 32: OTHER_CRATE})
-        host.checkpoint_native.assert_awaited_once_with(bridge, host.party)
+        host.checkpoint_native.assert_not_awaited()
+        self.assertIs(host.pending_host_save, False)
         with self.assertRaisesRegex(party.RuleError, "roll_replenished"):
             await native_loot.perform(host, bridge, "host", "open", OTHER_CRATE, expired["id"])
         bridge.command.assert_not_awaited()
@@ -517,6 +524,26 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_once()
         host.checkpoint_native.assert_awaited_once()
         self.assertTrue(host.checkpoint_native.await_args.kwargs["typed_inventory"])
+
+    async def test_stock_host_pickup_accepts_and_replays_without_a_save(self):
+        roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
+        item = roll["items"][0]
+        item["ammo"] = 4
+        host = self.host(CROSSROADS, {OTHER_CRATE: roll})
+        proof = {"action": "claim", "map": CROSSROADS, "pawn": PAWN, "crate": OTHER_CRATE,
+                 "escrow_slot": roll["escrow"]["slot"], "ok": True, "invoked": True, "status": "merged",
+                 "merge": dict(guid=item["guid"], inventory_guid="B" * 32, amount=4, before=7, after=11)}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=self.game(CROSSROADS, native_loot=proof)))
+        args = (host, bridge, "host", "claim", f"{item['guid']}@{OTHER_CRATE}")
+        result = await native_loot.perform(*args, OPERATION, defer_save=True)
+        self.assertTrue(host.pending_host_save)
+        self.assertFalse(host.native_checkpoint_unsafe)
+        self.assertEqual(result["native_loot_claim"]["claimed_by"], "host")
+        self.assertEqual(await native_loot.perform(*args, OPERATION, defer_save=True), result)
+        with self.assertRaisesRegex(party.RuleError, "native_loot_already_claimed"):
+            await native_loot.perform(*args, "2" * 32, defer_save=True)
+        host.checkpoint_native.assert_not_awaited()
+        bridge.command.assert_awaited_once()
 
     async def test_unverified_stock_crate_merge_fences_checkpoint_and_leaves_the_item_unclaimed(self):
         roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)

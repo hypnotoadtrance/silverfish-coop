@@ -32,9 +32,7 @@ Set `$sfPython` and `$sfCli` again when opening a new terminal. The workspace pa
 
 Choose **Multiplayer** on the first screen, then **Host**. **New Game** opens the stock character creator and creates a co-op save automatically. **Load Game** lists saves by location and last-saved time. The selected save restores its character and world. Use **Network** to select the connection method. The Direct IP form starts with the configured UDP port and listening address. Select **Require password** to enable the password field for either method. Up to four guests can join.
 
-## Create an invitation in the development build
-
-Open the stock **Journal** in the active co-op campaign with **J** or your configured key and choose **Invite a co-op player**. Enter the participant's name, their starter character's name, and the address they can reach. Leave the address blank to use the configured host address. Choose **Create**, then **Copy invitation** once it is ready. Share the invitation privately. It contains the guest credential.
+Host container pickups take effect immediately. Rest, Save and Quit, level transitions, and the loss of an enrolled guest connection can save the live campaign. If the game closes unexpectedly before a save, the campaign resumes at the last saved checkpoint.
 
 ## Join from the co-op title
 
@@ -134,7 +132,7 @@ Invitations from a current matched native stage also enable the guest's stock in
 | `--native-expanded-zones` | Opts into the wider catalog of exact authored routes. Use it with `--native-zones` on a current matched stage. Supported routes still enforce host authority and the 15-meter party check. |
 | `--max-guests N` | Accepts one to four guests on the native guest and zone scopes. The default is one guest. Loopback testing covered four guests at once. |
 | `--native-guest-regen` | Enables the qualified stock passive regeneration path for a detached guest save. Use on a current matched native stage. |
-| `--native-guest-mre` | Enables guest use of stock MREs, Canned Peaches, Canned Beans, and Brown Mushroom. Select an owned item in the inventory overlay and press Home twice. Local guest actions `native-guest-mre`, `native-guest-canned-peaches`, `native-guest-canned-beans`, and `native-guest-brown-mushroom` accept the backpack item's `--target GUID`. |
+| `--native-guest-mre` | Enables guest use of stock MREs, Canned Peaches, Canned Beans, and Brown Mushroom. Use the item from the game's Backpack context menu. Local guest actions `native-guest-mre`, `native-guest-canned-peaches`, `native-guest-canned-beans`, and `native-guest-brown-mushroom` accept the backpack item's `--target GUID`. |
 | `--native-guest-held-fire` | Enables experimental hold and release for the standard SMG on a current matched native stage. The invitation enables the matching guest control. |
 | `--native-authored-enemy-loot` | Enables shared stock shotgun-shell loot for the qualified CQC encounters. Look at the shell stack and press Interact. Automation can inspect nearby item actors in `game.native_world_loot_items` and use `native-enemy-loot-claim --target GUID` with the GUID shown in `gameplay.native_enemy_loot_rolls`. |
 | `--native-extraction-keep N` | Starts a separate fresh authored native campaign with stock extraction mode and `N` retained inventory rows. Add `--native-extraction-backpacks` and optionally `--native-extraction-lose-slot`. The host save retains those settings, so omit these switches when resuming. |

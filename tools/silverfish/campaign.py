@@ -701,6 +701,13 @@ class CampaignStore:
         """Save world state and return the revision."""
         return self.checkpoint(state, {})
 
+    @property
+    def revision(self):
+        """Return the durable revision without copying the campaign."""
+        with self._mutex:
+            self._require_open()
+            return self._data["revision"]
+
     def status(self):
         """Return campaign and roster data for trusted local inspection."""
         with self._mutex:
