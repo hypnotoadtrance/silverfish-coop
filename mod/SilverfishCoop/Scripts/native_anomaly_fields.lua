@@ -11,6 +11,7 @@ local classes = {
     electrode = "/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C",
     ["wandering-teleport"] = "/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C",
 }
+local gravity = "BlueprintGeneratedClass /Game/Classes/Anomalies/GravityAnomaly_BP.GravityAnomaly_BP_C"
 local kinds = {}
 for kind, path in pairs(classes) do kinds["BlueprintGeneratedClass " .. path] = kind end
 local fire_jet = "BlueprintGeneratedClass /Game/Classes/Anomalies/Fire_Jet_BP.Fire_Jet_BP_C"
@@ -32,6 +33,12 @@ end
 
 local function in_world(actor, current)
     return valid(actor) and not actor:IsActorBeingDestroyed() and same(actor:GetWorld(), current)
+end
+
+local function trap_kind(actor, class)
+    if class ~= gravity then return kinds[class] end
+    local at = actor:GetWorld()
+    if valid(at) and at:GetFullName() == "World " .. crossroads .. ".CrossRoads_P" then return "gravity" end
 end
 
 local function replica(actor)
@@ -126,7 +133,7 @@ function fields.start(role)
             if class == effects.blast_class and in_world(actor, world) then
                 effects.observe_blast(actor, active, canisters.blast_source)
             end
-        elseif kinds[class] or class == fire_jet then
+        elseif trap_kind(actor, class) or class == fire_jet then
             local _, local_copy = placement(actor)
             if local_copy or replica(actor) then actor:SetActorEnableCollision(false) end
         end
@@ -139,15 +146,21 @@ function fields.start(role)
         local class = actor:GetClass():GetFullName()
         canisters.created(actor, class, seat, replica)
         fixed.created(actor, class, seat)
-        local kind = kinds[class]
+        local kind = trap_kind(actor, class)
         if not kind and class ~= fire_jet then return end
         local placed, local_copy
         if kind then placed, local_copy = placement(actor) end
-        if seat == "host" and not actor:HasAuthority()
-            or seat == "client" and not local_copy and not replica(actor) then return end
+        if seat == "host" and not actor:HasAuthority() then return end
+        if seat == "client" and not local_copy and not replica(actor) then
+            if kind == "gravity" and actor:GetLocalRole() == 1 then
+                pending[actor:GetAddress()] = {actor = actor, kind = kind}
+            end
+            return
+        end
         if seat == "client" then
             actor:SetActorEnableCollision(false)
             if kind == "electrode" then electrodes.suspend(actor) end
+            if kind == "gravity" then actor:SetActorTickEnabled(false) end
         end
         local address = actor:GetAddress()
         if class == fire_jet then
@@ -271,11 +284,23 @@ function fields.rows(state, phase, row)
         active, fires, fixtures, world, world_map = {}, {}, {}, state.world, state.map
         effects.clear()
         electrodes.clear()
+        -- Initial replicated actors can finish BeginPlay while the new driver is still pending.
+        if phase == "connected" and state.map == crossroads then
+            for _, actor in ipairs(FindAllOf("GravityAnomaly_BP_C") or {}) do
+                if in_world(actor, world) and actor:GetClass():GetFullName() == gravity and replica(actor) then
+                    pending[actor:GetAddress()] = {actor = actor, kind = "gravity"}
+                end
+            end
+        end
     end
     for address, entry in pairs(pending) do
         local actor = entry.actor
         if in_world(actor, world) then
             if phase == "connected" then
+                if entry.kind == "gravity" and replica(actor) then
+                    actor:SetActorEnableCollision(false)
+                    actor:SetActorTickEnabled(false)
+                end
                 if actor:GetActorEnableCollision() == false then active[address] = entry end
             elseif entry.placed or actor:ActorHasTag(FName("Anomaly")) then
                 -- SpawnField applies its stock tag after finishing the spawned actor's BeginPlay.

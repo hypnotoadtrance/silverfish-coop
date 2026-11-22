@@ -30,6 +30,8 @@ namespace
     constexpr auto mushroom_patch = STR("/Game/Assets/PCG_Brushes/MushroomPatch_BP.MushroomPatch_BP_C");
     constexpr auto trap_overlap = STR("BndEvt__Starburst_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature");
     constexpr auto electrode_class = STR("/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C");
+    constexpr auto gravity_class = STR("/Game/Classes/Anomalies/GravityAnomaly_BP.GravityAnomaly_BP_C");
+    constexpr auto crossroads_world = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P");
     constexpr auto roaming_teleport_class = STR("/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C");
     constexpr auto physics_prop = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
     constexpr auto fixed_prop = STR("/Game/Assets/StaticMeshes/Destructable/Explosive_Prop_Master_BP.Explosive_Prop_Master_BP_C");
@@ -46,6 +48,7 @@ namespace
     };
     std::array<H::GlobalCallbackId, 5> hooks{H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID};
     U::FName spawn_field, overlap, electrode, roaming_teleport, fixed_prop_name;
+    U::FName gravity, gravity_graph, gravity_add_actors;
     U::FName patch_name;
     std::array<U::FName, 3> patch_events;
     std::array<U::FName, 6> electrode_events;
@@ -105,14 +108,16 @@ namespace
         return type && base && static_cast<U::UClass*>(type)->IsChildOf(base);
     }
 
-    bool replicated_field(U::UObject* field)
+    bool replicated_field(U::UObject* field, U::UWorld* world)
     {
         auto* roster = property<U::FArrayProperty>(field, STR("Anomalies"));
         auto* entry = roster ? U::CastField<U::FClassProperty>(roster->GetInner()) : nullptr;
         if (!entry) return false;
         U::FScriptArrayHelper classes(roster, roster->ContainerPtrToValuePtr<void>(field));
         if (classes.Num() != 1) return false;
-        return trap_class(entry->GetObjectPropertyValue(classes.GetRawPtr(0)));
+        auto* type = entry->GetObjectPropertyValue(classes.GetRawPtr(0));
+        return trap_class(type) || (type && type->GetFName() == gravity && type->GetPathName() == gravity_class &&
+            world && world->GetPathName() == crossroads_world);
     }
 
     bool server_connection(U::UObject* driver, U::UObject* connection)
@@ -139,10 +144,11 @@ namespace
         const bool trap = name == overlap ||
             std::find(electrode_events.begin(), electrode_events.end(), name) != electrode_events.end();
         const bool roaming_event = std::ranges::find(roaming_events, name) != roaming_events.end();
+        const bool gravity_event = name == gravity_graph || name == gravity_add_actors;
         const bool prop_event = !field && std::find(canister_events.begin(), canister_events.end(), name) != canister_events.end();
         const bool fixed_event = !field && std::find(fixed_prop_events.begin(), fixed_prop_events.end(), name) != fixed_prop_events.end();
         const bool patch_event = std::ranges::find(patch_events, name) != patch_events.end();
-        if ((!field && !trap && !roaming_event && !prop_event && !fixed_event && !patch_event) || !U::IsInGameThreadRaw() ||
+        if ((!field && !trap && !roaming_event && !gravity_event && !prop_event && !fixed_event && !patch_event) || !U::IsInGameThreadRaw() ||
             call.OriginalFunctionCallPrevented() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
         auto* type = actor->GetClassPrivate();
         if (!type) return;
@@ -163,10 +169,12 @@ namespace
         }
         const bool canister = prop_event && (class_name == canister_names[0] || class_name == canister_names[1]);
         const bool roaming = roaming_event && class_name == roaming_teleport && type->GetPathName() == roaming_teleport_class;
+        const bool gravity_well = gravity_event && class_name == gravity && type->GetPathName() == gravity_class;
         auto* binding = function->GetOuterPrivate();
         const bool fixed = fixed_event && binding && binding->GetFName() == fixed_prop_name &&
             binding->GetPathName() == fixed_prop && type->IsChildOf(static_cast<U::UClass*>(binding));
-        if (!field && !trap && !roaming && !canister && !fixed) return;
+        if (!field && !trap && !roaming && !gravity_well && !canister && !fixed) return;
+        auto* world = static_cast<U::AActor*>(actor)->GetWorld();
         if (canister)
         {
             if (!canister_class(type) || !binding || (binding != type && binding->GetPathName() != physics_prop)) return;
@@ -174,15 +182,18 @@ namespace
         else if (!fixed && binding != type) return;
         if (field)
         {
-            if (type->GetPathName() != field_class || function->GetNumParms() != 0 || !replicated_field(actor)) return;
+            if (type->GetPathName() != field_class || function->GetNumParms() != 0 || !replicated_field(actor, world)) return;
         }
         else if (!canister && !fixed && class_name == electrode)
         {
             // Keep arming, blast creation, and queued graph continuations on the host.
             if (type->GetPathName() != electrode_class) return;
         }
+        else if (gravity_well)
+        {
+            if (!world || world->GetPathName() != crossroads_world) return;
+        }
         else if (!canister && !fixed && !roaming && (function->GetNumParms() != 6 || !trap_class(type))) return;
-        auto* world = static_cast<U::AActor*>(actor)->GetWorld();
         if (!guest_world(world)) return;
 
         if (observed_world.Get() != world)
@@ -257,6 +268,9 @@ namespace silverfish::native_anomaly_fields
     {
         if (installed()) return;
         spawn_field = U::FName{STR("SpawnField"), U::FNAME_Add};
+        gravity = U::FName{STR("GravityAnomaly_BP_C"), U::FNAME_Add};
+        gravity_graph = U::FName{STR("ExecuteUbergraph_GravityAnomaly_BP"), U::FNAME_Add};
+        gravity_add_actors = U::FName{STR("AddActors"), U::FNAME_Add};
         patch_name = U::FName{STR("MushroomPatch_BP_C"), U::FNAME_Add};
         patch_events = {
             U::FName{STR("ReceiveBeginPlay"), U::FNAME_Add},
