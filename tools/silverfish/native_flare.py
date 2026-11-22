@@ -34,7 +34,7 @@ def parse(fields, phase, area):
         _, _, pawn, guid, toss, raw_before, raw_after, item_class, projectile = fields
         before, after = int(raw_before), int(raw_after)
         projectile_class = CLASSES.get(item_class)
-        if (not native_gold.valid_guid(guid) or toss not in ("0", "1") or not 0 <= after == before - 1 < 2**31
+        if (not native_gold.valid_guid(guid) or toss not in ("0", "1") or not 1 <= before < 2**31 or after != before - 1
                 or not projectile_class or not re.fullmatch(
                     re.escape(f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel.{projectile_class}_") + r"[0-9]+",
                     projectile)):
@@ -46,7 +46,8 @@ def parse(fields, phase, area):
 
 async def perform(host, bridge, character, selection, operation):
     fields = selection.split("@") if isinstance(selection, str) and len(selection) <= 70 else []
-    if len(fields) != 3 or not native_gold.valid_guid(fields[1]) or fields[2] not in ("0", "1"):
+    if (len(fields) != 3 or not native_gold.valid_guid(fields[1]) or fields[2] not in ("0", "1")
+            or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation)):
         raise party.RuleError("native_guest_flare_exact_slot_required")
     epoch, guid, toss = fields
     if (not host.native_guest or not host.native_profile or host.stopping or host.transitioning
@@ -111,3 +112,11 @@ async def service_input(client, active):
         client.control.event("native_guest_flare_input", operation_id=operation, **result)
     except (OSError, ValueError, RuntimeError) as error:
         client.control.event("native_guest_flare_input_rejected", operation_id=operation, reason=str(error))
+        return
+    receipt = result.get(PROOF, {})
+    if receipt.get("guid") == proof["guid"] and receipt.get("class_path") == proof["class_path"]:
+        try:
+            client.last_game = await client.bridge.command("native-guest-flare-complete", str(sequence), proof["guid"],
+                str(receipt["before"]), str(receipt["after"]), timeout=2)
+        except (OSError, ValueError, RuntimeError) as error:
+            client.control.event("native_guest_flare_local_charge_unverified", operation_id=operation, reason=str(error))

@@ -11,9 +11,24 @@ for _, name in ipairs({"Eqp_Flare", "Eqp_Flare_Blue", "Eqp_Flare_Yellow"}) do
     flare.equipment["/Game/Classes/Equipment/" .. name .. "." .. name .. "_C"] = true
 end
 local intent, receipt
+local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
+local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
+local ammo_field = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
+end
+
+local function same(first, second)
+    return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local empty_guid = ("0"):rep(32)
+
+local function row_guid(row)
+    local id = row and row[guid_field]
+    if not id then return end
+    return ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
 end
 
 local function qualified(context, client)
@@ -65,11 +80,57 @@ function flare.sync(state, phase)
     if not local_pawn or not valid(local_pawn.pawn) then return end
     local sequence, guid, toss, class = SilverfishTakeLocalGuestFlare(local_pawn.pawn:GetAddress())
     if sequence and flare.equipment[class] then
+        local pawn = local_pawn.pawn
         intent = {state.map, local_pawn.name, sequence, guid, toss and 1 or 0, class}
+        intent.actor, intent.slot, intent.save = pawn.EquipedItem, pawn.Save.PlayerEquipIndex, pawn.Save
     end
 end
 
+local function complete(fields, state, phase)
+    local sequence, guid, before, after = math.tointeger(fields[3]), fields[4], math.tointeger(fields[5]), math.tointeger(fields[6])
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    if phase ~= "connected" or not state.server or not intent or not valid(pawn) or not pawn:IsLocallyControlled()
+        or state.map ~= intent[1] or #fields ~= 6 or sequence ~= intent[3] or guid ~= intent[4]
+        or not before or before < 1 or after ~= before - 1 then error("native_guest_flare_local_receipt_expired", 0) end
+    local actor, save, slot = intent.actor, intent.save, intent.slot
+    if not same(actor, pawn.EquipedItem) or not same(save, pawn.Save) or slot ~= save.PlayerEquipIndex then
+        return "stock flare slot has changed"
+    end
+    local row = save.PlayerEquipment[slot + 1]
+    local identity = row_guid(row)
+    local amount = row and row[ammo_field]
+    local class = actor:GetClass()
+    local expected = StaticFindObject(intent[6])
+    if not same(class, expected) or not same(actor.Player_Ref, pawn) or not same(actor:GetOwner(), pawn)
+        or not (identity == guid and same(row[class_field], class) and (amount == before or amount == after)
+            or after == 0 and row and not valid(row[class_field]) and identity == empty_guid) then
+        error("native_guest_flare_local_receipt_mismatch", 0)
+    end
+    -- Consume adjusts the attached co-op row from the actor's own Ammo value.
+    -- A newer projection can already have the resulting count in that row.
+    if actor.Ammo == before then
+        actor:Consume(1, {})
+    elseif actor.Ammo ~= after then
+        error("native_guest_flare_local_ammo_mismatch", 0)
+    end
+    local updated = save.PlayerEquipment[slot + 1]
+    if after == 0 then
+        if not updated or valid(updated[class_field]) or row_guid(updated) ~= empty_guid then
+            error("native_guest_flare_local_consumption_unverified", 0)
+        end
+        if same(actor, pawn.EquipedItem) then
+            -- An empty quick-slot ring can leave a reference to the retired actor.
+            if not actor:IsActorBeingDestroyed() then actor:K2_DestroyActor() end
+            pawn.EquipedItem = nil
+        end
+    elseif actor.Ammo ~= after or updated[ammo_field] ~= after then
+        error("native_guest_flare_local_consumption_unverified", 0)
+    end
+    return "stock flare charge reconciled"
+end
+
 function flare.command(fields, state, phase)
+    if fields[2] == "native-guest-flare-complete" then return complete(fields, state, phase) end
     if fields[2] ~= "native-guest-flare-throw" then return end
     local name, guid, toss = fields[3], fields[4], fields[5]
     if phase ~= "hosting" or #fields ~= 5 or #guid ~= 32 or guid:find("[^0-9A-F]") or not guid:find("[^0]")

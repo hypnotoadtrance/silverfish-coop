@@ -91,7 +91,9 @@ async def verify(work, canary):
             stored = await command("action", *guest, native_inventory.STORE_EQUIPMENT, "--target", guid)
             slot = stored[native_inventory.STORE_KEY]["slot"]
             assert await probe(hbox, "world") == await probe(gbox, "world") == ""
-            await asyncio.sleep(.8)
+            async with asyncio.timeout(8):
+                while await probe(gbox, "slot", slot) != "ready":
+                    await asyncio.sleep(.1)
             assert await probe(gbox, "equip", slot) == "2"
             await wait(grun, lambda row: row.get("game", {}).get("native_guest_equipment_selection", {}).get("guid") == guid)
             await asyncio.sleep(.8)
@@ -101,14 +103,41 @@ async def verify(work, canary):
             result = await wait(hrun, lambda row: row.get("game", {}).get(native_flare.PROOF, {}).get("guid") == guid)
             proof = result["game"][native_flare.PROOF]
             assert (proof["before"], proof["after"], proof["toss"]) == (2, 1, "0")
+            async with asyncio.timeout(10):
+                while True:
+                    rows = [json.loads(line) for line in (hrun / "events.jsonl").read_text().splitlines()]
+                    commit = next((row for row in rows if row["event"] == "native_guest_flare_committed"
+                                   and row["guid"] == guid), None)
+                    if commit:
+                        break
+                    await asyncio.sleep(.1)
             host_shot = await probe(hbox, "world")
             async with asyncio.timeout(6):
                 while not (guest_shot := await probe(gbox, "world")):
                     await asyncio.sleep(.1)
             assert host_shot.startswith("3,") and guest_shot.startswith("1,") and "|" not in host_shot + guest_shot
+            async with asyncio.timeout(6):
+                while await probe(gbox, "ammo") != "1":
+                    await asyncio.sleep(.1)
+            assert await probe(gbox, "press") == "press"
+            await asyncio.sleep(.2)
+            assert await probe(gbox, "release") == "release"
+            terminal = await wait(hrun, lambda row: row.get("game", {}).get(native_flare.PROOF, {}).get("after") == 0)
+            last = terminal["game"][native_flare.PROOF]
+            assert last["guid"] == guid and last["before"] == 1 and last["projectile"] != proof["projectile"]
+            async with asyncio.timeout(6):
+                while True:
+                    host_final, guest_final = await probe(hbox, "world"), await probe(gbox, "world")
+                    if host_final.count("|") == guest_final.count("|") == 1 and await probe(gbox, "ammo") == "gone":
+                        break
+                    await asyncio.sleep(.1)
+            final_commit = next(row for row in (json.loads(line) for line in (hrun / "events.jsonl").read_text().splitlines())
+                                if row["event"] == "native_guest_flare_committed" and row["after"] == 0)
             evidence = hrun / "guest-flare-verification.json"
-            evidence.write_text(json.dumps({"stock_slot": slot, "receipt": proof, "host_projectile": host_shot,
-                "guest_projectile": guest_shot}, indent=2), encoding="utf-8")
+            evidence.write_text(json.dumps({"stock_slot": slot, "receipt": proof, "save_revision": commit["revision"],
+                "host_projectile": host_shot, "guest_projectile": guest_shot, "last_unit": last,
+                "last_unit_revision": final_commit["revision"], "host_final": host_final, "guest_final": guest_final},
+                indent=2), encoding="utf-8")
             print(evidence, flush=True)
         finally:
             for run, process in reversed(games):

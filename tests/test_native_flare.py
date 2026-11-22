@@ -1,4 +1,7 @@
+import time
+from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock
 
 from tools.silverfish import native_flare
 from tools.silverfish.travel import OBSERVATORY
@@ -25,3 +28,19 @@ class StockFlareReceiptTests(unittest.TestCase):
         row[6] = "1"
         with self.assertRaises(ValueError):
             native_flare.parse(row, "hosting", "/Game/AnotherMap")
+
+
+class StockFlareRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_committed_retry_reuses_projectile_and_does_not_throw_again(self):
+        operation, epoch, guid = "a" * 32, "b" * 32, "C" * 32
+        selection = f"{epoch}@{guid}@0"
+        result = {native_flare.PROOF: {"before": 2, "after": 1, "projectile": "original"}}
+        host = SimpleNamespace(native_guest=True, native_profile=True, stopping=False, transitioning=False,
+            native_checkpoint_unsafe=False, zone_epoch=epoch, last_seen=time.monotonic(), last_game={"state": "hosting"},
+            native_recipients=lambda: {"guest": {"connected": True, "pawn": "stock_pawn"}},
+            party={"players": {"guest": {"downed": False}}, "pending_spawns": {}, "receipts": {"guest": [
+                {"id": operation, "request": [native_flare.ACTION, selection, None], "result": result},
+            ]}})
+        bridge = SimpleNamespace(command=AsyncMock())
+        self.assertEqual(await native_flare.perform(host, bridge, "guest", selection, operation), result)
+        bridge.command.assert_not_awaited()

@@ -14,11 +14,13 @@ local function same(first, second)
 end
 
 local function run(world, pawn, guest, command, arg)
-    if command == "equip" then
+    if command == "equip" or command == "slot" then
         local slot = assert(math.tointeger(tonumber(arg)))
         assert(guest and slot >= 0 and slot < 8)
         local row = pawn.Save.PlayerEquipment[slot + 1]
-        assert(row and same(row[item_class], StaticFindObject(item_path)) and row[item_ammo] == 2)
+        local contains_flare = row and same(row[item_class], StaticFindObject(item_path)) and row[item_ammo] == 2
+        if command == "slot" then return contains_flare and "ready" or "waiting" end
+        assert(contains_flare)
         pawn:Equip_NextItem(slot, false)
         assert(valid(pawn.EquipedItem) and same(pawn.EquipedItem:GetClass(), StaticFindObject(item_path)))
         return pawn.EquipedItem.Ammo
@@ -27,6 +29,11 @@ local function run(world, pawn, guest, command, arg)
         assert(guest and valid(pawn.EquipedItem) and same(pawn.EquipedItem:GetClass(), StaticFindObject(item_path)))
         pawn.EquipedItem:Use_Item_Primary(command == "press", 1.0)
         return command
+    end
+    if command == "ammo" then
+        assert(guest)
+        local actor = pawn.EquipedItem
+        return valid(actor) and same(actor:GetClass(), StaticFindObject(item_path)) and actor.Ammo or "gone"
     end
     assert(command == "world")
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
