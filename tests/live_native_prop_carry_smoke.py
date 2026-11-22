@@ -163,11 +163,10 @@ async def exercise(work, untouched, kind="crate"):
             await wait(grun, lambda state: lamp(state) is True)
         input_mode = "grab" if kind == "crate" or fuel_drum else "pickup"
         target = initial["class_path"]
-        if kind in ("placed-prop", "placed-item"):
-            target = f"{target}|{placed_name}"
-        elif input_mode == "pickup" or fuel_drum:
-            occupants = 1 if kind == "lantern" else len(barrels)
-            target = f"{target}|{occupants}|{initial['actor']}"
+        if kind == "lantern":
+            target = f"{target}|1|{initial['actor']}"
+        elif kind != "crate":
+            target = f"{target}|{initial['actor']}"
         await fixture(guest, f"{input_mode}@{target}")
         grabbed = await wait(hrun, lambda state: prop(state).get("held") and prop(state).get("grip")
                              and proof(state).get("edge") == "grab")

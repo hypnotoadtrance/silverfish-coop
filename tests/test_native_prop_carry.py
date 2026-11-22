@@ -1,6 +1,29 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from tools.silverfish import native_prop_carry as carry
+
+
+class CarrierPoseTests(unittest.TestCase):
+    def test_carrier_targets_reach_the_game_thread_with_a_stale_pawn_snapshot(self):
+        epoch, lease, character = "a" * 32, "b" * 32, "c" * 32
+        service = SimpleNamespace(zone_epoch=epoch, last_game={"pawns": {"guest": {
+            "name": "guest pawn", "location": [0, 0, 0],
+        }}})
+        host = carry.Host(service)
+        host._reset()
+        host.holders[character] = {"lease": lease, "pawn": "guest pawn", "sample": 0, "deadline": 3}
+
+        with (TemporaryDirectory() as temporary, patch.object(host, "_pawn", return_value="guest pawn"),
+              patch.object(carry.time, "monotonic", return_value=2)):
+            bridge = SimpleNamespace(directory=Path(temporary))
+            target = f"{epoch}@{lease}@1@400@0@0@0@0@0"
+            self.assertEqual(host.aim(bridge, character, target), {"ok": True})
+            queued = (bridge.directory / "native-prop-carry-poses").read_text(encoding="utf-8")
+            self.assertEqual(queued.rstrip().split("\t")[:3], [lease, "1", "400.0"])
 
 
 class CorpseCarryPayloadTests(unittest.TestCase):

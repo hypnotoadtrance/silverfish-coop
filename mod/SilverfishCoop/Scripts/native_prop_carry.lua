@@ -617,12 +617,35 @@ function carry.command(fields, current, seat)
     return "stock physics prop action verified"
 end
 
-local function follow()
-    if not next(holdings) then return end
-    local now = os.clock()
-    local input = mailbox and now >= (next_read or 0) and io.open(mailbox, "rb")
-    if input then
+local function interpolate_rotation(angle, goal, alpha)
+    local difference = (goal - angle + 180) % 360 - 180
+    return (angle + difference * alpha + 180) % 360 - 180
+end
+
+local function guide_handle(entry, now)
+    local target, rotation = entry.target, entry.rotation
+    local previous, previous_rotation = entry.applied_target, entry.applied_rotation
+    if previous and previous_rotation then
+        local seconds = math.min(math.max(now - entry.applied_at, 0), .05)
+        local alpha = 1 - math.exp(-seconds / .04)
+        target = {X = previous.X + (target.X - previous.X) * alpha,
+            Y = previous.Y + (target.Y - previous.Y) * alpha,
+            Z = previous.Z + (target.Z - previous.Z) * alpha}
+        rotation = {Pitch = interpolate_rotation(previous_rotation.Pitch, rotation.Pitch, alpha),
+            Yaw = interpolate_rotation(previous_rotation.Yaw, rotation.Yaw, alpha),
+            Roll = interpolate_rotation(previous_rotation.Roll, rotation.Roll, alpha)}
+    end
+    entry.grip:SetTargetLocationAndRotation(target, rotation)
+    entry.applied_target, entry.applied_rotation, entry.applied_at = target, rotation, now
+end
+
+local function read_targets(now)
+    local input
+    if mailbox and now >= (next_read or 0) then
         next_read = now + .05
+        input = io.open(mailbox, "rb")
+    end
+    if input then
         local row_limit = 0
         for line in input:lines() do
             row_limit = row_limit + 1
@@ -639,12 +662,17 @@ local function follow()
         end
         input:close()
     end
+end
+
+function carry.update()
+    if phase ~= "hosting" or not next(holdings) then return end
+    local now = os.clock()
     for _, entry in pairs(holdings) do
         if now > entry.deadline or not valid(entry.pawn) or entry.pawn.Dead ~= false
             or not held(entry.pawn, entry.actor, entry.grip, entry.corpse) then
             remove(entry, "drop", 0, 0)
         elseif entry.target then
-            entry.grip:SetTargetLocationAndRotation(entry.target, entry.rotation)
+            guide_handle(entry, now)
         end
     end
 end
@@ -702,7 +730,7 @@ function carry.sync(current, seat, bridge)
         end)
         hook = true
     end
-    if seat == "hosting" then follow() end
+    if seat == "hosting" and next(holdings) then read_targets(os.clock()) end
 end
 
 return carry

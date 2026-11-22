@@ -205,10 +205,8 @@ class Host:
         if sequence <= holder["sample"]:
             raise party.RuleError("native_prop_carry_stale_pose")
         position = _numbers(coordinates, (1e7, 1e7, 1e7, 360, 360, 360))
-        bodies = self.service.last_game.get("pawns", {})
-        origin = next((body.get("location") for body in bodies.values() if body.get("name") == holder["pawn"]), None)
-        if not origin or len(origin) != 3 or math.dist(origin, position[:3]) > 375:
-            raise party.RuleError("native_prop_carry_pose_out_of_reach")
+        # The game thread verifies reach against the live pawn before moving the handle.
+        # The worker's periodic pawn snapshot can trail the actual carrier while running.
         now = time.monotonic()
         holder["sample"], holder["deadline"] = sequence, now + 1.4
         self.poses[lease] = "\t".join((lease, str(sequence), *(str(axis) for axis in position)))
