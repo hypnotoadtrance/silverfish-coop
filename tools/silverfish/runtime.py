@@ -697,6 +697,7 @@ class Bridge:
         self._status_text = ""
         self._status_snapshot: dict | None = None
         self.local_bridge = None
+        self._local_status = None
 
     async def wait_for_interaction(self, timeout: float, *, wake_if=None, guest=False) -> None:
         """Wake for local input, a new game frame, or pending network work."""
@@ -1122,7 +1123,12 @@ class Bridge:
             self._status_revision = published.st_mtime_ns, published.st_size
         except (OSError, UnicodeError):
             return None
-        return self._parse_status(text)
+        frame = self._parse_status(text)
+        if self.local_bridge is not None and self._local_status is not None:
+            if frame is None or frame.get("sequence", -1) < self._local_status["sequence"]:
+                return self._local_status
+            self._local_status = None
+        return frame
 
     def _parse_status(self, text: str) -> dict | None:
         try:
@@ -2876,6 +2882,7 @@ class Bridge:
             status = self._parse_status(await self.local_bridge.command(request.encode("utf-8"), timeout))
             if not status or status.get("ack", {}).get("id") != fields[0]:
                 raise RuntimeError("The local co-op command receipt did not match the request")
+            self._local_status = status
         ack = status["ack"]
         if ack["result"] != "accepted":
             raise RuntimeError(ack["message"] or f"The game declined the {action} command")

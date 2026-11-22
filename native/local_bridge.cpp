@@ -20,7 +20,7 @@ namespace
     constexpr std::uint32_t input_limit = 1024;
     constexpr std::size_t input_capacity = 64;
 
-    enum class State { idle, queued, running, replied, too_large };
+    enum class State { idle, queued, taken, running, replied, too_large };
     std::mutex mutex;
     std::condition_variable changed;
     bool ready{};
@@ -52,16 +52,31 @@ namespace
             active = attached;
             if (state == State::queued)
             {
-                state = State::running;
-                ticket = active_ticket;
+                state = State::taken;
                 pending = std::move(command);
             }
+            if (state == State::taken || state == State::running) ticket = active_ticket;
         }
         lua.set_bool(active);
         if (!ticket) return 1;
         lua.set_integer(ticket);
+        if (pending.empty()) return 2;
         lua.set_string(pending);
         return 3;
+    }
+
+    int claim_command(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 1 || !lua.is_integer()) return 0;
+        const auto ticket = lua.get_integer();
+        bool claimed{};
+        {
+            std::lock_guard lock(mutex);
+            claimed = state == State::taken && ticket == active_ticket;
+            if (claimed) state = State::running;
+        }
+        lua.set_bool(claimed);
+        return 1;
     }
 
     int enqueue_input(const Lua& lua)
@@ -177,6 +192,7 @@ namespace silverfish::local_bridge
     void register_lua(RC::LuaMadeSimple::Lua& lua)
     {
         lua.register_function("SilverfishTakeLocalBridgeCommand", take);
+        lua.register_function("SilverfishClaimLocalBridgeCommand", claim_command);
         lua.register_function("SilverfishPublishLocalBridgeReply", publish);
         lua.register_function("SilverfishEnqueueLocalBridgeInput", enqueue_input);
     }

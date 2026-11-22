@@ -47,6 +47,12 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["sequence"], 42)
             self.assertEqual(result["ack"]["message"], "move")
             self.assertEqual(list(bridge.directory.iterdir()), [])
+            status_file = bridge.directory / "status.tsv"
+            frame = "schema\t1\nseq\t{}\nsession\tclient\tconnected\tObservatory\t1\t0\n"
+            status_file.write_text(frame.format(41), encoding="utf-8")
+            self.assertEqual(bridge.snapshot()["sequence"], 42)
+            status_file.write_text(frame.format(43), encoding="utf-8")
+            self.assertEqual(bridge.snapshot()["sequence"], 43)
 
     async def test_embedded_inputs_wake_worker_and_keep_file_fallback_in_order(self):
         with TemporaryDirectory() as temporary:

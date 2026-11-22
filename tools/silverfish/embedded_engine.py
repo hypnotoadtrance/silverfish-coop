@@ -286,8 +286,12 @@ class EmbeddedEngine:
 
         status = await self.bridge.wait_for(advancing, timeout=timeout)
         self._sequence = status["sequence"]
-        self.bridge.local_bridge = LocalBridge.connect(_current_startup(()).image)
         self._state = "active"
+
+    def attach_local_bridge(self) -> None:
+        if self._state != "active" or self.bridge.local_bridge is not None:
+            raise RuntimeError("The active engine lease already owns its command bridge")
+        self.bridge.local_bridge = LocalBridge.connect(_current_startup(()).image)
 
     async def select_save_scope(self, scope: native_host_save.SaveScope) -> None:
         if self._state != "active" or self._save_scope is not None or scope.profile != self._saved_directory.parent:

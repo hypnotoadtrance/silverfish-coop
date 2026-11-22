@@ -34,13 +34,15 @@ class LocalBridge:
         if os.name != "nt":
             return None
         path = image.parent / "ue4ss" / "Mods" / "SilverfishCoopNative" / "dlls" / "main.dll"
-        get_module = ctypes.WinDLL("kernel32").GetModuleHandleW
-        get_module.argtypes, get_module.restype = [wintypes.LPCWSTR], wintypes.HMODULE
-        handle = get_module(str(path))
-        if not handle:
+        get_module = ctypes.WinDLL("kernel32").GetModuleHandleExW
+        get_module.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, ctypes.POINTER(wintypes.HMODULE)]
+        get_module.restype = wintypes.BOOL
+        handle = wintypes.HMODULE()
+        pin_until_exit = 1
+        if not get_module(pin_until_exit, str(path), ctypes.byref(handle)):
             return None
         try:
-            library = ctypes.CDLL(str(path), handle=handle)
+            library = ctypes.CDLL(str(path), handle=handle.value)
             bridge = cls(library)
         except (AttributeError, OSError):
             return None

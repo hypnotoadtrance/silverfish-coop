@@ -1445,6 +1445,7 @@ namespace
 
         ~SilverfishNativeMod() override
         {
+            silverfish::local_bridge::stop();
             silverfish::native_guest_item::shutdown();
             silverfish::native_zone::uninstall_hooks();
             silverfish::native_transport::uninstall_hooks();

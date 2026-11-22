@@ -4283,6 +4283,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                 embedded = resident_engine or await _acquire_embedded_game(
                     work, directory, "host", headless, embedded_port, game_options)
                 process, bridge = embedded, embedded.bridge
+                embedded.attach_local_bridge()
             else:
                 bridge_directory = directory / "run" / "game-bridge" / uuid.uuid4().hex
                 process = launch(work, profile, bridge_directory, headless, internal_port,
@@ -5995,6 +5996,7 @@ async def join_game(work: Path, directory: Path, invitation: Path | direct_ip.Co
                 embedded = resident_engine or await _acquire_embedded_game(
                     work, directory, "client", headless, None, game_options)
                 process, bridge = embedded, embedded.bridge
+                embedded.attach_local_bridge()
                 await embedded.select_save_scope(
                     native_host_save.SaveScope(embedded.profile, uuid.UUID(invite["character_id"]).hex))
                 transport = await link.start_client(game_pid=process.pid if resident_engine is not None else None)

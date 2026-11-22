@@ -21,6 +21,7 @@ class StockBridge:
         self.sequence = 0
         self.state = "ready"
         self.save_scope = None
+        self.local_bridge = None
 
     def snapshot(self):
         self.sequence += 1

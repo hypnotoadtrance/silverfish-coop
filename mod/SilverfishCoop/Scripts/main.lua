@@ -1114,14 +1114,21 @@ local function run_command(fields, state, current_phase)
     error("Unknown command", 0)
 end
 
+local pending_local
 local function read_command(periodic)
     local content, ticket
     if type(SilverfishTakeLocalBridgeCommand) == "function" then
         local active
         active, ticket, content = SilverfishTakeLocalBridgeCommand()
-        if active and not ticket and not periodic then return end
+        if pending_local and pending_local.ticket ~= ticket then pending_local = nil end
+        if pending_local then
+            if pending_local.dispatched then return nil, pending_local end
+            return pending_local.fields, pending_local
+        end
+        if active and not content and not periodic then return end
     end
     if not content then
+        ticket = nil
         local file = io.open(command_path, "rb")
         if not file then return end
         content = file:read(32769)
@@ -1138,7 +1145,10 @@ local function read_command(periodic)
     if not id or #id > 80 or not id:match("^[%w_.%-]+$") or seen_commands[id] then
         return
     end
-    return fields, ticket
+    if ticket then
+        pending_local = {ticket = ticket, fields = fields, dispatched = false}
+    end
+    return fields, pending_local
 end
 
 local function world_view_row(mode, view)
@@ -1150,7 +1160,7 @@ local function world_view_row(mode, view)
         view.cloud_density_offset or "-", view.weather_verified and 1 or 0)
 end
 
-local function write_status(state, current_phase, failure, fields, ticket)
+local function write_status(state, current_phase, failure, fields, pending)
     sequence = sequence + 1
     local rows = {
         status_row("schema", 1),
@@ -1392,7 +1402,9 @@ local function write_status(state, current_phase, failure, fields, ticket)
     if failure then rows[#rows + 1] = status_row("diagnostic", failure) end
 
     local frame = table.concat(rows, "\n") .. "\n"
-    if ticket then SilverfishPublishLocalBridgeReply(ticket, frame) end
+    if pending and pending.dispatched and acknowledged_id == pending.fields[1] then
+        SilverfishPublishLocalBridgeReply(pending.ticket, frame)
+    end
     local temporary = status_path .. ".tmp"
     local file = io.open(temporary, "wb")
     if not file then return end
@@ -1437,7 +1449,7 @@ local function observe_session()
     return state, current_phase
 end
 
-local function tick(fields, ticket)
+local function tick(fields, pending)
     local state, current_phase = observe_session()
     if not state then return end
     native_mindcore_replication.sync(state, current_phase)
@@ -1483,7 +1495,7 @@ local function tick(fields, ticket)
         if not state then return end
     end
     if fields then
-        if not ticket then seen_commands[fields[1]] = true end
+        if not pending then seen_commands[fields[1]] = true end
         last_quest_catalog = nil
         last_broker_quest = nil
         last_broker_position = nil
@@ -1498,6 +1510,10 @@ local function tick(fields, ticket)
         native_guest_stack_drop.reset()
         last_authored_arrival = nil
         local was_guest_bound = guest_save.active()
+        if pending then
+            if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return end
+            pending.dispatched = true
+        end
         local accepted, message = pcall(run_command, fields, state, current_phase)
         acknowledged_id = fields[1]
         acknowledged_result = accepted and "accepted" or "error"
@@ -1551,7 +1567,8 @@ local function tick(fields, ticket)
     local pause_checked, pause_failure = pcall(native_coop_pause.sync, state, current_phase)
     if not pause_checked then native_coop_pause.clear() end
     native_guest_smg_hold.cache_context(state, current_phase)
-    write_status(state, current_phase, not projected and failure or not pause_checked and pause_failure or nil, fields, ticket)
+    write_status(state, current_phase, not projected and failure or not pause_checked and pause_failure or nil,
+        fields or pending and pending.fields, pending)
 end
 
 players.start(bridge)
@@ -1600,9 +1617,9 @@ LoopInGameThreadWithDelay(25, function()
     if not leaving then pcall(native_player_avatar.animate_cycle, current_world) end
     local now = os.clock()
     local periodic = now >= next_snapshot
-    local fields, ticket = read_command(periodic)
+    local fields, pending = read_command(periodic)
     if not fields and not periodic then return end
     next_snapshot = now + 0.25
-    local ok, failure = pcall(tick, fields, ticket)
+    local ok, failure = pcall(tick, fields, pending)
     if not ok then print("[SilverfishCoop] " .. tostring(failure) .. "\n") end
 end)
