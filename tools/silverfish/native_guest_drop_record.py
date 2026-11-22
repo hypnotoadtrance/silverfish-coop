@@ -58,7 +58,8 @@ def parse_stock_action(fields, game):
             or (mode == "drop" and not 1 <= amount <= MAX_QUANTITY)
             or (mode == "split" and not 0 < amount < before < 2**31)
             or (mode == "unload" and not 1 <= amount == before <= MAX_TAKE_AMMO_ROUNDS)
-            or (mode not in ("split", "unload") and before != 0)):
+            or (mode == "equip" and not 0 <= before <= 8)
+            or (mode not in ("split", "unload", "equip") and before != 0)):
         raise ValueError("Invalid stock backpack operation")
     return dict(area=area, pawn=pawn, epoch=epoch, sequence=int(sequence), entry=entry, guid=guid,
                 count=amount, expected=before, mode=mode)

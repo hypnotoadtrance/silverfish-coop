@@ -158,11 +158,16 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
         elif mode == "equip":
             if entry != "equip" or quantity != 1:
                 raise ValueError("The native action did not select one equipment item")
+            requested_slot = int(expected or 0) - 1
+            if not -1 <= requested_slot < 8:
+                raise ValueError("The stock equipment destination is invalid")
+            target = guid if requested_slot == -1 else f"{guid}|{requested_slot}"
             key = native_inventory.STORE_KEY
-            receipt = (await client.gameplay_action(native_inventory.STORE_EQUIPMENT, operation, guid)).get(key)
+            receipt = (await client.gameplay_action(native_inventory.STORE_EQUIPMENT, operation, target)).get(key)
             if (not isinstance(receipt, dict)
                     or (receipt.get("owner"), receipt.get("map"), receipt.get("guid")) != (client.invite["character_id"], area, guid)
                     or type(slot := receipt.get("slot")) is not int or not 0 <= slot < 8
+                    or requested_slot != -1 and slot != requested_slot
                     or ((displaced := receipt.get("displaced")) != "-" and (not valid_guid(displaced) or displaced == guid))):
                 raise RuntimeError("The host did not verify the saved stock equipment slot")
             committed = ("equipped", str(slot), displaced)

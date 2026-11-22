@@ -113,6 +113,37 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
         for target in (f"{GUID}|0", f"{GUID}|{too_many}", f"{GUID}|1|2", f"{'0' * 32}|1"):
             self.assertIsNone(native_inventory.take_ammo_target(target))
 
+    async def test_stock_utility_slot_equip_requires_the_requested_destination(self):
+        client = self.client()
+        client.guest_ui = SimpleNamespace(refresh=AsyncMock())
+        operation = "a" * 32
+        envelope = [record.STOCK_ACTION_ROW, MAP, PAWN, client.zone_epoch, "5", "equip", GUID, "1"]
+        intent = record.parse_stock_action([*envelope, "8"], client.last_game)
+        self.assertEqual((intent["mode"], intent["expected"]), ("equip", 8))
+        with self.assertRaisesRegex(ValueError, "Invalid stock backpack operation"):
+            record.parse_stock_action([*envelope, "9"], client.last_game)
+
+        receipt = {"owner": client.invite["character_id"], "map": MAP, "guid": GUID, "slot": 7, "displaced": "-"}
+        client.gameplay_action.side_effect = None
+        client.gameplay_action.return_value = {native_inventory.STORE_KEY: receipt}
+        args = (client, MAP, client.zone_epoch, operation, "equip", "equip", GUID, 1, "5", "8", None)
+        self.assertEqual((await drop.settle_stock_action(*args))[native_inventory.STORE_KEY], receipt)
+        client.gameplay_action.assert_awaited_once_with(native_inventory.STORE_EQUIPMENT, operation, f"{GUID}|7")
+        client.guest_ui.refresh.assert_awaited_once_with(client)
+        client.bridge.command.assert_awaited_once_with(
+            "native-inventory-stock-drop-finish", client.zone_epoch, "5", "equipped", "7", "-", timeout=5,
+        )
+
+        client.bridge.command.reset_mock()
+        client.guest_ui.refresh.reset_mock()
+        client.gameplay_action.return_value = {native_inventory.STORE_KEY: {**receipt, "slot": 6}}
+        with self.assertRaisesRegex(RuntimeError, "did not verify the saved stock equipment slot"):
+            await drop.settle_stock_action(*args)
+        client.guest_ui.refresh.assert_not_awaited()
+        client.bridge.command.assert_awaited_once_with(
+            "native-inventory-stock-drop-finish", client.zone_epoch, "5", "refused", timeout=3,
+        )
+
     def test_take_ammo_result_must_match_registered_primary_ammo_and_capacity(self):
         for weapon in FIREARMS:
             with self.subTest(weapon=weapon.kind):

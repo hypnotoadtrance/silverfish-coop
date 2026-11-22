@@ -32,6 +32,7 @@ SORT_KEY = "native_inventory_sort"
 STORE_EQUIPMENT = "native-inventory-store-equipment"
 STORE_CAPABILITY = "native_inventory_store_equipment_capability"
 STORE_KEY = "native_inventory_store_equipment"
+_STORE_TARGET = re.compile(r"([0-9A-F]{32})(?:\|([0-7]))?\Z")
 _STOCK_CLASS = re.compile(r"/Game/Classes/[A-Za-z0-9_./-]+_C\Z")
 
 
@@ -239,9 +240,11 @@ async def sort_backpack(host, bridge, character: str, target, operation: str) ->
     return result
 
 
-async def store_equipment(host, bridge, character: str, item, operation: str) -> dict:
-    if not valid_guid(item) or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
+async def store_equipment(host, bridge, character: str, target, operation: str) -> dict:
+    selection = _STORE_TARGET.fullmatch(target) if isinstance(target, str) else None
+    if not selection or not valid_guid(selection[1]) or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
         raise party.RuleError("native_inventory_equip_requires_item_and_operation")
+    item, requested_slot = selection.groups()
     game = host.last_game
     if (not host.native_guest or not host.native_profile or host.stopping or host.transitioning
             or host.native_checkpoint_unsafe or game.get("state") != "hosting" or game.get(STORE_CAPABILITY) != 1
@@ -251,7 +254,7 @@ async def store_equipment(host, bridge, character: str, item, operation: str) ->
     player = host.party["players"].get(character)
     if not owner.get("connected") or not owner.get("pawn") or not player:
         raise party.RuleError("guest_not_active")
-    fingerprint = [STORE_EQUIPMENT, item, None]
+    fingerprint = [STORE_EQUIPMENT, target, None]
     for receipt in host.party["receipts"].get(character, ()):
         if receipt["id"] == operation:
             if receipt["request"] != fingerprint:
@@ -265,7 +268,8 @@ async def store_equipment(host, bridge, character: str, item, operation: str) ->
     host.native_checkpoint_unsafe = True
     try:
         try:
-            snapshot = await bridge.command(STORE_EQUIPMENT, pawn, item, timeout=6)
+            arguments = (pawn, item) if requested_slot is None else (pawn, item, requested_slot)
+            snapshot = await bridge.command(STORE_EQUIPMENT, *arguments, timeout=6)
         except RuntimeError as error:
             if str(error).startswith("native_inventory_equip_refused_"):
                 host.native_checkpoint_unsafe = False
@@ -273,7 +277,8 @@ async def store_equipment(host, bridge, character: str, item, operation: str) ->
             raise
         proof = snapshot.get(STORE_KEY, {})
         if ((snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"), proof.get("guid"))
-                != ("hosting", area, area, pawn, item)):
+                != ("hosting", area, area, pawn, item)
+                or requested_slot is not None and proof.get("slot") != int(requested_slot)):
             raise RuntimeError("The host did not verify the guest's stock equipment move")
         host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {STORE_KEY: dict(proof, owner=character)}

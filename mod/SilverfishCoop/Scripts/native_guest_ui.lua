@@ -335,6 +335,26 @@ local function project(state, phase, character, path)
     if count(old.JournalEntries) ~= note_count or #old.ActiveQuests ~= quest_count then
         error("The attached co-op Journal view failed readback", 0)
     end
+    local instance = state.world.OwningGameInstance
+    -- The normal stock inventory mutations update these derived values. The
+    -- detached projection replaces its rows directly, so refresh them here.
+    instance:Compile_PassiveEffects()
+    instance:Calc_CarryWeight()
+    local stack = state.controller.MenuStack
+    for index = math.min(stack:GetArrayNum(), 32), 1, -1 do
+        local widget = stack[index]
+        if widget and type(widget.type) == "function" and widget:type() == "RemoteUnrealParam" then
+            widget = widget:get()
+        end
+        if exact(widget, "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C") then
+            local info = widget.PlayerInfoBox
+            if valid(info) then
+                info:RefreshPassives()
+                info:UpdateStats()
+            end
+            break
+        end
+    end
     return ("stock co-op inventory and Journal projected %d %d %d %d %d"):format(
         items, note_count, quest_count, completed, attachments)
 end

@@ -26,23 +26,17 @@ namespace
     using Clock = std::chrono::steady_clock;
     using Iteration = Hook::TCallbackIterationData<void>;
 
-    struct Effect
+    struct EffectCount
     {
-        const U::TCHAR* caller;
-        const U::TCHAR* name;
-    };
-
-    constexpr std::array effects{
-        Effect{STR("ApplyDynamicStats"), STR("SpeedBoost")},
-        Effect{STR("Calc_CrouchSpeed"), STR("SwiftPaw")},
-        Effect{STR("DetermineMoveSpeed"), STR("Nudist")},
-        Effect{STR("Action_Sprint"), STR("BadSwimmer")},
+        U::FName name{};
+        int count{};
     };
 
     struct Readback
     {
         U::FWeakObjectPtr pawn, save, stock;
-        std::array<int, effects.size()> counts{};
+        std::array<EffectCount, 48> effects{};
+        std::int32_t bonus{};
         Clock::time_point expires{};
     };
 
@@ -78,7 +72,7 @@ namespace
         return entry ? nullptr : result;
     }
 
-    const Readback* readback(U::UObject* pawn, U::UObject* save, U::UObject* stock, bool recalculate)
+    Readback* readback(U::UObject* pawn, U::UObject* save, U::UObject* stock, bool recalculate)
     {
         const auto now = Clock::now();
         Readback* slot{};
@@ -101,15 +95,7 @@ namespace
         next.save = save;
         next.stock = stock;
         next.expires = now + std::chrono::milliseconds(250);
-        std::int32_t bonus{};
-        if (!silverfish::native_guest_sickness::read_passive_amplification(save, bonus)) return nullptr;
-        for (std::size_t i = 0; i < effects.size(); ++i)
-        {
-            const U::FName name{effects[i].name, U::FNAME_Find};
-            auto& count = next.counts[i];
-            if (name.IsNone() || !silverfish::native_enemy_loot::count_save_passive(save, name, count)) return nullptr;
-            if (count > 0) count += bonus;
-        }
+        if (!silverfish::native_guest_sickness::read_passive_amplification(save, next.bonus)) return nullptr;
         *slot = next;
         return slot;
     }
@@ -142,19 +128,30 @@ namespace
         auto* instances = parameter<U::FIntProperty>(function, STR("Instances"), 12, true);
         if (!name || !count || !active || !instances) return;
         const auto effect = name->GetPropertyValueInContainer(frame.Locals());
-        for (std::size_t i = 0; i < effects.size(); ++i)
+        auto* found = output(frame, active);
+        auto* total = output(frame, instances);
+        if (effect.IsNone() || !found || !total || found == total ||
+            reinterpret_cast<std::uintptr_t>(total) % alignof(std::int32_t)) return;
+
+        // Hydrophobic and DoubleJump open the stock dynamic-stat and jump
+        // refreshes respectively. Read the guest's current loadout for both.
+        static const U::FName dynamic{STR("ApplyDynamicStats")}, hydrophobic{STR("Hydrophobic")};
+        static const U::FName jump{STR("Calc_JumpVelocity")}, double_jump{STR("DoubleJump")};
+        const auto origin_name = origin->GetFName();
+        const bool recalculate = (origin_name == dynamic && effect == hydrophobic) ||
+                                 (origin_name == jump && effect == double_jump);
+        auto* verified = readback(pawn, save, stock, recalculate);
+        if (!verified) return;
+        for (auto& row : verified->effects)
         {
-            if (origin->GetFName() != U::FName{effects[i].caller, U::FNAME_Find}
-                || effect != U::FName{effects[i].name, U::FNAME_Find}) continue;
-            auto* found = output(frame, active);
-            auto* total = output(frame, instances);
-            if (!found || !total || found == total || reinterpret_cast<std::uintptr_t>(total) % alignof(std::int32_t))
-                return;
-            // A new ApplyDynamicStats run can follow a change to the save. Its
-            // SpeedBoost query refreshes the other movement counts for that run.
-            const auto* verified = readback(pawn, save, stock, i == 0);
-            if (!verified) return;
-            const auto owned = verified->counts[i];
+            if (row.name.IsNone())
+            {
+                if (!silverfish::native_enemy_loot::count_save_passive(save, effect, row.count)) return;
+                row.name = effect;
+                if (row.count > 0) row.count += verified->bonus;
+            }
+            if (row.name != effect) continue;
+            const auto owned = row.count;
             active->SetPropertyValue(found, owned > 0);
             instances->SetPropertyValue(total, count->GetPropertyValueInContainer(frame.Locals()) ? owned : (owned > 0));
             return;

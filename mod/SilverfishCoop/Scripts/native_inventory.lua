@@ -84,7 +84,9 @@ function inventory.command(fields, state, phase)
     if fields[2] == "native-inventory-store-equipment" then
         stored = nil
         local name, item = fields[3], fields[4]
-        if #fields ~= 4 or phase ~= "hosting" or not state.listening or state.server ~= false
+        local requested = math.tointeger(tonumber(fields[5]))
+        if (#fields ~= 4 and (#fields ~= 5 or not requested or requested < 0 or requested > 7))
+            or phase ~= "hosting" or not state.listening or state.server ~= false
             or not guid(item) or type(SilverfishStoreNativeGuestEquipment) ~= "function" then
             error("native_inventory_equip_refused_scope", 0)
         end
@@ -92,9 +94,10 @@ function inventory.command(fields, state, phase)
         if not exact or not pawn or not save then error("native_inventory_equip_refused_owner", 0) end
         local screen = StaticFindObject(stock_backpack)
         if not screen or not screen:IsValid() then LoadAsset(stock_backpack) end
-        local ok, status, slot, class, displaced = SilverfishStoreNativeGuestEquipment(pawn:GetAddress(), save:GetAddress(), item)
+        local arguments = {pawn:GetAddress(), save:GetAddress(), item, requested}
+        local ok, status, slot, class, displaced = SilverfishStoreNativeGuestEquipment(table.unpack(arguments))
         if ok ~= true then error(tostring(status), 0) end
-        if status ~= "stored" or math.type(slot) ~= "integer" or slot < 0 or slot > 7
+        if status ~= "stored" or math.type(slot) ~= "integer" or slot < 0 or slot > 7 or requested and slot ~= requested
             or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$")
             or (displaced ~= "-" and (not guid(displaced) or displaced == item)) then
             error("mutation_unverified_native_inventory_equip_receipt", 0)

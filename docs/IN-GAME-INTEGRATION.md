@@ -192,6 +192,12 @@ The transport-item hook now requires an active co-op session before intercepting
 
 The guest's provisional NPC barter widget is hidden in the stock menu-open callback. The visible stock menu opens after applying the host's inventory and shared wallet. A muted Observatory test observed zero opacity immediately after the native interaction, then verified the visible host offers and a later refresh at the same trader. [NPC barter trial](../tests/live_npc_barter_smoke.py)
 
+The remote avatar keeps one displayed weapon when the stock equipped actor is also attached. A muted pair verified the reported suppressed shotgun with actual stock quick-slot selection and guest ADS. The host saw one visible shotgun and the stock aim and lower transitions. A separate test sampled interpolated head yaw during the turn and verified neck and tail alignment through landing. [Avatar trial](../tests/live_avatar_capture.py)
+
+A muted pair dragged a blowtorch into the guest's stock Utility slot 7. The host held the same typed utility item, the guest's Character Info showed SwiftPaw and 1.5/25 kg, and only the host's jump velocity changed when the host gained DoubleJump. The save hashes matched through equip and inspection. The number-slot shortcut also uses the same host transaction and still needs live input verification.
+
+The host now samples the guest's stock movement mode to keep track of falls. A muted trial downed the guest from a stock landing and verified a stock poison gas hit, revive, reconnect, and restart. The reported acid surface and Observatory NPC retarget behavior still need focused checks.
+
 ### Steam hosting options
 
 - The in-game Host flow offers a transport choice. Direct IP uses the configured port and address. Steam Networking opens a Steam lobby when the campaign is ready.

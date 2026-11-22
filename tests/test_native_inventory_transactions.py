@@ -112,17 +112,19 @@ class NativeInventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
         blank = {"item": BLANK_CLASS, "value": 30, "price": 47}
         host = self.host_without_fresh_guest_frame(SCIENTIST_SHOP)
         bridge = SimpleNamespace(command=AsyncMock(return_value=self.shop_frame(SCIENTIST_SHOP, HOST_PAWN, "listed", **blank)))
-        with self.assertRaisesRegex(RuntimeError, "exact qualified stock offer"):
+        with self.assertRaisesRegex(party.RuleError, "native_scientist_purchase_profile_unavailable"):
             await native_finite_shop.perform(host, bridge, "host", "native-finite-shop-buy", f"{GUID}@47", OPERATION_ID)
         host.checkpoint_native.assert_not_awaited()
         self.assertEqual(bridge.command.await_count, 1)
 
         host = self.host_without_fresh_guest_frame(SCIENTIST_SHOP)
+        listing = self.shop_frame(SCIENTIST_SHOP, PAWN, "listed", **blank)
+        listing["native_finite_shop"]["offers"][0]["source"] = "shelf"
         bridge = SimpleNamespace(command=AsyncMock(side_effect=[
-            self.shop_frame(SCIENTIST_SHOP, PAWN, "listed", **blank),
+            listing,
             self.shop_frame(SCIENTIST_SHOP, PAWN, "purchased", -47, **blank),
         ]))
-        with self.assertRaisesRegex(RuntimeError, "mint a fresh stock blank tape GUID"):
+        with self.assertRaisesRegex(RuntimeError, "exact reusable shelf transfer"):
             await native_finite_shop.perform(host, bridge, GUEST, "native-finite-shop-buy", f"{GUID}@47", OPERATION_ID)
         self.assertEqual(host.party["receipts"], {})
         self.assertEqual(host.checkpoint_native.await_count, 1)
@@ -177,6 +179,7 @@ class NativeInventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         host = self.host_without_fresh_guest_frame(SCIENTIST_SHOP)
         host.checkpoint_native.side_effect = (4, 5)
+        host.smg_holds = None
         bridge = SimpleNamespace(walk=AsyncMock())
         with Control(root / "run") as control:
             host.control = control

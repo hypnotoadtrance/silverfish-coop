@@ -702,7 +702,8 @@ local function finish_stock_drop(fields, current, state, phase)
         and created and #created == 32 and created:match("^[0-9A-F]+$") and created:find("[^0]") and created ~= pending.guid
     local slot = pending and pending.equip and fields[5] == "equipped" and #fields == 7 and integer(fields[6], 7)
     local displaced = slot and fields[7]
-    local equipped = slot and (displaced == "-" or #displaced == 32 and displaced:match("^[0-9A-F]+$")
+    local equipped = slot and (not pending.expected or pending.expected == 0 or slot + 1 == pending.expected)
+        and (displaced == "-" or #displaced == 32 and displaced:match("^[0-9A-F]+$")
         and displaced:find("[^0]") and displaced ~= pending.guid)
     if (not split and not equipped and #fields ~= 5) or not pending or not same_context(current, pending.context)
         or fields[3] ~= pending.epoch or integer(fields[4], 9007199254740991) ~= pending.sequence

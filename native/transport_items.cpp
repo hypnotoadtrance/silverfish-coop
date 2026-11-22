@@ -147,6 +147,7 @@ namespace
         Unreal::FName drop_item{STR("DropItem")};
         Unreal::FName action_drop{STR("ActionDrop")};
         Unreal::FName action_equip{STR("ActionEquip")};
+        Unreal::FName equip_to_slot{STR("EquipToNumberSlot")};
         Unreal::FName insert_item{STR("InsertItem")};
         Unreal::FName action_use{STR("ActionUse")};
         Unreal::FName sort_items{STR("SortItems")};
@@ -1206,8 +1207,10 @@ namespace
             object_field(slot, STR("ItemManager")) != manager || !array_has_widget(manager, STR("EquipSlots"), slot, false))
             return {};
         auto* index = field<Unreal::FIntProperty>(slot, STR("ItemIndex"));
+        auto* inventory = field<Unreal::FIntProperty>(slot, STR("InventoryIndex"));
         const auto value = index ? index->GetPropertyValueInContainer(slot) : -1;
-        return value >= 0 && value < 8 ? std::optional{value} : std::nullopt;
+        return inventory && inventory->GetPropertyValueInContainer(slot) == 0 && value >= 0 && value < 8
+            ? std::optional{value} : std::nullopt;
     }
 
     [[nodiscard]] bool pack_equipment_drop(Unreal::UObject* manager, Unreal::UObject* pack, Unreal::UObject* slot,
@@ -1494,9 +1497,9 @@ namespace
     }
 
     void intercept_backpack_action(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
-                                   bool from_menu, std::string_view action = {})
+                                   bool from_menu, std::string_view action = {}, std::optional<int> target_slot = {})
     {
-        if (function->GetNumParms() != 0 || function->GetReturnProperty() ||
+        if (function->GetNumParms() != (target_slot ? 1 : 0) || function->GetReturnProperty() ||
             function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
             !live(manager) || !exact_class(manager, manager_path) ||
             function->GetOuterPrivate() != manager->GetClassPrivate() || !qualified_drop_seat(scope.host)) return;
@@ -1568,7 +1571,8 @@ namespace
         const bool unload = action == "take-ammo";
         if (guid == Guid{} || (stack && (saved_ammo < 1 || saved_ammo > max_drop_ammo)) ||
             (unload && !silverfish::native_guest_item::take_ammo_supported(item_class, saved_ammo)) ||
-            !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class, equipped_index, !using_item)) return;
+            !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class, equipped_index,
+                                      !using_item && action != "equip")) return;
         if (equipped_index)
         {
             auto* hover = field<Unreal::FObjectProperty>(manager, STR("HoveredCard"));
@@ -1586,7 +1590,7 @@ namespace
             equipped_index ? (from_menu ? "equipped_context_menu" : "equipped_ctrl_click") :
                              (from_menu ? "context_menu" : "ctrl_click");
         host_drop_request = HostDropRequest{guid, count, ++host_drop_sequence, false, now + request_lease, manager,
-                                            screen, panel, entry, unload ? saved_ammo : 0};
+            screen, panel, entry, target_slot ? *target_slot + 1 : unload ? saved_ammo : 0};
     }
 
     [[nodiscard]] bool request_current(const TransportRequest& request, Unreal::UObject* save)
@@ -1935,17 +1939,16 @@ namespace
         return true;
     }
 
-    std::string_view exact_guest_cursor_item(Unreal::UObject* save, const ItemView& item, Guid& guid)
+    Unreal::UObject* exact_guest_cursor_item(Unreal::UObject* save, const ItemView& item, Guid& guid)
     {
         const GuidFields fields(item.structure);
         auto* quantity = field<Unreal::FIntProperty>(item.structure, item_ammo_name);
         auto* item_class = object_value(field<Unreal::FClassProperty>(item.structure, item_class_name), item.value);
-        const auto use = stock_backpack_use(item_class);
-        if (use.empty() || !fields.valid() || !quantity) return {};
+        if (!live(item_class) || !fields.valid() || !quantity) return nullptr;
         guid = fields.read(item.value);
         if (guid == Guid{} || !exact_canonical_drop_row(save, item, guid,
                 quantity->GetPropertyValueInContainer(item.value), item_class, {}, false)) return {};
-        return use;
+        return item_class;
     }
 
     bool intercept_guest_use_cursor(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
@@ -1992,7 +1995,7 @@ namespace
             Guid guid{};
             const bool selectable = !held_here && ready() && item.panel == panel && same_widget_player(card) &&
                 object_field(card, STR("ItemManager")) == manager && array_has_widget(panel, STR("Cards"), card, false) &&
-                !exact_guest_cursor_item(save, item, guid).empty();
+                exact_guest_cursor_item(save, item, guid);
             if (begin && selectable)
             {
                 guest_use_cursor = {manager, guid, {}};
@@ -2017,13 +2020,16 @@ namespace
         if (!iteration.OriginalFunctionCallPrevented()) return true;
         const auto item = inventory_item(manager, STR("HeldItem"));
         auto* target = insert ? object_value(field<Unreal::FObjectProperty>(function, STR("InventoryWidget")), parameters) : nullptr;
+        const auto target_slot = drop_equipment_index(manager, target);
         const bool matches_player = !insert || (target && target == object_field(screen, STR("PlayerCard")) &&
                                                     same_widget_player(target));
         Guid guid{};
-        const auto action = ready() && matches_player ? exact_guest_cursor_item(save, item, guid) : std::string_view{};
+        auto* item_class = ready() && (matches_player || target_slot) ? exact_guest_cursor_item(save, item, guid) : nullptr;
+        const auto action = item_class ? (target_slot ? std::string_view{"equip"} : stock_backpack_use(item_class))
+                                       : std::string_view{};
         if (!action.empty() && guid == guest_use_cursor.held)
             host_drop_request = HostDropRequest{guid, 1, ++host_drop_sequence, false, now + request_lease,
-                                                manager, screen, panel, action};
+                                                manager, screen, panel, action, target_slot ? *target_slot + 1 : 0};
         guest_use_cursor = {};
         clear_stash_cursor(manager);
         return true;
@@ -2079,6 +2085,20 @@ namespace
                         context->ProcessEvent(close, nullptr);
                 }
                 return;
+            }
+        }
+        if (name == entries->equip_to_slot && guarded_inventory() && parameters)
+        {
+            auto* slot = field<Unreal::FIntProperty>(function, STR("Slot"));
+            if (slot && slot->GetOffset_Internal() == 0 && function->GetParmsSize() == sizeof(std::int32_t) &&
+                slot->HasAnyPropertyFlags(Unreal::CPF_Parm) && !slot->HasAnyPropertyFlags(Unreal::CPF_OutParm))
+            {
+                const auto index = slot->GetPropertyValueInContainer(parameters);
+                if (index >= 0 && index < 8)
+                {
+                    intercept_backpack_action(iteration, context, function, false, "equip", index);
+                    return;
+                }
             }
         }
         if (host_drop_scope.stock_inventory &&
@@ -2448,7 +2468,7 @@ namespace
         lua.set_string({guid.data(), guid.size()});
         lua.set_integer(request.count);
         lua.set_string(request.entry);
-        if (request.entry == "split" || request.entry == "take-ammo")
+        if (request.entry == "split" || request.entry == "take-ammo" || request.entry == "equip")
         {
             lua.set_integer(request.expected);
             return 5;

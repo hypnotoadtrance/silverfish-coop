@@ -314,13 +314,14 @@ namespace
     }
 
     std::string_view resolve(const Lua& lua, Context& context, SeedSelection* seed_selection,
-                             std::int64_t* hold_duration = nullptr, StackSplit* split = nullptr, bool full_split = false)
+                             std::int64_t* hold_duration = nullptr, StackSplit* split = nullptr, bool full_split = false,
+                             int* requested_slot = nullptr)
     {
         if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE")) return "native_guest_weapon_scope_disabled";
         const auto count = lua.get_stack_size();
         const bool split_fields = split && count == 6 && lua.is_string(4) && lua.is_integer(5) && lua.is_integer(6);
         const bool legacy_fields = count == 3 || (count == 4 && ((seed_selection && lua.is_string(4)) ||
-            (hold_duration && lua.is_integer(4))));
+            ((hold_duration || requested_slot) && lua.is_integer(4))));
         if (!Unreal::IsInGameThreadRaw() || (split ? !split_fields : !legacy_fields) || (hold_duration && count != 4) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3)) return "guest_pawn_save_and_guid_required";
         const auto pawn_address = lua.get_integer();
@@ -342,6 +343,12 @@ namespace
         {
             *hold_duration = lua.get_integer();
             if (*hold_duration < 250 || *hold_duration > 2400) return "native_guest_smg_hold_duration_unqualified";
+        }
+        else if (requested_slot && count == 4)
+        {
+            const auto slot = lua.get_integer();
+            if (slot < 0 || slot >= 8) return "native_inventory_equip_refused_slot";
+            *requested_slot = static_cast<int>(slot);
         }
         else if (count == 4)
         {
@@ -2125,7 +2132,8 @@ namespace
     int store_stock_equipment(const Lua& lua)
     {
         Context context;
-        if (!resolve(lua, context, nullptr).empty() || !ready_pawn(context) ||
+        int requested_slot = -1;
+        if (!resolve(lua, context, nullptr, nullptr, nullptr, false, &requested_slot).empty() || !ready_pawn(context) ||
             std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
                 return hold.fenced && hold.pawn.Get() == context.pawn;
             })) return result(lua, false, "native_inventory_equip_refused_owner");
@@ -2152,7 +2160,8 @@ namespace
         int occupied = -1;
         for (int index = 0; index < quick_slots; ++index)
         {
-            if (index == selected || !accepts_stock_quick_slot(index, type, item_kind)) continue;
+            if (index == selected || (requested_slot >= 0 && index != requested_slot) ||
+                !accepts_stock_quick_slot(index, type, item_kind)) continue;
             const auto* row = equipment.GetRawPtr(index);
             const auto id = inventory.identity(row);
             auto* current_class = inventory.row_class(row);
