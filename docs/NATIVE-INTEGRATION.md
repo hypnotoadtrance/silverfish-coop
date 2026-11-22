@@ -8,6 +8,8 @@ The separate co-op world snapshot is requested twice per second during steady pl
 
 The embedded host keeps the latest guest Physics Handle targets in a process-local mailbox. The game thread reads it up to 20 times per second while a guest is holding a prop. These targets travel as 58-byte application datagrams on the authenticated game connection when the host advertises support. A newer pose can replace an older queued pose during congestion. Grab and release use reliable stock action receipts. Older peers keep using the existing request path, and external test workers can use the file bridge.
 
+The embedded host also renews its native damage and guest-save scope through the process-local bridge. Its two-second freshness check still applies, and disconnecting the worker clears the timestamp. A muted overwrite-upgrade trial hosted and joined from both title processes. Each host kept the native party scope ready past the initial freshness window without creating the native-event heartbeat file.
+
 The staged Direct IP build supports an experimental native party of up to four guests. One host and four guests completed the loopback travel, Observatory sleep, and party wipe sequence. The campaign store, guest catalog, and action channel also support the two playtest maps. See the [locked design](DESIGN.md) for release requirements.
 
 A same-PC Direct IP transport run used a non-loopback host-only interface and a selected UDP port. Four authenticated guests exchanged fragmented 12 KiB gameplay packets on separate routes. One guest reconnected on the same game-facing endpoints while another exchanged packets. Pausing gameplay forwarding for travel left control requests working. The run used UDP test endpoints in place of Unreal game instances.
