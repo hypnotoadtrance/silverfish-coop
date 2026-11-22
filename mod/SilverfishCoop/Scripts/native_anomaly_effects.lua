@@ -21,6 +21,19 @@ assets.powerbox = {assets.electrode[1], assets.electrode[2], assets.blast[3]}
 assets.fixedfire = {assets.blast[1], "/Game/Assets/Sounds/MetaSounds/MS_Blast_Firey.MS_Blast_Firey", assets.blast[3]}
 local audio_range = {charge = 4000, blast = 500100, vortex = 500100, electrode = 8100, canister = 500100,
     powerbox = 500100, fixedtank = 500100, fixedfire = 500100}
+local observer_blasts = {
+    [0] = {kind = "observersparks", particle = "NI_Sparks"},
+    {kind = "observerred", particle = "FX_Blast_Pulse_Red"},
+    {kind = "observergreen", particle = "FX_Blast_Pulse_Green"},
+    {kind = "observerblue", particle = "FX_Blast_PulseGrenade_Converted"},
+    {kind = "observerpurple", particle = "FX_Blast_Pulse_Purple"},
+    {kind = "observergold", particle = "FX_Blast_Pulse_Gold"},
+}
+for _, spec in pairs(observer_blasts) do
+    assets[spec.kind] = {"/Game/Assets/PFX/" .. spec.particle .. "." .. spec.particle,
+        assets.vortex[2], assets.blast[3]}
+    audio_range[spec.kind] = audio_range.blast
+end
 local blasts = {starburst = "blast", vortex = "vortex", electrode = "electrode"}
 effects.blast_class = "BlueprintGeneratedClass /Game/Classes/Actors/ExplosionActor_BP.ExplosionActor_BP_C"
 local history, pending, serial, seen, visit = {}, {}, 0, {}, nil
@@ -118,6 +131,13 @@ function effects.observe_blast(actor, active, registered_canister)
         local source = ignored[index]
         local entry = valid(source) and active[source:GetAddress()]
         local cue = entry and blasts[entry.kind]
+        if entry and entry.kind == "observer" then
+            local spec = observer_blasts[source.ResultIndex]
+            local attenuation = actor["Attenuation Settings"]
+            if spec and valid(attenuation) and attenuation:GetFullName() == "SoundAttenuation " .. assets[spec.kind][3] then
+                cue = spec.kind
+            end
+        end
         if cue and entry.actor:GetAddress() == source:GetAddress()
             and stock_blast(cue, actor:K2_GetActorLocation(), actor.PFX, actor.SFX, actor["PFX Scale"], actor["SFX Vol"]) then
             if cue == "blast" then entry.charged = true end

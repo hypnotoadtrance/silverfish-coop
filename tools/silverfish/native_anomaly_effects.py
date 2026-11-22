@@ -15,10 +15,12 @@ OBSERVER_OPACITY = "native_observer_opacity"
 CANISTERS = "native_explosive_canisters"
 FIXED_EXPLOSIVES = "native_fixed_explosives"
 FIXED_CUES = ("powerbox", "fixedtank", "fixedfire")
+OBSERVER_CUES = ("observersparks", "observerred", "observergreen", "observerblue", "observerpurple", "observergold")
 KINDS = {"charge": 4000, "blast": 500100, "vortex": 500100, "electrode": 8100, "canister": 500100,
-         **dict.fromkeys(FIXED_CUES, 500100)}
+         **dict.fromkeys((*FIXED_CUES, *OBSERVER_CUES), 500100)}
 CUE_EVENTS = {"vortex": "native_vortex_effect_played", "electrode": "native_electrode_effect_played",
-              "canister": "native_canister_effect_played", **dict.fromkeys(FIXED_CUES, "native_fixed_explosive_effect_played")}
+              "canister": "native_canister_effect_played", **dict.fromkeys(FIXED_CUES, "native_fixed_explosive_effect_played"),
+              **dict.fromkeys(OBSERVER_CUES, "native_observer_absorb_played")}
 MAX_CUES = 12
 MAX_SENSORS = 256
 MAX_ANGLER_LAMPS = 32
