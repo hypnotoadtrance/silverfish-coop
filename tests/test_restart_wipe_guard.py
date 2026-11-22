@@ -34,7 +34,7 @@ class RestartWipeGuardTests(unittest.IsolatedAsyncioTestCase):
         party.add_player(host.party, "traveler")
         host.party["players"]["host"].update(health=0, downed=True)
         host.last_game = {"state": "hosting", "pawns": {
-            "local": {"max_health": 250}, "guest": {"name": "OtherPawn", "max_health": 400},
+            "local": {"max_health": 250, "health": 250}, "guest": {"name": "OtherPawn", "max_health": 400, "health": 350},
         }}
         host.native_recipients.return_value = {"traveler": {"alias": "guest", "pawn": "TravelersPawn"}}
 
@@ -44,6 +44,7 @@ class RestartWipeGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.party["players"]["host"]["max_health"], 250)
         self.assertTrue(host.party["players"]["host"]["downed"])
         self.assertEqual(host.party["players"]["traveler"]["max_health"], party.BASE_MAX_HEALTH)
+        self.assertNotIn("traveler", host.native_health_readback[2])
 
     def guard(self, status):
         return RestartWipeGuard(status, wall=lambda: self.wall, clock=lambda: self.clock)

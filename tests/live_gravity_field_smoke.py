@@ -87,11 +87,19 @@ async def verify_pyrogeist(host, guest, host_box, guest_box, probe):
                         for seat, _, role, fire, _ in hits), hits
     after = await wait(host, lambda view: view.get("game", {}).get("pawns", {}).get("guest", {}).get("health", before) < before)
     remote = after["game"]["pawns"]["guest"]["health"]
+    host_health = after["game"]["pawns"]["local"]["health"]
+    def reports_damage(view):
+        players = view.get("gameplay", {}).get("players", {})
+        return (players.get("guest", {}).get("health") == remote and players.get("host", {}).get("health") == host_health)
+    host_report, guest_report = await asyncio.gather(wait(host, reports_damage, timeout=6),
+                                                     wait(guest, reports_damage, timeout=6))
     return {"host_jets": host_jets, "guest_jets": guest_jets, "retired_on_both": True,
             "guest_native_vetoes_after_body_probe": blocked_triggers(body_guard) - before_body,
             "guest_native_vetoes_after_hit_probe": blocked_triggers(jet_guard) - before_jet,
             "stock_authority_damage": hits, "guest_health_before": before, "guest_health_on_host": remote,
-            "host_health": after["game"]["pawns"]["local"]["health"]}
+            "host_health": host_health,
+            "shared_health_report": {"host": host_report["gameplay"]["players"]["guest"]["health"],
+                                     "guest": guest_report["gameplay"]["players"]["guest"]["health"]}}
 
 
 async def verify(work, family):

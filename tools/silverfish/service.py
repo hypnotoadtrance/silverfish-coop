@@ -302,6 +302,7 @@ class Host:
         self.matrix_supported = matrix_supported
         self.world_flush_supported = world_flush_supported
         self.native_guest_health = None
+        self.native_health_readback = None
         self.native_guest_position = None
         self.hazard_origin = None
         self.fall_origin = None
@@ -826,6 +827,7 @@ class Host:
                 if key in self.last_game}
 
     def sync_native_health_limits(self) -> None:
+        self.native_health_readback = None
         if (not self.native_guest or not self.native_zones or self.native_profile is None
                 or self.last_game.get("state") != "hosting"):
             return
@@ -835,18 +837,29 @@ class Host:
             pawn = pawns.get(owner["alias"], {})
             if pawn.get("name") == owner["pawn"]:
                 exact[character] = pawn
+        readback = {}
         for character, pawn in exact.items():
             maximum = pawn.get("max_health")
             player = self.party["players"].get(character)
-            if (not player or type(maximum) not in (int, float) or not math.isfinite(maximum)
-                    or maximum < 1 or player["max_health"] == maximum):
+            if not player or type(maximum) not in (int, float) or not math.isfinite(maximum) or maximum < 1:
                 continue
-            if not player["downed"]:
-                player["health"] = maximum if player["health"] == player["max_health"] else min(player["health"], maximum)
-            player["max_health"] = maximum
+            if maximum != player["max_health"]:
+                if not player["downed"]:
+                    player["health"] = maximum if player["health"] == player["max_health"] else min(player["health"], maximum)
+                player["max_health"] = maximum
+            health = pawn.get("health")
+            if type(health) in (int, float) and math.isfinite(health) and 0 < health <= maximum:
+                readback[character] = health
+        self.native_health_readback = self.zone_epoch, self.last_game.get("map"), readback
 
     def public_gameplay(self) -> dict:
         view = party.public_state(self.party, self.roles(), test_fixtures=self.fixtures)
+        if (self.native_health_readback and not self.transitioning and self.last_game.get("state") == "hosting"
+                and self.native_health_readback[:2] == (self.zone_epoch, self.last_game.get("map"))):
+            health = self.native_health_readback[2]
+            for player in view["players"].values():
+                if not player["downed"] and player["character_id"] in health:
+                    player["health"] = health[player["character_id"]]
         view["host_world"] = self.native_world_state()
         if cue_frame := self.pickup_audio.frame(self.last_game, self.zone_epoch):
             view[native_pickup_audio.KEY] = cue_frame
