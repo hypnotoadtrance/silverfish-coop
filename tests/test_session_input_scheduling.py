@@ -3,9 +3,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock, call
+from unittest.mock import AsyncMock, Mock, call, patch
 
-from tools.silverfish import native_stock_door, runtime, service
+from tools.silverfish import native_player_avatar, native_stock_door, runtime, service
 from tools.silverfish.travel import PLAYTEST_MAPS
 
 
@@ -39,6 +39,105 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(client.needs_travel)
         self.assertEqual(client.zone_epoch, "new")
         self.assertIsNone(client.snapshot_request)
+
+    async def test_aim_edges_request_immediately_and_unchanged_aim_keeps_the_snapshot_cadence(self):
+        zone = "CrossRoads"
+        aim = native_player_avatar.LOCAL_AIM
+        reply = {"ok": True, "gameplay": {}, "zone_epoch": "epoch", "zone": zone}
+        request = AsyncMock(return_value=reply)
+        client = self.guest(request)
+        client.zone_epoch, client.expected_zone = "epoch", zone
+        client.last_game = {"state": "connected", "map": zone, aim: False, "player_local_sprint": False}
+        clock = Mock(return_value=100.0)
+
+        with patch.object(service, "time", SimpleNamespace(monotonic=clock)):
+            await client.refresh_gameplay(project=False)
+            clock.return_value = 100.1
+            client.last_game[aim] = True
+            await client.refresh_gameplay(project=False)
+            await client.refresh_gameplay(project=False)
+            self.assertEqual(request.await_count, 2)
+            clock.return_value = 100.2
+            client.last_game[aim] = False
+            await client.refresh_gameplay(project=False)
+            clock.return_value = 100.69
+            await client.refresh_gameplay(project=False)
+            self.assertEqual(request.await_count, 3)
+            clock.return_value = 100.71
+            await client.refresh_gameplay(project=False)
+
+        self.assertEqual(request.await_args_list, [
+            call({"action": "snapshot", "avatar_aim": held, "sprinting": False, "zone_epoch": "epoch"}, timeout=2)
+            for held in (False, True, False, False)
+        ])
+
+    async def test_snapshot_handoff_coalesces_aim_and_sprint_edges_while_waiting(self):
+        zone = "CrossRoads"
+        aim = native_player_avatar.LOCAL_AIM
+        started, release = asyncio.Event(), asyncio.Event()
+        reply = {"ok": True, "gameplay": {}, "zone_epoch": "epoch", "zone": zone}
+
+        async def request(payload, *, timeout):
+            if not started.is_set():
+                started.set()
+                await release.wait()
+            return reply
+
+        transport_request = AsyncMock(side_effect=request)
+        client = self.guest(transport_request)
+        client.zone_epoch, client.expected_zone = "epoch", zone
+        client.last_game = {"state": "connected", "map": zone, aim: True, "player_local_sprint": False}
+        waiting = asyncio.create_task(client.refresh_gameplay(project=False))
+        self.addAsyncCleanup(self.cancel_wait, waiting)
+        await asyncio.wait_for(started.wait(), .5)
+        first = client.snapshot_request
+        client.last_game.update({aim: False, "player_local_sprint": False})
+        await client.refresh_gameplay(project=False, wait=False)
+        client.last_game.update({aim: False, "player_local_sprint": True})
+        await client.refresh_gameplay(project=False, wait=False)
+        self.assertIs(client.snapshot_request, first)
+        self.assertEqual(transport_request.await_count, 1)
+        release.set()
+        await asyncio.wait_for(waiting, .5)
+        self.assertIsNotNone(client.snapshot_request)
+        self.assertIsNot(client.snapshot_request, first)
+        await client.refresh_gameplay(project=False)
+        self.assertEqual(transport_request.await_args_list, [
+            call({"action": "snapshot", "avatar_aim": aimed, "sprinting": sprinting, "zone_epoch": "epoch"}, timeout=2)
+            for aimed, sprinting in ((True, False), (False, True))
+        ])
+        self.assertIsNone(client.snapshot_request)
+
+    async def test_aim_edge_waits_for_the_exact_joined_map_and_resends_in_the_new_epoch(self):
+        source, destination = "Observatory", "CrossRoads"
+        aim = native_player_avatar.LOCAL_AIM
+        reply = {"ok": True, "gameplay": {}, "zone_epoch": "new", "zone": destination}
+        request = AsyncMock(return_value=reply)
+        client = self.guest(request)
+        client.zone_epoch, client.expected_zone = "old", source
+        client.last_game = {"state": "connected", "map": source, aim: True}
+        clock = Mock(return_value=100.0)
+
+        with patch.object(service, "time", SimpleNamespace(monotonic=clock)):
+            await client.refresh_gameplay(project=False, wait=False)
+            await asyncio.sleep(0)
+            client.last_game[aim] = False
+            await client.refresh_gameplay(project=False, wait=False)
+            self.assertTrue(client.needs_travel)
+            self.assertIsNone(client.snapshot_request)
+            self.assertEqual(request.await_count, 1)
+
+            client.needs_travel = False
+            clock.return_value = 100.6
+            await client.refresh_gameplay(project=False)
+            client.last_game.update(map=destination)
+            await client.refresh_gameplay(project=False)
+
+        self.assertEqual(request.await_args_list, [
+            call({"action": "snapshot", "avatar_aim": True, "zone_epoch": "old"}, timeout=2),
+            call({"action": "snapshot"}, timeout=2),
+            call({"action": "snapshot", "avatar_aim": False, "zone_epoch": "new"}, timeout=2),
+        ])
 
     async def test_cancellation_discards_a_completed_snapshot_from_old_session(self):
         request = AsyncMock(return_value={"ok": True, "gameplay": {"old": True}, "zone_epoch": "retired"})

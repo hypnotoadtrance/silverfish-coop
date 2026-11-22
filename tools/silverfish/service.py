@@ -4890,6 +4890,7 @@ class Client:
         self.snapshot_request: asyncio.Task | None = None
         self.next_snapshot = 0.0
         self.last_sprint_sent = None
+        self.last_aim_sent = None
         self.next_projection = 0.0
         self.gameplay_seen = 0.0
         self.guest_clock = native_guest_clock.GuestClockView() if guest_clock else None
@@ -4982,6 +4983,7 @@ class Client:
         self.native_return_reservation = None
         self.native_return_retry_allowed = False
         self.next_snapshot = 0.0
+        self.last_sprint_sent = self.last_aim_sent = None
         self.stack_drop_projection.rebind()
         self.control.event("client_link_authenticated", character_id=request["character_id"],
                            resumed=bool(result.get("resumed")))
@@ -5545,30 +5547,48 @@ class Client:
         self.loading_zone = destination
         await _start_zone_loading(self.bridge, self.control, destination, "guest")
 
+    def _schedule_gameplay_snapshot(self, *, edges_only: bool = False) -> None:
+        if self.snapshot_request is not None or self.stopping:
+            return
+        now = time.monotonic()
+        active = (self.zone_epoch and not self.needs_travel and not self.server_transitioning
+                  and self.last_game.get("state") == "connected" and self.last_game.get("map") == self.expected_zone)
+        sprint = self.last_game.get("player_local_sprint") if active else None
+        aim = self.last_game.get(native_player_avatar.LOCAL_AIM) if active else None
+        sprint_update = (self.zone_epoch, sprint) if type(sprint) is bool else None
+        aim_update = (self.zone_epoch, aim) if type(aim) is bool else None
+        sprint_changed = sprint_update is not None and sprint_update != self.last_sprint_sent
+        aim_changed = aim_update is not None and aim_update != self.last_aim_sent
+        if not (sprint_changed or aim_changed) and (edges_only or now < self.next_snapshot):
+            return
+        self.next_snapshot = now + 0.5
+        request = {"action": "snapshot"}
+        if active:
+            if events := native_voice.client_events(self.last_game):
+                request.update(voice_events=events, zone_epoch=self.zone_epoch)
+            if aim_update is not None:
+                request.update(avatar_aim=aim, zone_epoch=self.zone_epoch)
+            if sprint_update is not None:
+                request.update(sprinting=sprint, zone_epoch=self.zone_epoch)
+        self.last_sprint_sent, self.last_aim_sent = sprint_update, aim_update
+        self.snapshot_request = asyncio.create_task(self.transport.request(request, timeout=2))
+
     async def refresh_gameplay(self, *, project: bool = True, wait: bool = True) -> None:
         if self.check_host_end():
             return
-        now = time.monotonic()
-        active = self.zone_epoch and not self.needs_travel and not self.server_transitioning
-        sprint = self.last_game.get("player_local_sprint") if active else None
-        sprint_update = (self.zone_epoch, sprint) if type(sprint) is bool else None
-        sprint_changed = sprint_update is not None and sprint_update != self.last_sprint_sent
-        if self.snapshot_request is None and (now >= self.next_snapshot or sprint_changed):
-            self.next_snapshot = now + 0.5
-            request = {"action": "snapshot"}
-            if active:
-                if events := native_voice.client_events(self.last_game):
-                    request.update(voice_events=events, zone_epoch=self.zone_epoch)
-                if native_player_avatar.LOCAL_AIM in self.last_game:
-                    request.update(avatar_aim=self.last_game[native_player_avatar.LOCAL_AIM], zone_epoch=self.zone_epoch)
-                if sprint_update is not None:
-                    request.update(sprinting=sprint, zone_epoch=self.zone_epoch)
-            self.last_sprint_sent = sprint_update
-            self.snapshot_request = asyncio.create_task(self.transport.request(request, timeout=2))
-        if self.snapshot_request is not None and (wait or self.snapshot_request.done()):
-            pending, self.snapshot_request = self.snapshot_request, None
+        self._schedule_gameplay_snapshot()
+        pending = self.snapshot_request
+        if pending is not None and (wait or pending.done()):
             try:
-                reply = await pending
+                try:
+                    reply = await pending
+                except asyncio.CancelledError:
+                    if self.snapshot_request is not pending:
+                        return
+                    raise
+                if self.snapshot_request is not pending:
+                    return
+                self.snapshot_request = None
                 if reply.get("ok"):
                     self.gameplay = reply["gameplay"]
                     viewer = reply.get("viewer_role")
@@ -5588,8 +5608,14 @@ class Client:
                     self.zone_epoch = epoch
                     self.expected_zone = reply["zone"]
                     await self.sync_zone_loading(reply.get("loading_zone"))
+                    # Send the latest edges after handoff without waiting for
+                    # another idle iteration or blocking the input loop.
+                    self._schedule_gameplay_snapshot(edges_only=True)
             except (OSError, RuntimeError) as error:
                 self.control.event("gameplay_snapshot_unavailable", error_type=type(error).__name__)
+            finally:
+                if self.snapshot_request is pending:
+                    self.snapshot_request = None
         if project:
             await self.project_gameplay()
 
