@@ -3,6 +3,7 @@ import hashlib
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 import uuid
 from unittest.mock import AsyncMock, Mock, patch
@@ -126,6 +127,46 @@ class GameplayStatusTests(unittest.TestCase):
                 self.assertTrue(control.gameplay_status_due("reconnecting", "zone-a"))
                 self.assertFalse(control.gameplay_status_due("reconnecting", "zone-a"))
                 self.assertTrue(control.gameplay_status_due("reconnecting", "zone-a"))
+
+
+class WorldWeatherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_the_fog_density_survives_the_snapshot_and_guest_bridge(self):
+        area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+        actor = service.WORLD_VIEW_ACTORS[area]
+        epoch = uuid.uuid4().hex
+        # SetFogDensity stores the stock 1.2 value as a float.
+        weather = ("1.2000000476837", "0.7", "2", "3", "0.1")
+
+        def frame(mode, visit, verified):
+            fields = ("native-world-view", mode, area, actor, visit, "3", "9000",
+                      "20", "40", "0", "0", "0", "1", "1", "5",
+                      "0.3", "0.4", "0.5", "02:30", "1", "1", *weather, verified)
+            return "\t".join(fields) + "\n"
+
+        bridge = runtime.Bridge(Path("unused"), None)
+        source_s = "schema\t1\nseq\t8\nsession\thost\thosting\t" + area + "\t1\t0\n"
+        source = bridge._parse_status(source_s + frame("sample", "-", "0"))["native_world_view"]
+        self.assertEqual(source["fog_density"], float(weather[0]))
+        self.assertEqual(source["cloud_density_offset"], float(weather[-1]))
+
+        async def reply(request, timeout):
+            command_id, action, visit, sequence, destination, day, *arguments = request.decode().rstrip("\n").split("\t")
+            self.assertEqual((action, visit, sequence, destination, day, timeout),
+                             ("native-world-view-apply", epoch, "3", area, actor, 3))
+            self.assertEqual(tuple(map(float, arguments[-5:])), tuple(map(float, weather)))
+            return ("schema\t1\nseq\t9\n"
+                    f"ack\t{command_id}\taccepted\tworld weather applied\n"
+                    f"session\tclient\tconnected\t{area}\t0\t1\n" + frame("applied", epoch, "1"))
+
+        bridge.local_bridge = AsyncMock()
+        bridge.local_bridge.command.side_effect = reply
+        client = SimpleNamespace(bridge=bridge, zone_epoch=epoch, last_game={"state": "connected", "map": area},
+                                 gameplay_seen=service.time.monotonic(), gameplay={"host_world": {"native_world_view": source}})
+        await service.Client.project_world_view(client)
+        applied = client.last_game["native_world_view"]
+        self.assertTrue(applied["weather_verified"])
+        self.assertTrue(applied["save_unchanged"])
+        self.assertEqual(applied["fog_density"], source["fog_density"])
 
 
 class StageBackendTests(unittest.TestCase):

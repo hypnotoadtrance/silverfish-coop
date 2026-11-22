@@ -33,7 +33,7 @@ def staged_probe(work):
         probe.rmdir()
 
 
-async def validate(work):
+async def validate(work, the_fog=False):
     name = "weather-proof-" + uuid.uuid4().hex[:8]
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
@@ -100,6 +100,38 @@ async def validate(work):
             await spawn(guest, "join", "--profile", name, "--invite", invite["invite_file"], "--headless", "--native-zones")
             baseline = await wait(guest, lambda row: applied(row, 0))
             guest_box, = (guest / "game-bridge").iterdir()
+            if the_fog:
+                density, siren, duration = await probe(host, "the-fog")
+                assert math.isclose(float(density), 1.2, abs_tol=.0001) and float(duration) == 44
+
+                def has_fog(row, expected, mode):
+                    frame = row.get("game", {}).get("native_world_view", {})
+                    return (frame.get("mode") == mode and (mode == "sample" or frame.get("weather_verified") is True)
+                            and isinstance(frame.get("fog_density"), (int, float))
+                            and math.isclose(frame["fog_density"], expected, abs_tol=.002))
+
+                peak_host = await wait(host, lambda row: has_fog(row, float(density), "sample"), timeout=35)
+                peak_guest = await wait(guest, lambda row: has_fog(row, float(density), "applied"))
+                assert peak_guest["game"]["native_world_view"]["save_unchanged"] is True
+                async with asyncio.timeout(8):
+                    while not lines(guest_box / "guest-siren"):
+                        await asyncio.sleep(.1)
+                await asyncio.sleep(2)
+                horn, = lines(guest_box / "guest-siren")
+                source, cue, remaining = horn.split("|")
+                assert source == siren and "StormSiren_03_Cue" in cue and 0 < float(remaining) <= float(duration), horn
+                restored, = await probe(host, "clear-fog")
+                clear = await wait(guest, lambda row: has_fog(row, float(restored), "applied"))
+                assert float(restored) < 1.2
+                target = host / "live-the-fog-projection.json"
+                target.write_text(json.dumps({
+                    "stock_warning_seconds": float(duration), "guest_siren_once": horn,
+                    "host_fog": peak_host["game"]["native_world_view"],
+                    "guest_fog": peak_guest["game"]["native_world_view"],
+                    "guest_clear": clear["game"]["native_world_view"],
+                }, indent=2), encoding="utf-8")
+                print(target)
+                return
             amount, siren, replicated = await probe(host, "wet")
             assert float(amount) > 0 and replicated == "false", (amount, siren, replicated)
             wet = await wait(guest, lambda row: applied(row, float(amount)))
@@ -135,4 +167,6 @@ async def validate(work):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--work", type=Path, required=True)
-    asyncio.run(validate(ap.parse_args().work.resolve()))
+    ap.add_argument("--the-fog", action="store_true", help="exercise the real stock Fog storm and its warning")
+    args = ap.parse_args()
+    asyncio.run(validate(args.work.resolve(), args.the_fog))

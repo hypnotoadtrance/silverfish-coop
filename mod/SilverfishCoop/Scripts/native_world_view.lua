@@ -23,7 +23,8 @@ local weather_tolerance = 0.0001
 local lease_seconds = 3
 local lease, receipt, warning_receipts
 local weather_fields = {
-    { "fog_density", 0, 1 }, { "fog_falloff", 0, 2 }, { "cloud_bottom_km", 1, 10 },
+    -- TheFog_BP blends to a stock fog density of 1.2.
+    { "fog_density", 0, 1.2 + weather_tolerance }, { "fog_falloff", 0, 2 }, { "cloud_bottom_km", 1, 10 },
     { "cloud_height_km", 3, 20 }, { "cloud_density_offset", 0, 1 },
 }
 

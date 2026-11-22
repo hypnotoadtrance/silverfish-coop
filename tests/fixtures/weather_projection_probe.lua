@@ -18,13 +18,60 @@ local function spool(name, value)
     target:close()
 end
 
-local rain, installed, previous
+local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
+local fog_class = "/Game/Classes/Weather/Storms/TheFog_BP.TheFog_BP_C"
+local fog_cue = "/Game/Assets/Sounds/CUEs/Alarm_Cues/StormSiren_03_Cue.StormSiren_03_Cue"
+local rain, installed, previous, fog_demo
+
+local function start_fog(world, statics, pawn)
+    assert(not fog_demo and world:GetFullName() == "World " .. crossroads)
+    local day = StaticFindObject(crossroads .. ":PersistentLevel.DayCycle_SunControler_BP_C_1")
+    local horn = StaticFindObject(crossroads .. ":PersistentLevel.AlarmSiren_BP_C_1")
+    assert(valid(day) and same(day:GetWorld(), world) and not valid(day.LocalStorm) and day:HasAuthority())
+    assert(valid(horn) and same(horn:GetWorld(), world) and horn.bReplicates == false)
+    local class = find(fog_class)
+    assert(valid(class))
+    local transform = {Translation = {X = 0, Y = 0, Z = 0},
+        Rotation = {X = 0, Y = 0, Z = 0, W = 1}, Scale3D = {X = 1, Y = 1, Z = 1}}
+    local storm = statics:BeginDeferredActorSpawnFromClass(pawn, class, transform, 1, nil, 0)
+    assert(valid(storm) and same(storm:GetClass(), class) and same(storm:GetWorld(), world))
+    assert(math.abs(storm.FogDensity - 1.2) < .0001 and storm.FogDensityBlend == 1
+        and storm.SirenTime == 44 and valid(storm.Siren) and storm.Siren:GetFullName() == "SoundCue " .. fog_cue)
+    storm.FirstActivation = true
+    -- NoHazards keeps the stock fog and warning without spawning a hunting squad.
+    storm.StormLevel = 1
+    local realtime = day.UpdateInRealTime
+    day.UpdateInRealTime = false
+    storm = statics:FinishSpawningActor(storm, transform, 0)
+    assert(valid(storm))
+    day.LocalStorm = storm
+    fog_demo = {day = day, storm = storm, realtime = realtime}
+    return tostring(storm.FogDensity) .. "|" .. horn:GetFullName() .. "|" .. tostring(storm.SirenTime)
+end
+
+local function clear_fog(world)
+    assert(fog_demo and valid(fog_demo.day) and same(fog_demo.day:GetWorld(), world))
+    local demo = fog_demo
+    assert(valid(demo.storm) and same(demo.day.LocalStorm, demo.storm))
+    demo.storm:Start_Stop(false)
+    demo.storm:K2_DestroyActor()
+    demo.day.LocalStorm = nil
+    fog_demo = nil
+    demo.day:UpdateFog()
+    local density = demo.day.HightFog.Component.FogDensity
+    demo.day.UpdateInRealTime = demo.realtime
+    return tostring(density)
+end
+
 LoopInGameThreadWithDelay(100, function()
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     local driver = valid(world) and world.NetDriver
     if not valid(driver) then return end
     local guest = valid(driver.ServerConnection)
+    if fog_demo and valid(fog_demo.storm) and same(fog_demo.storm:GetWorld(), world) then
+        fog_demo.day:UpdateFog()
+    end
     if guest and not installed then
         RegisterHook("/Script/Niagara.NiagaraComponent:SetVariableFloat", function(context, parameter, amount)
             local particle = context:get()
@@ -66,6 +113,8 @@ LoopInGameThreadWithDelay(100, function()
             return tostring(stock) .. "|" .. tostring(projected)
         end
         assert(os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1")
+        if command == "the-fog" then return start_fog(world, statics, pawn) end
+        if command == "clear-fog" then return clear_fog(world) end
         if command == "dry" then
             assert(valid(rain))
             rain:UpdateIntensity(0, false)
