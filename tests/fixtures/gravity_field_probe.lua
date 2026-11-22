@@ -412,6 +412,85 @@ local function command(operation, world, driver, host, local_pawn, argument)
         selected.well:CheckPlayerLooking()
         assert(same(selected.well["As Player FP"], local_pawn), "Observer retained the temporary target")
         return local_pawn:GetFullName()
+    elseif observer and operation == "observeroffering" then
+        assert(host and selected and valid(selected.well) and not selected.offering and #driver.ClientConnections == 1)
+        local path = "/Game/Classes/Items/Item_Jewely.Item_Jewely_C"
+        local kind = StaticFindObject(path)
+        if not valid(kind) then LoadAsset(path); kind = StaticFindObject(path) end
+        local point = selected.well:K2_GetActorLocation()
+        local item = world:SpawnActor(kind, {X = point.X + 265, Y = point.Y, Z = point.Z}, {Pitch = 0, Yaw = 0, Roll = 0})
+        assert(valid(item) and item:HasAuthority() and valid(item.Box))
+        -- A high-value item guarantees an ordinary stock reward without choosing its tier.
+        item.Value = 2500
+        item.Instigator = driver.ClientConnections[1].PlayerController.Pawn
+        item.Box:SetSimulatePhysics(true)
+        item.Box:SetEnableGravity(false)
+        item:SetReplicates(true)
+        item:SetReplicateMovement(true)
+        item:ForceNetUpdate()
+        selected.offering = item
+        selected.absorptions = 0
+        RegisterHook("/Game/Classes/Anomalies/Observers_BP.Observers_BP_C:AbsorbItem", function(context, input)
+            local observer_ = context:get()
+            if not same(observer_, selected.well) then return end
+            local offering = input:get()
+            if same(offering, item) and observer_.ResultIndex > 0 then selected.absorptions = selected.absorptions + 1 end
+            write("observer-stock-absorb", ("%s|%s"):format(
+                valid(offering) and offering:GetFullName() or "-", tostring(observer_.ResultIndex)), "ab")
+        end)
+        return item:GetFullName()
+    elseif observer and operation == "observerimpact" then
+        assert(host and selected and valid(selected.offering) and valid(selected.well))
+        local item = selected.offering
+        local point, target = item:K2_GetActorLocation(), selected.well:K2_GetActorLocation()
+        assert(math.abs(point.Y - target.Y) < 35 and math.abs(point.Z - target.Z) < 35 and point.X > target.X)
+        item.Value = 2500
+        assert(item:K2_SetActorLocation(target, false, {}, true))
+        return "entered stock capsule"
+    elseif observer and operation == "observerabsorptions" then
+        assert(host and selected and selected.absorptions)
+        return tostring(selected.absorptions)
+    elseif observer and operation == "observerofferingprobe" then
+        assert(host and selected and selected.absorptions)
+        local record = io.open(box .. "/observer-native-reward", "r")
+        local native = record and record:read("*l") or "unavailable"
+        if record then record:close() end
+        local found = {}
+        for _, tier in ipairs({"Red", "Green", "Blue", "Purple", "Gold"}) do
+            local stem = "Art_Tesseract_" .. tier
+            local type_ = StaticFindObject("/Game/Classes/Items/Artifacts/" .. stem .. "." .. stem .. "_C")
+            local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+            if valid(type_) then
+                local result = {}
+                api:GetAllActorsOfClass(world, type_, result)
+                for _, actor in ipairs(result.OutActors or result) do
+                    if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+                    if valid(actor) and same(actor:GetWorld(), world) then
+                        local at = actor:K2_GetActorLocation()
+                        found[#found + 1] = ("%s:%.1f/%.1f/%.1f"):format(tier, at.X, at.Y, at.Z)
+                    end
+                end
+            end
+        end
+        return ("%d:%s|%s"):format(selected.absorptions, native, table.concat(found, ";"))
+    elseif observer and operation == "observerrewards" then
+        local function near(actor)
+            if not valid(actor) or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return false end
+            local point = actor:K2_GetActorLocation()
+            return (point.X - test_lane.X)^2 + (point.Y - test_lane.Y)^2 < 450^2
+        end
+        local offers, rewards = 0, {}
+        for _, actor in ipairs(FindAllOf("Item_Jewely_C") or {}) do
+            if near(actor) then offers = offers + 1 end
+        end
+        for _, tier in ipairs({"Red", "Green", "Blue", "Purple", "Gold"}) do
+            for _, actor in ipairs(FindAllOf("Art_Tesseract_" .. tier .. "_C") or {}) do
+                if near(actor) then
+                    rewards[#rewards + 1] = ("%s,%d,%s"):format(tier, actor:GetLocalRole(), tostring(actor.bReplicateMovement))
+                end
+            end
+        end
+        return tostring(offers) .. "|" .. table.concat(rewards, ";")
     elseif observer and operation == "observervisual" then
         for _, actor in ipairs(current) do
             local point = actor:K2_GetActorLocation()

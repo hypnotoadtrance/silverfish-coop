@@ -170,6 +170,37 @@ async def verify_observer(guest, host_box, guest_box, probe):
             "stock_psy_attack_recipients": attack_log.read_text().splitlines()}
 
 
+async def verify_observer_offering(host_box, guest_box, probe):
+    await probe(host_box, "observerpose", "far")
+    source = await probe(host_box, "observeroffering")
+    assert source.startswith("Item_Jewely_C ")
+    async with asyncio.timeout(8):
+        while await probe(guest_box, "observerrewards") != "1|":
+            await asyncio.sleep(.15)
+    assert await probe(host_box, "observerrewards") == "1|"
+    assert await probe(host_box, "observerimpact") == "entered stock capsule"
+    host_result = guest_result = ""
+    try:
+        async with asyncio.timeout(10):
+            while True:
+                host_result, guest_result = await asyncio.gather(
+                    probe(host_box, "observerrewards"), probe(guest_box, "observerrewards"))
+                head, _, tail = host_result.partition("|")
+                if head == "0" and tail.endswith(",3,true") and ";" not in tail:
+                    tier = tail.split(",", 1)[0]
+                    if guest_result == f"0|{tier},1,true":
+                        await asyncio.sleep(.6)
+                        assert await probe(host_box, "observerabsorptions") == "1"
+                        assert await probe(host_box, "observerrewards") == host_result
+                        assert await probe(guest_box, "observerrewards") == guest_result
+                        return {"offering": source, "reward": tier, "host": host_result, "guest": guest_result,
+                                "stock_reward_count": 1}
+                await asyncio.sleep(.15)
+    except TimeoutError as error:
+        extra = await probe(host_box, "observerofferingprobe")
+        raise RuntimeError(f"Stock offering did not settle on both peers. Host {host_result!r}. Guest {guest_result!r}. Stock {extra}.") from error
+
+
 async def verify_angler(guest, host_box, guest_box, probe):
     parking = list(map(float, (await probe(host_box, "anglerholdguest")).split("|")))
     await wait(guest, lambda view: math.dist(
@@ -242,7 +273,7 @@ async def verify_shadow(guest, host_box, guest_box, probe):
             "guest_stock_psychic_feedback": True, "guest_darkness_cleared": True}
 
 
-async def verify(work, family):
+async def verify(work, family, observer_offering=False):
     profile = f"{family}-proof-" + uuid.uuid4().hex[:8]
     host, guest = [work / role / profile / "run" for role in ("campaigns", "clients")]
     host.mkdir(parents=True)
@@ -352,8 +383,12 @@ async def verify(work, family):
                 print(evidence, flush=True)
                 return
             if family == "observer":
-                common.update(await verify_observer(guest, host_box, guest_box, probe))
-                evidence = host / "live-observer-gaze.json"
+                if observer_offering:
+                    common.update(await verify_observer_offering(host_box, guest_box, probe))
+                    evidence = host / "live-observer-offering.json"
+                else:
+                    common.update(await verify_observer(guest, host_box, guest_box, probe))
+                    evidence = host / "live-observer-gaze.json"
                 evidence.write_text(json.dumps(common, indent=2), encoding="utf-8")
                 print(evidence, flush=True)
                 return
@@ -395,5 +430,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--family", choices=("gravity", "pyrogeist", "shadow-sphere", "angler-lamp", "observer"), default="gravity")
+    parser.add_argument("--observer-offering", action="store_true")
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(), args.family))
+    if args.observer_offering and args.family != "observer":
+        parser.error("--observer-offering requires --family observer")
+    asyncio.run(verify(args.work.resolve(), args.family, args.observer_offering))

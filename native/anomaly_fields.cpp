@@ -42,6 +42,7 @@ namespace
     constexpr auto shadow_class = STR("/Game/Classes/Anomalies/ShadowSphere_BP.ShadowSphere_BP_C");
     constexpr auto angler_class = STR("/Game/Classes/Anomalies/AnglerLamp_BP.AnglerLamp_BP_C");
     constexpr auto observer_class = STR("/Game/Classes/Anomalies/Observers_BP.Observers_BP_C");
+    constexpr auto item_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto crossroads_world = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P");
     constexpr auto roaming_teleport_class = STR("/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C");
     constexpr auto physics_prop = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
@@ -64,12 +65,13 @@ namespace
     U::FName shadow, shadow_graph;
     U::FName angler;
     std::array<U::FName, 4> angler_events;
-    U::FName observer, observer_check;
+    U::FName observer, observer_check, observer_absorb;
     std::array<U::FName, 3> observer_events;
     bool shadow_replication{};
     bool angler_replication{};
     bool observer_fixture{};
     H::GlobalCallbackId observer_script_post = H::ERROR_ID, observer_internal_post = H::ERROR_ID;
+    H::GlobalCallbackId observer_actor_begin = H::ERROR_ID;
     U::FName patch_name;
     std::array<U::FName, 3> patch_events;
     std::array<U::FName, 6> electrode_events;
@@ -103,6 +105,15 @@ namespace
         U::FFrame* frame{};
     };
     thread_local ObserverCheck checking_observer;
+    struct ObserverOffering
+    {
+        U::FFrame* frame{};
+        U::FObjectProperty* deferred{};
+        U::FWeakObjectPtr world, reward;
+    };
+    thread_local ObserverOffering observer_offering;
+    thread_local std::array<U::FWeakObjectPtr, 32> observer_rewards;
+    thread_local std::int64_t observer_offers{}, observer_reward_results{};
 
     bool installed()
     {
@@ -219,6 +230,71 @@ namespace
                 member->SetObjectPropertyValue(address, checking_observer.prior.Get());
         }
         checking_observer = {};
+    }
+
+    void begin_observer_offering(Iteration& call, U::UObject* actor, U::FFrame& frame)
+    {
+        auto* method = frame.Node();
+        if (!observer_fixture || guest_session || observer_offering.frame || !method ||
+            method->GetFName() != observer_absorb || frame.Object() != actor || call.OriginalFunctionCallPrevented() ||
+            !U::IsInGameThreadRaw() || !actual_observer(actor) || method->GetOuterPrivate() != actor->GetClassPrivate() ||
+            method->GetNumParms() != 1 || method->GetReturnProperty() || !frame.Locals()) return;
+        auto* world = static_cast<U::AActor*>(actor)->GetWorld();
+        auto* driver = object(world, STR("NetDriver"));
+        if (!world || world->GetPathName() != crossroads_world || !driver || object(driver, STR("World")) != world ||
+            !property<U::FObjectProperty>(driver, STR("ServerConnection")) || object(driver, STR("ServerConnection"))) return;
+        ++observer_offers;
+
+        // Follow only the stock artifact spawn. The unsuffixed local is the damaging burst.
+        for (auto* member : U::TFieldRange<U::FProperty>(method, U::EFieldIterationFlags::None))
+        {
+            if (member->GetFName().ToString() != STR("CallFunc_BeginDeferredActorSpawnFromClass_ReturnValue_1")) continue;
+            auto* deferred = U::CastField<U::FObjectProperty>(member);
+            if (deferred && deferred->GetArrayDim() == 1 &&
+                !deferred->HasAnyPropertyFlags(U::CPF_Parm | U::CPF_OutParm | U::CPF_ReturnParm))
+                observer_offering = {&frame, deferred, world, {}};
+            break;
+        }
+    }
+
+    void capture_observer_reward(Iteration& call, U::AActor* actor)
+    {
+        if (!observer_offering.frame || call.OriginalFunctionCallPrevented() || !actor || !U::IsInGameThreadRaw()) return;
+        const auto* member = observer_offering.deferred;
+        auto* locals = observer_offering.frame->Locals();
+        if (!locals || member->GetObjectPropertyValue(member->ContainerPtrToValuePtr<void>(locals)) != actor) return;
+        if (actor->GetWorld() == observer_offering.world.Get()) observer_offering.reward = actor;
+    }
+
+    void end_observer_offering(Iteration& call, U::FFrame& frame)
+    {
+        if (observer_offering.frame != &frame) return;
+        auto* item = observer_offering.reward.Get();
+        auto* world = observer_offering.world.Get();
+        observer_offering = {};
+        if (call.OriginalFunctionCallPrevented()) return;
+        auto* base = U::UObjectGlobals::StaticFindObject<U::UClass*>(nullptr, nullptr, item_class);
+        if (!item || !base || !item->IsA(base) || static_cast<U::AActor*>(item)->GetWorld() != world) return;
+        ++observer_reward_results;
+        if (std::ranges::any_of(observer_rewards, [&](const auto& entry) { return entry.Get() == item; })) return;
+        auto slot = std::ranges::find_if(observer_rewards, [](const auto& entry) { return !entry.Get(); });
+        if (slot != observer_rewards.end()) *slot = item;
+    }
+
+    int take_observer_reward(const Lua& lua)
+    {
+        if (!observer_fixture || guest_session || !U::IsInGameThreadRaw() ||
+            lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto world = static_cast<std::uintptr_t>(lua.get_integer());
+        for (auto& entry : observer_rewards)
+        {
+            auto* item = entry.Get();
+            entry = U::FWeakObjectPtr{};
+            if (!item || reinterpret_cast<std::uintptr_t>(static_cast<U::AActor*>(item)->GetWorld()) != world) continue;
+            lua.set_string(RC::to_utf8_string(item->GetPathName()));
+            return 1;
+        }
+        return 0;
     }
 
     bool trap_class(U::UObject* kind)
@@ -463,6 +539,7 @@ namespace silverfish::native_anomaly_fields
         observer_fixture = opt_in("SILVERFISH_COOP_HEADLESS") && opt_in("SILVERFISH_COOP_OBSERVER_FIXTURE");
         observer = U::FName{STR("Observers_BP_C"), U::FNAME_Add};
         observer_check = U::FName{STR("CheckPlayerLooking"), U::FNAME_Add};
+        observer_absorb = U::FName{STR("AbsorbItem"), U::FNAME_Add};
         observer_events = {
             U::FName{STR("ExecuteUbergraph_Observers_BP"), U::FNAME_Add},
             U::FName{STR("TryCatchItem"), U::FNAME_Add},
@@ -525,6 +602,7 @@ namespace silverfish::native_anomaly_fields
         const auto script = [](Iteration& call, U::UObject* actor, U::FFrame& frame, void*) {
             intercept(call, actor, frame.Node());
             begin_observer_check(call, actor, frame);
+            begin_observer_offering(call, actor, frame);
         };
         hooks[0] = H::RegisterProcessEventPreCallback(
             [](Iteration& call, U::UObject* actor, U::UFunction* function, void*) { intercept(call, actor, function); },
@@ -552,17 +630,23 @@ namespace silverfish::native_anomaly_fields
             }, {false, true, owner, STR("Release the guest trap map loading scope")});
         if (observer_fixture)
         {
+            const auto stock_result = [](Iteration& call, U::UObject* actor, U::FFrame& frame, void* result) {
+                end_observer_check(call, actor, frame, result);
+                end_observer_offering(call, frame);
+            };
             observer_script_post = H::RegisterProcessLocalScriptFunctionPostCallback(
-                end_observer_check, {false, false, owner, STR("Restore the stock Observer target after its gaze check")});
+                stock_result, {false, false, owner, STR("Read stock Observer gaze and offering results")});
             observer_internal_post = H::RegisterProcessInternalPostCallback(
-                end_observer_check, {false, false, owner, STR("Restore the stock Observer target after a reflected gaze check")});
+                stock_result, {false, false, owner, STR("Read reflected Observer gaze and offering results")});
+            observer_actor_begin = H::RegisterBeginPlayPostCallback(
+                capture_observer_reward, {false, false, owner, STR("Track the actual stock Observer reward actor")});
         }
         if (!installed()) uninstall_hooks();
     }
 
     void uninstall_hooks()
     {
-        for (auto* post : {&observer_script_post, &observer_internal_post})
+        for (auto* post : {&observer_script_post, &observer_internal_post, &observer_actor_begin})
         {
             if (*post != H::ERROR_ID) H::UnregisterCallback(*post);
             *post = H::ERROR_ID;
@@ -578,7 +662,16 @@ namespace silverfish::native_anomaly_fields
     {
         lua.register_function("SilverfishSetNativeAnomalyGuest", set_guest);
         lua.register_function("SilverfishReadNativeAnomalySkips", count);
-        if (observer_fixture) lua.register_function("SilverfishSetNativeObserverTarget", set_observer_target);
+        if (observer_fixture)
+        {
+            lua.register_function("SilverfishSetNativeObserverTarget", set_observer_target);
+            lua.register_function("SilverfishTakeNativeObserverReward", take_observer_reward);
+            lua.register_function("SilverfishReadObserverOfferingFixture", [](const Lua& access) {
+                access.set_integer(observer_offers);
+                access.set_integer(observer_reward_results);
+                return 2;
+            });
+        }
         lua.register_function("SilverfishReadNativeMushroomSkips", [](const Lua& current) {
             const bool match = U::IsInGameThreadRaw() && guest_session && current.get_stack_size() == 1 &&
                 current.is_integer(1) && reinterpret_cast<std::uintptr_t>(patch_world.Get()) ==

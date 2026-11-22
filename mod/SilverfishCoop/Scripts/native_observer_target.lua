@@ -10,6 +10,8 @@ local material_library = "/Script/Engine.Default__KismetMaterialLibrary"
 local asset_path = "/Game/Assets/Materials/Mat_Observer.Mat_Observer"
 local color = {R = 0, G = 0, B = 0, A = 0}
 local visuals = {}
+local fixture_box = os.getenv("SILVERFISH_COOP_BRIDGE")
+local last_fixture_report
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -174,6 +176,31 @@ function observers.target(active, state, phase)
                 local accepted = path and SilverfishSetNativeObserverTarget(path, nearest or "")
                 entry.observer_target = accepted and nearest or nil
             end
+        end
+    end
+end
+
+function observers.publish_rewards(state, phase)
+    if not observers.enabled or phase ~= "hosting" or state.server or not state.listening or state.map ~= crossroads
+        or type(SilverfishTakeNativeObserverReward) ~= "function" then return end
+    if fixture_box and fixture_box:find("observer%-proof%-%x+") and type(SilverfishReadObserverOfferingFixture) == "function" then
+        local calls, results = SilverfishReadObserverOfferingFixture()
+        local report = tostring(calls) .. ":" .. tostring(results)
+        if report ~= last_fixture_report then
+            local file = io.open(fixture_box .. "/observer-native-reward", "w")
+            if file then file:write(report, "\n"); file:close(); last_fixture_report = report end
+        end
+    end
+    for _ = 1, 32 do
+        local path = SilverfishTakeNativeObserverReward(state.world:GetAddress())
+        if not path then break end
+        local actor = StaticFindObject(path)
+        if valid(actor) and actor:GetFullName():match("^%S+ (.+)$") == path and same(actor:GetWorld(), state.world)
+            and actor:HasAuthority() and not actor:IsActorBeingDestroyed() then
+            actor.NetUpdateFrequency = math.min(actor.NetUpdateFrequency, 15)
+            if not actor.bReplicates then actor:SetReplicates(true) end
+            if not actor.bReplicateMovement then actor:SetReplicateMovement(true) end
+            actor:ForceNetUpdate()
         end
     end
 end

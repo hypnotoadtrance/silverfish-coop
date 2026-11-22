@@ -371,6 +371,7 @@ function fields.rows(state, phase, row)
     shadows.project(active, state, phase)
     lamps.project(active, state, phase)
     observers.target(active, state, phase)
+    observers.publish_rewards(state, phase)
     for address, fire in pairs(pending_fires) do
         if in_world(fire, world) then
             if phase == "hosting" then
