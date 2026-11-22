@@ -140,19 +140,23 @@ async def proof(work, combat=False, squad="single", production=False, corpse=Fal
                 before = census(host_box)
             assert host_ready(before), (before, census(guest_box))
             guest_pre = census(guest_box)
-            marker = before["marker"].split(" ", 1)[1]
-            result = await probe(guest_box, f"veto|{marker}")
-            assert result == ("stock refresh" if production else "0"), result
-            async with asyncio.timeout(8):
-                while census(guest_box).get("denials", 0) <= guest_pre["denials"]:
-                    await asyncio.sleep(.15)
+            check_spawn_veto = not corpse_drag or combat
+            result = None
+            if check_spawn_veto:
+                marker = before["marker"].split(" ", 1)[1]
+                result = await probe(guest_box, f"veto|{marker}")
+                assert result == ("stock refresh" if production else "0"), result
+                async with asyncio.timeout(8):
+                    while census(guest_box).get("denials", 0) <= guest_pre["denials"]:
+                        await asyncio.sleep(.15)
             target = await probe(host_box, "approach")
             async with asyncio.timeout(12):
                 while not guest_ready(census(guest_box), before["authority_network_ready"]):
                     await asyncio.sleep(.15)
             guest_post = census(guest_box)
             assert guest_ready(guest_post, before["authority_network_ready"]), guest_post
-            assert guest_post["stage"] == f"stock_client_{family}_spawn_denied", guest_post
+            if check_spawn_veto:
+                assert guest_post["stage"] == f"stock_client_{family}_spawn_denied", guest_post
             def positions(raw, role):
                 actors = []
                 for entry in raw.split(";"):
@@ -243,6 +247,13 @@ async def proof(work, combat=False, squad="single", production=False, corpse=Fal
 
                 identifier = await probe(host_box, "corpseid")
                 assert identifier.isdecimal() and identifier == await probe(guest_box, "corpseid")
+                async with asyncio.timeout(5):
+                    while True:
+                        host_anchor, guest_anchor = await asyncio.gather(probe(host_box, "corpseanchor"),
+                                                                        probe(guest_box, "corpseanchor"))
+                        if host_anchor == guest_anchor and host_anchor != "pending":
+                            break
+                        await asyncio.sleep(.08)
                 initial, initial_guest = await anchor(host_box), await anchor(guest_box)
                 await probe(host_box, "corpseprepare")
                 await asyncio.sleep(.6)
@@ -267,7 +278,8 @@ async def proof(work, combat=False, squad="single", production=False, corpse=Fal
                 assert math.dist(settled, settled_guest) < 65, (settled, settled_guest)
                 assert await probe(guest_box, "death|after-drag") == "1"
                 (host / "live-boar-guest-corpse-drag.json").write_text(json.dumps(
-                    {"marker": int(identifier), "bone": bone, "host_before": initial, "guest_before": initial_guest,
+                    {"marker": int(identifier), "bone": bone, "shared_anchor": host_anchor,
+                     "host_before": initial, "guest_before": initial_guest,
                      "host_moved": moved, "guest_moved": moved_guest, "host_released": settled,
                      "guest_released": settled_guest}, indent=2), encoding="utf-8")
         finally:

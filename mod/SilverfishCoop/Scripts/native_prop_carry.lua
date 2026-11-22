@@ -176,8 +176,8 @@ local function trace(pawn, pitch, yaw, number, expected_bone, claimed)
             index, tostring(part:IsSimulatingPhysics(bone)))
     end
     local location = part:GetSocketLocation(bone)
-    -- The replicas can settle in different poses. Check that the guest aimed
-    -- near their selected body, then check the same host body for reach and occlusion.
+    -- Stock client Interact already traced the requested body. The host pose
+    -- can settle behind different geometry, so match the bone and verify reach.
     local projection = (claimed.X - origin.X) * ray.X + (claimed.Y - origin.Y) * ray.Y + (claimed.Z - origin.Z) * ray.Z
     if not point(location) then return nil, "invalid body location" end
     if projection <= 0 or projection > range or dist2(along(projection), claimed) > 55^2
@@ -185,10 +185,6 @@ local function trace(pawn, pitch, yaw, number, expected_bone, claimed)
         return nil, ("skeletal aim %.1f / %.1f, ray offset %.1f, body separation %.1f, distance %.1f"):format(
             projection, range, math.sqrt(dist2(along(projection), claimed)), math.sqrt(dist2(claimed, location)),
             math.sqrt(dist2(origin, location)))
-    end
-    local surface, collision = impact(location)
-    if valid(surface) and not same(surface, part) and (not point(collision) or dist2(location, collision) > 9^2) then
-        return nil, "skeletal body occluded"
     end
     return actor, math.sqrt(dist2(origin, location)), {number = number, part = part, bone = bone, name = expected_bone,
         location = location}

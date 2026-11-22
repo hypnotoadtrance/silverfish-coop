@@ -7,6 +7,7 @@ local active_world, markers, numbered, mirrors, ended, anchors = nil, {}, {}, {}
 local next_sample, corpse_number = 0, 0
 local sample_period = .1
 local byte_angle = 360 / 256
+local anchor_limit = 120
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -23,33 +24,61 @@ local function world_driver(actor, guest)
     return world
 end
 
-function corpses.position(actor)
+local function rotation_byte(angle)
+    return math.floor(angle / byte_angle + .5) % 256
+end
+
+local function anchor_code(pitch)
+    local code = rotation_byte(pitch)
+    if code <= 60 then return code end
+    if code >= 196 then return code - 135 end
+    return 0
+end
+
+local function anchor_pitch(index)
+    local code = (index or -1) + 1
+    -- Stay within the canonical rotator's pitch range so yaw and roll retain
+    -- the corpse ID after Unreal converts through a quaternion.
+    return (code <= 60 and code or code - 121) * byte_angle
+end
+
+local function anchor_index(actor)
     local mesh, address = actor.Mesh, actor:GetAddress()
-    local bone = anchors[address]
-    if bone == nil then
-        local pelvis = FName("pelvis", EFindName.FNAME_Find)
-        if mesh:GetBoneIndex(pelvis) >= 0 and mesh:IsSimulatingPhysics(pelvis) then
-            bone = pelvis
-        else
-            -- Wildlife rigs can lack a pelvis socket, and their detached
-            -- component origin can remain behind as the bodies move.
-            for index = 0, mesh:GetNumBones() - 1 do
-                local candidate = mesh:GetBoneName(index)
-                if mesh:IsSimulatingPhysics(candidate) then bone = candidate break end
-            end
-        end
-        anchors[address] = bone or false
+    local mirror = mirrors[address]
+    if mirror and valid(mirror.marker) then
+        local index = anchor_code(mirror.marker:K2_GetActorRotation().Pitch) - 1
+        return index >= 0 and index < mesh:GetNumBones() and index or nil
     end
-    if bone then return mesh:GetSocketLocation(bone) end
-    return mesh:K2_GetComponentLocation()
+    if anchors[address] then return anchors[address] end
+    local pelvis = FName("pelvis", EFindName.FNAME_Find)
+    local index = mesh:GetBoneIndex(pelvis)
+    if index >= 0 and index < anchor_limit and mesh:IsSimulatingPhysics(pelvis) then
+        anchors[address] = index
+        return index
+    end
+    -- ResolveDeath can fire before the bodies begin simulating. Retry the
+    -- selection on later samples and publish the chosen bone to all observers.
+    for candidate = 0, math.min(anchor_limit - 1, mesh:GetNumBones() - 1) do
+        if mesh:IsSimulatingPhysics(mesh:GetBoneName(candidate)) then
+            anchors[address] = candidate
+            return candidate
+        end
+    end
+end
+
+function corpses.position(actor)
+    local mesh, index = actor.Mesh, anchor_index(actor)
+    if index then
+        return mesh:GetSocketLocation(mesh:GetBoneName(index)), index
+    end
+    return mesh:K2_GetComponentLocation(), nil
 end
 
 local function marker_number(marker)
     -- This invisible marker's rotation carries a world-local ID in two
     -- movement-quantized axes. Its Owner remains the replicated corpse.
     local rotation = marker:K2_GetActorRotation()
-    return (math.floor(rotation.Roll / byte_angle + .5) % 256) * 256
-        + math.floor(rotation.Yaw / byte_angle + .5) % 256
+    return rotation_byte(rotation.Roll) * 256 + rotation_byte(rotation.Yaw)
 end
 
 function corpses.binding(actor, guest)
@@ -90,8 +119,10 @@ local function publish(actor)
     if not valid(mesh) then return end
     if corpse_number == 65535 then return end
     corpse_number = corpse_number + 1
-    local marker = world:SpawnActor(marker_class, corpses.position(actor), {
-        Pitch = 0, Yaw = (corpse_number % 256) * byte_angle, Roll = (corpse_number // 256) * byte_angle,
+    local point, index = corpses.position(actor)
+    local marker = world:SpawnActor(marker_class, point, {
+        Pitch = anchor_pitch(index),
+        Yaw = (corpse_number % 256) * byte_angle, Roll = (corpse_number // 256) * byte_angle,
     })
     if not valid(marker) then return end
     marker:SetOwner(actor)
@@ -159,9 +190,14 @@ local function publish_positions(world)
         else
             local mesh = actor.Mesh
             if valid(mesh) and actor.Alive == false and mesh:IsAnySimulatingPhysics() then
-                local point = corpses.position(actor)
+                local point, anchor = corpses.position(actor)
+                local rotation = marker:K2_GetActorRotation()
                 local _, distance_squared = between(marker:K2_GetActorLocation(), point)
-                if distance_squared > 3^2 then marker:K2_SetActorLocation(point, false, {}, true) end
+                if distance_squared > 3^2 or anchor_code(rotation.Pitch) ~= (anchor or -1) + 1 then
+                    rotation.Pitch = anchor_pitch(anchor)
+                    marker:K2_SetActorLocationAndRotation(point, rotation, false, {}, true)
+                    marker:ForceNetUpdate()
+                end
             end
         end
     end

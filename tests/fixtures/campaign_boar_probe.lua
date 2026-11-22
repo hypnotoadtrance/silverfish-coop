@@ -181,7 +181,7 @@ local function execution(world, director, driver, pawn, host, operation, marker_
             mesh:K2_AddWorldOffset({X = 0, Y = 360, Z = 10}, false, {}, true)
         end
         local pelvis = FName("pelvis", EFindName.FNAME_Find)
-        local point = require("native_corpse_view").position(corpse)
+        local point, anchor = require("native_corpse_view").position(corpse)
         if operation == "corpseprepare" then
             assert(host and #driver.ClientConnections == 1)
             local guest = driver.ClientConnections[1].PlayerController.Pawn
@@ -190,6 +190,8 @@ local function execution(world, director, driver, pawn, host, operation, marker_
             return "ready"
         elseif operation == "corpseid" then
             return tostring(require("native_corpse_view").binding(corpse, not host))
+        elseif operation == "corpseanchor" then
+            return anchor and ("%d|%s"):format(anchor, mesh:GetBoneName(anchor):ToString()) or "pending"
         elseif operation == "corpsegrab" then
             assert(not host and type(SilverfishProbeNativeInteractInput) == "function")
             local eye = pawn.Camera:K2_GetComponentLocation()
