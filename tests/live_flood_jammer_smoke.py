@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from hashlib import file_digest
 import json
 import math
 from pathlib import Path
@@ -20,7 +21,9 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
-from tools.silverfish.native_flood_jammer import BLACK_LAKE, CROSSROADS_JAMMER, FLOOD, LENNY, POSE, SPRATT, same_pose
+from tools.silverfish.native_flood_jammer import (
+    BLACK_LAKE, CROSSROADS_JAMMER, DEFERRED_SAVE_BOUNTIES, FLOOD, LENNY, POSE, SPRATT, same_pose,
+)
 from tools.silverfish import native_lenny, native_spratt, native_spratt_fixture
 from tools.silverfish.guest_weapon_profiles import NINE_MM_BALL, TWELVE_GAUGE_BUCK
 from tools.silverfish.travel import CROSSROADS
@@ -36,6 +39,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
     assassination = lenny or spratt
     stock_menu = stock_menu or crossroads
     stock_board_input = lake or crossroads or assassination
+    defer_save = spec in DEFERRED_SAVE_BOUNTIES
     weapon = "sg-71-a" if assassination else "light-pistol"
     weapon_label = "shotgun" if assassination else "pistol"
     ammo = TWELVE_GAUGE_BUCK if assassination else NINE_MM_BALL
@@ -168,12 +172,32 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
         assert (pressed["map"], pressed["board"], pressed["quest"], pressed["state"]) == (board_map, spec.board, quest, expected), pressed
         evidence.setdefault("board_presses", []).append(pressed)
 
+    def live_quest(frame):
+        return frame.get("gameplay", {}).get("native_quests", {}).get(quest, {})
+
     async def committed(step):
-        result = await wait(run, lambda frame: quest_record(frame.get("campaign", {}), quest).get("step") == step)
-        return quest_record(result["campaign"], quest)
+        result = await wait(run, lambda frame: live_quest(frame).get("step") == step)
+        return live_quest(result)
 
     def read_saved():
         return json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
+
+    def save_files():
+        hashes = {}
+        if not defer_save:
+            return hashes
+        for folder in ("save", "game-user/Saved/SaveGames"):
+            for path in (campaign / folder).rglob("*"):
+                # The campaign lease exclusively locks a byte while the host runs.
+                if path.is_file() and path.name != ".campaign.lock":
+                    with path.open("rb") as stream:
+                        hashes[path.relative_to(campaign)] = file_digest(stream, "sha256").hexdigest()
+        return hashes
+
+    def require_deferred_save(phase, before):
+        if defer_save:
+            assert save_files() == before, f"The stock bounty wrote save files during {phase}"
+            evidence.setdefault("no_save_during_bounty", []).append(phase)
 
     async def balances():
         await action(host, "checkpoint")
@@ -242,7 +266,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
         return state.get("gameplay", {}).get("players", {}).get("guest", {}).get("downed") is True
 
     def objective_committed(state):
-        return quest_record(state.get("campaign", {}), quest).get("step") == 2
+        return live_quest(state).get("step") == 2
 
     async def revive_assassination_guest():
         armed = await wait(run, lambda state: objective_committed(state) or (
@@ -314,6 +338,12 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
                                         == f"stock_{spec.key.removeprefix('native_')}_target_unavailable")
                     evidence["stock_precontract_spawn"] = report["game"][objective_key]
 
+        guid = uuid.uuid4().hex.upper()
+        seed_command = ("native-guest-weapon-seed", "--kind", weapon) if assassination else ("native-guest-weapon-seed-light-pistol",)
+        seeded = (await action(host, *seed_command, "--target", "guest", "--item-guid", guid))["native_guest_weapon"]
+        evidence[f"stock_{weapon_label}_seed"] = seeded
+        assert (seeded["guid"], seeded["status"], seeded["stored_ammo"]) == (guid, "backpack", 7), seeded
+
         offer = await board()
         evidence["stock_offer"] = offer
         assert offer["step_before"] is None and offer["step_after"] is None, offer
@@ -333,6 +363,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
                 offset = next_offset
             assert "stock_catalog" in evidence, catalog
             evidence["native_balances_at_offer"] = await balances()
+            acceptance_save_files = save_files()
             await board_state("armed", "focused", selected=False)
             if stock_menu:
                 await stock_button("start", "starting")
@@ -342,22 +373,19 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
                 await board_press("starting")
             accepted = await committed(1)
         else:
+            acceptance_save_files = save_files()
             accepted = await action(client, "native-quest-start", "--target", quest)
             assert accepted["effect"] == "native_quest_changed", accepted
         evidence["stock_acceptance"] = accepted
         assert (accepted["quest_id"], accepted["step"], accepted["actor"]) == (quest, 1, character), accepted
-        assert quest_record(read_saved(), quest)["step"] == 1
+        require_deferred_save("acceptance", acceptance_save_files)
         premature = await action(client, "native-quest-turnin", "--target", quest, expected=False)
         assert premature["error"] == f"{spec.key}_objective_incomplete", premature
         evidence["early_turn_in"] = premature["error"]
 
-        guid = uuid.uuid4().hex.upper()
-        seed_command = ("native-guest-weapon-seed", "--kind", weapon) if assassination else ("native-guest-weapon-seed-light-pistol",)
-        seeded = (await action(host, *seed_command, "--target", "guest", "--item-guid", guid))["native_guest_weapon"]
-        evidence[f"stock_{weapon_label}_seed"] = seeded
-        assert (seeded["guid"], seeded["status"], seeded["stored_ammo"]) == (guid, "backpack", 7), seeded
         for destination, tag in outbound:
             current = await cross(current, destination, tag)
+        assert quest_record(read_saved(), quest)["step"] == 1
 
         watcher = await wait(run, lambda state: state.get("game", {}).get(objective_key, {}).get("state") == "watching")
         watched = watcher["game"][objective_key]
@@ -401,6 +429,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
             evidence["ordinary_guest_revivals"] = []
         fired = 0
         observed = None
+        objective_save_files = save_files()
         for _ in range(max_shots + (8 if assassination else 0)):
             present = status(run)
             if objective_committed(present):
@@ -441,10 +470,9 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
                     raise
         if observed is None:
             raise RuntimeError("The party did not verify the stock objective within its shot and revive limit")
-        completed = quest_record(observed["campaign"], quest)
-        assert quest_record(read_saved(), quest) == completed, completed
+        completed = live_quest(observed)
         proof = completed["objective"]
-        evidence["durable_objective"] = completed
+        evidence["live_objective"] = completed
         assert completed["actor"] == character and (
             proof["map"], proof["state"], proof["step_before"], proof["step_after"], proof["shooter_role"], proof["shooter"]
         ) == (area, "stock_objective_verified", 1, 2, "guest", shot["pawn"]), completed
@@ -464,12 +492,16 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
             concealed = await projected("hidden", "absent")
             evidence["client_projection_after"] = concealed
             assert (concealed["state"], concealed["audio"]) in {("hidden", "muted"), ("absent", "none")}, concealed
+        require_deferred_save("objective", objective_save_files)
 
         for destination, tag in returning:
             current = await cross(current, destination, tag)
+        assert quest_record(read_saved(), quest) == completed, completed
+        evidence["durable_objective"] = completed
         ready = await board()
         before = await balances()
         evidence["stock_redemption_ready"], evidence["native_balances_before"] = ready, before
+        turn_in_save_files = save_files()
         assert ready["step_after"] == 2 and ready["xp_after"] == offer["xp_after"], ready
         if spratt:
             assert ready["objective_qualified"] is True, ready
@@ -523,11 +555,12 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
                     (30, 50) if spratt else (15, 50) if lenny else (30, -30) if crossroads else (50, -40)), reputation
 
         def reward_materialized(state):
-            players = state.get("campaign", {}).get("world", {}).get("party", {}).get("players", {})
-            return all(players.get(owner, {}).get("quest_xp") == 1 and not players[owner].get("native_quest_xp_pending")
-                       for owner in ("host", character))
+            players = state.get("gameplay", {}).get("players", {})
+            return all(players.get(role, {}).get("quest_xp") == 1 and not players[role].get("native_quest_xp_pending")
+                       for role in ("host", "guest"))
 
         await wait(run, reward_materialized)
+        require_deferred_save("redemption and detached XP", turn_in_save_files)
         paid = await balances()
         expected = {owner: {**values, "Player_Cash": values["Player_Cash"] + (spec.cash if owner == "host" else 0),
                             "Player_Xp": values["Player_Xp"] + 1} for owner, values in before.items()}

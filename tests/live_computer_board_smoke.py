@@ -383,9 +383,9 @@ async def exercise(work, vanilla_saved, *, stock_board_input=False, crafting_ben
             guid, character, before["host"]["Player_Cash"] + 800, {"host", character},
         ), settled
         def xp_settled(state):
-            party = state.get("campaign", {}).get("world", {}).get("party", {})
-            player = party.get("players", {}).get(character, {})
-            return player.get("quest_xp") == 1 and not player.get("native_quest_xp_pending")
+            players = state.get("gameplay", {}).get("players", {}).values()
+            return any(player.get("character_id") == character and player.get("quest_xp") == 1
+                       and not player.get("native_quest_xp_pending") for player in players)
 
         await wait(host_run, xp_settled)
         expected = {owner: values.copy() for owner, values in before.items()}

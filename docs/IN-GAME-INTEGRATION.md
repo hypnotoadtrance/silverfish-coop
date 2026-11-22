@@ -168,6 +168,8 @@ Physical stock enemy drops and the Dead Bridge and Refinery shell encounter adap
 
 Player drops and pickups use the typed stock inventory in memory. A three-player trial verified a guest's drop and a teammate's pickup through stock Interact. A two-player trial exercised the host's stock split-and-drag, then gave the split stack to the guest. Save-file hashes stayed unchanged until the tests requested a checkpoint. [Player drop trial](../tests/live_guest_stack_drop_smoke.py)
 
+The Crossroads and Black Lake jammer bounties defer quest progress and reward writes. A muted Simmi trial checked acceptance, guest objective completion, shared cash, and both XP awards against unchanged file hashes. Travel and an explicit save preserved the payout through restart. Black Lake uses the same save path and was checked with focused unit tests. [Jammer bounty trial](../tests/live_flood_jammer_smoke.py)
+
 Some quest callbacks and reward templates still use immediate save generations. The automated trials measured file changes during each interaction. Foreground playtests can assess any remaining frame hitches from stock inventory work.
 
 The transport-item hook now requires an active co-op session before intercepting stock item use. Stardust and Fruiting Stardust use the game's own behavior in singleplayer.

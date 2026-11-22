@@ -39,11 +39,19 @@ async def settle(host, bridge) -> None:
     recipients = pending_recipients(host, host.party)
     if not recipients:
         return
+    defer_save = host.last_game.get("native_guest_save_retention") is True
+    if defer_save:
+        from .native_inventory import retain_guest_save
+
+        for character, pawn, _amount in recipients:
+            if not await retain_guest_save(host, bridge, character, pawn):
+                return
     candidate = party.load_party(host.party)
     host.native_checkpoint_unsafe = True
     try:
         applied = await project(host, bridge, candidate, recipients)
-        await host.checkpoint_native(bridge, candidate, require_guest_frames=applied)
+        if not defer_save:
+            await host.checkpoint_native(bridge, candidate, require_guest_frames=applied)
     except (OSError, RuntimeError, ValueError):
         host.stopping = True
         raise

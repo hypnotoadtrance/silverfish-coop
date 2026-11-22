@@ -308,8 +308,9 @@ async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = Fals
         assert package not in await inventory(run) and package not in await inventory(guest_run), done
 
         def guest_reward_applied(status):
-            player = party_state(status).get("players", {}).get(character, {})
-            return player.get("quest_xp") == 1 and not player.get("native_quest_xp_pending")
+            players = status.get("gameplay", {}).get("players", {}).values()
+            return any(player.get("character_id") == character and player.get("quest_xp") == 1
+                       and not player.get("native_quest_xp_pending") for player in players)
 
         await wait(run, guest_reward_applied)
         expected_host = dict(before[0], Player_Cash=done["wallet"], Player_Xp=before[0]["Player_Xp"] + 1,

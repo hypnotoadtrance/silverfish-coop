@@ -1,4 +1,5 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,8 +50,9 @@ class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
         return SimpleNamespace(
             native_guest=True, native_zones=True, native_profile="isolated",
             stopping=False, transitioning=False, native_checkpoint_unsafe=False, party=saved,
+            pending_host_save=None, last_seen=time.monotonic(),
             last_game={"state": "hosting", "map": spec.objective_map, f"{spec.key}_objective": proof},
-            native_recipients=lambda: {"guest-character": {"pawn": "exact guest pawn"}},
+            native_recipients=lambda: {"guest-character": {"pawn": "exact guest pawn", "connected": True}},
             roles=lambda: {"host": "host", "guest": "guest-character"},
             checkpoint_native=AsyncMock(return_value=2), control=Mock(),
         )
@@ -84,6 +86,46 @@ class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.party["native_quests"][jammer.QUEST_ID]["step"], 1)
         host.checkpoint_native.assert_not_awaited()
 
+    async def test_simmi_and_lake_board_progress_and_payout_do_not_write(self):
+        for spec in (jammer.CROSSROADS_JAMMER, jammer.BLACK_LAKE):
+            with self.subTest(spec=spec.key):
+                host = self.host(1, spec=spec)
+                objective_snapshot = host.last_game
+                host.party.pop("native_quests")
+                host.last_game = {"state": "hosting", "map": spec.board_map}
+                guest = "guest-character"
+
+                def snapshot(verb, step_before, step_after, *, payout=0):
+                    operation = spec.command(verb)
+                    proof = dict(
+                        operation=operation, map=spec.board_map, pawn="exact guest pawn", board=spec.board, quest=spec.quest,
+                        step_before=step_before, step_after=step_after, cash_before=10, cash_after=10 + payout,
+                        xp_before=2, xp_after=2 + bool(payout),
+                        reputation={faction: {"before": 0, "after": 20 if payout else 0} for faction in spec.factions},
+                    )
+                    return {"state": "hosting", "map": spec.board_map, spec.key: proof}
+
+                bridge = SimpleNamespace(command=AsyncMock(side_effect=(
+                    snapshot("preflight", None, None), snapshot("start", None, 1),
+                    snapshot("preflight", 2, 2), snapshot("turn-in", 2, -10, payout=spec.cash),
+                )))
+                started = await jammer.act(host, bridge, guest, spec.command("start"))
+                self.assertEqual(started["step"], 1)
+                host.last_game = objective_snapshot
+                await jammer.observe(host, bridge)
+                self.assertEqual(host.party["native_quests"][spec.quest]["step"], 2)
+                host.last_game = {"state": "hosting", "map": spec.board_map}
+                settled = await jammer.act(host, bridge, guest, spec.command("turn-in"))
+                repeated = await jammer.act(host, bridge, guest, spec.command("turn-in"))
+
+                self.assertEqual((settled["step"], repeated["effect"]), (-10, "native_quest_already_settled"))
+                self.assertEqual(host.party["economy"]["wallet"], 10 + spec.cash)
+                self.assertEqual(host.party["players"][guest][native_rewards.PENDING], 1)
+                self.assertIs(host.pending_host_save, False)
+                self.assertFalse(host.native_checkpoint_unsafe)
+                self.assertEqual(bridge.command.await_count, 4)
+                host.checkpoint_native.assert_not_awaited()
+
     async def test_crossroads_can_adopt_an_authored_objective_accepted_in_an_older_host_save(self):
         spec = jammer.CROSSROADS_JAMMER
         host = self.host(1, spec=spec)
@@ -93,7 +135,7 @@ class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
         record = host.party["native_quests"][spec.quest]
         self.assertEqual((record["step"], record["actor"]), (2, "guest-character"))
         self.assertEqual(host.party["economy"]["wallet"], 0)
-        host.checkpoint_native.assert_awaited_once()
+        host.checkpoint_native.assert_not_awaited()
 
     async def test_live_pose_matches_the_current_exact_host_actor(self):
         for spec in (jammer.FLOOD, jammer.BLACK_LAKE, jammer.CROSSROADS_JAMMER):
@@ -154,7 +196,7 @@ class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.party["native_quests"][spec.quest]["step"], 2)
         self.assertEqual(host.party["native_quests"][jammer.FLOOD.quest]["step"], 1)
         self.assertEqual(host.party["native_quests"][spec.quest]["actor"], "guest-character")
-        host.checkpoint_native.assert_awaited_once()
+        host.checkpoint_native.assert_not_awaited()
 
         projection = f"{spec.key}_projection"
         live = {"map": spec.objective_map, "actor": spec.jammer, "state": "present", "audio": "-"}

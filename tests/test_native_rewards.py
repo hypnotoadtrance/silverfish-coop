@@ -37,6 +37,8 @@ class NativeRewardDurabilityTests(unittest.IsolatedAsyncioTestCase):
         host.native_checkpoint_unsafe = host.stopping = False
         host.allowed_maps, host.control = {CROSSROADS}, Mock()
         host.party = party.new_party()
+        host.pending_host_save = None
+        host.pending_guest_saves = {}
 
         self.live_xp = dict.fromkeys(self.pawns.values(), 10)
         self.slots = {}
@@ -64,6 +66,8 @@ class NativeRewardDurabilityTests(unittest.IsolatedAsyncioTestCase):
             before = self.live_xp[character]
             self.live_xp[character] += int(secondary)
             state["native_guest_xp"] = {"map": CROSSROADS, "pawn": primary, "before": before, "after": self.live_xp[character]}
+        elif action == "native-guest-save-retain":
+            self.assertEqual(self.pawns[primary], secondary)
         elif action == "native-host-save-capture":
             self.slots[primary] = None
             state["native_host_save"] = {"state": "captured", "map": CROSSROADS, "pawn": "HostPawn", "slot": primary}
@@ -114,3 +118,22 @@ class NativeRewardDurabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.status()["revision"], revision)
         self.assertTrue(self.host.native_checkpoint_unsafe)
         self.assertTrue(self.host.stopping)
+
+    async def test_live_rewards_retain_detached_xp_and_leave_the_checkpoint_unchanged(self):
+        self.base["native_guest_save_retention"] = True
+        revision = self.store.status()["revision"]
+        self.members.disconnect(self.disconnected)
+
+        await native_rewards.settle(self.host, self.bridge)
+        self.assertEqual(self.live_xp, {self.grace: 10, self.active: 11})
+        self.assertEqual(set(self.host.pending_guest_saves), {self.active})
+        self.assertEqual(self.host.party["players"][self.grace][native_rewards.PENDING], 1)
+
+        self.assertTrue(self.members.admit(game=self.base, **self.invites[0]).resumed)
+        await native_rewards.settle(self.host, self.bridge)
+        await native_rewards.settle(self.host, self.bridge)
+
+        self.assertEqual(self.live_xp, {self.grace: 11, self.active: 11})
+        self.assertEqual(set(self.host.pending_guest_saves), {self.grace, self.active})
+        self.assertEqual(self.saved_awards(), ({self.grace: 10, self.active: 10}, {self.grace: 1, self.active: 1}))
+        self.assertEqual(self.store.status()["revision"], revision)
