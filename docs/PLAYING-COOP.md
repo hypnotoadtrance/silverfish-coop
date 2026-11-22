@@ -44,7 +44,7 @@ The game asks you to confirm trust on a first connection or when a known host’
 
 ### Steam Cloud backups
 
-The installed mod mirrors each hosted campaign as a complete backup under `%LOCALAPPDATA%\SilverFish\Saved\SaveGames\SilverfishCoopCloud`. The backup includes the host’s world and characters saved on the host. Steam Auto-Cloud uploads these files on exit and downloads them on launch when Steam Cloud is enabled for Project Silverfish. The mod reads downloaded backups when you open the Host campaign picker. The same Steam account and a compatible mod build are required on the other PC.
+The installed mod mirrors each hosted campaign as a complete backup under `%LOCALAPPDATA%\SilverFish\Saved\SaveGames\SilverfishCoopCloud`. The backup includes the world, host and guest characters, and the campaign’s private host identity so returning guests can use their existing characters. Keep the backup files within the host’s Steam account. Steam Auto-Cloud uploads these files on exit and downloads them on launch when Steam Cloud is enabled for Project Silverfish. The mod reads downloaded backups when you open the Host campaign picker. The same Steam account and a compatible mod build are required on the other PC.
 
 Use **Multiplayer → Host → Load Game** on the other PC. The mod restores missing campaigns and newer revisions. An equal or older revision leaves the local campaign in place. Live multiplayer saves keep their own storage and Singleplayer continues to use the original save slots. Guests keep their progress with the host’s campaign.
 

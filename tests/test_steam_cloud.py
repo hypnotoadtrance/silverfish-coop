@@ -7,7 +7,7 @@ import unittest
 import uuid
 from zipfile import ZipFile
 
-from tools.silverfish import native_host_save, service
+from tools.silverfish import direct_ip, native_host_save, runtime, service
 from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.steam_cloud import CloudBackups
 from tools.silverfish.travel import CROSSROADS
@@ -21,19 +21,21 @@ class CloudBackupTests(unittest.TestCase):
         for device in (self.first, self.second):
             device.directory.mkdir(parents=True)
             (device.root / "20260101-101010.sav").write_bytes(b"unchanged solo slot")
+        self.identity = direct_ip._new_identity_record()
+        runtime.write_json(self.first.campaigns.parent / direct_ip.WORKSPACE_IDENTITY, self.identity)
         self.campaign = self.first.campaigns / "original-name"
         with CampaignStore(self.campaign / "save") as store:
             self.campaign_hex = uuid.UUID(store.status()["campaign_id"]).hex
             self.world = {"map": CROSSROADS, native_host_save.SCOPE_FIELD: self.campaign_hex,
                           "native_host_save": self.generation(self.first, b"host world")}
-            guest = store.issue_guest("Guest")
-            self.character = store.create_character(name="Scout", **guest)["character_id"]
+            self.guest = store.issue_guest("Guest")
+            self.character = store.create_character(name="Scout", **self.guest)["character_id"]
             self.guest_frame = dict(self.generation(self.first, b"guest inventory and stash"),
                                     character_id=self.character)
             store.checkpoint(self.world, {}, unleased_states={
                 self.character: {"native_guest_save": self.guest_frame},
             })
-            self.assertNotIn(guest["credential"], store.path.read_text())
+            self.assertNotIn(self.guest["credential"], store.path.read_text())
         self.restored = self.second.campaigns / f"campaign-{self.campaign_hex}"
         self.backup = self.first.directory / f"SFCoopBackup-{self.campaign_hex}.sav"
         self.download = self.second.directory / self.backup.name
@@ -54,11 +56,16 @@ class CloudBackupTests(unittest.TestCase):
         self.assertFalse(self.first.publish(self.campaign))
         with ZipFile(self.backup) as archive:
             self.assertEqual(set(archive.namelist()), {
-                "campaign.json", self.world["native_host_save"]["slot"] + ".sav", self.guest_frame["slot"] + ".sav",
+                "campaign.json", direct_ip.RESTORED_IDENTITY,
+                self.world["native_host_save"]["slot"] + ".sav", self.guest_frame["slot"] + ".sav",
             })
         shutil.copyfile(self.backup, self.download)
         self.second.restore()
         self.assertEqual(self.checkpoint(self.second, self.restored), self.checkpoint(self.first, self.campaign))
+        destination_cert = direct_ip.resident_host_identity(self.second.campaigns.parent, self.restored, 1).certificate_pem
+        self.assertEqual(destination_cert, self.identity["certificate"])
+        with CampaignStore(self.restored / "save", require_existing=True) as store:
+            self.assertEqual(store.list_characters(**self.guest)[0]["character_id"], self.character)
         self.assertEqual([path.name for path in self.second.root.glob("*.sav")], ["20260101-101010.sav"])
         self.assertEqual((self.second.root / "20260101-101010.sav").read_bytes(), b"unchanged solo slot")
 

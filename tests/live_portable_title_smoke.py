@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from contextlib import ExitStack
 from dataclasses import dataclass
+from hashlib import sha256
 from itertools import combinations
 import json
 import math
@@ -19,12 +20,12 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
 from tools.silverfish import (
-    embedded_startup, native_guest_consumable, native_guest_drop, native_host_save, native_inventory, native_loose_pickup,
+    direct_ip, embedded_startup, native_guest_consumable, native_guest_drop, native_host_save, native_inventory, native_loose_pickup,
     native_loot, native_world_loot, runtime,
 )
 from tools.silverfish.authored_loot import GUARANTEED_CRATES
 from tools.silverfish.control import NAME, submit
-from tools.silverfish.service import menu_host_checkpoint
+from tools.silverfish.service import PROTOCOL, menu_host_checkpoint
 from tools.silverfish.steam_cloud import FOLDER
 from tools.silverfish.win_job import GameProcess
 from live_installed_title_smoke import boot_states, native_mailbox
@@ -440,7 +441,7 @@ async def create_stock_split_character(guest, join, name):
     await offered(guest)
 
 
-async def verify_cloud_restore(first, second, session):
+async def verify_cloud_restore(first, second, session, game, processes):
     campaign_id = uuid.UUID(session["campaign_id"]).hex
     source = first.profile / "Saved/SaveGames" / FOLDER / f"SFCoopBackup-{campaign_id}.sav"
     assert source.is_file(), "The installed title did not back up the committed host campaign"
@@ -449,11 +450,29 @@ async def verify_cloud_restore(first, second, session):
     destination = second.profile / "Saved/SaveGames" / FOLDER / source.name
     destination.parent.mkdir(exist_ok=True)
     assert not directory.exists() and not destination.exists()
-    shutil.copy2(source, destination)  # Stand in for Steam's download on a second PC.
     solo = stock_save_hashes(second.profile)
     solo.pop("Config.sav", None)
     preferences = await stock_profile(second.bridge)
     form = "native-title-host-form-fixture"
+
+    async def simulate_steam_download():
+        await runtime.stop_game(second.bridge.process)
+        # Auto-Cloud downloads the file before launching the game on the other PC.
+        shutil.copy2(source, destination)
+        root = second.bridge.directory.parent
+        previous = set(root.iterdir())
+        process = launch_portable(game, second.profile)
+        processes.append((game, process))
+        async with asyncio.timeout(30):
+            while process.poll() is None:
+                fresh = [path for path in root.iterdir() if path not in previous and path.is_dir()]
+                if fresh:
+                    mailbox, = fresh
+                    second.bridge = runtime.Bridge(mailbox, process)
+                    await offered(second)
+                    return
+                await asyncio.sleep(.1)
+        raise RuntimeError("The second replica exited before its next Steam-style launch")
 
     async def pick_restored():
         await second.bridge.command(form, "open")
@@ -471,6 +490,7 @@ async def verify_cloud_restore(first, second, session):
     def checkpoint():
         return menu_host_checkpoint(directory, profile=second.profile, require_scoped=True)
 
+    await simulate_steam_download()
     await pick_restored()
     restored = checkpoint()
     assert restored["campaign_id"] == session["campaign_id"] and restored["revision"] == session["revision"]
@@ -482,6 +502,12 @@ async def verify_cloud_restore(first, second, session):
     hosted = await wait(directory / "run", lambda frame: frame.get("state") == "hosting")
     assert hosted["campaign"]["campaign_id"] == restored["campaign_id"]
     assert hosted["game"]["save_scope"] == campaign_id
+    identity = direct_ip.read_resident_identity(first.campaign.parent.parent, first.campaign)
+    build = runtime.read_json(game / runtime.PORTABLE_STAGE_MANIFEST)["game_build"]
+    pin = sha256(identity["certificate"].encode("utf-8")).hexdigest()
+    guest_connection = await direct_ip.connect(second.client, "127.0.0.1", second.port, "", build, PROTOCOL,
+                                               verified_fingerprint=pin)
+    assert guest_connection.details["guest_id"] == character["guest_id"]
     await second.bridge.wait_for(lambda game: game.get("stock_pause_exit", {}).get("state") == "armed")
     await stock_pause(second.bridge, "open")
     await stock_pause(second.bridge, "save_and_quit")
@@ -491,16 +517,18 @@ async def verify_cloud_restore(first, second, session):
     assert newer["revision"] > restored["revision"]
     assert destination.read_bytes() != source.read_bytes(), "The resumed host's backup was not refreshed"
 
-    shutil.copy2(source, destination)
+    await simulate_steam_download()
     await pick_restored()
     assert checkpoint() == newer, "The old cloud backup replaced a newer local campaign"
     await second.bridge.command(form, "cancel")
     await second.bridge.command(form, "cancel")
+    await second.bridge.command("native-title-button-fixture", "modes")
     observed_solo = stock_save_hashes(second.profile)
     observed_solo.pop("Config.sav", None)
     assert observed_solo == solo and await stock_profile(second.bridge) == preferences
     return {"restored_revision": restored["revision"], "retained_revision": newer["revision"],
-            "guest_character_restored": session["character_id"], "singleplayer_unchanged": True,
+            "guest_character_restored": session["character_id"], "host_identity_restored": True,
+            "singleplayer_unchanged": True,
             "steam_download_simulated": True}
 
 
@@ -589,7 +617,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         assert proof["sessions"][0]["guest_pid"] == proof["sessions"][1]["host_pid"]
         assert len({leg["campaign_id"] for leg in proof["sessions"]}) == 2
         if steam_cloud:
-            proof["steam_cloud"] = await verify_cloud_restore(first, second, proof["sessions"][0])
+            proof["steam_cloud"] = await verify_cloud_restore(first, second, proof["sessions"][0], second_game, processes)
         for seat, (hashes, preferences) in zip(seats, baselines, strict=True):
             for key in ("singleplayer", "modes", "multiplayer", "modes", "singleplayer"):
                 button = await seat.bridge.command("native-title-button-fixture", key)

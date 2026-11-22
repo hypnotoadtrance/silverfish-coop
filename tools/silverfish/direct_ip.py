@@ -166,9 +166,21 @@ def _new_identity_record() -> dict:
     return {"certificate": identity.certificate_pem, "private_key": key.decode("ascii")}
 
 
+WORKSPACE_IDENTITY = "direct-ip-host-identity.json"
+RESTORED_IDENTITY = "cloud-host-identity.json"
+
+
+def read_resident_identity(work: Path, campaign: Path) -> dict | None:
+    restored = _record(campaign / "save" / RESTORED_IDENTITY)
+    return restored if restored is not None else _record(work / WORKSPACE_IDENTITY)
+
+
 def resident_host_identity(work: Path, campaign: Path, guest_count: int) -> link.ServerIdentity:
-    """Reuse one host identity across all campaigns in this resident workspace."""
-    path = work / "direct-ip-host-identity.json"
+    """Keep a restored campaign's identity and share one identity for new campaigns."""
+    restored = _record(campaign / "save" / RESTORED_IDENTITY)
+    if restored is not None:
+        return link.load_server_identity(restored["certificate"], restored["private_key"])
+    path = work / WORKSPACE_IDENTITY
     shared = _record(path)
     if shared is None:
         legacy = _record(campaign / "save/host-identity.json")
