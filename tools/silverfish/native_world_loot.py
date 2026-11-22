@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from itertools import chain
 
-from . import native_enemy_shells, native_guest_drop_record, native_loot, native_stock_enemy_drops, party
+from . import native_enemy_shells, native_guest_drop_record, native_loot, native_mushrooms, native_stock_enemy_drops, party
 from .authored_loot import valid_item_transform
 from .native_gold import valid_guid
 from .native_guest_drop_record import valid_position
@@ -160,7 +160,14 @@ def _display_count(value):
     return value if type(value) is int and 0 < value < 2**31 else 0
 
 
-def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drops=None, stock_enemy_drops=None):
+def _mushroom_items(frame, area, zone):
+    for identity, row in native_mushrooms.visible(frame, area, zone):
+        yield Item(identity, row.get("class_path"), row.get("transform"), native_mushrooms.CLAIM,
+                   identity, _display_count(row.get("amount")))
+
+
+def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drops=None, stock_enemy_drops=None,
+           mushroom_frame=None):
     area = game.get("map")
     pawn = game.get("pawns", {}).get("local", {})
     origin = pawn.get("location")
@@ -168,7 +175,8 @@ def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drop
         return {}
     visible = []
     for item in chain(_crate_items(rolls, area), _enemy_items(enemy_frame, enemy_rolls or {}, area, zone),
-                      _player_items(player_drops or {}, area), _stock_enemy_items(stock_enemy_drops, area)):
+                      _player_items(player_drops or {}, area), _stock_enemy_items(stock_enemy_drops, area),
+                      _mushroom_items(mushroom_frame, area, zone)):
         if (not isinstance(item.class_path, str) or len(item.class_path) > 256
                 or not _CLASS.fullmatch(item.class_path) or not valid_item_transform(item.transform)):
             continue
@@ -191,7 +199,7 @@ class Projection:
         self.retired = set()
 
     async def sync(self, bridge, game, rolls, generation, zone, *, active, enemy_frame=None, enemy_rolls=None,
-                   player_drops=None, stock_enemy_drops=None):
+                   player_drops=None, stock_enemy_drops=None, mushroom_frame=None):
         phase = game.get("state")
         if phase not in {"hosting", "connected"} or not isinstance(zone, str):
             self.previous = None
@@ -204,7 +212,8 @@ class Projection:
             self.retired.clear()
             self.presses.clear()
         self.items = nearby(game, rolls, zone, enemy_frame=enemy_frame, enemy_rolls=enemy_rolls,
-                            player_drops=player_drops, stock_enemy_drops=stock_enemy_drops) if active else {}
+                            player_drops=player_drops, stock_enemy_drops=stock_enemy_drops,
+                            mushroom_frame=mushroom_frame) if active else {}
         for identity in self.retired:
             self.items.pop(identity, None)
         args = tuple("|".join((identity, item.class_path, *(("ground",) if item.ground_snap else ()), *(str(axis)

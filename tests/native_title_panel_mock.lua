@@ -3,6 +3,8 @@ local join_request, join_response = "bridge/title-join-request.tsv", "bridge/tit
 local join_invite = "bridge/title-join-fixture.invite.json"
 local steam_join, steam_cancel = "bridge/steam-coop-join.tsv", "bridge/steam-coop-join-cancel.tsv"
 local steam_opened = "bridge/steam-coop-join-opened.tsv"
+local browse_request = "bridge/steam-coop-browser-request.tsv"
+local browse_response = "bridge/steam-coop-browser-response.tsv"
 local host_catalog = "bridge/title-host-campaigns.tsv"
 local files, flags, queued = {}, {}, {}
 local now, id, tick, display, solo_back, writes = 100, 0, nil, nil, nil, 0
@@ -148,14 +150,16 @@ env = setmetatable({
             return {read = function(_, size) return files[path]:sub(1, size) end, close = function() return true end}
         end
         assert(mode == "wb" and (path:sub(1, #request) == request or path:sub(1, #join_request) == join_request
-            or path:sub(1, #steam_cancel) == steam_cancel or path:sub(1, #steam_opened) == steam_opened))
+            or path:sub(1, #steam_cancel) == steam_cancel or path:sub(1, #steam_opened) == steam_opened
+            or path:sub(1, #browse_request) == browse_request))
         return {write = function(_, ...) files[path] = table.concat({...}); writes = writes + 1; return true end,
             close = function() return true end}
     end},
     os = {time = function() return now end, getenv = function(name) return flags[name] end,
         remove = function(path) files[path] = nil end,
         rename = function(source, target)
-            assert(target == request or target == join_request or target == steam_cancel or target == steam_opened)
+            assert(target == request or target == join_request or target == steam_cancel or target == steam_opened
+                or target == browse_request)
             if refuse_rename or files[target] then return false end
             files[target], files[source] = files[source], nil
             return true
@@ -425,3 +429,36 @@ tick()
 assert(display.title == "Multiplayer" and not files[steam_opened], "Do not reopen the consumed Steam invite")
 click("join")
 assert(display.title == "Join co-op" and display.fields.port == defaults[3])
+
+offer("host,join", 110, generation("9"), defaults)
+click("multiplayer")
+click("host")
+click("new")
+click("network")
+click("steam")
+assert(display.title == "Host networking" and display.note:find("unavailable", 1, true))
+files["bridge/steam-coop-available"] = "1\n"
+click("steam")
+assert(display.title == "Steam lobby access" and display.buttons.invite.label == "Invite Only"
+    and display.buttons.friends.label == "Friends Only" and display.buttons.public.label == "Public")
+click("public")
+assert(display.title == "New Game" and display.fields.port == nil and display.fields.bind == nil
+    and display.buttons.network.label == "Steam · Public")
+assert(host("password"))
+click("submit")
+assert(files[request] == ("6\t%s\t%s\thost\t\tpublic\tFixture co-op pass\tcreator\n")
+    :format(generation("9"), operation_id()))
+
+files[request] = nil
+local browse_generation = generation("a")
+offer("host,join", 110, browse_generation, defaults)
+click("multiplayer")
+click("steam-public")
+local prefix = ("1\t%s\t%s\t"):format(browse_generation, operation_id())
+assert(files[browse_request] == prefix .. "search\n")
+files[browse_request] = nil
+files[browse_response] = prefix .. "ready\t1\nFixture Host\n"
+tick()
+assert(display.buttons["steam-pick:1"].label == "Fixture Host")
+click("steam-pick:1")
+assert(files[browse_request] == prefix .. "1\n")

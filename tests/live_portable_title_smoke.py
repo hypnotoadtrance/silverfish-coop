@@ -440,21 +440,32 @@ async def verify_stock_use(host: Seat, guest: Seat, pawn: str, *, starter: bool)
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     before = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
     host_before = (await submit(host_run, "native-inventory-list"))["native_inventory"]
-    classes = set(native_guest_consumable.STARTER_BAGS.values()) if starter else {native_guest_consumable.BANDAGE_CLASS}
-    item, = (row for row in before["items"] if row["source"] == "backpack" and row["class_path"] in classes)
+    classes = ({native_guest_consumable.STARTER_BAGS["hyperrandom"]} if starter
+               else {native_guest_consumable.BANDAGE_CLASS})
+    candidates = [row for row in before["items"] if row["source"] == "backpack" and row["class_path"] in classes]
+    assert candidates and (not starter or len(candidates) == 1), before
+    item = min(candidates, key=lambda row: row["guid"])
     assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
     gesture = "drag" if starter else "context"
     target = item["guid"] + ("|drag" if starter else "")
     selected = await submit(guest_run, "native-inventory-stock-use-click-fixture", target=target)
     assert selected["ok"] and selected["stock_action"]["guid"] == item["guid"], selected
-    await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock"
-               and "native_inventory_stock_action" not in state.get("game", {}))
     action = native_guest_consumable.COMMANDS[item["class_path"]]
     key = native_guest_consumable.RESULT[action]
-    events = [json.loads(line) for line in (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-    event, = (entry for entry in events if entry["event"] == "native_stock_inventory_action"
-              and entry.get(key, {}).get("guid") == item["guid"])
+    async with asyncio.timeout(15):
+        while True:
+            events = [json.loads(line) for line in (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            refused = next((entry for entry in events if entry["event"] == "native_stock_inventory_rejected"), None)
+            if refused:
+                raise RuntimeError(refused["reason"])
+            if succeeded := [entry for entry in events if entry["event"] == "native_stock_inventory_action"
+                             and entry.get(key, {}).get("guid") == item["guid"]]:
+                event, = succeeded
+                break
+            await asyncio.sleep(.1)
+    await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock"
+               and "native_inventory_stock_action" not in state.get("game", {}))
     receipt = event[key]
     assert (receipt["pawn"], receipt["quantity_before"], receipt["quantity_after"]) == (
         pawn, item["quantity"], item["quantity"] - 1), receipt
@@ -467,6 +478,10 @@ async def verify_stock_use(host: Seat, guest: Seat, pawn: str, *, starter: bool)
     else:
         assert not added, after
     assert contents.get(item["guid"], {}).get("quantity", 0) == receipt["quantity_after"], after
+    remaining = {row["guid"]: {key: value for key, value in row.items() if key != "index"}
+                 for row in after["items"] if row["guid"] not in added and row["guid"] != item["guid"]}
+    assert remaining == {row["guid"]: {key: value for key, value in row.items() if key != "index"}
+                         for row in before["items"] if row["guid"] != item["guid"]}, after
     assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before
     replay = await submit(guest_run, action, target=item["guid"], operation_id=event["operation_id"])
     assert replay["ok"] and replay[key] == receipt, replay
@@ -490,7 +505,7 @@ async def create_stock_drop_character(guest, join, name):
 async def create_stock_bag_character(guest, join, name):
     await join("create-editor", name)
     await guest.bridge.wait_for(lambda frame: frame.get("native_guest_stock_creator", {}).get("state") == "creating")
-    await creator_action(guest, "gueststyle")
+    await creator_action(guest, "guesthyperkit")
     assert await creator_action(guest, "guestnext") == "page=3"
     await creator_action(guest, "finish")
     await offered(guest)
@@ -633,7 +648,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     probes = ExitStack()
 
     try:
-        if stock_drop or stock_split or stock_equip or stock_nearby or container_nearby:
+        if stock_use or stock_drop or stock_split or stock_equip or stock_nearby or container_nearby:
             for game in games:
                 probes.enter_context(installed_probe(game))
         for game, workspace, release, port in zip(games, workspaces, qualified, choose_ports(), strict=True):

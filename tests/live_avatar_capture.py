@@ -167,7 +167,7 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
         await wait(host_run, lambda state: state.get("state") == "hosting")
         invitation = await command("invite", *host, "--name", "Loopback avatar guest", "--character", "Avatar guest")
         join = ("join", *guest, "--invite", invitation["invite_file"], "--headless", "--native-zones")
-        if equipment:
+        if equipment or rifle:
             join += ("--native-guest-primary-input",)
         if rifle:
             join += ("--native-guest-reload-input",)
@@ -201,8 +201,12 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             fields = ("magazine", "caliber", "fire_rate", "burst_length", "action_on_release", "single_reload", "projectile")
             evidence["guest_rifle_selection"] = {"receipt": receipt, "observer": projections(mounted),
                 "stock_profile": dict(zip(fields, authority_profile, strict=True))}
-            await avatar_probe(guest_run, "riflerange")
-            shot = await command("action", *guest, "native-guest-weapon-fire", "--target", guid)
+            await wait(guest_run, lambda state: state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
+            await command("action", *guest, "native-guest-primary-input-fixture")
+            async with asyncio.timeout(10):
+                while not (shots := events(guest_run, "native_guest_primary_input")):
+                    await asyncio.sleep(.1)
+            shot, = shots
             assert tuple(shot["native_guest_weapon"][key] for key in ("guid", "before", "after", "projectiles")) == (
                 guid, 1, 0, 1), shot
             reserve_guid = uuid.uuid4().hex.upper()
@@ -215,6 +219,10 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             ammo = reloaded["native_guest_weapon"]
             assert tuple(ammo[key] for key in ("guid", "before", "after", "reserve_before", "reserve_after")) == (
                 guid, 0, 1, 8, 7), reloaded
+            reload_clip = "BreakAction_Reload_50BMG.BreakAction_Reload_50BMG"
+            await wait(host_run, lambda state: any(
+                row.get("clip", "").endswith(reload_clip) and row.get("travel_cm", 0) > .5 and not row.get("active")
+                for row in state.get("game", {}).get("native_avatar_cycle", {}).values()), timeout=10)
             evidence["guest_rifle_combat"] = {"fire": shot["native_guest_weapon"], "reload": ammo}
         if equipment:
             await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")

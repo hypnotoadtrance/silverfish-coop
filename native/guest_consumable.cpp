@@ -773,65 +773,153 @@ namespace
             return scope.current() && backpack->Identical(stock_rows, host_before.get()) &&
                 flags->Identical(flags->ContainerPtrToValuePtr<void>(scope.stock), host_flags.get());
         };
-        const auto generation_failed = [&](bool retired) {
-            return retired && unchanged() && backpack->Identical(guest_rows, before.get())
-                ? refuse("guest_starter_bag_refused_stock_contents")
-                : refuse("mutation_unverified_guest_starter_bag_generation");
+        const auto generation_failed = [&](bool retired, std::string_view reason) {
+            if (!retired) return refuse(reason);
+            if (!scope.current()) return refuse("mutation_unverified_guest_starter_bag_owner_changed");
+            if (!backpack->Identical(stock_rows, host_before.get()))
+                return refuse("mutation_unverified_guest_starter_bag_host_backpack");
+            if (!flags->Identical(flags->ContainerPtrToValuePtr<void>(scope.stock), host_flags.get()))
+                return refuse("mutation_unverified_guest_starter_bag_host_flags");
+            if (!backpack->Identical(guest_rows, before.get()))
+                return refuse("mutation_unverified_guest_starter_bag_guest_backpack");
+            return refuse(reason);
         };
 
-        const auto position = static_cast<Unreal::AActor*>(scope.pawn)->K2_GetActorLocation();
-        const Unreal::FRotator rotation{};
-        const auto retire = [&](Unreal::UObject* actor) {
-            if (!live(actor)) return true;
-            const Unreal::FWeakObjectPtr pointer{actor};
-            actor->ProcessEvent(destroy, nullptr);
-            auto* remaining = pointer.Get();
-            return !live(remaining) || read_bool(remaining, STR("bActorIsBeingDestroyed"), true);
+        // Set the no-respawn policy before BeginPlay so temporary stock items
+        // cannot create world persistence entries in the canonical save.
+        struct Deferred
+        {
+            Unreal::UObject* context{};
+            Unreal::UClass* item{};
+            Unreal::FTransform_As500Plus transform;
+            std::uint8_t collision{1};
+            Unreal::UObject* owner{};
+            std::uint8_t scale{1};
+            Unreal::AActor* result{};
+        } begin;
+        struct Finished
+        {
+            Unreal::AActor* actor{};
+            Unreal::FTransform_As500Plus transform;
+            std::uint8_t scale{1};
+            Unreal::AActor* result{};
+        } finish;
+        static_assert(offsetof(Deferred, transform) == 0x10 && offsetof(Deferred, result) == 0x88);
+        static_assert(offsetof(Finished, transform) == 0x10 && offsetof(Finished, result) == 0x78);
+        auto* statics = find<Unreal::UObject>(STR("/Script/Engine.Default__GameplayStatics"));
+        auto* deferred = find<Unreal::UFunction>(STR("/Script/Engine.GameplayStatics:BeginDeferredActorSpawnFromClass"));
+        auto* complete = find<Unreal::UFunction>(STR("/Script/Engine.GameplayStatics:FinishSpawningActor"));
+        auto* actor_class = find<Unreal::UClass>(STR("/Script/Engine.Actor"));
+        auto* transform = find<Unreal::UScriptStruct>(STR("/Script/CoreUObject.Transform"));
+        const auto spawn_function = [&](Unreal::UFunction* function, int count, int size, int output) {
+            auto* position = field<Unreal::FStructProperty>(function, STR("SpawnTransform"));
+            auto* result_actor = field<Unreal::FObjectProperty>(function, STR("ReturnValue"));
+            return statics && actor_class && transform && function && function->GetOuterPrivate() == statics->GetClassPrivate() &&
+                function->HasAnyFunctionFlags(Unreal::FUNC_Native) && function->GetNumParms() == count &&
+                function->GetParmsSize() == size && position && position->GetStruct().Get() == transform &&
+                position->GetSize() == 0x60 && position->GetOffset_Internal() == 0x10 && result_actor &&
+                function->GetReturnProperty() == result_actor && result_actor->GetOffset_Internal() == output &&
+                result_actor->GetPropertyClass().Get() == actor_class;
         };
-        auto* bag = scope.world->SpawnActor(type, &position, &rotation);
-        if (!authority(bag, scope.world) || !exact(bag, type)) return generation_failed(retire(bag));
+        auto* item_arg = field<Unreal::FClassProperty>(deferred, STR("ActorClass"));
+        if (!spawn_function(deferred, 7, 0x90, 0x88) || !spawn_function(complete, 4, 0x80, 0x78) ||
+            !item_arg || item_arg->GetOffset_Internal() != 8 || item_arg->GetMetaClass().Get() != actor_class)
+            return refuse("guest_starter_bag_refused_spawn_schema");
+
+        auto position = static_cast<Unreal::AActor*>(scope.pawn)->K2_GetActorLocation();
+        position.SetZ(position.GetZ() + 1500.0);
+        begin.context = scope.pawn;
+        begin.owner = scope.pawn;
+        begin.transform = Unreal::FTransform{Unreal::FQuat(0, 0, 0, 1), position, Unreal::FVector(1, 1, 1)};
+        const auto spawn = [&](Unreal::UClass* item, bool& qualified) {
+            qualified = false;
+            begin.item = item;
+            begin.result = nullptr;
+            statics->ProcessEvent(deferred, &begin);
+            auto* actor = begin.result;
+            if (!exact(actor, item) || !authority(actor, scope.world) || actor->HasAnyFlags(Unreal::RF_WasLoaded)) return actor;
+            auto* respawn = field<Unreal::FByteProperty>(actor, STR("Item_RespawnMode"));
+            auto* instigator = field<Unreal::FObjectProperty>(actor, STR("Instigator"));
+            if (!respawn || !instigator || !scope.pawn->IsA(instigator->GetPropertyClass().Get())) return actor;
+            actor->SetFlags(Unreal::RF_Transient);
+            actor->SetActorEnableCollision(false);
+            actor->SetActorHiddenInGame(true);
+            respawn->SetPropertyValueInContainer(actor, 0);
+            instigator->SetObjectPropertyValue(instigator->ContainerPtrToValuePtr<void>(actor), scope.pawn);
+            finish.actor = actor;
+            finish.transform = begin.transform;
+            finish.result = nullptr;
+            statics->ProcessEvent(complete, &finish);
+            qualified = finish.result == actor && authority(actor, scope.world) && respawn->GetPropertyValueInContainer(actor) == 0;
+            if (qualified)
+            {
+                actor->SetActorEnableCollision(false);
+                actor->SetActorHiddenInGame(true);
+            }
+            return actor;
+        };
+        const auto retire = [&](Unreal::AActor* actor) {
+            if (!live(actor) || read_bool(actor, STR("bActorIsBeingDestroyed"), true)) return true;
+            const Unreal::FWeakObjectPtr pointer{actor};
+            actor->K2_DestroyActor();
+            auto* remaining = pointer.Get();
+            return !live(remaining) || read_bool(remaining, STR("bActorIsBeingDestroyed"), true) ||
+                static_cast<Unreal::AActor*>(remaining)->GetWorld() != scope.world;
+        };
+        const auto refused_bag = [&](Unreal::AActor* actor) {
+            const bool retired = retire(actor);
+            return generation_failed(retired, retired ? "guest_starter_bag_refused_stock_contents" :
+                "mutation_unverified_guest_starter_bag_retire_bag");
+        };
+        bool bag_ready{};
+        auto* bag = spawn(type, bag_ready);
+        if (!bag_ready) return refused_bag(bag);
         Unreal::FScriptArrayHelper stock_contents(contents, contents->ContainerPtrToValuePtr<void>(bag));
         std::array<Unreal::UClass*, max_rewards> rewards{};
         int reward_count = 0;
-        if (stock_contents.Num() < 1 || stock_contents.Num() > max_rewards) return generation_failed(retire(bag));
+        if (stock_contents.Num() < 1 || stock_contents.Num() > max_rewards) return refused_bag(bag);
         for (int index = 0; index < stock_contents.Num(); ++index)
         {
             auto* value = entry->GetObjectPropertyValue(stock_contents.GetRawPtr(index));
             if (!value) continue;
             auto* reward = Unreal::Cast<Unreal::UClass>(value);
             if (!live(reward) || !reward->IsChildOf(row.item_base) || reward->GetPathName() == starter_bag_path ||
-                reward->GetPathName() == hyper_bag_path) return generation_failed(retire(bag));
+                reward->GetPathName() == hyper_bag_path) return refused_bag(bag);
             rewards[reward_count++] = reward;
         }
-        if (!retire(bag)) return generation_failed(false);
-        if (reward_count == 0 || guest.Num() - 1 + reward_count > max_inventory) return generation_failed(true);
+        if (!retire(bag)) return refuse("mutation_unverified_guest_starter_bag_retire_bag");
+        if (reward_count == 0 || guest.Num() - 1 + reward_count > max_inventory)
+            return generation_failed(true, "guest_starter_bag_refused_stock_contents");
 
         Unreal::FScriptArrayHelper destination(backpack, prepared.get());
         destination.RemoveValues(selected);
         std::string awarded;
         for (int index = 0; index < reward_count; ++index)
         {
-            auto* actor = scope.world->SpawnActor(rewards[index], &position, &rotation);
+            bool reward_ready{};
+            auto* actor = spawn(rewards[index], reward_ready);
             const auto converted = Value(row_property->AllocateAndInitializeValue(), {row_property});
-            const bool valid_row = converted && exact(actor, rewards[index]) && authority(actor, scope.world) &&
+            const bool valid_row = reward_ready && converted &&
                 silverfish::loot_escrow::convert_stock_item(scope.pawn, actor, converted.get());
-            if (!retire(actor)) return generation_failed(false);
-            if (!valid_row) return generation_failed(true);
+            if (!retire(actor)) return refuse("mutation_unverified_guest_starter_bag_retire_reward");
+            if (!valid_row) return generation_failed(true, "guest_starter_bag_refused_stock_reward");
             const auto guid = row.identity(converted.get());
             if (guid == Guid{} || guid == source || rows_contain(destination, guid) || rows_contain(host, guid) ||
-                gear_contains(scope.guest, guid) || gear_contains(scope.stock, guid)) return generation_failed(true);
+                gear_contains(scope.guest, guid) || gear_contains(scope.stock, guid))
+                return generation_failed(true, "guest_starter_bag_refused_reward_identity");
             const int inserted = destination.AddValue();
             row_property->CopyCompleteValue(destination.GetRawPtr(inserted), converted.get());
             if (!awarded.empty()) awarded.push_back(',');
             awarded += std::format("{:08X}{:08X}{:08X}{:08X}", guid[0], guid[1], guid[2], guid[3]);
         }
-        if (!unchanged() || !backpack->Identical(guest_rows, before.get())) return generation_failed(true);
+        if (!unchanged() || !backpack->Identical(guest_rows, before.get()))
+            return generation_failed(true, "guest_starter_bag_refused_stock_contents");
         backpack->CopyCompleteValue(guest_rows, prepared.get());
         if (!unchanged() || !backpack->Identical(guest_rows, prepared.get()))
         {
             if (!unchanged()) return refuse("mutation_unverified_guest_starter_bag_commit");
             backpack->CopyCompleteValue(guest_rows, before.get());
-            return generation_failed(true);
+            return generation_failed(true, "guest_starter_bag_refused_commit");
         }
         result(lua, true, "used");
         lua.set_string(bag_path == starter_bag_path ? "random" : "hyperrandom");

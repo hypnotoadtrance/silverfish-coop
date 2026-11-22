@@ -7,10 +7,11 @@ import time
 import unittest
 from unittest.mock import Mock
 
-from tools.silverfish import direct_ip, link, runtime, steam_session
+from tools.silverfish import direct_ip, link, runtime, steam_browser, steam_session
 from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.native_session_exit import SESSION
-from tools.silverfish.steam_transport import SteamTransport, _CALLBACK_INVITE
+from tools.silverfish.steam_transport import SteamTransport, _CALLBACK_FRIEND_JOIN, _CALLBACK_INVITE
+from tools.silverfish.title_handoff import DESCRIPTOR_FILE
 
 from tests.test_steam_transport import GUEST, HOST, LOBBY, Platform
 
@@ -57,18 +58,22 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
         runtime.write_text(host_bridge / SESSION, f"1\t{pause_token}\thost\t{int(time.time()) + 5}\n", newline="\n")
         host_api.overlay = False
         async with host.playing(role="host"), host.host_panel(
-            host_bridge, "127.0.0.1", server.address[1], identity.certificate_pem, Mock(),
+            host_bridge, "127.0.0.1", server.address[1], identity.certificate_pem, Mock(), access="friends",
         ):
             offer = host_bridge / steam_session.HOST_OFFER
             await self.ready(offer.exists)
             self.assertEqual(offer.read_text(), f"1\t{pause_token}\tready\n")
             runtime.write_text(host_bridge / steam_session.HOST_INVITE, f"1\t{'b' * 32}\tinvite\n", newline="\n")
             await self.ready(lambda: not (host_bridge / steam_session.HOST_INVITE).exists())
-            self.assertIsNone(host.transport.lobby)
+            self.assertEqual(host.transport.lobby, LOBBY)
+            self.assertIsNone(host_api.invited)
+            self.assertEqual(host_api.lobby_access, "friends")
+            self.assertEqual(host_api.presence, LOBBY)
             runtime.write_text(host_bridge / steam_session.HOST_INVITE, f"1\t{pause_token}\tinvite\n", newline="\n")
             await self.ready(lambda: offer.exists() and offer.read_text().endswith("\tfriends\n"))
             self.assertEqual(host_api.presence, LOBBY)
-            guest_api.callbacks.append((_CALLBACK_INVITE, struct.pack("<QQ", LOBBY, HOST), 0))
+            connect = f"+connect_lobby {LOBBY}".encode("ascii").ljust(256, b"\x00")
+            guest_api.callbacks.append((_CALLBACK_FRIEND_JOIN, struct.pack("<Q", HOST) + connect, 0))
             join = guest_bridge / steam_session.JOIN_OFFER
             await self.ready(join.exists)
             _, nonce, port, _ = join.read_text().strip().split("\t")
@@ -94,6 +99,32 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(guest.transport.lobby)
         self.assertFalse(offer.exists())
         self.assertIsNone(host_api.presence)
+
+    async def test_public_lobby_browser_search_and_selection_use_the_steam_join_route(self):
+        _, host, _ = await self.start(HOST)
+        _, guest, bridge = await self.start(GUEST)
+        fingerprint = "e" * 64
+        await host.transport.host(32124, fingerprint=fingerprint, access="public")
+        browser = asyncio.create_task(steam_browser.serve(bridge, guest.transport, guest.open_lobby, guest.pump))
+        self.addAsyncCleanup(self.stop_browser, browser)
+        await asyncio.sleep(0)
+        generation, token = "a" * 32, "b" * 32
+        runtime.write_text(bridge / DESCRIPTOR_FILE, f"1\t{generation}\thost,join\t{int(time.time()) + 8}\n")
+        request, result = bridge / steam_browser.REQUEST, bridge / steam_browser.RESPONSE
+        prefix = f"1\t{generation}\t{token}\t"
+        runtime.write_text(request, prefix + "search\n", newline="\n")
+        await self.ready(result.exists)
+        self.assertEqual(result.read_text(), prefix + "ready\t1\nFixture Host\n")
+        runtime.write_text(request, prefix + "1\n", newline="\n")
+        offer = bridge / steam_session.JOIN_OFFER
+        await self.ready(offer.exists)
+        _, _, port, _ = offer.read_text().split()
+        self.assertEqual(guest.fingerprint_for("127.0.0.1", int(port)), fingerprint)
+
+    @staticmethod
+    async def stop_browser(browser):
+        browser.cancel()
+        await asyncio.gather(browser, return_exceptions=True)
 
     async def test_cancel_releases_only_the_current_join_offer(self):
         _, host, _ = await self.start(HOST)

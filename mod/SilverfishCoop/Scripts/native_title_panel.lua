@@ -17,6 +17,7 @@ local dispatch
 local settings_fixture, credits_fixture
 local credits_path = "/Game/Classes/GUI/Credits_MainMenu_Widget.Credits_MainMenu_Widget_C"
 local initial_port, edited_port = "7777", "28181"
+local steam_access_labels = {invite = "Invite Only", friends = "Friends Only", public = "Public"}
 
 local function valid(object)
     return object and object:IsValid()
@@ -122,10 +123,22 @@ local function button(key, label, detail)
     return {key = key, label = label, detail = detail}
 end
 
+local function steam_available()
+    local file = io.open(bridge_path .. "/steam-coop-available", "rb")
+    if not file then return false end
+    local available = file:read(3) == "1\n"
+    file:close()
+    return available
+end
+
 local function multiplayer(offer)
+    session.browser = nil
     local choices, rows = actions[offer.choices], {}
     if choices.host then rows[#rows + 1] = {button("host", "Host")} end
     if choices.join then rows[#rows + 1] = {button("join", direct_join and "Join by Direct IP" or "Join")} end
+    if choices.join and direct_join and steam_available() then
+        rows[#rows + 1] = {button("steam-public", "Public Steam Lobbies")}
+    end
     rows[#rows + 1] = {button("modes", "Back")}
     present({title = "Multiplayer", rows = rows})
 end
@@ -196,7 +209,8 @@ local function write_request(generation, action, form_values)
     if not file then return false end
     local version = "2"
     if action == "host" and form_values then
-        version = ({creator = "4", resume = "5"})[form_values[5]] or (#form_values == 4 and "3" or "2")
+        version = steam_access_labels[form_values[2]] and "6"
+            or ({creator = "4", resume = "5"})[form_values[5]] or (#form_values == 4 and "3" or "2")
     end
     local row = form_values and {version, generation, id, action, table.unpack(form_values)}
         or {"1", generation, id, action}
@@ -262,10 +276,36 @@ end
 local function host_settings(form, note)
     form.screen = "settings"
     local rows = form.api.rows(form.values, resident, form.fixture and not form.saved_name)
+    if resident and not form.fixture then
+        local access = form.values.steam_access
+        table.insert(rows, 1, {button("network", access and "Steam · " .. steam_access_labels[access] or "Network · Direct IP")})
+    end
     local label = form.saved_name and "Load Game" or "Start Game"
     rows[#rows + 1] = {button("submit", label), button("back", "Back")}
     local title_text = form.saved_name and "Load Game" or "New Game"
     present({title = title_text, note = note or form.saved_display, rows = rows})
+end
+
+local function host_network(form, note)
+    form.screen = "network"
+    present({title = "Host networking", note = note, rows = {
+        {button("direct", "Direct IP"), button("steam", "Steam Networking")},
+        {button("back", "Back")},
+    }})
+end
+
+local function host_steam_access(form)
+    if not steam_available() then
+        host_network(form, "Steam networking is unavailable. Check Steam and try again.")
+        return
+    end
+    form.screen = "steam-access"
+    present({title = "Steam lobby access", rows = {
+        {button("invite", steam_access_labels.invite)},
+        {button("friends", steam_access_labels.friends)},
+        {button("public", steam_access_labels.public)},
+        {button("back", "Back")},
+    }})
 end
 
 local function show_saved(form)
@@ -307,12 +347,32 @@ local function handle_host_form(action, context)
         return true
     end
     if action == "back" then
-        if form.fixture and form.screen == "saved" then host_settings(form)
+        if form.screen == "steam-access" then host_network(form)
+        elseif form.screen == "network" then host_settings(form)
+        elseif form.fixture and form.screen == "saved" then host_settings(form)
         elseif form.fixture or form.screen == "menu" or not resident then
             close_form(session)
             multiplayer(offer)
         elseif form.screen == "settings" and form.saved_name then show_saved(form)
         else host_menu() end
+        return true
+    end
+    if form.screen == "settings" and action == "network" and resident and not form.fixture then
+        form.api.selection(session.view, form.values, resident, form.saved_name, false)
+        host_network(form)
+        return true
+    end
+    if form.screen == "network" then
+        if action == "steam" then host_steam_access(form)
+        elseif action == "direct" then
+            form.values.steam_access = nil
+            host_settings(form)
+        else return false, "title_host_form_unavailable" end
+        return true
+    end
+    if form.screen == "steam-access" and steam_access_labels[action] then
+        form.values.steam_access = action
+        host_settings(form)
         return true
     end
     if action == "new" and form.screen == "menu" then
@@ -353,7 +413,8 @@ local function handle_host_form(action, context)
         host_settings(form, hint)
         return false, failure
     end
-    if form.saved_name then values[5] = "resume"
+    if form.values.steam_access then values[4] = form.saved_name and "resume" or "creator"
+    elseif form.saved_name then values[5] = "resume"
     elseif resident and (action == "creator" or not form.fixture) then values[5] = "creator" end
     return choose("host", context, values)
 end
@@ -437,11 +498,109 @@ local function poll_steam_invite(context)
         or #port > 5 or tonumber(port) > 65535 or not expiry or expiry < now or expiry > now + 60 then return end
     if handle_join_form("join", current.state, current.phase, context, {nonce = nonce, port = port}) then
         last_steam_invite = nonce
+        session.browser = nil
         controls.remove(session.solo_back)
         session.solo_back = nil
         singleplayer_title = nil
         show_stock(session, false)
     end
+end
+
+local function show_public_lobbies(browser)
+    local rows, note = {}, nil
+    if browser.state == "joining" then
+        note = "Connecting through Steam…"
+    elseif browser.state == "searching" then
+        note = "Looking for public lobbies…"
+    elseif browser.state == "unavailable" then
+        note = "Steam lobbies are unavailable. Try again."
+    elseif #browser.names == 0 then
+        note = "No public lobbies found."
+    else
+        local first = browser.first
+        for index = first, math.min(first + 3, #browser.names) do
+            rows[#rows + 1] = {button("steam-pick:" .. index, browser.names[index])}
+        end
+        local pages = {}
+        if first > 1 then pages[#pages + 1] = button("steam-prev", "Previous") end
+        if first + 3 < #browser.names then pages[#pages + 1] = button("steam-next", "Next") end
+        if #pages > 0 then rows[#rows + 1] = pages end
+    end
+    if browser.state ~= "joining" then
+        rows[#rows + 1] = {button("steam-public", "Refresh"), button("steam-back", "Back")}
+    end
+    present({title = "Public Steam Lobbies", note = note, rows = rows})
+end
+
+local function browser_request(browser, action)
+    local path = bridge_path .. "/steam-coop-browser-request.tsv"
+    local temporary = path .. "." .. browser.token .. ".tmp"
+    local file = io.open(temporary, "wb")
+    if not file then return false end
+    local written = file:write("1\t", browser.generation, "\t", browser.token, "\t", action, "\n")
+    local closed = file:close()
+    if written and closed and os.rename(temporary, path) then return true end
+    os.remove(temporary)
+    return false
+end
+
+local function browser_action(action)
+    local browser = session.browser
+    if action == "steam-back" then
+        multiplayer(session.offer)
+        return
+    end
+    if action == "steam-public" then
+        local token = request_id()
+        if not token then return end
+        browser = {generation = session.offer.generation, token = token, first = 1,
+            state = "searching", names = {}, expires = os.time() + 15}
+        session.browser = browser
+        if not browser_request(browser, "search") then browser.state = "unavailable" end
+    elseif browser and browser.state == "ready" then
+        local selected = action:match("^steam%-pick:([1-9][0-9]?)$")
+        if selected and session.view.buttons[action] and browser.names[tonumber(selected)] then
+            browser.state = browser_request(browser, selected) and "joining" or "unavailable"
+            browser.expires = os.time() + 15
+        elseif action == "steam-prev" or action == "steam-next" then
+            local first = browser.first + (action == "steam-prev" and -4 or 4)
+            if first >= 1 and first <= #browser.names then browser.first = first end
+        end
+    end
+    if browser then show_public_lobbies(browser) end
+end
+
+local function poll_public_lobbies(browser)
+    if browser.state ~= "searching" and browser.state ~= "joining" then return end
+    local now = os.time()
+    if now > browser.expires then
+        browser.state = "unavailable"
+        show_public_lobbies(browser)
+        return
+    end
+    if browser.polled == now then return end
+    browser.polled = now
+    local file = io.open(bridge_path .. "/steam-coop-browser-response.tsv", "rb")
+    if not file then return end
+    local data = file:read(1501)
+    file:close()
+    if not data or #data > 1500 then return end
+    local generation, token, result, count, start = data:match("^1\t([0-9a-f]+)\t([0-9a-f]+)\t([a-z]+)\t([0-9][0-9]?)\n()")
+    if generation ~= browser.generation or token ~= browser.token or not count or tonumber(count) > 12 then return end
+    if result == "unavailable" then
+        browser.state = "unavailable"
+    elseif result == "ready" and browser.state == "searching" then
+        local names = {}
+        for name in data:sub(start):gmatch("([^\n]+)\n") do
+            if #name > 104 or name:find("[%c]") or not utf8.len(name) then return end
+            names[#names + 1] = name
+        end
+        if #names ~= tonumber(count) then return end
+        browser.state, browser.names = "ready", names
+    else
+        return
+    end
+    show_public_lobbies(browser)
 end
 
 local function resume_guest_creation(context, offer, state, phase)
@@ -720,6 +879,7 @@ local function update_title()
         return
     end
     poll_steam_invite(context)
+    if session.browser then poll_public_lobbies(session.browser) end
     surface.sync(session.view)
     local form = session.form
     if form and form.role == "join" then
@@ -760,6 +920,8 @@ dispatch = function(action)
         elseif action == "quit" then
             local quit = context.menu.Button_QUIT
             if valid(quit) and valid(quit.Button_63) then quit.Button_63.OnPressed:Broadcast() end
+        elseif session.browser or not session.form and action == "steam-public" then
+            browser_action(action)
         elseif session.form and session.form.role == "join" or not session.form and action == "join" then
             handle_join_form(action, current.state, current.phase, context)
         elseif session.form or action == "host" then

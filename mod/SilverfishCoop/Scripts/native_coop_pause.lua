@@ -155,14 +155,15 @@ local function owned_pause(value, scene)
 end
 
 local steam_labels = {
-    ready = "Invite Steam Friend",
-    friends = "Steam friends can join",
+    ready = "Invite Steam Friends",
+    friends = "Invite Steam Friends",
     opening = "Opening Steam…",
-    unavailable = "Steam invite unavailable",
+    retry = "Retry Steam Lobby",
+    overlay = "Invite Steam Friends",
 }
 
 local function can_invite(status)
-    return status == "ready" or status == "friends"
+    return status and status ~= "opening"
 end
 
 local function steam_status(scene)
@@ -204,7 +205,11 @@ local function sync_steam_invite(scene)
     if steam_invite.button and steam_invite.status ~= status then
         local widget = steam_invite.button.widget
         widget:UpdateText(FText(steam_labels[status]))
-        widget:SetToolTipText(FText(status == "friends" and "Friends can select Join Game from your Steam profile." or ""))
+        local hint = status == "friends" and "Steam overlay is unavailable. Friends can use Join Game."
+            or status == "overlay" and "Enable the Steam overlay to send invites."
+            or status == "retry" and "Steam could not create this lobby. Try again."
+            or "Open the Steam friends list."
+        widget:SetToolTipText(FText(hint))
         widget:SetIsEnabled(can_invite(status))
         steam_invite.status = status
     end

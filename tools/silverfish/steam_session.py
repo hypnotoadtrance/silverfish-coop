@@ -10,7 +10,7 @@ import shlex
 import time
 import uuid
 
-from . import runtime
+from . import runtime, steam_browser
 from .embedded_engine import _exact_existing
 
 
@@ -20,6 +20,7 @@ STEAM_DLL_SHA256 = "e082bf5c9f881c822b1540a76b74f9d15e18019a73ebd206a559595badcb
 STATUS = "steam-coop-status.json"
 HOST_OFFER = "steam-coop-host.tsv"
 HOST_INVITE = "steam-coop-invite-request.tsv"
+AVAILABLE = "steam-coop-available"
 JOIN_OFFER = "steam-coop-join.tsv"
 JOIN_CANCEL = "steam-coop-join-cancel.tsv"
 JOIN_OPENED = "steam-coop-join-opened.tsv"
@@ -96,24 +97,29 @@ class SteamSession:
                 continue
             if self._role or self._nonce or _PAUSE_OFFER.fullmatch(_read(self.title_bridge, SESSION)):
                 continue
-            async with self._lock:
-                if self._role:
-                    continue
-                self._leave()
-                _status(self.title_bridge, "joining_lobby")
-                try:
-                    route = await self.transport.join(lobby)
-                    if self._role or self.pump.done():
-                        self._leave()
-                        continue
-                    self._route, self._nonce = route, uuid.uuid4().hex
-                    self._expires = int(time.time()) + 60
-                    runtime.write_text(self.title_bridge / JOIN_OFFER,
-                                       f"1\t{self._nonce}\t{route.port}\t{self._expires}\n", newline="\n")
-                    _status(self.title_bridge, "invite_ready")
-                except (OSError, ValueError, RuntimeError):
+            await self.open_lobby(lobby)
+
+    async def open_lobby(self, lobby: int) -> bool:
+        async with self._lock:
+            if self._role or self._nonce or self.pump.done():
+                return False
+            self._leave()
+            _status(self.title_bridge, "joining_lobby")
+            try:
+                route = await self.transport.join(lobby)
+                if self._role or self.pump.done():
                     self._leave()
-                    _status(self.title_bridge, "invite_unavailable")
+                    return False
+                self._route, self._nonce = route, uuid.uuid4().hex
+                self._expires = int(time.time()) + 60
+                runtime.write_text(self.title_bridge / JOIN_OFFER,
+                                   f"1\t{self._nonce}\t{route.port}\t{self._expires}\n", newline="\n")
+                _status(self.title_bridge, "invite_ready")
+                return True
+            except (OSError, ValueError, RuntimeError):
+                self._leave()
+                _status(self.title_bridge, "invite_unavailable")
+                return False
 
     @asynccontextmanager
     async def playing(self, address: str = "", port: int = 0, *, role: str):
@@ -131,15 +137,14 @@ class SteamSession:
             _status(self.title_bridge, "ready" if not self.pump.done() else "unavailable")
 
     @asynccontextmanager
-    async def host_panel(self, bridge: Path, bind: str, port: int, certificate: str, control):
+    async def host_panel(self, bridge: Path, bind: str, port: int, certificate: str, control, *, access: str):
         address = ip_address(bind)
-        if address.version != 4 or self.pump.done():
-            _status(bridge, "unavailable", reason="ipv4_host_required" if address.version != 4 else "steam_offline")
+        if address != ip_address("127.0.0.1") or self.pump.done():
+            _status(bridge, "unavailable", reason="loopback_required" if not address.is_loopback else "steam_offline")
             yield
             return
         fingerprint = sha256(certificate.encode("utf-8")).hexdigest()
-        endpoint = "127.0.0.1" if address.is_unspecified else str(address)
-        panel = asyncio.create_task(self._host_panel(bridge, endpoint, port, fingerprint, control))
+        panel = asyncio.create_task(self._host_panel(bridge, str(address), port, fingerprint, control, access))
         try:
             yield
         finally:
@@ -148,13 +153,24 @@ class SteamSession:
                 await panel
             _remove(bridge, HOST_OFFER, HOST_INVITE)
 
-    async def _host_panel(self, bridge, address, port, fingerprint, control):
+    async def _host_panel(self, bridge, address, port, fingerprint, control, access):
         from .native_session_exit import SESSION
+
+        async def open_lobby():
+            try:
+                await self.transport.host(port, address=address, fingerprint=fingerprint, access=access)
+            except (OSError, ValueError, RuntimeError):
+                _status(bridge, "lobby_unavailable", access=access)
+                return "retry"
+            _status(bridge, "lobby_open", access=access)
+            with suppress(OSError):
+                control.event("steam_lobby_open", access=access)
+            return "ready"
 
         offer_path = bridge / HOST_OFFER
         last_token = None
-        offer_state = "ready"
-        _status(bridge, "ready")
+        _status(bridge, "opening_lobby", access=access)
+        offer_state = await open_lobby()
         while not self.pump.done():
             match = _PAUSE_OFFER.fullmatch(_read(bridge, SESSION))
             token = match[1].decode("ascii") if match and int(match[2]) > time.time() else None
@@ -169,19 +185,16 @@ class SteamSession:
             if token is not None and request == f"1\t{token}\tinvite\n".encode("ascii"):
                 try:
                     runtime.write_text(offer_path, f"1\t{token}\topening\n", newline="\n")
-                    if self.transport.lobby is None:
-                        await self.transport.host(port, address=address, fingerprint=fingerprint)
-                    overlay = self.transport.show_invites()
+                    offer_state = await open_lobby() if self.transport.lobby is None else "ready"
+                    if offer_state == "ready":
+                        overlay = self.transport.show_invites()
+                        offer_state = "ready" if overlay else "friends"
+                        _status(bridge, "lobby_open", access=access, overlay=overlay)
                 except (OSError, ValueError, RuntimeError):
-                    offer_state = "ready"
-                    _status(bridge, "invite_unavailable")
+                    offer_state = "overlay"
+                    _status(bridge, "invite_unavailable", access=access)
                     with suppress(OSError):
                         control.event("steam_invite_unavailable")
-                else:
-                    offer_state = "ready" if overlay else "friends"
-                    _status(bridge, "lobby_open", overlay=overlay)
-                    with suppress(OSError):
-                        control.event("steam_lobby_open")
                 finally:
                     with suppress(OSError):
                         runtime.write_text(offer_path, f"1\t{token}\t{offer_state}\n", newline="\n")
@@ -193,6 +206,7 @@ class SteamSession:
 @asynccontextmanager
 async def installed_steam(work: Path, bridge: Path, argv, *, enabled: bool):
     """Keep Steam failures optional so Direct IP can start in ordinary installations."""
+    _remove(bridge, AVAILABLE)
     if not enabled:
         yield None
         return
@@ -223,14 +237,21 @@ async def installed_steam(work: Path, bridge: Path, argv, *, enabled: bool):
         if cold_lobby is not None:
             transport.pending_invites.put_nowait(cold_lobby)
         _status(bridge, "ready")
+        with suppress(OSError):
+            runtime.write_text(bridge / AVAILABLE, "1\n", newline="\n")
         inbox = asyncio.create_task(session.receive_invites())
+        browser = asyncio.create_task(steam_browser.serve(bridge, transport, session.open_lobby, pump))
         try:
             yield session
         finally:
+            browser.cancel()
             inbox.cancel()
             with suppress(asyncio.CancelledError):
                 await inbox
+            with suppress(asyncio.CancelledError):
+                await browser
     finally:
+        _remove(bridge, AVAILABLE)
         session._leave()
         pump.cancel()
         with suppress(asyncio.CancelledError, OSError, RuntimeError, ValueError):

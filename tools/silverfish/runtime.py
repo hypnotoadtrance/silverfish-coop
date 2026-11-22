@@ -28,11 +28,12 @@ from . import native_inventory, native_sewer_barter, native_stash
 from . import native_guest_drop_projection, native_guest_drop_record, native_guest_stack_drop
 from . import native_loot, native_world_loot
 from . import native_loose_pickup
+from . import native_mushrooms
 from . import native_stock_enemy_drops
 from . import native_lantern, native_stock_door
 from . import native_player_avatar
 from . import native_weapon_fire_view
-from . import native_damage_feedback
+from . import native_damage_feedback, native_weather_view
 from . import native_voice
 from . import native_anomaly_effects
 from .native_guest_creator import valid_profile
@@ -2209,6 +2210,18 @@ class Bridge:
                 elif fields[0] == "native-loose-pickup-capability" and len(fields) == 3:
                     data[native_loose_pickup.CAPABILITY] = int(fields[1])
                     data["native_loose_pickup_count"] = int(fields[2])
+                elif fields == ["native-mushroom-capability", "1"]:
+                    data[native_mushrooms.CAPABILITY] = 1
+                elif fields[0] == "native-mushroom-suppression" and len(fields) == 2:
+                    data[native_mushrooms.SUPPRESSION] = int(fields[1])
+                elif fields[0] == native_mushrooms.ROW:
+                    mushroom = native_mushrooms.parse(fields, data.get("state"), data.get("map"))
+                    active = data.setdefault(native_mushrooms.KEY, {})
+                    if mushroom["id"] in active or len(active) >= native_mushrooms.LIMIT:
+                        raise ValueError("Repeated stock mushroom source or oversized patch roster")
+                    active[mushroom["id"]] = mushroom
+                elif fields[0] == native_mushrooms.CLAIM:
+                    data[native_mushrooms.PROOF] = native_mushrooms.parse_claim(fields, data.get("state"), data.get("map"))
                 elif fields[0] == native_loose_pickup.ROW:
                     placed = native_loose_pickup.parse(fields, data.get("state"), data.get("map"))
                     data.setdefault(native_loose_pickup.KEY, {})[placed["actor"]] = placed
@@ -2271,16 +2284,25 @@ class Bridge:
                         "map": fields[1], "pawn": fields[2], "door": fields[3], "key": int(fields[4]),
                         "locked": fields[5] == "1", "unlocked": fields[6] == "1",
                     }
-                elif fields[0] == "native-world-view" and len(fields) in (21, 27) and fields[1] in ("sample", "applied"):
+                elif fields[0] == "native-weather-siren" and len(fields) == 5 and data.get("state") == "hosting":
+                    cues = data.setdefault(native_weather_view.KEY, [])
+                    if len(cues) < native_weather_view.MAX_SIRENS:
+                        cues.append(native_weather_view.parse_siren(fields))
+                elif fields[0] == "native-world-view" and len(fields) in (21, 27, 32) and fields[1] in ("sample", "applied"):
                     row = {"mode": fields[1], "map": fields[2], "actor": fields[3], "epoch": fields[4],
                            "sequence": int(fields[5]), "sun_visible": fields[13] == "1", "sun_intensity": _finite(fields[14]),
                            "clock_text": fields[18], "save_unchanged": fields[19] == "1", "sky_verified": fields[20] == "1"}
                     row.update(zip(("game_seconds", "pitch", "yaw", "roll", "sun_x", "sun_y", "sun_z"),
                                    map(_finite, fields[6:13])))
                     row.update(zip(("sky_r", "sky_g", "sky_b"), map(_finite, fields[15:18])))
-                    if len(fields) == 27:
+                    if len(fields) >= 27:
                         row.update(zip(WORLD_WEATHER_FIELDS, map(_finite, fields[21:26])))
                         row["weather_verified"] = fields[26] == "1"
+                    if len(fields) == 32:
+                        rain = list(map(_finite, fields[27:31]))
+                        if native_weather_view.valid_rain(rain):
+                            row.update(zip(native_weather_view.RAIN_FIELDS, rain))
+                            row["rain_verified"] = fields[31] == "1"
                     data["native_world_view"] = row
                 elif fields[0] == "native-loot" and len(fields) in (14, 15):
                     count = int(fields[12])

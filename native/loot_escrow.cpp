@@ -43,6 +43,7 @@ namespace
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto item_base_path = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
+    constexpr auto mushroom_patch_path = STR("/Game/Assets/PCG_Brushes/MushroomPatch_BP.MushroomPatch_BP_C");
     constexpr auto library_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C");
     constexpr auto converter_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:ItemActorToStruct");
     constexpr auto stack_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Items.FL_Items_C:StackItem_Stats");
@@ -567,6 +568,83 @@ namespace
         return 4;
     }
 
+    Unreal::UObject* mushroom_source(const Owner& owner, const std::wstring& patch_path,
+                                    const std::wstring& actor_path, const Guid& expected)
+    {
+        auto* patch = find<Unreal::UObject>(patch_path.c_str());
+        auto* actor = find<Unreal::UObject>(actor_path.c_str());
+        auto* level = field<Unreal::FObjectProperty>(owner.world, STR("PersistentLevel"));
+        auto* persistent = level ? level->GetObjectPropertyValue(level->ContainerPtrToValuePtr<void>(owner.world)) : nullptr;
+        if (!live(patch) || !live(actor) || !live(persistent) || patch->GetPathName() != patch_path ||
+            actor->GetPathName() != actor_path || patch->GetOuterPrivate() != persistent || actor->GetOuterPrivate() != persistent ||
+            !patch->HasAnyFlags(Unreal::RF_WasLoaded) || actor->HasAnyFlags(Unreal::RF_WasLoaded) ||
+            patch->GetClassPrivate() != find<Unreal::UClass>(mushroom_patch_path) ||
+            !actor->IsA(find<Unreal::UClass>(item_base_path))) return nullptr;
+
+        auto* property = field<Unreal::FMapProperty>(patch, STR("SpawnedShrooms"));
+        auto* key = property ? Unreal::CastField<Unreal::FObjectProperty>(property->GetKeyProp()) : nullptr;
+        auto* value = property ? Unreal::CastField<Unreal::FStructProperty>(property->GetValueProp()) : nullptr;
+        if (!key || key->GetPropertyClass().Get() != find<Unreal::UClass>(item_base_path) ||
+            key->GetOffset_Internal() != 0 || !value || value->GetSize() != sizeof(Guid) ||
+            value->GetStruct().Get() != find<Unreal::UScriptStruct>(guid_struct_path)) return nullptr;
+        const auto layout = Unreal::FScriptMap::GetScriptLayout(
+            key->GetSize(), key->GetMinAlignment(), value->GetSize(), value->GetMinAlignment());
+        if (value->GetOffset_Internal() != layout.ValueOffset) return nullptr;
+        const auto* map = property->ContainerPtrToValuePtr<Unreal::FScriptMap>(patch);
+        if (map->Num() < 1 || map->Num() > map->GetMaxIndex() || map->GetMaxIndex() > 256) return nullptr;
+        for (int index = 0; index < map->GetMaxIndex(); ++index)
+        {
+            if (!map->IsValidIndex(index)) continue;
+            const auto* entry = map->GetData(index, layout);
+            if (!entry || key->GetObjectPropertyValue(entry) != actor) continue;
+            if (expected == *value->ContainerPtrToValuePtr<Guid>(entry)) return actor;
+        }
+        return nullptr;
+    }
+
+    int capture_mushroom(const Lua& lua)
+    {
+        std::array<Address, 4> args{};
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 7 || !lua.is_string(5) ||
+            !lua.is_string(6) || !lua.is_string(7) || !read_addresses(lua, args, args.size()))
+            return result(lua, false, "native_mushroom_escrow_scope_unavailable");
+        const auto patch_path = RC::to_generic_string(lua.get_string());
+        const auto actor_path = RC::to_generic_string(lua.get_string());
+        const auto expected = parse_guid(lua.get_string());
+        if (patch_path.size() > 256 || actor_path.size() > 256 || expected == Guid{} ||
+            !patch_path.starts_with(STR("/Game/Classes/Maps/")) || !actor_path.starts_with(STR("/Game/Classes/Maps/")))
+            return result(lua, false, "native_mushroom_escrow_scope_unavailable");
+        Owner owner;
+        auto* actor = silverfish::shared_loot::qualify_escrow_owner(args[0], args[1], args[2], owner) ?
+            mushroom_source(owner, patch_path, actor_path, expected) : nullptr;
+        if (!actor) return result(lua, false, "native_mushroom_escrow_source_unverified");
+
+        Inventory inventory;
+        if (!inventory.bind()) return result(lua, false, "native_loot_inventory_schema_unavailable");
+        std::string_view failure;
+        auto* scratch = isolated_save(args[3], inventory, failure);
+        if (!scratch) return result(lua, false, failure);
+        Unreal::FScriptArrayHelper rows(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(scratch));
+        if (rows.Num() != 0 || !qualified_escrow(inventory, scratch, rows, 1))
+            return result(lua, false, "native_loot_blank_escrow_required");
+        const auto item = convert(inventory, owner.pawn, actor);
+        if (!item || mushroom_source(owner, patch_path, actor_path, expected) != actor)
+            return result(lua, false, "native_loot_stock_actor_conversion_unverified");
+
+        AddedRows append{rows};
+        const auto index = rows.AddValue();
+        if (index != 0 || rows.Num() != 1) return result(lua, false, "native_loot_escrow_append_unverified");
+        auto* destination = rows.GetRawPtr(index);
+        inventory.row->CopyCompleteValue(destination, item.get());
+        if (!inventory.identical(destination, item.get()) || !qualified_escrow(inventory, scratch, rows, 1))
+            return result(lua, false, "native_loot_escrow_payload_unverified");
+        append.committed = true;
+        result(lua, true, "captured");
+        lua.set_string(print_guid(inventory.identity(item.get())));
+        lua.set_integer(inventory.ammo->GetPropertyValueInContainer(item.get()));
+        return 4;
+    }
+
     struct Match
     {
         int count{};
@@ -1009,6 +1087,7 @@ namespace silverfish::loot_escrow
         lua.register_function("SilverfishMergeNativeGroundStack", claim<false, true>);
         lua.register_function("SilverfishCaptureNativeEnemyLootEscrow", capture<true>);
         lua.register_function("SilverfishCaptureStockEnemyDrop", capture_stock_enemy_drop);
+        lua.register_function("SilverfishCaptureNativeMushroom", capture_mushroom);
         lua.register_function("SilverfishClaimNativeEnemyLootEscrow", claim<true>);
     }
 }

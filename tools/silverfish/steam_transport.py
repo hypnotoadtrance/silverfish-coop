@@ -19,11 +19,14 @@ if TYPE_CHECKING:
 _LOOPBACK = "127.0.0.1"
 _METADATA_KEY = "silverfishcoop"
 _METADATA_VERSION = "1"
+_PUBLIC_KEY = "silverfishcoop-public"
+_HOST_NAME = "silverfishcoop-host"
 _FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 _HEADER = struct.Struct("!4sQQ")
 _MAGIC = b"SFQ1"
 _MAX_PACKET = 4096 - _HEADER.size
 _MAX_MEMBERS = 5
+_PUBLIC_LIMIT = 12
 _MAX_PEER_FLOWS = 16
 _FLOW_IDLE = 45.0
 _LOBBY_TIMEOUT = 12.0
@@ -32,6 +35,7 @@ _ROSTER_INTERVAL = .25
 _CALLBACK_INVITE = 333
 _CALLBACK_FRIEND_JOIN = 337
 _CALLBACK_ENTER = 504
+_CALLBACK_MATCH_LIST = 510
 _CALLBACK_ROSTER = 506
 _CALLBACK_CREATED = 513
 _CALLBACK_SESSION_REQUEST = 1251
@@ -64,6 +68,12 @@ class SteamRoute:
     host: str
     port: int
     fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class PublicLobby:
+    lobby: int
+    host_name: str
 
 
 @dataclass(slots=True)
@@ -113,6 +123,7 @@ class SteamTransport:
         self._guest_flows: dict[int, _GuestFlow] = {}
         self._guest_sources: dict[tuple[str, int], int] = {}
         self._calls: dict[int, _LobbyCall] = {}
+        self._search: tuple[int, asyncio.Future] | None = None
         self._opening = False
         self._join_presence = False
         self._closed = False
@@ -120,12 +131,12 @@ class SteamTransport:
         self._generation = 0
         self._roster_at = 0.0
 
-    async def _lobby_call(self, requested: int | None) -> int:
+    async def _lobby_call(self, requested: int | None, *, access: str = "friends") -> int:
         if self._closed or self._opening or self.lobby is not None:
             raise SteamTransportError("A Steam lobby is already active or opening.")
         if len(self._calls) >= 4 or any(entry.lobby == requested for entry in self._calls.values()):
             raise SteamTransportError("Steam is still finishing a previous lobby request.")
-        handle = self.api.create_lobby(friends_only=True) if requested is None else self.api.join_lobby(requested)
+        handle = self.api.create_lobby(access=access) if requested is None else self.api.join_lobby(requested)
         if not handle or handle in self._calls:
             raise SteamTransportError("Steam could not start the lobby request.")
         future = asyncio.get_running_loop().create_future()
@@ -145,8 +156,8 @@ class SteamTransport:
         finally:
             self._opening = False
 
-    async def host(self, port: int, *, address: str = _LOOPBACK, fingerprint: str) -> int:
-        """Publish an invite lobby for an already bound local QUIC listener."""
+    async def host(self, port: int, *, address: str = _LOOPBACK, fingerprint: str, access: str = "friends") -> int:
+        """Publish the chosen Steam lobby for an already bound local QUIC listener."""
         try:
             endpoint = ipaddress.IPv4Address(address)
             if endpoint.is_unspecified:
@@ -162,7 +173,9 @@ class SteamTransport:
             raise SteamTransportError("Steam relay hosting requires a valid local endpoint.")
         if not isinstance(fingerprint, str) or not _FINGERPRINT.fullmatch(fingerprint):
             raise SteamTransportError("Steam relay hosting requires a campaign identity.")
-        lobby = await self._lobby_call(None)
+        if access not in ("invite", "friends", "public"):
+            raise SteamTransportError("Choose a Steam lobby access mode.")
+        lobby = await self._lobby_call(None, access=access)
         self.lobby = lobby
         try:
             self._owner = self.api.local_id
@@ -174,11 +187,51 @@ class SteamTransport:
             self._refresh_roster()
             if self.lobby != lobby or self.api.local_id not in self._members:
                 raise SteamTransportError("Steam could not confirm the co-op lobby.")
-            self._join_presence = self.api.set_join_presence(lobby)
+            if access == "public":
+                host_name = self._display_name(self.api.persona_name())
+                if (not self.api.set_lobby_data(lobby, _HOST_NAME, host_name)
+                        or not self.api.set_lobby_data(lobby, _PUBLIC_KEY, _METADATA_VERSION)):
+                    raise SteamTransportError("Steam could not list the public co-op lobby.")
+            self._join_presence = access != "invite" and self.api.set_join_presence(lobby)
             return lobby
         except BaseException:
             self.leave()
             raise
+
+    @staticmethod
+    def _display_name(value: str) -> str:
+        return "".join(char for char in value if char.isprintable()).strip()[:26] or "Silverfish player"
+
+    async def public_lobbies(self) -> tuple[PublicLobby, ...]:
+        if self._closed or self._search is not None or self._opening or self.lobby is not None:
+            raise SteamTransportError("The Steam lobby browser is unavailable.")
+        future = asyncio.get_running_loop().create_future()
+        handle = self.api.request_lobbies(_PUBLIC_KEY, _METADATA_VERSION, limit=_PUBLIC_LIMIT)
+        self._search = handle, future
+        try:
+            async with asyncio.timeout(_LOBBY_TIMEOUT):
+                return await future
+        except TimeoutError as error:
+            raise SteamTransportError("Steam did not return a lobby list.") from error
+        finally:
+            self._search = None
+
+    def _lobby_results(self, data: bytes) -> tuple[PublicLobby, ...]:
+        if len(data) != 4:
+            raise SteamTransportError("Steam did not return a lobby list.")
+        count, = struct.unpack("<I", data)
+        results = []
+        for lobby in dict.fromkeys(self.api.list_lobbies(min(count, _PUBLIC_LIMIT))):
+            if not _steam_id(lobby) or self.api.lobby_data(lobby, _PUBLIC_KEY) != _METADATA_VERSION:
+                continue
+            owner = self.api.lobby_owner(lobby)
+            if not _steam_id(owner) or owner == self.api.local_id:
+                continue
+            marker = self.api.lobby_data(lobby, _METADATA_KEY)
+            prefix = f"{_METADATA_VERSION}:{owner}:"
+            if marker.startswith(prefix) and _FINGERPRINT.fullmatch(marker[len(prefix):]):
+                results.append(PublicLobby(lobby, self._display_name(self.api.lobby_data(lobby, _HOST_NAME))))
+        return tuple(results)
 
     async def join(self, lobby: int) -> SteamRoute:
         """Join a Steam invite and bind the local endpoint for catalogue and gameplay."""
@@ -371,6 +424,14 @@ class SteamTransport:
             self.pending_invites.put_nowait(lobby)
 
     def _callback(self, callback: int, data: bytes, handle: int) -> None:
+        if callback == _CALLBACK_MATCH_LIST and self._search is not None and self._search[0] == handle:
+            _, future = self._search
+            if not future.done():
+                try:
+                    future.set_result(self._lobby_results(data))
+                except (OSError, ValueError, RuntimeError) as error:
+                    future.set_exception(error)
+            return
         if handle and (call := self._calls.get(handle)) is not None:
             if call.callback != callback:
                 return

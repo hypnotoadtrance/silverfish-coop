@@ -167,8 +167,7 @@ local function run(operation)
         local clip_index, clip_sample = operation:match("^clip([1-4])([01])$")
         local rig_operation = pose_fixture and (operation == "rig" or operation == "wrists" or clip_index)
         assert(operation == "aim" or operation == "lower" or rig_operation
-            or pose_fixture and operation == "jump"
-            or rifle_fixture and (operation == "selectrifle" or operation == "riflerange"),
+            or pose_fixture and operation == "jump" or rifle_fixture and operation == "selectrifle",
             "avatar_probe_unknown_guest_operation")
         local viewport = FindFirstOf("GameViewportClient")
         local world = valid(viewport) and viewport.World
@@ -182,7 +181,7 @@ local function run(operation)
                 if candidate:IsLocallyControlled() then
                     assert(not local_pawn, "avatar_probe_duplicate_local_guest")
                     local_pawn = candidate
-                elseif rig_operation or operation == "riflerange" then
+                elseif rig_operation then
                     assert(not remote_pawn, "avatar_probe_duplicate_remote_host")
                     remote_pawn = candidate
                 end
@@ -207,14 +206,6 @@ local function run(operation)
         if operation == "jump" then
             assert(local_pawn.CharacterMovement:IsMovingOnGround(), "avatar_probe_jump_ground_unavailable")
             local_pawn:Jump()
-            return
-        end
-        if operation == "riflerange" then
-            assert(valid(local_pawn) and valid(local_pawn.Controller) and valid(remote_pawn),
-                "avatar_probe_rifle_controller_unavailable")
-            local origin, teammate = local_pawn:K2_GetActorLocation(), remote_pawn:K2_GetActorLocation()
-            local yaw = math.deg(math.atan(origin.Y - teammate.Y, origin.X - teammate.X))
-            local_pawn.Controller:SetControlRotation({Pitch = 12, Yaw = yaw, Roll = 0})
             return
         end
         if operation == "selectrifle" then

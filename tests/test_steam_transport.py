@@ -10,6 +10,7 @@ from tools.silverfish.steam_transport import (
     SteamTransportError,
     _CALLBACK_CREATED,
     _CALLBACK_ENTER,
+    _CALLBACK_MATCH_LIST,
     _CALLBACK_FRIEND_JOIN,
     _CALLBACK_INVITE,
     _CALLBACK_SESSION_REQUEST,
@@ -48,9 +49,10 @@ class FakeSteam:
         self.presence = self.invited = None
         self.closed = False
         self.overlay = True
+        self.lobby_access = None
 
-    def create_lobby(self, *, friends_only):
-        assert friends_only
+    def create_lobby(self, *, access):
+        self.lobby_access = access
         self.platform.members.add(self.local_id)
         self.callbacks.append((_CALLBACK_CREATED, struct.pack("<i4xQ", 1, LOBBY), 25))
         return 25
@@ -72,6 +74,17 @@ class FakeSteam:
 
     def lobby_data(self, lobby, key):
         return self.platform.metadata.get(key, "")
+
+    def persona_name(self):
+        return "Fixture Host"
+
+    def request_lobbies(self, key, value, *, limit):
+        count = int(self.platform.metadata.get(key) == value)
+        self.callbacks.append((_CALLBACK_MATCH_LIST, struct.pack("<I", count), 27))
+        return 27
+
+    def list_lobbies(self, count):
+        return (LOBBY,) if count else ()
 
     def set_lobby_data(self, lobby, key, value):
         self.platform.metadata[key] = value
@@ -126,6 +139,19 @@ class Inbox(asyncio.DatagramProtocol):
 
 
 class SteamTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_steam_lobby_access_controls_friend_join_presence_without_disabling_invites(self):
+        api = Platform().client(HOST)
+        host = await self.start(api)
+        for access in ("invite", "friends", "public"):
+            with self.subTest(access=access):
+                await host.host(32124, fingerprint="d" * 64, access=access)
+                self.assertEqual(api.lobby_access, access)
+                self.assertEqual(api.presence, None if access == "invite" else LOBBY)
+                self.assertTrue(host.show_invites())
+                self.assertEqual(api.invited, LOBBY)
+                host.leave()
+                self.assertIsNone(api.presence)
+
     async def start(self, api):
         transport = SteamTransport(api)
         task = asyncio.create_task(transport.run())

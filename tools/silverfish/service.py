@@ -42,11 +42,12 @@ from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lif
 from . import native_lantern, native_stock_door
 from . import native_player_avatar
 from . import native_pickup_audio
-from . import native_damage_feedback
+from . import native_damage_feedback, native_weather_view
 from . import native_voice
 from . import native_anomaly_effects
 from . import native_weapon_fire_view
 from . import native_loose_pickup
+from . import native_mushrooms
 from . import native_stock_enemy_drops
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
 from . import native_prototype_drill
@@ -92,6 +93,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
                         native_authored_pickup.ACTION, native_loose_pickup.CLAIM, native_enemy_loot.CLAIM, native_stock_enemy_drops.CLAIM,
+                        native_mushrooms.CLAIM,
                         *native_guest_weapon.GUEST_ACTIONS, native_guest_weapon.SELECT_EQUIPMENT,
                         *native_guest_consumable.RESULT, native_guest_melee.SWING,
                         native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION)
@@ -866,6 +868,8 @@ class Host:
                 and native_authored_pickup._displayed(self.last_game, native_authored_pickup.GOLD_BAG).get("state") == "available")
         if self.last_game.get(native_loose_pickup.CAPABILITY) == 1:
             view[native_loose_pickup.STATE] = self.loose_pickups.hidden(self)
+        if mushrooms := native_mushrooms.frame(self.last_game, self.zone_epoch):
+            view[native_mushrooms.KEY] = mushrooms
         if dead_drop := native_dead_drop.frame(self):
             view[native_dead_drop.FRAME] = dead_drop
         if cabinet := native_dust_cabinet.frame(self):
@@ -877,6 +881,8 @@ class Host:
         if (world_view and world_view.get("mode") == "sample" and world_view.get("map") == area
                 and world_view.get("actor") == WORLD_VIEW_ACTORS.get(area)):
             view["host_world"]["native_world_view"] = world_view
+            if sirens := native_weather_view.siren_frame(self.last_game, area):
+                view["host_world"][native_weather_view.KEY] = sirens
         view["native_quests"] = self.party.get("native_quests", {})
         if jammer_pose := native_flood_jammer.pose_frame(self.last_game, self.zone_epoch):
             view[native_flood_jammer.POSE] = jammer_pose
@@ -2037,6 +2043,8 @@ class Host:
                 result = await native_finite_shop.perform(self, bridge, character, action, target, request["operation_id"])
             elif action == native_loose_pickup.CLAIM:
                 result = await native_loose_pickup.claim(self, bridge, character, target, request["operation_id"])
+            elif action == native_mushrooms.CLAIM:
+                result = await native_mushrooms.claim(self, bridge, character, target, request["operation_id"])
             elif action == native_authored_pickup.ACTION:
                 result = await native_authored_pickup.claim(self, bridge, character, target, request["operation_id"])
             elif action == native_stock_enemy_drops.CLAIM:
@@ -2696,6 +2704,19 @@ class Host:
                     self.last_game = await bridge.command(action, identity, pawn, timeout=5)
                     self.last_seen = time.monotonic()
                     result = {native_world_loot.KEY: self.last_game.get(native_world_loot.KEY, {})}
+                elif action == native_mushrooms.LOCATE and self.fixtures:
+                    self.last_game = await bridge.command(action, timeout=6)
+                    self.last_seen = time.monotonic()
+                    result = {native_mushrooms.KEY: self.last_game.get(native_mushrooms.KEY, {})}
+                elif action in (native_mushrooms.APPROACH, native_mushrooms.HARVEST) and self.fixtures:
+                    role, _, identity = (request.get("target") or "").partition("@")
+                    pawn = native_loot._scope(self, self.roles().get(role))
+                    row = self.last_game.get(native_mushrooms.KEY, {}).get(identity)
+                    if not row or not pawn or (action == native_mushrooms.HARVEST and role != "host"):
+                        raise party.RuleError("native_mushroom_fixture_scope_unavailable")
+                    self.last_game = await bridge.command(action, row["patch"], row["patch_guid"], pawn, timeout=6)
+                    self.last_seen = time.monotonic()
+                    result = {native_mushrooms.KEY: self.last_game.get(native_mushrooms.KEY, {})}
                 elif action in (native_host_stack_drop.FIXTURE, native_host_stack_drop.CLOSE_FIXTURE) and self.fixtures:
                     result = await native_host_stack_drop.fixture(self, bridge, action, request.get("target"))
                 elif action == native_kill_volume.FIXTURE and self.fixtures:
@@ -4187,7 +4208,10 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     guest_melee_canary: bool = False, host_dig_live_fixture: bool = False,
                     embedded_port: int | None = None, runtime_listener: bool = False,
                     resident_engine: EmbeddedEngine | None = None, direct_password: str | None = None,
-                    stock_creator: bool = False, resume_existing: bool = False, steam_session=None) -> None:
+                    stock_creator: bool = False, resume_existing: bool = False,
+                    steam_session=None, steam_access: str | None = None) -> None:
+    if steam_session is not None and (bind != "127.0.0.1" or steam_access not in ("invite", "friends", "public")):
+        raise ValueError("Steam hosting requires a local listener and a Steam lobby access mode")
     if resume_existing and (resident_engine is None or stock_creator or start_preset):
         raise ValueError("Resume requires the resident campaign and its existing checkpoint")
     if resident_engine is not None:
@@ -4522,7 +4546,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             async with contextlib.AsyncExitStack() as scope:
                 if steam_session is not None:
                     await scope.enter_async_context(steam_session.host_panel(
-                        bridge.directory, bind, controller.port, identity.certificate_pem, control))
+                        bridge.directory, bind, controller.port, identity.certificate_pem, control, access=steam_access))
                 await controller.run(bridge, transport)
         except (Exception, asyncio.CancelledError) as error:
             result = "stopped" if isinstance(error, asyncio.CancelledError) else "failed"
@@ -4692,6 +4716,7 @@ class Client:
         self.pickup_playback = native_pickup_audio.Playback()
         self.voice_playback = native_voice.Playback()
         self.hurt_playback = native_damage_feedback.Playback()
+        self.weather_sirens = native_weather_view.SirenPlayback()
         self.anomaly_playback = native_anomaly_effects.Playback()
         self.weapon_shot_playback = native_weapon_fire_view.Playback()
         self.snapshot_request: asyncio.Task | None = None
@@ -4943,7 +4968,8 @@ class Client:
         area, epoch = self.last_game.get("map"), self.zone_epoch
         if action == native_authored_pickup.ACTION:
             target = native_authored_pickup.request_target(target, self.zone_epoch)
-        elif action == native_loose_pickup.CLAIM and native_loose_pickup.target_path(target):
+        elif ((action == native_loose_pickup.CLAIM and native_loose_pickup.target_path(target))
+              or (action == native_mushrooms.CLAIM and isinstance(target, str) and party.REQUEST_ID.fullmatch(target))):
             target = f"{target}@{self.zone_epoch}"
         elif action == native_guest_melee.SWING:
             target = native_guest_melee.request_target(target, self.zone_epoch)
@@ -5423,6 +5449,10 @@ class Client:
                         self.last_game = await native_loot.project_opened(
                             self.bridge, self.last_game, self.gameplay.get(native_loot.STATE_KEY, {}))
                 await self.project_world_view()
+                self.last_game = await self.weather_sirens.sync(
+                    self.bridge, self.control, self.last_game,
+                    self.gameplay.get("host_world", {}).get(native_weather_view.KEY), self.zone_epoch,
+                )
                 if self.guest_clock:
                     await self.guest_clock.sync(self)
             except (OSError, RuntimeError) as error:
@@ -5448,24 +5478,30 @@ class Client:
         numeric = [frame.get(key) for key in keys]
         sky = [frame.get(key) for key in ("sky_r", "sky_g", "sky_b")]
         weather = [frame.get(key) for key in WORLD_WEATHER_FIELDS]
+        rain = [frame.get(key) for key in native_weather_view.RAIN_FIELDS]
         if (not all(type(value) in (int, float) and abs(value) < 10**12 for value in numeric)
                 or (any(value is not None for value in sky) and not all(
                     type(value) in (int, float) and abs(value) <= 1.01 for value in sky))
                 or (any(value is not None for value in weather) and not all(
                     type(value) in (int, float) and 0 <= value <= 100 for value in weather))
+                or any(value is not None for value in rain) and not native_weather_view.valid_rain(rain)
                 or type(frame.get("sun_visible")) is not bool):
             return
-        weather_args = tuple(str(value) for value in weather) if all(value is not None for value in weather) else ()
+        weather_present = all(value is not None for value in weather)
+        rain_present = native_weather_view.valid_rain(rain)
+        weather_args = tuple("-" if value is None else str(value) for value in weather) if weather_present or rain_present else ()
+        rain_args = tuple(map(str, rain)) if rain_present else ()
         snapshot = await self.bridge.command(
             "native-world-view-apply", self.zone_epoch, str(frame["sequence"]), area, expected_actor,
             *(str(value) for value in numeric[:-1]), "1" if frame["sun_visible"] else "0", str(numeric[-1]),
-            *("-" if value is None else str(value) for value in sky), *weather_args, timeout=3,
+            *("-" if value is None else str(value) for value in sky), *weather_args, *rain_args, timeout=3,
         )
         proof = snapshot.get("native_world_view", {})
         if (proof.get("map") != area or proof.get("actor") != expected_actor
                 or proof.get("mode") != "applied" or proof.get("epoch") != self.zone_epoch
                 or proof.get("sequence") != frame["sequence"] or proof.get("save_unchanged") is not True
-                or weather_args and proof.get("weather_verified") is not True):
+                or weather_present and proof.get("weather_verified") is not True
+                or rain_present and proof.get("rain_verified") is not True):
             raise RuntimeError("The connected guest did not verify the host's rendered world frame")
         self.last_game = snapshot
 
@@ -5919,6 +5955,7 @@ class Client:
                         enemy_rolls=self.gameplay.get(native_enemy_loot.STATE_KEY),
                         stock_enemy_drops=self.gameplay.get(native_stock_enemy_drops.STATE),
                         player_drops=self.gameplay.get(native_guest_drop_record.STATE) if shared_pickups else None,
+                        mushroom_frame=self.gameplay.get(native_mushrooms.KEY),
                     )
                 except (OSError, RuntimeError) as error:
                     if self.world_loot.last_error != str(error):

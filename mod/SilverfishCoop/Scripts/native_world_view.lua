@@ -28,6 +28,7 @@ local weather_fields = {
 }
 
 local profiles = require("authored_world_view")
+local weather_view = require("native_weather_view")
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -221,6 +222,8 @@ function view.observe(state, phase)
     report.game_seconds = game_seconds(current.save)
     local ok, weather = pcall(observed_weather, current)
     if ok and weather then copy_weather(report, weather) end
+    local rain_ok, rain = pcall(weather_view.read_rain, current)
+    if rain_ok and rain then weather_view.copy_rain(report, rain) end
     return report
 end
 
@@ -250,7 +253,8 @@ local function valid_frame(frame)
             and bounded(frame.sky_b, -1.01, 1.01)) then
         return false
     end
-    return not has_weather(frame) or weather_fields_valid(frame)
+    return (not has_weather(frame) or weather_fields_valid(frame))
+        and (not weather_view.has_rain(frame) or weather_view.valid_rain(frame))
 end
 
 local function project_visuals(current, report)
@@ -367,6 +371,7 @@ function view.clear()
     lease = nil
     if not previous then return true end
     local current = previous.context
+    local rain_ok, rain_failure = pcall(weather_view.destroy_rain, previous.rain)
     local weather_ok, weather_failure = pcall(restore_weather, previous)
     local ok, failure = pcall(function()
         if not day_current(current) then return end
@@ -380,6 +385,7 @@ function view.clear()
             error("native_world_original_render_unverified", 0)
         end
     end)
+    if not rain_ok then return false, rain_failure end
     if not weather_ok then return false, weather_failure end
     return ok, failure
 end
@@ -395,6 +401,7 @@ local function lease_current(state, phase)
 end
 
 function view.sync(state, phase)
+    pcall(weather_view.sync, state, phase)
     if not lease then return true end
     local ok, current = pcall(lease_current, state, phase)
     if not ok or not current then return view.clear() end
@@ -414,6 +421,10 @@ local function readback(current, frame, saved_seconds)
         local weather = read_weather(lease.weather)
         if weather then copy_weather(report, weather) end
         report.weather_verified = matches_weather(weather, frame)
+    end
+    if weather_view.has_rain(frame) then
+        weather_view.copy_rain(report, frame)
+        report.rain_verified = weather_view.rain_verified(lease.rain, frame)
     end
     return report
 end
@@ -452,10 +463,17 @@ function view.apply(state, phase, frame)
             restore_weather(lease)
             lease.weather, lease.original_weather = nil, nil
         end
+        if weather_view.has_rain(frame) then
+            lease.rain = weather_view.apply_rain(current, frame, lease.rain)
+        elseif lease.rain then
+            weather_view.destroy_rain(lease.rain)
+            lease.rain = nil
+        end
         local actual = readback(current, frame, saved_seconds)
         if current.day.UpdateInRealTime ~= false or not actual.save_unchanged or not matches_sun(actual, frame)
             or frame.sky_r ~= nil and actual.sky_r ~= nil and not actual.sky_verified
-            or has_weather(frame) and not actual.weather_verified then
+            or has_weather(frame) and not actual.weather_verified
+            or weather_view.has_rain(frame) and not actual.rain_verified then
             error("native_world_projection_readback_mismatch", 0)
         end
         return actual
@@ -479,6 +497,23 @@ function view.status(state, phase)
         end
     end)
     return ok and report or nil
+end
+
+function view.siren_rows(state, phase, row)
+    return weather_view.siren_rows(state, phase, row)
+end
+
+function view.play_siren(state, phase, epoch, sequence, source, cue, remaining)
+    if not lease or lease.frame.epoch ~= epoch or not lease_current(state, phase)
+        or not math.tointeger(sequence) or sequence < 1 or sequence >= 2^53 then
+        error("guest_weather_siren_scope_unavailable", 0)
+    end
+    if sequence <= (lease.last_siren or 0) then return "weather siren already played" end
+    if not weather_view.play_siren(lease.context, source, cue, remaining) then
+        error("guest_weather_siren_source_unavailable", 0)
+    end
+    lease.last_siren = sequence
+    return "stock weather siren played"
 end
 
 return view

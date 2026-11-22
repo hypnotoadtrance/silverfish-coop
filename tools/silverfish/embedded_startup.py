@@ -434,7 +434,11 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
     if host_options is None:
         host_options = service.MENU_HOST_OPTIONS
 
-    def host_plan(selected, bind, port, password="", *, creator_requested=False, resume_area=None):
+    def host_plan(selected, bind, port, password="", *, creator_requested=False, resume_area=None, steam_access=None):
+        if steam_access is not None:
+            if steam is None or steam.pump.done():
+                raise ValueError("Steam networking is unavailable")
+            bind, port = "127.0.0.1", 0
         mode, area = (("resume", resume_area) if resume_area is not None
                       else service.menu_host_start(selected, profile=saved.parent))
         if creator_requested and mode == "resume":
@@ -457,7 +461,7 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
                     direct_password=password, stock_creator=use_creator, resume_existing=resume_area is not None,
                     max_guests=service.MENU_HOST_GUEST_LIMIT, **host_options,
                     **({"start_preset": mode} if mode == "wanderer" and not use_creator else {}),
-                    **({"steam_session": steam} if steam is not None else {}),
+                    **({"steam_session": steam, "steam_access": steam_access} if steam_access is not None else {}),
                 )
                 if cloud_backups is None:
                     await session
@@ -467,9 +471,15 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
         def status():
             return runtime.read_json(selected / "run" / "status.json")
 
-        return SessionPlan(start, status,
-                           lambda frame: frame.get("endpoint") == {"address": bind, "port": port}
-                           and (use_creator or frame["game"]["map"] == area))
+        def ready(frame):
+            listener = frame.get("endpoint")
+            if not isinstance(listener, dict) or listener.get("address") != bind:
+                return False
+            actual_port = listener.get("port")
+            return (type(actual_port) is int and (actual_port == port if port else 0 < actual_port <= 65535)
+                    and (use_creator or frame["game"]["map"] == area))
+
+        return SessionPlan(start, status, ready)
 
     def resolve(claim):
         if claim.host_settings is None:
@@ -478,7 +488,8 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
         bind, port = endpoint(address or default_bind, int(port_text) if port_text else default_port)
         if claim.stock_resume:
             selected, area = saved_campaign(campaign, saved, name)
-            return host_plan(selected, bind, port, claim.direct_password or "", resume_area=area)
+            return host_plan(selected, bind, port, claim.direct_password or "", resume_area=area,
+                             steam_access=claim.steam_access)
         selected = campaign
         if not name and claim.stock_creator and automatic_campaigns:
             selected = _reserve_campaign(work, campaign.parent)
@@ -488,7 +499,8 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
             selected = select_run(work, "campaigns", name)
             if selected != campaign.parent / name:
                 raise ValueError("The campaign directory is redirected")
-        return host_plan(selected, bind, port, claim.direct_password or "", creator_requested=claim.stock_creator)
+        return host_plan(selected, bind, port, claim.direct_password or "", creator_requested=claim.stock_creator,
+                         steam_access=claim.steam_access)
 
     async def no_selection():
         raise ValueError("Choose a host campaign first")

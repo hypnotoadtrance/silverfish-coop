@@ -56,10 +56,19 @@ local function valid(field, value)
     return #value <= 45 and numeric_address(value)
 end
 
-function form.rows(draft, direct, show_name)
+local function active_fields(draft, resident, show_name)
+    local result = {}
+    for index = show_name and 1 or 2, resident and #fields or #fields - 1 do
+        if not draft.steam_access or index == 1 or fields[index].secret then
+            result[#result + 1] = fields[index]
+        end
+    end
+    return result
+end
+
+function form.rows(draft, resident, show_name)
     local rows = {}
-    for index = show_name and 1 or 2, direct and #fields or #fields - 1 do
-        local field = fields[index]
+    for _, field in ipairs(active_fields(draft, resident, show_name)) do
         if field.secret then
             rows[#rows + 1] = {toggle = {key = "require_password", label = "Require password",
                 target = field.key, checked = draft.require_password == true}}
@@ -70,11 +79,10 @@ function form.rows(draft, direct, show_name)
     return rows
 end
 
-function form.selection(view, draft, direct, saved_name, show_name)
+function form.selection(view, draft, resident, saved_name, show_name)
     local invalid
-    draft.require_password = direct and surface.checked(view, "require_password") == true
-    for index = show_name and 1 or 2, direct and #fields or #fields - 1 do
-        local field = fields[index]
+    draft.require_password = resident and surface.checked(view, "require_password") == true
+    for _, field in ipairs(active_fields(draft, resident, show_name)) do
         local value = surface.read(view, field.key)
         if field.secret and not draft.require_password then value = "" end
         if value then draft[field.key] = value end
@@ -82,7 +90,9 @@ function form.selection(view, draft, direct, saved_name, show_name)
         if not invalid and field.secret and draft.require_password and value == "" then invalid = field end
     end
     if invalid then return nil, "title_host_form_invalid_" .. invalid.key, invalid.error end
-    return {saved_name or (show_name and draft.campaign) or "", draft.bind, draft.port, direct and draft.password or nil}
+    local name = saved_name or (show_name and draft.campaign) or ""
+    if draft.steam_access then return {name, draft.steam_access, draft.password} end
+    return {name, draft.bind, draft.port, resident and draft.password or nil}
 end
 
 return form

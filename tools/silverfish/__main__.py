@@ -253,6 +253,7 @@ def parser() -> argparse.ArgumentParser:
         "native-stock-enemy-escrow-fixture", "native-stock-broker-key-fixture", "native-stock-enemy-loot-claim",
         "native-loose-pickup-claim", "native-loose-pickup-approach", "native-loose-pickup-fixture",
         "native-loose-pickup-expire-fixture",
+        "native-mushroom-claim", "native-mushroom-approach-fixture", "native-mushroom-harvest-fixture", "native-mushroom-locate-fixture",
         "native-wire-quest-preflight", "native-wire-quest-approach", "native-wire-board-fixture",
         "native-turret-photo-preflight", "native-turret-photo-capture", "native-turret-photo-capture-fixture", "native-turret-photo-shutter",
         "native-turret-photo-xp-fixture", "native-bounty-board-list", "native-host-camera-input-fixture",

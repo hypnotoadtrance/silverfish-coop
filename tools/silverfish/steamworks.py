@@ -12,6 +12,7 @@ from threading import get_ident
 APP_ID = 2941710
 LOBBY_CREATED = 513
 LOBBY_ENTER = 504
+LOBBY_MATCH_LIST = 510
 LOBBY_JOIN_REQUESTED = 333
 RICH_PRESENCE_JOIN_REQUESTED = 337
 SESSION_REQUEST = 1251
@@ -20,13 +21,12 @@ MAX_DATAGRAM = 4096
 
 _STEAM_API_CALL_COMPLETED = 703
 _CALL_RESULT = struct.Struct("<QiI")
-_CALL_RESULT_SIZE = {LOBBY_CREATED: 16, LOBBY_ENTER: 24}
+_CALL_RESULT_SIZE = {LOBBY_CREATED: 16, LOBBY_ENTER: 24, LOBBY_MATCH_LIST: 4}
 _EVENTS = {LOBBY_ENTER, LOBBY_JOIN_REQUESTED, RICH_PRESENCE_JOIN_REQUESTED, SESSION_REQUEST, SESSION_FAILED}
 _MAX_CALLBACKS = 128
 _MAX_DATAGRAMS = 64
 _MAX_PENDING_CALLS = 32
-_PRIVATE_LOBBY = 0
-_FRIENDS_ONLY_LOBBY = 1
+LOBBY_TYPES = {"invite": 0, "friends": 1, "public": 2}
 _COOP_CHANNEL = 83
 _SEND_UNRELIABLE_NO_NAGLE = 1
 _SEND_AUTO_RESTART_BROKEN_SESSION = 32
@@ -120,6 +120,15 @@ class Steamworks:
         self._member = _binding(dll, "ISteamMatchmaking_GetLobbyMemberByIndex", number64, pointer, number64, integer)
         self._lobby_data = _binding(dll, "ISteamMatchmaking_GetLobbyData", char, pointer, number64, char)
         self._set_lobby_data = _binding(dll, "ISteamMatchmaking_SetLobbyData", boolean, pointer, number64, char, char)
+        self._lobby_filter = _binding(dll, "ISteamMatchmaking_AddRequestLobbyListStringFilter", None, pointer,
+                                      char, char, integer)
+        self._lobby_result_limit = _binding(dll, "ISteamMatchmaking_AddRequestLobbyListResultCountFilter", None,
+                                            pointer, integer)
+        self._lobby_open_slots = _binding(dll, "ISteamMatchmaking_AddRequestLobbyListFilterSlotsAvailable", None,
+                                          pointer, integer)
+        self._lobby_list = _binding(dll, "ISteamMatchmaking_RequestLobbyList", number64, pointer)
+        self._lobby_by_index = _binding(dll, "ISteamMatchmaking_GetLobbyByIndex", number64, pointer, integer)
+        self._persona = _binding(dll, "ISteamFriends_GetPersonaName", char, pointer)
         self._overlay_enabled = _binding(dll, "ISteamUtils_IsOverlayEnabled", boolean, pointer)
         self._open_invites = _binding(dll, "ISteamFriends_ActivateGameOverlayInviteDialog", None, pointer, number64)
         self._get_presence = _binding(dll, "ISteamFriends_GetFriendRichPresence", char, pointer, number64, char)
@@ -221,14 +230,28 @@ class Steamworks:
                 self._free_callback(self._pipe)
         return events
 
-    def create_lobby(self, *, friends_only: bool = False) -> int:
+    def create_lobby(self, *, access: str = "invite") -> int:
         self._require_open()
-        kind = _FRIENDS_ONLY_LOBBY if friends_only else _PRIVATE_LOBBY
-        return self._remember(LOBBY_CREATED, self._create_lobby(self._matchmaking, kind, 5))
+        return self._remember(LOBBY_CREATED, self._create_lobby(self._matchmaking, LOBBY_TYPES[access], 5))
 
     def join_lobby(self, lobby_id: int) -> int:
         self._require_open()
         return self._remember(LOBBY_ENTER, self._join_lobby(self._matchmaking, _steam_id(lobby_id)))
+
+    def request_lobbies(self, key: str, value: str, *, limit: int) -> int:
+        self._require_open()
+        self._lobby_filter(self._matchmaking, _lobby_text(key, 64), _lobby_text(value, 64), 0)
+        self._lobby_result_limit(self._matchmaking, limit)
+        self._lobby_open_slots(self._matchmaking, 1)
+        return self._remember(LOBBY_MATCH_LIST, self._lobby_list(self._matchmaking))
+
+    def list_lobbies(self, count: int) -> tuple[int, ...]:
+        self._require_open()
+        return tuple(self._lobby_by_index(self._matchmaking, index) for index in range(count))
+
+    def persona_name(self) -> str:
+        self._require_open()
+        return (self._persona(self._friends) or b"")[:128].decode("utf-8", errors="ignore")
 
     def leave_lobby(self, lobby_id: int) -> None:
         self._require_open()

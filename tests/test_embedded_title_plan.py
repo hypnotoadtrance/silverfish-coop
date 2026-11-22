@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -6,12 +7,44 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from tools.silverfish import embedded_startup as startup, embedded_title_plan as plans, runtime
+from tools.silverfish import embedded_startup as startup, embedded_title_plan as plans, runtime, service
 from tools.silverfish.title_handoff import Claim
 from tools.silverfish.travel import OBSERVATORY
 
 
 class EmbeddedTitlePlanTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resident_steam_host_uses_a_loopback_listener_and_a_separate_unreal_port(self):
+        work = Path(self.enterContext(TemporaryDirectory())).resolve(strict=True)
+        campaign = work / "campaigns" / "trial"
+        steam_roles = []
+
+        @asynccontextmanager
+        async def playing(*, role):
+            steam_roles.append(role)
+            yield
+
+        steam = SimpleNamespace(playing=playing, pump=SimpleNamespace(done=lambda: False))
+        binding = startup._resident_host_plan(
+            work, campaign, work / "bridge", work / "saved", False, "0.0.0.0", 7777,
+            host_options={}, steam=steam,
+        )
+        choice = Claim("host", "b" * 32, "c" * 32, binding, host_settings=("", "", ""),
+                       direct_password="test pass", stock_creator=True, steam_access="public")
+        with (patch.object(service, "menu_host_start", return_value=("wanderer", OBSERVATORY)),
+              patch.object(runtime, "spare_udp_port", return_value=28101),
+              patch.object(startup, "EmbeddedEngine") as engine,
+              patch.object(service, "host_game", new_callable=AsyncMock) as host):
+            engine.return_value.observe_title = AsyncMock()
+            plan = binding.resolve_claim(choice)
+            await plan.start()
+            self.assertEqual(host.call_args.args, (work, campaign, "127.0.0.1", 0, False))
+            self.assertEqual(engine.call_args.args[-1], 28101)
+            self.assertEqual(host.call_args.kwargs["steam_access"], "public")
+            self.assertEqual(host.call_args.kwargs["direct_password"], "test pass")
+            self.assertEqual(steam_roles, ["host"])
+            self.assertTrue(plan.ready({"endpoint": {"address": "127.0.0.1", "port": 28100}}))
+            self.assertFalse(plan.ready({"endpoint": {"address": "0.0.0.0", "port": 28100}}))
+
     async def test_host_plan_publishes_only_for_the_owned_game_and_accepts_its_receipt(self):
         work = Path(self.enterContext(TemporaryDirectory())).resolve(strict=True)
         campaign = work / "campaigns" / "trial"

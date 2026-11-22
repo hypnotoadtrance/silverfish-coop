@@ -1,6 +1,6 @@
 # Playing Project Silverfish Co-op
 
-Use Direct IP on Windows. The resident trial opens co-op from the same game process that displays the title. The development CLI can also start a two-player session on the stock `PlaytestMap_01`. The matched C++ stage adds supported stock campaign areas, interactions, and separate native character saves. The largest loopback party joined with one host and four guests. [Current native coverage](NATIVE-INTEGRATION.md)
+Host via Steam Networking or Direct IP on Windows. The installed mod opens co-op from the game’s title screen. The development CLI can also start a two-player session on the stock `PlaytestMap_01`. The matched C++ stage adds supported stock campaign areas, interactions, and separate native character saves. The largest loopback party joined with one host and four guests. [Current native coverage](NATIVE-INTEGRATION.md)
 
 ## Install and open the Windows trial
 
@@ -30,7 +30,7 @@ Set `$sfPython` and `$sfCli` again when opening a new terminal. The workspace pa
 
 ## Host from the co-op title
 
-Choose **Multiplayer** on the first screen, then **Host**. **New Game** opens the stock character creator and creates a co-op save automatically. **Load Game** lists saves by location and last-saved time. The selected save restores its character and world. The form starts with the configured UDP port and listening address. Select **Require password** to enable the password field. Up to four guests can join.
+Choose **Multiplayer** on the first screen, then **Host**. **New Game** opens the stock character creator and creates a co-op save automatically. **Load Game** lists saves by location and last-saved time. The selected save restores its character and world. Use **Network** to select the connection method. The Direct IP form starts with the configured UDP port and listening address. Select **Require password** to enable the password field for either method. Up to four guests can join.
 
 ## Create an invitation in the development build
 
@@ -45,12 +45,13 @@ The game asks you to confirm trust on a first connection or when a known host’
 ### Steam relay trial
 
 1. Install the same Steam-enabled co-op ZIP on both PCs and launch the game through Steam on accounts that can run Silverfish concurrently.
-2. On the host, start or load a co-op campaign using the default IPv4 listening address. In the pause menu, select **Invite Steam Friend**. If Steam’s overlay is unavailable, the pause menu indicates that friends can use **Join Game** from their Steam friends list.
-3. On the guest, accept the invite at the title screen or in Steam before launching. Select **Connect**, use the host password if set, then select or create a campaign character.
+2. On the host, choose **Steam Networking** in the campaign’s **Network** settings. **Invite Only** requires a Steam invite. **Friends Only** also lets the host’s friends use **Join Game** in Steam. **Public** adds the lobby to **Public Steam Lobbies** on the Multiplayer menu and also supports **Join Game** for friends. [Steam lobby types](https://partner.steamgames.com/doc/api/ISteamMatchmaking#ELobbyType)
+3. Once the campaign is ready, open the pause menu and select **Invite Steam Friends** to open the Steam overlay. If the overlay is disabled, friends can still use **Join Game** for Friends Only and Public lobbies. Enable the overlay to send invites.
+4. On the guest, accept the invite, use **Join Game**, or select a lobby from the public list. Then select **Connect**, enter the host password if set, and select or create a campaign character.
 
 Steam relay carries the connection without a publicly reachable UDP port. The host remains the authority for the same campaign and character roster. The lobby ends when the host closes the campaign. Direct IP remains available through the title menu.
 
-The host sent an in-game Steam invite and the guest accepted it and joined the campaign in a two-PC playtest. Steam reconnect and longer sessions still need live coverage. If the invite button is absent, the host can check the `steam-coop-status.json` file in the current game bridge for the initialization state.
+The host sent an in-game Steam invite and the guest accepted it and joined the campaign in a two-PC playtest. Automated tests cover the new lobby choices, the friend join callback, and selection from the public browser. The new modes, Steam reconnect, and longer sessions still need a live two-PC test. If Steam is unavailable, check the `steam-coop-status.json` file in the current game bridge for the initialization result.
 
 ### Steam Cloud backups
 

@@ -27,6 +27,7 @@ namespace
 
     constexpr auto owner = STR("SilverfishCoopNative");
     constexpr auto field_class = STR("/Game/Classes/Actors/AnomalyField_BP.AnomalyField_BP_C");
+    constexpr auto mushroom_patch = STR("/Game/Assets/PCG_Brushes/MushroomPatch_BP.MushroomPatch_BP_C");
     constexpr auto trap_overlap = STR("BndEvt__Starburst_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature");
     constexpr auto electrode_class = STR("/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C");
     constexpr auto roaming_teleport_class = STR("/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C");
@@ -45,6 +46,8 @@ namespace
     };
     std::array<H::GlobalCallbackId, 5> hooks{H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID};
     U::FName spawn_field, overlap, electrode, roaming_teleport, fixed_prop_name;
+    U::FName patch_name;
+    std::array<U::FName, 3> patch_events;
     std::array<U::FName, 6> electrode_events;
     std::array<U::FName, 7> roaming_events;
     std::array<U::FName, 2> canister_names;
@@ -53,6 +56,8 @@ namespace
     thread_local bool guest_session{};
     thread_local U::FWeakObjectPtr observed_world;
     thread_local std::int64_t skipped{}, blocked_triggers{}, blocked_canister_calls{}, blocked_fixed_prop_calls{};
+    thread_local U::FWeakObjectPtr patch_world;
+    thread_local std::int64_t blocked_patches{};
 
     struct PendingLoad
     {
@@ -136,11 +141,26 @@ namespace
         const bool roaming_event = std::ranges::find(roaming_events, name) != roaming_events.end();
         const bool prop_event = !field && std::find(canister_events.begin(), canister_events.end(), name) != canister_events.end();
         const bool fixed_event = !field && std::find(fixed_prop_events.begin(), fixed_prop_events.end(), name) != fixed_prop_events.end();
-        if ((!field && !trap && !roaming_event && !prop_event && !fixed_event) || !U::IsInGameThreadRaw() ||
+        const bool patch_event = std::ranges::find(patch_events, name) != patch_events.end();
+        if ((!field && !trap && !roaming_event && !prop_event && !fixed_event && !patch_event) || !U::IsInGameThreadRaw() ||
             call.OriginalFunctionCallPrevented() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
         auto* type = actor->GetClassPrivate();
         if (!type) return;
         const auto class_name = type->GetFName();
+        if (patch_event && class_name == patch_name && type == function->GetOuterPrivate() &&
+            type->GetPathName() == mushroom_patch && function->GetNumParms() == 0 && actor->HasAnyFlags(U::RF_WasLoaded))
+        {
+            auto* world = static_cast<U::AActor*>(actor)->GetWorld();
+            if (!guest_world(world) || object(world, STR("PersistentLevel")) != actor->GetOuterPrivate()) return;
+            if (patch_world.Get() != world)
+            {
+                patch_world = world;
+                blocked_patches = 0;
+            }
+            ++blocked_patches;
+            call.PreventOriginalFunctionCall();
+            return;
+        }
         const bool canister = prop_event && (class_name == canister_names[0] || class_name == canister_names[1]);
         const bool roaming = roaming_event && class_name == roaming_teleport && type->GetPathName() == roaming_teleport_class;
         auto* binding = function->GetOuterPrivate();
@@ -210,6 +230,8 @@ namespace
                 blocked_triggers = 0;
                 blocked_canister_calls = 0;
                 blocked_fixed_prop_calls = 0;
+                patch_world = U::FWeakObjectPtr{};
+                blocked_patches = 0;
                 loading = {};
             }
         }
@@ -235,6 +257,12 @@ namespace silverfish::native_anomaly_fields
     {
         if (installed()) return;
         spawn_field = U::FName{STR("SpawnField"), U::FNAME_Add};
+        patch_name = U::FName{STR("MushroomPatch_BP_C"), U::FNAME_Add};
+        patch_events = {
+            U::FName{STR("ReceiveBeginPlay"), U::FNAME_Add},
+            U::FName{STR("GrowMushrooms"), U::FNAME_Add},
+            U::FName{STR("LoadMushrooms"), U::FNAME_Add},
+        };
         overlap = U::FName{trap_overlap, U::FNAME_Add};
         electrode = U::FName{STR("Electrode_BP_C"), U::FNAME_Add};
         roaming_teleport = U::FName{STR("Wandering_Teleport_BP_C"), U::FNAME_Add};
@@ -326,6 +354,13 @@ namespace silverfish::native_anomaly_fields
     {
         lua.register_function("SilverfishSetNativeAnomalyGuest", set_guest);
         lua.register_function("SilverfishReadNativeAnomalySkips", count);
+        lua.register_function("SilverfishReadNativeMushroomSkips", [](const Lua& current) {
+            const bool match = U::IsInGameThreadRaw() && guest_session && current.get_stack_size() == 1 &&
+                current.is_integer(1) && reinterpret_cast<std::uintptr_t>(patch_world.Get()) ==
+                    static_cast<std::uintptr_t>(current.get_integer());
+            current.set_integer(match ? blocked_patches : 0);
+            return 1;
+        });
         lua.register_function("SilverfishQualifyNativePlacedTrap",
             [](const Lua& current) { return qualify_placed(current, trap_class); });
         lua.register_function("SilverfishQualifyNativePlacedCanister",

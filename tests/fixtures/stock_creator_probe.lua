@@ -197,6 +197,10 @@ function actions.guestkit(menu, switch, page)
     return guest_style(menu, switch, page, 1)
 end
 
+function actions.guesthyperkit(menu, switch, page)
+    return guest_style(menu, switch, page, 3)
+end
+
 function actions.guestnext(menu, switch)
     page_is(switch, 1)
     menu:BndEvt__Character_Editor_Widget_Button_Confirm_1_K2Node_ComponentBoundEvent_35_Pressed__DelegateSignature()

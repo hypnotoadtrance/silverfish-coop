@@ -27,6 +27,10 @@ _HOST_REQUEST = re.compile(rb"2" + _HOST_FIELDS + rb"\r?\n")
 _DIRECT_HOST_REQUEST = re.compile(rb"3" + _HOST_FIELDS + rb"\t([^\x00-\x1f\x7f]{0,512})\r?\n")
 _CREATOR_HOST_REQUEST = re.compile(rb"4" + _HOST_FIELDS + rb"\t([^\x00-\x1f\x7f]{0,512})\tcreator\r?\n")
 _RESUME_HOST_REQUEST = re.compile(rb"5" + _HOST_FIELDS + rb"\t([^\x00-\x1f\x7f]{0,512})\tresume\r?\n")
+_STEAM_HOST_REQUEST = re.compile(
+    rb"6\t([0-9a-f]{32})\t([0-9a-f]{32})\thost\t([A-Za-z0-9_-]{0,64})"
+    rb"\t(invite|friends|public)\t([^\x00-\x1f\x7f]{0,512})\t(creator|resume)\r?\n"
+)
 _CHARACTER_UUID = rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _JOIN_REQUEST = re.compile(rb"2\t([0-9a-f]{32})\t([0-9a-f]{32})\tjoin\t([0-9a-f]{32})"
                            rb"\t([A-Za-z0-9_-]{0,64})\t(" + _CHARACTER_UUID + rb")\r?\n")
@@ -57,6 +61,7 @@ class Claim:
     direct_password: str | None = field(default=None, repr=False)
     stock_creator: bool = False
     stock_resume: bool = False
+    steam_access: str | None = None
 
 
 def _stock_title(snapshot):
@@ -251,7 +256,7 @@ class TitleHandoff:
         except (FileNotFoundError, PermissionError):
             return None
 
-        host_settings = join_settings = direct_password = None
+        host_settings = join_settings = direct_password = steam_access = None
         stock_creator = stock_resume = False
         choice = _REQUEST.fullmatch(data)
         if choice:
@@ -272,6 +277,19 @@ class TitleHandoff:
             if len(direct_password) > 128 or (stock_resume and not NAME.fullmatch(campaign)):
                 return self._refuse("malformed_request")
             action, host_settings = "host", (campaign, bind, port)
+        elif choice := _STEAM_HOST_REQUEST.fullmatch(data):
+            generation, request_id, campaign, steam_access, password, action_mode = choice.groups()
+            generation, request_id, campaign, steam_access = (
+                field.decode("ascii") for field in (generation, request_id, campaign, steam_access)
+            )
+            stock_creator, stock_resume = action_mode == b"creator", action_mode == b"resume"
+            try:
+                direct_password = password.decode("utf-8")
+            except UnicodeDecodeError:
+                return self._refuse("malformed_request")
+            if len(direct_password) > 128 or (stock_resume and not NAME.fullmatch(campaign)):
+                return self._refuse("malformed_request")
+            action, host_settings = "host", (campaign, "", "")
         elif choice := _JOIN_REQUEST.fullmatch(data):
             generation, request_id, invite, profile, character = (field.decode("ascii") for field in choice.groups())
             action, join_settings = "join", (invite, profile, character)
@@ -295,7 +313,7 @@ class TitleHandoff:
         if not _unlink(self.request_path):
             return None
         claim = Claim(action, request_id, generation, self._bindings[action], host_settings, join_settings,
-                      direct_password, stock_creator, stock_resume)
+                      direct_password, stock_creator, stock_resume, steam_access)
         self._claim = claim
         self.last_refusal = None
         self.close()

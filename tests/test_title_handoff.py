@@ -156,6 +156,21 @@ class TitleHandoffTests(unittest.TestCase):
         self.assertNotIn(invite, repr(claim))
         self.assertNotIn(character, repr(claim))
 
+    def test_steam_host_carries_access_and_password_without_a_network_endpoint(self):
+        generation = self.publish({"host": self.host})
+        prefix = f"6\t{generation}\t{'a' * 32}\thost\t".encode("ascii")
+        for suffix in (b"\tunknown\tsecret\tcreator\n", b"\tinvite\tsecret\tresume\n",
+                       b"campaign\tinvite\t\xff\tresume\n"):
+            self.handoff.request_path.write_bytes(prefix + suffix)
+            self.assert_refused("malformed_request", ready(2))
+        self.handoff.request_path.write_bytes(prefix + b"campaign\tpublic\tsecret\tresume\n")
+        self.assertIsNone(self.handoff.poll(ready(2)))
+        claim = self.handoff.poll(ready(3))
+        self.assertEqual(claim, Claim("host", "a" * 32, generation, self.host,
+                                      host_settings=("campaign", "", ""), direct_password="secret",
+                                      stock_resume=True, steam_access="public"))
+        self.assertNotIn("secret", repr(claim))
+
     def test_rejects_stale_generation_and_unadvertised_action(self):
         original = self.publish({"join": self.join})
         current = self.publish({"host": self.host}, sequence=2)

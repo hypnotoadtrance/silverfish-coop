@@ -74,6 +74,7 @@ local native_stash_view = require("native_stash_view")
 local native_inventory_view = require("native_inventory_view")
 local native_corpse_view = require("native_corpse_view")
 local native_crate_props = require("native_crate_props")
+local native_mushrooms = require("native_mushrooms")
 local native_guest_ui = require("native_guest_ui")
 local native_wipe_inventory = require("native_wipe_inventory")
 local native_guest_stack_drop = require("native_guest_stack_drop")
@@ -935,8 +936,14 @@ local function run_command(fields, state, current_phase)
     elseif command == "native-dream-nothing-position" then
         if #fields ~= 4 then error("Expected an exact terminal fixture guest and distance", 0) end
         return native_dream.position_terminal_fixture(state, current_phase, argument, fields[4])
+    elseif command == "native-weather-siren-play" then
+        if not world_view_enabled or #fields ~= 7 or current_phase ~= "connected" or role ~= "client" then
+            error("Weather siren requires the authenticated client", 0)
+        end
+        return native_world_view.play_siren(state, current_phase, fields[3], tonumber(fields[4]),
+            fields[5], tonumber(fields[6]), tonumber(fields[7]))
     elseif command == "native-world-view-apply" then
-        if not world_view_enabled or (#fields ~= 18 and #fields ~= 23)
+        if not world_view_enabled or (#fields ~= 18 and #fields ~= 23 and #fields ~= 27)
             or current_phase ~= "connected" or role ~= "client" then
             error("Authoritative sun projection requires the current connected client", 0)
         end
@@ -949,6 +956,8 @@ local function run_command(fields, state, current_phase)
             fog_density = tonumber(fields[19]), fog_falloff = tonumber(fields[20]),
             cloud_bottom_km = tonumber(fields[21]), cloud_height_km = tonumber(fields[22]),
             cloud_density_offset = tonumber(fields[23]),
+            rain_intensity = tonumber(fields[24]), rain_x = tonumber(fields[25]),
+            rain_y = tonumber(fields[26]), rain_z = tonumber(fields[27]),
         })
         return "authenticated host sun and sky projected"
     elseif command == "join" then
@@ -1078,6 +1087,7 @@ local function run_command(fields, state, current_phase)
         or native_stock_door.command(fields, state, current_phase)
         or native_lantern.command(fields, state, current_phase)
         or native_crate_props.command(fields, state, current_phase)
+        or native_mushrooms.command(fields, state, current_phase)
         or native_player_avatar.command(fields, state, current_phase)
         or native_pickup_audio.command(fields, state, current_phase)
         or native_voice.command(fields, state, current_phase)
@@ -1165,7 +1175,9 @@ local function world_view_row(mode, view)
         view.sun_visible and 1 or 0, view.sun_intensity, view.sky_r or "-", view.sky_g or "-", view.sky_b or "-",
         view.clock_text or "-", view.save_unchanged and 1 or 0, view.sky_verified and 1 or 0,
         view.fog_density or "-", view.fog_falloff or "-", view.cloud_bottom_km or "-", view.cloud_height_km or "-",
-        view.cloud_density_offset or "-", view.weather_verified and 1 or 0)
+        view.cloud_density_offset or "-", view.weather_verified and 1 or 0,
+        view.rain_intensity or "-", view.rain_x or "-", view.rain_y or "-", view.rain_z or "-",
+        view.rain_verified and 1 or 0)
 end
 
 local function write_status(state, current_phase, failure, fields, pending)
@@ -1193,6 +1205,9 @@ local function write_status(state, current_phase, failure, fields, pending)
             if host_world_view then host_world_view.sequence = sequence end
         end
         if host_world_view then rows[#rows + 1] = world_view_row("sample", host_world_view) end
+        for _, row in ipairs(native_world_view.siren_rows(state, current_phase, status_row)) do
+            rows[#rows + 1] = row
+        end
     elseif world_view_enabled and current_phase == "connected" then
         host_world_view = nil
         local seen = native_world_view.status(state, current_phase)
@@ -1287,6 +1302,7 @@ local function write_status(state, current_phase, failure, fields, pending)
         local lantern = native_lantern.status(state, current_phase, status_row)
         if lantern then rows[#rows + 1] = lantern end
         for _, row in ipairs(native_crate_props.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_mushrooms.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_cistern_lockpick.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_fixture.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_replication.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

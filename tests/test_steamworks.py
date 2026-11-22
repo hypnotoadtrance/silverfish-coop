@@ -80,6 +80,7 @@ class SteamworksTests(unittest.TestCase):
         api = steamworks.Steamworks(dll)
         self.addCleanup(api.close)
         self.assertEqual(api.create_lobby(), 24)
+        dll.SteamAPI_ISteamMatchmaking_CreateLobby.assert_called_once_with(api._matchmaking, 0, 5)
         self.assertEqual(api.join_lobby(17), 25)
         created = struct.pack("<i4xQ", 1, 42)
         invited = struct.pack("<QQ", 43, 44)
@@ -90,6 +91,14 @@ class SteamworksTests(unittest.TestCase):
         self.assertEqual(api.poll_callbacks(), [(513, created, 24), (333, invited, 0), (504, b"", 25)])
         self.assertEqual(dll.SteamAPI_ManualDispatch_FreeLastCallback.call_count, 5)
         self.assertEqual(dll.SteamAPI_ManualDispatch_GetAPICallResult.call_count, 2)
+
+    def test_creates_each_steam_lobby_type_explicitly(self):
+        dll = _Dll()
+        api = steamworks.Steamworks(dll)
+        self.addCleanup(api.close)
+        for access, kind in (("invite", 0), ("friends", 1), ("public", 2)):
+            api.create_lobby(access=access)
+            dll.SteamAPI_ISteamMatchmaking_CreateLobby.assert_called_with(api._matchmaking, kind, 5)
 
     def test_received_data_is_copied_and_each_message_is_released(self):
         dll = _Dll()
