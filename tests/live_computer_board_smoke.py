@@ -11,7 +11,7 @@ import sys
 import uuid
 
 from live_ai_smoke import wait
-from live_multi_smoke import CROSSROADS, OBSERVATORY, saved_hashes
+from live_multi_smoke import CROSSROADS, OBSERVATORY, campaign_save_hashes, saved_hashes
 from live_turret_photo_smoke import BOROUGH, CITY, RAIL, RUINS, SCIENTIST
 
 REPO = Path(__file__).resolve().parents[1]
@@ -230,12 +230,12 @@ async def exercise(work, vanilla_saved, *, stock_board_input=False, crafting_ben
         ), event
         return result
 
-    async def quest_checkpoint(step):
+    async def quest_progress(step):
         def record(state):
-            return state.get("campaign", {}).get("world", {}).get("party", {}).get("native_quests", {}).get(QUEST, {})
+            return state.get("gameplay", {}).get("native_quests", {}).get(QUEST, {})
 
-        saved = await wait(host_run, lambda state: record(state).get("step") == step, timeout=15)
-        return record(saved)
+        current = await wait(host_run, lambda state: record(state).get("step") == step, timeout=15)
+        return record(current)
 
     async def stop(process, owner):
         if process.returncode is None:
@@ -337,16 +337,18 @@ async def exercise(work, vanilla_saved, *, stock_board_input=False, crafting_ben
         proof["stock_offer"] = offered
         assert (offered["map"], offered["step_after"], offered["xp_after"], offered["can_turn_in"]) == (BOROUGH, None, 0, False), offered
         assert offered["board"].endswith("BountyBoard_BP_C_3"), offered
+        save_files = campaign_save_hashes(campaign_dir)
         if stock_board_input:
             await catalog(offered, offered=True)
             selected = await press_board(offered, "view", "offer")
             confirmed = await press_board(offered, "start", "elsewhere")
             assert selected["sequence"] == selected["open"] == confirmed["open"] < confirmed["sequence"], confirmed
-            accepted = await quest_checkpoint(1)
+            accepted = await quest_progress(1)
         else:
             accepted = await action(profile, "native-quest-start", "--target", QUEST)
         proof["stock_acceptance"] = accepted
         assert (accepted["quest_id"], accepted["step"], accepted["actor"]) == (QUEST, 1, character), accepted
+        assert campaign_save_hashes(campaign_dir) == save_files, "The stock board saved while accepting its contract"
         active = (await action(profile, "native-computer-board-preflight"))["native_computer_board"]
         proof["borough_active"] = active
         assert (active["objective_guid"], active["objective_owner"], active["step_after"]) == (guid, "guest", 1), active
@@ -368,12 +370,13 @@ async def exercise(work, vanilla_saved, *, stock_board_input=False, crafting_ben
         assert guid not in host_inventory and guest_inventory.pop(guid) == row, (host_inventory, guest_inventory)
         before = await balances()
         proof["native_flags_before"] = before
+        save_files = campaign_save_hashes(campaign_dir)
 
         if stock_board_input:
             selected = await press_board(redeemable, "view", "ready")
             confirmed = await press_board(redeemable, "turnin", "completed")
             assert selected["sequence"] == selected["open"] == confirmed["open"] < confirmed["sequence"], confirmed
-            settled = await quest_checkpoint(-10)
+            settled = await quest_progress(-10)
         else:
             settled = await action(profile, "native-quest-turnin", "--target", QUEST)
             assert settled["effect"] == "native_quest_changed", settled
@@ -388,6 +391,8 @@ async def exercise(work, vanilla_saved, *, stock_board_input=False, crafting_ben
                        and not player.get("native_quest_xp_pending") for player in players)
 
         await wait(host_run, xp_settled)
+        assert campaign_save_hashes(campaign_dir) == save_files, "The stock board saved while settling its contract and XP"
+        proof["no_save_during_contract"] = True
         expected = {owner: values.copy() for owner, values in before.items()}
         expected["host"]["Player_Cash"] += 800
         for owner in expected:

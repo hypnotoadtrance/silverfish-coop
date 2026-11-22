@@ -57,7 +57,8 @@ class NorthernPassageTests(unittest.IsolatedAsyncioTestCase):
         party.add_player(state, GUEST)
         self.host = SimpleNamespace(
             party=state, native_profile=profile, fixtures=False, native_zones=True, native_guest=True,
-            transitioning=False, stopping=False, native_checkpoint_unsafe=False, last_seen=time.monotonic(),
+            transitioning=False, stopping=False, native_checkpoint_unsafe=False, pending_host_save=None,
+            last_seen=time.monotonic(),
             last_game={"state": "hosting", "map": DEAD_END, native_authored_pickup.SOURCES_KEY: {SOURCE: {
                 "source": SOURCE, "map": DEAD_END, "actor": NOTE, "class_path": NOTE_CLASS, "state": "available",
             }}},
@@ -126,7 +127,9 @@ class NorthernPassageTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(self.host.checkpoint_native.call_args.kwargs["require_guest_frames"], {GUEST})
         self.host.last_game["map"] = BOROUGH
+        self.host.checkpoint_native.reset_mock()
         self.assertEqual((await self.quest("native-quest-start"))["step"], 1)
+        self.host.checkpoint_native.assert_not_awaited()
         before = await collection.preflight(self.host, self.bridge, GUEST, spec=CONTRACT)
         self.assertTrue(before[CONTRACT.key]["objective_qualified"])
         receipt = await self.quest("native-quest-turnin")

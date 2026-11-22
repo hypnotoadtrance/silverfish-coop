@@ -12,7 +12,7 @@ import uuid
 
 from live_ai_smoke import status as read_status, wait
 from live_computer_board_smoke import stock_flags
-from live_multi_smoke import saved_hashes
+from live_multi_smoke import campaign_save_hashes, saved_hashes
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -150,12 +150,12 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         assert (pressed["map"], pressed["board"], pressed["quest"], pressed["state"]) == (redemption, board, quest, expected), pressed
         evidence.setdefault("board_presses", []).append(pressed)
 
-    async def committed_quest(step):
+    async def quest_progress(step):
         def record(state):
-            return state.get("campaign", {}).get("world", {}).get("party", {}).get("native_quests", {}).get(quest, {})
+            return state.get("gameplay", {}).get("native_quests", {}).get(quest, {})
 
-        saved = await wait(run, lambda state: record(state).get("step") == step)
-        return record(saved)
+        current = await wait(run, lambda state: record(state).get("step") == step)
+        return record(current)
 
     async def accept():
         if spec.fixture_xp:
@@ -195,7 +195,7 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
             await board_press("loading")
             await board_state("offer")
             await board_press("starting")
-            accepted = await committed_quest(1)
+            accepted = await quest_progress(1)
         else:
             accepted = await action(guest, "native-quest-start", "--target", quest)
         assert (accepted["quest_id"], accepted["step"], accepted["actor"]) == (quest, 1, character), accepted
@@ -449,16 +449,25 @@ async def exercise(work, vanilla_saved, *, board_input=False, plan=NORTHERN_PASS
         evidence["effective_stock_reputation_before"] = {faction: row["before"] for faction, row in reputation.items()}
         before = await stock_balances()
         evidence["stock_before"] = before
+        save_files = campaign_save_hashes(root)
         if board_input:
             await board_state("ready")
             await board_press("redeeming")
-            redeemed = await committed_quest(-10)
+            redeemed = await quest_progress(-10)
         else:
             redeemed = await action(guest, "native-quest-turnin", "--target", quest)
         assert (redeemed["step"], redeemed["cash"], redeemed["xp"]) == (-10, spec.cash, 1), redeemed
         assert set(redeemed["recipients"]) == {"host", character}, redeemed
         assert (redeemed[spec.consumed_field], redeemed["objective_owner"]) == (guid, character), redeemed
         assert guid not in await inventory(guest) and guid not in await inventory(host)
+        def xp_settled(state):
+            players = state.get("gameplay", {}).get("players", {}).values()
+            return any(player.get("character_id") == character and player.get("quest_xp") == 1
+                       and not player.get("native_quest_xp_pending") for player in players)
+
+        await wait(run, xp_settled)
+        assert campaign_save_hashes(root) == save_files, "The stock board saved while settling its contract and XP"
+        evidence["no_save_during_redemption"] = True
         after = await stock_balances()
         expected_reputation = {flag: reputation[faction]["before"] + delta
                                for faction, (flag, delta) in plan.reputation.items()}

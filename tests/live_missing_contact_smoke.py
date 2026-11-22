@@ -10,7 +10,7 @@ import uuid
 
 from live_ai_smoke import wait
 from live_computer_board_smoke import stock_flags
-from live_multi_smoke import saved_hashes
+from live_multi_smoke import campaign_save_hashes, saved_hashes
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -118,9 +118,12 @@ async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = Fals
     def party_state(doc):
         return doc.get("campaign", {}).get("world", {}).get("party", {})
 
-    async def committed(step):
-        status = await wait(run, lambda doc: party_state(doc).get("native_quests", {}).get(SPEC.quest_id, {}).get("step") == step)
-        return party_state(status)["native_quests"][SPEC.quest_id]
+    async def quest_progress(step):
+        def record(doc):
+            return doc.get("gameplay", {}).get("native_quests", {}).get(SPEC.quest_id, {})
+
+        status = await wait(run, lambda doc: record(doc).get("step") == step)
+        return record(status)
 
     async def inventory(directory):
         page = (await action(directory, "native-inventory-list"))["native_inventory"]
@@ -213,7 +216,7 @@ async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = Fals
         await press(guest_run, "loading")
         await board_state(guest_run, "offer")
         await press(guest_run, "starting")
-        accepted = await committed(1)
+        accepted = await quest_progress(1)
         assert (accepted["actor"], accepted["quest_id"]) == (character, SPEC.quest_id), accepted
         evidence["accepted"] = accepted
         await action(run, SPEC.command("approach"), target="host")
@@ -285,6 +288,7 @@ async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = Fals
             1, package, owner_kind, True), active
         before = await balances(character)
         assert before[0][dig.FLAG] == 1 and before[1][dig.FLAG] == 0
+        save_files = campaign_save_hashes(campaign)
         if guest_turnin:
             assert before == unredeemed_balances, (unredeemed_balances, before)
             evidence["handoff_restart"]["stock_balances"] = before
@@ -294,7 +298,7 @@ async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = Fals
         await press(redeem_run, "loading")
         await board_state(redeem_run, "ready")
         await press(redeem_run, "redeeming")
-        done = await committed(-10)
+        done = await quest_progress(-10)
         assert (done["cash"], done["xp"], done[SPEC.consumed_field], done["objective_owner"], done["actor"]) == (
             450, 1, package, redeemer, redeemer), done
         assert set(done["recipients"]) == {"host", character}, done
@@ -313,6 +317,8 @@ async def exercise(work: Path, vanilla_saved: Path, *, guest_turnin: bool = Fals
                        and not player.get("native_quest_xp_pending") for player in players)
 
         await wait(run, guest_reward_applied)
+        assert campaign_save_hashes(campaign) == save_files, "The stock board saved while settling Missing Contact and XP"
+        evidence["no_save_during_redemption"] = True
         expected_host = dict(before[0], Player_Cash=done["wallet"], Player_Xp=before[0]["Player_Xp"] + 1,
                              Rep_Freelancer=expected_reputation["8"], Rep_State=expected_reputation["4"])
         expected_guest = dict(before[1], Player_Xp=before[1]["Player_Xp"] + 1)

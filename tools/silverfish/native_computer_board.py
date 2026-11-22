@@ -3,7 +3,7 @@
 import time
 from dataclasses import dataclass
 
-from . import native_authored_pickup, native_black_box, native_loot, native_rewards, native_wire_quest, party
+from . import native_authored_pickup, native_black_box, native_inventory, native_loot, native_rewards, native_wire_quest, party
 from .native_gold import valid_guid
 from .native_host_dig import KEY as DIG_RECORD, FLAG as DIG_FLAG, SOURCE as DIG_SOURCE
 from .native_host_dig_live import CUSTODY as DIG_CUSTODY
@@ -253,10 +253,14 @@ async def _commit(host, bridge, actor: str, spec: CollectionContract, *, turning
                 raise party.RuleError(refusal + "objective_required")
             arguments = (guid, owner)
 
-        await host.checkpoint_native(bridge)
         recipients = sorted(set(host.roles().values()) & host.party["players"].keys()) if turning_in else []
         if turning_in and actor not in recipients:
             raise party.RuleError(f"{spec.key}_interactor_unavailable")
+        required = frozenset({actor}) if turning_in and actor != "host" else frozenset()
+        defer_save = not required or await native_inventory.retain_guest_save(host, bridge, actor, pawn)
+        if not defer_save:
+            # A bridge without retention needs a paired save to preserve the detached objective removal.
+            await host.checkpoint_native(bridge)
         host.native_checkpoint_unsafe = True
         proof = await _command(host, bridge, spec, "turn-in" if turning_in else "start", pawn, area, *arguments)
         cash = proof["cash_after"] - proof["cash_before"]
@@ -289,8 +293,11 @@ async def _commit(host, bridge, actor: str, spec: CollectionContract, *, turning
             if spec is BLACK_BOX:
                 record["completion_flag"] = native_black_box.COMPLETION_FLAG
         candidate.setdefault("native_quests", {})[spec.quest_id] = record
-        required = frozenset({actor}) if turning_in and actor != "host" else frozenset()
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=required)
+        revision = None
+        if defer_save:
+            host.pending_host_save = bool(host.pending_host_save or turning_in and actor == "host")
+        else:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=required)
         host.party = candidate
         host.native_checkpoint_unsafe = False
         event = spec.key + ("_completed" if turning_in else "_started")

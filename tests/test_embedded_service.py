@@ -144,7 +144,7 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
                                native_events=True, native_guest=True, native_zones=True, embedded_engine=True)
             process.assert_not_called()
 
-    async def test_host_netdriver_and_quic_use_different_ports_and_leave_after_checkpoint(self):
+    async def test_host_netdriver_and_quic_use_different_ports_and_teardown_without_saving(self):
         mailbox = self.simulate_boot(self.campaign, host=True)
         transport = self.transport(self.quic_port)
         owns_port = iter((True, False))
@@ -174,23 +174,19 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(controller.native_profile.id, self.bridge.save_scope)
             self.events.append(("run",))
 
-        async def checkpoint(_controller, bridge):
-            self.assertIs(bridge, self.bridge)
-            self.assertEqual(bridge.state, "hosting")
-            self.events.append(("checkpoint",))
-
         with (patch.object(service, "verify_loopback_socket", side_effect=verify_socket),
               patch.object(service.link, "start_host", side_effect=start_transport),
               patch.object(service.Host, "run", new=run),
-              patch.object(service.Host, "checkpoint_native", new=checkpoint)):
+              patch.object(service.Host, "checkpoint_native", new_callable=AsyncMock) as checkpoint):
             await self.host()
+            checkpoint.assert_not_awaited()
         status = runtime.read_json(self.campaign / "run" / "status.json")
         scope = uuid.UUID(status["campaign"]["campaign_id"]).hex
         self.assertEqual(self.events, [
             ("native-save-scope-select", scope),
             ("host", OBSERVATORY, f"listener={self.raw_port}"), ("verify-raw", self.raw_port),
             ("quic", self.quic_port), ("run",),
-            ("checkpoint",), ("native-guest-clear",), ("transport-closed", self.quic_port), ("leave",),
+            ("native-guest-clear",), ("transport-closed", self.quic_port), ("leave",),
             ("native-save-scope-release", scope),
         ])
         self.assertEqual(self.bridge.process.returncode, 0)

@@ -92,9 +92,9 @@ async def action(host, bridge, actor: str, verb: str, *, fixture: bool = False, 
             if not -(2**31) <= wallet <= 2_147_483_647 - cash_reward:
                 raise party.RuleError("wallet_capacity_exceeded")
 
-        await host.checkpoint_native(bridge)
+        if fixture:
+            await host.checkpoint_native(bridge)
         host.native_checkpoint_unsafe = True
-        applied_xp = frozenset()
         if verb == "native-quest-start":
             operation = f"{prefix}-issue-fixture" if fixture else f"{prefix}-issue"
             after = await _command(host, bridge, operation, expected, BROKER, quest_id=quest_id)
@@ -116,7 +116,6 @@ async def action(host, bridge, actor: str, verb: str, *, fixture: bool = False, 
                 recipient["quest_xp"] = recipient.get("quest_xp", 0) + XP
                 if character != "host":
                     native_rewards.queue(recipient, XP)
-            applied_xp = await native_rewards.project(host, bridge, candidate, native_rewards.pending_recipients(host, candidate))
             candidate["economy"]["wallet"] = after["native_cash"]
             record = {"quest_id": quest_id, "step": -10, "actor": actor, "recipients": recipients, "xp": XP,
                       "cash": cash_reward, "wallet": after["native_cash"], "consumed_guid": after["consumed_guid"]}
@@ -128,7 +127,14 @@ async def action(host, bridge, actor: str, verb: str, *, fixture: bool = False, 
                               freelancer_rep=after["freelancer_rep"], fae_rep=after["fae_rep"])
 
         candidate.setdefault("native_quests", {})[quest_id] = record
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=applied_xp)
+        revision = None
+        if fixture:
+            applied_xp = (await native_rewards.project(host, bridge, candidate, native_rewards.pending_recipients(host, candidate))
+                          if verb == "native-quest-turnin" else frozenset())
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=applied_xp)
+        else:
+            # Stock Broker turn-in removes the objective from the canonical host inventory.
+            host.pending_host_save = bool(host.pending_host_save or verb == "native-quest-turnin")
         host.party = candidate
         host.native_checkpoint_unsafe = False
         host.control.event("native_broker_quest_committed", revision=revision, **record)

@@ -13,6 +13,8 @@ import sys
 import time
 import uuid
 
+from live_multi_smoke import campaign_save_hashes
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.silverfish.native_host_save import slot_path
@@ -1496,6 +1498,7 @@ async def smoke():
                            and status["game"].get("native_guest_save", {}).get("pawn") == original_guest)
                 await command("action", "--campaign", campaign, "checkpoint")
                 broker_before = broker_stock_balances(chosen)
+            broker_save_files = campaign_save_hashes(run.parent)
             redeem = ("action", "--profile", profile, "native-quest-turnin", "--target", quest_id)
             if args.native_broker_input:
                 guest_actions = ("action", "--profile", profile)
@@ -1526,17 +1529,22 @@ async def smoke():
                 assert observed["step"] == -10 and observed["topic_epc"] >= 1 and observed["topic_drill_lab"] >= 1, observed
                 assert observed["voucher_rows"] == 0 and observed["guarded_ping"] == 1 and observed["guarded_menu"] >= 1, observed
                 note("stock_drill_head_redeems_shared_debt_voucher_once_and_sequences_broker_dialogue", observed)
+            repeat = await command(*redeem)
+            assert repeat["effect"] == "native_quest_already_settled" and repeat["wallet"] == turned["wallet"], repeat
             if args.native_guest:
+                await wait(run, lambda status: any(
+                    player.get("character_id") == chosen and player.get("quest_xp", 0) >= turned["xp"]
+                    and not player.get("native_quest_xp_pending")
+                    for player in status.get("gameplay", {}).get("players", {}).values()
+                ))
+            assert campaign_save_hashes(run.parent) == broker_save_files, "The stock Broker saved while redeeming its objective"
+            if args.native_guest:
+                await command("action", "--campaign", campaign, "checkpoint")
                 broker_paid = broker_stock_balances(chosen)
                 assert broker_paid == {"host_xp": broker_before["host_xp"] + turned["xp"],
                                        "host_cash": turned["wallet"],
                                        "guest_xp": broker_before["guest_xp"] + turned["xp"],
                                        "guest_cash": broker_before["guest_cash"]}, (broker_before, broker_paid)
-            repeat = await command(*redeem)
-            assert repeat["effect"] == "native_quest_already_settled" and repeat["wallet"] == turned["wallet"], repeat
-            if args.native_guest:
-                await command("action", "--campaign", campaign, "checkpoint")
-                assert broker_stock_balances(chosen) == broker_paid
                 note("broker_stock_guest_xp_is_persisted_once_in_detached_save", {
                     "character_id": chosen, "before": broker_before, "after": broker_paid,
                 })

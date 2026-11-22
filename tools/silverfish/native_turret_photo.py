@@ -247,7 +247,8 @@ async def advance(host, bridge, character, action, target=None, *, expected_came
 
     host.transitioning = True
     try:
-        await host.checkpoint_native(bridge)
+        if action == CAPTURE_FIXTURE:
+            await host.checkpoint_native(bridge)
         host.native_checkpoint_unsafe = True
         proof = await _command(host, bridge, action, pawn, area, target, *arguments)
         cash = proof["cash_after"] - proof["cash_before"]
@@ -279,7 +280,11 @@ async def advance(host, bridge, character, action, target=None, *, expected_came
             receipts = candidate["receipts"].setdefault(character, [])
             receipts.append({"id": identifier, "request": request, "result": result})
             del receipts[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, candidate)
+        revision = None
+        if action == CAPTURE_FIXTURE:
+            revision = await host.checkpoint_native(bridge, candidate)
+        else:
+            host.pending_host_save = bool(host.pending_host_save)
         host.party = candidate
         host.native_checkpoint_unsafe = False
         host.control.event("native_turret_photo_committed", action=ACTIONS[action], target=target, revision=revision, **record)

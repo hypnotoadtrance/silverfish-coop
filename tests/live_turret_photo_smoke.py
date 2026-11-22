@@ -10,7 +10,7 @@ import sys
 import uuid
 
 from live_ai_smoke import wait
-from live_multi_smoke import saved_hashes
+from live_multi_smoke import campaign_save_hashes, saved_hashes
 
 BOROUGH = "/Game/Classes/Maps/Maps_SafeZones/Borough"
 SCIENTIST = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
@@ -126,8 +126,8 @@ async def validate(work: Path, vanilla_saved: Path | None, *, complete=False, re
         evidence["stock_camera_equipped"] = equipped
         state = await wait(run, lambda current: current.get("state") == "hosting"
                            and current.get("game", {}).get("map") == DEAD_BRIDGE
-                           and current.get("campaign", {}).get("world", {}).get("party", {}).get("native_quests", {}).get(QUEST))
-        recorded = state["campaign"]["world"]["party"]["native_quests"][QUEST]["photos"]
+                           and current.get("gameplay", {}).get("native_quests", {}).get(QUEST))
+        recorded = state["gameplay"]["native_quests"][QUEST]["photos"]
         if camera_input and len(recorded) < 2:
             await wait(guest_run, lambda state: (scope := state.get("game", {}).get("native_guest_primary_scope", {}))
                        and (scope.get("kind"), scope.get("guid")) == ("camera", camera))
@@ -156,6 +156,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, complete=False, re
                     await wait(run, lambda state: state.get("game", {}).get("native_host_camera_scope", {}).get("guid") == host_guid)
                     aim = (await command("action", *host, "native-host-camera-aim-fixture", "--target", turret))["native_turret_photo"]
                     assert (aim["camera"], aim["step_before"], aim["step_after"]) == (host_guid, step - 1, step - 1), aim
+                    save_files = campaign_save_hashes(run.parent)
                     press = (await command("action", *host, "native-host-camera-input-fixture"))["native_host_camera_fixture"]
                     assert press["guid"] == host_guid and press["stock_wrappers"] == 2, press
                     for _ in range(40):
@@ -168,9 +169,10 @@ async def validate(work: Path, vanilla_saved: Path | None, *, complete=False, re
                         await asyncio.sleep(.2)
                     else:
                         raise RuntimeError("The stock host shutter did not reach the quest coordinator")
-                    settled = await wait(run, lambda state: state.get("campaign", {}).get("world", {}).get("party", {})
+                    settled = await wait(run, lambda state: state.get("gameplay", {})
                                          .get("native_quests", {}).get(QUEST, {}).get("step") == step)
-                    photo = settled["campaign"]["world"]["party"]["native_quests"][QUEST]["photos"][turret]
+                    photo = settled["gameplay"]["native_quests"][QUEST]["photos"][turret]
+                    assert campaign_save_hashes(run.parent) == save_files, "The stock camera saved when taking a photo"
                     evidence["host_stock_shutter"] = {"equip": equipped, "aim": aim, "press": press, "event": event}
                 else:
                     capture = await command("action", *host, "native-turret-photo-capture-fixture", "--target", turret)
@@ -185,12 +187,14 @@ async def validate(work: Path, vanilla_saved: Path | None, *, complete=False, re
         for destination, tag in ((LAKE, "DB_Lake"), (CITY, "City_Lake"), (BOROUGH, "City_Borough")):
             await cross(destination, tag)
         await enroll()
+        save_files = campaign_save_hashes(run.parent)
         paid = await command("action", *guest, "native-quest-turnin", "--target", QUEST)
         last_purchase = host_purchase if host_camera else purchase
         assert (paid["step"], paid["cash"], paid["xp"], paid["wallet"]) == (-10, 700, 1, last_purchase["wallet_after"] + 700), paid
         assert len(paid["recipients"]) == 2, paid
         repeat = await command("action", *guest, "native-quest-turnin", "--target", QUEST)
         assert repeat["effect"] == "native_quest_already_settled" and repeat["wallet"] == paid["wallet"], repeat
+        assert campaign_save_hashes(run.parent) == save_files, "The stock camera contract saved while settling its reward"
         evidence["stock_turn_in"] = paid
         return paid
 
@@ -237,10 +241,12 @@ async def validate(work: Path, vanilla_saved: Path | None, *, complete=False, re
             visible = await offers()
             assert visible[QUEST]["cash"] == 700 and visible[QUEST]["co_op"] == "verified", visible
             evidence["board_offers_at_four_xp"] = sorted(visible)
+            save_files = campaign_save_hashes(run.parent)
             accepted = await command("action", *guest, "native-quest-start", "--target", QUEST)
             assert (accepted["quest_id"], accepted["step"], accepted["actor"], accepted["photos"]) == (
                 QUEST, 1, invite["character_id"], {}
             ), accepted
+            assert campaign_save_hashes(run.parent) == save_files, "The stock camera contract saved while accepting"
             evidence["stock_acceptance"] = accepted
             early = await command("action", *guest, "native-quest-turnin", "--target", QUEST, expected=False)
             assert early["error"] == "native_turret_photo_objectives_incomplete", early

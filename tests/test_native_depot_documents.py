@@ -32,7 +32,7 @@ class DepotDocumentsTests(unittest.IsolatedAsyncioTestCase):
             party.add_player(state, actor)
         self.host = SimpleNamespace(
             party=state, native_profile=True, native_zones=True, native_guest=True, native_checkpoint_unsafe=False,
-            transitioning=False, stopping=False, last_seen=time.monotonic(),
+            transitioning=False, stopping=False, pending_host_save=None, last_seen=time.monotonic(),
             last_game={"state": "hosting", "map": SCAV_BAR}, roles=lambda: {"host": "host", "guest": GUEST},
             native_recipients=lambda: {GUEST: {"pawn": PAWN, "connected": True}},
             checkpoint_native=AsyncMock(return_value=4), control=Mock(),
@@ -70,7 +70,7 @@ class DepotDocumentsTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.command.side_effect = [active]
         with self.assertRaisesRegex(party.RuleError, "objective_required"):
             await self.act("native-quest-turnin")
-        self.assertEqual(self.host.checkpoint_native.await_count, 2)
+        self.host.checkpoint_native.assert_not_awaited()
 
         area, actor, path = native_authored_pickup.SOURCES[SOURCE]
         self.host.party[native_authored_pickup.STATE_KEY] = {

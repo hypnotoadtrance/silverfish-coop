@@ -5,7 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish import native_host_save, native_meet_broker as broker, native_quest, native_wire_quest, party
+from tools.silverfish import native_broker, native_host_save, native_meet_broker as broker
+from tools.silverfish import native_quest, native_rewards, native_wire_quest, party
 from tools.silverfish.travel import BLACK_MARKET, CITY
 
 
@@ -25,7 +26,8 @@ class MeetBrokerTests(unittest.IsolatedAsyncioTestCase):
         }
         self.host = SimpleNamespace(
             native_profile=self.profile, native_zones=True, native_guest=True, party=characters, control=Mock(),
-            stopping=False, transitioning=False, native_checkpoint_unsafe=False, last_seen=time.monotonic(),
+            stopping=False, transitioning=False, native_checkpoint_unsafe=False, pending_host_save=None,
+            last_seen=time.monotonic(),
             allowed_maps={BLACK_MARKET, CITY}, roles=lambda: {"host": "host", "guest": "scout", "guest2": "reserve"},
             native_recipients=lambda: self.members, checkpoint_native=AsyncMock(return_value=1),
             last_game={"state": "hosting", "map": BLACK_MARKET, "native_guest_xp_ready": True,
@@ -88,6 +90,8 @@ class MeetBrokerTests(unittest.IsolatedAsyncioTestCase):
         started = await stock_action("native-quest-start")
         self.assertEqual((started["step"], self.xp), (1, 3))
         self.assertEqual((await stock_action("native-quest-start"))["effect"], "native_quest_present")
+        self.assertIs(self.host.pending_host_save, False)
+        self.host.checkpoint_native.assert_not_awaited()
         receipt = await stock_action("native-quest-turnin")
         self.assertEqual((receipt["step"], receipt["cash"], receipt["xp"], receipt["ammo_units"]), (-10, 0, 1, 9))
         self.assertEqual(receipt["freelancer_rep"], -4)
@@ -156,3 +160,28 @@ class MeetBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.host.stopping)
         self.assertFalse(self.host.native_checkpoint_unsafe)
         self.assertNotIn(broker.QUEST_ID, self.host.party.get("native_quests", {}))
+
+    async def test_manifest_redemption_queues_host_inventory_and_guest_xp_without_checkpoint(self):
+        pawn, objective = self.members["scout"]["pawn"], "91" * 16
+        self.host.authoritative_pawns = lambda roles: {"scout": pawn}
+        self.host.role_pawn = lambda role: ("guest", None)
+        self.host.last_game["pawns"]["guest"] = {"name": pawn}
+        inspect = {
+            "operation": "native-broker-inspect", "map": BLACK_MARKET, "pawn": pawn, "id": native_broker.QUEST_ID,
+            "state": "ready", "step": 2, "final_step": 2, "cash": 10_000, "xp": 1,
+            "manifest_guid": objective, "native_cash": 300, "native_xp": 3,
+        }
+        settled = dict(inspect, operation="native-broker-turn-in", state="completed", step=-10, manifest_guid="-",
+                       native_cash=10_300, native_xp=4, changed=True, consumed_guid=objective)
+        self.bridge.command.side_effect = [
+            dict(self.host.last_game, native_broker=report) for report in (inspect, settled)
+        ]
+
+        result = await native_broker.action(self.host, self.bridge, "scout", "native-quest-turnin")
+        self.assertEqual((result["step"], result["consumed_guid"], result["wallet"]), (-10, objective, 10_300))
+        self.assertEqual(self.host.party["players"]["scout"][native_rewards.PENDING], 1)
+        self.assertIs(self.host.pending_host_save, True)
+        replay = await native_broker.action(self.host, self.bridge, "scout", "native-quest-turnin")
+        self.assertEqual(replay["effect"], "native_quest_already_settled")
+        self.assertEqual(self.bridge.command.await_count, 2)
+        self.host.checkpoint_native.assert_not_awaited()

@@ -1,12 +1,63 @@
+import time
 import unittest
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish import native_wire_board as wire
+from tools.silverfish import native_rewards, native_turret_photo as photo, native_wire_board as wire, party
 
 
 class WireBoardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_turret_contract_and_shutter_receipt_stay_pending_until_checkpoint(self):
+        data = party.new_party()
+        party.add_player(data, "host")
+        party.add_player(data, "guest")
+        pawn, camera = "Player_FP_C Photographer", "91" * 16
+        host = SimpleNamespace(
+            native_guest=True, native_zones=True, native_profile=True, stopping=False, transitioning=False,
+            native_checkpoint_unsafe=False, pending_host_save=None, party=data, camera_ready_at={},
+            checkpoint_native=AsyncMock(), control=Mock(), last_seen=time.monotonic(),
+            roles=lambda: {"host": "host", "guest": "guest"},
+            native_recipients=lambda: {"guest": {"pawn": pawn, "connected": True}},
+        )
+
+        def snapshot(area, target, action, before, after, *, cash=0, xp=0):
+            return {"state": "hosting", "map": area,
+                    "native_guest_equipped_weapons": {pawn: {"kind": "camera", "guid": camera}},
+                    "native_turret_photo": {
+                        "action": action, "map": area, "pawn": pawn, "quest": photo.QUEST_ID, "target": target,
+                        "step_before": before, "step_after": after, "cash_before": 5, "cash_after": 5 + cash,
+                        "xp_before": 4, "xp_after": 4 + xp, "rep_after": 25, "camera": camera, "visibility": .85,
+                    }}
+
+        area = photo.BOROUGH
+        board = photo.BOARDS[area]
+        targets = sorted(photo.TARGETS)
+        host.last_game = {"state": "hosting", "map": area}
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            snapshot(area, board, "start", None, 1),
+            snapshot(photo.DEAD_BRIDGE, targets[0], "capture", 1, 2),
+            snapshot(photo.DEAD_BRIDGE, targets[1], "capture", 2, 3),
+            snapshot(area, board, "turn_in", 3, -10, cash=700, xp=1),
+        ]))
+        started = await photo.advance(host, bridge, "guest", "native-turret-photo-start")
+        self.assertEqual(started["step"], 1)
+        host.last_game = {"state": "hosting", "map": photo.DEAD_BRIDGE,
+                          "native_guest_equipped_weapons": {pawn: {"kind": "camera", "guid": camera}}}
+        operation = uuid.uuid4().hex
+        first = await photo.shutter(host, bridge, "guest", camera, operation)
+        self.assertEqual(await photo.shutter(host, bridge, "guest", camera, operation), first)
+        self.assertEqual(first["step"], 2)
+        second = await photo.advance(host, bridge, "guest", photo.CAPTURE, targets[1])
+        self.assertEqual(set(second["photos"]), photo.TARGETS)
+        host.last_game = {"state": "hosting", "map": area}
+        paid = await photo.advance(host, bridge, "guest", "native-turret-photo-turn-in")
+        self.assertEqual((paid["step"], paid["wallet"]), (-10, 705))
+        self.assertEqual(host.party["players"]["guest"][native_rewards.PENDING], 1)
+        self.assertIs(host.pending_host_save, False)
+        self.assertEqual(bridge.command.await_count, 4)
+        host.checkpoint_native.assert_not_awaited()
+
     async def test_stock_jammer_click_uses_only_the_exact_host_board(self):
         bridge = SimpleNamespace(input_namespace=uuid.uuid4(), native_wire_board_requests=Mock(), command=AsyncMock())
         control = SimpleNamespace(event=Mock())

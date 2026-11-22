@@ -3,7 +3,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 from tools.silverfish import native_authored_pickup as pickup
 from tools.silverfish import native_black_box as black_box
@@ -83,8 +83,11 @@ class BlackBoxSettlementTests(unittest.IsolatedAsyncioTestCase):
             await native_quest.action(host, bridge, OWNER, "native-quest-turnin", SPEC.quest_id + "_1")
         bridge.command.assert_not_awaited()
 
-    async def test_exact_placed_recording_is_consumed_once_and_completion_is_durable(self):
+    async def test_exact_placed_recording_is_consumed_once_and_guest_save_is_retained(self):
         host = scoped_host(OBSERVATORY)
+        host.pending_host_save = None
+        host.pending_guest_saves = {}
+        host.queue_guest_save = lambda character, pawn: host.pending_guest_saves.update({character: (pawn, None)})
         bridge = SimpleNamespace(command=AsyncMock(return_value=proof("preflight")))
         receipt = {"source": black_box.SOURCE, "map": black_box.MAP, "actor": black_box.ACTOR + "_1",
                    "class_path": black_box.CLASS, "guid": GUID, "owner": OWNER}
@@ -94,16 +97,26 @@ class BlackBoxSettlementTests(unittest.IsolatedAsyncioTestCase):
         host.checkpoint_native.assert_not_awaited()
 
         receipt["actor"] = black_box.ACTOR
-        bridge.command.side_effect = [proof("preflight"), proof("turn-in", completed=True)]
+        before = dict(proof("preflight"), native_guest_save_retention=True)
+        retained = {"state": "hosting", "map": OBSERVATORY, "native_guest_save_retention": True}
+        bridge.command.reset_mock()
+        bridge.command.side_effect = [before, retained, proof("turn-in", completed=True)]
         settled = await collections.turn_in(host, bridge, OWNER, spec=SPEC)
         self.assertEqual((settled["consumed_radio"], settled["cash"], settled["xp"], settled["completion_flag"]),
                          (GUID, 12000, 1, black_box.COMPLETION_FLAG))
-        self.assertEqual(host.checkpoint_native.await_args.kwargs["require_guest_frames"], {OWNER})
+        self.assertEqual(host.pending_guest_saves, {OWNER: (PAWN, None)})
+        self.assertIs(host.pending_host_save, False)
+        self.assertEqual(bridge.command.await_args_list, [
+            call(SPEC.command("preflight"), PAWN, timeout=5),
+            call("native-guest-save-retain", PAWN, OWNER, timeout=3),
+            call(SPEC.command("turn-in"), PAWN, GUID, "guest", timeout=8),
+        ])
         self.assertEqual(host.party["players"][OWNER][native_rewards.PENDING], 1)
         self.assertEqual(host.party["native_quests"][SPEC.quest_id]["completion_flag"], black_box.COMPLETION_FLAG)
         replay = await collections.turn_in(host, bridge, OWNER, spec=SPEC)
         self.assertEqual((replay["effect"], replay["consumed_radio"]), ("native_quest_already_settled", GUID))
-        self.assertEqual(host.checkpoint_native.await_count, 2)
+        host.checkpoint_native.assert_not_awaited()
+        self.assertEqual(bridge.command.await_count, 3)
 
     async def test_after_stock_mutation_missing_flag_blocks_commit(self):
         host = scoped_host(OBSERVATORY)

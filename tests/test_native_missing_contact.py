@@ -50,7 +50,7 @@ class MissingContactTests(unittest.IsolatedAsyncioTestCase):
             party.add_player(data, actor)
         host = SimpleNamespace(
             party=data, native_profile=True, native_guest=True, native_zones=True,
-            native_checkpoint_unsafe=False, transitioning=False, stopping=False,
+            native_checkpoint_unsafe=False, transitioning=False, stopping=False, pending_host_save=None,
             last_game=snapshot("preflight"), last_seen=time.monotonic(),
             roles=lambda: {"host": "host", "guest": "guest"},
             native_recipients=lambda: {"guest": {"pawn": GUEST, "connected": True}},
@@ -85,4 +85,5 @@ class MissingContactTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.party["players"]["guest"][native_rewards.PENDING], 1)
         bridge.command.assert_awaited_with(SPEC.command("turn-in"), HOST, GUID, "host", timeout=8)
         self.assertEqual((await redeem("guest"))["effect"], "native_quest_already_settled")
-        self.assertEqual(host.checkpoint_native.await_count, 2)
+        self.assertIs(host.pending_host_save, True)
+        host.checkpoint_native.assert_not_awaited()

@@ -26,6 +26,14 @@ def saved_hashes(root: Path) -> dict[str, str]:
     return result
 
 
+def campaign_save_hashes(root: Path) -> dict[str, str]:
+    result = saved_hashes(root / "game-user" / "Saved" / "SaveGames")
+    for path in (root / "save").glob("campaign*.json"):
+        with path.open("rb") as stream:
+            result[str(path.relative_to(root))] = file_digest(stream, "sha256").hexdigest()
+    return result
+
+
 async def validate(work: Path, vanilla_saved: Path | None, *, rest_wipe: bool = False, rest_ui: bool = False,
                    rest_guest_denial: bool = False, guest_count: int = 2, downed_markers: bool = False,
                    dead_bridge_rest: bool = False) -> None:

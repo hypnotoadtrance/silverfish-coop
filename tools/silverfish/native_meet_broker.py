@@ -84,10 +84,12 @@ async def commit(host, bridge, actor: str, *, turning_in: bool) -> dict:
             return {"effect": "native_quest_already_completed", "quest_id": QUEST_ID, "step": step}
         if turning_in and step != 1:
             raise party.RuleError("stock_meet_broker_quest_not_ready")
-        await host.checkpoint_native(bridge)
         recipients = sorted(set(host.roles().values()) & host.party["players"].keys()) if turning_in else []
         if turning_in and actor not in recipients:
             raise party.RuleError("native_meet_broker_interactor_unavailable")
+        if turning_in:
+            # This turn-in still banks a stock reward template for disconnected recipients.
+            await host.checkpoint_native(bridge)
         host.native_checkpoint_unsafe = True
         proof = await _command(host, bridge, TURN_IN if turning_in else START, pawn)
         expected_step = -10 if turning_in else 1
@@ -111,7 +113,11 @@ async def commit(host, bridge, actor: str, *, turning_in: bool) -> dict:
             record.update(recipients=recipients, cash=0, xp=1, weapon_guid=proof["weapon_guid"],
                           ammo_units=REWARDS.ammo_units, freelancer_rep=proof["reputation_after"])
         candidate.setdefault("native_quests", {})[QUEST_ID] = record
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset(granted))
+        revision = None
+        if turning_in:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset(granted))
+        else:
+            host.pending_host_save = bool(host.pending_host_save)
         host.party = candidate
         host.native_checkpoint_unsafe = False
         event = "native_meet_broker_completed" if turning_in else "native_meet_broker_started"
