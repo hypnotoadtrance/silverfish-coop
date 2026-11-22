@@ -640,33 +640,42 @@ local function guide_handle(entry, now)
 end
 
 local function read_targets(now)
-    local input
-    if mailbox and now >= (next_read or 0) then
-        next_read = now + .05
-        input = io.open(mailbox, "rb")
+    if now < (next_read or 0) then return end
+    next_read = now + .05
+    local active, frame
+    if type(SilverfishTakeLocalPropPoses) == "function" then
+        active, frame = SilverfishTakeLocalPropPoses()
     end
-    if input then
-        local row_limit = 0
-        for line in input:lines() do
-            row_limit = row_limit + 1
-            if row_limit > 4 or #line > 256 then break end
-            local lease, serial, x, y, z, pitch, yaw, roll = line:match("^([a-f0-9]+)\t(%d+)\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)$")
-            local entry, number = holdings[lease], math.tointeger(serial)
-            local target = {X = tonumber(x), Y = tonumber(y), Z = tonumber(z)}
-            local rotation = {Pitch = tonumber(pitch), Yaw = tonumber(yaw), Roll = tonumber(roll)}
-            local origin = entry and valid(entry.pawn) and entry.pawn:K2_GetActorLocation()
-            if entry and number and number > (entry.sample or 0) and held(entry.pawn, entry.actor, entry.grip, entry.corpse)
-                and point(origin) and point(target) and pose(rotation) and dist2(origin, target) <= 375^2 then
-                entry.sample, entry.deadline, entry.target, entry.rotation = number, now + 1.5, target, rotation
-            end
+    local frame_limit = 4 * 257
+    if not active and mailbox then
+        local input = io.open(mailbox, "rb")
+        if input then
+            frame = input:read(frame_limit + 1)
+            input:close()
         end
-        input:close()
+    end
+    if not frame or #frame > frame_limit then return end
+    local row_count = 0
+    for line in frame:gmatch("[^\r\n]+") do
+        row_count = row_count + 1
+        if row_count > 4 or #line > 256 then break end
+        local lease, serial, x, y, z, pitch, yaw, roll = line:match("^([a-f0-9]+)\t(%d+)\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)$")
+        local entry, number = holdings[lease], math.tointeger(serial)
+        local target = {X = tonumber(x), Y = tonumber(y), Z = tonumber(z)}
+        local rotation = {Pitch = tonumber(pitch), Yaw = tonumber(yaw), Roll = tonumber(roll)}
+        local origin = entry and valid(entry.pawn) and entry.pawn:K2_GetActorLocation()
+        if entry and now <= entry.deadline and number and number > (entry.sample or 0)
+            and held(entry.pawn, entry.actor, entry.grip, entry.corpse)
+            and point(origin) and point(target) and pose(rotation) and dist2(origin, target) <= 375^2 then
+            entry.sample, entry.deadline, entry.target, entry.rotation = number, now + 1.5, target, rotation
+        end
     end
 end
 
 function carry.update()
     if phase ~= "hosting" or not next(holdings) then return end
     local now = os.clock()
+    read_targets(now)
     for _, entry in pairs(holdings) do
         if now > entry.deadline or not valid(entry.pawn) or entry.pawn.Dead ~= false
             or not held(entry.pawn, entry.actor, entry.grip, entry.corpse) then
@@ -730,7 +739,6 @@ function carry.sync(current, seat, bridge)
         end)
         hook = true
     end
-    if seat == "hosting" and next(holdings) then read_targets(os.clock()) end
 end
 
 return carry

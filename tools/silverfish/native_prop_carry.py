@@ -197,9 +197,10 @@ class Host:
         if len(fields) != 9 or fields[0] != self.epoch:
             raise party.RuleError("native_prop_carry_invalid_pose")
         _, lease, raw_sequence, *coordinates = fields
+        now = time.monotonic()
         holder = self.holders.get(character)
         if (not holder or holder["lease"] != lease or holder["pawn"] != self._pawn(character)
-                or time.monotonic() >= holder["deadline"]):
+                or now >= holder["deadline"]):
             raise party.RuleError("native_prop_carry_wrong_holder")
         sequence = _serial(raw_sequence)
         if sequence <= holder["sample"]:
@@ -207,12 +208,17 @@ class Host:
         position = _numbers(coordinates, (1e7, 1e7, 1e7, 360, 360, 360))
         # The game thread verifies reach against the live pawn before moving the handle.
         # The worker's periodic pawn snapshot can trail the actual carrier while running.
-        now = time.monotonic()
-        holder["sample"], holder["deadline"] = sequence, now + 1.4
-        self.poses[lease] = "\t".join((lease, str(sequence), *(str(axis) for axis in position)))
         allowed = {entry["lease"] for entry in self.holders.values() if entry["deadline"] > now}
-        self.poses = {key: value for key, value in self.poses.items() if key in allowed}
-        write_text(bridge.directory / "native-prop-carry-poses", "\n".join(self.poses.values()) + "\n", newline="\n")
+        poses = {key: value for key, value in self.poses.items() if key in allowed}
+        poses[lease] = "\t".join((lease, str(sequence), *(str(axis) for axis in position)))
+        frame = "\n".join(poses.values()) + "\n"
+        if bridge.local_bridge is None:
+            # External test workers have no process-local bridge.
+            write_text(bridge.directory / "native-prop-carry-poses", frame, newline="\n")
+        elif not bridge.local_bridge.publish_prop_poses(frame):
+            raise RuntimeError("The game could not queue the local prop poses")
+        self.poses = poses
+        holder["sample"], holder["deadline"] = sequence, now + 1.4
         return {"ok": True}
 
 

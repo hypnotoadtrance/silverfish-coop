@@ -29,6 +29,10 @@ class LocalBridge:
         self._input_ready.argtypes, self._input_ready.restype = [], ctypes.c_int
         self._read_input = library.SilverfishBridgeReadInputV1
         self._read_input.argtypes, self._read_input.restype = [ctypes.c_void_p, ctypes.c_uint32], ctypes.c_uint32
+        self._prop_poses = getattr(library, "SilverfishBridgePublishPropPosesV1", None)
+        if self._prop_poses is not None:
+            self._prop_poses.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
+            self._prop_poses.restype = ctypes.c_int
         self._lock = asyncio.Lock()
         self._status_buffer = None
         self._status_revision = 0
@@ -114,6 +118,12 @@ class LocalBridge:
 
     def input_ready(self):
         return bool(self._input_ready())
+
+    def publish_prop_poses(self, frame: str) -> bool:
+        if self._prop_poses is None:
+            return False
+        payload = frame.encode("ascii")
+        return bool(self._prop_poses(payload, len(payload)))
 
     def read_input(self):
         buffer = ctypes.create_string_buffer(1024)

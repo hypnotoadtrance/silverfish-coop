@@ -19,6 +19,7 @@ namespace
     constexpr std::uint32_t reply_limit = 2 * 1024 * 1024;
     constexpr std::uint32_t input_limit = 1024;
     constexpr std::size_t input_capacity = 64;
+    constexpr std::uint32_t prop_poses_limit = 4 * 257;
 
     enum class State { idle, queued, taken, running, replied, too_large };
     std::mutex mutex;
@@ -34,6 +35,7 @@ namespace
     std::string status_frame;
     std::uint64_t status_revision{};
     std::deque<std::string> input;
+    std::string prop_poses;
 
     void clear()
     {
@@ -141,6 +143,21 @@ namespace
         lua.set_bool(published);
         return 1;
     }
+
+    int take_prop_poses(const Lua& lua)
+    {
+        bool active{};
+        std::string frame;
+        {
+            std::lock_guard lock(mutex);
+            active = attached;
+            frame.swap(prop_poses);
+        }
+        lua.set_bool(active);
+        if (frame.empty()) return 1;
+        lua.set_string(frame);
+        return 2;
+    }
 }
 
 extern "C" __declspec(dllexport) int SilverfishBridgeOpenV1()
@@ -158,6 +175,7 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
     status_enabled = false;
     status_frame.clear();
     input.clear();
+    prop_poses.clear();
     clear();
 }
 
@@ -205,6 +223,15 @@ extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeReadInputV1(char*
     return size;
 }
 
+extern "C" __declspec(dllexport) int SilverfishBridgePublishPropPosesV1(const char* data, std::uint32_t size)
+{
+    if (!data || !size || size > prop_poses_limit) return 0;
+    std::lock_guard lock(mutex);
+    if (!attached) return 0;
+    prop_poses.assign(data, size);
+    return 1;
+}
+
 extern "C" __declspec(dllexport) std::int64_t SilverfishBridgeSubmitV1(const char* data, std::uint32_t size)
 {
     if (!data || !size || size > command_limit) return 0;
@@ -250,6 +277,7 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishPublishLocalBridgeReply", publish);
         lua.register_function("SilverfishPublishLocalBridgeStatus", publish_status);
         lua.register_function("SilverfishEnqueueLocalBridgeInput", enqueue_input);
+        lua.register_function("SilverfishTakeLocalPropPoses", take_prop_poses);
     }
 
     void stop()
@@ -260,6 +288,7 @@ namespace silverfish::local_bridge
         status_enabled = false;
         status_frame.clear();
         input.clear();
+        prop_poses.clear();
         clear();
     }
 }

@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from tools.silverfish import native_prop_carry as carry
 
@@ -19,11 +19,33 @@ class CarrierPoseTests(unittest.TestCase):
 
         with (TemporaryDirectory() as temporary, patch.object(host, "_pawn", return_value="guest pawn"),
               patch.object(carry.time, "monotonic", return_value=2)):
-            bridge = SimpleNamespace(directory=Path(temporary))
+            bridge = SimpleNamespace(directory=Path(temporary), local_bridge=None)
             target = f"{epoch}@{lease}@1@400@0@0@0@0@0"
             self.assertEqual(host.aim(bridge, character, target), {"ok": True})
             queued = (bridge.directory / "native-prop-carry-poses").read_text(encoding="utf-8")
             self.assertEqual(queued.rstrip().split("\t")[:3], [lease, "1", "400.0"])
+
+    def test_embedded_worker_publishes_latest_poses_without_creating_a_file(self):
+        epoch, lease, character = "a" * 32, "b" * 32, "c" * 32
+        service = SimpleNamespace(zone_epoch=epoch, last_game={})
+        host = carry.Host(service)
+        host._reset()
+        host.holders[character] = {"lease": lease, "pawn": "guest pawn", "sample": 0, "deadline": 3}
+
+        with (TemporaryDirectory() as temporary, patch.object(host, "_pawn", return_value="guest pawn"),
+              patch.object(carry.time, "monotonic", return_value=2)):
+            local_bridge = Mock()
+            local_bridge.publish_prop_poses.side_effect = (True, True, False)
+            bridge = SimpleNamespace(directory=Path(temporary), local_bridge=local_bridge)
+            for sample in (1, 2):
+                self.assertEqual(host.aim(bridge, character, f"{epoch}@{lease}@{sample}@400@0@0@0@0@0"),
+                                 {"ok": True})
+            frame = local_bridge.publish_prop_poses.call_args.args[0]
+            self.assertEqual(frame.splitlines()[0].split("\t")[:3], [lease, "2", "400.0"])
+            with self.assertRaisesRegex(RuntimeError, "could not queue the local prop poses"):
+                host.aim(bridge, character, f"{epoch}@{lease}@3@400@0@0@0@0@0")
+            self.assertEqual(host.holders[character]["sample"], 2)
+            self.assertEqual(list(bridge.directory.iterdir()), [])
 
 
 class CorpseCarryPayloadTests(unittest.TestCase):
