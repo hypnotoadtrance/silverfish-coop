@@ -1,7 +1,8 @@
-"""Verify a durable native stock 9mm or loaded Light Pistol drop and party pickup."""
+"""Verify durable stock ammo, Bandage, and loaded pistol drops and party pickup."""
 
 import argparse
 import asyncio
+from contextlib import contextmanager, nullcontext
 import json
 import math
 from pathlib import Path
@@ -18,6 +19,7 @@ sys.path.insert(0, str(REPO))
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, native_guest_stack_drop as probe
 from tools.silverfish import native_host_save, native_world_loot as projection
 from tools.silverfish import native_host_stack_drop as host_drop_input, native_lantern as lantern
+from tools.silverfish.authored_supply import BANDAGE_CLASS
 from tools.silverfish.native_guest_weapon import FIRE_CLASSES
 
 
@@ -25,15 +27,49 @@ EXIT_TAG, EXIT_ACTOR = "Obsv_Etr", "Level_Exit_BP_C_1"
 NEAR_LANES = (1, 2, 3, 4, 5, 6, 7, 8, None)
 
 
+@contextmanager
+def staged_bandage_probe(work):
+    scripts = work / "stage/SilverFish/Binaries/Win64/ue4ss/Mods/SilverfishCoop/Scripts"
+    main, fixture = scripts / "main.lua", scripts / "host_bandage_split_probe.lua"
+    original = main.read_bytes()
+    with fixture.open("xb") as stream:
+        stream.write((Path(__file__).with_name("fixtures") / fixture.name).read_bytes())
+    try:
+        main.write_bytes(original + b'\nrequire("host_bandage_split_probe")\n')
+        yield
+    finally:
+        main.write_bytes(original)
+        fixture.unlink()
+
+
+async def bandage_probe(run, verb, value=""):
+    mailbox = next((run / "game-bridge").iterdir())
+    reply = mailbox / "bandage-split-reply"
+    reply.unlink(missing_ok=True)
+    (mailbox / "bandage-split-probe").write_text(f"{verb}|{value}|{uuid.uuid4().hex[:8]}\n", encoding="ascii")
+    async with asyncio.timeout(8):
+        while True:
+            try:
+                status, result = reply.read_text().split("|", 1)
+            except (OSError, ValueError):
+                await asyncio.sleep(.05)
+                continue
+            if status != "ok":
+                raise RuntimeError(f"{verb}: {result}")
+            return result
+
+
 async def verify(work: Path, originals_path: Path, *, visible_projection=False, claimant="owner", host_origin=False,
-                 host_origin_menu=None, pistol_kind=None, probe_lantern=False):
+                 host_origin_menu=None, pistol_kind=None, probe_lantern=False, bandage=False):
     host_origin = host_origin or host_origin_menu is not None
     claimant = "teammate" if pistol_kind and not host_origin else claimant
     mode = (f"host-menu-{host_origin_menu}" if host_origin_menu else
             "host-origin" if host_origin else pistol_kind or claimant)
-    if pistol_kind and host_origin:
+    if bandage:
+        mode += "-bandage"
+    elif pistol_kind and host_origin:
         mode += f"-{pistol_kind}"
-    item_class, quantity = (FIRE_CLASSES[pistol_kind], 1) if pistol_kind else (record.ITEM, 9)
+    item_class, quantity = (FIRE_CLASSES[pistol_kind], 1) if pistol_kind else (BANDAGE_CLASS if bandage else record.ITEM, 9)
     actor_class = item_class.rsplit(".", 1)[1]
     name = f"drop-{mode}-" + uuid.uuid4().hex[:8]
     campaign = work / "campaigns" / name
@@ -263,6 +299,12 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
         identity = projection.player_drop_identity(drop_id)
         near = await place(recipient_id, "near", dropped["location"], preferred_lane=preferred_lane, role=role)
         unclaimed = await projected(recipient, recipient_id, drop_id, dropped["owner"])
+        if bandage:
+            host_visible = await projected(host, "host", drop_id, dropped["owner"])
+            actors = {run: host_visible["actor"].split(" ", 1)[1],
+                      clients[recipient]: unclaimed["actor"].split(" ", 1)[1]}
+            for directory, actor in actors.items():
+                assert await bandage_probe(directory, "actor", actor) == "present"
         if recipient == host:
             assert unclaimed["pawn"] == near["pawn"], unclaimed
         press = (await action(recipient, projection.FIXTURE, "--target", identity))[projection.KEY][identity]
@@ -272,6 +314,15 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
                        and drop_id not in state.get("gameplay", {}).get(record.STATE, {})
                        and identity not in state.get("game", {}).get(projection.KEY, {}))
         await wait(run, lambda state: identity not in state.get("game", {}).get(projection.KEY, {}))
+        if bandage:
+            async with asyncio.timeout(6):
+                while True:
+                    statuses = [await bandage_probe(directory, "actor", actor) for directory, actor in actors.items()]
+                    if statuses == ["gone", "gone"]:
+                        break
+                    evidence["bandage_retirement_pending"] = statuses
+                    await asyncio.sleep(.1)
+            evidence["physical_bandage_actors_removed"] = {"host": actors[run], "guest": actors[clients[recipient]]}
         events = (await command("events", *recipient, "--tail", "50"))["events"]
         event, = [item for item in events if item["event"] == "local_interaction"
                   and item.get(drop.RESULT, {}).get("drop_id") == drop_id]
@@ -300,6 +351,60 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
         assert await inventory(recipient, recipient_id) == after
         return {"stock_projection_interact": press, "reclaim_position": near["location"], "reclaim": reclaimed,
                 "stock_projection_reclaim_operation": claim_id, "lane": near["lane"]}
+
+    async def drop_from_host(source, quantity, guest_before, expected_position, preferred_lane):
+        host_before = await inventory(host, "host")
+        host_stack, = (item for item in host_before if item["guid"] == source)
+
+        partial = host_origin_menu == "split_drag_to_floor"
+        dropped_quantity = 4 if partial else quantity
+        drop_guid = source
+        if host_origin_menu:
+            await wait(run, lambda state: state.get("game", {}).get(host_drop_input.SCOPE) is not None)
+            fixture = await action(host, host_drop_input.FIXTURE, "--target",
+                                   f"{source}|{dropped_quantity}|{host_origin_menu}")
+            if partial:
+                drop_guid = fixture["drop_guid"]
+                assert drop_guid != source, fixture
+            if pistol_kind:
+                assert fixture["stored_ammo"] == 7, fixture
+                evidence["loaded_host"] = {"guid": source, "stored_ammo": fixture["stored_ammo"]}
+            await wait(run, lambda state: any(row.get("owner") == "host" and row.get("guid") == drop_guid
+                       for row in state.get("gameplay", {}).get(record.STATE, {}).values()))
+            events = (await command("events", *host, "--tail", "50"))["events"]
+            committed_by_menu, = [event for event in events if event["event"] == "native_host_stock_drop"
+                                  and event.get(drop.RESULT, {}).get("guid") == drop_guid]
+            host_drop_id, host_drop = committed_by_menu["operation_id"], committed_by_menu[drop.RESULT]
+            assert (committed_by_menu["entry"], committed_by_menu["refresh"]) == (host_origin_menu, "refreshed"), committed_by_menu
+            evidence["host_menu_drop"] = committed_by_menu
+            await action(host, host_drop_input.CLOSE_FIXTURE, "--target", drop_guid)
+        else:
+            host_drop_id = uuid.uuid4().hex
+            host_drop = (await action(host, drop.HOST_DROP, "--target", f"{source}|{quantity}",
+                                      "--operation-id", host_drop_id))[drop.RESULT]
+        host_request = (drop.HOST_DROP, "--target", f"{drop_guid}|{dropped_quantity}", "--operation-id", host_drop_id)
+        evidence["host_drop"] = host_drop
+        assert (host_drop["state"], host_drop["drop_id"], host_drop["owner"], host_drop["guid"],
+                host_drop["quantity"], host_drop["class_path"]) == (
+            "dropped", host_drop_id, "host", drop_guid, dropped_quantity, item_class), host_drop
+        assert record.valid_position(host_drop["location"])
+        assert math.dist(host_drop["location"], expected_position) < 180, host_drop
+        assert (await action(host, *host_request))[drop.RESULT] == host_drop
+        expected_host = ([dict(item, quantity=quantity - dropped_quantity) if item["guid"] == source else item
+                          for item in host_before] if partial else [item for item in host_before if item["guid"] != source])
+        assert await inventory(host, "host") == expected_host
+        assert await inventory(owner, owner_id) == guest_before
+        host_escrow = evidence["host_drop_durable_escrow"] = saved()[host_drop_id]
+        assert "escrow" in host_escrow and host_escrow["claim_id"] is None and "actor" not in host_escrow, host_escrow
+        evidence["host_drop_pickup"] = await collect(
+            owner, owner_id, "guest", guest_before, host_drop, host_escrow,
+            dict(host_stack, guid=drop_guid, quantity=dropped_quantity), preferred_lane)
+        if pistol_kind:
+            evidence["loaded_recipient"] = await inspect_loaded_pistol(owner, source)
+        duplicate = await action(host, drop.HOST_RECLAIM, "--target", host_drop_id, success=False)
+        assert duplicate["error"] == "native_guest_stack_drop_already_reclaimed", duplicate
+        assert await inventory(host, "host") == expected_host
+        evidence["verified"] = True
 
     try:
         server = await start("host", "host", host, "--port", "0", *flags)
@@ -336,6 +441,17 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
             relit = (await action(host, lantern.FIXTURE, "--target", "toggle"))[lantern.KEY]
             assert relit["lit"] is original["lit"], relit
             await wait(peer, lambda state: report(state).get("lit") is original["lit"])
+
+        if bandage:
+            guest_before = await inventory(owner, owner_id)
+            source = await bandage_probe(run, "seed")
+            seeded, = (item for item in await inventory(host, "host") if item["guid"] == source)
+            assert (seeded["source"], seeded["class_path"], seeded["quantity"], seeded["stackable"]) == (
+                "backpack", BANDAGE_CLASS, quantity, True), seeded
+            evidence["host_stock_bandage_setup"] = seeded
+            drop_site = await place("host", "near", role="host")
+            await drop_from_host(source, quantity, guest_before, drop_site["location"], drop_site["lane"])
+            return
 
         source, attempt, claim_id = uuid.uuid4().hex.upper(), uuid.uuid4().hex, uuid.uuid4().hex
         host_items = await inventory(host, "host")
@@ -396,58 +512,7 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
             evidence["host_stock_pistol_setup" if pistol_kind else "host_stock_ammo_setup"] = bootstrap
             guest_before = await inventory(owner, owner_id)
             assert guest_before == [item for item in initial_items if item["guid"] != source]
-            host_before = await inventory(host, "host")
-            host_stack, = (item for item in host_before if item["guid"] == source)
-
-            partial = host_origin_menu == "split_drag_to_floor"
-            dropped_quantity = 4 if partial else quantity
-            drop_guid = source
-            if host_origin_menu:
-                await wait(run, lambda state: state.get("game", {}).get(host_drop_input.SCOPE) is not None)
-                fixture = await action(host, host_drop_input.FIXTURE, "--target",
-                                       f"{source}|{dropped_quantity}|{host_origin_menu}")
-                if partial:
-                    drop_guid = fixture["drop_guid"]
-                    assert drop_guid != source, fixture
-                if pistol_kind:
-                    assert fixture["stored_ammo"] == 7, fixture
-                    evidence["loaded_host"] = {"guid": source, "stored_ammo": fixture["stored_ammo"]}
-                await wait(run, lambda state: any(row.get("owner") == "host" and row.get("guid") == drop_guid
-                           for row in state.get("gameplay", {}).get(record.STATE, {}).values()))
-                events = (await command("events", *host, "--tail", "50"))["events"]
-                committed_by_menu, = [event for event in events if event["event"] == "native_host_stock_drop"
-                                      and event.get(drop.RESULT, {}).get("guid") == drop_guid]
-                host_drop_id, host_drop = committed_by_menu["operation_id"], committed_by_menu[drop.RESULT]
-                assert (committed_by_menu["entry"], committed_by_menu["refresh"]) == (host_origin_menu, "refreshed"), committed_by_menu
-                evidence["host_menu_drop"] = committed_by_menu
-                await action(host, host_drop_input.CLOSE_FIXTURE, "--target", drop_guid)
-            else:
-                host_drop_id = uuid.uuid4().hex
-                host_drop = (await action(host, drop.HOST_DROP, "--target", f"{source}|{quantity}",
-                                          "--operation-id", host_drop_id))[drop.RESULT]
-            host_request = (drop.HOST_DROP, "--target", f"{drop_guid}|{dropped_quantity}", "--operation-id", host_drop_id)
-            evidence["host_drop"] = host_drop
-            assert (host_drop["state"], host_drop["drop_id"], host_drop["owner"], host_drop["guid"],
-                    host_drop["quantity"], host_drop["class_path"]) == (
-                "dropped", host_drop_id, "host", drop_guid, dropped_quantity, item_class), host_drop
-            assert record.valid_position(host_drop["location"])
-            assert math.dist(host_drop["location"], bootstrap["reclaim_position"]) < 180, host_drop
-            assert (await action(host, *host_request))[drop.RESULT] == host_drop
-            expected_host = ([dict(item, quantity=quantity - dropped_quantity) if item["guid"] == source else item
-                              for item in host_before] if partial else host_items)
-            assert await inventory(host, "host") == expected_host
-            assert await inventory(owner, owner_id) == guest_before
-            host_escrow = evidence["host_drop_durable_escrow"] = saved()[host_drop_id]
-            assert "escrow" in host_escrow and host_escrow["claim_id"] is None and "actor" not in host_escrow, host_escrow
-            evidence["host_drop_pickup"] = await collect(
-                owner, owner_id, "guest", guest_before, host_drop, host_escrow,
-                dict(host_stack, guid=drop_guid, quantity=dropped_quantity), drop_site["lane"])
-            if pistol_kind:
-                evidence["loaded_recipient"] = await inspect_loaded_pistol(owner, source)
-            duplicate = await action(host, drop.HOST_RECLAIM, "--target", host_drop_id, success=False)
-            assert duplicate["error"] == "native_guest_stack_drop_already_reclaimed", duplicate
-            assert await inventory(host, "host") == expected_host
-            evidence["verified"] = True
+            await drop_from_host(source, quantity, guest_before, bootstrap["reclaim_position"], drop_site["lane"])
             return
 
         if claimant != "owner":
@@ -572,6 +637,7 @@ if __name__ == "__main__":
                         help="drop a loaded pistol from the guest inventory, then verify the pickup and host route")
     pistol.add_argument("--suppressed-pistol", dest="pistol_kind", action="store_const", const="light-pistol-suppressed",
                         help="verify the same workflow for the suppressed pistol")
+    parser.add_argument("--bandage", action="store_true", help="use a stock Bandage stack in the host split-and-drag trial")
     parser.add_argument("--probe-lantern", action="store_true", help="verify stock Observatory lantern light and physics")
     settings = parser.parse_args()
     if (settings.host_origin or settings.host_origin_menu) and (settings.visible_projection or settings.claimant != "owner"):
@@ -580,7 +646,11 @@ if __name__ == "__main__":
         parser.error("The split drag fixture requires a stackable item")
     if settings.pistol_kind and (settings.visible_projection or settings.claimant == "host"):
         parser.error("Loaded pistol tests use a second guest or a host-to-guest round trip")
-    asyncio.run(verify(settings.work.resolve(), settings.vanilla_saved.resolve(),
-                       visible_projection=settings.visible_projection, claimant=settings.claimant,
-                       host_origin=settings.host_origin, host_origin_menu=settings.host_origin_menu,
-                       pistol_kind=settings.pistol_kind, probe_lantern=settings.probe_lantern))
+    if settings.bandage and (settings.host_origin_menu != "split_drag_to_floor" or settings.pistol_kind):
+        parser.error("--bandage requires --host-origin-menu split_drag_to_floor and a stackable item")
+    work = settings.work.resolve()
+    with staged_bandage_probe(work) if settings.bandage else nullcontext():
+        asyncio.run(verify(work, settings.vanilla_saved.resolve(),
+                           visible_projection=settings.visible_projection, claimant=settings.claimant,
+                           host_origin=settings.host_origin, host_origin_menu=settings.host_origin_menu,
+                           pistol_kind=settings.pistol_kind, probe_lantern=settings.probe_lantern, bandage=settings.bandage))
