@@ -20,6 +20,7 @@ class GameThreadBridge:
         self.commands = []
         self.acknowledgement = 3
         self.blocked = None
+        self.local_bridge = None
 
     async def wait_for(self, condition, timeout):
         while self.frames:
