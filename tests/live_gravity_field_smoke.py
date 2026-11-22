@@ -1,4 +1,4 @@
-"""Verify stock Crossroads GravityWell, Pyrogeist, or ShadowSphere with muted peers."""
+"""Verify scoped stock Crossroads anomaly families with muted peers."""
 
 import argparse
 import asyncio
@@ -111,6 +111,43 @@ def shadow_rows(raw):
     return result
 
 
+def angler_rows(raw):
+    result = []
+    for item in filter(None, raw.split(";")):
+        *values, enabled, alpha, yaw, pitch = item.split("|")
+        coordinates = list(map(float, values))
+        result.append({"location": coordinates[:3], "colors": coordinates[3:],
+                       "lure": enabled == "true", "alpha": float(alpha), "aim": [float(yaw), float(pitch)]})
+    return result
+
+
+async def verify_angler(guest, host_box, guest_box, probe):
+    vetoes = blocked_triggers(status(guest))
+    assert await probe(guest_box, "guestguard") == "0"
+    guarded = await wait(guest, lambda view: blocked_triggers(view) >= vetoes + 5, timeout=5)
+    parked = angler_rows(await probe(guest_box, "anglervisual"))
+    assert parked and not any(row["lure"] for row in parked), parked
+    aim = parked[0]["aim"]
+    await probe(host_box, "anglerpresent", await probe(guest_box, "anglerviewpoint"))
+    expected = [.8, .2, .45, .4, .6, .12]
+    async with asyncio.timeout(12):
+        while True:
+            host_rows = angler_rows(await probe(host_box, "anglervisual"))
+            guest_rows = angler_rows(await probe(guest_box, "anglervisual"))
+            host_lamp = next((row for row in host_rows if math.dist(row["colors"], expected) < .035), None)
+            replica = next((row for row in guest_rows if host_lamp and math.dist(row["location"], host_lamp["location"]) < 4), None)
+            if replica and replica["lure"] and replica["alpha"] > .025 and math.dist(replica["colors"], host_lamp["colors"]) < .03:
+                break
+            await asyncio.sleep(.12)
+    assert math.dist(aim, replica["aim"]) > .2, (aim, replica)
+    await probe(host_box, "viewrestore")
+    async with asyncio.timeout(6):
+        while any(row["lure"] for row in angler_rows(await probe(guest_box, "anglervisual"))):
+            await asyncio.sleep(.1)
+    return {"host_lamp": host_lamp, "guest_lamp": replica, "guest_aim_before": aim, "lure_cleared": True,
+            "guest_native_vetoes": blocked_triggers(guarded) - vetoes}
+
+
 async def verify_shadow(guest, host_box, guest_box, probe):
     vetoes = blocked_triggers(status(guest))
     assert await probe(guest_box, "guestguard") == "0"
@@ -165,6 +202,8 @@ async def verify(work, family):
         env = {**os.environ, "SILVERFISH_COOP_RENDER_CAPTURE": "guest"}
         if family == "shadow-sphere":
             env["SILVERFISH_COOP_SHADOW_SPHERE_FIXTURE"] = "1"
+        if family == "angler-lamp" and args[0] == "join":
+            env["SILVERFISH_COOP_ANGLER_LAMP_FIXTURE"] = "1"
         with (host / f"{args[0]}.log").open("wb") as log:
             child = await asyncio.create_subprocess_exec(*cli, *args, stdout=log, stderr=log,
                 creationflags=flags, env=env)
@@ -226,7 +265,7 @@ async def verify(work, family):
                     host_wells, guest_wells = row(host_view), row(guest_view)
                     matching = [well for well in guest_wells if any(
                         math.dist(well["location"], source["location"]) < tolerance for source in host_wells)]
-                    if family != "gravity":
+                    if family in {"pyrogeist", "shadow-sphere"}:
                         matching = [well for well in matching if math.dist(well["location"], anchor) < 160]
                     if matching:
                         guest_wells = matching
@@ -236,7 +275,7 @@ async def verify(work, family):
                                                        for well in host_wells)
             for well in guest_wells:
                 assert (well["role"] == 1 and not well["tick"] and not well["collision"]
-                        and well["idle_effect"] == (family != "shadow-sphere")), well
+                        and well["idle_effect"] == (family in {"gravity", "pyrogeist"})), well
             common = {"stock_director_counts": director, "guest_duplicate_counts": attempted,
                       "host_actors": host_wells, "guest_actors": guest_wells}
             if family == "pyrogeist":
@@ -248,6 +287,12 @@ async def verify(work, family):
             if family == "shadow-sphere":
                 common.update(await verify_shadow(guest, host_box, guest_box, probe))
                 evidence = host / "live-shadow-sphere-field.json"
+                evidence.write_text(json.dumps(common, indent=2), encoding="utf-8")
+                print(evidence, flush=True)
+                return
+            if family == "angler-lamp":
+                common.update(await verify_angler(guest, host_box, guest_box, probe))
+                evidence = host / "live-angler-lamp-field.json"
                 evidence.write_text(json.dumps(common, indent=2), encoding="utf-8")
                 print(evidence, flush=True)
                 return
@@ -288,6 +333,6 @@ async def verify(work, family):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
-    parser.add_argument("--family", choices=("gravity", "pyrogeist", "shadow-sphere"), default="gravity")
+    parser.add_argument("--family", choices=("gravity", "pyrogeist", "shadow-sphere", "angler-lamp"), default="gravity")
     args = parser.parse_args()
     asyncio.run(verify(args.work.resolve(), args.family))

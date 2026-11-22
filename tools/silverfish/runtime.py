@@ -2610,11 +2610,18 @@ class Bridge:
                     if len(jets) < 64 and all(bit in {"0", "1"} for bit in fields[4:]):
                         jets.append({"location": [_finite(axis) for axis in fields[1:4]], "collision": fields[4] == "1",
                                      "particles_active": fields[5] == "1"})
+                elif (fields[0] == "native-angler-colors" and len(fields) == 10
+                      and data.get("map") == native_anomaly_effects.ANGLER_MAP and data.get("state") in {"hosting", "connected"}):
+                    lights = data.setdefault(native_anomaly_effects.ANGLER_COLORS, [])
+                    values = [_finite(field) for field in fields[1:]]
+                    row = [values[:3], values[3:]]
+                    if len(lights) < native_anomaly_effects.MAX_ANGLER_LAMPS and native_anomaly_effects.valid_angler_colors(row):
+                        lights.append(row)
                 elif fields[0] == "native-anomaly-position" and len(fields) == 6:
                     positions = data.setdefault("native_anomaly_positions", [])
                     if (len(positions) < 1024 and fields[1] in {
                             "starburst", "burner", "vortex", "electrode", "wandering-teleport", "gravity",
-                            "pyrogeist", "shadow-sphere",
+                            "pyrogeist", "shadow-sphere", "angler-lamp",
                         }
                             and fields[5] in {"0", "1"}):
                         positions.append({"kind": fields[1], "location": [_finite(value) for value in fields[2:5]],

@@ -9,6 +9,8 @@ from .native_guest_drop_record import valid_id, valid_position
 KEY = "native_anomaly_cues"
 VORTEX_SENSORS = "native_vortex_sensors"
 ELECTRODE_PHASES = "native_electrode_phases"
+ANGLER_COLORS = "native_angler_colors"
+ANGLER_MAP = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 CANISTERS = "native_explosive_canisters"
 FIXED_EXPLOSIVES = "native_fixed_explosives"
 FIXED_CUES = ("powerbox", "fixedtank", "fixedfire")
@@ -18,6 +20,45 @@ CUE_EVENTS = {"vortex": "native_vortex_effect_played", "electrode": "native_elec
               "canister": "native_canister_effect_played", **dict.fromkeys(FIXED_CUES, "native_fixed_explosive_effect_played")}
 MAX_CUES = 12
 MAX_SENSORS = 256
+MAX_ANGLER_LAMPS = 32
+
+
+def valid_angler_colors(row):
+    return (isinstance(row, list) and len(row) == 2 and valid_position(row[0])
+            and isinstance(row[1], list) and len(row[1]) == 6
+            and all(type(channel) in (int, float) and 0 <= channel <= 1 for channel in row[1]))
+
+
+def angler_frame(game, epoch, pawn):
+    if game.get("state") != "hosting" or game.get("map") != ANGLER_MAP or not valid_id(epoch):
+        return None
+    target = next((entry.get("location") for entry in game.get("pawns", {}).values() if entry.get("name") == pawn), None)
+    if not valid_position(target):
+        return None
+    nearby = [row for row in game.get(ANGLER_COLORS, ()) if valid_angler_colors(row) and math.dist(row[0], target) <= 15500]
+    if not nearby:
+        return None
+    return {"map": ANGLER_MAP, "epoch": epoch, "lights": nearby[:MAX_ANGLER_LAMPS]}
+
+
+async def project_angler_colors(bridge, game, frame, epoch):
+    if not isinstance(frame, dict) or not valid_id(epoch) or (game.get("state"), game.get("map")) != ("connected", ANGLER_MAP):
+        return game
+    lights = frame.get("lights")
+    if (frame.get("map"), frame.get("epoch")) != (ANGLER_MAP, epoch) or not isinstance(lights, list) or len(lights) > MAX_ANGLER_LAMPS:
+        return game
+    local = [row for row in game.get(ANGLER_COLORS, []) if valid_angler_colors(row)]
+    arguments = []
+    for row in lights:
+        if not valid_angler_colors(row):
+            continue
+        position, colors = row
+        matches = [candidate for origin, candidate in local if math.dist(origin, position) < 180]
+        if len(matches) == 1 and any(abs(a - b) > .006 for a, b in zip(matches[0], colors, strict=True)):
+            arguments.append("|".join(f"{value:.5f}" for value in [*position, *colors]))
+    if not arguments:
+        return game
+    return await bridge.command("native-angler-apply-colors", ANGLER_MAP, epoch, *arguments, timeout=1.5)
 
 
 async def project_sensors(bridge, game, frame, epoch):

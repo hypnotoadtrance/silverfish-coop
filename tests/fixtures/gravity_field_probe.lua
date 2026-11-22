@@ -1,12 +1,14 @@
 local box = os.getenv("SILVERFISH_COOP_BRIDGE")
 local pyrogeist = box and box:find("pyrogeist%-proof%-%x+") ~= nil
 local shadow = box and box:find("shadow%-sphere%-proof%-%x+") ~= nil
+local angler = box and box:find("angler%-lamp%-proof%-%x+") ~= nil
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not box
-    or not (pyrogeist or shadow or box:find("gravity%-proof%-%x+")) then return end
+    or not (pyrogeist or shadow or angler or box:find("gravity%-proof%-%x+")) then return end
 
 local level = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local director_path = level .. ":PersistentLevel.DynaimicSpawnControler_BP_C_1"
-local class = pyrogeist and "Pyrogeist_BP_C" or shadow and "ShadowSphere_BP_C" or "GravityAnomaly_BP_C"
+local class = pyrogeist and "Pyrogeist_BP_C" or shadow and "ShadowSphere_BP_C"
+    or angler and "AnglerLamp_BP_C" or "GravityAnomaly_BP_C"
 local particle_name = pyrogeist and "NI_Pyrogeist_Center" or "NI_GravityDistortion"
 local particle = "NiagaraSystem /Game/Assets/PFX/" .. particle_name .. "." .. particle_name
 local jet_particle = "NiagaraSystem /Game/Assets/PFX/NI_FireJet_Continuous_2.NI_FireJet_Continuous_2"
@@ -53,7 +55,7 @@ local function stock_roll(world)
     local cap = director.Max_AnomalyFields
     local ok, issue = pcall(function()
         map:Empty()
-        map:Add(FName(pyrogeist and "Pyrogiest" or shadow and "ShadowSwarm" or "GravityWell"), 1)
+        map:Add(FName(pyrogeist and "Pyrogiest" or shadow and "ShadowSwarm" or angler and "AnglerLamp" or "GravityWell"), 1)
         director.Max_AnomalyFields = 2
         director:SpawnAnomalies()
     end)
@@ -116,13 +118,15 @@ local function command(operation, world, driver, host, local_pawn, argument)
         local rows = {}
         for _, well in ipairs(current) do
             local at = well:K2_GetActorLocation()
-            local fx = pyrogeist and well.NI_StarburstHint or shadow and well.PostProcess_CreepingShadows or well.NI_GravityDistortion
-            local available = valid(fx) and same(fx:GetOwner(), well) and (shadow or valid(fx.Asset) and fx.Asset:GetFullName() == particle)
-            assert(pyrogeist or shadow or available)
+            local fx = pyrogeist and well.NI_StarburstHint or shadow and well.PostProcess_CreepingShadows
+                or angler and well.PostProcessLure or well.NI_GravityDistortion
+            local post = shadow or angler
+            local available = valid(fx) and same(fx:GetOwner(), well) and (post or valid(fx.Asset) and fx.Asset:GetFullName() == particle)
+            assert(pyrogeist or post or available)
             if available then
                 rows[#rows + 1] = ("%.2f|%.2f|%.2f|%d|%s|%s|%s"):format(at.X, at.Y, at.Z, well:GetLocalRole(),
                     tostring(well:GetActorEnableCollision()), tostring(well:IsActorTickEnabled()),
-                    tostring(shadow and fx.bEnabled or not shadow and fx:IsActive()))
+                    tostring(post and fx.bEnabled or not post and fx:IsActive()))
             end
         end
         return table.concat(rows, ";")
@@ -130,6 +134,15 @@ local function command(operation, world, driver, host, local_pawn, argument)
         assert(not host and #current > 0)
         local well = current[1]
         assert(well:GetLocalRole() == 1 and not well:GetActorEnableCollision() and not well:IsActorTickEnabled())
+        if angler then
+            well:ReceiveBeginPlay()
+            well:ReceiveTick(.2)
+            well:AddLook()
+            well:SubtractLook()
+            well:Attract_NPCs(local_pawn)
+            assert(well.LookAlpha == 0)
+            return "0"
+        end
         if shadow then
             local count = #well.OverlappingCharacters
             well:ReceiveBeginPlay()
@@ -156,7 +169,7 @@ local function command(operation, world, driver, host, local_pawn, argument)
         well:ReceiveTick(.2)
         assert(#well.Characters == characters and #well.PhysActors == bodies)
         return tostring(characters) .. "|" .. tostring(bodies)
-    elseif shadow and operation == "prepare" then
+    elseif (shadow or angler) and operation == "prepare" then
         assert(host and #current > 0 and #driver.ClientConnections == 0)
         local body = current[1]
         assert(body:HasAuthority() and body.bReplicates and body:GetActorEnableCollision())
@@ -239,7 +252,46 @@ local function command(operation, world, driver, host, local_pawn, argument)
         local guest = driver.ClientConnections[1].PlayerController.Pawn
         assert(valid(guest) and guest:K2_TeleportTo(selected.retreat, guest:K2_GetActorRotation()))
         return guest:GetFullName()
-    elseif shadow and operation == "viewpoint" then
+    elseif angler and operation == "anglerviewpoint" then
+        assert(not host and valid(local_pawn.Camera))
+        local camera = local_pawn.Camera
+        local point, ahead = camera:K2_GetComponentLocation(), camera:GetForwardVector()
+        return ("%.3f|%.3f|%.3f|%.5f|%.5f|%.5f"):format(point.X, point.Y, point.Z, ahead.X, ahead.Y, ahead.Z)
+    elseif angler and operation == "anglerpresent" then
+        assert(host and selected and valid(selected.well) and not selected.home)
+        local x, y, z, ax, ay, az = argument:match("^([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
+        x, y, z, ax, ay, az = tonumber(x), tonumber(y), tonumber(z), tonumber(ax), tonumber(ay), tonumber(az)
+        assert(x and y and z and ax and ay and az and math.abs(x - test_lane.X) < 8000 and math.abs(y - test_lane.Y) < 8000
+            and math.abs(z) < 10000 and math.abs(ax) <= 1 and math.abs(ay) <= 1 and math.abs(az) <= 1)
+        local body = selected.well
+        selected.home = body:K2_GetActorLocation()
+        body:SetActorTickEnabled(false)
+        local kismet = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+        kismet:MoveComponentTo(body.RootComponent, body.RootComponent.RelativeLocation, body.RootComponent.RelativeRotation,
+            false, false, 0, true, 1, {Linkage = -1, UUID = -436090044,
+                ExecutionFunction = FName("ExecuteUbergraph_AnglerLamp_BP"), CallbackTarget = body})
+        assert(body:K2_SetActorLocation({X = x + 325 * ax - 60 * ay, Y = y + 325 * ay + 60 * ax,
+            Z = z + 325 * az}, false, {}, true))
+        body.PointLight:SetLightColor({R = .8, G = .2, B = .45, A = 1}, true)
+        body.PointLight1:SetLightColor({R = .4, G = .6, B = .12, A = 1}, true)
+        body:ForceNetUpdate()
+        return body:GetFullName()
+    elseif angler and operation == "anglervisual" then
+        local rows = {}
+        for _, actor in ipairs(current) do
+            local post = actor.PostProcessLure
+            local first, second = actor.PointLight:GetLightColor(), actor.PointLight1:GetLightColor()
+            local list = post.Settings.WeightedBlendables.Array
+            local material = #list > 0 and list[1].Object
+            local vfx = valid(material) and material:GetFullName():match("^MaterialInstanceDynamic ")
+            local light = vfx and material:K2_GetVectorParameterValue(FName("Origin"))
+            local point, rotation = actor:K2_GetActorLocation(), local_pawn.Controller:GetControlRotation()
+            rows[#rows + 1] = ("%.3f|%.3f|%.3f|%.5f|%.5f|%.5f|%.5f|%.5f|%.5f|%s|%.4f|%.3f|%.3f"):format(
+                point.X, point.Y, point.Z, first.R, first.G, first.B, second.R, second.G, second.B,
+                tostring(post.bEnabled), light and light.A or 0, rotation.Yaw, rotation.Pitch)
+        end
+        return table.concat(rows, ";")
+    elseif (shadow or angler) and operation == "viewpoint" then
         assert(not host and valid(local_pawn.Camera))
         local point = local_pawn.Camera:K2_GetComponentLocation()
         return ("%.3f|%.3f|%.3f"):format(point.X, point.Y, point.Z)
@@ -255,9 +307,10 @@ local function command(operation, world, driver, host, local_pawn, argument)
             false, {}, true))
         body:ForceNetUpdate()
         return body:GetFullName()
-    elseif shadow and operation == "viewrestore" then
+    elseif (shadow or angler) and operation == "viewrestore" then
         assert(host and selected and valid(selected.well) and selected.home)
         assert(selected.well:K2_SetActorLocation(selected.home, false, {}, true))
+        if angler then selected.well:SetActorTickEnabled(true) end
         selected.well:ForceNetUpdate()
         selected.home = nil
         return selected.well:GetFullName()

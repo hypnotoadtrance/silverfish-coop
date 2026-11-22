@@ -1813,6 +1813,8 @@ class Host:
                     "map": self.last_game["map"], "epoch": self.zone_epoch,
                     "electrodes": [[row["path"], row["location"], row["phase"]] for row in electrodes],
                 }
+            if angler_lights := native_anomaly_effects.angler_frame(self.last_game, self.zone_epoch, pawn):
+                gameplay[native_anomaly_effects.ANGLER_COLORS] = angler_lights
             props = {path: row["phase"] for path, row in self.last_game.get(native_anomaly_effects.CANISTERS, {}).items()
                      if row["changed"]}
             if props:
@@ -5506,6 +5508,8 @@ class Client:
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.VORTEX_SENSORS), self.zone_epoch)
                     self.last_game = await native_anomaly_effects.project_electrodes(
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.ELECTRODE_PHASES), self.zone_epoch)
+                    self.last_game = await native_anomaly_effects.project_angler_colors(
+                        self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.ANGLER_COLORS), self.zone_epoch)
                     self.last_game = await native_anomaly_effects.project_canisters(
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.CANISTERS), self.zone_epoch)
                     self.last_game = await native_anomaly_effects.project_fixed_explosives(

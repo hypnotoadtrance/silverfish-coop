@@ -5,6 +5,7 @@ local canisters = require("native_explosive_canisters")
 local fixed = require("native_fixed_explosives")
 local pyrogeist = require("native_pyrogeist_view")
 local shadows = require("native_shadow_sphere_view")
+local lamps = require("native_angler_lamp_view")
 
 local classes = {
     starburst = "/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C",
@@ -38,12 +39,13 @@ local function in_world(actor, current)
 end
 
 local function trap_kind(actor, class)
-    if class == gravity or class == pyrogeist.body or shadows.enabled and class == shadows.class then
+    if class == gravity or class == pyrogeist.body or shadows.enabled and class == shadows.class
+        or lamps.enabled and class == lamps.class then
         local at = actor:GetWorld()
         if valid(at) and at:GetFullName() == "World " .. crossroads .. ".CrossRoads_P" then
             if class == gravity then return "gravity" end
             if class == pyrogeist.body then return "pyrogeist" end
-            return "shadow-sphere"
+            return class == shadows.class and "shadow-sphere" or "angler-lamp"
         end
         return
     end
@@ -51,7 +53,7 @@ local function trap_kind(actor, class)
 end
 
 local function disables_replica_tick(kind)
-    return kind == "gravity" or kind == "pyrogeist" or kind == "shadow-sphere"
+    return kind == "gravity" or kind == "pyrogeist" or kind == "shadow-sphere" or kind == "angler-lamp"
 end
 
 local function replica(actor)
@@ -136,6 +138,7 @@ end
 function fields.start(role)
     if type(SilverfishSetNativeAnomalyGuest) ~= "function" or type(RegisterBeginPlayPreHook) ~= "function"
         or type(RegisterBeginPlayPostHook) ~= "function" then return end
+    lamps.start()
     RegisterBeginPlayPreHook(function(context)
         local seat = role()
         if seat ~= "host" and seat ~= "client" then return end
@@ -218,6 +221,7 @@ end
 
 function fields.command(args, state, phase)
     if args[2] == "native-vortex-apply-sensors" then return project_placed_sensors(args, state, phase) end
+    if args[2] == "native-angler-apply-colors" then return lamps.apply_colors(args, state, phase, active) end
     local electrode = electrodes.command(args, state, phase, world, active)
     if electrode ~= nil then return electrode end
     local canister = canisters.command(args, state, phase)
@@ -302,15 +306,17 @@ function fields.command(args, state, phase)
 end
 
 function fields.rows(state, phase, row)
-    if phase ~= "hosting" and phase ~= "connected" or not valid(state.world) then return {} end
+    if phase ~= "hosting" and phase ~= "connected" or not valid(state.world) then lamps.clear(); return {} end
     if not same(world, state.world) or world_map ~= state.map then
         active, fires, fixtures, world, world_map = {}, {}, {}, state.world, state.map
         effects.clear()
         electrodes.clear()
+        lamps.clear()
         -- Initial replicated actors can finish BeginPlay while the new driver is still pending.
         if phase == "connected" and state.map == crossroads then
             local names = {"GravityAnomaly_BP_C", "Pyrogeist_BP_C"}
             if shadows.enabled then names[#names + 1] = "ShadowSphere_BP_C" end
+            if lamps.enabled then names[#names + 1] = "AnglerLamp_BP_C" end
             for _, name in ipairs(names) do
                 for _, actor in ipairs(FindAllOf(name) or {}) do
                     if in_world(actor, world) and replica(actor) then
@@ -353,6 +359,7 @@ function fields.rows(state, phase, row)
     end
     pyrogeist.apply(world, phase, active, replica)
     shadows.project(active, state, phase)
+    lamps.project(active, state, phase)
     for address, fire in pairs(pending_fires) do
         if in_world(fire, world) then
             if phase == "hosting" then
@@ -392,6 +399,8 @@ function fields.rows(state, phase, row)
                 end
             elseif entry.kind == "electrode" then
                 rows[#rows + 1] = electrodes.observe(entry, phase, row, position)
+            elseif entry.kind == "angler-lamp" then
+                rows[#rows + 1] = lamps.color_row(actor, row)
             end
         else
             if phase == "hosting" and entry.kind == "electrode" then electrodes.retire(entry) end

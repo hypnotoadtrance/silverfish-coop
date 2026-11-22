@@ -2,13 +2,30 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish.native_anomaly_effects import (
-    CANISTERS, ELECTRODE_PHASES, FIXED_EXPLOSIVES, Playback, VORTEX_SENSORS,
-    project_canisters, project_electrodes, project_fixed_explosives, project_sensors,
+    ANGLER_COLORS, ANGLER_MAP, CANISTERS, ELECTRODE_PHASES, FIXED_EXPLOSIVES, Playback, VORTEX_SENSORS,
+    angler_frame, project_angler_colors, project_canisters, project_electrodes, project_fixed_explosives, project_sensors,
 )
 from tools.silverfish.native_damage_feedback import Playback as HurtPlayback
 
 
 class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_angler_colors_require_nearby_unambiguous_replica_and_current_visit(self):
+        epoch = "c" * 32
+        old, changed = [0, 0, 0, 0, 0, 0], [1, .1, .2, .3, .4, .5]
+        host = {"state": "hosting", "map": ANGLER_MAP, "pawns": {"guest": {"name": "Guest", "location": [0, 0, 0]}},
+                ANGLER_COLORS: [[[200, 50, 20], changed], [[4000, 10, 20], changed], [[18000, 0, 0], changed]]}
+        frame = angler_frame(host, epoch, "Guest")
+        self.assertEqual(len(frame["lights"]), 2)
+        guest = {"state": "connected", "map": ANGLER_MAP,
+                 ANGLER_COLORS: [[[220, 50, 20], old], [[3980, 10, 20], old], [[4020, 10, 20], old]]}
+        bridge = Mock(command=AsyncMock(return_value=guest))
+        await project_angler_colors(bridge, guest, frame, "b" * 32)
+        bridge.command.assert_not_awaited()
+        await project_angler_colors(bridge, guest, frame, epoch)
+        bridge.command.assert_awaited_once_with(
+            "native-angler-apply-colors", ANGLER_MAP, epoch,
+            "200.00000|50.00000|20.00000|1.00000|0.10000|0.20000|0.30000|0.40000|0.50000", timeout=1.5)
+
     async def test_psychic_and_physical_feedback_from_one_hit_both_play_once(self):
         playback = HurtPlayback()
         epoch = "a" * 32
