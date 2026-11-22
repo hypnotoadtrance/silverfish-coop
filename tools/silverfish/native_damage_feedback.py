@@ -5,6 +5,7 @@ from .native_guest_drop_record import valid_id
 KEY = "native_guest_hurt"
 COMMAND = "native-guest-hurt-play"
 LIMIT = 12
+PSYCHE = 16
 
 
 def valid_cue(cue):
@@ -14,7 +15,8 @@ def valid_cue(cue):
     return (type(serial) is int and 0 < serial < 2**53
             and type(amount) in (int, float) and 1 <= amount <= 1000
             and all(type(value) in (int, float) and abs(value) <= 1 for value in (x, y, z))
-            and type(mask) is int and 0 <= mask <= 15)
+            and type(mask) is int and (0 <= mask < PSYCHE
+                                      or mask == PSYCHE and amount <= 10 and x == y == z == 0))
 
 
 def parse(fields):
@@ -49,16 +51,19 @@ class Playback:
         scope = area, epoch, identity
         if self.scope != scope:
             self.scope, self.last = scope, 0
-        latest = max((cue for cue in cues if valid_cue(cue) and cue[0] > self.last),
-                     key=lambda cue: cue[0], default=None)
-        if latest is None:
-            return game
-        self.last = latest[0]
-        try:
-            result = await bridge.command(COMMAND, area, epoch, identity, *map(str, latest), timeout=1.5)
-        except (OSError, RuntimeError) as error:
-            control.event("native_guest_hurt_unavailable", reason=str(error))
-            return game
-        if result.get("ack", {}).get("message") == "guest hurt feedback played":
-            control.event("native_guest_hurt_played", serial=self.last, damage=latest[1], sound_mask=latest[-1])
-        return result
+        latest = {}
+        for cue in cues:
+            if valid_cue(cue) and cue[0] > self.last:
+                psyche = cue[-1] == PSYCHE
+                if psyche not in latest or cue[0] > latest[psyche][0]:
+                    latest[psyche] = cue
+        for cue in sorted(latest.values(), key=lambda value: value[0]):
+            self.last = cue[0]
+            try:
+                game = await bridge.command(COMMAND, area, epoch, identity, *map(str, cue), timeout=1.5)
+            except (OSError, RuntimeError) as error:
+                control.event("native_guest_hurt_unavailable", reason=str(error))
+                continue
+            if game.get("ack", {}).get("message") == "guest hurt feedback played":
+                control.event("native_guest_hurt_played", serial=self.last, damage=cue[1], sound_mask=cue[-1])
+        return game

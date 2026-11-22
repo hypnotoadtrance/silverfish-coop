@@ -5,9 +5,27 @@ from tools.silverfish.native_anomaly_effects import (
     CANISTERS, ELECTRODE_PHASES, FIXED_EXPLOSIVES, Playback, VORTEX_SENSORS,
     project_canisters, project_electrodes, project_fixed_explosives, project_sensors,
 )
+from tools.silverfish.native_damage_feedback import Playback as HurtPlayback
 
 
 class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_psychic_and_physical_feedback_from_one_hit_both_play_once(self):
+        playback = HurtPlayback()
+        epoch = "a" * 32
+        game = {"state": "connected", "map": "Crossroads", "pawns": {"local": {"name": "GuestPawn"}}}
+        frame = {"map": game["map"], "epoch": epoch, "cues": [
+            [10, 6, 0, 0, 0, 16], [11, 7, 0, 0, 0, 16],
+            [12, 8, 1, 0, 0, 16], [13, 38, 0, 0, 0, 0],
+        ]}
+        result = {**game, "ack": {"message": "guest hurt feedback played"}}
+        bridge = Mock(command=AsyncMock(return_value=result))
+        control = Mock()
+        for _ in range(2):
+            await playback.sync(bridge, control, game, frame, epoch)
+        self.assertEqual([call.kwargs["serial"] for call in control.event.call_args_list], [11, 13])
+        self.assertEqual([call.kwargs["sound_mask"] for call in control.event.call_args_list], [16, 0])
+        self.assertEqual(bridge.command.await_count, 2)
+
     async def test_spatial_cues_play_once_per_authenticated_visit(self):
         playback = Playback()
         epoch = "a" * 32

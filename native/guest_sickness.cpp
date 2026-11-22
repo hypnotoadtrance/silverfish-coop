@@ -1,5 +1,6 @@
 #include "guest_sickness.hpp"
 
+#include "enemy_loot.hpp"
 #include "guest_regen.hpp"
 
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <string_view>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
+#include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FFrame.hpp>
@@ -21,6 +23,7 @@
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
+#include <Unreal/World.hpp>
 
 namespace
 {
@@ -37,6 +40,12 @@ namespace
     constexpr auto slow_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:SlowCheck");
     constexpr auto check_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:Check_SaveFlag");
     constexpr auto add_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:Add_PointTo_SaveFlag");
+    constexpr auto shadow_class = STR("/Game/Classes/Anomalies/ShadowSphere_BP.ShadowSphere_BP_C");
+    constexpr auto crossroads = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P");
+    constexpr auto effects_class = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.FL_GameEffects_C");
+    constexpr auto add_fatigue_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.FL_GameEffects_C:Add_PlayerFatigue");
+    constexpr auto find_passive_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:FindPassiveEffect");
+    constexpr auto resolve_psy_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Resolve_PsyAttack");
     constexpr auto owner = STR("SilverfishCoopNative");
     constexpr int max_entries = 4;
     constexpr int max_flags = 16384;
@@ -58,6 +67,8 @@ namespace
     {
         return opt_in("SILVERFISH_COOP_NATIVE_FIXTURES") && opt_in("SILVERFISH_COOP_HEADLESS");
     }
+
+    bool shadow_fixture{};
 
     template <typename T>
     T* find(const U::TCHAR* path)
@@ -112,6 +123,18 @@ namespace
         U::FBoolProperty* overwrite{};
         U::FBoolProperty* force_decrease{};
         U::FName sickness{}, fatigue{};
+        U::UFunction* resolve_psy{};
+        U::UFunction* add_fatigue{};
+        U::UFunction* find_passive{};
+        U::FObjectProperty* fatigue_instance{};
+        U::FObjectProperty* fatigue_pawn{};
+        U::FIntProperty* fatigue_delta{};
+        U::FIntProperty* fatigue_value{};
+        U::FNameProperty* passive_name{};
+        U::FBoolProperty* passive_count{};
+        U::FBoolProperty* passive_active{};
+        U::FIntProperty* passive_instances{};
+        U::FName shadow_graph{}, mindful{}, bad_aura{}, trauma{}, attuned{};
 
         bool bind()
         {
@@ -132,6 +155,25 @@ namespace
             force_decrease = parameter<U::FBoolProperty>(add_flag, STR("Force_Decrease"), 13);
             sickness = U::FName{STR("Sickness"), U::FNAME_Find};
             fatigue = U::FName{STR("Player_Fatigue"), U::FNAME_Find};
+            if (shadow_fixture)
+            {
+                resolve_psy = blueprint(resolve_psy_path, pawn, 1, 4);
+                add_fatigue = blueprint(add_fatigue_path, find<U::UClass>(effects_class), 4, 28);
+                find_passive = blueprint(find_passive_path, instance, 4, 16);
+                fatigue_instance = parameter<U::FObjectProperty>(add_fatigue, STR("GameInstance"), 0);
+                fatigue_delta = parameter<U::FIntProperty>(add_fatigue, STR("Difference"), 8);
+                fatigue_pawn = parameter<U::FObjectProperty>(add_fatigue, STR("__WorldContext"), 16);
+                fatigue_value = parameter<U::FIntProperty>(add_fatigue, STR("Fatigue_Value"), 24, true);
+                passive_name = parameter<U::FNameProperty>(find_passive, STR("EffectName"), 0);
+                passive_count = parameter<U::FBoolProperty>(find_passive, STR("CountInstances"), 8);
+                passive_active = parameter<U::FBoolProperty>(find_passive, STR("EffectActive"), 9, true);
+                passive_instances = parameter<U::FIntProperty>(find_passive, STR("Instances"), 12, true);
+                shadow_graph = U::FName{STR("ExecuteUbergraph_ShadowSphere_BP"), U::FNAME_Add};
+                mindful = U::FName{STR("Mindful"), U::FNAME_Add};
+                bad_aura = U::FName{STR("BadAura"), U::FNAME_Add};
+                trauma = U::FName{STR("LingeringTrauma"), U::FNAME_Add};
+                attuned = U::FName{STR("AttunedMadness"), U::FNAME_Add};
+            }
             return amount && check_key && check_found && check_value && add_key && add_value &&
                 overwrite && force_decrease && !sickness.IsNone() && !fatigue.IsNone();
         }
@@ -213,6 +255,9 @@ namespace
 
     std::array<Entry, max_entries> entries{};
     Hook::GlobalCallbackId callback = Hook::ERROR_ID;
+    Hook::GlobalCallbackId shadow_feedback_callback = Hook::ERROR_ID;
+    thread_local U::FFrame* shadow_feedback_frame{};
+    thread_local U::FWeakObjectPtr shadow_feedback_pawn;
     std::atomic<std::uint64_t> generation{1};
     bool schema_bound{};
 
@@ -257,6 +302,101 @@ namespace
         return item ? nullptr : data;
     }
 
+    bool shadow_source(U::FFrame* resolve, U::UObject* pawn)
+    {
+        if (!resolve || !pawn || !schema.resolve_psy || resolve->Node() != schema.resolve_psy ||
+            resolve->Object() != pawn || pawn->GetClassPrivate() != schema.resolve_psy->GetOuterPrivate()) return false;
+        auto* controller = object(pawn, STR("Controller"));
+        auto* connection = object(controller, STR("Player"));
+        auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
+        auto* driver = object(world, STR("NetDriver"));
+        if (!controller || !connection || !driver || !world || world->GetPathName() != crossroads ||
+            object(connection, STR("Driver")) != driver || object(connection, STR("PlayerController")) != controller)
+            return false;
+        auto* previous = resolve->PreviousFrame();
+        for (int depth = 0; previous && depth < 8; ++depth, previous = previous->PreviousFrame())
+        {
+            auto* source = previous->Object();
+            auto* node = previous->Node();
+            auto* type = source ? source->GetClassPrivate() : nullptr;
+            if (node && node->GetFName() == schema.shadow_graph && type && type == node->GetOuterPrivate() &&
+                type->GetPathName() == shadow_class && object(source, STR("AttackTarget")) == pawn &&
+                static_cast<U::AActor*>(source)->GetWorld() == world) return true;
+        }
+        return false;
+    }
+
+    bool redirect_psy(Iteration& iteration, U::UObject* receiver, U::FFrame& frame)
+    {
+        if (!shadow_fixture || !schema_bound || !schema.resolve_psy || !frame.Locals()) return false;
+        const bool resolve = frame.Node() == schema.resolve_psy;
+        const bool fatigue = frame.Node() == schema.add_fatigue;
+        const bool passive = frame.Node() == schema.find_passive;
+        if (!resolve && !fatigue && !passive) return false;
+        auto* parent = resolve ? &frame : frame.PreviousFrame();
+        auto* pawn = parent ? parent->Object() : nullptr;
+        if (!shadow_source(parent, pawn)) return false;
+        auto* scope = entry_for(pawn);
+        Flags guest, host;
+        const bool qualified = scope && current(*scope) && !scope->proof.quarantined
+            && guest.bind(scope->guest.Get()) && host.bind(scope->stock.Get());
+        if (resolve)
+        {
+            int count{};
+            if (!qualified || !schema.fatigue_instance || !schema.fatigue_delta || !schema.fatigue_pawn || !schema.fatigue_value ||
+                !schema.passive_name || !schema.passive_count || !schema.passive_active || !schema.passive_instances ||
+                !silverfish::native_enemy_loot::count_save_passive(scope->guest.Get(), schema.mindful, count))
+                iteration.PreventOriginalFunctionCall();
+            else if (shadow_feedback_callback != Hook::ERROR_ID && !shadow_feedback_frame)
+            {
+                shadow_feedback_frame = &frame;
+                shadow_feedback_pawn = pawn;
+            }
+            return true;
+        }
+        // A Shadow Sphere's personal writes must never reach the session's host save.
+        iteration.PreventOriginalFunctionCall();
+        if (!iteration.OriginalFunctionCallPrevented() || !qualified) return true;
+        auto* locals = frame.Locals();
+        auto* save = scope->guest.Get();
+        if (passive)
+        {
+            if (!schema.passive_name || !schema.passive_count || !schema.passive_active || !schema.passive_instances)
+                return true;
+            auto* found = output(frame, schema.passive_active);
+            auto* count = output(frame, schema.passive_instances);
+            if (!found || !count || receiver != scope->instance.Get()) return true;
+            const auto name = schema.passive_name->GetPropertyValueInContainer(locals);
+            std::int32_t present{}, attuned{};
+            const bool stacks = schema.passive_count->GetPropertyValueInContainer(locals);
+            if ((name != schema.mindful && name != schema.bad_aura) ||
+                !silverfish::native_enemy_loot::count_save_passive(save, name, present) ||
+                (stacks && !silverfish::native_enemy_loot::count_save_passive(save, schema.attuned, attuned))) present = 0;
+            schema.passive_active->SetPropertyValue(found, present > 0);
+            if (present > 0 && stacks && attuned > 0 && guest.read(schema.fatigue).value >= 75) ++present;
+            schema.passive_instances->SetPropertyValue(count, stacks ? present : static_cast<int>(present > 0));
+            return true;
+        }
+        if (!schema.fatigue_instance || !schema.fatigue_delta || !schema.fatigue_pawn || !schema.fatigue_value)
+            return true;
+        auto* value = output(frame, schema.fatigue_value);
+        if (!value || schema.fatigue_instance->GetObjectPropertyValue(
+                schema.fatigue_instance->ContainerPtrToValuePtr<void>(locals)) != scope->instance.Get() ||
+            schema.fatigue_pawn->GetObjectPropertyValue(schema.fatigue_pawn->ContainerPtrToValuePtr<void>(locals)) != pawn) return true;
+        const auto before = guest.read(schema.fatigue);
+        const auto canonical = host.read(schema.fatigue);
+        schema.fatigue_value->SetPropertyValue(value, before.value);
+        const auto amount = schema.fatigue_delta->GetPropertyValueInContainer(locals);
+        std::int32_t trauma{};
+        if (amount < 6 || amount > 100 || !silverfish::native_enemy_loot::count_save_passive(save, schema.trauma, trauma))
+            return true;
+        const auto next = std::clamp<std::int64_t>(static_cast<std::int64_t>(before.value) + amount, trauma > 0 ? 15 : 0, 100);
+        if (guest.write(schema.fatigue, before, static_cast<std::int32_t>(next)) && current(*scope)
+            && host.read(schema.fatigue) == canonical)
+            schema.fatigue_value->SetPropertyValue(value, static_cast<std::int32_t>(next));
+        return true;
+    }
+
     std::optional<std::int32_t> write_value(bool infect, U::FFrame& caller, void* locals, Flag before)
     {
         const auto value = schema.add_value->GetPropertyValueInContainer(locals);
@@ -280,6 +420,7 @@ namespace
     void redirect(Iteration& iteration, U::UObject* receiver, U::FFrame& frame, void*)
     {
         if (!U::IsInGameThreadRaw() || !schema_bound || iteration.OriginalFunctionCallPrevented()) return;
+        if (redirect_psy(iteration, receiver, frame)) return;
         const bool lookup = frame.Node() == schema.check_flag;
         if (!lookup && frame.Node() != schema.add_flag) return;
         auto* caller = frame.PreviousFrame();
@@ -342,6 +483,13 @@ namespace
     }
 
     bool available() { return U::IsInGameThreadRaw() && callback != Hook::ERROR_ID; }
+
+    int is_shadow_feedback(const Lua& lua)
+    {
+        const bool queried = available() && shadow_feedback_frame && lua.get_stack_size() == 1 && lua.is_integer(1);
+        lua.set_bool(queried && address(shadow_feedback_pawn.Get()) == static_cast<Address>(lua.get_integer()));
+        return 1;
+    }
 
     int result(const Lua& lua, bool ok, std::string_view status)
     {
@@ -491,14 +639,28 @@ bool silverfish::native_guest_sickness::read_fatigue(RC::Unreal::UObject* save, 
 void silverfish::native_guest_sickness::install_hooks()
 {
     if (!enabled() || callback != Hook::ERROR_ID) return;
+    shadow_fixture = fixtures() && opt_in("SILVERFISH_COOP_SHADOW_SPHERE_FIXTURE");
     callback = Hook::RegisterProcessLocalScriptFunctionPreCallback(
         redirect, {false, false, owner, STR("Redirect exact guest Sickness flag effects")});
+    if (shadow_fixture)
+        shadow_feedback_callback = Hook::RegisterProcessLocalScriptFunctionPostCallback(
+            [](Iteration&, U::UObject*, U::FFrame& frame, void*) {
+                if (shadow_feedback_frame == &frame)
+                {
+                    shadow_feedback_frame = nullptr;
+                    shadow_feedback_pawn = U::FWeakObjectPtr{};
+                }
+            }, {false, false, owner, STR("Close the exact guest ShadowSphere feedback scope")});
 }
 
 void silverfish::native_guest_sickness::uninstall_hooks()
 {
     if (callback != Hook::ERROR_ID) Hook::UnregisterCallback(callback);
+    if (shadow_feedback_callback != Hook::ERROR_ID) Hook::UnregisterCallback(shadow_feedback_callback);
     callback = Hook::ERROR_ID;
+    shadow_feedback_callback = Hook::ERROR_ID;
+    shadow_feedback_frame = nullptr;
+    shadow_feedback_pawn = U::FWeakObjectPtr{};
     schema_bound = false;
     schema = {};
     entries = {};
@@ -516,5 +678,6 @@ void silverfish::native_guest_sickness::register_lua(RC::LuaMadeSimple::Lua& lua
     lua.register_function("SilverfishSetNativeGuestSickness", set_scope);
     lua.register_function("SilverfishReadNativeGuestSickness", read);
     lua.register_function("SilverfishClearNativeGuestSickness", clear);
+    if (shadow_fixture) lua.register_function("SilverfishIsNativeShadowFeedbackTarget", is_shadow_feedback);
     if (fixtures()) lua.register_function("SilverfishProbeNativeGuestSickness", probe);
 }

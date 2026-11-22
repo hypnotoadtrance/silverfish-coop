@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <string_view>
 
 #include <Helpers/String.hpp>
@@ -34,6 +35,7 @@ namespace
     constexpr auto pyrogeist_class = STR("/Game/Classes/Anomalies/Pyrogeist_BP.Pyrogeist_BP_C");
     constexpr auto directed_jet_class = STR("/Game/Classes/Anomalies/Fire_Jet_Directed_BP.Fire_Jet_Directed_BP_C");
     constexpr auto fire_class = STR("/Game/Classes/Anomalies/Fire_BP.Fire_BP_C");
+    constexpr auto shadow_class = STR("/Game/Classes/Anomalies/ShadowSphere_BP.ShadowSphere_BP_C");
     constexpr auto crossroads_world = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P");
     constexpr auto roaming_teleport_class = STR("/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C");
     constexpr auto physics_prop = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
@@ -53,6 +55,8 @@ namespace
     U::FName spawn_field, overlap, electrode, roaming_teleport, fixed_prop_name;
     U::FName gravity, gravity_graph, gravity_add_actors;
     U::FName pyrogeist, pyrogeist_graph, directed_jet, fire_graph, fire_damage;
+    U::FName shadow, shadow_graph;
+    bool shadow_fixture{};
     U::FName patch_name;
     std::array<U::FName, 3> patch_events;
     std::array<U::FName, 6> electrode_events;
@@ -77,6 +81,13 @@ namespace
     {
         for (const auto id : hooks) if (id == H::ERROR_ID) return false;
         return true;
+    }
+
+    bool opt_in(const char* name)
+    {
+        std::array<char, 2> value{};
+        std::size_t size{};
+        return getenv_s(&size, value.data(), value.size(), name) == 0 && size == value.size() && value[0] == '1';
     }
 
     template <typename T>
@@ -121,9 +132,11 @@ namespace
         if (classes.Num() != 1) return false;
         auto* type = entry->GetObjectPropertyValue(classes.GetRawPtr(0));
         if (trap_class(type)) return true;
-        if (!type || (type->GetFName() != gravity && type->GetFName() != pyrogeist) ||
-            !world || world->GetPathName() != crossroads_world) return false;
-        return type->GetPathName() == (type->GetFName() == gravity ? gravity_class : pyrogeist_class);
+        if (!type || !world || world->GetPathName() != crossroads_world) return false;
+        const auto name = type->GetFName();
+        if (name == gravity) return type->GetPathName() == gravity_class;
+        if (name == pyrogeist) return type->GetPathName() == pyrogeist_class;
+        return shadow_fixture && name == shadow && type->GetPathName() == shadow_class;
     }
 
     bool passive_directed_jet(U::UObject* actor, U::UObject* type, U::UObject* binding)
@@ -164,11 +177,12 @@ namespace
         const bool gravity_event = name == gravity_graph || name == gravity_add_actors;
         const bool pyrogeist_event = name == pyrogeist_graph;
         const bool fire_event = name == fire_graph || name == fire_damage;
+        const bool shadow_event = shadow_fixture && name == shadow_graph;
         const bool prop_event = !field && std::find(canister_events.begin(), canister_events.end(), name) != canister_events.end();
         const bool fixed_event = !field && std::find(fixed_prop_events.begin(), fixed_prop_events.end(), name) != fixed_prop_events.end();
         const bool patch_event = std::ranges::find(patch_events, name) != patch_events.end();
         if ((!field && !trap && !roaming_event && !gravity_event && !pyrogeist_event && !fire_event &&
-            !prop_event && !fixed_event && !patch_event) || !U::IsInGameThreadRaw() ||
+            !shadow_event && !prop_event && !fixed_event && !patch_event) || !U::IsInGameThreadRaw() ||
             call.OriginalFunctionCallPrevented() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
         auto* type = actor->GetClassPrivate();
         if (!type) return;
@@ -193,9 +207,11 @@ namespace
         auto* binding = function->GetOuterPrivate();
         const bool pyrogeist_body = pyrogeist_event && class_name == pyrogeist && type->GetPathName() == pyrogeist_class;
         const bool pyrogeist_jet = fire_event && passive_directed_jet(actor, type, binding);
+        const bool shadow_sphere = shadow_event && class_name == shadow && type->GetPathName() == shadow_class;
         const bool fixed = fixed_event && binding && binding->GetFName() == fixed_prop_name &&
             binding->GetPathName() == fixed_prop && type->IsChildOf(static_cast<U::UClass*>(binding));
-        if (!field && !trap && !roaming && !gravity_well && !pyrogeist_body && !pyrogeist_jet && !canister && !fixed) return;
+        if (!field && !trap && !roaming && !gravity_well && !pyrogeist_body && !pyrogeist_jet &&
+            !shadow_sphere && !canister && !fixed) return;
         auto* world = static_cast<U::AActor*>(actor)->GetWorld();
         if (canister)
         {
@@ -211,7 +227,7 @@ namespace
             // Keep arming, blast creation, and queued graph continuations on the host.
             if (type->GetPathName() != electrode_class) return;
         }
-        else if (gravity_well || pyrogeist_body || pyrogeist_jet)
+        else if (gravity_well || pyrogeist_body || pyrogeist_jet || shadow_sphere)
         {
             if (!world || world->GetPathName() != crossroads_world) return;
         }
@@ -298,6 +314,9 @@ namespace silverfish::native_anomaly_fields
         directed_jet = U::FName{STR("Fire_Jet_Directed_BP_C"), U::FNAME_Add};
         fire_graph = U::FName{STR("ExecuteUbergraph_Fire_BP"), U::FNAME_Add};
         fire_damage = U::FName{STR("FireDmg_Actor"), U::FNAME_Add};
+        shadow_fixture = opt_in("SILVERFISH_COOP_HEADLESS") && opt_in("SILVERFISH_COOP_SHADOW_SPHERE_FIXTURE");
+        shadow = U::FName{STR("ShadowSphere_BP_C"), U::FNAME_Add};
+        shadow_graph = U::FName{STR("ExecuteUbergraph_ShadowSphere_BP"), U::FNAME_Add};
         patch_name = U::FName{STR("MushroomPatch_BP_C"), U::FNAME_Add};
         patch_events = {
             U::FName{STR("ReceiveBeginPlay"), U::FNAME_Add},

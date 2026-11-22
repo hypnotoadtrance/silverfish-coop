@@ -1,16 +1,19 @@
 local box = os.getenv("SILVERFISH_COOP_BRIDGE")
 local pyrogeist = box and box:find("pyrogeist%-proof%-%x+") ~= nil
+local shadow = box and box:find("shadow%-sphere%-proof%-%x+") ~= nil
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not box
-    or not (pyrogeist or box:find("gravity%-proof%-%x+")) then return end
+    or not (pyrogeist or shadow or box:find("gravity%-proof%-%x+")) then return end
 
 local level = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local director_path = level .. ":PersistentLevel.DynaimicSpawnControler_BP_C_1"
-local class = pyrogeist and "Pyrogeist_BP_C" or "GravityAnomaly_BP_C"
+local class = pyrogeist and "Pyrogeist_BP_C" or shadow and "ShadowSphere_BP_C" or "GravityAnomaly_BP_C"
 local particle_name = pyrogeist and "NI_Pyrogeist_Center" or "NI_GravityDistortion"
 local particle = "NiagaraSystem /Game/Assets/PFX/" .. particle_name .. "." .. particle_name
 local jet_particle = "NiagaraSystem /Game/Assets/PFX/NI_FireJet_Continuous_2.NI_FireJet_Continuous_2"
 local contact = "BndEvt__Pyrogeist_BP_CapsuleComponent_K2Node_ComponentBoundEvent_1_ComponentBeginOverlapSignature__DelegateSignature"
 local panic = "BndEvt__Pyrogeist_BP_Sphere_Panic_K2Node_ComponentBoundEvent_2_ComponentBeginOverlapSignature__DelegateSignature"
+local shadow_enter = "BndEvt__Starburst_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature"
+    .. "__DelegateSignature"
 local weights = "Anomalies_WtWeights_41_BDF2F049400F5C73E9FF86B6B2B4E19F"
 local test_lane = {X = 13850, Y = -200, Z = 132}
 local previous, lift, hooked, selected
@@ -50,7 +53,7 @@ local function stock_roll(world)
     local cap = director.Max_AnomalyFields
     local ok, issue = pcall(function()
         map:Empty()
-        map:Add(FName(pyrogeist and "Pyrogiest" or "GravityWell"), 1)
+        map:Add(FName(pyrogeist and "Pyrogiest" or shadow and "ShadowSwarm" or "GravityWell"), 1)
         director.Max_AnomalyFields = 2
         director:SpawnAnomalies()
     end)
@@ -103,7 +106,7 @@ local function floor_position(pawn, near, x, y, players)
     end
 end
 
-local function command(operation, world, driver, host, local_pawn)
+local function command(operation, world, driver, host, local_pawn, argument)
     local current = wells(world)
     if operation == "roll" then
         if host then assert(os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1") end
@@ -113,12 +116,13 @@ local function command(operation, world, driver, host, local_pawn)
         local rows = {}
         for _, well in ipairs(current) do
             local at = well:K2_GetActorLocation()
-            local fx = pyrogeist and well.NI_StarburstHint or well.NI_GravityDistortion
-            local available = valid(fx) and same(fx:GetOwner(), well) and valid(fx.Asset) and fx.Asset:GetFullName() == particle
-            assert(pyrogeist or available)
+            local fx = pyrogeist and well.NI_StarburstHint or shadow and well.PostProcess_CreepingShadows or well.NI_GravityDistortion
+            local available = valid(fx) and same(fx:GetOwner(), well) and (shadow or valid(fx.Asset) and fx.Asset:GetFullName() == particle)
+            assert(pyrogeist or shadow or available)
             if available then
                 rows[#rows + 1] = ("%.2f|%.2f|%.2f|%d|%s|%s|%s"):format(at.X, at.Y, at.Z, well:GetLocalRole(),
-                    tostring(well:GetActorEnableCollision()), tostring(well:IsActorTickEnabled()), tostring(fx:IsActive()))
+                    tostring(well:GetActorEnableCollision()), tostring(well:IsActorTickEnabled()),
+                    tostring(shadow and fx.bEnabled or not shadow and fx:IsActive()))
             end
         end
         return table.concat(rows, ";")
@@ -126,6 +130,15 @@ local function command(operation, world, driver, host, local_pawn)
         assert(not host and #current > 0)
         local well = current[1]
         assert(well:GetLocalRole() == 1 and not well:GetActorEnableCollision() and not well:IsActorTickEnabled())
+        if shadow then
+            local count = #well.OverlappingCharacters
+            well:ReceiveBeginPlay()
+            well:ReceiveTick(.2)
+            well[shadow_enter](well, well.Sphere, local_pawn, local_pawn.CapsuleComponent, 0, false, {})
+            well:Try_Attack()
+            assert(#well.OverlappingCharacters == count and not well.PlayerOverlap)
+            return tostring(count)
+        end
         if pyrogeist then
             watch(world, nil, local_pawn)
             local save = local_pawn.Save
@@ -143,6 +156,20 @@ local function command(operation, world, driver, host, local_pawn)
         well:ReceiveTick(.2)
         assert(#well.Characters == characters and #well.PhysActors == bodies)
         return tostring(characters) .. "|" .. tostring(bodies)
+    elseif shadow and operation == "prepare" then
+        assert(host and #current > 0 and #driver.ClientConnections == 0)
+        local body = current[1]
+        assert(body:HasAuthority() and body.bReplicates and body:GetActorEnableCollision())
+        local anchor = {X = test_lane.X, Y = test_lane.Y, Z = test_lane.Z + 3500}
+        -- Scope this lane above the roaming NPCs so unrelated attacks cannot alter either save during the proof.
+        local_pawn.CharacterMovement:StopMovementImmediately()
+        local_pawn.CharacterMovement:SetMovementMode(0, 0)
+        assert(local_pawn:K2_SetActorLocation({X = anchor.X + 1050, Y = anchor.Y, Z = anchor.Z}, false, {}, true))
+        assert(body:K2_SetActorLocation(anchor, false, {}, true))
+        body:ForceNetUpdate()
+        local_pawn:ForceNetUpdate()
+        selected = {well = body, entry = {X = anchor.X + 120, Y = anchor.Y, Z = anchor.Z}}
+        return ("%.2f|%.2f|%.2f"):format(anchor.X, anchor.Y, anchor.Z)
     elseif pyrogeist and operation == "prepare" then
         assert(host and #current > 0 and #driver.ClientConnections == 0)
         local body = current[1]
@@ -164,13 +191,13 @@ local function command(operation, world, driver, host, local_pawn)
                 body:ForceNetUpdate()
                 local_pawn:ForceNetUpdate()
                 selected = {well = body, entry = entry}
-                write("pyrogeist-anchor", ("%s|role=%d:%d|rep=%s|dormancy=%s|relevant=%s|cull=%s"):format(
+                write("hazard-anchor", ("%s|role=%d:%d|rep=%s|dormancy=%s|relevant=%s|cull=%s"):format(
                     body:GetFullName(), body:GetLocalRole(), body:GetRemoteRole(), tostring(body.bReplicates),
                     tostring(body.NetDormancy), tostring(body.bAlwaysRelevant), tostring(body.NetCullDistanceSquared)))
                 return ("%.2f|%.2f|%.2f"):format(anchor.X, anchor.Y, anchor.Z)
             end
         end
-        error("No floor for the Crossroads Pyrogeist test lane")
+        error("No floor for the Crossroads hazard test lane")
     elseif operation == "prepare" then
         assert(host and #current > 0 and #driver.ClientConnections == 0)
         local players = {local_pawn}
@@ -197,6 +224,85 @@ local function command(operation, world, driver, host, local_pawn)
         assert(valid(subject) and same(subject:GetWorld(), world))
         local point = subject:K2_GetActorLocation()
         return ("%.2f|%.2f|%.2f"):format(point.X, point.Y, point.Z)
+    elseif shadow and operation == "shadowinside" then
+        assert(host and selected and valid(selected.well) and #driver.ClientConnections == 1)
+        local guest = driver.ClientConnections[1].PlayerController.Pawn
+        assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled())
+        selected.retreat = {X = selected.entry.X + 930, Y = selected.entry.Y, Z = selected.entry.Z}
+        guest.CharacterMovement:StopMovementImmediately()
+        guest.CharacterMovement:SetMovementMode(0, 0)
+        assert(guest:K2_SetActorLocation(selected.entry, false, {}, true))
+        guest:ForceNetUpdate()
+        return guest:GetFullName()
+    elseif shadow and operation == "shadowleave" then
+        assert(host and selected and selected.retreat and #driver.ClientConnections == 1)
+        local guest = driver.ClientConnections[1].PlayerController.Pawn
+        assert(valid(guest) and guest:K2_TeleportTo(selected.retreat, guest:K2_GetActorRotation()))
+        return guest:GetFullName()
+    elseif shadow and operation == "viewpoint" then
+        assert(not host and valid(local_pawn.Camera))
+        local point = local_pawn.Camera:K2_GetComponentLocation()
+        return ("%.3f|%.3f|%.3f"):format(point.X, point.Y, point.Z)
+    elseif shadow and operation == "viewinside" then
+        assert(host and selected and valid(selected.well) and not selected.home)
+        local x, y, z = argument:match("^([^|]+)|([^|]+)|([^|]+)$")
+        x, y, z = tonumber(x), tonumber(y), tonumber(z)
+        assert(x and y and z and math.abs(x - test_lane.X) < 5000 and math.abs(y - test_lane.Y) < 5000 and math.abs(z) < 10000)
+        local body = selected.well
+        local at, center = body:K2_GetActorLocation(), body.Sphere:K2_GetComponentLocation()
+        selected.home = at
+        assert(body:K2_SetActorLocation({X = x + at.X - center.X + 400, Y = y + at.Y - center.Y, Z = z + at.Z - center.Z},
+            false, {}, true))
+        body:ForceNetUpdate()
+        return body:GetFullName()
+    elseif shadow and operation == "viewrestore" then
+        assert(host and selected and valid(selected.well) and selected.home)
+        assert(selected.well:K2_SetActorLocation(selected.home, false, {}, true))
+        selected.well:ForceNetUpdate()
+        selected.home = nil
+        return selected.well:GetFullName()
+    elseif shadow and operation == "shadowvisual" then
+        assert(not host and valid(local_pawn.Camera))
+        local rows = {}
+        local camera = local_pawn.Camera:K2_GetComponentLocation()
+        local manager = local_pawn.Controller.PlayerCameraManager
+        local rendered = valid(manager) and manager:GetCameraLocation() or {X = 0, Y = 0, Z = 0}
+        local pawn = local_pawn:K2_GetActorLocation()
+        write("shadow-camera", ("camera=%.2f,%.2f,%.2f|view=%.2f,%.2f,%.2f|pawn=%.2f,%.2f,%.2f"):format(
+            camera.X, camera.Y, camera.Z, rendered.X, rendered.Y, rendered.Z, pawn.X, pawn.Y, pawn.Z))
+        for _, actor in ipairs(current) do
+            local post, sphere, mesh = actor.PostProcess_CreepingShadows, actor.Sphere, actor.FX_Sphere_01
+            if actor:GetLocalRole() == 1 and valid(post) and valid(sphere) and valid(mesh) then
+                local list = post.Settings.WeightedBlendables.Array
+                local material = #list > 0 and list[1].Object
+                local point = sphere:K2_GetComponentLocation()
+                local d = math.sqrt((point.X - camera.X)^2 + (point.Y - camera.Y)^2 + (point.Z - camera.Z)^2)
+                local strength = valid(material) and material:GetFullName():match("^MaterialInstanceDynamic ")
+                    and material:K2_GetScalarParameterValue(FName("Intensity")) or 0
+                rows[#rows + 1] = ("%s|%.5f|%.4f|%.3f|%.3f|%.3f"):format(
+                    tostring(post.bEnabled), strength, mesh.RelativeScale3D.X, d, sphere.SphereRadius, actor.BlendRadius)
+            end
+        end
+        return table.concat(rows, ";")
+    elseif shadow and operation == "shadowstate" then
+        assert(host and #driver.ClientConnections == 1)
+        local guest = driver.ClientConnections[1].PlayerController.Pawn
+        local name = FName("Player_Fatigue")
+        local function fatigue(pawn)
+            local flags = pawn.Save.Flags
+            return flags:Contains(name) and flags:Find(name):get() or 0
+        end
+        return ("%d|%.3f|%d|%.3f"):format(fatigue(local_pawn), local_pawn.Save.PlayerHealth,
+            fatigue(guest), guest.Save.PlayerHealth)
+    elseif shadow and operation == "shadowhit" then
+        assert(host and selected and valid(selected.well) and #driver.ClientConnections == 1)
+        local guest = driver.ClientConnections[1].PlayerController.Pawn
+        assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled())
+        local body = selected.well
+        body.AttackTarget = guest
+        body[shadow_enter](body, body.Sphere, guest, guest.CapsuleComponent, 0, false, {})
+        body:Try_Attack()
+        return guest:GetFullName()
     elseif pyrogeist and operation == "enter" then
         assert(host and selected and valid(selected.well) and #driver.ClientConnections == 1)
         local body, guest = selected.well, driver.ClientConnections[1].PlayerController.Pawn
@@ -275,9 +381,9 @@ LoopInGameThreadWithDelay(60, function()
     local request = file:read("*l")
     file:close()
     if not request or previous == request then return end
-    local operation = request:match("^([a-z]+)|")
+    local operation, argument = request:match("^([a-z]+)|[a-f0-9]+|?(.*)$")
     if not operation then return end
     previous = request
-    local ok, result = pcall(command, operation, world, driver, not valid(driver.ServerConnection), pawn)
+    local ok, result = pcall(command, operation, world, driver, not valid(driver.ServerConnection), pawn, argument)
     write("gravity-reply", (ok and "ok|" or "failed|") .. tostring(result))
 end)

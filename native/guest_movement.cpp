@@ -104,13 +104,13 @@ namespace
         std::int32_t fatigue{};
         if (!silverfish::native_guest_sickness::read_fatigue(save, fatigue)) return nullptr;
         int attuned{};
-        if (fatigue >= 75 && !silverfish::native_enemy_loot::read_owned_passive_count(
+        if (fatigue >= 75 && !silverfish::native_enemy_loot::count_save_passive(
                 save, U::FName{STR("AttunedMadness"), U::FNAME_Find}, attuned)) return nullptr;
         for (std::size_t i = 0; i < effects.size(); ++i)
         {
             const U::FName name{effects[i].name, U::FNAME_Find};
             auto& count = next.counts[i];
-            if (name.IsNone() || !silverfish::native_enemy_loot::read_owned_passive_count(save, name, count)) return nullptr;
+            if (name.IsNone() || !silverfish::native_enemy_loot::count_save_passive(save, name, count)) return nullptr;
             if (count > 0 && attuned > 0) ++count;
         }
         *slot = next;

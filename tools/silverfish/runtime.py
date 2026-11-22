@@ -2593,7 +2593,8 @@ class Bridge:
                 elif fields[0] == "native-anomaly-position" and len(fields) == 6:
                     positions = data.setdefault("native_anomaly_positions", [])
                     if (len(positions) < 1024 and fields[1] in {
-                            "starburst", "burner", "vortex", "electrode", "wandering-teleport", "gravity", "pyrogeist"
+                            "starburst", "burner", "vortex", "electrode", "wandering-teleport", "gravity",
+                            "pyrogeist", "shadow-sphere",
                         }
                             and fields[5] in {"0", "1"}):
                         positions.append({"kind": fields[1], "location": [_finite(value) for value in fields[2:5]],

@@ -1,4 +1,4 @@
-"""Verify stock Crossroads GravityWell or Pyrogeist with muted peers."""
+"""Verify stock Crossroads GravityWell, Pyrogeist, or ShadowSphere with muted peers."""
 
 import argparse
 import asyncio
@@ -13,6 +13,7 @@ import uuid
 
 from live_ai_smoke import status, wait
 from live_campaign_npc_smoke import MAP
+from live_guest_held_fire_smoke import events
 
 
 @contextmanager
@@ -102,6 +103,56 @@ async def verify_pyrogeist(host, guest, host_box, guest_box, probe):
                                      "guest": guest_report["gameplay"]["players"]["guest"]["health"]}}
 
 
+def shadow_rows(raw):
+    result = []
+    for item in filter(None, raw.split(";")):
+        enabled, strength, scale, distance, radius, blend = item.split("|")
+        result.append((enabled == "true", *map(float, (strength, scale, distance, radius, blend))))
+    return result
+
+
+async def verify_shadow(guest, host_box, guest_box, probe):
+    vetoes = blocked_triggers(status(guest))
+    assert await probe(guest_box, "guestguard") == "0"
+    await wait(guest, lambda view: blocked_triggers(view) >= vetoes + 4, timeout=5)
+    parked = shadow_rows(await probe(guest_box, "shadowvisual"))
+    assert parked and all(not enabled for enabled, *_ in parked), parked
+    await probe(host_box, "viewinside", await probe(guest_box, "viewpoint"))
+    async with asyncio.timeout(8):
+        while True:
+            nearby = [item for item in shadow_rows(await probe(guest_box, "shadowvisual")) if item[0]]
+            if nearby and any(scale > 1 for _, _, scale, *_ in nearby):
+                break
+            await asyncio.sleep(.1)
+    assert len(nearby) == 1
+    _, strength, _, distance, radius, blend = nearby[0]
+    assert abs(strength - .97 * max(0, min(1, (radius - distance) / blend))) < .05, nearby
+    await probe(host_box, "viewrestore")
+    async with asyncio.timeout(6):
+        while any(enabled for enabled, *_ in shadow_rows(await probe(guest_box, "shadowvisual"))):
+            await asyncio.sleep(.1)
+    initial = (await probe(host_box, "shadowstate")).split("|")
+    await probe(host_box, "shadowinside")
+    for _ in range(10):
+        later = (await probe(host_box, "shadowstate")).split("|")
+        if float(later[2]) > float(initial[2]):
+            break
+        await probe(host_box, "shadowhit")
+        await asyncio.sleep(.22)
+    else:
+        raise RuntimeError(f"No authoritative ShadowSphere fatigue debit. Initial {initial}, later {later}")
+    assert list(map(float, later[:2])) == list(map(float, initial[:2])), (initial, later)
+    assert float(later[3]) < float(initial[3]), (initial, later)
+    async with asyncio.timeout(8):
+        while not any(item.get("sound_mask") == 16 for item in events(guest, "native_guest_hurt_played")):
+            await asyncio.sleep(.1)
+    await probe(host_box, "shadowleave")
+    return {"parked_guest_effects": parked, "active_guest_effect": nearby[0],
+            "host_fatigue_health_guest_fatigue_health_before": initial,
+            "host_fatigue_health_guest_fatigue_health_after": later,
+            "guest_stock_psychic_feedback": True, "guest_darkness_cleared": True}
+
+
 async def verify(work, family):
     profile = f"{family}-proof-" + uuid.uuid4().hex[:8]
     host, guest = [work / role / profile / "run" for role in ("campaigns", "clients")]
@@ -111,9 +162,12 @@ async def verify(work, family):
     processes = []
 
     async def start(run, *args):
+        env = {**os.environ, "SILVERFISH_COOP_RENDER_CAPTURE": "guest"}
+        if family == "shadow-sphere":
+            env["SILVERFISH_COOP_SHADOW_SPHERE_FIXTURE"] = "1"
         with (host / f"{args[0]}.log").open("wb") as log:
             child = await asyncio.create_subprocess_exec(*cli, *args, stdout=log, stderr=log,
-                creationflags=flags, env={**os.environ, "SILVERFISH_COOP_RENDER_CAPTURE": "guest"})
+                creationflags=flags, env=env)
         processes.append((child, run))
 
     async def command(*args):
@@ -124,10 +178,10 @@ async def verify(work, family):
             raise RuntimeError(stderr.decode(errors="replace"))
         return json.loads(stdout)
 
-    async def probe(mailbox, operation):
+    async def probe(mailbox, operation, argument=""):
         reply = mailbox / "gravity-reply"
         reply.unlink(missing_ok=True)
-        (mailbox / "gravity-probe").write_text(f"{operation}|{uuid.uuid4().hex}\n", encoding="ascii", newline="")
+        (mailbox / "gravity-probe").write_text(f"{operation}|{uuid.uuid4().hex}|{argument}\n", encoding="ascii", newline="")
         async with asyncio.timeout(6):
             while True:
                 try:
@@ -141,8 +195,9 @@ async def verify(work, family):
 
     with probe_mod(work):
         try:
+            host_flags = ("--native-guest-sickness",) if family == "shadow-sphere" else ()
             await start(host, "host", "--campaign", profile, "--port", "0", "--headless", "--fixtures",
-                        "--native-zones", "--native-events", "--native-guest", "--start-zone", MAP)
+                        "--native-zones", "--native-events", "--native-guest", "--start-zone", MAP, *host_flags)
             await wait(host, lambda view: view.get("state") == "hosting" and view.get("game", {}).get("map") == MAP)
             host_box, = (host / "game-bridge").iterdir()
             for attempt in range(6):
@@ -165,14 +220,14 @@ async def verify(work, family):
             before, after = map(int, attempted.split("|"))
             assert before == after, attempted
             await wait(guest, lambda view: view.get("game", {}).get("native_anomaly_field", {}).get("suppressed", 0) > old)
-            tolerance = 150 if family == "pyrogeist" else 3
+            tolerance = 150 if family != "gravity" else 3
             async with asyncio.timeout(12):
                 while True:
                     host_view, guest_view = await asyncio.gather(probe(host_box, "view"), probe(guest_box, "view"))
                     host_wells, guest_wells = row(host_view), row(guest_view)
                     matching = [well for well in guest_wells if any(
                         math.dist(well["location"], source["location"]) < tolerance for source in host_wells)]
-                    if family == "pyrogeist":
+                    if family != "gravity":
                         matching = [well for well in matching if math.dist(well["location"], anchor) < 160]
                     if matching:
                         guest_wells = matching
@@ -181,12 +236,19 @@ async def verify(work, family):
             assert host_wells and guest_wells and all(well["role"] == 3 and well["tick"] and well["collision"]
                                                        for well in host_wells)
             for well in guest_wells:
-                assert well["role"] == 1 and well["idle_effect"] and not well["tick"] and not well["collision"], well
+                assert (well["role"] == 1 and not well["tick"] and not well["collision"]
+                        and well["idle_effect"] == (family != "shadow-sphere")), well
             common = {"stock_director_counts": director, "guest_duplicate_counts": attempted,
                       "host_actors": host_wells, "guest_actors": guest_wells}
             if family == "pyrogeist":
                 common.update(await verify_pyrogeist(host, guest, host_box, guest_box, probe))
                 evidence = host / "live-pyrogeist-field.json"
+                evidence.write_text(json.dumps(common, indent=2), encoding="utf-8")
+                print(evidence, flush=True)
+                return
+            if family == "shadow-sphere":
+                common.update(await verify_shadow(guest, host_box, guest_box, probe))
+                evidence = host / "live-shadow-sphere-field.json"
                 evidence.write_text(json.dumps(common, indent=2), encoding="utf-8")
                 print(evidence, flush=True)
                 return
@@ -227,6 +289,6 @@ async def verify(work, family):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
-    parser.add_argument("--family", choices=("gravity", "pyrogeist"), default="gravity")
+    parser.add_argument("--family", choices=("gravity", "pyrogeist", "shadow-sphere"), default="gravity")
     args = parser.parse_args()
     asyncio.run(verify(args.work.resolve(), args.family))

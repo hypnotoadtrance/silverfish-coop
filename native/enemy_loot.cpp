@@ -1231,6 +1231,15 @@ namespace
 
 namespace silverfish::native_enemy_loot
 {
+    bool count_save_passive(U::UObject* save, const U::FName& name, std::int32_t& count)
+    {
+        BountyCounts counts;
+        if (!U::IsInGameThreadRaw() || !live(save) || save->GetClassPrivate() != find<U::UClass>(save_path)
+            || !count_bounty(save, name, counts)) return false;
+        count = counts.total();
+        return true;
+    }
+
     bool qualify_escrow_claimant(Address pawn, Address save, Address stock, shared_loot::EscrowOwner& claimant)
     {
         if (!available()) return false;
@@ -1277,16 +1286,6 @@ namespace silverfish::native_enemy_loot
         }
         actor = dropped;
         if (consume) proof.captured = true;
-        return true;
-    }
-
-    bool read_owned_passive_count(U::UObject* save, const U::FName& effect, int& total)
-    {
-        BountyCounts counts;
-        if (!U::IsInGameThreadRaw() || !live(save) || save->GetClassPrivate() != find<U::UClass>(save_path)
-            || !count_bounty(save, effect, counts))
-            return false;
-        total = counts.total();
         return true;
     }
 

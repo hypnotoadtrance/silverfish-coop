@@ -4,6 +4,7 @@ local electrodes = require("native_electrode_view")
 local canisters = require("native_explosive_canisters")
 local fixed = require("native_fixed_explosives")
 local pyrogeist = require("native_pyrogeist_view")
+local shadows = require("native_shadow_sphere_view")
 
 local classes = {
     starburst = "/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C",
@@ -37,10 +38,12 @@ local function in_world(actor, current)
 end
 
 local function trap_kind(actor, class)
-    if class == gravity or class == pyrogeist.body then
+    if class == gravity or class == pyrogeist.body or shadows.enabled and class == shadows.class then
         local at = actor:GetWorld()
         if valid(at) and at:GetFullName() == "World " .. crossroads .. ".CrossRoads_P" then
-            return class == gravity and "gravity" or "pyrogeist"
+            if class == gravity then return "gravity" end
+            if class == pyrogeist.body then return "pyrogeist" end
+            return "shadow-sphere"
         end
         return
     end
@@ -48,7 +51,7 @@ local function trap_kind(actor, class)
 end
 
 local function disables_replica_tick(kind)
-    return kind == "gravity" or kind == "pyrogeist"
+    return kind == "gravity" or kind == "pyrogeist" or kind == "shadow-sphere"
 end
 
 local function replica(actor)
@@ -306,7 +309,9 @@ function fields.rows(state, phase, row)
         electrodes.clear()
         -- Initial replicated actors can finish BeginPlay while the new driver is still pending.
         if phase == "connected" and state.map == crossroads then
-            for _, name in ipairs({"GravityAnomaly_BP_C", "Pyrogeist_BP_C"}) do
+            local names = {"GravityAnomaly_BP_C", "Pyrogeist_BP_C"}
+            if shadows.enabled then names[#names + 1] = "ShadowSphere_BP_C" end
+            for _, name in ipairs(names) do
                 for _, actor in ipairs(FindAllOf(name) or {}) do
                     if in_world(actor, world) and replica(actor) then
                         local kind = trap_kind(actor, actor:GetClass():GetFullName())
@@ -347,6 +352,7 @@ function fields.rows(state, phase, row)
         pending[address] = nil
     end
     pyrogeist.apply(world, phase, active, replica)
+    shadows.project(active, state, phase)
     for address, fire in pairs(pending_fires) do
         if in_world(fire, world) then
             if phase == "hosting" then
