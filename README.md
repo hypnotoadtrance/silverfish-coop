@@ -1,5 +1,10 @@
 # Project Silverfish Co-op
 
+> [!IMPORTANT]
+> **Proof of concept in heavy development.** Release candidates are for invited testers in this private repository. Public playtesting will wait until the core campaign systems have stronger coverage. Expect bugs, incomplete features, and changes between builds.
+>
+> Invited testers are encouraged to try the candidate, reproduce errors, and [open a GitHub issue](https://github.com/hypnotoadtrance/silverfish-coop/issues/new). Maintainers can assign reproducible reports to coding agents for investigation and draft pull requests.
+
 An unofficial Windows mod that adds Direct IP co-op to the Steam version of Project Silverfish. Open **Multiplayer** from the game’s title screen to host a campaign or join a friend. The mod runs in the existing Steam installation and keeps multiplayer campaigns separate from singleplayer saves.
 
 [Download the release candidate](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-d9978a3) · [Player guide](docs/PLAYING-COOP.md) · [18-rule design](docs/DESIGN.md) · [Contribute with a coding agent](CONTRIBUTING.md) · [Build and publish a release](docs/RELEASING.md)
@@ -48,7 +53,7 @@ Captured in development builds. The Direct IP form shows a test port.
 - **Networking.** Steam Invites, matchmaking, and an internet relay are outside the current build. Direct IP depends on the guest being able to reach the host.
 - **Compatibility.** Each ZIP targets a qualified Windows Steam build and includes a pinned UE4SS version. A game update or another UE4SS mod can introduce conflicts. Very long installation paths can prevent a bundled Windows DLL from loading.
 
-When reporting a problem, include the release tag, map, what each player did and saw, and whether the connection was LAN or internet. Keep passwords, private invitation files, and save data out of issue reports.
+When [reporting a problem](https://github.com/hypnotoadtrance/silverfish-coop/issues/new), include the release tag, map, steps to reproduce, what each player expected and saw, and whether the connection was LAN or internet. Keep passwords, private invitation files, and save data out of issue reports.
 
 ## AI disclosure and human playtesting
 

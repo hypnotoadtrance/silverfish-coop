@@ -22,6 +22,8 @@ For a hosted agent such as Codex Cloud, connect your GitHub account, grant the a
 
 ## Open a pull request
 
+Start with an [open issue](https://github.com/hypnotoadtrance/silverfish-coop/issues) or [file a new one](https://github.com/hypnotoadtrance/silverfish-coop/issues/new) with the build and reproduction steps. Maintainers can use that issue as the coding agent’s task and link the resulting draft PR back to it.
+
 Give the agent a specific issue, the map or feature involved, and the expected result. For example:
 
 > Read `AGENTS.md`, `docs/DESIGN.md`, and the relevant integration notes. Fix the reported guest inventory regression on this branch. Run focused tests for the affected path. Use muted replicas and copied saves for live checks. Summarize what ran and what still needs a human check. Push the branch and open a draft pull request targeting `main` for review.

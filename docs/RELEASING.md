@@ -1,6 +1,6 @@
 # Build and publish a Windows release candidate
 
-The repository is private. GitHub Releases is where playtesters with repository access download the compiled Windows ZIP. Each release tag identifies the source revision used to build it. Keep the ZIP as a release asset and keep game files, saves, credentials, and local build directories outside Git. [GitHub Releases](https://github.com/hypnotoadtrance/silverfish-coop/releases)
+The mod is a proof of concept in heavy development. Invitees use GitHub Releases in this private repository to download Windows test builds and [report errors](https://github.com/hypnotoadtrance/silverfish-coop/issues/new). Public playtesting remains deferred. Each release tag identifies the source revision used to build it. Keep the ZIP as a release asset and keep game files, saves, credentials, and local build directories outside Git. [GitHub Releases](https://github.com/hypnotoadtrance/silverfish-coop/releases)
 
 ## Build the ZIP on Windows
 
