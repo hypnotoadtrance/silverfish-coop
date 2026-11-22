@@ -76,6 +76,30 @@ class GuestDropTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await drop.perform(host, bridge, OWNER, drop.DROP, GUID + "|9", DROP), result)
         bridge.command.assert_awaited_once()
 
+    async def test_live_drop_and_claim_keep_exact_pending_escrow_without_save_io(self):
+        host, _, _, _, _, _ = self.make_world()
+        host.last_game[probe.MEMORY_CAPABILITY] = True
+        bridge = SimpleNamespace(command=AsyncMock())
+        retain = AsyncMock(return_value=True)
+        birth = {probe.KEY: {"location": POS, "class_path": record.ITEM}}
+        with (patch.object(probe, "perform", AsyncMock(return_value=birth)) as perform_birth,
+              patch.object(drop.native_inventory, "retain_guest_save", retain),
+              patch.object(native_host_save, "verify_record", Mock()) as verify):
+            dropped = await drop.perform(host, bridge, OWNER, drop.DROP, GUID + "|9", DROP)
+            pending = host.party[record.STATE][DROP]["escrow"]
+            self.assertEqual(pending, {"slot": perform_birth.await_args.kwargs["memory_slot"], "map": MAP, "pending": True})
+            self.assertEqual(dropped[drop.RESULT]["guid"], GUID)
+            bridge.command.return_value = self.reply(host, "reclaim", pending, recipient=OTHER)
+            claimed = await drop.perform(host, bridge, OTHER, drop.RECLAIM, DROP, CLAIM)
+            self.assertEqual(claimed[drop.RESULT]["claimed_by"], OTHER)
+            self.assertEqual(await drop.perform(host, bridge, OTHER, drop.RECLAIM, DROP, CLAIM), claimed)
+            verify.assert_not_called()
+        self.assertEqual([call.args[2] for call in retain.await_args_list], [OWNER, OTHER])
+        self.assertEqual(bridge.command.await_args.args[-4:], (GUID, "9", record.ITEM, "pending"))
+        self.assertNotIn("escrow", host.party[record.STATE][DROP])
+        bridge.command.assert_awaited_once()
+        host.checkpoint_native.assert_not_awaited()
+
     async def test_reclaim_refuses_inactive_guest_wrong_map_and_distance_before_bridge(self):
         host, _, escrow, _, _, row = self.make_world()
         host.party[record.STATE] = {DROP: row}

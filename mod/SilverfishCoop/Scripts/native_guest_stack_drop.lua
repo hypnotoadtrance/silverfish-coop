@@ -5,6 +5,7 @@ local players = require("players")
 local maps = require("native_guest_drop_maps")
 local drop_items = require("native_guest_drop_items")
 local ground_stack = require("native_ground_stack")
+local escrow = require("native_loot_actions")
 
 local action = "native-guest-stack-drop-probe"
 local birth = "native-guest-stack-drop-birth"
@@ -55,14 +56,82 @@ local function qualified_participant(state, phase, name)
     return qualified_owner(state, phase, name)
 end
 
+local function memory_available()
+    return type(SilverfishReferenceNativeDetachedSave) == "function"
+        and type(SilverfishReadNativeInventoryCensus) == "function"
+        and type(SilverfishPrepareNativeInventoryWipe) == "function"
+        and type(SilverfishApplyPreparedNativeInventory) == "function"
+        and type(SilverfishRecoverNativeInventoryBag) == "function"
+        and type(SilverfishVerifyNativeStashSave) == "function"
+end
+
+local function exact_row(save, guid, quantity, class, single)
+    local ok, status, rows, total = SilverfishReadNativeInventoryCensus(save:GetAddress())
+    if not ok or status ~= "complete" or type(rows) ~= "string"
+        or math.type(total) ~= "integer" or total < 1 or total > 8194 or (single and total ~= 1) then
+        return
+    end
+    local kept, found, seen = {}, nil, 0
+    for line in rows:gmatch("[^\n]+") do
+        local id, source, asset, count, important, droppable =
+            line:match("^([0-9A-F]+)\t([a-z]+)\t%d+\t([^\t]+)\t(%d+)\t[01]\t([01])\t[01]\t([01])$")
+        if not item_guid(id) then return end
+        seen = seen + 1
+        if id == guid then
+            if found or source ~= "backpack" or tonumber(count) ~= quantity or important ~= "0"
+                or droppable ~= "1" or (class and class ~= asset) then return end
+            found = asset
+        else
+            kept[#kept + 1] = id
+        end
+    end
+    if found and seen == total then return found, table.concat(kept, ","), total - 1 end
+end
+
+local function clone_save(save)
+    local transient = StaticFindObject("/Engine/Transient")
+    if valid(transient) then
+        return StaticConstructObject(save:GetClass(), transient, 0, EObjectFlags.RF_Transient, 0, false, false, save)
+    end
+end
+
+local function debit_pending(state, phase, pawn, save, frozen, slot, guid, count, class, kept, kept_count)
+    local instance = host_save.canonical_host(state, phase)
+    if not valid(instance) then error("native_guest_stack_drop_exact_host_unavailable", 0) end
+    local projected = clone_save(save)
+    if not valid(projected) then error("native_guest_stack_drop_frozen_frame_unavailable", 0) end
+    local pending = escrow.create_pending_escrow(instance.SaveSlot_Ref, instance, state.world, slot)
+    local called, ok, outcome, kept_total, dropped_total, discarded_total = pcall(SilverfishPrepareNativeInventoryWipe,
+        frozen:GetAddress(), projected:GetAddress(), pending:GetAddress(), kept, guid, "")
+    if not called or ok ~= true or outcome ~= "prepared" or kept_total ~= kept_count
+        or dropped_total ~= 1 or discarded_total ~= 0 or not exact_row(pending, guid, count, class, true) then
+        escrow.release_escrow(slot)
+        error("native_guest_stack_drop_pending_payload_unavailable", 0)
+    end
+    local applied, status = SilverfishApplyPreparedNativeInventory(
+        frozen:GetAddress(), projected:GetAddress(), save:GetAddress(), pawn:GetAddress())
+    if applied ~= true or status ~= "applied" then
+        if applied == false and type(status) == "string" and status:match("^native_inventory_wipe_") then
+            escrow.release_escrow(slot)
+            error("native_guest_stack_drop_pending_debit_refused", 0)
+        end
+        error("mutation_unverified_native_guest_stack_drop_pending_debit", 0)
+    end
+end
+
 local function transfer(fields, state, phase)
     local operation, name, id, source, replacement = table.unpack(fields, 3, 7)
     local debit = operation == "debit"
     local reclaim_guid = fields[12]
+    local pending_source = fields[15] == "pending"
+    local memory = #fields == 15 and (pending_source or fields[15] == "memory") and not debit and item_guid(reclaim_guid)
+    local quantity, class = memory and math.tointeger(tonumber(fields[13])), fields[14]
     local x, y, z = tonumber(fields[8]), tonumber(fields[9]), tonumber(fields[10])
     local apply = SilverfishRecoverNativeInventoryBag
     if debit then apply = SilverfishApplyPreparedNativeInventory end
-    if (#fields ~= 11 and (#fields ~= 12 or debit or not item_guid(reclaim_guid)))
+    if (not memory and #fields ~= 11 and (#fields ~= 12 or debit or not item_guid(reclaim_guid)))
+        or (memory and (not memory_available() or not quantity or quantity < 1 or quantity > 200
+            or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$")))
         or fields[11] ~= state.map or not hosting_map(state, phase)
         or (not debit and operation ~= "reclaim") or type(id) ~= "string" or #id ~= 32
         or not id:match("^[0-9a-f]+$") or not slot_name(source) or source == replacement
@@ -78,10 +147,14 @@ local function transfer(fields, state, phase)
         error("native_guest_stack_drop_out_of_range", 0)
     end
     local statics = StaticFindObject(settings)
-    local frozen = valid(statics) and statics:LoadGameFromSlot(source, 0)
+    local pending = memory and escrow.pending_escrow(state.world, source)
+    local frozen = pending or not pending_source and valid(statics) and statics:LoadGameFromSlot(source, 0)
     local prepared = debit and valid(frozen) and statics:LoadGameFromSlot(replacement, 0)
     if not valid(frozen) or (debit and not valid(prepared)) or (not debit and frozen.PlayerBackpack:GetArrayNum() ~= 1) then
         error("native_guest_stack_drop_settlement_slot_unavailable", 0)
+    end
+    if memory and not exact_row(frozen, reclaim_guid, quantity, class, true) then
+        error("native_guest_stack_drop_settlement_payload_unavailable", 0)
     end
     local called, ok, status, count, merged
     if debit then
@@ -103,6 +176,7 @@ local function transfer(fields, state, phase)
     end
     if not called or type(ok) ~= "boolean" or type(status) ~= "string" or not status:match("^[a-z0-9_]+$")
         or count ~= (ok and 1 or 0) then error("mutation_unverified_native_guest_stack_drop_settlement_call", 0) end
+    if pending and ok then escrow.release_escrow(source) end
     settlement = {map = state.map, operation = operation, pawn = name, id = id, source = source,
         replacement = replacement, ok = ok, status = status, count = count, stack_merge = merged}
     return "isolated stock stack settlement reported"
@@ -116,9 +190,11 @@ function stack_drop.command(fields, state, phase)
     observation = nil
     local name, slot, guid, raw_count = fields[3], fields[4], fields[5], fields[6]
     local count = math.tointeger(tonumber(raw_count))
+    local memory = command == birth and fields[8] == "memory"
     local expected_map = command == action and observatory or fields[7]
     local expected_count = command == action and 6 or 7
-    if #fields ~= expected_count or not hosting_map(state, phase) or expected_map ~= state.map
+    if #fields ~= expected_count + (memory and 1 or 0) or (memory and not memory_available())
+        or not hosting_map(state, phase) or expected_map ~= state.map
         or type(name) ~= "string" or name == "" or not slot_name(slot) or not item_guid(guid)
         or not count or count < 1 or count > 200 or tostring(count) ~= raw_count
         or type(SilverfishProbeNativeGuestStackDrop) ~= "function" then
@@ -128,8 +204,15 @@ function stack_drop.command(fields, state, phase)
     local pawn, save = qualify(state, phase, name)
     if not pawn then error("native_guest_stack_drop_exact_dropper_unavailable", 0) end
     local statics = StaticFindObject(settings)
-    local frozen = valid(statics) and statics:LoadGameFromSlot(slot, 0)
+    local frozen
+    if memory then frozen = clone_save(save)
+    elseif valid(statics) then frozen = statics:LoadGameFromSlot(slot, 0) end
     if not valid(frozen) then error("native_guest_stack_drop_frozen_frame_unavailable", 0) end
+    local expected_class, kept, kept_count
+    if memory then
+        expected_class, kept, kept_count = exact_row(frozen, guid, count, nil, false)
+        if not expected_class then error("native_guest_stack_drop_stock_item_row_unqualified", 0) end
+    end
     local called, ok, status, actor, new_guid, actual_count, x, y, z, class = pcall(SilverfishProbeNativeGuestStackDrop,
         pawn:GetAddress(), save:GetAddress(), frozen:GetAddress(), guid, count)
     if not called or type(ok) ~= "boolean" or type(status) ~= "string" or not status:match("^[a-z0-9_]+$") then
@@ -149,6 +232,10 @@ function stack_drop.command(fields, state, phase)
             or not item_guid(new_guid) or new_guid == guid or not coordinate(x) or not coordinate(y) or not coordinate(z) then
             error("mutation_unverified_native_guest_stack_drop_readback", 0)
         end
+        if memory then
+            if class ~= expected_class then error("native_guest_stack_drop_stock_item_row_unqualified", 0) end
+            debit_pending(state, phase, pawn, save, frozen, slot, guid, count, class, kept, kept_count)
+        end
     end
     observation = {command = command, map = state.map, pawn = name, slot = slot, guid = guid, count = count, ok = ok, status = status,
         actor = ok and actor or "-", new_guid = ok and new_guid or "-", location = ok and {x, y, z},
@@ -159,6 +246,7 @@ end
 function stack_drop.rows(state, phase, status_row)
     if not hosting_map(state, phase) or type(SilverfishProbeNativeGuestStackDrop) ~= "function" then return {} end
     local rows = {status_row(birth .. "-capability", 1)}
+    if memory_available() then rows[#rows + 1] = status_row("native-guest-stack-drop-memory", 1) end
     if type(SilverfishNativeGenericInventoryDrop) == "function" and SilverfishNativeGenericInventoryDrop() then
         rows[#rows + 1] = status_row("native-generic-inventory-drop", 1)
     end

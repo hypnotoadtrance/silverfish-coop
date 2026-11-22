@@ -1,4 +1,4 @@
-"""Settle a native inventory drop or pickup in one paired checkpoint."""
+"""Settle a native inventory drop or pickup and retain it for the next save."""
 
 import asyncio
 from contextlib import suppress
@@ -285,7 +285,8 @@ async def _escrow_item(host, bridge, frame: dict, guid: str, count: int, item: s
 
 
 async def _settle(host, bridge, character: str, action: str, request: str, drop_id: str, operation: str,
-                  source: dict, prepared: dict | None, candidate: dict, scope: tuple[str, str, str]) -> dict:
+                  source: dict, prepared: dict | None, candidate: dict, scope: tuple[str, str, str],
+                  *, defer: bool = False) -> dict:
     area, epoch, pawn = scope
     row = candidate[record.STATE][drop_id]
     if row["map"] != area or source.get("map") != area or (prepared is not None and prepared.get("map") != area):
@@ -293,7 +294,7 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
     if action == DROP:
         await probe.verify_owner_frame(host.native_profile, source, character)
         await asyncio.to_thread(native_host_save.verify_record, host.native_profile, prepared)
-    else:
+    elif source.get("pending") is not True:
         await asyncio.to_thread(native_host_save.verify_record, host.native_profile, source)
     if host.last_game.get("map") != area or host.zone_epoch != epoch or _participant(host, character) != pawn:
         raise party.RuleError("native_guest_stack_drop_scope_changed")
@@ -301,7 +302,11 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
         raise party.RuleError("native_guest_stack_drop_out_of_range")
     verb, expected = ("debit", "applied") if action == DROP else ("reclaim", "recovered")
     replacement = prepared["slot"] if prepared else None
-    merge_source = (row["guid"],) if action == RECLAIM and host.last_game.get("native_paired_save_capture") is True else ()
+    if defer:
+        mode = "pending" if source.get("pending") is True else "memory"
+        merge_source = (row["guid"], str(row["quantity"]), row["class_path"], mode)
+    else:
+        merge_source = (row["guid"],) if action == RECLAIM and host.last_game.get("native_paired_save_capture") is True else ()
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -332,9 +337,14 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": [action, request, None], "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        capture = {"typed_inventory": True} if merged else {}
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}),
-                                                **capture)
+        revision = None
+        if defer:
+            if character == "host":
+                host.pending_host_save = True
+        else:
+            capture = {"typed_inventory": True} if merged else {}
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}),
+                                                    **capture)
     except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
@@ -346,6 +356,11 @@ async def _settle(host, bridge, character: str, action: str, request: str, drop_
     return result
 
 
+async def _retain_drop_inventory(host, bridge, character: str, pawn: str):
+    if character != "host" and not await native_inventory.retain_guest_save(host, bridge, character, pawn):
+        raise party.RuleError("native_guest_save_retention_unavailable")
+
+
 async def perform(host, bridge, character: str, action: str, target: str | None, operation: str) -> dict:
     from .native_world_loot import CAPABILITY, SHARED_PICKUPS_VERSION
 
@@ -354,6 +369,7 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     pawn = _participant(host, character)
     area, epoch = host.last_game["map"], host.zone_epoch
     scope = area, epoch, pawn
+    defer = host.last_game.get(probe.MEMORY_CAPABILITY) is True
     drops = host.party.get(record.STATE, {})
     for receipt in host.party["receipts"].get(character, ()):
         if receipt["id"] == operation:
@@ -389,13 +405,16 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         if not _near(host, character, original):
             raise party.RuleError("native_guest_stack_drop_out_of_range")
         escrow = original["escrow"]
-        await host.checkpoint_native(bridge, require_guest_frames=frozenset({character} - {"host"}))
-        await _escrow_item(host, bridge, escrow, original["guid"], original["quantity"], original["class_path"])
+        if defer:
+            await _retain_drop_inventory(host, bridge, character, pawn)
+        else:
+            await host.checkpoint_native(bridge, require_guest_frames=frozenset({character} - {"host"}))
+            await _escrow_item(host, bridge, escrow, original["guid"], original["quantity"], original["class_path"])
         candidate = party.load_party(host.party)
         row = candidate[record.STATE][target]
         row.update(claim_id=operation, claimed_by=character)
         row.pop("escrow")
-        return await _settle(host, bridge, character, action, target, target, operation, escrow, None, candidate, scope)
+        return await _settle(host, bridge, character, action, target, target, operation, escrow, None, candidate, scope, defer=defer)
 
     selected = _SELECTION.fullmatch(target) if isinstance(target, str) else None
     if not selected or not valid_guid(selected[1]) or int(selected[2]) > record.MAX_QUANTITY:
@@ -408,6 +427,25 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     if (len(drops) >= record.MAX_DROPS or len(active) >= record.MAX_ACTIVE
             or any(row["guid"] == guid or (not multiple and row["owner"] == character) for row in active)):
         raise party.RuleError("native_guest_stack_drop_capacity")
+    if defer:
+        slot = native_host_save.new_slot()
+        await _retain_drop_inventory(host, bridge, character, pawn)
+        if host.zone_epoch != epoch or host.last_game.get("map") != area or _participant(host, character) != pawn:
+            raise party.RuleError("native_guest_stack_drop_scope_changed")
+        candidate = party.load_party(host.party)
+        birth = (await probe.perform(host, bridge, character, guid, count, fixture=False, memory_slot=slot))[probe.KEY]
+        row = dict(owner=character, guid=guid, quantity=count, class_path=birth["class_path"], map=area,
+                   location=birth["location"], claim_id=None, escrow={"slot": slot, "map": area, "pending": True})
+        candidate.setdefault(record.STATE, {})[operation] = row
+        result = _result(row, operation, action)
+        receipts = candidate["receipts"].setdefault(character, [])
+        receipts.append({"id": operation, "request": [action, target, None], "result": result})
+        del receipts[:-party.RECENT_ACTIONS]
+        host.party = candidate
+        if character == "host":
+            host.pending_host_save = True
+        host.control.event("native_guest_stack_drop_committed", phase="debit", revision=None, **result[RESULT])
+        return result
     birth = (await probe.perform(host, bridge, character, guid, count, fixture=False))[probe.KEY]
     location, item = birth.get("location"), birth.get("class_path")
     campaign = host.store.status()

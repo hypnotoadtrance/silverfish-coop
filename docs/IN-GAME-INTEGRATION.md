@@ -164,7 +164,11 @@ Merchant purchases and sales, NPC barter, Sewer Thing exchanges, and Borough or 
 
 Keyed, powered, and pried containers use the same pending save path as ordinary crates. Fort Leto's key and unlock survived an explicit save and restart, and opening and looting the locker left save files unchanged. In a separate trial, a guest used a blowtorch and recovered the item's remaining fuel after saving and restarting. The powered locker also left the save files unchanged until the test requested a save. [Keyed locker trial](../tests/live_secure_locker_smoke.py) · [Powered and pried container trials](../tests/live_authored_crate_expansion_smoke.py)
 
-Physical stock enemy drops share the crate escrow and stay in memory until saved or claimed. Six Fort Leto drops were banked in memory and all six were present in the later explicit checkpoint. Firearm shell rewards that use the separate encounter adapter, player drops, and some quest transitions and reward templates still have gameplay-time save calls.
+Physical stock enemy drops and the Dead Bridge and Refinery shell encounter adapter share the crate escrow. Six Fort Leto drops were banked in memory and all six were present in the later explicit checkpoint. The Dead Bridge trial verified the stock kill, shell pickup, and dropped weapon pickup without saving each action. [Stock combat trial](../tests/live_ai_smoke.py)
+
+Player drops and pickups use the typed stock inventory in memory. A three-player trial verified a guest's drop and a teammate's pickup through stock Interact. A two-player trial exercised the host's stock split-and-drag, then gave the split stack to the guest. Save-file hashes stayed unchanged until the tests requested a checkpoint. [Player drop trial](../tests/live_guest_stack_drop_smoke.py)
+
+Some quest callbacks and reward templates still use immediate save generations. The automated trials measured file changes during each interaction. Foreground playtests can assess any remaining frame hitches from stock inventory work.
 
 The transport-item hook now requires an active co-op session before intercepting stock item use. Stardust and Fruiting Stardust use the game's own behavior in singleplayer.
 

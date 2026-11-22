@@ -13,6 +13,7 @@ ACTION = "native-guest-stack-drop-probe"
 BIRTH = "native-guest-stack-drop-birth"
 KEY = "native_guest_stack_drop_probe"
 CAPABILITY = KEY + "_capability"
+MEMORY_CAPABILITY = "native_guest_stack_drop_memory"
 SETTLE = "native-guest-stack-drop-settle"
 SETTLE_KEY = "native_guest_stack_drop_settle"
 SUCCESS = "stock_spawn_verified_and_retired"
@@ -101,7 +102,8 @@ def parse_settlement(fields: list[str], state: str, area: str) -> dict:
     return proof
 
 
-async def perform(host, bridge, character: str, guid: str, count: int, *, fixture: bool = True) -> dict:
+async def perform(host, bridge, character: str, guid: str, count: int, *, fixture: bool = True,
+                  memory_slot: str | None = None) -> dict:
     if not valid_guid(guid) or type(count) is not int or not 1 <= count <= 200:
         raise party.RuleError("native_guest_stack_drop_exact_guid_and_quantity_required")
     game = host.last_game
@@ -115,17 +117,24 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
         raise party.RuleError("native_guest_stack_drop_fixture_unavailable")
     pawn = standing_pawn(host, character)
 
-    revision = await host.checkpoint_native(bridge, require_guest_frames=frozenset({character} - {"host"}))
-    campaign = host.store.status()
-    saved = native_inventory.saved_frame(host, campaign, character)
-    if not isinstance(saved, dict) or saved.get("map") != area or campaign.get("revision") != revision:
-        raise RuntimeError("The isolated stack drop requires the dropper's fresh source-map frame")
-    frame = await verify_owner_frame(host.native_profile, saved, character)
-    slot = frame["slot"]
+    if memory_slot is not None:
+        if fixture or game.get(MEMORY_CAPABILITY) is not True or not native_host_save.SLOT.fullmatch(memory_slot):
+            raise party.RuleError("native_guest_stack_drop_memory_unavailable")
+        frame, revision, slot = None, None, memory_slot
+    else:
+        revision = await host.checkpoint_native(bridge, require_guest_frames=frozenset({character} - {"host"}))
+        campaign = host.store.status()
+        saved = native_inventory.saved_frame(host, campaign, character)
+        if not isinstance(saved, dict) or saved.get("map") != area or campaign.get("revision") != revision:
+            raise RuntimeError("The isolated stack drop requires the dropper's fresh source-map frame")
+        frame = await verify_owner_frame(host.native_profile, saved, character)
+        slot = frame["slot"]
     if (host.transitioning or host.last_game.get("map") != area or host.zone_epoch != epoch
             or standing_pawn(host, character) != pawn):
         raise party.RuleError("native_guest_stack_drop_scope_changed")
     arguments = (pawn, slot, guid, str(count)) if fixture else (pawn, slot, guid, str(count), area)
+    if memory_slot is not None:
+        arguments += ("memory",)
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -151,9 +160,11 @@ async def perform(host, bridge, character: str, guid: str, count: int, *, fixtur
         item = proof.get("class_path") or (native_guest_drop_record.actor_class_path(area, actor) if fixture else None)
         if (proof.get("status") != SUCCESS or not native_guest_drop_record.valid_quantity(item, count)
                 or not native_guest_drop_record.actor_matches(area, actor, item)
-                or not valid_guid(proof.get("new_guid")) or proof["new_guid"] == guid):
+                or not valid_guid(proof.get("new_guid")) or proof["new_guid"] == guid
+                or (memory_slot is not None and not native_guest_drop_record.valid_position(proof.get("location")))):
             raise RuntimeError("The stock stack drop actor and typed conversion did not verify")
-        await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)
+        if frame:
+            await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)
     except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True

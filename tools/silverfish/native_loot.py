@@ -45,10 +45,11 @@ def public_roll(roll: dict) -> dict:
 
 
 async def flush_pending_escrows(host, bridge, state):
-    from . import native_stock_enemy_drops
+    from . import native_enemy_loot, native_guest_drop_record, native_stock_enemy_drops
 
+    ledgers = STATE_KEY, native_stock_enemy_drops.STATE, native_enemy_loot.STATE_KEY, native_guest_drop_record.STATE
     pending = {(ledger, identity): roll["escrow"]
-               for ledger in (STATE_KEY, native_stock_enemy_drops.STATE)
+               for ledger in ledgers
                for identity, roll in state.get(ledger, {}).items()
                if (roll.get("escrow") or {}).get("pending") is True}
     if not pending:

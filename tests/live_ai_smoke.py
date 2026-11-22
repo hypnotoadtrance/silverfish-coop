@@ -6,6 +6,7 @@ from contextlib import AsyncExitStack, asynccontextmanager, nullcontext
 import json
 import math
 import os
+from hashlib import sha256
 from pathlib import Path
 import shutil
 import subprocess
@@ -373,7 +374,15 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             raise AssertionError("The Bandit did not show enough stock movement to verify replica motion")
         if require_damage and not (damage and damage["other_player_untouched"]):
             raise AssertionError("The Bandit did not damage the exposed pawn independently of the other pawn")
+
+        def campaign_save_hashes():
+            campaign = run.parent
+            paths = list((campaign / "save").glob("campaign*.json"))
+            paths.extend((campaign / "game-user").rglob("*.sav"))
+            return {path.relative_to(campaign): sha256(path.read_bytes()).hexdigest() for path in paths}
+
         async def fight(target, proof_log, remaining):
+            before_fight = campaign_save_hashes() if automatic_cqc_loot else None
             def read_observer(current):
                 return actor_proof(current, "native_enemy_loot", target)
 
@@ -445,6 +454,10 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                         continue
                     if fire.get("error") == "No exact stock Bandit line of fire from the qualified staging points":
                         continue
+                    if fire.get("error") == "native_bandit_shot_watch_required" and automatic_cqc_loot:
+                        await wait(run, lambda state: killed(state) or read_observer(state).get("state") == "watching",
+                                   timeout=5)
+                        continue
                     accepted("aim and fire the stock firearm", fire)
                 aim = fire["native_bandit_aim"]
                 assert (aim["bandit"], aim["pawn"]) == (target, exact_pawn), aim
@@ -497,7 +510,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                                  and row.get("actor") == weapon["actor"]), None)
 
                 banked = await wait(run, banked_drop, timeout=12)
-                assert banked["revision"] is None, banked
+                assert banked.get("revision") is None, banked
+                assert before_fight and campaign_save_hashes() == before_fight, "Combat or enemy drops wrote a save"
                 accepted("save the stock enemy drops", await combat_action(run, "checkpoint"))
                 durable = durable_drop(await wait(run, durable_drop, timeout=12))
                 native_host_save.verify_record(campaign / "game-user", durable["escrow"])
@@ -582,19 +596,27 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     assert 3 <= roll["quantity"] <= 9, roll
                     from tools.silverfish.native_host_save import cqc_retired, verify_record
                     campaign = run.parent
-                    saved = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
-                    durable = saved["world"]["party"]["native_enemy_loot_rolls"][guid]
-                    verify_record(campaign / "game-user", durable["escrow"])
-                    assert {key: value for key, value in durable.items() if key not in ("escrow", "retirement")} == roll, durable
-                    if restart_unclaimed_shells or (automatic_cqc_loot and status(run)["game"].get("native_enemy_shell_view_version") == 2):
+                    if automatic_cqc_loot:
+                        entries = (run / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                        banked, = [event for line in entries if line.endswith("}")
+                                   and (event := json.loads(line)).get("event") == "native_enemy_loot_roll_committed"
+                                   and event.get("guid") == guid]
+                        assert banked.get("revision") is None, banked
+                        proof_log["no_save_on_shell_bank"] = True
+                    if defer_until_restart:
+                        accepted("save the unclaimed shell drop", await combat_action(run, "checkpoint"))
+                        saved = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
+                        durable = saved["world"]["party"]["native_enemy_loot_rolls"][guid]
+                        verify_record(campaign / "game-user", durable["escrow"])
+                        assert {key: value for key, value in durable.items() if key not in ("escrow", "retirement")} == roll, durable
                         assert cqc_retired(durable), durable
-                    assert durable["settled"] is True, durable
+                        proof_log["verified_stock_shell_escrow"] = durable
+                    assert roll["settled"] is True, roll
                     if stock_drop_census:
                         before = next(item["initial_height"] for item in proof_log["stock_drop_census"]
-                                      if item["actor"] == durable["actor"])
-                        assert before is not None and before - durable["position"][2] > 10, (before, durable)
-                        proof_log["stock_ammunition_fall_cm"] = before - durable["position"][2]
-                    proof_log["verified_stock_shell_escrow"] = durable
+                                      if item["actor"] == roll["actor"])
+                        assert before is not None and before - roll["position"][2] > 10, (before, roll)
+                        proof_log["stock_ammunition_fall_cm"] = before - roll["position"][2]
 
                     def projected(state):
                         view = actor_proof(state, "native_enemy_loot_death_view", target)
@@ -622,6 +644,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                         run, "native-enemy-loot-bank", target))["native_enemy_loot_roll"]
                     assert repeated == roll, repeated
                 interaction_epoch = await restart_with_unclaimed_shell(guid, target) if defer_until_restart else roll["epoch"]
+                prior_save = campaign_save_hashes() if automatic_cqc_loot else None
                 winner = stock_shell_input or "host"
                 recipient = invitation["character_id"] if winner == "guest" else "host"
                 winner_run, loser_run = (guest_run, run) if winner == "guest" else (run, guest_run)
@@ -751,6 +774,10 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     settled = await wait(guest_run, lambda state: state.get("gameplay", {}).get(
                         "native_enemy_loot_rolls", {}).get(guid) == claim_source(claimed))
                     assert settled["gameplay_fresh"], settled
+                    if prior_save is not None:
+                        assert campaign_save_hashes() == prior_save, "Stock shell pickup wrote a save"
+                        proof_log["no_save_on_shell_pickup"] = True
+                        accepted("save the stock shell pickup", await combat_action(run, "checkpoint"))
                     saved = json.loads((run.parent / "save" / "campaign.json").read_text(encoding="utf-8"))
                     durable = saved["world"]["party"]["native_enemy_loot_rolls"][guid]
                     assert {key: value for key, value in durable.items() if key != "retirement"} == claim_source(claimed), durable
@@ -858,7 +885,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                                  await combat_action(guest_run, "native-inventory-list"))["native_inventory"]
             item, = [row for row in inventory["items"] if row["guid"] == guid]
             assert item["class_path"] == payload["class_path"], item
-            assert commit["revision"] is None, commit
+            assert commit.get("revision") is None, commit
             accepted("save the collected stock weapon", await combat_action(run, "checkpoint"))
             campaign = run.parent
             saved = json.loads((campaign / "save" / "campaign.json").read_bytes())

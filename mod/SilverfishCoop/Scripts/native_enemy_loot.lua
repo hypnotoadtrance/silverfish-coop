@@ -4,6 +4,7 @@ local guest_save = require("guest_save")
 local transport = require("native_transport")
 local shell_view = require("native_enemy_shell_view")
 local profiles = require("native_enemy_loot_registry")
+local loot_pool = require("native_loot_actions")
 
 local map = "/Game/Classes/Maps/PlaytestMap_01"
 local dead_bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
@@ -250,9 +251,10 @@ local function stash(state, phase, fields)
     local bandit, slot, expected = fields[3], fields[4], fields[5]
     local scoped = watches[bandit] or watch
     local cqc = scoped and scoped.ordinary
+    local pending = cqc and #fields == 6 and fields[6] == "memory-escrow"
     local host = cqc and ordinary_host(state, phase, scoped) or not cqc and participants(state, phase)
     local report = scoped and scoped.proof
-    if not valid(host) or #fields ~= 5 or not is_slot(slot) or not report or not same(state.world, scoped.world)
+    if not valid(host) or (#fields ~= 5 and not pending) or not is_slot(slot) or not report or not same(state.world, scoped.world)
         or bandit ~= scoped.name or (not cqc and not valid(scoped.bandit)) or report[1] ~= "stock_loot_observed" or report[9] ~= 1
         or (cqc and (report.n ~= 26 or report[25] ~= 1 or report[26] ~= 0))
         or report[13] ~= expected or report[14] ~= shells then error("native_enemy_loot_roll_unavailable", 0) end
@@ -268,23 +270,30 @@ local function stash(state, phase, fields)
     if not at or not finite(at.X) or not finite(at.Y) or not finite(at.Z) then error("native_enemy_loot_position_unavailable", 0) end
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local class = StaticFindObject("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C")
-    if not valid(api) or not valid(class) or api:DoesSaveGameExist(slot, 0)
+    if not valid(api) or not valid(class) or (not pending and api:DoesSaveGameExist(slot, 0))
         or type(SilverfishCaptureNativeEnemyLootEscrow) ~= "function" or type(SilverfishVerifyNativeLootEscrow) ~= "function" then
         error("native_enemy_loot_escrow_unavailable", 0)
     end
-    local pool = api:CreateSaveGameObject(class)
+    local pool = pending and loot_pool.create_pending_escrow(host.Save, api:GetGameInstance(host), state.world, slot)
+        or api:CreateSaveGameObject(class)
     if not valid(pool) then error("native_enemy_loot_escrow_unavailable", 0) end
     local ok, reason, count, guid = SilverfishCaptureNativeEnemyLootEscrow(scoped.address, pool:GetAddress(), ammo:GetAddress(), 0)
-    if not ok then error(tostring(reason), 0) end
-    if count ~= 1 or not is_guid(guid) or not api:SaveGameToSlot(pool, slot, 0) then
+    if not ok then
+        if pending then loot_pool.release_escrow(slot) end
+        error(tostring(reason), 0)
+    end
+    if count ~= 1 or not is_guid(guid) then error("mutation_unverified_enemy_loot_escrow_capture", 0) end
+    if not pending and not api:SaveGameToSlot(pool, slot, 0) then
         error("mutation_unverified_enemy_loot_escrow_save", 0)
     end
-    local restored = api:LoadGameFromSlot(slot, 0)
-    if not valid(restored) or not SilverfishVerifyNativeLootEscrow(pool:GetAddress(), restored:GetAddress()) then
-        error("mutation_unverified_enemy_loot_escrow_readback", 0)
+    if not pending then
+        local restored = api:LoadGameFromSlot(slot, 0)
+        if not valid(restored) or not SilverfishVerifyNativeLootEscrow(pool:GetAddress(), restored:GetAddress()) then
+            error("mutation_unverified_enemy_loot_escrow_readback", 0)
+        end
     end
     escrow = {world = state.world, status = "captured", pawn = report[4], actor = expected, slot = slot, guid = guid, units = units,
-        at = {X = at.X, Y = at.Y, Z = at.Z}}
+        at = {X = at.X, Y = at.Y, Z = at.Z}, memory = pending}
     if cqc then
         scoped.capture = escrow
         scoped.capture.ammo, scoped.capture.address = ammo, ammo:GetAddress()
@@ -332,7 +341,7 @@ local function retire(state, phase, fields)
     captured.status, captured.raw_verified = "retired", true
     escrow = captured
     scoped.proof = read(host, scoped) or scoped.proof
-    return "exact stock ammunition retired after commit"
+    return "exact stock ammunition retired after capture"
 end
 
 local function claim(state, phase, fields)
@@ -370,11 +379,13 @@ local function claim(state, phase, fields)
         if not checked or visible ~= true then error("native_enemy_loot_focus_obstructed", 0) end
     end
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-    local pool = valid(api) and api:LoadGameFromSlot(slot, 0)
+    local pending = loot_pool.pending_escrow(state.world, slot)
+    local pool = pending or valid(api) and api:LoadGameFromSlot(slot, 0)
     if not valid(pool) or not valid(pawn.Save) or not valid(host.Save) then error("native_enemy_loot_claim_unavailable", 0) end
     local ok, status, amount, before, after, inventory_guid = SilverfishClaimNativeEnemyLootEscrow(pawn:GetAddress(), pawn.Save:GetAddress(),
         host.Save:GetAddress(), pool:GetAddress(), guid)
     if not ok then error(tostring(status), 0) end
+    if pending then loot_pool.release_escrow(slot) end
     escrow = {world = state.world, status = status, pawn = name, actor = "-", slot = slot, guid = guid}
     if status == "merged" then escrow.merge = {inventory_guid or "-", amount or "-", before or "-", after or "-"} end
     return "typed stock enemy ammunition claim verified"
@@ -596,6 +607,9 @@ function enemy_loot.rows(state, phase, status_row)
     if (version == 2 or version == 3)
         and type(SilverfishCaptureNativeEnemyLootEscrow) == "function" and type(SilverfishClaimNativeEnemyLootEscrow) == "function" then
         rows[#rows + 1] = status_row("native-enemy-loot-cqc-capability", version)
+        if phase == "hosting" and type(SilverfishReferenceNativeDetachedSave) == "function" then
+            rows[#rows + 1] = status_row("native-enemy-loot-memory", 1)
+        end
     end
     local profile = profiles[state.map]
     local names = profile and profile.names or {}
@@ -665,9 +679,10 @@ function enemy_loot.rows(state, phase, status_row)
     end
     if escrow and same(escrow.world, state.world) then
         local at = escrow.at
+        local detail = escrow.memory and escrow.status == "captured" and {"memory"} or escrow.merge or {}
         rows[#rows + 1] = status_row("native-enemy-loot-escrow", state.map, escrow.status, escrow.pawn, escrow.actor,
             escrow.slot, escrow.guid, escrow.units or "-", at and at.X or "-", at and at.Y or "-", at and at.Z or "-",
-            table.unpack(escrow.merge or {}))
+            table.unpack(detail))
         if escrow.raw_verified then
             rows[#rows + 1] = status_row("native-enemy-loot-retire-proof", 1, state.map, escrow.actor, escrow.slot, escrow.guid)
         end

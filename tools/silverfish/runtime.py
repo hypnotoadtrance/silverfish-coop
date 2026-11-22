@@ -1796,7 +1796,9 @@ class Bridge:
                             "map": area, "actor": actor, "state": mode, "epoch": None if epoch == "-" else epoch,
                             "guid": None if guid == "-" else guid, "hidden": hidden == "1", "collision": collision == "1",
                         })
-                elif fields[0] == "native-enemy-loot-escrow" and len(fields) in (11, 15):
+                elif fields == ["native-enemy-loot-memory", "1"] and data.get("state") == "hosting":
+                    data["native_enemy_loot_memory"] = True
+                elif fields[0] == "native-enemy-loot-escrow" and len(fields) in (11, 12, 15):
                     proof = dict(zip(("map", "state", "pawn", "actor", "slot", "guid"), fields[1:7]),
                                  units=None if fields[7] == "-" else int(fields[7]),
                                  position=[_finite(axis) for axis in fields[8:11]])
@@ -1805,8 +1807,10 @@ class Bridge:
                                 or not SLOT.fullmatch(proof["slot"]) or fields[7:11] != ["-"] * 4):
                             raise ValueError("Invalid stock enemy shell merge proof")
                         proof["merge"] = native_loot.parse_stack_merge((proof["guid"], *fields[11:]))
+                    elif proof["state"] == "captured" and fields[11:] == ["memory"]:
+                        proof["memory"] = True
                     elif len(fields) != 11:
-                        raise ValueError("Unexpected stock enemy shell merge proof")
+                        raise ValueError("Unexpected stock enemy shell escrow proof")
                     data["native_enemy_loot_escrow"] = proof
                 elif (fields[0] == "native-enemy-loot-retire-proof" and len(fields) == 6 and fields[1] == "1"
                         and fields[2] == data.get("map") and SLOT.fullmatch(fields[4]) and valid_guid(fields[5])):
@@ -2141,6 +2145,9 @@ class Bridge:
                             data[native_guest_drop_record.CAPABILITY] = 1
                         elif area == native_guest_stack_drop.OBSERVATORY:
                             data[native_guest_stack_drop.CAPABILITY] = 1
+                elif (fields == ["native-guest-stack-drop-memory", "1"] and data.get("state") == "hosting"
+                      and native_guest_drop_record.supported_map(data.get("map"))):
+                    data[native_guest_stack_drop.MEMORY_CAPABILITY] = True
                 elif fields[0] in (native_guest_stack_drop.ACTION, native_guest_stack_drop.BIRTH):
                     if native_guest_stack_drop.KEY in data:
                         raise ValueError("Duplicate isolated stack drop report")

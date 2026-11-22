@@ -19,6 +19,7 @@ APPROACH = "native-enemy-loot-approach"
 RETIRE = "native-enemy-loot-retire"
 PENDING = "native_enemy_loot_roll_pending"
 STATE_KEY = "native_enemy_loot_rolls"
+MEMORY_CAPABILITY = "native_enemy_loot_memory"
 CQC_SCOPE = "native_enemy_loot_cqc"
 DEATH_VIEW = "native_enemy_loot_death_view"
 SHELL_ACTOR = native_host_save.CQC_SHELL_ACTOR
@@ -144,10 +145,15 @@ async def approach(host, bridge, target: str | None) -> dict:
     return {"native_enemy_loot_approach": proof}
 
 
-async def _commit(host, bridge, candidate, snapshot, *, require_guest_frames=frozenset(), typed_inventory=False):
+async def _commit(host, bridge, candidate, snapshot, *, deferred=False, require_guest_frames=frozenset(),
+                  typed_inventory=False):
     host.last_game, host.last_seen = snapshot, time.monotonic()
-    revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=require_guest_frames,
-                                            typed_inventory=typed_inventory)
+    revision = None
+    if deferred:
+        host.pending_host_save = bool(host.pending_host_save or typed_inventory)
+    else:
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=require_guest_frames,
+                                                typed_inventory=typed_inventory)
     host.party = candidate
     host.native_checkpoint_unsafe = False
     return revision
@@ -267,7 +273,7 @@ async def _retire(host, bridge, roll):
             raise RuntimeError("The committed shotgun shells did not verify exact physical retirement")
         candidate = party.load_party(host.party)
         candidate[STATE_KEY][guid]["retirement"] = native_host_save.cqc_retirement_record(roll, slot)
-        return await _commit(host, bridge, candidate, snapshot)
+        return await _commit(host, bridge, candidate, snapshot, deferred=roll["escrow"].get("pending") is True)
     except (asyncio.CancelledError, OSError, RuntimeError, ValueError):
         host.stopping = True
         raise
@@ -319,10 +325,12 @@ async def bank(host, bridge, target: str | None) -> dict:
     if not killer:
         raise party.RuleError("native_enemy_loot_exact_killer_unavailable")
     slot = native_host_save.new_slot()
+    memory = cqc and host.last_game.get(MEMORY_CAPABILITY) is True
     host.native_checkpoint_unsafe = True
     try:
         try:
-            snapshot = await bridge.command(BANK, target, slot, ammo, timeout=7)
+            options = ("memory-escrow",) if memory else ()
+            snapshot = await bridge.command(BANK, target, slot, ammo, *options, timeout=7)
         except RuntimeError as error:
             if str(error) != "native_enemy_loot_drop_settling":
                 raise
@@ -335,7 +343,10 @@ async def bank(host, bridge, target: str | None) -> dict:
                 "hosting", area, area, "captured", source["killer_pawn"], source["ammo_actor"], slot, source["ammo_quantity"]
         ) or not valid_guid(guid) or not at or any(coord is None or abs(coord) > 10000000 for coord in at):
             raise RuntimeError("The exact stock enemy drop escrow did not verify")
-        frame = await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True)
+        if (proof.get("memory") is True) != memory:
+            raise RuntimeError("The stock enemy shell did not verify its requested escrow mode")
+        frame = ({"slot": slot, "map": area, "pending": True} if memory else
+                 await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True))
         roll = {"map": area, "epoch": host.zone_epoch, "bandit": target, "actor": proof["actor"], "guid": guid,
                 "class_path": SHELLS, "quantity": proof["units"], "position": at, "killer": killer, "claimed_by": None,
                 "settled": True,
@@ -347,7 +358,7 @@ async def bank(host, bridge, target: str | None) -> dict:
         if guid in records:
             raise RuntimeError("The stock enemy drop identity already exists")
         records[guid] = roll
-        revision = await _commit(host, bridge, candidate, snapshot)
+        revision = await _commit(host, bridge, candidate, snapshot, deferred=memory)
         if cqc:
             revision = await _retire(host, bridge, roll)
         report = _public_roll(roll)
@@ -394,7 +405,14 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
     if reach > party.INTERACT_RANGE:
         raise party.RuleError("native_enemy_loot_out_of_reach")
     frame = roll["escrow"]
-    await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)
+    deferred = _ordinary(host, area) and host.last_game.get(MEMORY_CAPABILITY) is True
+    if deferred and character != "host":
+        from .native_inventory import retain_guest_save
+
+        if not await retain_guest_save(host, bridge, character, pawn):
+            raise party.RuleError("native_guest_save_retention_unavailable")
+    if not frame.get("pending"):
+        await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -426,8 +444,8 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        revision = await _commit(host, bridge, candidate, snapshot, require_guest_frames=frozenset({character} - {"host"}),
-                                 typed_inventory=bool(merge))
+        revision = await _commit(host, bridge, candidate, snapshot, deferred=deferred,
+                                 require_guest_frames=frozenset({character} - {"host"}), typed_inventory=bool(merge))
         host.control.event("native_enemy_loot_claim_committed", revision=revision, operation_id=operation, **report)
         native_pickup_audio.committed(host, pawn, operation, committed["class_path"])
         return result

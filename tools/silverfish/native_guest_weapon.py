@@ -127,7 +127,9 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
             raise party.RuleError("respawn_in_progress")
 
     source, pawn = host.last_game["map"], scope["pawn"]
-    deferred = mutates and not fixture and await native_inventory.retain_guest_save(host, bridge, character, pawn)
+    deferred = mutates and (not fixture or operation == "fire") and await native_inventory.retain_guest_save(
+        host, bridge, character, pawn,
+    )
     if mutates:
         host.native_checkpoint_unsafe = True
     try:
