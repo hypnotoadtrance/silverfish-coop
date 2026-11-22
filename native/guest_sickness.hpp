@@ -17,6 +17,8 @@ namespace silverfish::native_guest_sickness
     bool read_exact(RC::Unreal::UObject* pawn, RC::Unreal::UObject* detached, RC::Unreal::UObject* stock,
                     SicknessSnapshot& out);
     bool read_passive_amplification(RC::Unreal::UObject* save, std::int32_t& bonus);
+    bool barter_psy(RC::Unreal::UObject* pawn, RC::Unreal::UObject* detached, RC::Unreal::UObject* stock,
+                    std::int32_t amount, bool apply);
     void install_hooks();
     void uninstall_hooks();
     void clear_scope();

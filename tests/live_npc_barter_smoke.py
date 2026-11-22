@@ -133,11 +133,19 @@ async def verify(work, canary, offer):
                 reputation = commit["reputation"]
                 assert result["reputation"] == reputation and reputation["flag"] == "Rep_Freelancer", reputation
                 assert reputation["after"] > reputation["before"] and any(line.startswith("confirmation\t") for line in tail(guest))
-            elif offer == "high-value":
+            elif offer in ("high-value", "skinflint"):
                 assert transfers == {("receive", "Item_Jewely_C", 8), ("give", "Item_CannedPeaches_C", 1)}, transfers
                 assert commit["cash_before"] == 20000 and 1000 < 20000 - commit["cash"] <= 20000, commit
             evidence = {"offer": offer, "commit": commit, "receipt": receipt, "checkpoint_revision": checkpoint["revision"],
                         "guest_stock_screen": view["game"]["native_npc_barter_view"], "guest_inventory": inventory}
+            if offer == "skinflint":
+                effect, = [line.split("\t") for line in tail(host) if line.startswith("skinflint\t")]
+                _, pawn, value, guest_before, guest_after, host_before, host_after = effect
+                assert pawn == commit["pawn"] and int(value) > 0 and int(guest_after) > int(guest_before)
+                assert host_before == host_after
+                await wait(host, lambda state: state["game"]["pawns"]["local"]["health"] == 250)
+                evidence["skinflint"] = {"pawn": pawn, "amount": int(value), "guest_fatigue": [int(guest_before), int(guest_after)],
+                                         "host_fatigue": int(host_before)}
             (host / "npc-barter-flow.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
             print(host / "npc-barter-flow.json", flush=True)
         except TimeoutError as error:
@@ -159,6 +167,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
-    parser.add_argument("--offer", choices=("cash", "high-value", "donation", "refresh"), default="cash")
+    parser.add_argument("--offer", choices=("cash", "high-value", "donation", "refresh", "skinflint"), default="cash")
     options = parser.parse_args()
     asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve(strict=True), options.offer))

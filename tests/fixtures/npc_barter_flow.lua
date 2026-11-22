@@ -11,7 +11,8 @@ local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local jewelry = "/Game/Classes/Items/Item_Jewely.Item_Jewely_C"
 local peaches = "/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"
 local mode = os.getenv("SILVERFISH_COOP_BARTER_PROBE")
-local donation, high_value = mode == "donation", mode == "high-value"
+local skinflint = mode == "skinflint"
+local donation, high_value = mode == "donation", mode == "high-value" or skinflint
 local refresh_test = mode == "refresh"
 local payment = donation and jewelry or high_value and peaches or nil
 local money = high_value and 20000 or 1200
@@ -46,6 +47,11 @@ local function place_guest(pawn, actor)
     pawn:ForceNetUpdate()
 end
 
+local function fatigue(save)
+    local flag = FName("Player_Fatigue")
+    return save.Flags:Contains(flag) and save.Flags:Find(flag):get() or 0
+end
+
 local function prepare(state, phase, actor)
     local guest = state.guests[1]
     if not guest then return end
@@ -55,6 +61,22 @@ local function prepare(state, phase, actor)
     state.world.OwningGameInstance:Give_PlayerCash(money, false)
     if high_value then seed(actor, actor.Inventory, jewelry, 8) end
     if payment then seed(actor, save.PlayerBackpack, payment, donation and 12 or 1) end
+    if skinflint then
+        local character = save.Character
+        local key = "PermanentEffects_42_E298D351429CF6DCAE0911A4D1EEDB00"
+        character[key] = {FName("Skinflint")}
+        save.Character = character
+        assert(save.Character[key][1]:ToString() == "Skinflint", "Stock Skinflint trait was not stored on the guest")
+        local host = state.local_pawn.pawn
+        local guest_fatigue, host_fatigue = fatigue(save), fatigue(host.Save)
+        RegisterHook("/Game/Classes/Player/Player_FP.Player_FP_C:PsyAttack", function(context, amount)
+            local attacked = context:get()
+            if valid(attacked) and attacked:GetAddress() == pawn:GetAddress() then
+                proof("skinflint", attacked:GetFullName(), amount:get(), guest_fatigue, fatigue(save),
+                    host_fatigue, fatigue(host.Save))
+            end
+        end)
+    end
     armed = true
     proof("ready", guest.name, actor.Inventory:GetArrayNum())
 end

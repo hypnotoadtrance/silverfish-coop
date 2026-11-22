@@ -1398,11 +1398,25 @@ namespace
         const auto funds = barter.money();
         if (cash < 0 || cash > funds || (cash && !bool_value(barter.actor, STR("AcceptCash"), barter.actor, true)))
             return reply(false, "barter_refused_wallet");
+        int psychic_amount{};
         if (cash > 1000)
         {
-            std::int32_t skinflint{};
-            if (!silverfish::native_enemy_loot::count_save_passive(barter.owner.save, U::FName{STR("Skinflint")}, skinflint) ||
-                skinflint != 0) return reply(false, "barter_refused_skinflint_cash_effect");
+            int count{}, intensity{};
+            if (!npc_barter_passive(barter, STR("Skinflint"), count, intensity))
+                return reply(false, "barter_refused_skinflint_cash_effect");
+            if (count)
+            {
+                auto* screen = find<U::UClass>(STR("/Game/Classes/GUI/New/BarterScreen.BarterScreen_C"));
+                auto* defaults = screen ? screen->GetClassDefaultObject().Get() : nullptr;
+                auto* maximum = field<U::FIntProperty>(defaults, STR("Max Skin Flint Psy Dmg"));
+                const auto cap = maximum ? maximum->GetPropertyValueInContainer(defaults) : 0;
+                if (cap < 1 || cap > 100) return reply(false, "barter_refused_skinflint_cash_effect");
+                psychic_amount = static_cast<int>(std::clamp(static_cast<std::int64_t>(cash / 1000) * intensity,
+                    std::int64_t{1}, static_cast<std::int64_t>(cap)));
+                if (!silverfish::native_guest_sickness::barter_psy(
+                    barter.owner.pawn, barter.owner.save, barter.owner.stock, psychic_amount, false))
+                    return reply(false, "barter_refused_skinflint_cash_effect");
+            }
         }
         std::vector<BarterSelection> give, receive;
         if (!selections(player_selection, give) || !selections(trader_selection, receive) ||
@@ -1482,7 +1496,9 @@ namespace
         if (cash) barter.wallet.change(barter.instance, static_cast<int>(cash), true);
         barter.actor->ProcessEvent(barter.save_inventory, nullptr);
         if (bag->Identical(bag_list, new_bag.get()) && barter.inventory->Identical(stock_list, new_stock.get()) &&
-            barter.money() == funds - cash && reputation.verified(barter) && barter.saved_matches())
+            barter.money() == funds - cash && reputation.verified(barter) && barter.saved_matches() &&
+            (!psychic_amount || silverfish::native_guest_sickness::barter_psy(
+                barter.owner.pawn, barter.owner.save, barter.owner.stock, psychic_amount, true)))
             return reply(true, "exchanged", receipt + reputation.receipt(), funds, barter.money());
         bag->CopyCompleteValue(bag_list, old_bag.get());
         barter.inventory->CopyCompleteValue(stock_list, old_stock.get());

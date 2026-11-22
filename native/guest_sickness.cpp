@@ -47,6 +47,7 @@ namespace
     constexpr auto add_fatigue_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.FL_GameEffects_C:Add_PlayerFatigue");
     constexpr auto find_passive_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:FindPassiveEffect");
     constexpr auto resolve_psy_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Resolve_PsyAttack");
+    constexpr auto psy_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:PsyAttack");
     constexpr auto owner = STR("SilverfishCoopNative");
     constexpr int max_entries = 4;
     constexpr int max_flags = 16384;
@@ -264,6 +265,7 @@ namespace
     Hook::GlobalCallbackId shadow_feedback_callback = Hook::ERROR_ID;
     thread_local U::FFrame* shadow_feedback_frame{};
     thread_local U::FWeakObjectPtr shadow_feedback_pawn;
+    thread_local Entry* barter_psy_scope{};
     std::atomic<std::uint64_t> generation{1};
     bool schema_bound{};
 
@@ -308,7 +310,7 @@ namespace
         return item ? nullptr : data;
     }
 
-    enum class PsychicSource { None, ShadowSphere, Observer };
+    enum class PsychicSource { None, ShadowSphere, Observer, Skinflint };
 
     PsychicSource psychic_source(U::FFrame* resolve, U::UObject* pawn)
     {
@@ -320,9 +322,11 @@ namespace
         auto* connection = object(controller, STR("Player"));
         auto* world = static_cast<U::AActor*>(pawn)->GetWorld();
         auto* driver = object(world, STR("NetDriver"));
-        if (!controller || !connection || !driver || !world || world->GetPathName() != crossroads ||
+        if (!controller || !connection || !driver || !world ||
             object(connection, STR("Driver")) != driver || object(connection, STR("PlayerController")) != controller)
             return PsychicSource::None;
+        if (barter_psy_scope && barter_psy_scope->pawn.Get() == pawn) return PsychicSource::Skinflint;
+        if (world->GetPathName() != crossroads) return PsychicSource::None;
         auto* previous = resolve->PreviousFrame();
         for (int depth = 0; previous && depth < 8; ++depth, previous = previous->PreviousFrame())
         {
@@ -356,7 +360,7 @@ namespace
         auto* pawn = parent ? parent->Object() : nullptr;
         const auto source = psychic_source(parent, pawn);
         if (source == PsychicSource::None) return false;
-        auto* scope = entry_for(pawn);
+        auto* scope = source == PsychicSource::Skinflint ? barter_psy_scope : entry_for(pawn);
         Flags guest, host;
         const bool qualified = scope && current(*scope) && !scope->proof.quarantined
             && guest.bind(scope->guest.Get()) && host.bind(scope->stock.Get());
@@ -408,7 +412,7 @@ namespace
         schema.fatigue_value->SetPropertyValue(value, before.value);
         const auto amount = schema.fatigue_delta->GetPropertyValueInContainer(locals);
         std::int32_t trauma{};
-        const auto minimum = source == PsychicSource::Observer ? 4 : 6;
+        const auto minimum = source == PsychicSource::Skinflint ? 1 : source == PsychicSource::Observer ? 4 : 6;
         if (amount < minimum || amount > 100 || !silverfish::native_enemy_loot::count_save_passive(save, schema.trauma, trauma))
             return true;
         const auto next = std::clamp<std::int64_t>(static_cast<std::int64_t>(before.value) + amount, trauma > 0 ? 15 : 0, 100);
@@ -660,6 +664,31 @@ bool silverfish::native_guest_sickness::read_passive_amplification(RC::Unreal::U
     if (!silverfish::native_enemy_loot::count_save_passive(
             save, U::FName{STR("AttunedMadness"), U::FNAME_Find}, attuned)) return false;
     bonus = attuned > 0 ? 1 : 0;
+    return true;
+}
+
+bool silverfish::native_guest_sickness::barter_psy(U::UObject* pawn, U::UObject* detached, U::UObject* stock,
+                                                std::int32_t amount, bool apply)
+{
+    if (!available() || !shadow_routing || barter_psy_scope || amount < 1 || amount > 100) return false;
+    if (!schema_bound) schema_bound = schema.bind();
+    Flags guest, host;
+    auto* effect = blueprint(psy_path, find<U::UClass>(pawn_path), 1, 4);
+    if (!schema_bound || !schema.resolve_psy || !schema.fatigue_instance || !schema.fatigue_delta ||
+        !schema.fatigue_pawn || !schema.fatigue_value || !schema.passive_name || !schema.passive_count ||
+        !schema.passive_active || !schema.passive_instances || !parameter<U::FIntProperty>(effect, STR("Fatigue"), 0) ||
+        !silverfish::native_guest_regen::qualifies_detached_guest(pawn, detached, stock) ||
+        !guest.bind(detached) || !host.bind(stock)) return false;
+    std::int32_t count{};
+    if (!silverfish::native_enemy_loot::count_save_passive(detached, schema.mindful, count) ||
+        !silverfish::native_enemy_loot::count_save_passive(detached, schema.bad_aura, count) ||
+        !silverfish::native_enemy_loot::count_save_passive(detached, schema.trauma, count)) return false;
+    if (!apply) return true;
+    Entry scope{pawn, detached, stock, object(pawn, STR("As Game Instance FP")),
+        Clock::now() + lease, {}, generation.load(std::memory_order_acquire)};
+    struct Restore { ~Restore() { barter_psy_scope = nullptr; } } restore;
+    barter_psy_scope = &scope;
+    pawn->ProcessEvent(effect, &amount);
     return true;
 }
 
