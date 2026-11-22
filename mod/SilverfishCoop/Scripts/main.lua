@@ -1241,9 +1241,11 @@ local function write_status(state, current_phase, failure, fields, pending)
         local seen = native_world_view.status(state, current_phase)
         if seen then rows[#rows + 1] = world_view_row("applied", seen) end
     end
+    local viewed_health = native_save_scope.guest_health(state, current_phase)
     for _, details in ipairs(state.pawns) do
         if finite(details.x) and finite(details.y) and finite(details.z) then
-            rows[#rows + 1] = status_row("pawn", details.slot or details.kind, details.name, details.health or "-",
+            local health = details == state.local_pawn and viewed_health or details.health
+            rows[#rows + 1] = status_row("pawn", details.slot or details.kind, details.name, health or "-",
                 details.x, details.y, details.z, details.controller, details.max_health or "-")
         end
     end

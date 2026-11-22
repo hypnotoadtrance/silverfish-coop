@@ -1870,6 +1870,10 @@ class Host:
         member = self.native_recipients().get(character) if self.native_guest else None
         if member and member["connected"] and not self.transitioning and time.monotonic() - self.last_seen < 2:
             pawn = member["pawn"]
+            if health := native_guest_ui.health_frame(
+                self.last_game, self.zone_epoch, character, member, gameplay["players"].get(role, {})
+            ):
+                gameplay[native_guest_ui.HEALTH] = health
             self.voice_audio.observed(self.last_game, self.zone_epoch)
             if voice_frame := self.voice_audio.frame(self.last_game, self.zone_epoch, pawn):
                 gameplay[native_voice.KEY] = voice_frame
@@ -6101,6 +6105,7 @@ class Client:
                     self.next_retry = time.monotonic() + self.auto_delay
             active = (self.transport.connected and self.last_game.get("state") == "connected"
                       and not self.needs_travel and not self.server_transitioning)
+            await self.guest_ui.sync_health(self, active)
             if active and self.last_game.get("map") == self.expected_zone and time.monotonic() - self.gameplay_seen < 2:
                 self.last_game = await self.hurt_playback.sync(
                     self.bridge, self.control, self.last_game, self.gameplay.get(native_damage_feedback.KEY), self.zone_epoch)

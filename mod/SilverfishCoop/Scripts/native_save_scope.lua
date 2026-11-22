@@ -76,6 +76,14 @@ function scope.bind_guest(state, phase)
     return guest.save, pawn, active.id
 end
 
+function scope.guest_health(state, phase)
+    local guest = active and active.guest
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    if phase == "connected" and state.server and guest and valid(state.world) and valid(pawn)
+        and same(state.world.OwningGameInstance, guest.instance) and same(guest.instance.SaveSlot_Ref, guest.save)
+        and same(pawn.Save, guest.save) then return guest.save.PlayerHealth end
+end
+
 local function route(parameter)
     if not active then return end
     local slot = text(parameter:get())

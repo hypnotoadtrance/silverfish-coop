@@ -359,8 +359,38 @@ local function project(state, phase, character, path)
         items, note_count, quest_count, completed, attachments)
 end
 
+local function matches_health(current, expected)
+    return type(current) == "number" and math.abs(current - expected) <= 0.0001
+end
+
+local function project_health(fields, state, phase)
+    local area, session, epoch, token, name = fields[3], fields[4], fields[5], fields[6], fields[7]
+    local health, maximum = tonumber(fields[8]), tonumber(fields[9])
+    if #fields ~= 9 or phase ~= "connected" or state.map ~= area or scope.selected() ~= token
+        or not health or not maximum or not (1 <= maximum and maximum <= 1000000 and 0 <= health and health <= maximum)
+        or type(SilverfishReadNativeClientDamageScope) ~= "function" then
+        error("The authenticated stock health view is unavailable", 0)
+    end
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    if not valid(pawn) or pawn:GetFullName() ~= name or pawn.Dead ~= false
+        or SilverfishReadNativeClientDamageScope(pawn:GetAddress(), session, epoch) ~= true then
+        error("The stock health view belongs to another guest or visit", 0)
+    end
+    local save, bound, owner = scope.bind_guest(state, phase)
+    if not valid(save) or owner ~= token or bound:GetAddress() ~= pawn:GetAddress() then
+        error("The isolated stock health view is unavailable", 0)
+    end
+    if not matches_health(pawn.MaxHealth, maximum) then pawn.MaxHealth = maximum end
+    if not matches_health(save.PlayerHealth, health) then save.PlayerHealth = health end
+    if not matches_health(pawn.MaxHealth, maximum) or not matches_health(save.PlayerHealth, health) then
+        error("The stock health view failed readback", 0)
+    end
+    return "stock co-op guest health projected"
+end
+
 function guest_ui.command(fields, state, phase, bridge)
     local op, target, token = fields[2], fields[3], fields[4]
+    if op == "native-guest-health-project" then return project_health(fields, state, phase) end
     if op ~= "native-guest-ui-read" and op ~= "native-guest-ui-project" then return end
     if #fields ~= 4 or not token or #token ~= 32 or not token:match("^[a-f0-9]+$") then
         error("Invalid co-op view request", 0)

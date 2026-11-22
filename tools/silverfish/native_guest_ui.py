@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 from hashlib import sha256
+import math
 import re
 import time
 import uuid
@@ -13,9 +14,29 @@ from . import party, runtime
 
 
 ACTION = "native-guest-ui-read"
+HEALTH = "native_guest_health"
+HEALTH_PROJECT = "native-guest-health-project"
 MAX_BYTES = 20_000
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _READY = re.compile(r"stock co-op inventory and Journal projected (\d+) (\d+) (\d+) (\d+) (\d+)")
+
+
+def bounded_health(health, maximum):
+    return (type(health) in (int, float) and type(maximum) in (int, float)
+            and 1 <= maximum <= 1_000_000 and 0 <= health <= maximum)
+
+
+def health_frame(game, epoch, owner, member, player):
+    if game.get("state") != "hosting" or not member.get("connected") or player.get("character_id") != owner:
+        return None
+    pawn = game.get("pawns", {}).get(member["alias"], {})
+    if pawn.get("name") != member["pawn"]:
+        return None
+    health = 0 if player.get("downed") else pawn.get("health")
+    maximum = pawn.get("max_health")
+    if not bounded_health(health, maximum) or health == 0 and not player.get("downed"):
+        return None
+    return {"map": game["map"], "epoch": epoch, "owner": owner, "health": health, "maximum": maximum}
 
 
 def validate(contents: bytes, area: str, character: str) -> str:
@@ -60,6 +81,9 @@ class GuestView:
         self.identity = None
         self.digest = "-"
         self.last_error = None
+        self.health_receipt = None
+        self.health_checked = None
+        self.health_error = None
 
     async def close(self):
         if self.request is not None:
@@ -67,6 +91,52 @@ class GuestView:
             with contextlib.suppress(asyncio.CancelledError, OSError, ValueError, RuntimeError):
                 await self.request
             self.request = None
+
+    async def sync_health(self, client, active):
+        game, frame = client.last_game, client.gameplay.get(HEALTH)
+        if not active or game.get("state") != "connected":
+            self.health_receipt = self.health_checked = self.health_error = None
+            return
+        if not isinstance(frame, dict) or time.monotonic() - client.gameplay_seen >= 2:
+            return
+        character = client.invite["character_id"]
+        area, epoch, session = game.get("map"), client.zone_epoch, client.host_session
+        if (not session or not epoch or area != client.expected_zone
+                or (frame.get("owner"), frame.get("map"), frame.get("epoch")) != (character, area, epoch)):
+            return
+        token = uuid.UUID(character).hex
+        pawn = game.get("pawns", {}).get("local", {})
+        name = pawn.get("name")
+        guard = game.get("native_client_damage", {})
+        health, maximum = frame.get("health"), frame.get("maximum")
+        if (game.get("save_scope") != token or not name or guard.get("pawn") != name
+                or guard.get("dead") is not False or not bounded_health(health, maximum)):
+            return
+        identity = (session, character, area, epoch, name)
+        checked = (identity, client.gameplay_seen)
+        receipt = (identity, health, maximum)
+        if self.health_checked == checked:
+            return
+        self.health_checked = checked
+        current, current_maximum = pawn.get("health"), pawn.get("max_health")
+        if (self.health_receipt == receipt and (current is None or math.isclose(current, health, abs_tol=.01))
+                and current_maximum == maximum):
+            return
+        try:
+            updated = await client.bridge.command(HEALTH_PROJECT, area, session, epoch, token, name,
+                                                  str(health), str(maximum), timeout=1.5)
+            if ((updated.get("state"), updated.get("map"), updated.get("save_scope")) != ("connected", area, token)
+                    or updated.get("pawns", {}).get("local", {}).get("name") != name
+                    or updated.get("ack", {}).get("message") != "stock co-op guest health projected"):
+                raise RuntimeError("The isolated stock health view did not verify")
+        except (OSError, RuntimeError) as error:
+            reason = str(error)
+            if self.health_error != reason:
+                self.health_error = reason
+                client.control.event("native_guest_health_unavailable", reason=reason)
+            return
+        self.health_receipt, self.health_error = receipt, None
+        client.last_game = updated
 
     async def sync(self, client, active):
         game = client.last_game

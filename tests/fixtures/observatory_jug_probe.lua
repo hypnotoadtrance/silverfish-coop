@@ -278,6 +278,31 @@ local function sample(actor, pawn, guest)
         largest_impulse or "-", impact_instigator, impulses_decoded, npc_damage_calls, npc_damage_instigator}
 end
 
+local function stock_health(world, pawn)
+    local controller, instance, hud = pawn.Controller, world.OwningGameInstance, pawn.HUD
+    local hud_class = StaticFindObject("/Game/Classes/GUI/HUD_Widget.HUD_Widget_C")
+    local inventory_class = StaticFindObject("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C")
+    local card_class = StaticFindObject("/Game/Classes/GUI/New/Components/PlayerCard.PlayerCard_C")
+    assert(valid(hud) and same(hud:GetClass(), hud_class) and same(hud["As Player FP"], pawn)
+        and same(hud["As Game Instance FP"], instance) and same(instance.SaveSlot_Ref, pawn.Save),
+        "the stock HUD is not bound to the isolated local guest")
+    local slot = instance.CurrentSaveSlot
+    if type(slot) == "userdata" then slot = slot:ToString() end
+    assert(type(slot) == "string" and slot:match("^SFCoopGuest_[a-f0-9]+$") and instance.SaveAfterTransition == false,
+        "the stock health readback escaped its co-op save scope")
+    for index = math.min(16, controller.MenuStack:GetArrayNum()), 1, -1 do
+        local screen = unwrap(controller.MenuStack[index])
+        if valid(screen) and same(screen:GetClass(), inventory_class) then
+            local card = screen.PlayerCard
+            assert(valid(card) and same(card:GetClass(), card_class) and same(card.PlayerFP, pawn),
+                "the stock PlayerCard is not bound to the isolated local guest")
+            return {name(pawn), slot, health(pawn), pawn.MaxHealth, hud:Get_ProgressBar_Health_Percent(),
+                card:Get_ProgressBar_Health_Percent()}
+        end
+    end
+    error("the stock InventoryScreen is not open", 0)
+end
+
 local function down_host(actor, pawn, guest)
     assert(armed and same(actor, npc) and same(actor.CombatTarget, pawn) and npc_damage_calls > 0
         and npc_damage_instigator == name(pawn), "the exact stalker is not targeting its stock attacker")
@@ -307,6 +332,7 @@ local function observe(operation)
     local world, pawn, guest, hosting = context()
     local actor = npc_in(world)
     if operation == "sample" then return sample(actor, pawn, guest) end
+    if operation == "hudhealth" and not hosting then return stock_health(world, pawn) end
     assert(hosting and pawn:HasAuthority() and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1",
         "only the private fixture host may stage a stock attack")
     if operation == "downhost" then return down_host(actor, pawn, guest) end

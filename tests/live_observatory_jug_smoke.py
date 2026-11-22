@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from contextlib import contextmanager
 import json
+import math
 from pathlib import Path
 import shutil
 import subprocess
@@ -76,7 +77,16 @@ async def sample(run: Path) -> dict:
     return row
 
 
-async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damage: bool) -> None:
+async def stock_health(run: Path) -> dict:
+    pawn, slot, health, maximum, hud, player_card = await probe(run, "hudhealth")
+    health, maximum, hud, player_card = map(float, (health, maximum, hud, player_card))
+    assert maximum > 0 and math.isclose(hud, health / maximum, abs_tol=.00001)
+    assert math.isclose(player_card, hud, abs_tol=.00001)
+    return {"pawn": pawn, "slot": slot, "health": health, "maximum": maximum, "hud": hud, "player_card": player_card}
+
+
+async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damage: bool,
+                   require_stock_health: bool = False) -> None:
     name = "observatory-jug-" + uuid.uuid4().hex[:8]
     host_run, guest_run = (work / folder / name / "run" for folder in ("campaigns", "clients"))
     evidence_path = host_run / "observatory-jug-verification.json"
@@ -120,7 +130,9 @@ async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damag
         assert invite.returncode == 0, output.decode(errors="replace")
         invitation = json.loads(output)
         character = invitation["character_id"]
-        await start("join", guest_run, "--profile", name, "--headless", "--native-zones", "--invite", invitation["invite_file"])
+        health_flags = ("--native-guest-inventory-view",) if require_stock_health else ()
+        await start("join", guest_run, "--profile", name, "--headless", "--native-zones", "--invite",
+                    invitation["invite_file"], *health_flags)
         enrolled = await wait(host_run, lambda state: exact_binding(state, OBSERVATORY, character))
         scope = await wait(host_run, lambda state: (hook := state.get("game", {}).get("native_death_hook", {}))
                            and (hook.get("state"), hook.get("backend"), hook.get("scope")) == ("ready", "cpp-scoped", "party"))
@@ -187,6 +199,12 @@ async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damag
                 raise AssertionError("the authored prop missed the stalker")
             raise AssertionError("the stock attack did not establish damage and the host as the stalker's target")
 
+        if require_stock_health:
+            await checked(guest_run, "native-inventory-view-fixture")
+            await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+            before_health = evidence["stock_health_before"] = await stock_health(guest_run)
+            assert before_health["pawn"] == baseline["guest"]["local_pawn"]
+
         identities_and_health = ("host_pawn", "host_before", "host_after", "guest_pawn", "guest_before", "guest_after")
         damage = dict(zip(identities_and_health, await probe(host_run, "downhost"), strict=True))
         for key in ("host_before", "host_after", "guest_before", "guest_after"):
@@ -231,6 +249,19 @@ async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damag
             assert observation["downed_host_removed_from_threats"], observation
         if require_guest_damage:
             assert observation["guest_took_damage_from_stalker"], observation
+        if require_stock_health:
+            deadline = loop.time() + 5
+            while loop.time() < deadline:
+                current = await sample(host_run)
+                display = await stock_health(guest_run)
+                if (current["guest_hits"] > hit["guest_hits"] and display["pawn"] == before_health["pawn"]
+                        and display["slot"] == before_health["slot"] and 0 < display["health"] < before_health["health"]
+                        and math.isclose(display["health"], current["guest_health"], abs_tol=1)):
+                    evidence["stock_health_after"] = {"authority_health": current["guest_health"], **display}
+                    break
+                await asyncio.sleep(.1)
+            else:
+                raise AssertionError(f"the stock HUD and PlayerCard missed the guest's nonlethal health debit: {display}")
         evidence["stock_repro_completed"] = True
     except BaseException as error:
         evidence.update(stock_repro_completed=False, failure=str(error) or type(error).__name__)
@@ -269,10 +300,15 @@ if __name__ == "__main__":
     parser.set_defaults(attack="jug")
     parser.add_argument("--require-guest-damage", action="store_true",
                         help="also require one stock hit on the standing guest during 12 seconds after retargeting")
+    parser.add_argument("--require-stock-health", action="store_true",
+                        help="also verify the HUD and PlayerCard progress getters after a real guest hit")
     options = parser.parse_args()
     if options.require_guest_damage and options.attack != "pistols":
         parser.error("--require-guest-damage requires --pistols")
+    if options.require_stock_health and not options.require_guest_damage:
+        parser.error("--require-stock-health requires --require-guest-damage")
     work = options.work.resolve()
     with installed_probe(work):
         asyncio.run(exercise(work, options.canary.resolve(), attack=options.attack,
-                             require_guest_damage=options.require_guest_damage))
+                             require_guest_damage=options.require_guest_damage,
+                             require_stock_health=options.require_stock_health))

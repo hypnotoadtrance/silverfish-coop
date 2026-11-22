@@ -132,6 +132,86 @@ class NativeGuestUIOwnershipTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(list(directory.iterdir()), [])
 
 
+class NativeGuestHealthViewTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+        self.token = uuid.uuid4()
+        self.pawn = f"Player_FP_C {self.area}.Observitory_P:PersistentLevel.Player_FP_C_1"
+        self.epoch = "b" * 32
+        self.session = "a" * 32
+        self.body = {"name": self.pawn, "health": 250, "max_health": 250}
+        self.frame = {"owner": str(self.token), "map": self.area, "epoch": self.epoch, "health": 74, "maximum": 250}
+        self.game = {"state": "connected", "map": self.area, "save_scope": self.token.hex,
+                     "pawns": {"local": self.body}, "native_client_damage": {"pawn": self.pawn, "dead": False},
+                     "ack": {"message": "stock co-op guest health projected"}}
+
+        async def command(operation, area, session, epoch, token, name, health, maximum, *, timeout):
+            self.assertEqual((operation, area, session, epoch, token, name, timeout),
+                             (native_guest_ui.HEALTH_PROJECT, self.area, self.session, self.epoch, self.token.hex,
+                              self.body["name"], 1.5))
+            self.body.update(health=float(health), max_health=float(maximum))
+            return self.game
+
+        self.bridge = SimpleNamespace(command=AsyncMock(side_effect=command))
+        self.client = SimpleNamespace(last_game=self.game, bridge=self.bridge, control=Mock(),
+                                      gameplay={native_guest_ui.HEALTH: self.frame}, gameplay_seen=time.monotonic(),
+                                      expected_zone=self.area, host_session=self.session, zone_epoch=self.epoch,
+                                      invite={"character_id": str(self.token)})
+        self.view = native_guest_ui.GuestView()
+
+    def test_owner_snapshot_uses_the_detached_live_pawn(self):
+        member = {"connected": True, "alias": "guest", "pawn": self.pawn}
+        player = {"character_id": str(self.token), "health": 250, "downed": False}
+        game = {"state": "hosting", "map": self.area, "pawns": {"guest": {**self.body, "health": 74}}}
+        self.assertEqual(native_guest_ui.health_frame(game, self.epoch, str(self.token), member, player), self.frame)
+        self.assertIsNone(native_guest_ui.health_frame(game, self.epoch, str(uuid.uuid4()), member, player))
+        self.assertIsNone(native_guest_ui.health_frame(game, self.epoch, str(self.token), {**member, "pawn": "stale"}, player))
+        player["downed"] = True
+        self.assertEqual(native_guest_ui.health_frame(game, self.epoch, str(self.token), member, player)["health"], 0)
+
+    async def test_live_health_coalesces_and_updates_through_heal_and_rejoin(self):
+        await self.view.sync_health(self.client, True)
+        self.assertEqual(self.body["health"], 74)
+        self.client.gameplay_seen = time.monotonic()
+        await self.view.sync_health(self.client, True)
+        self.bridge.command.assert_awaited_once()
+        self.body["health"] = 80  # Stock local regeneration cannot replace host authority.
+        self.client.gameplay_seen = time.monotonic()
+        await self.view.sync_health(self.client, True)
+        self.assertEqual(self.body["health"], 74)
+        self.frame["health"] = 0
+        self.client.gameplay_seen = time.monotonic()
+        await self.view.sync_health(self.client, True)
+        self.assertEqual(self.body["health"], 0)
+        self.frame["health"] = 25
+        self.client.gameplay_seen = time.monotonic()
+        await self.view.sync_health(self.client, True)
+        self.assertEqual(self.body["health"], 25)
+        await self.view.sync_health(self.client, False)
+        self.body["name"] = self.pawn.replace("_C_1", "_C_7")
+        self.game["native_client_damage"]["pawn"] = self.body["name"]
+        await self.view.sync_health(self.client, True)
+        self.assertEqual(self.bridge.command.await_count, 5)
+
+    async def test_stale_or_mismatched_receipts_leave_the_game_untouched(self):
+        for key, value in (("owner", str(uuid.uuid4())), ("epoch", "c" * 32), ("map", "/Game/Invalid"),
+                           ("health", float("inf")), ("maximum", 0)):
+            with self.subTest(key=key):
+                self.client.gameplay[native_guest_ui.HEALTH] = {**self.frame, key: value}
+                await self.view.sync_health(self.client, True)
+        self.client.gameplay[native_guest_ui.HEALTH] = self.frame
+        self.game["save_scope"] = uuid.uuid4().hex
+        await self.view.sync_health(self.client, True)
+        self.game["save_scope"] = self.token.hex
+        self.game["native_client_damage"]["dead"] = True
+        await self.view.sync_health(self.client, True)
+        self.game["native_client_damage"]["dead"] = False
+        self.client.gameplay_seen = time.monotonic() - 3
+        await self.view.sync_health(self.client, True)
+        self.bridge.command.assert_not_awaited()
+        self.assertEqual(self.body["health"], 250)
+
+
 class NativeGuestInventoryUseTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
