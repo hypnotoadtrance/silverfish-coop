@@ -90,11 +90,13 @@ async def verify(work, canary, offer):
             if offer == "refresh":
                 def visible(cash):
                     return next((int(fields[1]) for line in tail(guest) if (fields := line.split("\t"))[0] == "visible"
-                                 and int(fields[2]) == cash), None)
+                                 and int(fields[2]) == cash and float(fields[3]) == 1), None)
 
                 ready = await wait(guest, lambda state: state.get("game", {}).get(native_npc_barter.VIEW, {}).get("state") == "ready"
                                    and visible(1200), timeout=15)
                 sequence = ready["game"][native_npc_barter.VIEW]["sequence"]
+                opened, = [line.split("\t") for line in tail(guest) if line.startswith("interact\t")]
+                assert "BarterScreen_C " in opened[1] and float(opened[2]) == 0, opened
                 original_count = visible(1200)
                 mailbox, = (host / "game-bridge").iterdir()
                 (mailbox / "npc-barter-flow-refresh").touch()
@@ -105,7 +107,8 @@ async def verify(work, canary, offer):
                 refreshed, = events(guest, "native_npc_barter_stock_refreshed")
                 assert refreshed["entries"] == original_count + 1 and refreshed["cash"] == 1375
                 assert not events(host, "native_npc_barter_committed")
-                proof = {"initial_items": original_count, "initial_cash": 1200, "stock_refresh": refreshed, "sequence": sequence}
+                proof = {"initial_items": original_count, "initial_cash": 1200, "provisional_screen_hidden": True,
+                         "stock_refresh": refreshed, "sequence": sequence}
                 (host / "npc-barter-refresh.json").write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
                 print(host / "npc-barter-refresh.json", flush=True)
                 return

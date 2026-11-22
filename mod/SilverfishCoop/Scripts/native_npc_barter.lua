@@ -6,6 +6,7 @@ local npc_class = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local trader_class = "/Game/Classes/Actors/Barter_BP.Barter_BP_C"
 local merchant_class = "/Game/Classes/Libraries/DataAssets/Merchants/MerchantData.MerchantData_C"
 local barter_screen = "/Game/Classes/GUI/New/BarterScreen.BarterScreen_C"
+local add_menu = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C:AddMenu"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local item_weight = "Weight_12_11AB9ED547504E78A849A692A36DC938"
@@ -152,6 +153,7 @@ end
 
 local guest_scope = require("native_save_scope")
 local session
+local menu_hook, observed_state, observed_phase
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_SHOP_VIEW") == "1"
 local confirmation_screen = "/Game/Classes/GUI/New/ConfirmationScreen.ConfirmationScreen_C"
 local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
@@ -176,6 +178,17 @@ local function local_context(state, phase)
     if not identifier or not (session or actor.Save == true) or not close_to(pawn, npc) or not close_to(pawn, actor) then return end
     return {actor = actor, pawn = pawn, controller = controller, name = pawn:GetFullName(),
         identifier = identifier, map = state.map}
+end
+
+local function hide_provisional_screen(controller)
+    if session or not observed_state or not same(controller, observed_state.controller) then return end
+    local context = local_context(observed_state, observed_phase)
+    if not context or controller.Loading ~= false then return end
+    -- This stock menu only carries the interaction to the host. The projected menu
+    -- is constructed after host stock and the shared wallet have been applied.
+    local screen = controller.MenuStack[1]
+    screen:SetRenderOpacity(0)
+    screen:SetIsEnabled(false)
 end
 
 local function top(context, screen)
@@ -229,7 +242,10 @@ local function close_stock(committed)
     session = nil
 end
 
-function barter.clear() close_stock(); latest = nil end
+function barter.clear()
+    close_stock()
+    latest, observed_state, observed_phase = nil, nil, nil
+end
 
 local function read_item(text)
     local id, path, ammo, weight, value, never = text:match(
@@ -390,6 +406,12 @@ end
 
 function barter.sync(state, phase)
     if not enabled or type(SilverfishSetNativeNpcBarter) ~= "function" then return end
+    observed_state, observed_phase = state, phase
+    if phase == "connected" and not menu_hook and type(RegisterHook) == "function" and valid(StaticFindObject(add_menu)) then
+        menu_hook = RegisterHook(add_menu, function(controller)
+            pcall(hide_provisional_screen, controller:get())
+        end)
+    end
     local current = local_context(state, phase)
     if not current then close_stock(); return end
     if session and (session.expires and session.expires < os.time() or not same(current.pawn, session.pawn)
@@ -404,6 +426,7 @@ function barter.sync(state, phase)
     if accepting then
         local sequence = SilverfishCaptureNativeNpcBarterMenu(opened:GetAddress())
         if sequence then
+            opened:SetRenderOpacity(0)
             opened:SetIsEnabled(false)
             session = current
             session.sequence, session.state, session.expires = sequence, "opening", os.time() + 12

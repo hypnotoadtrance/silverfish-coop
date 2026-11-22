@@ -242,12 +242,14 @@ function probe.sample(state, phase)
                 local player, merchant = pawn:K2_GetActorLocation(), actor:K2_GetActorLocation()
                 if (player.X - merchant.X)^2 + (player.Y - merchant.Y)^2 + (player.Z - merchant.Z)^2 > pawn.InteractionRange^2 then return end
                 actor:SendInteractionToActor(pawn, actor.Box)
-                proof("interact", valid(menus[1]) and menus[1]:GetFullName() or "-")
+                local opened = menus[1]
+                proof("interact", valid(opened) and opened:GetFullName() or "-",
+                    valid(opened) and opened:GetRenderOpacity() or "-")
             elseif view and view[5] == "ready" and menus:GetArrayNum() == 1 then
                 if refresh_test then
                     local flag = FName("Player_Cash")
                     if pawn.Save.Flags:Contains(flag) then
-                        proof("visible", actor.Inventory:GetArrayNum(), pawn.Save.Flags:Find(flag):get())
+                        proof("visible", actor.Inventory:GetArrayNum(), pawn.Save.Flags:Find(flag):get(), menus[1]:GetRenderOpacity())
                     end
                 else
                     confirm(state, menus[1], actor, payment_row)

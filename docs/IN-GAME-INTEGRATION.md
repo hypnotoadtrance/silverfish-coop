@@ -176,6 +176,20 @@ Some quest callbacks and reward templates still use immediate save generations. 
 
 The transport-item hook now requires an active co-op session before intercepting stock item use. Stardust and Fruiting Stardust use the game's own behavior in singleplayer.
 
+### Follow-up two-PC reports
+
+| Report | Completion check |
+| --- | --- |
+| Equipping or switching guns shows a second floating model. The host cannot see the guest aim down sights | Switch and holster several stock weapons from each seat. Each observer sees exactly one held weapon, attached to the correct socket, and sees aim begin and end from the actual stock controls |
+| Guest cannot equip utility items. The character panel omits traits and carry weight. The guest appears to inherit the host's double-height jump trait | Equip and remove an item in each utility slot. Check the character panel with asymmetric traits and different carried loads. Compare jump height while standing side by side and after reconnect |
+| Guest hears damage feedback in acid and on hard landings but loses no health | Cross an acid hazard and land a damaging fall on each seat. Verify the authoritative health debit, local feedback, and downed state apply to the affected character |
+| The player's trade window opens with local offers before switching to the host's stock | Interact with a trader from the guest seat. The first visible frame should show the matching host stock and shared wallet, including after a prior purchase |
+| Held props move in steps or snap back to their starting position. Head motion also jumps between samples | Grab, rotate, carry, release, and throw a placed prop and a loose prop from each seat. The carrier's input remains continuous and observers see interpolated motion. Verify the settled position after release and smooth head motion while turning |
+| A jug hit made an Observatory NPC hostile. After the host was downed, the guest still saw the NPC attack when the host saw it stop | Trigger stock hostility with a thrown prop. Confirm both observers see the same NPC behavior and the host simulates target selection and damage for the remaining standing player |
+| Q and E lean could use a visible remote pose | Observe stock left and right lean from each seat. Qualify an existing movement or bone pose before adding a remote presentation |
+
+The guest's provisional NPC barter widget is hidden in the stock menu-open callback. The visible stock menu opens after applying the host's inventory and shared wallet. A muted Observatory test observed zero opacity immediately after the native interaction, then verified the visible host offers and a later refresh at the same trader. [NPC barter trial](../tests/live_npc_barter_smoke.py)
+
 ### Steam hosting options
 
 - The in-game Host flow offers a transport choice. Direct IP uses the configured port and address. Steam Networking opens a Steam lobby when the campaign is ready.
