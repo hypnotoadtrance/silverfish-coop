@@ -6,15 +6,17 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC") == "1"
 local not_deer_enabled = enabled and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER") == "1"
 local combat_enabled = os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT") == "1"
-local fixture = enabled and (os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE") == "1"
-    or (not_deer_enabled and combat_enabled))
-    and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local production_roster = os.getenv("SILVERFISH_COOP_NATIVE_CROSSROADS_ROSTER") == "1"
+local headless_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local fixture = enabled and (os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE") == "1"
+    or (not_deer_enabled and combat_enabled)) and headless_fixtures
 local combat_fixture = fixture and combat_enabled
 local detached_sickness = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SICKNESS") == "1"
     or os.getenv("SILVERFISH_COOP_NATIVE_CROSSROADS_ROSTER") == "1"
 local refresh_fixture = fixture and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH") == "1"
 local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+local ambient_worlds = { ["/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"] = true }
 local level = map .. ".CrossRoads_P:PersistentLevel."
 local types = {
     husk = { name = "NPC_Zomb_01_C", path = "/Game/Classes/NPCs/NPC_Zomb_01.NPC_Zomb_01_C", limit = 5,
@@ -29,7 +31,10 @@ local view = "husk"
 if requested_view == "notdeer" and not_deer_enabled then view = "notdeer" end
 if requested_view == "flayer" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1" then view = "flayer" end
 
-local function read_family(pawn, host, family)
+local function read_family(pawn, host, family, current_map)
+    if current_map and current_map ~= map then
+        return SilverfishReadCampaignNpc(pawn:GetAddress(), host, family, current_map)
+    end
     if family ~= "husk" then return SilverfishReadCampaignNpc(pawn:GetAddress(), host, family) end
     return SilverfishReadCampaignNpc(pawn:GetAddress(), host)
 end
@@ -68,10 +73,10 @@ local function controlled(detail, world, local_player)
         and same(pawn:GetWorld(), world) and same(controller:GetWorld(), world)
 end
 
-local function paired(state, phase)
+local function paired(state, phase, ambient)
     local host = state.local_pawn
     local guest = state.guests and #state.guests == 1 and state.guests[1]
-    if phase ~= "hosting" or state.map ~= map or not state.listening or state.server ~= false or state.clients ~= 1
+    if phase ~= "hosting" or (state.map ~= map and not ambient) or not state.listening or state.server ~= false or state.clients ~= 1
         or not valid(state.world) then return nil, "listen_world" end
     if not controlled(host, state.world, true) or not same(host.controller_object, state.controller) then
         return nil, "host_authority"
@@ -96,14 +101,17 @@ local function paired(state, phase)
     return nil, "guest_detached_save"
 end
 
-local function stock_member(world, local_pawn, name)
-    local profile = types[view]
-    local prefix = profile.name .. " " .. level
+local function stock_member(world, local_pawn, name, current_map)
+    local family = current_map and current_map ~= map and "husk" or view
+    local profile = types[family]
+    local current_level = family == "husk" and current_map and current_map ~= map
+        and current_map .. "." .. current_map:match("[^/]+$") .. ":PersistentLevel." or level
+    local prefix = profile.name .. " " .. current_level
     if type(SilverfishReadCampaignNpc) ~= "function" or type(name) ~= "string" or #name > 512
         or name:sub(1, #prefix) ~= prefix
         or not name:sub(#prefix + 1):match("^" .. profile.name .. "_%d+$") then return end
     local receipts, stage, spawner, data, size, replicated, _, _, natural_calls, _, _, _, _, _, roster =
-        read_family(local_pawn, true, view)
+        read_family(local_pawn, true, family, current_map)
     if type(receipts) ~= "number" or receipts < 1 or not profile.stages[stage]
         or type(spawner) ~= "string" or spawner == "" or type(data) ~= "string" or data == ""
         or type(size) ~= "number" or size < 1 or size > profile.limit or replicated ~= size
@@ -182,6 +190,12 @@ end
 local function at(pawn, target, tolerance)
     local current = point(pawn:K2_GetActorLocation())
     return current and distance(current, target) <= tolerance and current
+end
+
+local function restore_position(player)
+    return at(player.pawn, player.origin, 1) or
+        (player.pawn:K2_TeleportTo(player.origin, player.facing) == true
+            and at(player.pawn, player.origin, readback_tolerance))
 end
 
 local function safe_melee_placement(trace, host, guest, target, cohort, anchor, x, y, angle, ignored, sweep)
@@ -307,11 +321,7 @@ local function place_pair(world, host, guest, target, cohort)
                 if not ok and diagnostics then diagnostics.trace = "callback_failed" end
                 local restored = true
                 for _, player in ipairs({ host, guest }) do
-                    local checked, result = pcall(function()
-                        return at(player.pawn, player.origin, 1) or
-                            (player.pawn:K2_TeleportTo(player.origin, player.facing) == true
-                                and at(player.pawn, player.origin, readback_tolerance))
-                    end)
+                    local checked, result = pcall(restore_position, player)
                     restored = restored and checked and result ~= nil and result ~= false
                 end
                 if not restored then error("mutation_unverified_stock_husk_approach_restore", 0) end
@@ -479,15 +489,31 @@ function campaign_npc.command(fields, state, phase)
     end
     if fields[2] ~= "native-campaign-npc-approach" then return end
     local projectile = #fields == 5 and fields[4] == "projectile"
-    if not fixture or (view == "notdeer" and not combat_fixture) or (#fields ~= 3 and not projectile) or (projectile and (view ~= "flayer"
+    local returning = #fields == 4 and fields[4] == "return"
+    local ambient = production_roster and ambient_worlds[state.map] and headless_fixtures and (#fields == 3 or returning)
+    if returning and not ambient then error("stock_husk_return_fixture_disabled", 0) end
+    if (not ambient and (not fixture or (view == "notdeer" and not combat_fixture))) or (#fields ~= 3 and not projectile and not returning) or (projectile and (view ~= "flayer"
         or type(SilverfishReadCampaignFlayerProjectile) ~= "function")) then error("stock_husk_approach_fixture_disabled", 0) end
-    approach = nil
+    if not returning then approach = nil end
     if projectile then shot_ticket, shot_aim = nil, nil end
-    local host, guest, detached = paired(state, phase)
+    local host, guest, detached = paired(state, phase, ambient)
     if not host then
         error(projectile and "stock_flayer_shot_pair_" .. guest or "stock_husk_approach_exact_pair_unavailable", 0)
     end
-    local target, cohort = stock_member(state.world, host.pawn, fields[3])
+    if returning then
+        local origins = approach and approach.origins
+        if not origins or approach.world ~= state.world:GetAddress() or approach.member ~= fields[3]
+            or not same(host.pawn, origins[1].pawn) or not same(guest.pawn, origins[2].pawn) then
+            error("stock_husk_return_pair_unavailable", 0)
+        end
+        local first = restore_position(origins[1])
+        local second = restore_position(origins[2])
+        if not first or not second then error("mutation_unverified_stock_husk_return", 0) end
+        for _, player in ipairs(origins) do player.pawn:ForceNetUpdate() end
+        approach.origins = nil
+        return "verified headless pair return to both exact original positions"
+    end
+    local target, cohort = stock_member(state.world, host.pawn, fields[3], state.map)
     if not target then error("stock_husk_approach_cohort_member_unavailable", 0) end
     if projectile then
         local weapon = light_pistol(state, guest.pawn)
@@ -503,7 +529,7 @@ function campaign_npc.command(fields, state, phase)
     end
     local first, second = placement(host.pawn), placement(guest.pawn)
     if not first or not second then error("stock_husk_approach_capsule_unavailable", 0) end
-    if combat_fixture then
+    if combat_fixture and not ambient then
         local flayer = view == "flayer"
         local family = view == "husk" and {} or { view }
         if (flayer and not detached_sickness) or type(SilverfishArmCampaignNpcCombat) ~= "function"
@@ -518,7 +544,8 @@ function campaign_npc.command(fields, state, phase)
         error(host_distance, 0)
     end
     approach = { world = state.world:GetAddress(), member = fields[3], host = host.name, guest = guest.name,
-        host_distance = host_distance, guest_distance = guest_distance, geometry = geometry }
+        host_distance = host_distance, guest_distance = guest_distance, geometry = geometry,
+        origins = ambient and { first, second } or nil }
     return "verified headless pair placement near an exact stock " .. view
 end
 
@@ -526,7 +553,7 @@ local function family_rows(state, pawn, host, status_row, family, topic)
     local receipts, stage, spawner, stock_data, cohort, replicated, spawn_denials, ai_denials, natural_calls,
         authority, simulated, other, simulated_controllers, antfarm, roster, saved_calls, saved_denials,
         saved_stage, saved_spawner, saved_data, authority_network_ready, local_begins, local_initializations,
-        early_denials, last_actor, last_caller, last_script, replica = read_family(pawn, host, family)
+        early_denials, last_actor, last_caller, last_script, replica = read_family(pawn, host, family, state.map)
     if type(receipts) ~= "number" then return {} end
     local viewer = host and "host" or "client"
     local rows = {
@@ -558,25 +585,51 @@ local function family_rows(state, pawn, host, status_row, family, topic)
     return rows
 end
 
+local function append_approach(rows, state, status_row)
+    if not approach or approach.world ~= active or state.local_pawn.name ~= approach.host
+        or not state.guests or #state.guests ~= 1 or state.guests[1].name ~= approach.guest then return end
+    rows[#rows + 1] = status_row("native-campaign-npc-approach", state.map, approach.member,
+        approach.host, approach.guest, approach.host_distance, approach.guest_distance)
+    local geometry = approach.geometry
+    if geometry then
+        rows[#rows + 1] = status_row("native-campaign-npc-approach-geometry", state.map, approach.member, types[view].trace_sweep,
+            geometry.floors, geometry.placements, geometry.trace, geometry.component)
+        local impact = geometry.impact
+        rows[#rows + 1] = status_row("native-campaign-npc-approach-impact", state.map, approach.member,
+            impact.time, impact.distance, impact.depth)
+    end
+end
+
 local function read_rows(state, phase, status_row)
     local host = phase == "hosting" and state.server == false
     local client = phase == "connected" and state.server == true
     local pawn = state.local_pawn and state.local_pawn.pawn
-    if state.map ~= map or not state.listening or not (host or client) or not valid(state.world) or not valid(pawn) then
+    local ambient = production_roster and ambient_worlds[state.map]
+    if (state.map ~= map and not ambient) or not state.listening or not (host or client)
+        or not valid(state.world) or not valid(pawn) then
         -- During initial load a native receipt can precede the first bridge poll.
         -- Only clear state after leaving a world that the bridge observed.
         if active then campaign_npc.clear() end
         return {}
     end
     if type(SilverfishReadCampaignNpc) ~= "function" then return {} end
-    local rows = family_rows(state, pawn, host, status_row, view, "native-campaign-npc")
+    local rows = family_rows(state, pawn, host, status_row, ambient and "husk" or view, "native-campaign-npc")
     if #rows == 0 then return rows end
     active = state.world:GetAddress()
     if host and type(SilverfishReadCampaignNpcHostRoster) == "function" then
-        local husks, boars, defeated = SilverfishReadCampaignNpcHostRoster(pawn:GetAddress())
+        local husks, boars, defeated
+        if ambient then husks, boars, defeated = SilverfishReadCampaignNpcHostRoster(pawn:GetAddress(), state.map)
+        else husks, boars, defeated = SilverfishReadCampaignNpcHostRoster(pawn:GetAddress()) end
         if type(husks) == "number" then
             rows[#rows + 1] = status_row("native-campaign-npc-host-roster", state.map, husks, boars, defeated)
         end
+    end
+    if ambient then
+        for _, row in ipairs(family_rows(state, pawn, host, status_row, "boar", "native-campaign-npc-boar")) do
+            rows[#rows + 1] = row
+        end
+        if host then append_approach(rows, state, status_row) end
+        return rows
     end
     if shot_ticket then
         local guest = state.guests and #state.guests == 1 and state.guests[1]
@@ -628,19 +681,7 @@ local function read_rows(state, phase, status_row)
                 shot_aim.reach or "-", shot_aim.state)
         end
     end
-    if host and approach and approach.world == active and state.local_pawn.name == approach.host
-        and state.guests and #state.guests == 1 and state.guests[1].name == approach.guest then
-        rows[#rows + 1] = status_row("native-campaign-npc-approach", state.map, approach.member,
-            approach.host, approach.guest, approach.host_distance, approach.guest_distance)
-        local geometry = approach.geometry
-        if geometry then
-            rows[#rows + 1] = status_row("native-campaign-npc-approach-geometry", state.map, approach.member, types[view].trace_sweep,
-                geometry.floors, geometry.placements, geometry.trace, geometry.component)
-            local impact = geometry.impact
-            rows[#rows + 1] = status_row("native-campaign-npc-approach-impact", state.map, approach.member,
-                impact.time, impact.distance, impact.depth)
-        end
-    end
+    if host then append_approach(rows, state, status_row) end
     return rows
 end
 

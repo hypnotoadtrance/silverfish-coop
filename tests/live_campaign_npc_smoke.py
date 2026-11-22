@@ -1,4 +1,4 @@
-"""Observe stock CrossRoads encounters on a headless loopback party."""
+"""Observe stock campaign encounters on a headless loopback party."""
 
 import argparse
 import asyncio
@@ -27,6 +27,11 @@ from tools.silverfish.campaign import CampaignStore
 MAP = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 LEVEL = MAP + ".CrossRoads_P:PersistentLevel."
 SPAWNER = re.compile(r"AI_Spawner_Squad_BP_C " + re.escape(LEVEL) + r"AI_Spawner_Squad_BP_C_(\d+)\Z")
+DEAD_BRIDGE = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
+DEAD_BRIDGE_LEVEL = DEAD_BRIDGE + ".DeadBridge_P:PersistentLevel."
+DEAD_BRIDGE_SPAWNER = re.compile(r"AI_Spawner_Squad_BP_C " + re.escape(DEAD_BRIDGE_LEVEL) + r"AI_Spawner_Squad_BP_C_(\d+)\Z")
+DEAD_BRIDGE_MARKERS = frozenset((1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 15, 16, 17, 19, 20))
+DEAD_BRIDGE_HUSK_SEED = 982360
 MARKERS = frozenset((1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24,
                      26, 27, 28, 30, 31, 32, 34, 35, 37, 38, 40, 41))
 DATA = {
@@ -135,7 +140,7 @@ def status(run: Path) -> dict:
         return {}
 
 
-def read_npcs(run: Path, viewer: str) -> dict | None:
+def read_npcs(run: Path, viewer: str, area: str = MAP) -> dict | None:
     """Read the qualified native receipt and census from one game frame."""
     paths = tuple((run / "game-bridge").glob("*/status.tsv"))
     if len(paths) != 1:
@@ -146,14 +151,14 @@ def read_npcs(run: Path, viewer: str) -> dict | None:
         schema, = [row for row in rows if row[0] == "schema"]
         sequence, = [row for row in rows if row[0] == "seq"]
         session, = [row for row in rows if row[0] == "session"]
-        if schema != ["schema", "1"] or session[1:4] != [viewer, phase, MAP]:
+        if schema != ["schema", "1"] or session[1:4] != [viewer, phase, area]:
             return None
         receipt, = [row for row in rows if row[0] == "native-campaign-npc"]
         census, = [row for row in rows if row[0] == "native-campaign-npc-census"]
-        if len(receipt) != 10 or len(census) != 10 or receipt[1:3] != [MAP, viewer] or census[1:3] != [MAP, viewer]:
+        if len(receipt) != 10 or len(census) != 10 or receipt[1:3] != [area, viewer] or census[1:3] != [area, viewer]:
             return None
         members = [row[3] for row in rows if row[0] == "native-campaign-npc-member"
-                   and len(row) == 4 and row[1:3] == [MAP, viewer]]
+                   and len(row) == 4 and row[1:3] == [area, viewer]]
         result = {
             "sequence": int(sequence[1]),
             "receipts": int(receipt[3]),
@@ -178,7 +183,7 @@ def read_npcs(run: Path, viewer: str) -> dict | None:
         network = [row for row in rows if row[0] == "native-campaign-npc-network"]
         if network:
             net, = network
-            if len(net) != 10 or net[1:3] != [MAP, viewer]:
+            if len(net) != 10 or net[1:3] != [area, viewer]:
                 return None
             counts = tuple(map(int, net[3:7]))
             if (any(count < 0 for count in counts) or counts[0] > result["authority"]
@@ -192,14 +197,14 @@ def read_npcs(run: Path, viewer: str) -> dict | None:
         saved_squads = [row for row in rows if row[0] == "native-campaign-npc-saved-squads"]
         if saved_squads:
             saved, = saved_squads
-            if len(saved) != 8 or saved[1:3] != [MAP, viewer]:
+            if len(saved) != 8 or saved[1:3] != [area, viewer]:
                 return None
             result["saved_squads"] = {"calls": int(saved[3]), "denials": int(saved[4]), "stage": saved[5],
                                       "spawner": saved[6], "data": saved[7]}
         approach = [row for row in rows if row[0] == "native-campaign-npc-approach"]
         if approach and viewer == "host":
             move, = approach
-            if len(move) != 7 or move[1] != MAP:
+            if len(move) != 7 or move[1] != area:
                 return None
             distances = list(map(float, move[5:7]))
             if not all(math.isfinite(distance) and 0 < distance <= 4000 for distance in distances):
@@ -286,18 +291,20 @@ def read_npcs(run: Path, viewer: str) -> dict | None:
         return None
 
 
-def stock_cohort(report: dict | None, replicate: bool, family: str = "husk") -> bool:
+def stock_cohort(report: dict | None, replicate: bool, family: str = "husk", area: str = MAP) -> bool:
     stages, actor, squads = DATA[family]
     if not report or report["stage"] not in stages:
         return False
-    source = SPAWNER.fullmatch(report["spawner"])
+    pattern, markers, level = (DEAD_BRIDGE_SPAWNER, DEAD_BRIDGE_MARKERS, DEAD_BRIDGE_LEVEL) if area == DEAD_BRIDGE else (
+        SPAWNER, MARKERS, LEVEL)
+    source = pattern.fullmatch(report["spawner"])
     members = report["members"]
     maximum = next((size for name, size in squads.items() if report["data"] == f"{SQUAD_PREFIX}{name}.{name}"), 0)
-    return bool(source and int(source.group(1)) in MARKERS
+    return bool(source and int(source.group(1)) in markers
                 and 0 < report["cohort"] <= maximum
                 and report["natural_calls"] >= report["receipts"] > 0
                 and len(set(members)) == len(members) == report["cohort"]
-                and all(name.startswith(f"{actor} {LEVEL}{actor}_") for name in members)
+                and all(name.startswith(f"{actor} {level}{actor}_") for name in members)
                 and report["authority"] >= report["cohort"]
                 and report["simulated"] == report["other"] == report["spawn_denials"] == report["ai_denials"] == 0
                 and report["replicated"] == (report["cohort"] if replicate else 0)
@@ -369,12 +376,17 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                    require_client_denial: bool, approach: bool = False, family: str = "husk",
                    flayer_veto: bool = False, join_only: bool = False, combat: bool = False,
                    stock_refresh: bool = False, antfarm_replay: Path | None = None,
-                   projectile_tap: bool = False, flayer_defaults: bool = False) -> None:
+                   projectile_tap: bool = False, flayer_defaults: bool = False, dead_bridge: bool = False) -> None:
     if os.name != "nt":
         raise OSError("The live canary requires the staged Windows game")
     name = "campaign-npc-" + uuid.uuid4().hex[:8]
+    area = DEAD_BRIDGE if dead_bridge else MAP
     campaign_root = work / "campaigns" / name
     prepared = seed_antfarm_replay(antfarm_replay, campaign_root, family) if antfarm_replay else None
+    if dead_bridge:
+        # The audited seed lets the stock director choose a Husk squad without a spawn fixture.
+        with CampaignStore(campaign_root / "save") as campaign:
+            campaign.save_world({"map": area, "native_observation": {"native_scene": {"instance_seed": DEAD_BRIDGE_HUSK_SEED}}})
     host = campaign_root / "run"
     guest = work / "clients" / name / "run"
     host.mkdir(parents=True)
@@ -402,9 +414,11 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         if flayer_veto:
             environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO"] = "1"
     default_not_deer = family == "notdeer" and not combat
-    if default_not_deer or flayer_defaults:
+    if default_not_deer or flayer_defaults or dead_bridge:
         environment.pop("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC")
         environment.pop("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE", None)
+        if dead_bridge:
+            environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW"] = "husk"
         if flayer_defaults and combat:
             environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW"] = "flayer"
     elif family == "notdeer":
@@ -414,7 +428,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
     launched = []
     flayer_combat = combat and family == "flayer"
     sweep_combat = combat and family in ("flayer", "notdeer")
-    evidence = {"map": MAP, "family": family, "mode": "replicated" if replicate else "observed",
+    evidence = {"map": area, "family": family, "mode": "replicated" if replicate else "observed",
                 "verification_scope": ("join" if join_only else "combat" if combat
                                        else "projectile_tap" if projectile_tap else "encounter"), "approach_requested": approach,
                 "flayer_publication": family == "flayer" and replicate, "flayer_spawn_veto": flayer_veto,
@@ -430,13 +444,13 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
     evidence["client_history"] = client_history
 
     def frames():
-        current = {"host": read_npcs(host, "host"), "guest": read_npcs(guest, "client")}
+        current = {"host": read_npcs(host, "host", area), "guest": read_npcs(guest, "client", area)}
         for viewer, frame in current.items():
             if frame is None or (last_frames[viewer] and frame["sequence"] <= last_frames[viewer]["sequence"]):
                 continue
             last_frames[viewer] = frame
             if viewer == "host":
-                if stock_cohort(frame, replicate, family):
+                if stock_cohort(frame, replicate, family, area):
                     evidence.setdefault("first_host_cohort", frame)
                 if diagnostic := frame.get("combat_diagnostic"):
                     evidence.setdefault("first_combat_diagnostic", diagnostic)
@@ -509,13 +523,13 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
     def paired(server, client):
         return (server.get("state") == "hosting" and client.get("state") == "connected"
                 and server.get("game", {}).get("remote_clients") == 1 and client.get("link_connected") is True
-                and server.get("game", {}).get("map") == client.get("game", {}).get("map") == MAP
+                and server.get("game", {}).get("map") == client.get("game", {}).get("map") == area
                 and server.get("generation") == client.get("host_session")
                 and bool(server.get("zone_epoch")) and server["zone_epoch"] == client.get("zone_epoch"))
 
     def proved(server, client, snapshot):
         host_npcs, guest_npcs = snapshot["host"], snapshot["guest"]
-        if not paired(server, client) or not stock_cohort(host_npcs, replicate, family) or not guest_npcs:
+        if not paired(server, client) or not stock_cohort(host_npcs, replicate, family, area) or not guest_npcs:
             return False
         if replicate:
             return (client_replica(guest_npcs, host_npcs["cohort"], require_client_denial, family)
@@ -633,9 +647,11 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         fixture_flags = ("--fixtures",) if approach or projectile_tap else ()
         if flayer_combat and not flayer_defaults:
             fixture_flags += ("--native-guest-sickness",)
+        if dead_bridge:
+            fixture_flags += ("--native-authored-enemy-loot",)
         await start("host", host, primary, "--port", "0", "--headless", "--native-zones",
-                    "--native-events", "--native-guest", "--start-zone", MAP, *fixture_flags)
-        initial, _, _ = await wait("The CrossRoads host did not start",
+                    "--native-events", "--native-guest", "--start-zone", area, *fixture_flags)
+        initial, _, _ = await wait(f"The host did not start {area}",
                                    lambda server, _, __: server.get("state") == "hosting", 45)
         if prepared:
             evidence[replay_key]["adopted"] = verify_antfarm_restore(host, initial, prepared)
@@ -645,7 +661,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         if join_only:
             def initial_join(server, client, snapshot):
                 return (paired(server, client) and snapshot["guest"] is not None
-                        and stock_cohort(snapshot["host"], replicate, family)
+                        and stock_cohort(snapshot["host"], replicate, family, area)
                         and client.get("character_id") == invitation["character_id"])
 
             _, _, joined = await wait(f"The guest did not finish joining the stock {family} world", initial_join)
@@ -669,7 +685,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         if approach or projectile_tap:
             def ready(server, client, snapshot):
                 pair = approach_pair(server)
-                return (paired(server, client) and stock_cohort(snapshot["host"], True, family) and pair
+                return (paired(server, client) and stock_cohort(snapshot["host"], True, family, area) and pair
                         and (not flayer_combat or healthy_guest_sickness(server, pair[1])))
 
             before, _, natural = await wait(f"No stock {family} cohort and enrolled pair appeared", ready)
@@ -716,6 +732,22 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         if client.get("character_id") != invitation["character_id"]:
             raise AssertionError("The authenticated guest did not activate its invited character")
         evidence.update({"host": snapshot["host"], "guest": snapshot["guest"], "zone_epoch": server["zone_epoch"]})
+        if dead_bridge:
+            watch = server.get("game", {}).get("native_enemy_loot", {})
+            assert watch.get("state") == "watching" and watch.get("map") == area, watch
+            assert watch.get("bandit", "").startswith(f"NPC_State_Infantry_CQC_C {DEAD_BRIDGE_LEVEL}"), watch
+            evidence["stock_cqc_loot_watch"] = watch
+            original_pawns = before["game"]["pawns"]
+
+            async def return_to_entry():
+                reply = await command("action", *primary, "native-campaign-npc-approach", "--target", target, "--amount", "2")
+                returned = reply["native_campaign_npc_return"]
+                for role in ("local", "guest"):
+                    assert returned[role]["name"] == original_pawns[role]["name"], returned
+                    assert math.dist(returned[role]["location"], original_pawns[role]["location"]) <= 60, returned
+                return returned
+
+            evidence["returned_before_reconnect"] = await return_to_entry()
 
         if replicate:
             dropped = await command("action", *secondary, "drop-link")
@@ -726,7 +758,11 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                 raise AssertionError("The guest's Direct IP link did not resume")
 
             def after_reconnect(server, client, current):
-                return (proved(server, client, current) and server["zone_epoch"] == evidence["zone_epoch"]
+                encounter_ready = (paired(server, client) and stock_cohort(current["host"], True, family, area)
+                                   and current["guest"] is not None and approach_pair(server) == (host_pawn, guest_pawn)
+                                   and current["guest"]["authority"] == 0 and "first_client_local_birth_frame" not in evidence
+                                   if dead_bridge else proved(server, client, current))
+                return (encounter_ready and server["zone_epoch"] == evidence["zone_epoch"]
                         and client.get("character_id") == invitation["character_id"]
                         and all(current[viewer]["sequence"] > snapshot[viewer]["sequence"] for viewer in ("host", "guest"))
                         and set(snapshot["host"]["members"]) == set(current["host"]["members"])
@@ -734,6 +770,13 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
 
             _, _, rejoined = await wait("The stock cohort did not survive the guest reconnect", after_reconnect, 24)
             evidence["reconnected"] = {"host": rejoined["host"], "guest": rejoined["guest"]}
+            if dead_bridge:
+                await command("action", *primary, "native-campaign-npc-approach", "--target", target)
+                _, _, visible = await wait("The same stock cohort did not become visible again after reconnect",
+                                           lambda server, client, current: approached(server, client, current)
+                                           and after_reconnect(server, client, current), 12)
+                evidence["visible_after_reconnect"] = {"host": visible["host"], "guest": visible["guest"]}
+                evidence["returned_after_reconnect"] = await return_to_entry()
         evidence["verified"] = True
     except BaseException as failure:
         evidence["verified"] = False
@@ -781,6 +824,7 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True, help="root of an already prepared stage")
     parser.add_argument("--vanilla-saved", type=Path, help="optional original Saved directory to hash")
     parser.add_argument("--cohort", choices=tuple(DATA), default="husk", help="stock encounter family to verify")
+    parser.add_argument("--dead-bridge", action="store_true", help="verify the stock Dead Bridge Husk director with production defaults")
     parser.add_argument("--flayer-defaults", action="store_true", help="verify stock Flayer combat and reconnect under ordinary campaign defaults")
     parser.add_argument("--flayer-veto", action="store_true", help="also enable the experimental guest Flayer spawn veto")
     parser.add_argument("--flayer-replay", type=Path, help="replay the verified d474f2cf CrossRoads campaign directory")
@@ -797,6 +841,11 @@ if __name__ == "__main__":
     parser.add_argument("--require-client-denial", action="store_true", help="also require a naturally attempted client spawn veto")
     parser.add_argument("--timeout", type=float, default=125.0, help="observation window, including the stock 90-second refresh")
     options = parser.parse_args()
+    if options.dead_bridge:
+        if options.cohort != "husk" or any((options.approach, options.combat, options.stock_refresh, options.join_only,
+                                            options.flayer_replay, options.notdeer_replay, options.projectile_tap)):
+            parser.error("--dead-bridge verifies Husk publication, client spawn ownership, and reconnect")
+        options.replicate = options.approach = True
     if options.cohort == "notdeer":
         if (not options.notdeer_replay or not options.notdeer_replay.is_dir() or (options.approach and not options.combat)
                 or options.join_only or options.stock_refresh or options.projectile_tap or options.flayer_replay):
@@ -841,4 +890,5 @@ if __name__ == "__main__":
                          approach=options.approach, family=options.cohort, flayer_veto=options.flayer_veto,
                          join_only=options.join_only, combat=options.combat, stock_refresh=options.stock_refresh,
                          antfarm_replay=options.flayer_replay or options.notdeer_replay,
-                         projectile_tap=options.projectile_tap, flayer_defaults=options.flayer_defaults))
+                         projectile_tap=options.projectile_tap, flayer_defaults=options.flayer_defaults,
+                         dead_bridge=options.dead_bridge))

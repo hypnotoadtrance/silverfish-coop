@@ -2923,15 +2923,23 @@ class Host:
                     result = {"native_enemy_shell_fixture": proof}
                 elif action == "native-campaign-npc-approach" and self.native_guest and self.fixtures:
                     target, mode = request.get("target"), request.get("amount")
+                    area = self.last_game.get("map")
                     authority = self.last_game.get("native_campaign_npc", {})
-                    if (self.last_game.get("map") != CROSSROADS or not isinstance(target, str)
-                            or target not in authority.get("members", [])):
-                        raise ValueError("Choose an exact observed stock CrossRoads enemy")
-                    if mode is not None and (type(mode) is not int or mode != 1
-                                             or not target.startswith("NPC_Flayer_C ")):
+                    if (area not in (CROSSROADS, DEAD_BRIDGE) or not isinstance(target, str)
+                            or (area == DEAD_BRIDGE and not target.startswith("NPC_Zomb_01_C "))
+                            or (mode != 2 and target not in authority.get("members", []))):
+                        raise ValueError("Choose an exact observed stock encounter enemy")
+                    if mode is not None and (type(mode) is not int or mode not in (1, 2)):
+                        raise ValueError("Choose a stock encounter fixture action")
+                    if mode == 1 and (area != CROSSROADS or not target.startswith("NPC_Flayer_C ")):
                         raise ValueError("Choose an exact observed Flayer for the stock projectile fixture")
                     arguments = (target,)
-                    if mode == 1:
+                    if mode == 2:
+                        prior = self.last_game.get("native_campaign_npc_approach", {})
+                        if area != DEAD_BRIDGE or (prior.get("map"), prior.get("member")) != (area, target):
+                            raise ValueError("The stock Dead Bridge approach return is unavailable")
+                        arguments = (target, "return")
+                    elif mode == 1:
                         guest = self.last_game.get("pawns", {}).get("guest", {}).get("name")
                         weapon = self.last_game.get("native_guest_equipped_weapons", {}).get(guest, {})
                         guid = weapon.get("guid")
@@ -2940,7 +2948,14 @@ class Host:
                         arguments = (target, "projectile", guid)
                     self.last_game = await bridge.command(action, *arguments, timeout=6)
                     self.last_seen = time.monotonic()
-                    if mode == 1:
+                    if mode == 2:
+                        if self.last_game.get("map") != area:
+                            raise RuntimeError("The stock encounter return left its original world")
+                        key = "native_campaign_npc_return"
+                        pawns = self.last_game.get("pawns", {})
+                        proof = {role: {field: pawns.get(role, {}).get(field) for field in ("name", "location")}
+                                 for role in ("local", "guest")}
+                    elif mode == 1:
                         key = "native_campaign_flayer_shot_aim"
                         proof = self.last_game.get(key, {})
                         guest = self.last_game.get("pawns", {}).get("guest", {}).get("name")
@@ -2951,7 +2966,7 @@ class Host:
                     else:
                         key = "native_campaign_npc_approach"
                         proof = self.last_game.get(key, {})
-                        if (proof.get("member"), proof.get("map")) != (target, CROSSROADS):
+                        if (proof.get("member"), proof.get("map")) != (target, area):
                             raise RuntimeError("The stock enemy approach did not verify both exact pawns")
                     result = {key: proof}
                 elif action == "native-campaign-npc-refresh" and self.native_guest and self.native_zones and self.fixtures:

@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -47,7 +48,6 @@ namespace
     constexpr auto marker_check_path = STR("/Game/Classes/ScriptingActors/AI_Spawner_Squad_BP.AI_Spawner_Squad_BP_C:SpawnIsValid");
     constexpr auto pool_path = STR("/Game/Classes/Libraries/DataAssets/AmbientSpawnPools/CrossRoadsSquadPool.CrossRoadsSquadPool");
     constexpr auto spawner_class = STR("/Game/Classes/ScriptingActors/AI_Spawner_Squad_BP.AI_Spawner_Squad_BP_C");
-    constexpr auto spawner_prefix = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.AI_Spawner_Squad_BP_C_");
     constexpr auto spawn_path = STR("/Game/Classes/ScriptingActors/AI_Spawner_Squad_BP.AI_Spawner_Squad_BP_C:SpawnSquadFromData");
     constexpr auto data_class = STR("/Game/Classes/Libraries/DataAssets/Squads/SquadData.SquadData_C");
     constexpr auto npc_class = STR("/Game/Classes/NPCs/NPC_Zomb_01.NPC_Zomb_01_C");
@@ -92,6 +92,30 @@ namespace
     };
     constexpr std::array marker_numbers{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24,
         26, 27, 28, 30, 31, 32, 34, 35, 37, 38, 40, 41};
+    constexpr std::array dead_bridge_markers{1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 15, 16, 17, 19, 20};
+
+    struct DirectorProfile
+    {
+        const U::TCHAR* package;
+        const U::TCHAR* world;
+        const U::TCHAR* director;
+        const U::TCHAR* pool;
+        const U::TCHAR* marker_prefix;
+        std::span<const int> markers;
+    };
+
+    constexpr DirectorProfile crossroads{world_package, world_path, director_path, pool_path,
+        STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.AI_Spawner_Squad_BP_C_"),
+        marker_numbers};
+    constexpr DirectorProfile dead_bridge{
+        STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P:PersistentLevel.DynaimicSpawnControler_BP_C_0"),
+        STR("/Game/Classes/Libraries/DataAssets/AmbientSpawnPools/DeadBridgeSquadPool.DeadBridgeSquadPool"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P:PersistentLevel.AI_Spawner_Squad_BP_C_"),
+        dead_bridge_markers};
+    constexpr std::array ambient_directors{&crossroads, &dead_bridge};
+
     constexpr std::array squad_assets{
         STR("/Game/Classes/Libraries/DataAssets/Squads/Monsters/Husks_Scattered.Husks_Scattered"),
         STR("/Game/Classes/Libraries/DataAssets/Squads/Monsters/Husks_SwarmSmall.Husks_SwarmSmall"),
@@ -212,12 +236,14 @@ namespace
         U::UObject* driver{};
         U::UObject* instance{};
         Seat seat{Seat::Inactive};
+        const DirectorProfile* director{};
     };
 
     struct PendingClientLoad
     {
         U::FWeakObjectPtr driver, connection;
         U::FWorldContext* context{};
+        const DirectorProfile* director{};
     } pending_client_load;
 
     bool server_connection(U::UObject* connection, U::UObject* driver)
@@ -226,9 +252,20 @@ namespace
         return live(driver) && live(connection) && type && connection->IsA(type) && object(connection, STR("Driver")) == driver;
     }
 
+    const DirectorProfile* director_for(std::wstring_view path)
+    {
+        for (const auto* profile : ambient_directors)
+        {
+            if ((profile == &crossroads || production_roster) && (path == profile->package || path == profile->world))
+                return profile;
+        }
+        return nullptr;
+    }
+
     Network network(U::UWorld* world, bool during_load = false)
     {
-        if (!live(world) || world->GetPathName() != world_path) return {};
+        const auto* profile = live(world) ? director_for(world->GetPathName()) : nullptr;
+        if (!profile) return {};
         auto* instance = object(world, STR("OwningGameInstance"));
         if (!exact(instance, instance_class)) return {};
         auto* driver = object(world, STR("NetDriver"));
@@ -236,20 +273,23 @@ namespace
         if (live(driver) && object(driver, STR("World")) == world && connection)
         {
             auto* server = get_object(connection, driver);
-            if (server_connection(server, driver)) return {world, driver, instance, Seat::Client};
+            if (server_connection(server, driver)) return {world, driver, instance, Seat::Client, profile};
             if (server) return {};
-            if (!during_load || driver != pending_client_load.driver.Get()) return {world, driver, instance, Seat::Host};
+            if (!during_load || driver != pending_client_load.driver.Get()) return {world, driver, instance, Seat::Host, profile};
         }
-        if (!during_load || !pending_client_load.context) return {};
+        if (!during_load || !pending_client_load.context || pending_client_load.director != profile) return {};
         auto* pending = pending_client_load.driver.Get();
         if ((driver && driver != pending) || !server_connection(pending_client_load.connection.Get(), pending)) return {};
-        return {world, pending, instance, Seat::Client};
+        return {world, pending, instance, Seat::Client, profile};
     }
 
     bool exact_director(U::UObject* actor, const Network& active)
     {
-        return exact(actor, director_class) && actor->GetPathName() == director_path && in_level(actor, active.world) &&
-            object(actor, STR("As Game Instance FP")) == active.instance;
+        if (!active.director || !exact(actor, director_class) || actor->GetPathName() != active.director->director ||
+            !in_level(actor, active.world) || object(actor, STR("As Game Instance FP")) != active.instance) return false;
+        if (active.director == &crossroads) return true;
+        auto* pool = object(actor, STR("AmbientSquadPool"));
+        return live(pool) && pool->GetPathName() == active.director->pool;
     }
 
     U::UObject* local_pawn(U::UObject* director, const Network& active)
@@ -280,11 +320,13 @@ namespace
         if (!squad_spawner(actor) || !in_level(actor, world)) return false;
         auto* arrow = object(actor, STR("Arrow_Leader"));
         if (!exact(arrow, STR("/Script/Engine.ArrowComponent")) || arrow->GetOuterPrivate() != actor) return false;
-        const std::wstring_view prefix{spawner_prefix};
+        const auto* profile = director_for(world->GetPathName());
+        if (!profile) return false;
+        const std::wstring_view prefix{profile->marker_prefix};
         const auto path = actor->GetPathName();
         if (!std::wstring_view{path}.starts_with(prefix)) return false;
         const auto suffix = std::wstring_view{path}.substr(prefix.size());
-        return std::ranges::any_of(marker_numbers, [suffix](int number) { return suffix == std::to_wstring(number); });
+        return std::ranges::any_of(profile->markers, [suffix](int number) { return suffix == std::to_wstring(number); });
     }
 
     int data_index(U::UObject* data)
@@ -642,6 +684,11 @@ namespace
         return family == NpcFamily::Husk && (operate || production_roster);
     }
 
+    bool roster_family(const Network& active, NpcFamily family)
+    {
+        return active.director == &crossroads || family == NpcFamily::Husk || family == NpcFamily::Boar;
+    }
+
     bool hook_ready()
     {
         return U::IsInGameThreadRaw() && installed.load(std::memory_order_acquire);
@@ -689,7 +736,7 @@ namespace
         })) return;
 
         const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld(), true);
-        if (!active.world || !placed_spawner(receiver, active.world) || !in_level(antfarm, active.world) ||
+        if (active.director != &crossroads || !placed_spawner(receiver, active.world) || !in_level(antfarm, active.world) ||
             object(antfarm, STR("GameInstance")) != active.instance ||
             (active.seat == Seat::Host && byte_field(receiver, STR("Role")) != 3)) return;
         update_scope(active);
@@ -1156,7 +1203,7 @@ namespace
         if (!publishes(family) ||
             (family == NpcFamily::NotDeer && byte_field(receiver, STR("Faction")) != not_deer_profile.faction)) return false;
         const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld());
-        if (active.seat != Seat::Client || !in_level(receiver, active.world) ||
+        if (active.seat != Seat::Client || !roster_family(active, family) || !in_level(receiver, active.world) ||
             (frame && frame->Object() != receiver)) return false;
         call.PreventOriginalFunctionCall();
         if (!call.OriginalFunctionCallPrevented()) return false;
@@ -1193,7 +1240,7 @@ namespace
         const auto family = npc_family(receiver);
         if (!publishes(family) || (family == NpcFamily::NotDeer && byte_field(receiver, STR("Faction")) != 7)) return;
         const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld());
-        if (active.seat != Seat::Client || !in_level(receiver, active.world)) return;
+        if (active.seat != Seat::Client || !roster_family(active, family) || !in_level(receiver, active.world)) return;
         update_scope(active);
         call.PreventOriginalFunctionCall();
         auto* cohort = antfarm_cohort(family);
@@ -1281,7 +1328,7 @@ namespace
             if (family != NpcFamily::Unknown && (family != NpcFamily::NotDeer || operate_not_deer))
             {
                 const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld(), true);
-                if (active.seat == Seat::Client && in_level(receiver, active.world))
+                if (active.seat == Seat::Client && roster_family(active, family) && in_level(receiver, active.world))
                 {
                     update_scope(active);
                     auto& births = births_for(family);
@@ -1478,7 +1525,7 @@ namespace
             {
                 // Identify loaded classes from the actors. Looking up an unloaded optional class can scan the object array.
                 const auto family = npc_family(actor);
-                if (family == NpcFamily::Unknown || (family == NpcFamily::NotDeer && !operate_not_deer) ||
+                if (family == NpcFamily::Unknown || !roster_family(active, family) || (family == NpcFamily::NotDeer && !operate_not_deer) ||
                     !in_level(actor, active.world)) continue;
                 auto* cohort = antfarm_cohort(family);
                 auto& counts = cohort ? cohort->counts : scope.counts;
@@ -1534,17 +1581,19 @@ namespace
     int report(const Lua& lua)
     {
         const auto arguments = lua.get_stack_size();
-        if (!hook_ready() || (arguments != 2 && arguments != 3) || !lua.is_integer(1) || !lua.is_bool(2) ||
-            (arguments == 3 && !lua.is_string(3))) return 0;
+        if (!hook_ready() || arguments < 2 || arguments > 4 || !lua.is_integer(1) || !lua.is_bool(2) ||
+            (arguments >= 3 && !lua.is_string(3)) || (arguments == 4 && !lua.is_string(4))) return 0;
         const auto expected = static_cast<std::uintptr_t>(lua.get_integer());
         const auto host = lua.get_bool();
-        const auto selection = arguments == 3 ? lua.get_string() : std::string_view{};
+        const std::string selection = arguments >= 3 ? std::string(lua.get_string()) : std::string{};
         const bool not_deer = selection == "notdeer" && operate_not_deer;
         const auto* family = antfarm_cohort(not_deer ? NpcFamily::NotDeer :
             selection == "flayer" ? NpcFamily::Flayer : selection == "boar" ? NpcFamily::Boar : NpcFamily::Unknown);
-        if (arguments == 3 && !family) return 0;
-        const auto active = network(find<U::UWorld>(world_path));
-        auto* director = find<U::UObject>(director_path);
+        if (arguments >= 3 && selection != "husk" && !family) return 0;
+        const auto* profile = arguments == 4 ? director_for(RC::ensure_str(lua.get_string())) : &crossroads;
+        if (!profile || (profile != &crossroads && selection != "husk" && selection != "boar")) return 0;
+        const auto active = network(find<U::UWorld>(profile->world));
+        auto* director = find<U::UObject>(profile->director);
         if (active.seat != (host ? Seat::Host : Seat::Client) || !exact_director(director, active) ||
             !expected || reinterpret_cast<std::uintptr_t>(local_pawn(director, active)) != expected) return 0;
         update_scope(active);
@@ -1604,10 +1653,14 @@ namespace
 
     int report_host_roster(const Lua& lua)
     {
-        if (!hook_ready() || !production_roster || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto arguments = lua.get_stack_size();
+        if (!hook_ready() || !production_roster || (arguments != 1 && arguments != 2) || !lua.is_integer(1) ||
+            (arguments == 2 && !lua.is_string(2))) return 0;
         const auto expected = static_cast<std::uintptr_t>(lua.get_integer());
-        const auto active = network(find<U::UWorld>(world_path));
-        auto* director = find<U::UObject>(director_path);
+        const auto* profile = arguments == 2 ? director_for(RC::ensure_str(lua.get_string())) : &crossroads;
+        if (!profile) return 0;
+        const auto active = network(find<U::UWorld>(profile->world));
+        auto* director = find<U::UObject>(profile->director);
         if (!expected || active.seat != Seat::Host || !exact_director(director, active) ||
             reinterpret_cast<std::uintptr_t>(local_pawn(director, active)) != expected) return 0;
         update_scope(active);
@@ -1966,14 +2019,14 @@ namespace silverfish::campaign_npc
                 if (!hook_ready()) return;
                 pending_client_load = {};
                 if (!pending || url.Map.IsEmpty()) return;
-                const std::wstring_view package{*url.Map};
-                if (package != world_package && package != world_path) return;
+                const auto* profile = director_for(*url.Map);
+                if (!profile) return;
                 // The engine can start map Blueprints before publishing World.NetDriver.
                 auto* pending_object = reinterpret_cast<U::UObject*>(pending);
                 if (!exact(pending_object, STR("/Script/Engine.PendingNetGame"))) return;
                 auto* driver = object(pending_object, STR("NetDriver"));
                 auto* connection = object(driver, STR("ServerConnection"));
-                if (server_connection(connection, driver)) pending_client_load = {driver, connection, &context};
+                if (server_connection(connection, driver)) pending_client_load = {driver, connection, &context, profile};
             }, {false, true, STR("SilverfishCoopNative"), STR("Bind early connected CrossRoads load")});
         callbacks[5] = Hook::RegisterLoadMapPostCallback(
             [](Hook::TCallbackIterationData<bool>&, U::UEngine*, U::FWorldContext& context,
@@ -1987,7 +2040,7 @@ namespace silverfish::campaign_npc
                 if (family == NpcFamily::Unknown || (family == NpcFamily::NotDeer && !operate_not_deer) ||
                     byte_field(candidate, STR("Role")) != 3) return;
                 const auto active = network(candidate->GetWorld(), true);
-                if (active.seat != Seat::Client || !in_level(candidate, active.world)) return;
+                if (active.seat != Seat::Client || !roster_family(active, family) || !in_level(candidate, active.world)) return;
                 update_scope(active);
                 auto& births = births_for(family);
                 ++births.local_begins;
