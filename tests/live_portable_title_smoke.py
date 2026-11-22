@@ -71,6 +71,10 @@ def fingerprint(path: Path) -> str | None:
 
 
 def qualify_release(game: Path, legacy_work: Path | None) -> PortableRelease:
+    for name in runtime.STOCK_PACKAGES:
+        package = game / runtime.PAKS / name
+        if not package.is_file() or not install_stage._ordinary(package).st_size:
+            raise ValueError(f"Stock content is missing from the portable test replica: {package}")
     mods = game / runtime.SHIPPING.parent / "ue4ss" / "Mods"
     embedded = mods / install_stage.MOD
     marker = embedded / "resident-portable.json"
