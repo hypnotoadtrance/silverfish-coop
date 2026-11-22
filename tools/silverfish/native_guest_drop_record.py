@@ -4,7 +4,7 @@ import math
 import re
 
 from .authored_routes import MAPS as NORMAL_CAMPAIGN_MAPS
-from .guest_weapon_profiles import NINE_MM_BALL, STOCK_AMMO
+from .guest_weapon_profiles import MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL, STOCK_AMMO
 from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULTS
 from .native_gold import valid_guid
 from .party import REQUEST_ID
@@ -56,7 +56,7 @@ def parse_stock_action(fields, game):
             or (mode == "sort" and amount != 0) or (mode in ("use", "equip") and amount != 1)
             or (mode == "drop" and not 1 <= amount <= MAX_QUANTITY)
             or (mode == "split" and not 0 < amount < before < 2**31)
-            or (mode == "unload" and not 1 <= amount == before <= 12)
+            or (mode == "unload" and not 1 <= amount == before <= MAX_TAKE_AMMO_ROUNDS)
             or (mode not in ("split", "unload") and before != 0)):
         raise ValueError("Invalid stock backpack operation")
     return dict(area=area, pawn=pawn, epoch=epoch, sequence=int(sequence), entry=entry, guid=guid,

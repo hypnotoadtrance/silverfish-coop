@@ -40,7 +40,6 @@ local split_ammo = {
     ["/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C"] = true,
     ["/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"] = true,
 }
-local take_ammo_weapons = {[weapon_profiles.paths.pistol] = 12, [weapon_profiles.paths["break-action-50"]] = 1}
 local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
 local keys = {up = "PageUp", down = "PageDown", confirm = "Home", back = "End", drop = "Delete"}
 local input_keys, held = {}, {}
@@ -482,7 +481,7 @@ local function enable_take_ammo(screen)
     if not exact(card, card_path) or not same(card.InventoryWidget, panel) or not same(card.ItemManager, manager) then return end
     local class = card.Item[item_class]
     local path = valid(class) and class:GetFullName():match("^BlueprintGeneratedClass (.+)$")
-    local count, maximum = card.Item[item_ammo], take_ammo_weapons[path]
+    local count, maximum = card.Item[item_ammo], weapon_profiles.magazine_capacity[path]
     if not maximum or math.type(count) ~= "integer" or count < 1 or count > maximum then return end
     local button = menu.Button_SplitStack
     if not exact(button, "/Game/Classes/GUI/SubWidgets/Button_Default_Widget.Button_Default_Widget_C") then return end

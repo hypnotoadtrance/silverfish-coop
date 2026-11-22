@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 import uuid
 
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, native_inventory
+from tools.silverfish.guest_weapon_profiles import FIREARMS, MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL
 
 
 MAP = record.OBSERVATORY
@@ -100,12 +101,26 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
     def test_take_ammo_requires_the_entire_expected_magazine(self):
         game = {"state": "connected", "map": MAP, "pawns": {"local": {"name": PAWN}}}
         envelope = [record.STOCK_ACTION_ROW, MAP, PAWN, "b" * 32, "5", "take-ammo", GUID]
-        for rounds in ("1", "12"):
+        maximum = str(MAX_TAKE_AMMO_ROUNDS)
+        too_many = str(MAX_TAKE_AMMO_ROUNDS + 1)
+        for rounds in ("1", maximum):
             intent = record.parse_stock_action([*envelope, rounds, rounds], game)
             self.assertEqual((intent["mode"], intent["count"], intent["expected"]), ("unload", int(rounds), int(rounds)))
             self.assertEqual(native_inventory.take_ammo_target(f"{GUID}|{rounds}"), (GUID, int(rounds), int(rounds)))
-        for amount, expected in (("0", "0"), ("1", "7"), ("13", "13"), ("2", "0")):
+        for amount, expected in (("0", "0"), ("1", "7"), (too_many, too_many), ("2", "0")):
             with self.assertRaises(ValueError):
                 record.parse_stock_action([*envelope, amount, expected], game)
-        for target in (f"{GUID}|0", f"{GUID}|13", f"{GUID}|1|2", f"{'0' * 32}|1"):
+        for target in (f"{GUID}|0", f"{GUID}|{too_many}", f"{GUID}|1|2", f"{'0' * 32}|1"):
             self.assertIsNone(native_inventory.take_ammo_target(target))
+
+    def test_take_ammo_result_must_match_registered_primary_ammo_and_capacity(self):
+        for weapon in FIREARMS:
+            with self.subTest(weapon=weapon.kind):
+                magazine = weapon.magazine
+                if magazine is None:
+                    self.assertFalse(native_inventory.valid_take_ammo_result(weapon.path, NINE_MM_BALL.item_path, 1))
+                    continue
+                ammo = magazine.ammo.item_path
+                self.assertTrue(native_inventory.valid_take_ammo_result(weapon.path, ammo, magazine.capacity))
+                self.assertFalse(native_inventory.valid_take_ammo_result(weapon.path, ammo, magazine.capacity + 1))
+                self.assertFalse(native_inventory.valid_take_ammo_result(weapon.path, ammo + "_variant", 1))

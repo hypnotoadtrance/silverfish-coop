@@ -144,8 +144,8 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                     or tuple(receipt.get(field) for field in (
                         "state", "owner", "map", "source_guid", "quantity_before", "split", "remaining",
                     )) != ("unloaded" if unloading else "split", client.invite["character_id"], area, guid, split[2], quantity, remaining)
-                    or (native_inventory.TAKE_AMMO_WEAPONS.get(receipt.get("weapon_class")) != receipt.get("class_path")
-                        or not receipt.get("class_path") if unloading
+                    or (not native_inventory.valid_take_ammo_result(receipt.get("weapon_class"), receipt.get("class_path"), quantity)
+                        if unloading
                         else receipt.get("class_path") not in native_inventory.SPLIT_CLASSES)
                     or not valid_guid(created := receipt.get("new_guid")) or created == guid):
                 raise RuntimeError("The host did not verify both resulting stock stacks")

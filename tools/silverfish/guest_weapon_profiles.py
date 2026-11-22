@@ -83,3 +83,8 @@ FIREARMS = (
     Firearm("black-fox", "Wep_Pistol_Fennec_02", True,
             Magazine(17, 1, 0.06, True, FIVE_SEVEN_AP, reload_first_stack=True)),
 )
+
+# Registered ordinary magazines use the stock primary-ammunition transaction.
+# The underbarrel SMG and other specialized receivers have no magazine profile.
+TAKE_AMMO_MAGAZINES = {weapon.path: weapon.magazine for weapon in FIREARMS if weapon.magazine}
+MAX_TAKE_AMMO_ROUNDS = max(magazine.capacity for magazine in TAKE_AMMO_MAGAZINES.values())

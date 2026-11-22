@@ -1,5 +1,6 @@
 local inventory = {}
 local guest_save = require("guest_save")
+local weapon_profiles = require("guest_weapon_registry")
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local observation, split, unloaded, sorted, stored
 local stock_backpack = "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"
@@ -36,7 +37,8 @@ local function take_ammo(fields, state, phase)
     local name, source, created = fields[3], fields[4], fields[5]
     local expected = math.tointeger(tonumber(fields[6]))
     if #fields ~= 6 or phase ~= "hosting" or not state.listening or state.server ~= false
-        or not guid(source) or not guid(created) or source == created or not expected or expected < 1 or expected > 12
+        or not guid(source) or not guid(created) or source == created or not expected or expected < 1
+        or expected > weapon_profiles.max_take_ammo_rounds
         or type(SilverfishTakeNativeGuestWeaponAmmo) ~= "function" then
         error("native_inventory_take_ammo_refused_scope", 0)
     end

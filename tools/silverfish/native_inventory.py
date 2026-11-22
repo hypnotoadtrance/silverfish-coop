@@ -7,7 +7,9 @@ import time
 import uuid
 
 from . import native_host_save, party
-from .guest_weapon_profiles import FIREARMS, FORTY_FIVE_BALL, NINE_MM_BALL, TWELVE_GAUGE_BUCK
+from .guest_weapon_profiles import (
+    FORTY_FIVE_BALL, MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL, TAKE_AMMO_MAGAZINES, TWELVE_GAUGE_BUCK,
+)
 from .native_gold import valid_guid
 
 
@@ -21,9 +23,7 @@ SPLIT_CLASSES = frozenset(ammo.item_path for ammo in (NINE_MM_BALL, FORTY_FIVE_B
 TAKE_AMMO = "native-inventory-take-ammo"
 TAKE_AMMO_KEY = "native_inventory_take_ammo"
 TAKE_AMMO_CAPABILITY = "native_inventory_take_ammo_capability"
-_TAKE_AMMO_TARGET = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]?)")
-TAKE_AMMO_WEAPONS = {weapon.path: weapon.magazine.ammo.item_path for weapon in FIREARMS
-                     if weapon.kind in ("pistol", "break-action-50")}
+_TAKE_AMMO_TARGET = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,9})")
 _SPLIT_TARGET = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,9})\|([1-9][0-9]{0,9})")
 SPLIT_VIEW = "native_guest_inventory_split_view"
 SORT = "native-inventory-sort"
@@ -88,9 +88,15 @@ def splittable(row):
 
 def take_ammo_target(value):
     match = _TAKE_AMMO_TARGET.fullmatch(value) if isinstance(value, str) else None
-    if match and valid_guid(match[1]) and 1 <= (rounds := int(match[2])) <= 12:
+    if match and valid_guid(match[1]) and 1 <= (rounds := int(match[2])) <= MAX_TAKE_AMMO_ROUNDS:
         return match[1], rounds, rounds
     return None
+
+
+def valid_take_ammo_result(weapon, ammo, rounds):
+    magazine = TAKE_AMMO_MAGAZINES.get(weapon) if isinstance(weapon, str) else None
+    return (magazine is not None and ammo == magazine.ammo.item_path
+            and type(rounds) is int and 1 <= rounds <= magazine.capacity)
 
 
 async def split_stack(host, bridge, character: str, target, operation: str, *, unload=False) -> dict:
@@ -133,7 +139,7 @@ async def split_stack(host, bridge, character: str, target, operation: str, *, u
             raise
         proof = snapshot.get(key, {})
         ammo_class = proof.get("class_path")
-        qualified = (TAKE_AMMO_WEAPONS.get(proof.get("weapon_class")) == ammo_class and ammo_class is not None
+        qualified = (valid_take_ammo_result(proof.get("weapon_class"), ammo_class, expected)
                      if unload else ammo_class in SPLIT_CLASSES)
         if ((snapshot.get("state"), snapshot.get("map")) != ("hosting", area)
                 or tuple(proof.get(key) for key in ("map", "pawn", "source_guid", "new_guid", "quantity_before",

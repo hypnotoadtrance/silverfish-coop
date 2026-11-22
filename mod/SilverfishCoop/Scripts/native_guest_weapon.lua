@@ -76,8 +76,9 @@ function guest_weapon.command(fields, state, phase)
     local inspect = operations.inspect
     local name, guid = fields[3], fields[4]
     local fixture = action == "seed" or action == "seed-ammo"
+    local fixture_kind = fields[5] == "smg-standard-full" and "smg-standard" or fields[5]
     local seed_profile = action == "seed" and #fields == 5 and fixtures and headless
-        and (pry_tool_paths[fields[5]] or weapon_profiles.seeds[fields[5]])
+        and (pry_tool_paths[fixture_kind] or weapon_profiles.seeds[fixture_kind])
     local equipped_target = action == "reload" and guid == "equipped"
     observation = nil
     if not enabled or (#fields ~= 4 and not seed_profile) or phase ~= "hosting"

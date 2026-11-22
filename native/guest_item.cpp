@@ -205,6 +205,12 @@ namespace
         std::int32_t expected{};
     };
 
+    struct SeedSelection
+    {
+        const Unreal::TCHAR* path{smg_path};
+        bool full_magazine{};
+    };
+
     bool ownership_current(const Context& context)
     {
         if (!authority(context.pawn) || !authority(context.controller) || !live(context.connection) ||
@@ -289,13 +295,13 @@ namespace
         return {};
     }
 
-    std::string_view resolve(const Lua& lua, Context& context, const Unreal::TCHAR** seed_variant,
+    std::string_view resolve(const Lua& lua, Context& context, SeedSelection* seed_selection,
                              std::int64_t* hold_duration = nullptr, StackSplit* split = nullptr, bool full_split = false)
     {
         if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE")) return "native_guest_weapon_scope_disabled";
         const auto count = lua.get_stack_size();
         const bool split_fields = split && count == 6 && lua.is_string(4) && lua.is_integer(5) && lua.is_integer(6);
-        const bool legacy_fields = count == 3 || (count == 4 && ((seed_variant && lua.is_string(4)) ||
+        const bool legacy_fields = count == 3 || (count == 4 && ((seed_selection && lua.is_string(4)) ||
             (hold_duration && lua.is_integer(4))));
         if (!Unreal::IsInGameThreadRaw() || (split ? !split_fields : !legacy_fields) || (hold_duration && count != 4) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3)) return "guest_pawn_save_and_guid_required";
@@ -323,14 +329,16 @@ namespace
         {
             if (!env("SILVERFISH_COOP_HEADLESS")) return "stock_guest_weapon_fixture_profile_unqualified";
             const auto kind = lua.get_string();
-            if (kind == "blowtorch") *seed_variant = blowtorch_path;
-            else if (kind == "crowbar") *seed_variant = crowbar_path;
+            if (kind == "blowtorch") seed_selection->path = blowtorch_path;
+            else if (kind == "crowbar") seed_selection->path = crowbar_path;
             else
             {
-                const auto profile = std::ranges::find(profiles::firearms, kind, &profiles::Profile::kind);
+                seed_selection->full_magazine = kind == "smg-standard-full";
+                const std::string_view profile_kind = seed_selection->full_magazine ? "smg-standard" : kind;
+                const auto profile = std::ranges::find(profiles::firearms, profile_kind, &profiles::Profile::kind);
                 if (profile == profiles::firearms.end() || !profile->headless_seed)
                     return "stock_guest_weapon_fixture_profile_unqualified";
-                *seed_variant = profile->path;
+                seed_selection->path = profile->path;
             }
         }
 
@@ -699,7 +707,7 @@ namespace
     };
 
     int seed(const Lua& lua, const Context& context, const Inventory& inventory, Unreal::UClass* item_class,
-             const profiles::StockAmmo* ammo_fixture)
+             const profiles::StockAmmo* ammo_fixture, bool full_magazine)
     {
         if (inventory.item && !ammo_fixture) return result(lua, true, "present");
         auto* source = item_class->GetClassDefaultObject().Get();
@@ -709,7 +717,7 @@ namespace
         const auto capacity = quantity ? quantity->GetPropertyValueInContainer(source) : -1;
         const auto* magazine = ammo_fixture ? nullptr : stock_magazine(item_class);
         const auto units = ammo_fixture ? ammo_fixture->fixture_units : blowtorch ? blowtorch_capacity : crowbar ? -1 :
-            magazine ? std::min(magazine_fixture, magazine->capacity) : magazine_fixture;
+            magazine ? (full_magazine ? magazine->capacity : std::min(magazine_fixture, magazine->capacity)) : magazine_fixture;
         if (!source || !source->HasAnyFlags(Unreal::RF_ClassDefaultObject) || source->GetClassPrivate() != item_class ||
             (magazine && capacity != magazine->capacity) ||
             (ammo_fixture ? capacity != units || !boolean(source, STR("Stacks"), true) : capacity < units))
@@ -2231,7 +2239,7 @@ namespace
     const profiles::Profile* unload_profile(Unreal::UObject* item_class, int rounds)
     {
         const auto* profile = stock_magazine(Unreal::Cast<Unreal::UClass>(item_class));
-        return profile && profile->ammo && (profile->kind == "pistol" || profile->kind == "break-action-50")
+        return profile && profile->ammo
             && rounds > 0 && rounds <= profile->capacity ? profile : nullptr;
     }
 
@@ -2393,8 +2401,8 @@ namespace
             if (!env("SILVERFISH_COOP_NATIVE_FIXTURES")) return fail("native_guest_weapon_fixtures_disabled");
         }
         Context context;
-        const auto* seed_variant = smg_path;
-        if (const auto error = resolve(lua, context, operation == Operation::Seed ? &seed_variant : nullptr);
+        SeedSelection seed_selection;
+        if (const auto error = resolve(lua, context, operation == Operation::Seed ? &seed_selection : nullptr);
             !error.empty()) return fail(error);
         if constexpr (operation != Operation::Inspect)
             if (std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
@@ -2409,14 +2417,14 @@ namespace
                 reserve = reserve_fixture_profile(context);
                 if (!reserve) return fail("stock_guest_ammo_fixture_profile_unqualified");
             }
-            const auto path = reserve ? reserve->item : seed_variant;
+            const auto path = reserve ? reserve->item : seed_selection.path;
             auto* expected_class = find<Unreal::UClass>(path);
             if (!expected_class || (operation == Operation::Seed && !qualified_weapon(expected_class) &&
                 !qualified_blowtorch(expected_class) && !qualified_melee_item(expected_class, crowbar_path)))
                 return fail(operation == Operation::SeedAmmo ? "stock_guest_ammo_fixture_class_unavailable"
                                                              : "stock_guest_weapon_class_unavailable");
             if (const auto error = locate(context, inventory, expected_class); !error.empty()) return fail(error);
-            return seed(lua, context, inventory, expected_class, reserve);
+            return seed(lua, context, inventory, expected_class, reserve, seed_selection.full_magazine);
         }
         if (const auto error = locate(context, inventory); !error.empty()) return fail(error);
         if (!inventory.item) return fail("owned_guest_weapon_guid_required");

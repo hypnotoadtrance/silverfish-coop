@@ -1,4 +1,4 @@
-"""Exercise Take Ammo on two qualified guest weapon cards in an isolated game."""
+"""Exercise Take Ammo across registered magazines in an isolated game."""
 
 import argparse
 import asyncio
@@ -17,7 +17,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from tools.silverfish import native_host_save, native_inventory
 from tools.silverfish.control import submit
-from tools.silverfish.guest_weapon_profiles import FIFTY_CAL_FMJ, NINE_MM_BALL
+from tools.silverfish.guest_weapon_profiles import FIREARMS
 from tools.silverfish.travel import OBSERVATORY
 
 
@@ -61,13 +61,20 @@ async def verify(work: Path, original: Path):
         await wait(host, lambda state: any(lease.get("state") == "active" and lease.get("character_id") == invite["character_id"]
                    for lease in state.get("campaign", {}).get("leases", ())))
         host_inventory = (await action(host, "native-inventory-list"))["native_inventory"]
-        for kind, ammo in (("pistol", NINE_MM_BALL), ("break-action-50", FIFTY_CAL_FMJ)):
+        profiles = {weapon.kind: weapon.magazine for weapon in FIREARMS}
+        cases = ("smg-standard", "pistol", "break-action-50", "1911", "sg-71-a", "fennec-57")
+        for kind in cases:
+            profile = profiles[kind]
             prior_items = (await action(guest, "native-inventory-list"))["native_inventory"]["total"]
             guid = uuid.uuid4().hex.upper()
-            await action(host, "native-guest-weapon-seed", target="guest", item_guid=guid, kind=kind)
+            fixture = "smg-standard-full" if kind == "smg-standard" else kind
+            await action(host, "native-guest-weapon-seed", target="guest", item_guid=guid, kind=fixture)
             initial = (await action(guest, "native-guest-weapon-inspect", target=guid))["native_guest_weapon"]
             assert initial["status"] == "backpack" and initial["stored_ammo"] > 0, initial
             before = initial["stored_ammo"]
+            if kind == "smg-standard":
+                assert before == profile.capacity == 30, initial
+            ammo = profile.ammo.item_path
             await wait_event(guest, "native_guest_ui_projected", lambda row: row.get("items", 0) >= prior_items + 1)
             await action(guest, "native-inventory-view-fixture")
             await wait(guest, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
@@ -77,11 +84,11 @@ async def verify(work: Path, original: Path):
             event = await wait_event(guest, "native_stock_inventory_action", lambda row: row.get(key, {}).get("source_guid") == guid)
             received = event[key]
             assert (received["owner"], received["source_guid"], received["remaining"], received["split"], received["class_path"]) == (
-                invite["character_id"], guid, 0, before, ammo.item_path), received
+                invite["character_id"], guid, 0, before, ammo), received
             assert "empty weapon and recovered ammo" in event["stock_inventory_proof"], event
             items = (await action(guest, "native-inventory-list"))["native_inventory"]["items"]
             extra, = (row for row in items if row["guid"] == received["new_guid"])
-            assert (extra["quantity"], extra["class_path"], extra["source"]) == (before, ammo.item_path, "backpack"), extra
+            assert (extra["quantity"], extra["class_path"], extra["source"]) == (before, ammo, "backpack"), extra
             after = (await action(guest, "native-guest-weapon-inspect", target=guid))["native_guest_weapon"]
             assert (after["guid"], after["stored_ammo"], after["status"]) == (guid, 0, "backpack"), after
             replay = await action(guest, native_inventory.TAKE_AMMO, target=f"{guid}|{before}", operation_id=event["operation_id"])
@@ -95,6 +102,15 @@ async def verify(work: Path, original: Path):
             await action(guest, "native-inventory-view-fixture")
             proof["weapons"].append({"kind": kind, "loaded_before": before, "receipt": received,
                                      "duplicate_refusal": repeated["error"], "view": event["stock_inventory_proof"]})
+        underbarrel = uuid.uuid4().hex.upper()
+        await action(host, "native-guest-weapon-seed", target="guest", item_guid=underbarrel)
+        inventory_before = (await action(guest, "native-inventory-list"))["native_inventory"]
+        loaded = (await action(guest, "native-guest-weapon-inspect", target=underbarrel))["native_guest_weapon"]
+        assert loaded["status"] == "backpack" and loaded["stored_ammo"] > 0, loaded
+        denied = await submit(guest, native_inventory.TAKE_AMMO, target=f"{underbarrel}|{loaded['stored_ammo']}")
+        assert not denied["ok"] and denied["error"] == "native_inventory_take_ammo_refused_loaded_state", denied
+        assert (await action(guest, "native-inventory-list"))["native_inventory"] == inventory_before
+        proof["underbarrel_refusal"] = denied["error"]
         proof["verified"] = True
     finally:
         for owner, process in reversed(jobs):
