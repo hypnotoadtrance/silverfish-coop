@@ -2398,6 +2398,12 @@ class Bridge:
                     if item["id"] in projected:
                         raise ValueError("Duplicate stock world loot actor identity")
                     projected[item["id"]] = item
+                elif fields[0] == native_world_loot.PHYSICS_ROW:
+                    observed = native_world_loot.parse_physics(fields, data.get("state"), data.get("map"))
+                    rows = data.setdefault(native_world_loot.PHYSICS, {})
+                    if observed["id"] in rows or len(rows) >= 64:
+                        raise ValueError("Duplicate or oversized shared loot physics report")
+                    rows[observed["id"]] = observed
                 elif fields[0] == native_world_loot.ERROR_ROW:
                     failure = native_world_loot.parse_projection_error(fields, data.get("state"), data.get("map"))
                     errors = data.setdefault(native_world_loot.ERROR_KEY, {})

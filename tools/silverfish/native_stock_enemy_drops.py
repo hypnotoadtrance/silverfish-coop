@@ -158,15 +158,17 @@ def active_frames(data, members):
     return frames
 
 
-def published(data, game):
+def published(data, game, *, pinned=()):
     from .native_guest_drop_record import valid_position
+    from .native_world_loot import stock_enemy_identity
 
     points = [row["location"] for row in game.get("pawns", {}).values() if valid_position(row.get("location"))]
     area = game.get("map")
     visible = {}
     for guid, row in data.get(STATE, {}).items():
         if (row["map"] == area and row["claimed_by"] is None
-                and any(math.dist(point, row["transform"]["position"]) <= 2000 for point in points)):
+                and (stock_enemy_identity(guid, row.get("visual_id")) in pinned
+                     or any(math.dist(point, row["transform"]["position"]) <= 2000 for point in points))):
             visible[guid] = {**{key: row[key] for key in ("map", "class_path", "transform", "ammo")},
                              "settled": row.get("settled", False)}
             if identity := row.get("visual_id"):
@@ -212,6 +214,9 @@ async def relay_motion(host, transport):
             previous.clear()
             continue
         frame = moving_frame(host.last_game, host.zone_epoch, host.processed_stock_enemy_drops)
+        if carried := host.world_loot.moving:
+            frame = frame or {"map": host.last_game.get("map"), "epoch": host.zone_epoch, "items": {}}
+            frame["items"] = dict(list({**carried, **frame["items"]}.items())[:MOTION_LIMIT])
         if not frame:
             previous.clear()
             continue
@@ -235,7 +240,10 @@ async def relay_motion(host, transport):
             if pose == prior and now - last < .3:
                 continue
             sequence += 1
-            data = json.dumps([frame["map"], frame["epoch"], sequence, identity, item["class_path"], pose],
+            packet = [frame["map"], frame["epoch"], sequence, identity, item["class_path"], pose]
+            if identity in carried:
+                packet.append("carry")
+            data = json.dumps(packet,
                               separators=(",", ":")).encode("ascii")
             transport.send_loot_motion(data, allowed)
             previous[identity] = pose, now
@@ -261,9 +269,10 @@ class MotionPlayback:
                 frame = json.loads(packet)
             except (ValueError, UnicodeError, RecursionError):
                 continue
-            if not isinstance(frame, list) or len(frame) != 6 or tuple(frame[:2]) != scope:
+            if (not isinstance(frame, list) or len(frame) not in (6, 7) or tuple(frame[:2]) != scope
+                    or (len(frame) == 7 and frame[6] != "carry")):
                 continue
-            _, _, serial, identity, class_path, axes = frame
+            _, _, serial, identity, class_path, axes = frame[:6]
             if (type(serial) is not int or not 0 < serial < 2**53 or not isinstance(identity, str)
                     or not party.REQUEST_ID.fullmatch(identity) or not isinstance(class_path, str)
                     or len(class_path) > 256 or not _CLASS.fullmatch(class_path) or not isinstance(axes, list) or len(axes) != 9):
@@ -273,7 +282,10 @@ class MotionPlayback:
                 continue
             pose = {"position": axes[:3], "rotation": axes[3:6], "scale": axes[6:]}
             if valid_item_transform(pose):
-                self.items[identity] = received, serial, {"class_path": class_path, "transform": pose}
+                row = {"class_path": class_path, "transform": pose}
+                if len(frame) == 7:
+                    row["carried"] = True
+                self.items[identity] = received, serial, row
         return {"map": area, "epoch": epoch, "items": {identity: state[2] for identity, state in self.items.items()}}
 
 
@@ -373,7 +385,7 @@ async def observe(host, bridge):
 
 async def claim(host, bridge, character, guid, operation):
     from . import native_host_save, native_loot
-    from .native_world_loot import stock_enemy_identity
+    from .native_world_loot import item_is_moving, stock_enemy_identity
 
     player = host.party["players"].get(character)
     pawn = native_loot._scope(host, character)
@@ -390,6 +402,8 @@ async def claim(host, bridge, character, guid, operation):
         raise party.RuleError("stock_enemy_loot_item_unavailable")
     if roll["claimed_by"] is not None:
         raise party.RuleError("stock_enemy_loot_already_claimed")
+    if item_is_moving(host, stock_enemy_identity(guid, roll.get("visual_id"))):
+        raise party.RuleError("native_world_loot_item_in_motion")
     if player["downed"] or character in host.party["pending_spawns"]:
         raise party.RuleError("stock_enemy_loot_claimant_unavailable")
 

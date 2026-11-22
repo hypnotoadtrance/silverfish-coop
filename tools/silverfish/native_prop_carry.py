@@ -62,6 +62,8 @@ def _identity(fields, area):
     if len(fields) != 1:
         return _corpse(fields)
     path = fields[0]
+    if path.startswith("loot:") and _token(path[5:]):
+        return {"loot_id": path[5:]}
     prefix = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel."
     if len(path) > 320 or not path.startswith(prefix) or not re.fullmatch(r"[A-Za-z0-9_]{1,100}", path[len(prefix):]):
         raise ValueError("Invalid placed physics carry target")
@@ -72,10 +74,13 @@ def parse(fields, phase, area):
     if len(fields) < 2 or fields[1] != area:
         raise ValueError("Physics carry changed maps")
     if fields[0] == ACTION:
-        if len(fields) not in (7, 9) or phase != "hosting" or not _token(fields[2]) or fields[4] not in _EDGES:
+        if len(fields) not in (7, 8, 9) or phase != "hosting" or not _token(fields[2]) or fields[4] not in _EDGES:
             raise ValueError("Invalid physics carry receipt")
+        identity = _identity(fields[7:], area)
+        if "placement" in identity:
+            raise ValueError("Unexpected placed item in physics carry receipt")
         return dict(lease=fields[2], sequence=_serial(fields[3]), edge=fields[4], pawn=fields[5], actor=fields[6],
-                    **_corpse(fields[7:]))
+                    **identity)
     if fields[0] == FIXTURE:
         if len(fields) not in (11, 15) or phase != "hosting" or not _class(fields[2]) or fields[10] not in {"0", "1"}:
             raise ValueError("Invalid stock physics fixture")
@@ -170,7 +175,7 @@ class Host:
         snapshot = await bridge.command(ACTION, lease, pawn, edge, str(number), str(pitch), str(yaw), *args, timeout=4)
         proof = snapshot.get(PROOF, {})
         if (tuple(proof.get(key) for key in ("lease", "sequence", "edge", "pawn")) != (lease, number, edge, pawn)
-                or any(proof.get(key) != identity.get(key) for key in ("corpse", "bone"))
+                or any(proof.get(key) != identity.get(key) for key in ("corpse", "bone", "loot_id"))
                 or ("placement" in identity and proof.get("actor", "").partition(" ")[2] != identity["placement"])):
             raise RuntimeError("The stock physics carry did not return the exact action")
         self.service.last_game, self.service.last_seen = snapshot, time.monotonic()
@@ -237,6 +242,8 @@ class Guest:
             suffix += (str(row["corpse"]), row["bone"])
         elif edge == "grab" and "placement" in row:
             suffix += (row["placement"],)
+        elif edge == "grab" and "loot_id" in row:
+            suffix += ("loot:" + row["loot_id"],)
         target = "@".join((self.epoch, lease, edge, str(number), str(pitch), str(yaw), *suffix))
         try:
             returned = await service.gameplay_action(ACTION, operation, target)
@@ -247,7 +254,7 @@ class Guest:
         except (OSError, ValueError, RuntimeError) as error:
             self.lease = self.grab = None
             service.control.event("native_prop_carry_refused", edge=edge, reason=str(error))
-            if edge == "grab" and ("corpse" in row or "placement" in row):
+            if edge == "grab" and any(key in row for key in ("corpse", "placement", "loot_id")):
                 try:
                     await service.bridge.command("native-prop-carry-refuse", str(number), timeout=2)
                 except (OSError, ValueError, RuntimeError) as failure:

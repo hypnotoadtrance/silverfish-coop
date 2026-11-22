@@ -602,6 +602,10 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             raise party.RuleError("native_loot_item_unavailable")
         if item.get("claimed_by"):
             raise party.RuleError("native_loot_already_claimed")
+        from .native_world_loot import crate_identity, item_is_moving
+
+        if item_is_moving(host, crate_identity(saved["id"], guid)):
+            raise party.RuleError("native_world_loot_item_in_motion")
         escrow = saved["escrow"]
         if escrow.get("map") != area:
             raise RuntimeError("The crate escrow belongs to a different map")

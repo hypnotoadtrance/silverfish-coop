@@ -121,9 +121,28 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
                         "settled": True, "visual_id": identity}}
         await view.sync(bridge, game, {}, "first", zone, active=True, stock_enemy_drops=drops, enemy_motion=moving)
         self.assertEqual(list(view.items), [identity])
-        self.assertEqual(bridge.command.await_args.args[3].split("|")[:5], [identity, record.ITEM, "10", "20", "40"])
+        self.assertEqual(bridge.command.await_args.args[3].split("|")[:6], [identity, record.ITEM, "carry", "10", "20", "40"])
         self.assertEqual(view.claim_target(game, target), (native_stock_enemy_drops.CLAIM, guid))
         self.assertEqual(playback.frame([], MAP, zone, active=True, now=11)["items"], {})
+
+    def test_carried_motion_cannot_recreate_loot_after_its_claim(self):
+        client = self.client()
+        identity = native_world_loot.player_drop_identity(ID)
+        rows = client.gameplay[record.STATE]
+        position = [12, 20, 90]
+        zone = client.zone_epoch
+        packet = [MAP, zone, 1, identity, record.ITEM, [*position, 0, 10, 0, 1, 1, 1], "carry"]
+        motion = native_stock_enemy_drops.MotionPlayback().frame(
+            [(10, json.dumps(packet))], MAP, zone, active=True, now=10.1)
+        moving, = native_world_loot.nearby(client.last_game, {}, zone, player_drops=rows,
+                                          enemy_motion=motion, carried=[identity]).values()
+        self.assertEqual(moving.transform["position"], position)
+        self.assertIsNone(moving.claim_action)
+        landed, = native_world_loot.nearby(client.last_game, {}, zone, player_drops=rows, enemy_motion=motion).values()
+        self.assertEqual(landed.transform["position"], rows[ID]["location"])
+        self.assertEqual(landed.claim_action, drop.RECLAIM)
+        self.assertEqual(native_world_loot.nearby(client.last_game, {}, zone, enemy_motion=motion,
+                                                carried=[identity]), {})
 
     async def test_guest_can_collect_nearest_stock_drop_from_another_guest(self):
         client, view = self.client(), projection.Projection()

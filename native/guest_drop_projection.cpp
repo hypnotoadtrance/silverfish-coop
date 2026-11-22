@@ -497,7 +497,20 @@ namespace
         actor->ProcessEvent(function, parameters.data());
         const bool applied = success->GetPropertyValueInContainer(parameters.data());
         hit->DestroyValue_InContainer(parameters.data());
-        return applied;
+        if (applied) return true;
+
+        // Unreal may report no movement when a serialized settle pose rounds to the existing transform.
+        auto point = actor->K2_GetActorLocation();
+        auto facing = actor->K2_GetActorRotation();
+        const Position actual_position{point.GetX(), point.GetY(), point.GetZ()};
+        const Position actual_rotation{facing.GetPitch(), facing.GetYaw(), facing.GetRoll()};
+        for (std::size_t axis = 0; axis < position.size(); ++axis)
+        {
+            if (!(std::abs(actual_position[axis] - position[axis]) <= .001 &&
+                  std::abs(std::remainder(actual_rotation[axis] - rotation[axis], 360.0)) <= .001))
+                return false;
+        }
+        return true;
     }
 
     bool byte_enum(U::UFunction* call, const U::TCHAR* name, int offset, const U::TCHAR* path)

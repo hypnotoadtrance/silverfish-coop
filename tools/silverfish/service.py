@@ -924,8 +924,10 @@ class Host:
             view[native_enemy_loot.STATE_KEY] = native_enemy_loot.published(rolls)
             if frame := native_enemy_loot.shell_frame(self):
                 view[native_enemy_shells.FRAME_KEY] = frame
-        if drops := native_stock_enemy_drops.published(self.party, self.last_game):
+        if drops := native_stock_enemy_drops.published(self.party, self.last_game, pinned=self.world_loot.moving):
             view[native_stock_enemy_drops.STATE] = drops
+        if self.world_loot.moving:
+            view[native_world_loot.MOVING] = sorted(self.world_loot.moving)
         if broker_cue := native_stock_enemy_drops.broker_cue_frame(self.last_game, self.zone_epoch):
             view[native_stock_enemy_drops.BROKER_CUE] = broker_cue
         if pending := pending_cube(self.party):
@@ -3946,6 +3948,7 @@ class Host:
             self.sync_native_health_limits()
             await native_enemy_loot.observe(self, bridge)
             await native_stock_enemy_drops.observe(self, bridge)
+            self.world_loot.observe_physics(self.party, self.last_game)
             try:
                 await self.loose_pickups.refresh(self, bridge)
             except (OSError, RuntimeError) as error:
@@ -4098,7 +4101,8 @@ class Host:
                         active=can_project,
                         enemy_frame=native_enemy_loot.shell_frame(self) if world_items else None,
                         enemy_rolls=self.party.get(native_enemy_loot.STATE_KEY),
-                        stock_enemy_drops=native_stock_enemy_drops.published(self.party, self.last_game),
+                        stock_enemy_drops=native_stock_enemy_drops.published(
+                            self.party, self.last_game, pinned=self.world_loot.moving),
                         player_drops=native_guest_drop.visible_drops(self.party, self.last_game.get("map"))
                         if shared_pickups else None,
                     )
@@ -6097,6 +6101,7 @@ class Client:
                         enemy_rolls=self.gameplay.get(native_enemy_loot.STATE_KEY),
                         stock_enemy_drops=self.gameplay.get(native_stock_enemy_drops.STATE),
                         enemy_motion=motion,
+                        carried=self.gameplay.get(native_world_loot.MOVING),
                         player_drops=self.gameplay.get(native_guest_drop_record.STATE) if shared_pickups else None,
                         mushroom_frame=self.gameplay.get(native_mushrooms.KEY),
                     )
