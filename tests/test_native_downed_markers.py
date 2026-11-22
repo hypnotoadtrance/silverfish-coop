@@ -43,12 +43,12 @@ class MarkerTests(unittest.IsolatedAsyncioTestCase):
             status = directory / "status.tsv"
             state = f"schema\t1\nseq\t1\nsession\tclient\tconnected\t{CROSSROADS}\t0\t1\n"
             frame = f"{markers.COMMAND}\t{EPOCH}\t{CROSSROADS}\t"
-            bridge = SimpleNamespace(directory=directory)
+            bridge = Bridge(directory, None)
             status.write_text(state + frame + "0\n", encoding="utf-8")
-            valid = Bridge.snapshot(bridge)
+            valid = bridge.snapshot()
             self.assertEqual(valid[markers.KEY], {"epoch": EPOCH, "map": CROSSROADS, "count": 0, "markers": {}})
             status.write_text(state + frame + "1\n", encoding="utf-8")
-            invalid = Bridge.snapshot(bridge)
+            invalid = bridge.snapshot()
             self.assertEqual(invalid["state"], "connected")
             self.assertNotIn(markers.KEY, invalid)
 
@@ -59,15 +59,15 @@ class MarkerTests(unittest.IsolatedAsyncioTestCase):
             state = (f"schema\t1\nseq\t1\nsession\thost\thosting\t{CROSSROADS}\t1\t0\n"
                      "pawn\tlocal\tPlayer_FP_C TestPawn\t1\t0\t0\t0\tPawnController\t250\n")
             row = "player-local-input\t{pawn}\tdowned\tverified\t0\t1\t1\t1\t0\t0\t0\t0\t0\t0\tclosed\n"
-            bridge = SimpleNamespace(directory=directory)
+            bridge = Bridge(directory, None)
             status.write_text(state + row.format(pawn="Player_FP_C TestPawn"), encoding="utf-8")
-            parsed = Bridge.snapshot(bridge)["player_local_input"]
+            parsed = bridge.snapshot()["player_local_input"]
             self.assertTrue(parsed["reduced_context"])
             self.assertTrue(parsed["move"])
             self.assertFalse(parsed["inventory"])
             self.assertEqual(parsed["host_inventory"], "closed")
             status.write_text(state + row.format(pawn="Player_FP_C OtherPawn"), encoding="utf-8")
-            self.assertNotIn("player_local_input", Bridge.snapshot(bridge))
+            self.assertNotIn("player_local_input", bridge.snapshot())
 
     async def test_client_renews_only_current_authenticated_markers_and_clears_on_revive(self):
         view = markers.MarkerView()

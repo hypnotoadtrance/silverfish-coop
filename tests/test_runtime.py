@@ -1,9 +1,11 @@
+import asyncio
 import hashlib
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import AsyncMock, patch
+import uuid
+from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import runtime, service
 
@@ -26,6 +28,50 @@ class BridgeWalkTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError, "50 to 1000 ms"):
                 await bridge.walk(0, 1, 1001)
             command.assert_awaited_once()
+
+
+class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_embedded_command_accepts_exact_receipt_without_file_polling(self):
+        with TemporaryDirectory() as temporary:
+            bridge = runtime.Bridge(Path(temporary), None)
+
+            async def reply(payload, timeout):
+                request, action, argument = payload.decode().rstrip("\n").split("\t")
+                self.assertEqual((action, argument, timeout), ("walk", "20", 3))
+                return (f"schema\t1\nseq\t42\nack\t{request}\taccepted\tmove\n"
+                        "session\tclient\tconnected\tObservatory\t1\t0\n")
+
+            bridge.local_bridge = AsyncMock()
+            bridge.local_bridge.command.side_effect = reply
+            result = await bridge.command("walk", "20", timeout=3)
+            self.assertEqual(result["sequence"], 42)
+            self.assertEqual(result["ack"]["message"], "move")
+            self.assertEqual(list(bridge.directory.iterdir()), [])
+
+    async def test_embedded_inputs_wake_worker_and_keep_file_fallback_in_order(self):
+        with TemporaryDirectory() as temporary:
+            bridge = runtime.Bridge(Path(temporary), None)
+            bridge.local_bridge = Mock()
+            bridge.local_bridge.input_ready.return_value = True
+            bridge.local_bridge.read_input.return_value = [b"interact\t8", b"interact\t10"]
+            (bridge.directory / "input.tsv").write_bytes(b"interact\t9\n")
+            await asyncio.wait_for(bridge.wait_for_interaction(1), .2)
+            self.assertEqual(bridge.interactions(), [
+                (uuid.uuid5(bridge.input_namespace, str(sequence)).hex, None) for sequence in (8, 9, 10)
+            ])
+
+    async def test_bad_embedded_receipt_does_not_fall_back_to_replay(self):
+        with TemporaryDirectory() as temporary:
+            bridge = runtime.Bridge(Path(temporary), None)
+            bridge.local_bridge = AsyncMock()
+            bridge.local_bridge.command.return_value = (
+                "schema\t1\nseq\t42\nack\tother-request\taccepted\n"
+                "session\tclient\tconnected\tObservatory\t1\t0\n"
+            )
+            with self.assertRaisesRegex(RuntimeError, "did not match"):
+                await bridge.command("leave")
+            bridge.local_bridge.command.assert_awaited_once()
+            self.assertEqual(list(bridge.directory.iterdir()), [])
 
 
 class StageBackendTests(unittest.TestCase):

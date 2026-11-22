@@ -696,6 +696,7 @@ class Bridge:
         self._status_revision: tuple[int, int] | None = None
         self._status_text = ""
         self._status_snapshot: dict | None = None
+        self.local_bridge = None
 
     async def wait_for_interaction(self, timeout: float, *, wake_if=None, guest=False) -> None:
         """Wake for local input, a new game frame, or pending network work."""
@@ -713,7 +714,7 @@ class Bridge:
                 ("native-mosby-station-events", self.mosby_station_offset),
             ))
         while (remaining := deadline - time.monotonic()) > 0:
-            if wake_if is not None and wake_if():
+            if (wake_if is not None and wake_if()) or (self.local_bridge is not None and self.local_bridge.input_ready()):
                 return
             try:
                 published = (self.directory / "status.tsv").stat()
@@ -744,11 +745,14 @@ class Bridge:
                 stream.seek(self.input_offset)
                 batch = stream.read(4096)
         except OSError:
-            return []
+            batch = b""
         end = batch.rfind(b"\n") + 1
         self.input_offset += end if end else len(batch) if len(batch) == 4096 else 0
+        records = batch[:end].splitlines()
+        if self.local_bridge is not None and self.local_bridge.input_ready():
+            records.extend(self.local_bridge.read_input())
         results = []
-        for line in batch[:end].splitlines():
+        for line in records:
             fields = line.split(b"\t")
             if len(fields) not in (2, 3) or fields[0] != b"interact" or not fields[1].isdigit() or len(fields[1]) > 12:
                 continue
@@ -763,9 +767,10 @@ class Bridge:
                     and not native_stock_door.target_actor(decoded) and not native_loose_pickup.target_path(decoded)
                     and (len(target) != 32 or any(digit not in b"0123456789abcdef" for digit in target))):
                 continue
-            results.append((uuid.uuid5(self.input_namespace, fields[1].decode("ascii")).hex,
-                            decoded))
-        return results
+            identity = uuid.uuid5(self.input_namespace, fields[1].decode("ascii")).hex
+            results.append((int(fields[1]), identity, decoded))
+        results.sort(key=lambda entry: entry[0])
+        return [(identity, target) for _, identity, target in results]
 
     def native_inventory_view_requests(self) -> list[tuple[int, str, str, str, int]]:
         try:
@@ -1115,6 +1120,12 @@ class Bridge:
                 published = os.fstat(stream.fileno())
                 text = stream.read()
             self._status_revision = published.st_mtime_ns, published.st_size
+        except (OSError, UnicodeError):
+            return None
+        return self._parse_status(text)
+
+    def _parse_status(self, text: str) -> dict | None:
+        try:
             if text == getattr(self, "_status_text", None):
                 return self._status_snapshot
             self._status_text, self._status_snapshot = text, None
@@ -2857,8 +2868,14 @@ class Bridge:
         fields = (uuid.uuid4().hex, action, *arguments)
         if any(len(value) > 1024 or "\t" in value or "\r" in value or "\n" in value for value in fields):
             raise ValueError("Invalid game bridge command value")
-        write_text(self.directory / "command.tsv", "\t".join(fields) + "\n")
-        status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout, interval=.025)
+        request = "\t".join(fields) + "\n"
+        if self.local_bridge is None:
+            write_text(self.directory / "command.tsv", request)
+            status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout, interval=.025)
+        else:
+            status = self._parse_status(await self.local_bridge.command(request.encode("utf-8"), timeout))
+            if not status or status.get("ack", {}).get("id") != fields[0]:
+                raise RuntimeError("The local co-op command receipt did not match the request")
         ack = status["ack"]
         if ack["result"] != "accepted":
             raise RuntimeError(ack["message"] or f"The game declined the {action} command")

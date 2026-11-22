@@ -70,10 +70,14 @@ local function write_interaction(pawn, pickup_source)
         or not pawn:IsLocallyControlled() then return end
     local target = pickup_source or native_bag_projection.focused_target(pawn) or native_enemy_shell_view.focused_target(pawn)
         or native_stock_door.focused_target(pawn)
+    input_sequence = input_sequence + 1
+    local record = "interact\t" .. tostring(input_sequence) .. (target and "\t" .. target or "") .. "\n"
+    if type(SilverfishEnqueueLocalBridgeInput) == "function" and SilverfishEnqueueLocalBridgeInput(record) then
+        return target
+    end
     local file = io.open(input_file, "ab")
     if not file then return end
-    input_sequence = input_sequence + 1
-    local written = file:write("interact\t", tostring(input_sequence), target and "\t" .. target or "", "\n")
+    local written = file:write(record)
     local closed = file:close()
     if written and closed then return target end
 end

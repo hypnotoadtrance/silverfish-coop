@@ -13,6 +13,7 @@ import threading
 
 from . import native_host_save, native_title_entry, runtime
 from .control import NAME
+from .local_bridge import LocalBridge
 from .title_handoff import _isolated_stock_title
 
 
@@ -285,6 +286,7 @@ class EmbeddedEngine:
 
         status = await self.bridge.wait_for(advancing, timeout=timeout)
         self._sequence = status["sequence"]
+        self.bridge.local_bridge = LocalBridge.connect(_current_startup(()).image)
         self._state = "active"
 
     async def select_save_scope(self, scope: native_host_save.SaveScope) -> None:
@@ -325,6 +327,9 @@ class EmbeddedEngine:
             self.returncode = 0
             return ready
         finally:
+            if self.bridge.local_bridge is not None:
+                self.bridge.local_bridge.close()
+                self.bridge.local_bridge = None
             self._state = "released"
 
 

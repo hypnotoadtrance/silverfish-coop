@@ -2,7 +2,6 @@
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
 import unittest
 
 from live_campaign_npc_smoke import LEVEL, MAP, SQUAD_PREFIX, client_replica, read_npcs
@@ -31,11 +30,11 @@ class NativeNotDeerTests(unittest.TestCase):
             directory = root / "game-bridge" / "active"
             directory.mkdir(parents=True)
             path = directory / "status.tsv"
-            bridge = SimpleNamespace(directory=directory)
+            bridge = Bridge(directory, None)
 
             def publish():
                 path.write_text("\n".join("\t".join(row) for row in frame) + "\n", encoding="utf-8")
-                return Bridge.snapshot(bridge)
+                return bridge.snapshot()
 
             report = publish()["native_campaign_npc"]
             self.assertEqual((report["family"], report["replica"]), ("notdeer", REPLICA))

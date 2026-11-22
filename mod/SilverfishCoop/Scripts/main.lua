@@ -1114,11 +1114,19 @@ local function run_command(fields, state, current_phase)
     error("Unknown command", 0)
 end
 
-local function read_command()
-    local file = io.open(command_path, "rb")
-    if not file then return end
-    local content = file:read(32769)
-    file:close()
+local function read_command(periodic)
+    local content, ticket
+    if type(SilverfishTakeLocalBridgeCommand) == "function" then
+        local active
+        active, ticket, content = SilverfishTakeLocalBridgeCommand()
+        if active and not ticket and not periodic then return end
+    end
+    if not content then
+        local file = io.open(command_path, "rb")
+        if not file then return end
+        content = file:read(32769)
+        file:close()
+    end
     if not content or #content > 32768 then return end
     local line = content:gsub("[\r\n]+$", "")
     if line == "" or line:find("[\r\n]") then return end
@@ -1130,7 +1138,7 @@ local function read_command()
     if not id or #id > 80 or not id:match("^[%w_.%-]+$") or seen_commands[id] then
         return
     end
-    return fields
+    return fields, ticket
 end
 
 local function world_view_row(mode, view)
@@ -1142,7 +1150,7 @@ local function world_view_row(mode, view)
         view.cloud_density_offset or "-", view.weather_verified and 1 or 0)
 end
 
-local function write_status(state, current_phase, failure, fields)
+local function write_status(state, current_phase, failure, fields, ticket)
     sequence = sequence + 1
     local rows = {
         status_row("schema", 1),
@@ -1383,10 +1391,12 @@ local function write_status(state, current_phase, failure, fields)
     end
     if failure then rows[#rows + 1] = status_row("diagnostic", failure) end
 
+    local frame = table.concat(rows, "\n") .. "\n"
+    if ticket then SilverfishPublishLocalBridgeReply(ticket, frame) end
     local temporary = status_path .. ".tmp"
     local file = io.open(temporary, "wb")
     if not file then return end
-    local written = file:write(table.concat(rows, "\n"), "\n")
+    local written = file:write(frame)
     local closed = file:close()
     if not written or not closed then return end
 
@@ -1427,7 +1437,7 @@ local function observe_session()
     return state, current_phase
 end
 
-local function tick(fields)
+local function tick(fields, ticket)
     local state, current_phase = observe_session()
     if not state then return end
     native_mindcore_replication.sync(state, current_phase)
@@ -1473,7 +1483,7 @@ local function tick(fields)
         if not state then return end
     end
     if fields then
-        seen_commands[fields[1]] = true
+        if not ticket then seen_commands[fields[1]] = true end
         last_quest_catalog = nil
         last_broker_quest = nil
         last_broker_position = nil
@@ -1541,7 +1551,7 @@ local function tick(fields)
     local pause_checked, pause_failure = pcall(native_coop_pause.sync, state, current_phase)
     if not pause_checked then native_coop_pause.clear() end
     native_guest_smg_hold.cache_context(state, current_phase)
-    write_status(state, current_phase, not projected and failure or not pause_checked and pause_failure or nil, fields)
+    write_status(state, current_phase, not projected and failure or not pause_checked and pause_failure or nil, fields, ticket)
 end
 
 players.start(bridge)
@@ -1588,10 +1598,11 @@ LoopInGameThreadWithDelay(25, function()
     if not leaving then pcall(native_player_avatar.animate_melee, current_world) end
     if not leaving then pcall(native_player_avatar.animate_recoil, current_world) end
     if not leaving then pcall(native_player_avatar.animate_cycle, current_world) end
-    local fields = read_command()
     local now = os.clock()
-    if not fields and now < next_snapshot then return end
+    local periodic = now >= next_snapshot
+    local fields, ticket = read_command(periodic)
+    if not fields and not periodic then return end
     next_snapshot = now + 0.25
-    local ok, failure = pcall(tick, fields)
+    local ok, failure = pcall(tick, fields, ticket)
     if not ok then print("[SilverfishCoop] " .. tostring(failure) .. "\n") end
 end)

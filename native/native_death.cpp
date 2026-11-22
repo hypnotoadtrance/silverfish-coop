@@ -26,6 +26,7 @@
 #include <Unreal/World.hpp>
 
 #include "black_stone.hpp"
+#include "local_bridge.hpp"
 #include "guest_item.hpp"
 #include "guest_armor.hpp"
 #include "guest_melee.hpp"
@@ -1609,6 +1610,7 @@ namespace
             silverfish::native_inventory_view::register_lua(lua);
             silverfish::native_bag_projection::register_lua(lua);
             silverfish::native_interaction_input::register_lua(lua);
+            silverfish::local_bridge::register_lua(lua);
             silverfish::native_authored_pickup::register_lua(lua);
             silverfish::native_mindcore::register_lua(lua);
             silverfish::native_mindcore_carry::register_lua(lua);
@@ -1678,6 +1680,7 @@ namespace
                 silverfish::native_bag_projection::clear_scope();
                 silverfish::native_guest_drop_projection::clear_scope();
                 silverfish::native_interaction_input::clear_scope();
+                silverfish::local_bridge::stop();
                 silverfish::native_authored_pickup::clear_scope();
                 silverfish::native_broker_menu::clear_scope();
                 silverfish::native_broker_input::clear_scope();
