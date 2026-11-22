@@ -53,6 +53,12 @@ namespace
     constexpr auto npc_class = STR("/Game/Classes/NPCs/NPC_Zomb_01.NPC_Zomb_01_C");
     constexpr auto flayer_class = STR("/Game/Classes/NPCs/NPC_Flayer.NPC_Flayer_C");
     constexpr auto flayer_squad = STR("/Game/Classes/Libraries/DataAssets/Squads/Monsters/Flayers.Flayers");
+    constexpr auto boar_class = STR("/Game/Classes/NPCs/NPC_WildBoar.NPC_WildBoar_C");
+    constexpr std::array boar_squads{
+        STR("/Game/Classes/Libraries/DataAssets/Squads/WildLife/Boar_Single.Boar_Single"),
+        STR("/Game/Classes/Libraries/DataAssets/Squads/WildLife/Boar_SmallGroup.Boar_SmallGroup"),
+    };
+    bool operate_boars{};
     constexpr auto not_deer_class = STR("/Game/Classes/NPCs/NPC_NotDeer.NPC_NotDeer_C");
     constexpr auto not_deer_squad = STR("/Game/Classes/Libraries/DataAssets/Squads/Monsters/NotDeer.NotDeer");
     constexpr auto npc_controller = STR("/Game/Classes/NPCs/NPC_Assets/MasterNPC_AI_Controler_BP.MasterNPC_AI_Controler_BP_C");
@@ -139,7 +145,7 @@ namespace
         return live(value) && value->GetClassPrivate() == find<U::UClass>(path);
     }
 
-    enum class NpcFamily { Unknown, Husk, Flayer, NotDeer };
+    enum class NpcFamily { Unknown, Husk, Flayer, NotDeer, Boar };
 
     struct AntfarmProfile
     {
@@ -164,6 +170,11 @@ namespace
         static const U::FName flayer{STR("NPC_Flayer_C")};
         static const U::FName not_deer{STR("NPC_NotDeer_C")};
         const auto name = type->GetFName();
+        if (operate_boars)
+        {
+            static const U::FName boar{STR("NPC_WildBoar_C")};
+            if (name == boar && exact(actor, boar_class)) return NpcFamily::Boar;
+        }
         if (name == husk && exact(actor, npc_class)) return NpcFamily::Husk;
         if (name == flayer && exact(actor, flayer_class)) return NpcFamily::Flayer;
         if (name == not_deer && exact(actor, not_deer_class)) return NpcFamily::NotDeer;
@@ -280,6 +291,34 @@ namespace
         const auto path = data->GetPathName();
         const auto match = std::ranges::find_if(squad_assets, [&path](const auto candidate) { return path == candidate; });
         return match == squad_assets.end() ? -1 : static_cast<int>(match - squad_assets.begin());
+    }
+
+    int boar_squad_size(U::UObject* data)
+    {
+        if (!operate_boars || !exact(data, data_class)) return 0;
+        const auto path = data->GetPathName();
+        if (std::ranges::none_of(boar_squads, [&path](const auto candidate) { return path == candidate; })) return 0;
+
+        auto* base = find<U::UClass>(npc_base);
+        auto* leader = field<U::FSoftClassProperty>(data, STR("Leader"));
+        auto* followers = field<U::FArrayProperty>(data, STR("Followers"));
+        auto* follower = followers ? U::CastField<U::FSoftClassProperty>(followers->GetInner()) : nullptr;
+        if (!base || !leader || !follower || leader->GetMetaClass().Get() != base || follower->GetMetaClass().Get() != base)
+            return 0;
+
+        const auto is_boar = [](const U::FSoftObjectPtr* soft) {
+            const auto& path = soft->ToSoftObjectPath();
+            const auto asset = path.GetAssetPathString();
+            return path.GetSubPathString().IsEmpty() && std::wstring_view{*asset} == boar_class;
+        };
+        if (!is_boar(leader->ContainerPtrToValuePtr<U::FSoftObjectPtr>(data))) return 0;
+        U::FScriptArrayHelper rows(followers, followers->ContainerPtrToValuePtr<void>(data));
+        if (rows.Num() < 0 || rows.Num() > 4) return 0;
+        for (int i = 0; i < rows.Num(); ++i)
+        {
+            if (!is_boar(follower->ContainerPtrToValuePtr<U::FSoftObjectPtr>(rows.GetRawPtr(i)))) return 0;
+        }
+        return 1 + rows.Num();
     }
 
     struct SpawnSchema
@@ -491,6 +530,7 @@ namespace
         ClientBirths client_births;
         Flayers flayers;
         AntfarmCohort not_deer;
+        AntfarmCohort boars;
         SavedSquad not_deer_saved;
         U::FWeakObjectPtr not_deer_replica;
         RefreshObservation refresh;
@@ -505,6 +545,7 @@ namespace
         Handles before, births;
         SpawnSchema schema{};
         int max_count{};
+        NpcFamily family{NpcFamily::Husk};
         bool initial{};
         std::string_view birth_failure{};
     } attempt;
@@ -573,6 +614,7 @@ namespace
     {
         if (family == NpcFamily::Flayer) return &scope.flayers;
         if (family == NpcFamily::NotDeer && operate_not_deer) return &scope.not_deer;
+        if (family == NpcFamily::Boar && operate_boars) return &scope.boars;
         return nullptr;
     }
 
@@ -586,6 +628,7 @@ namespace
     {
         if (family == NpcFamily::Flayer) return publish_flayers;
         if (family == NpcFamily::NotDeer) return operate_not_deer;
+        if (family == NpcFamily::Boar) return operate_boars;
         return family == NpcFamily::Husk && operate;
     }
 
@@ -599,8 +642,9 @@ namespace
         auto* spawner = attempt.spawner.Get();
         auto* world = U::Cast<U::UWorld>(attempt.world.Get());
         if (!attempt.birth_failure.empty()) return;
-        if (!world || parent.Object() != spawner || !exact(actor, npc_class) ||
-            !in_level(actor, world) || contains(attempt.before, actor) || !bool_field(actor, STR("Wander"), true))
+        if (!world || parent.Object() != spawner || npc_family(actor) != attempt.family ||
+            !in_level(actor, world) || contains(attempt.before, actor) ||
+            (attempt.family == NpcFamily::Husk && !bool_field(actor, STR("Wander"), true)))
         {
             attempt.birth_failure = "stock_husk_birth_context_unverified";
             return;
@@ -1090,7 +1134,7 @@ namespace
 
     void prevent_replica_brain(Iteration& call, U::UObject* receiver, U::UFunction* function)
     {
-        if ((!operate && !publish_flayers && !operate_not_deer) || !function || !receiver ||
+        if ((!operate && !publish_flayers && !operate_not_deer && !operate_boars) || !function || !receiver ||
             call.OriginalFunctionCallPrevented()) return;
         static const U::FName init_name{STR("InitializeAI")};
         static const U::FName perceive_name{STR("Proscess_TargetPerception")};
@@ -1119,23 +1163,27 @@ namespace
             return;
         }
         auto* data = get_object(schema.data, frame.Locals());
-        if (data_index(data) < 0 || !bool_field(data, STR("ForceWander"), true)) return;
-        ++scope.natural_calls;
-        scope.latest = {receiver, data, {}, "stock_client_husk_spawn_observed", 0};
-        if (!operate) return;
+        const bool boar = boar_squad_size(data) > 0;
+        if (!boar && (data_index(data) < 0 || !bool_field(data, STR("ForceWander"), true))) return;
+        auto& calls = boar ? scope.boars.calls : scope.natural_calls;
+        auto& latest = boar ? scope.boars.latest : scope.latest;
+        ++calls;
+        latest = {receiver, data, {}, boar ? "stock_client_boar_spawn_observed" : "stock_client_husk_spawn_observed", 0};
+        if (!boar && !operate) return;
         auto* output = schema.output_address(frame);
         if (!output)
         {
-            scope.latest.stage = "stock_client_husk_output_unverified";
+            latest.stage = boar ? "stock_client_boar_output_unverified" : "stock_client_husk_output_unverified";
             return;
         }
         call.PreventOriginalFunctionCall();
         if (call.OriginalFunctionCallPrevented())
         {
             schema.count->SetPropertyValue(output, 0);
-            ++scope.spawn_denials;
-            if (network(active.world).seat != Seat::Client) ++scope.client_births.early_spawn_denials;
-            scope.latest.stage = "stock_client_husk_spawn_denied";
+            ++(boar ? scope.boars.spawn_denials : scope.spawn_denials);
+            if (network(active.world).seat != Seat::Client)
+                ++births_for(boar ? NpcFamily::Boar : NpcFamily::Husk).early_spawn_denials;
+            latest.stage = boar ? "stock_client_boar_spawn_denied" : "stock_client_husk_spawn_denied";
         }
     }
 
@@ -1159,7 +1207,7 @@ namespace
         if (name == init_name && attempt.frame && frame.PreviousFrame() == attempt.frame &&
             frame.Node() == find<U::UFunction>(initialize_path))
         {
-            // ForceWander Husk assets initialize each newly finished actor directly and skip the squad roster append.
+            // The stock spawn frame identifies the particular newly finished leader or follower.
             observe_birth(receiver, *attempt.frame);
             return;
         }
@@ -1220,23 +1268,25 @@ namespace
             scope.refresh.marker = receiver;
             if (exact(data, data_class)) scope.refresh.data = data;
         }
+        const auto boar_count = boar_squad_size(data);
         const auto source = data_index(data);
-        if (source < 0 || !bool_field(data, STR("ForceWander"), true)) return;
-
-
+        if (!boar_count && (source < 0 || !bool_field(data, STR("ForceWander"), true))) return;
+        auto& latest = boar_count ? scope.boars.latest : scope.latest;
+        if (boar_count) ++scope.boars.calls;
         if (const auto error = schema.bind_birth(frame.Node()); !error.empty())
         {
-            if (scope.latest.cohort.empty()) scope.latest = {receiver, data, {}, error, 0};
+            if (latest.cohort.empty()) latest = {receiver, data, {}, error, 0};
             return;
         }
         if (!local_pawn(director, active)) return;
         Actors before;
-        if (!scene_npcs(active.world, npc_class, before)) return;
+        if (!scene_npcs(active.world, boar_count ? boar_class : npc_class, before)) return;
         Handles baseline;
         baseline.reserve(before.size());
         for (auto* existing : before) baseline.emplace_back(existing);
         attempt = {&frame, active.world, director, receiver, data, std::move(baseline), {}, schema,
-            maximum_squad_sizes[static_cast<std::size_t>(source)], initial, {}};
+            boar_count ? boar_count : maximum_squad_sizes[static_cast<std::size_t>(source)],
+            boar_count ? NpcFamily::Boar : NpcFamily::Husk, initial, {}};
     }
 
     void on_post(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
@@ -1270,9 +1320,12 @@ namespace
         auto* director = observed.director.Get();
         auto* data = observed.data.Get();
         const auto& schema = observed.schema;
+        const bool boar = observed.family == NpcFamily::Boar;
+        auto& latest = boar ? scope.boars.latest : scope.latest;
         if (active.seat != Seat::Host || !exact_director(director, active) || !local_pawn(director, active) ||
             !placed_spawner(receiver, active.world) || frame.Node() != find<U::UFunction>(spawn_path) ||
-            data != get_object(schema.data, frame.Locals()) || data_index(data) < 0) return;
+            data != get_object(schema.data, frame.Locals()) ||
+            (boar ? boar_squad_size(data) != observed.max_count : data_index(data) < 0)) return;
 
         Observation next{receiver, data, {}, "stock_count_unavailable", 0};
         Actors after;
@@ -1282,7 +1335,7 @@ namespace
         {
             if (output) next.stage = "stock_count_unexpected";
         }
-        else if (!scene_npcs(active.world, npc_class, after))
+        else if (!scene_npcs(active.world, boar ? boar_class : npc_class, after))
         {
             next.stage = "stock_husk_census_unavailable";
             after.clear();
@@ -1301,11 +1354,12 @@ namespace
         }
         if (after.empty())
         {
-            if (scope.latest.cohort.empty()) scope.latest = std::move(next);
+            if (latest.cohort.empty()) latest = std::move(next);
             return;
         }
         if (!std::ranges::all_of(after, [&](U::UObject* actor) {
-            return stock_npc_authority(actor, npc_class, active.world);
+            return boar ? in_level(actor, active.world) && exact(actor, boar_class) && byte_field(actor, STR("Role")) == 3
+                        : stock_npc_authority(actor, npc_class, active.world);
         }))
         {
             next.stage = "stock_husk_authority_unverified";
@@ -1318,13 +1372,13 @@ namespace
         }
         else
         {
-            ++scope.receipts;
+            ++(boar ? scope.boars.receipts : scope.receipts);
             for (auto* actor : after) next.cohort.emplace_back(actor);
             next.stage = observed.initial ? "stock_initial" : "stock_refresh";
-            if (operate && Replication{}.apply(after)) next.replicated = static_cast<int>(after.size());
+            if ((boar || operate) && Replication{}.apply(after)) next.replicated = static_cast<int>(after.size());
         }
         // Retain the latest successful stock receipt across an occupied or failed marker.
-        if (!next.cohort.empty() || scope.latest.cohort.empty()) scope.latest = std::move(next);
+        if (!next.cohort.empty() || latest.cohort.empty()) latest = std::move(next);
     }
 
     void census(const Network& active)
@@ -1335,10 +1389,12 @@ namespace
         scope.counts = {};
         scope.flayers.counts = {};
         scope.not_deer.counts = {};
+        scope.boars.counts = {};
         scope.not_deer_replica.Reset();
         auto* husk = find<U::UClass>(npc_class);
         auto* flayer = find<U::UClass>(flayer_class);
         auto* not_deer = operate_not_deer ? find<U::UClass>(not_deer_class) : nullptr;
+        auto* boar = operate_boars ? find<U::UClass>(boar_class) : nullptr;
         auto* antfarm = find<U::UClass>(antfarm_class);
 
         if (auto* base = find<U::UClass>(npc_base))
@@ -1349,9 +1405,10 @@ namespace
             {
                 if (!actor) continue;
                 auto* type = actor->GetClassPrivate();
-                if ((type != husk && type != flayer && type != not_deer) || !in_level(actor, active.world))
+                if ((type != husk && type != flayer && type != not_deer && type != boar) || !in_level(actor, active.world))
                     continue;
-                auto& counts = type == flayer ? scope.flayers.counts : type == not_deer ? scope.not_deer.counts : scope.counts;
+                auto& counts = type == flayer ? scope.flayers.counts : type == not_deer ? scope.not_deer.counts :
+                    type == boar ? scope.boars.counts : scope.counts;
                 if (type == not_deer && byte_field(actor, STR("Faction")) != not_deer_profile.faction)
                 {
                     ++counts.other;
@@ -1411,7 +1468,7 @@ namespace
         const auto selection = arguments == 3 ? lua.get_string() : std::string_view{};
         const bool not_deer = selection == "notdeer" && operate_not_deer;
         const auto* family = antfarm_cohort(not_deer ? NpcFamily::NotDeer :
-            selection == "flayer" ? NpcFamily::Flayer : NpcFamily::Unknown);
+            selection == "flayer" ? NpcFamily::Flayer : selection == "boar" ? NpcFamily::Boar : NpcFamily::Unknown);
         if (arguments == 3 && !family) return 0;
         const auto active = network(find<U::UWorld>(world_path));
         auto* director = find<U::UObject>(director_path);
@@ -1777,6 +1834,7 @@ namespace silverfish::campaign_npc
         publish_flayers = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_PUBLISH");
         veto_flayer_spawns = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO");
         operate_not_deer = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER");
+        operate_boars = env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_NATIVE_BOAR_FIXTURE");
         const bool headless_fixture = env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_NATIVE_FIXTURES");
         watch_combat = headless_fixture && env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT");
         refresh_fixture = headless_fixture && env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH");
@@ -1790,12 +1848,12 @@ namespace silverfish::campaign_npc
             }, {false, false, STR("SilverfishCoopNative"), STR("Guard stock CrossRoads Husk replica brains")});
         callbacks[3] = Hook::RegisterProcessInternalPreCallback(
             [](Iteration& call, U::UObject* receiver, U::FFrame& frame, void*) {
-                if (!hook_ready() || (!operate && !veto_flayer_spawns && !operate_not_deer) || !receiver || !frame.Node() ||
+                if (!hook_ready() || (!operate && !veto_flayer_spawns && !operate_not_deer && !operate_boars) || !receiver || !frame.Node() ||
                     call.OriginalFunctionCallPrevented()) return;
                 static const U::FName spawn_name{STR("SpawnSquadFromData")};
                 static const U::FName load_name{STR("LoadSquad")};
                 const auto name = frame.Node()->GetFName();
-                if ((name != load_name && (name != spawn_name || !operate)) || !squad_spawner(receiver)) return;
+                if ((name != load_name && (name != spawn_name || (!operate && !operate_boars))) || !squad_spawner(receiver)) return;
                 const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld(), true);
                 if (active.seat != Seat::Client) return;
                 if (name == spawn_name) prevent_client_spawn(call, receiver, frame, active);
