@@ -5,6 +5,7 @@ local firearm_type = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local static_type = "/Script/Engine.StaticMeshComponent"
 local skeletal_type = "/Script/Engine.SkeletalMeshComponent"
+local mesh_type = "/Script/Engine.MeshComponent"
 local scene_type = "/Script/Engine.SceneComponent"
 local statics_type = "/Script/Engine.Default__GameplayStatics"
 local math_library = "/Script/Engine.Default__KismetMathLibrary"
@@ -32,6 +33,13 @@ end
 
 local function same(first, second)
     return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function unwrap(object)
+    if type(object) == "userdata" and type(object.type) == "function" and object:type() == "RemoteUnrealParam" then
+        return object:get()
+    end
+    return object
 end
 
 local function stock_asset(path)
@@ -132,10 +140,7 @@ function view.observe(pawn, save, cached)
         if not valid(class) then return "-", nil end
         local components = equipment:K2_GetComponentsByClass(class)
         for index = 1, #components do
-            local component = components[index]
-            if type(component) == "userdata" and type(component.type) == "function" and component:type() == "RemoteUnrealParam" then
-                component = component:get()
-            end
+            local component = unwrap(components[index])
             if valid(component) and not same(component, rig) and same(component:GetOwner(), equipment) and component:IsVisible()
                 and component.bHiddenInGame == false then
                 local asset = component[profile[2]]
@@ -160,7 +165,59 @@ function view.observe(pawn, save, cached)
     return model, { actor = equipment, model = model }
 end
 
+local function restore_stock(entry)
+    for _, component in ipairs(entry.stock_weapon_masks or {}) do
+        if valid(component) and component.bOnlyOwnerSee then component:SetOnlyOwnerSee(false) end
+    end
+    entry.stock_weapon_actor, entry.stock_weapon_masks = nil, nil
+end
+
+local function stock_held_actor(entry)
+    local pawn, firearm = entry.pawn, entry.firearm_class
+    local base = StaticFindObject(equipment_type)
+    if not valid(base) then return end
+    local function qualifies(actor)
+        return valid(actor) and actor:IsA(base) and not actor:IsActorBeingDestroyed()
+            and same(actor:GetAttachParentActor(), pawn)
+            and (same(actor:GetOwner(), pawn) or same(actor.User, pawn))
+            and (firearm == "-" or actor:GetClass():GetFullName() == "BlueprintGeneratedClass " .. firearm)
+    end
+    if qualifies(pawn.EquipedItem) then return pawn.EquipedItem end
+    if qualifies(entry.stock_weapon_actor) then return entry.stock_weapon_actor end
+    -- Unreal can replicate the actor attachment without replicating the
+    -- remote pawn's first-person equipped-item reference.
+    if firearm == "-" then return end
+    local output = {}
+    pawn:GetAttachedActors(output, true, false)
+    local attached = output.OutActors or output
+    for index = 1, #attached do
+        local actor = unwrap(attached[index])
+        if qualifies(actor) then return actor end
+    end
+end
+
+function view.suppress_stock(entry)
+    local stock = #entry.weapon_parts > 0 and stock_held_actor(entry)
+    if stock and same(stock, entry.stock_weapon_actor) then return end
+    restore_stock(entry)
+    if not stock then return end
+    local class = StaticFindObject(mesh_type)
+    if not valid(class) then return end
+    local components = stock:K2_GetComponentsByClass(class)
+    entry.stock_weapon_actor, entry.stock_weapon_masks = stock, {}
+    for index = 1, #components do
+        local component = unwrap(components[index])
+        if valid(component) and same(component:GetOwner(), stock) and not component.bOnlyOwnerSee then
+            -- Keep collision, actor replication, and the stock owner's own
+            -- first-person meshes intact. Only this observer renders the copy.
+            component:SetOnlyOwnerSee(true)
+            entry.stock_weapon_masks[#entry.stock_weapon_masks + 1] = component
+        end
+    end
+end
+
 function view.clear(entry)
+    restore_stock(entry)
     active_recoil[entry] = nil
     active_cycle[entry] = nil
     for _, component in ipairs(entry.weapon_parts or {}) do

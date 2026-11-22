@@ -94,9 +94,19 @@ async def verify_pose(host_run, guest_run):
     stationary = await observe(host_run, lambda row: row["tail_x"] == 0 and row["falling"] == 0, timeout=15)
     aligned(initial, skeletal=True)
     aligned(stationary, skeletal=False)
-    await avatar_probe(host_run, "turn")
-    turned = await observe(guest_run, lambda row: abs((row["actor_yaw"] - initial["actor_yaw"] + 180) % 360 - 180) > 60
-                          and row["body_cm"] < 3)
+    def angle_between(first, second):
+        return abs((first - second + 180) % 360 - 180)
+
+    turn_samples = []
+
+    def head_caught_up(row):
+        if angle_between(row["actor_yaw"], initial["actor_yaw"]) <= 60:
+            return False
+        turn_samples.append(row)
+        return angle_between(row["head_yaw"], row["actor_yaw"]) < 4 and row["body_cm"] < 3
+
+    turned, _ = await asyncio.gather(observe(guest_run, head_caught_up), avatar_probe(host_run, "turn"))
+    assert any(5 < angle_between(row["head_yaw"], initial["head_yaw"]) < 80 for row in turn_samples), turn_samples
     aligned(turned, skeletal=True)
     await avatar_probe(host_run, "jump")
     airborne = await observe(guest_run, lambda row: row["falling"] == 1)
@@ -112,7 +122,7 @@ async def verify_pose(host_run, guest_run):
             wrists[clip][str(sample * .15)] = dict(zip(
                 ("weapon_socket", "right_hand", "left_hand"),
                 (list(map(float, point.split(","))) for point in points), strict=True))
-    return {"guest_sees_host": initial, "host_sees_guest": stationary, "turned": turned,
+    return {"guest_sees_host": initial, "host_sees_guest": stationary, "turned": turned, "turn_samples": turn_samples,
             "airborne": airborne, "landed": landed, "aim_clip_wrist_positions": wrists}
 
 
@@ -186,7 +196,7 @@ async def capture_movement(host_run, guest_run, command, host, guest, with_trait
     return evidence
 
 
-async def verify_aim_movement(host_run, guest_run, command, host, guest, projections):
+async def verify_aim_movement(host_run, guest_run, command, host, guest, projections, shotgun=False):
     async def stance(run, operation):
         crouched, grounded, x, y, yaw, clip, position, height = await avatar_probe(run, operation)
         return {"crouched": crouched == "1", "grounded": grounded == "1", "position": [float(x), float(y)],
@@ -230,9 +240,10 @@ async def verify_aim_movement(host_run, guest_run, command, host, guest, project
     await avatar_probe(host_run, "preparemovement")
     await avatar_probe(guest_run, "preparemovement")
     evidence = {}
+    guest_mesh = "BoltShotgun_Frame_Suppressed" if shotgun else "BreakAction_BMG_Frame"
     for role, runner, observer, target, idle, moving, lowered, mesh in (
         ("host", host_run, guest_run, host, "HandGun_Idle_3", "HandGun_Walk", "HandGun_Idle", "9mmAuto_Frame"),
-        ("guest", guest_run, host_run, guest, "Rifle_Aiming_Idle", "Rifle_Walk", "Rifle_Idle_1_", "BreakAction_BMG_Frame"),
+        ("guest", guest_run, host_run, guest, "Rifle_Aiming_Idle", "Rifle_Walk", "Rifle_Idle_1_", guest_mesh),
     ):
         await avatar_probe(host_run, "resetlane")
         await observe(observer, lowered, mesh)
@@ -240,6 +251,12 @@ async def verify_aim_movement(host_run, guest_run, command, host, guest, project
         try:
             aimed = await observe(observer, idle, mesh)
             assert 130 <= aimed["rig"]["socket_height"] <= 143, aimed
+            if shotgun and role == "guest":
+                state = await wait(runner, lambda row: row.get("game", {}).get("native_avatar_local_aim") is True)
+                assert not state["game"].get("native_guest_primary_scope"), state["game"]["native_guest_primary_scope"]
+                projected, stock, owner_only = map(int, await avatar_probe(observer, "weaponcopies"))
+                assert (projected, stock, owner_only) == (1, 0, 1), (projected, stock, owner_only)
+                evidence["shotgun_visible_copies"] = {"projected": projected, "stock_duplicate": stock}
             strafing = await move(runner, observer, target, "aimstrafe", moving, mesh)
             await observe(observer, idle, mesh)
             await avatar_probe(runner, "crouch")
@@ -259,7 +276,7 @@ async def verify_aim_movement(host_run, guest_run, command, host, guest, project
 async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: bool = False,
                   melee: bool = False, pose: bool = False, rifle: bool = False,
                   consumable: bool = False, movement: bool = False, movement_traits: bool = False,
-                  aim_movement: bool = False) -> None:
+                  aim_movement: bool = False, stock_shotgun_aim: bool = False) -> None:
     profile = "avatar-" + uuid.uuid4().hex[:8]
     host_dir = work / "campaigns" / profile
     guest_dir = work / "clients" / profile
@@ -276,6 +293,8 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
         env["SILVERFISH_COOP_MOVEMENT_PROBE"] = "1"
     if aim_movement:
         env["SILVERFISH_COOP_AIM_MOVEMENT_PROBE"] = "1"
+    if stock_shotgun_aim:
+        env["SILVERFISH_COOP_STOCK_SHOTGUN_PROBE"] = "1"
     if movement_traits:
         env["SILVERFISH_COOP_MOVEMENT_TRAIT_PROBE"] = "1"
     base = (sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work))
@@ -357,8 +376,10 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             async with asyncio.timeout(15):
                 while not (local_profile := await avatar_probe(guest_run, "selectrifle", allow_pending=True)):
                     await asyncio.sleep(.1)
+            expected_meshes = ({"BoltShotgun_Frame_Suppressed"} if stock_shotgun_aim
+                               else {"BreakAction_BMG_Frame", "BreakAction_BMG_Swing"})
             mounted = await wait(host_run, lambda state: any(
-                {"BreakAction_BMG_Frame", "BreakAction_BMG_Swing"} <= {path.rsplit(".", 1)[-1]
+                expected_meshes <= {path.rsplit(".", 1)[-1]
                     for path in row.get("weapon_meshes", ())}
                 for row in (projections(state) or {}).values()), timeout=12)
             selected, = events(guest_run, "native_guest_equipment_selected")
@@ -374,7 +395,8 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
                 evidence["stock_movement"] = await capture_movement(host_run, guest_run, command, host, guest, movement_traits,
                     {"host": "Running_Unarmed", "guest": "Rifle_Run_Forward"})
             if aim_movement:
-                evidence["stock_moving_aim"] = await verify_aim_movement(host_run, guest_run, command, host, guest, projections)
+                evidence["stock_moving_aim"] = await verify_aim_movement(
+                    host_run, guest_run, command, host, guest, projections, stock_shotgun_aim)
         if rifle:
             async with asyncio.timeout(8):
                 while True:
@@ -595,6 +617,8 @@ if __name__ == "__main__":
     parser.add_argument("--movement-traits", action="store_true", help="give only the guest a stock movement-speed effect")
     parser.add_argument("--aim-movement", action="store_true",
                         help="verify pistol and break-action ADS while strafing, crouching, and crouch-walking")
+    parser.add_argument("--stock-shotgun-aim", action="store_true",
+                        help="exercise the suppressed shotgun's native ADS without a primary-fire scope")
     options = parser.parse_args()
     if options.melee and (not options.equipment or options.lifecycle):
         parser.error("--melee requires --equipment and runs independently of --lifecycle")
@@ -607,6 +631,8 @@ if __name__ == "__main__":
     if options.aim_movement and (options.pose or options.equipment or options.lifecycle
                                  or options.movement and not options.rifle):
         parser.error("--aim-movement can run alone or with --rifle")
+    if options.stock_shotgun_aim and (not options.aim_movement or options.rifle):
+        parser.error("--stock-shotgun-aim requires --aim-movement and replaces the break-action rifle")
     work = options.work.resolve(strict=True)
     with installed_probe(work) if any(
         (options.equipment, options.pose, options.rifle, options.consumable, options.movement, options.aim_movement)
@@ -614,4 +640,4 @@ if __name__ == "__main__":
         asyncio.run(capture(work, options.vanilla_saved.resolve(strict=True),
                             options.lifecycle, options.equipment, options.melee, options.pose,
                             options.rifle, options.consumable, options.movement, options.movement_traits,
-                            options.aim_movement))
+                            options.aim_movement, options.stock_shotgun_aim))

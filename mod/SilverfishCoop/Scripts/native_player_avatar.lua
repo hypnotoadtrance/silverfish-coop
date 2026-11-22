@@ -11,6 +11,7 @@ local animation_root = "/Game/Classes/NPCs/NPC_Assets/Animations/"
 local crouched_idle = "Crouching_Idle"
 local crouched_walk = "Crouched_Walking"
 local firearm_class = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
+local gameplay_statics = "/Script/Engine.Default__GameplayStatics"
 local aimed = {pistol = {"HandGun_Idle_3", "HandGun_Walk"}, rifle = {"Rifle_Aiming_Idle", "Rifle_Walk"}}
 local lowered = {pistol = "HandGun_Idle", rifle = "Rifle_Idle_1_"}
 local running = {pistol = "HandGun_Run", rifle = "Rifle_Run_Forward"}
@@ -67,8 +68,7 @@ local function worn(row)
     return path and outfit_path(path) and path or "-"
 end
 
-local function aim_kind(equipped)
-    local weapon = equipped and equipped.actor
+local function aim_kind(weapon)
     if not valid(weapon) then return "-" end
     local base = StaticFindObject(firearm_class)
     if not valid(base) or not weapon:IsA(base) then return "-" end
@@ -84,7 +84,15 @@ end
 local function sync_local_aim(state, phase)
     local pawn = phase == "connected" and state.local_pawn and state.local_pawn.pawn or nil
     holding_aim = nil
-    if valid(pawn) and type(SilverfishReadNativeGuestAim) == "function" then
+    if not valid(pawn) or not pawn:IsLocallyControlled() then return end
+    holding_aim = false
+    if pawn.Dead or pawn.Sprinting or pawn.IsWeaponBlocked then return end
+    -- The stock ADS state works for all local firearms, including ones that
+    -- have no registered interception path for primary-fire input.
+    if aim_kind(pawn.EquipedItem) ~= "-" then
+        holding_aim = pawn.Aiming == true
+    end
+    if not holding_aim and type(SilverfishReadNativeGuestAim) == "function" then
         holding_aim = SilverfishReadNativeGuestAim(pawn:GetAddress()) == true
     end
 end
@@ -124,7 +132,7 @@ local function observe(state, phase)
                     local read_weapon, weapon, cached = pcall(weapon_view.observe, pawn, save, observed_weapons[address])
                     local read_appearance, appearance = pcall(character_view.observe, save.Character)
                     if read_weapon then weapons[address] = cached end
-                    local gun = aim_kind(read_weapon and cached)
+                    local gun = aim_kind(read_weapon and cached and cached.actor or nil)
                     local firearm = gun ~= "-" and cached.actor:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
                     if not firearm or not firearm_path(firearm) then firearm = "-" end
                     observations[id] = { pawn = details.name, body = body, head = head, weapon = read_weapon and weapon or "-",
@@ -441,20 +449,42 @@ function avatar.animate_cycle(get_world)
     weapon_view.animate_cycle(get_world)
 end
 
-local function angle_difference(a, b)
-    return math.abs((a - b + 180) % 360 - 180)
+local function angle_delta(target, current)
+    return (target - current + 180) % 360 - 180
 end
 
-local function aim_head(entry)
+local function aim_head(entry, now)
     local rotation = entry.pawn:GetBaseAimRotation()
     local pitch = math.max(-45, math.min(45, (rotation.Pitch + 180) % 360 - 180))
-    local shown = entry.head_pivot:K2_GetComponentRotation()
-    if angle_difference(shown.Pitch, pitch) > 0.01 or angle_difference(shown.Yaw, rotation.Yaw) > 0.01
-        or angle_difference(shown.Roll, 0) > 0.01 then
-        entry.head_pivot:K2_SetWorldRotation({Pitch = pitch, Yaw = rotation.Yaw, Roll = 0}, false, {}, true)
-        shown = entry.head_pivot:K2_GetComponentRotation()
+    local yaw, previous = rotation.Yaw, entry.head_aim
+    if previous then
+        local elapsed = now - previous.time
+        if elapsed <= 0 then return end
+        previous.time = now
+        if elapsed < .25 then
+            local fraction = 1 - math.exp(-elapsed / .05)
+            pitch = previous.pitch + (pitch - previous.pitch) * fraction
+            yaw = (previous.yaw + angle_delta(yaw, previous.yaw) * fraction + 180) % 360 - 180
+        end
     end
-    entry.aim_roll = shown.Roll
+    if not previous or math.abs(pitch - previous.pitch) > .01 or math.abs(angle_delta(yaw, previous.yaw)) > .01 then
+        entry.head_pivot:K2_SetWorldRotation({Pitch = pitch, Yaw = yaw, Roll = 0}, false, {}, true)
+        entry.aim_roll = entry.head_pivot:K2_GetComponentRotation().Roll
+        entry.head_aim = {pitch = pitch, yaw = yaw, time = now}
+    end
+end
+
+function avatar.animate_head(get_world)
+    if not next(avatars) then return end
+    local world, clock = get_world(), StaticFindObject(gameplay_statics)
+    if not valid(world) or not valid(clock) then return end
+    local scope, now = world:GetAddress(), clock:GetRealTimeSeconds(world)
+    for _, entry in pairs(avatars) do
+        if entry.world == scope and valid(entry.head_pivot) and valid(entry.pawn)
+            and not entry.pawn:IsActorBeingDestroyed() then
+            aim_head(entry, now)
+        end
+    end
 end
 
 local function create(entry)
@@ -575,7 +605,7 @@ function avatar.sync(state, phase)
                 seen[address] = true
                 local entry = avatars[address]
                 if not entry or not valid(entry.pawn) or entry.name ~= details.name then
-                    entry = { pawn = pawn, name = details.name, map = state.map }
+                    entry = { pawn = pawn, name = details.name, map = state.map, world = state.world:GetAddress() }
                     avatars[address] = entry
                     local ok, failure = pcall(create, entry)
                     if not ok then
@@ -595,13 +625,13 @@ function avatar.sync(state, phase)
                             apply_outfit(entry, outfit, cosmetics)
                             character_view.apply(entry, cosmetics, appearance, asset, visual_component)
                             weapon_view.apply(entry, outfit and outfit.weapon or "-", outfit and outfit.firearm or "-")
+                            weapon_view.suppress_stock(entry)
                             if uses[entry] then hide_held_item(entry) end
                             local aim = outfit and outfit.aim or "-"
                             if phase == "hosting" then
                                 aim = outfit and host_aims[entry.id] == outfit.gun and outfit.gun or "-"
                             end
                             apply_locomotion(entry, aim, outfit)
-                            aim_head(entry)
                         end
                         if entry.weapon_parts and #entry.weapon_parts > 0 then
                             local socket = entry.body:GetSocketTransform(FName("Weapon_Socket01", EFindName.FNAME_Find), 2)

@@ -2,6 +2,7 @@
 local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
 local pose_fixture = os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_POSE") == "1"
 local rifle_fixture = os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_RIFLE") == "1"
+local shotgun_fixture = os.getenv("SILVERFISH_COOP_STOCK_SHOTGUN_PROBE") == "1"
 local sprint_fixture = os.getenv("SILVERFISH_COOP_MOVEMENT_PROBE") == "1"
 local aim_movement_fixture = os.getenv("SILVERFISH_COOP_AIM_MOVEMENT_PROBE") == "1"
 local sprint_trait_fixture = os.getenv("SILVERFISH_COOP_MOVEMENT_TRAIT_PROBE") == "1"
@@ -19,7 +20,8 @@ local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local projectile_field = "Base_Projectile_6_619A2F0C42DB644A02A7B4B4594BC74A"
-local break_action = "/Game/Classes/Weapons/Wep_50BMP_BreakAction.Wep_50BMP_BreakAction_C"
+local long_gun = shotgun_fixture and "/Game/Classes/Weapons/Wep_BoltAction_Shotgun_Suppressed.Wep_BoltAction_Shotgun_Suppressed_C"
+    or "/Game/Classes/Weapons/Wep_50BMP_BreakAction.Wep_50BMP_BreakAction_C"
 local face_field = "Mesh_Head_60_630BB776410363C64BE2C89A3F72B1C5"
 local plumage_field = "Mesh_Plumage_80_4B6C3DD94D27DEC901D6829472D5F546"
 local skin_field = "Color_Skin_53_0B756DAC41D1CF33A2BB2480770F4445"
@@ -173,6 +175,26 @@ local function rifle_profile(weapon)
     assert(valid(projectile), "avatar_probe_rifle_projectile_unavailable")
     return table.concat({defaults.MagSize, defaults.Caliber, defaults.FireRate, defaults.BurstLength,
         tostring(defaults.Action_OnRelease), tostring(defaults.SingleReload), projectile:GetFullName()}, "\t")
+end
+
+local function visible_weapon_copies(pawn)
+    local held = pawn.EquipedItem
+    assert(valid(held) and same(held:GetClass(), asset(long_gun)) and same(held:GetAttachParentActor(), pawn),
+        "avatar_probe_stock_weapon_attachment_unavailable")
+    local frame = held.Mesh_Frame
+    assert(valid(frame) and valid(frame.StaticMesh), "avatar_probe_stock_weapon_frame_unavailable")
+    local meshes = pawn:K2_GetComponentsByClass(asset("/Script/Engine.StaticMeshComponent"))
+    local visible = 0
+    for index = 1, #meshes do
+        local mesh = unwrap(meshes[index])
+        if valid(mesh) and same(mesh.StaticMesh, frame.StaticMesh) and mesh:IsVisible()
+            and not mesh.bHiddenInGame and not mesh.bOnlyOwnerSee then
+            visible = visible + 1
+        end
+    end
+    local stock_visible = frame:IsVisible() and not frame.bHiddenInGame and not frame.bOnlyOwnerSee
+        and not held.bHidden
+    return table.concat({visible, stock_visible and 1 or 0, frame.bOnlyOwnerSee and 1 or 0}, "\t")
 end
 
 local trace_color = {R = 0, G = 0, B = 0, A = 0}
@@ -377,12 +399,12 @@ local function run(operation)
         end
         if operation == "selectrifle" then
             local rows = local_pawn.Save.PlayerEquipment
-            if not rows or rows:GetArrayNum() < 1 or not same(rows[1][item_class], asset(break_action)) then
+            if not rows or rows:GetArrayNum() < 1 or not same(rows[1][item_class], asset(long_gun)) then
                 error("avatar_probe_rig_pending", 0)
             end
             local_pawn:Equip_NextItem(0, false)
             local held = local_pawn.EquipedItem
-            assert(valid(held) and same(held:GetClass(), asset(break_action)) and held.Ammo == 1,
+            assert(valid(held) and same(held:GetClass(), asset(long_gun)) and held.Ammo == 1,
                 "avatar_probe_local_rifle_selection_unavailable")
             return rifle_profile(held)
         end
@@ -399,7 +421,7 @@ local function run(operation)
     local host, guest = player_pair()
     if movement_operation then return movement_probe(operation, host, guest) end
     if rifle_fixture and operation == "seedrifle" then
-        local class = asset(break_action)
+        local class = asset(long_gun)
         local rows = guest.Save.PlayerEquipment
         assert(rows:GetArrayNum() >= 1 and not valid(rows[1][item_class]), "avatar_probe_rifle_slot_occupied")
         local out = {}
@@ -414,10 +436,12 @@ local function run(operation)
             guid.C & 0xffffffff, guid.D & 0xffffffff)
     elseif rifle_fixture and operation == "heldrifle" then
         local held = guest.EquipedItem
-        assert(valid(held) and same(held:GetClass(), asset(break_action)) and held:HasAuthority()
+        assert(valid(held) and same(held:GetClass(), asset(long_gun)) and held:HasAuthority()
             and same(held.User, guest) and guest.Save.PlayerEquipIndex == 0 and held.Ammo == 1,
             "avatar_probe_authority_rifle_unavailable")
         return rifle_profile(held)
+    elseif shotgun_fixture and operation == "weaponcopies" then
+        return visible_weapon_copies(guest)
     elseif pose_fixture and operation == "style" then
         style(host, "SM_Head_UV_02_EarRing", "SM_Plumage_007", { R = .2, G = .7, B = .35, A = 1 })
         style(guest, "SM_Head_UV_Fangs_01", "SM_Plumage_012", { R = .8, G = .25, B = .33, A = 1 })
