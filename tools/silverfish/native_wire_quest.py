@@ -83,7 +83,6 @@ async def start(host, bridge, actor: str) -> dict:
         prior = await _command(host, bridge, PREFLIGHT, pawn)
         if prior["step"] is not None:
             return {"effect": "native_quest_present", "quest_id": QUEST_ID, "step": prior["step"]}
-        await host.checkpoint_native(bridge)
         host.native_checkpoint_unsafe = True
         verified = await _command(host, bridge, START, pawn)
         balances = ("native_cash", "native_xp", "native_commune_rep")
@@ -93,10 +92,11 @@ async def start(host, bridge, actor: str) -> dict:
         candidate = party.load_party(host.party)
         record = {"quest_id": QUEST_ID, "step": 1, "actor": actor}
         candidate.setdefault("native_quests", {})[QUEST_ID] = record
-        revision = await host.checkpoint_native(bridge, candidate)
+        # Acceptance changes stock quest progress only. The next normal save captures it.
+        host.pending_host_save = bool(host.pending_host_save)
         host.party = candidate
         host.native_checkpoint_unsafe = False
-        host.control.event("native_wire_quest_started", revision=revision, **record)
+        host.control.event("native_wire_quest_started", revision=None, **record)
         return {"effect": "native_quest_changed", **record}
     except (OSError, RuntimeError, ValueError):
         if host.native_checkpoint_unsafe:
