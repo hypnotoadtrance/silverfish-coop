@@ -1,7 +1,10 @@
 -- Stock appearance and weapon fixtures for a private, two-player headless campaign.
 local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
-if os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1" or os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1"
-    or not mailbox or not mailbox:match("[/\\]campaigns[/\\]avatar%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$") then return end
+local guest_fixture = mailbox and mailbox:match("[/\\]clients[/\\]avatar%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
+    and os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_EQUIPMENT") == "1"
+local host_fixture = mailbox and mailbox:match("[/\\]campaigns[/\\]avatar%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
+    and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not (guest_fixture or host_fixture) then return end
 
 local command, reply = mailbox .. "/avatar-probe-command.tsv", mailbox .. "/avatar-probe-reply.tsv"
 local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
@@ -81,11 +84,43 @@ local function equip(pawn, blueprint)
 end
 
 local function run(operation)
+    if guest_fixture then
+        assert(operation == "aim" or operation == "lower", "avatar_probe_unknown_guest_operation")
+        local viewport = FindFirstOf("GameViewportClient")
+        local world = valid(viewport) and viewport.World
+        local driver = valid(world) and world.NetDriver
+        assert(valid(world) and world:GetFullName() == "World " .. map and valid(driver)
+            and valid(driver.ServerConnection), "avatar_probe_guest_connection_unavailable")
+        local local_pawn
+        for _, candidate in ipairs(FindAllOf("Player_FP_C") or {}) do
+            if valid(candidate) and same(candidate:GetWorld(), world) and candidate:IsLocallyControlled()
+                and not candidate:HasAuthority() and not candidate:IsActorBeingDestroyed() then
+                assert(not local_pawn, "avatar_probe_duplicate_local_guest")
+                local_pawn = candidate
+            end
+        end
+        assert(local_pawn and local_pawn.MoveInputs_Enabled and not local_pawn.IsWeaponBlocked,
+            "avatar_probe_guest_input_unavailable")
+        local action = asset("/Game/Classes/Player/Player_Inputs/IA_Use_Secondary.IA_Use_Secondary")
+        local input = asset("/Script/EnhancedInput.Default__EnhancedInputLibrary")
+        local action_value = input:MakeInputActionValueOfType(operation == "aim" and 1 or 0, 0, 0, 0)
+        if operation == "aim" then
+            local_pawn:InpActEvt_IA_Use_Secondary_K2Node_EnhancedInputActionEvent_33(action_value, 0, 0, action)
+        else
+            local_pawn:InpActEvt_IA_Use_Secondary_K2Node_EnhancedInputActionEvent_35(action_value, .5, .5, action)
+        end
+        return
+    end
     local host, guest = player_pair()
     if operation == "equip" then
         style(host, "SM_Head_UV_02_EarRing", "SM_Plumage_007", { R = .2, G = .7, B = .35, A = 1 })
         style(guest, "SM_Head_UV_Fangs_01", "SM_Plumage_012", { R = .8, G = .25, B = .33, A = 1 })
         equip(host, "Wep_Pistol")
+    elseif operation == "aim" or operation == "lower" then
+        local weapon = host.EquipedItem
+        assert(valid(weapon) and same(weapon.User, host), "avatar_probe_stock_equip_unavailable")
+        weapon:Use_Item_Secondary(operation == "aim")
+        assert(host.Aiming == (operation == "aim"), "avatar_probe_stock_aim_failed")
     elseif operation == "holster" then
         local save = host.Save
         local index = save.PlayerEquipIndex + 1

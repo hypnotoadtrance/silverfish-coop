@@ -251,6 +251,7 @@ class Host:
         self.stock_drop_input = native_host_stack_drop.HostDropInput()
         self.pickup_audio, self.pickup_playback = native_pickup_audio.PickupAudio(), native_pickup_audio.Playback()
         self.voice_audio, self.voice_playback = native_voice.VoiceQueue(), native_voice.Playback()
+        self.guest_avatar_aims = {}
         self.native_zone_walls = native_zone_walls
         self.native_profile = native_profile
         self.persist_native_guest = persist_native_guest
@@ -1778,13 +1779,15 @@ class Host:
         if not identity:
             return {"ok": False, "error": "guest_not_active"}
         role, character = identity
-        if request.get("action") == "snapshot" and set(request) in (
-                {"action"}, {"action", "voice_events", "zone_epoch"}):
+        if request.get("action") == "snapshot" and request.keys() <= {"action", "voice_events", "avatar_aim", "zone_epoch"}:
             if request.get("zone_epoch") == self.zone_epoch and not self.transitioning:
                 member = self.native_recipients().get(character) if self.native_guest else None
                 if member and member["connected"] and time.monotonic() - self.last_seen < 2:
-                    self.voice_audio.observed(self.last_game, self.zone_epoch)
-                    self.voice_audio.received(self.last_game, self.zone_epoch, member["pawn"], request.get("voice_events"))
+                    if "voice_events" in request:
+                        self.voice_audio.observed(self.last_game, self.zone_epoch)
+                        self.voice_audio.received(self.last_game, self.zone_epoch, member["pawn"], request["voice_events"])
+                    if type(request.get("avatar_aim")) is bool:
+                        native_player_avatar.guest_aim(self, character, member, request["avatar_aim"])
             return self.snapshot_for_guest(guest_id, role)
         action = request.get("action")
         if action in (link.GUEST_LEAVE, link.GUEST_LEAVE_CONFIRM):
@@ -3712,6 +3715,9 @@ class Host:
             if bridge.process.poll() is not None:
                 raise RuntimeError(f"Host game exited with code {bridge.process.returncode}")
             await self.observe(bridge, transport)
+            if not self.transitioning:
+                with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                    self.last_game = await native_player_avatar.project_host(self, bridge)
             if self.mindcore_carry:
                 self.mindcore_carry.maintain()
             try:
@@ -5222,6 +5228,8 @@ class Client:
             if not self.needs_travel and not self.server_transitioning and self.zone_epoch:
                 if events := native_voice.client_events(self.last_game):
                     request.update(voice_events=events, zone_epoch=self.zone_epoch)
+                if native_player_avatar.LOCAL_AIM in self.last_game:
+                    request.update(avatar_aim=self.last_game[native_player_avatar.LOCAL_AIM], zone_epoch=self.zone_epoch)
             self.snapshot_request = asyncio.create_task(self.transport.request(request, timeout=2))
         if self.snapshot_request is not None and (wait or self.snapshot_request.done()):
             pending, self.snapshot_request = self.snapshot_request, None

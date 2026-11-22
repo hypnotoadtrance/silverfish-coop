@@ -106,14 +106,14 @@ Keep a local, versioned JSON interface alongside the menu. It should expose sess
 - Sync a guest's harvest of a wild mushroom so its collected state is visible to the host and other guests.
 - Check opening and closing the same door from both sides. The guest's panel and collision should follow the host's current hinge state through repeated toggles and a reconnect.
 - Accept a quest directly from Simmi as a guest and verify it appears in the host's Journal. Confirm both players see the host's faction dispositions.
-- Verify avatar head position from both seats with the Hunter Jacket and distinct faces. Check that the bat grip, crouch, aiming down sights, melee swings, and ranged firing are visible to the other peer.
+- Recheck avatar head position, bat grip, crouch, and firearm aiming during a foreground two-PC playtest. Verify rifle aim and aim while moving or crouching.
 - Replicate the Observatory lantern's light state, carry, and release using the stock physics-object interaction. The player holding it drives its position while the host validates ownership.
 - Replicate loose physics props spawned by containers, including bottles and rusty cans, with the same world identity and carry rules.
 - Preserve the Crossroads frog's hop animation on peers and let guests pick it up through the same host-authoritative action as the host.
 - Replicate entity death and the transition to the stock corpse or ragdoll on peers. Cover the boar and other enemy types killed by the host.
 - Play the player-hit screen effect only for the struck player. When a target is downed, hostile NPCs should disengage and acquire an eligible standing player.
 - Extend anomaly synchronization to more field and map-placed hazard types, including their active effects. Drive health, downing, and game-over from the host so a guest-side anomaly cannot kill a remote player or trigger a party wipe.
-- Replicate third-person aim, firing, and melee animations. Extend coverage to fires spawned by fixed explosive props.
+- Replicate third-person recoil and melee swings. Extend coverage to fires spawned by fixed explosive props.
 - Replicate a thrown flare's lit world actor after it leaves the equipped hand. Check the throw and light on both peers through expiry.
 - Compare frame times and network traffic at the Observatory and Crossroads. Measure the client projection and host discovery work separately from packet arrival before changing update pacing.
 
@@ -170,6 +170,8 @@ In a separate packaged Observatory test, the host opened the stock small crate a
 At Dead Bridge, a portable guest joined a staged host over loopback and defeated a stock State Infantry CQC trooper. The stock Nearby Items menu transferred the Army Shotgun with its six loaded rounds and displayed `x4` on the shell stack. Both items disappeared on both peers. The host refused competing claims and returned the original receipts on replay. The guest reconnected to the same pawn. General drag and drop, quick-slot hotkeys, and unequip remain open.
 
 In the two-seat rendered crouch checks, the stock crouch flag reached both peers and the full-body crouch clip lowered the remote model. Standing restored the original animation graph on each seat.
+
+Remote avatars use stock aim poses when a teammate holds the game's secondary action with an equipped firearm. The host identifies the equipped firearm, and a guest reports the stock Enhanced Input press and release from its bound weapon scope. The muted Crossroads test checks that the weapon socket reaches the stock pistol pose on each observer's animation skeleton and that release restores its normal animation mode. Guest first-person sights and the moving and crouched aim variants still need verification. [Rendered avatar test](../tests/live_avatar_capture.py)
 
 The bat's stock first-person mesh carries an offset that put the replica beside the player's shin. The remote weapon view now aligns the bat handle to the hand socket. The rendered Observatory check used an actual equipped bat and verified the grip from the guest's view.
 

@@ -10,6 +10,8 @@ local scene_class = "/Script/Engine.SceneComponent"
 local animation_root = "/Game/Classes/NPCs/NPC_Assets/Animations/"
 local crouched_idle = "Crouching_Idle"
 local crouched_walk = "Crouched_Walking"
+local firearm_class = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
+local aimed = {pistol = {"HandGun_Idle", "HandGun_Walk"}, rifle = {"Rifle_Aiming_Idle", "Rifle_Walk"}}
 local identity = {
     Rotation = { X = 0, Y = 0, Z = 0, W = 1 },
     Translation = { X = 0, Y = 0, Z = 0 },
@@ -19,6 +21,8 @@ local avatars = {}
 local observations, client_outfits = {}, {}
 local observed_weapons = {}
 local client_world, client_map, client_receipt
+local host_world, host_aim_receipt, host_aims
+local holding_aim
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local armor_root = "/Game/Classes/Armor_Items/"
 
@@ -57,6 +61,23 @@ local function worn(row)
     return path and outfit_path(path) and path or "-"
 end
 
+local function aim_kind(equipped)
+    local weapon = equipped and equipped.actor
+    if not valid(weapon) then return "-" end
+    local base = StaticFindObject(firearm_class)
+    if not valid(base) or not weapon:IsA(base) then return "-" end
+    -- The stock player animation graph identifies handguns by ItemType 3.
+    return weapon.ItemType == 3 and "pistol" or "rifle"
+end
+
+local function sync_local_aim(state, phase)
+    local pawn = phase == "connected" and state.local_pawn and state.local_pawn.pawn or nil
+    holding_aim = nil
+    if valid(pawn) and type(SilverfishReadNativeGuestAim) == "function" then
+        holding_aim = SilverfishReadNativeGuestAim(pawn:GetAddress()) == true
+    end
+end
+
 local function observe(state, phase)
     observations = {}
     if phase ~= "hosting" then
@@ -87,8 +108,9 @@ local function observe(state, phase)
                     local read_weapon, weapon, cached = pcall(weapon_view.observe, pawn, save, observed_weapons[address])
                     local read_appearance, appearance = pcall(character_view.observe, save.Character)
                     if read_weapon then weapons[address] = cached end
+                    local gun = aim_kind(read_weapon and cached)
                     observations[id] = { pawn = details.name, body = body, head = head, weapon = read_weapon and weapon or "-",
-                        appearance = read_appearance and appearance or "-" }
+                        appearance = read_appearance and appearance or "-", gun = gun, aim = pawn.Aiming and gun or "-" }
                 end
             end
         end
@@ -135,30 +157,45 @@ local function position_head(entry)
 end
 
 local function restore_locomotion(entry)
-    if entry.crouch_animation and valid(entry.body) then
+    if entry.pose_animation and valid(entry.body) then
         entry.body:SetAnimationMode(entry.animation_mode, true)
-        entry.crouch_animation, entry.crouch_mesh = nil, nil
+        entry.pose_animation, entry.pose_mesh = nil, nil
     end
 end
 
-local function apply_locomotion(entry)
-    if entry.pawn.bIsCrouched ~= true then
+local function apply_locomotion(entry, aim)
+    local crouched = entry.pawn.bIsCrouched == true
+    local profile = aimed[aim]
+    if not crouched and not profile then
         restore_locomotion(entry)
         return
     end
     local velocity = entry.pawn:GetVelocity()
-    local name = velocity.X^2 + velocity.Y^2 > 20^2 and crouched_walk or crouched_idle
+    local moving = velocity.X^2 + velocity.Y^2 > 20^2
+    local name
+    if crouched then
+        if profile then
+            name = moving and "Walk_Crouching_Forward" or "Idle_Crouching_Aiming"
+        else
+            name = moving and crouched_walk or crouched_idle
+        end
+    else
+        name = profile[moving and 2 or 1]
+    end
     local mesh = entry.body.SkinnedAsset
     if not valid(mesh) then return end
-    if entry.crouch_animation == name and entry.crouch_mesh == mesh:GetAddress() then return end
+    if entry.pose_animation == name and entry.pose_mesh == mesh:GetAddress() then return end
     local animation = asset(animation_root .. name .. "." .. name)
     if not valid(animation) or not valid(animation.Skeleton) or not valid(mesh.Skeleton)
-        or animation.Skeleton:GetAddress() ~= mesh.Skeleton:GetAddress() then return end
+        or animation.Skeleton:GetAddress() ~= mesh.Skeleton:GetAddress() then
+        restore_locomotion(entry)
+        return
+    end
 
     -- The stock first-person AnimBP reads the replicated crouch flag but its
     -- pose keeps the visible remote body upright. Use the stock full-body clip.
     entry.body:PlayAnimation(animation, true)
-    entry.crouch_animation, entry.crouch_mesh = name, mesh:GetAddress()
+    entry.pose_animation, entry.pose_mesh = name, mesh:GetAddress()
 end
 
 local function remove(entry)
@@ -293,6 +330,9 @@ function avatar.sync(state, phase)
     if client_world ~= world or client_map ~= state.map then
         client_world, client_map, client_outfits, client_receipt = world, state.map, {}, nil
     end
+    local authority = phase == "hosting" and state.world:GetAddress() or nil
+    if authority ~= host_world then host_world, host_aim_receipt, host_aims = authority, nil, {} end
+    sync_local_aim(state, phase)
     observe(state, phase)
     local outfits = phase == "hosting" and observations or client_outfits
     local seen = {}
@@ -323,10 +363,20 @@ function avatar.sync(state, phase)
                             if not cosmetics then error("Invalid remote character appearance") end
                             apply_outfit(entry, outfit, cosmetics)
                             character_view.apply(entry, cosmetics, appearance, asset, visual_component)
-                            apply_locomotion(entry)
+                            local aim = outfit and outfit.aim or "-"
+                            if phase == "hosting" then
+                                aim = outfit and host_aims[entry.id] == outfit.gun and outfit.gun or "-"
+                            end
+                            apply_locomotion(entry, aim)
                             aim_head(entry)
                         end
                         weapon_view.apply(entry, outfit and outfit.weapon or "-")
+                        if entry.weapon_parts and #entry.weapon_parts > 0 then
+                            local socket = entry.body:GetSocketTransform(FName("Weapon_Socket01", EFindName.FNAME_Find), 2)
+                            entry.weapon_socket_height = socket.Translation.Z
+                        else
+                            entry.weapon_socket_height = nil
+                        end
                     end)
                     entry.failure = not ok and tostring(failure) or nil
                 end
@@ -342,21 +392,40 @@ function avatar.sync(state, phase)
 end
 
 function avatar.command(fields, state, phase)
+    if fields[2] == "native-avatar-host-aims" then
+        local receipt = fields[4]
+        if phase ~= "hosting" or fields[3] ~= state.map or not receipt or #receipt ~= 32
+            or not receipt:match("^[0-9a-f]+$") or (#fields - 4) % 2 ~= 0 or #fields > 12 then
+            error("Invalid hosted avatar aim scope")
+        end
+        local aims = {}
+        for index = 5, #fields, 2 do
+            local id, mode = math.tointeger(tonumber(fields[index])), fields[index + 1]
+            if not id or id < 0 or id > 2147483647 or aims[id] or not aimed[mode] then
+                error("Invalid hosted avatar aim")
+            end
+            aims[id] = mode
+        end
+        host_world, host_aim_receipt, host_aims = state.world:GetAddress(), receipt, aims
+        return "Guest avatar aim received"
+    end
     if fields[2] ~= "native-avatar-outfits" then return end
     local receipt = fields[4]
     if phase ~= "connected" or fields[3] ~= state.map or not receipt or #receipt ~= 32
-        or not receipt:match("^[0-9a-f]+$") or (#fields - 4) % 5 ~= 0 or #fields > 29 then
+        or not receipt:match("^[0-9a-f]+$") or (#fields - 4) % 6 ~= 0 or #fields > 34 then
         error("Invalid remote avatar outfit scope")
     end
     local outfits = {}
-    for index = 5, #fields, 5 do
+    for index = 5, #fields, 6 do
         local id = math.tointeger(tonumber(fields[index]))
         local body, head, weapon, appearance = fields[index + 1], fields[index + 2], fields[index + 3], fields[index + 4]
+        local aim = fields[index + 5]
         if not id or id < 0 or id > 2147483647 or outfits[id] or not outfit_path(body) or not outfit_path(head)
-            or not weapon_view.decode(weapon) or not character_view.decode(appearance) then
+            or not weapon_view.decode(weapon) or not character_view.decode(appearance)
+            or aim ~= "-" and (weapon == "-" or not aimed[aim]) then
             error("Invalid remote avatar outfit")
         end
-        outfits[id] = { body = body, head = head, weapon = weapon, appearance = appearance }
+        outfits[id] = { body = body, head = head, weapon = weapon, appearance = appearance, aim = aim }
     end
     client_world, client_map, client_outfits, client_receipt = state.world:GetAddress(), state.map, outfits, receipt
     return "Remote avatar outfits received"
@@ -367,12 +436,16 @@ function avatar.rows(row)
     for _, entry in pairs(avatars) do
         rows[#rows + 1] = row("native-player-avatar", entry.map, entry.name, entry.status, entry.failure or "",
             entry.id or "-", entry.body_worn or "-", entry.head_worn or "-", entry.aim_roll or "-",
-            entry.weapon_model or "-", entry.appearance or "-")
+            entry.weapon_model or "-", entry.appearance or "-", entry.pose_animation or "-", entry.weapon_socket_height or "-",
+            valid(entry.body) and entry.body.AnimationMode or "-")
     end
     for id, outfit in pairs(observations) do
-        rows[#rows + 1] = row("native-avatar-outfit", id, outfit.pawn, outfit.body, outfit.head, outfit.weapon, outfit.appearance)
+        rows[#rows + 1] = row("native-avatar-outfit", id, outfit.pawn, outfit.body, outfit.head, outfit.weapon,
+            outfit.appearance, outfit.aim, outfit.gun)
     end
     if client_receipt then rows[#rows + 1] = row("native-avatar-outfits-receipt", client_receipt) end
+    if host_aim_receipt then rows[#rows + 1] = row("native-avatar-host-aim-receipt", host_aim_receipt) end
+    if holding_aim ~= nil then rows[#rows + 1] = row("native-avatar-local-aim", holding_aim and 1 or 0) end
     return rows
 end
 

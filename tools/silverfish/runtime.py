@@ -2699,7 +2699,7 @@ class Bridge:
                                                "location": [_finite(axis) for axis in fields[4:7]],
                                                "controller": fields[7],
                                                "max_health": _finite(fields[8]) if len(fields) == 9 else None}
-                elif fields[0] == "native-player-avatar" and len(fields) in (5, 8, 10, 11):
+                elif fields[0] == "native-player-avatar" and len(fields) in (5, 8, 10, 11, 14):
                     area, pawn, status, diagnostic = fields[1:5]
                     if area == data.get("map") and status in ("default_body", "stock_body", "unavailable"):
                         avatar = {"state": status, "diagnostic": diagnostic}
@@ -2713,10 +2713,14 @@ class Bridge:
                             meshes = native_player_avatar.weapon_meshes(fields[9])
                             if meshes is not None:
                                 avatar.update(head_roll=head_roll, weapon_meshes=meshes)
-                        if len(fields) == 11:
+                        if len(fields) >= 11:
                             appearance = native_player_avatar.character_appearance(fields[10])
                             if appearance is not None:
                                 avatar["appearance"] = appearance
+                        if len(fields) == 14:
+                            clip, height, mode = fields[11:]
+                            avatar.update(pose_clip=None if clip == "-" else clip, weapon_socket_height=_finite(height),
+                                          animation_mode=int(mode) if mode in ("0", "1", "2") else None)
                         data.setdefault("native_player_avatars", {})[pawn] = avatar
                 elif fields[0] == native_player_avatar.TAG:
                     player_id, outfit = native_player_avatar.parse(fields, data.get("state"), data.get("map"))
@@ -2727,6 +2731,12 @@ class Bridge:
                 elif (fields[0] == "native-avatar-outfits-receipt" and len(fields) == 2
                       and data.get("state") == "connected" and native_player_avatar.REQUEST_ID.fullmatch(fields[1])):
                     data[native_player_avatar.RECEIPT] = fields[1]
+                elif (fields[0] == "native-avatar-host-aim-receipt" and len(fields) == 2
+                      and data.get("state") == "hosting" and native_player_avatar.REQUEST_ID.fullmatch(fields[1])):
+                    data[native_player_avatar.HOST_AIM_RECEIPT] = fields[1]
+                elif (fields[0] == "native-avatar-local-aim" and len(fields) == 2
+                      and data.get("state") == "connected" and fields[1] in ("0", "1")):
+                    data[native_player_avatar.LOCAL_AIM] = fields[1] == "1"
             if data.get("schema") == 1 and "state" in data:
                 local_input = data.get("player_local_input")
                 if local_input and local_input["pawn"] != data["pawns"].get("local", {}).get("name"):

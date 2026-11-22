@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import time
 
 from .native_stock_door import actor_map
 from .party import REQUEST_ID
@@ -10,6 +11,8 @@ from .party import REQUEST_ID
 
 KEY = "native_avatar_outfits"
 RECEIPT = "native_avatar_outfits_receipt"
+HOST_AIM_RECEIPT = "native_avatar_host_aim_receipt"
+LOCAL_AIM = "native_avatar_local_aim"
 TAG = "native-avatar-outfit"
 _ARMOR = re.compile(r"/Game/Classes/Armor_Items/([A-Za-z0-9_]+)\.\1_C")
 _MESH = re.compile(r"/Game/(?:Assets|Classes)/[A-Za-z0-9_/]+/([A-Za-z0-9_]+)\.\1")
@@ -22,7 +25,8 @@ _NPC = "/Game/Classes/NPCs/NPC_Assets/"
 _HELMET_MESHES = "/Game/Classes/Player/PlayerAssets/HelmetMeshes/"
 _APPEARANCE = ("face", "plumage", "body", "tail_static", "tail_skeletal", "scale_pattern", "skin_color",
                "plumage_color", "eye_color", "eye_style")
-_OUTFIT = ("body", "head", "weapon", "appearance")
+_OUTFIT = ("body", "head", "weapon", "appearance", "aim")
+_AIM = ("-", "pistol", "rifle")
 
 
 def valid_path(path):
@@ -97,16 +101,29 @@ def character_appearance(model):
 
 
 def parse(fields, phase, area):
-    if len(fields) not in (5, 6, 7) or phase != "hosting":
+    if len(fields) not in (5, 6, 7, 8, 9) or phase != "hosting":
         raise ValueError("Invalid authoritative outfit row")
     _, player_id, pawn, body, head = fields[:5]
     weapon = fields[5] if len(fields) >= 6 else "-"
-    appearance = fields[6] if len(fields) == 7 else "-"
+    appearance = fields[6] if len(fields) >= 7 else "-"
+    aim = fields[7] if len(fields) >= 8 else "-"
+    gun = fields[8] if len(fields) == 9 else aim
     if (not valid_id(player_id) or not pawn.startswith("Player_FP_C ") or actor_map(pawn) != area
             or not all(map(valid_path, (body, head))) or weapon_meshes(weapon) is None
-            or character_appearance(appearance) is None):
+            or character_appearance(appearance) is None or aim not in ("-", gun)
+            or gun not in _AIM or gun != "-" and weapon == "-"):
         raise ValueError("Invalid authoritative outfit identity")
-    return player_id, {"pawn": pawn, "body": body, "head": head, "weapon": weapon, "appearance": appearance}
+    return player_id, {"pawn": pawn, "body": body, "head": head, "weapon": weapon, "appearance": appearance,
+                       "aim": aim, "gun": gun}
+
+
+def guest_aim(host, character, member, pressed):
+    pawn = member["pawn"]
+    standing = host.party["players"].get(character, {}).get("downed") is False
+    if pressed and standing and not host.party.get("wipe"):
+        host.guest_avatar_aims[pawn] = host.zone_epoch, time.monotonic() + 1.5
+    else:
+        host.guest_avatar_aims.pop(pawn, None)
 
 
 def frame(host):
@@ -115,12 +132,39 @@ def frame(host):
     if (game.get("state") != "hosting" or not area or KEY not in game
             or not isinstance(epoch, str) or not REQUEST_ID.fullmatch(epoch)):
         return None
-    allowed = {owner["pawn"] for owner in host.native_recipients().values() if owner["connected"]}
-    allowed.add(game.get("pawns", {}).get("local", {}).get("name"))
-    return {"map": area, "epoch": epoch, "outfits": {
-        player_id: {key: outfit.get(key, "-") for key in _OUTFIT}
-        for player_id, outfit in game[KEY].items() if outfit["pawn"] in allowed
-    }}
+    allowed = {owner["pawn"]: character for character, owner in host.native_recipients().items() if owner["connected"]}
+    lead = game.get("pawns", {}).get("local", {}).get("name")
+    now = time.monotonic()
+    host.guest_avatar_aims = {pawn: value for pawn, value in host.guest_avatar_aims.items()
+                              if pawn in allowed and value[0] == epoch and value[1] > now}
+    outfits = {}
+    for player_id, outfit in game[KEY].items():
+        pawn = outfit["pawn"]
+        if pawn in allowed or pawn == lead:
+            row = {key: outfit.get(key, "-") for key in _OUTFIT}
+            if pawn in allowed:
+                standing = host.party["players"].get(allowed[pawn], {}).get("downed") is False
+                aiming = pawn in host.guest_avatar_aims and standing and not host.party.get("wipe")
+                row["aim"] = outfit.get("gun", "-") if aiming else "-"
+            outfits[player_id] = row
+    return {"map": area, "epoch": epoch, "outfits": outfits}
+
+
+async def project_host(host, bridge):
+    game = host.last_game
+    if not host.guest_avatar_aims and not game.get(HOST_AIM_RECEIPT):
+        return game
+    incoming = frame(host)
+    if incoming is None:
+        return game
+    lead = game.get("pawns", {}).get("local", {}).get("name")
+    aims = {player_id: row["aim"] for player_id, row in incoming["outfits"].items()
+            if row["aim"] != "-" and game[KEY][player_id]["pawn"] != lead}
+    receipt = hashlib.sha256(json.dumps([incoming["map"], incoming["epoch"], aims], sort_keys=True).encode()).hexdigest()[:32]
+    if game.get(HOST_AIM_RECEIPT) == receipt:
+        return game
+    arguments = [value for pair in sorted(aims.items()) for value in pair]
+    return await bridge.command("native-avatar-host-aims", incoming["map"], receipt, *arguments, timeout=2)
 
 
 async def project(bridge, game, incoming, epoch):
@@ -132,7 +176,8 @@ async def project(bridge, game, incoming, epoch):
     if (not isinstance(outfits, dict) or len(outfits) > 5 or any(
             not valid_id(key) or not isinstance(row, dict) or set(row) != set(_OUTFIT)
             or not all(map(valid_path, (row["body"], row["head"]))) or weapon_meshes(row["weapon"]) is None
-            or character_appearance(row["appearance"]) is None
+            or character_appearance(row["appearance"]) is None or row["aim"] not in _AIM
+            or row["aim"] != "-" and row["weapon"] == "-"
             for key, row in outfits.items())):
         return game
     receipt = hashlib.sha256(json.dumps([area, epoch, outfits], sort_keys=True).encode()).hexdigest()[:32]

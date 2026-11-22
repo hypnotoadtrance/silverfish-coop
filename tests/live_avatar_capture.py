@@ -81,8 +81,11 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
         return json.loads(output)
 
     async def start(log, target, *args):
+        process_env = dict(env)
+        if equipment and target == host:
+            process_env["SILVERFISH_COOP_RENDER_CAPTURE"] = "host"
         with (host_run / log).open("wb") as stream:
-            process = await asyncio.create_subprocess_exec(*base, *args, cwd=REPO, env=env,
+            process = await asyncio.create_subprocess_exec(*base, *args, cwd=REPO, env=process_env,
                 stdout=stream, stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW)
         processes.append((process, target))
         return process
@@ -100,6 +103,8 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
         await wait(host_run, lambda state: state.get("state") == "hosting")
         invitation = await command("invite", *host, "--name", "Loopback avatar guest", "--character", "Avatar guest")
         join = ("join", *guest, "--invite", invitation["invite_file"], "--headless", "--native-zones")
+        if equipment:
+            join += ("--native-guest-primary-input",)
         guest_process = await start("guest.txt", guest, *join)
         evidence = {}
         for role, run in (("host", host_run), ("guest", guest_run)):
@@ -140,6 +145,31 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
                                           on_host=(role == "host"))
                 for role, run in (("host", host_run), ("guest", guest_run))
             }
+            def aimed_pistol(state, *, on_host):
+                peer = equipped_projection(state, on_host=on_host)
+                if (peer and peer.get("pose_clip") == "HandGun_Idle" and peer.get("animation_mode") == 1
+                        and 100 <= (peer.get("weapon_socket_height") or 0) <= 107):
+                    return peer
+
+            lowered = evidence["held"]["guest"]
+            await avatar_probe(host_run, "aim")
+            aimed_host = await wait(guest_run, lambda state: aimed_pistol(state, on_host=False), timeout=10)
+            evidence["aimed_pistol"] = aimed_pistol(aimed_host, on_host=False)
+            await avatar_probe(host_run, "lower")
+            await wait(guest_run, lambda state: (peer := equipped_projection(state, on_host=False))
+                       and peer.get("pose_clip") is None and peer.get("animation_mode") == lowered["animation_mode"], timeout=10)
+            evidence["aim_release_verified"] = True
+            guest_lowered = evidence["held"]["host"]
+            await wait(guest_run, lambda state: state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
+            await avatar_probe(guest_run, "aim")
+            await wait(guest_run, lambda state: state.get("game", {}).get("native_avatar_local_aim") is True, timeout=8)
+            aimed_guest = await wait(host_run, lambda state: aimed_pistol(state, on_host=True), timeout=10)
+            evidence["guest_aimed_pistol"] = aimed_pistol(aimed_guest, on_host=True)
+            await avatar_probe(guest_run, "lower")
+            await wait(guest_run, lambda state: state.get("game", {}).get("native_avatar_local_aim") is False, timeout=8)
+            await wait(host_run, lambda state: (peer := equipped_projection(state, on_host=True))
+                       and peer.get("pose_clip") is None and peer.get("animation_mode") == guest_lowered["animation_mode"], timeout=10)
+            evidence["guest_aim_release_verified"] = True
             await command("action", *guest, "drop-link")
             await wait(host_run, lambda state: any(lease["character_id"] == invitation["character_id"]
                        and lease["state"] == "reserved" for lease in state.get("campaign", {}).get("leases", ())))

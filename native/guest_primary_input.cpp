@@ -46,6 +46,13 @@ namespace
         STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_36");
     constexpr auto completed_path =
         STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_37");
+    constexpr auto aim_action_path = STR("/Game/Classes/Player/Player_Inputs/IA_Use_Secondary.IA_Use_Secondary");
+    constexpr auto aim_started_path =
+        STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Use_Secondary_K2Node_EnhancedInputActionEvent_33");
+    constexpr auto aim_canceled_path =
+        STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Use_Secondary_K2Node_EnhancedInputActionEvent_34");
+    constexpr auto aim_completed_path =
+        STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_Use_Secondary_K2Node_EnhancedInputActionEvent_35");
     constexpr auto toggle_path = STR("/Game/Classes/Player/Player_Inputs/IA_ModeToggle.IA_ModeToggle");
     constexpr auto toggle_completed_path =
         STR("/Game/Classes/Player/Player_FP.Player_FP_C:InpActEvt_IA_ModeToggle_K2Node_EnhancedInputActionEvent_29");
@@ -205,6 +212,9 @@ namespace
         std::string text;
         std::uint64_t generation{};
         MappedInput mapped{};
+        U::FWeakObjectPtr aim_action{};
+        std::array<Wrapper, 3> aim_wrappers{};
+        bool aiming{};
     };
 
     struct CapturedPress
@@ -645,6 +655,17 @@ namespace
         if (!next.started.function.Get()) return "stock_guest_primary_wrappers_unavailable";
         if (observed) return {};
         next.completed = bind_wrapper(pawn_type, action, completed_path, 16);
+        if (!next.seat.host && next.item != &old_pipe && next.item != &blowtorch && next.item != &camera)
+        {
+            if (auto* aim = find<U::UObject>(aim_action_path); live(aim) && aim->GetClassPrivate() == action_type)
+            {
+                next.aim_wrappers = {bind_wrapper(pawn_type, aim, aim_started_path, 2),
+                                     bind_wrapper(pawn_type, aim, aim_canceled_path, 8),
+                                     bind_wrapper(pawn_type, aim, aim_completed_path, 16)};
+                if (next.aim_wrappers[0].function.Get() && next.aim_wrappers[1].function.Get() &&
+                    next.aim_wrappers[2].function.Get()) next.aim_action = aim;
+            }
+        }
         if (next.completed.function.Get() && !next.seat.host && next.item->kind == "smg-standard" && held_enabled())
             bind_mapped_input(next);
         return next.completed.function.Get() ? std::string_view{} : "stock_guest_primary_wrappers_unavailable";
@@ -788,6 +809,18 @@ namespace
     void intercept(Iteration& iteration, U::UObject* pawn, U::UFunction* function, const void* arguments)
     {
         if (!available() || !pawn || !function || iteration.OriginalFunctionCallPrevented()) return;
+        if (auto* action = scope.aim_action.Get(); pawn == scope.seat.pawn.Get() && action)
+        {
+            for (std::size_t i = 0; i < scope.aim_wrappers.size(); ++i)
+            {
+                const auto& wrapper = scope.aim_wrappers[i];
+                if (wrapper.function.Get() != function) continue;
+                if (verifies_source(wrapper, action, arguments))
+                    scope.aiming = i == 0 && qualified(scope, Clock::now()) && can_act(scope.seat) &&
+                        false_field(pawn, STR("Sprinting"));
+                return;
+            }
+        }
         if (scope.item == &crowbar && pawn == scope.seat.pawn.Get() && function == scope.completed.function.Get())
         {
             const auto now = Clock::now();
@@ -902,6 +935,17 @@ namespace
         head = (head + 1) % receipt_limit;
         --count;
         return 4;
+    }
+
+    int read_aim(const Lua& lua)
+    {
+        auto* pawn = scope.seat.pawn.Get();
+        if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1) ||
+            lua.get_integer() != address(pawn)) return 0;
+        if (scope.aiming && (!qualified(scope, Clock::now()) || !can_act(scope.seat) ||
+            !false_field(pawn, STR("Sprinting")))) scope.aiming = false;
+        lua.set_bool(scope.aiming);
+        return 1;
     }
 
     int take_held(const Lua& lua)
@@ -1274,6 +1318,7 @@ namespace silverfish::native_guest_primary_input
             lua.register_function("SilverfishSetNativeGuestPrimaryScope", [](const Lua& lua) { return set_scope(lua, false); });
             lua.register_function("SilverfishTakeNativeGuestPrimaryIntent", take);
             lua.register_function("SilverfishClearNativeGuestPrimaryScope", clear);
+            lua.register_function("SilverfishReadNativeGuestAim", read_aim);
             if (fixtures(false)) lua.register_function("SilverfishProbeNativeGuestPrimaryInput", probe);
             if (held_enabled())
             {
