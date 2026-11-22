@@ -17,6 +17,7 @@
 #include <ranges>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <Helpers/String.hpp>
@@ -62,6 +63,22 @@ namespace
     constexpr auto crowbar_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C");
     constexpr std::int32_t blowtorch_capacity = 3;
     constexpr auto equipment_base_path = STR("/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C");
+    constexpr auto grenade_base_path = STR("/Game/Classes/Equipment/Grenade_Master_BP.Grenade_Master_BP_C");
+    constexpr auto grenade_spawn_path = STR("/Game/Classes/Equipment/Grenade_Master_BP.Grenade_Master_BP_C:SpawnNade");
+    constexpr auto grenade_throw_path = STR("/Game/Classes/Equipment/Grenade_Master_BP.Grenade_Master_BP_C:ThrowNade");
+    struct FlareProfile
+    {
+        const Unreal::TCHAR* equipment;
+        const Unreal::TCHAR* projectile;
+    };
+    constexpr FlareProfile flares[]{
+        {STR("/Game/Classes/Equipment/Eqp_Flare.Eqp_Flare_C"),
+         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Flare_Projectile_BP.Flare_Projectile_BP_C")},
+        {STR("/Game/Classes/Equipment/Eqp_Flare_Blue.Eqp_Flare_Blue_C"),
+         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Blue_Flare_Projectile_BP.Blue_Flare_Projectile_BP_C")},
+        {STR("/Game/Classes/Equipment/Eqp_Flare_Yellow.Eqp_Flare_Yellow_C"),
+         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Yellow_Flare_Projectile_BP.Yellow_Flare_Projectile_BP_C")},
+    };
     constexpr auto old_pipe_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C");
     constexpr auto weapon_base_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
     constexpr auto ammo_master_path = STR("/Game/Classes/Items/Ammo_Master_BP.Ammo_Master_BP_C");
@@ -331,6 +348,7 @@ namespace
             const auto kind = lua.get_string();
             if (kind == "blowtorch") seed_selection->path = blowtorch_path;
             else if (kind == "crowbar") seed_selection->path = crowbar_path;
+            else if (kind == "stock-flare") seed_selection->path = flares[0].equipment;
             else
             {
                 seed_selection->full_magazine = kind == "smg-standard-full";
@@ -713,14 +731,16 @@ namespace
         auto* source = item_class->GetClassDefaultObject().Get();
         const bool blowtorch = item_class == find<Unreal::UClass>(blowtorch_path);
         const bool crowbar = item_class == find<Unreal::UClass>(crowbar_path);
-        auto* quantity = field<Unreal::FIntProperty>(source, ammo_fixture || blowtorch || crowbar ? STR("Ammo") : STR("MagSize"));
+        const bool flare = item_class->GetPathName() == flares[0].equipment;
+        auto* quantity = field<Unreal::FIntProperty>(source, ammo_fixture || blowtorch || crowbar || flare ? STR("Ammo") : STR("MagSize"));
         const auto capacity = quantity ? quantity->GetPropertyValueInContainer(source) : -1;
         const auto* magazine = ammo_fixture ? nullptr : stock_magazine(item_class);
-        const auto units = ammo_fixture ? ammo_fixture->fixture_units : blowtorch ? blowtorch_capacity : crowbar ? -1 :
+        const auto units = ammo_fixture ? ammo_fixture->fixture_units : blowtorch ? blowtorch_capacity : crowbar ? -1 : flare ? 2 :
             magazine ? (full_magazine ? magazine->capacity : std::min(magazine_fixture, magazine->capacity)) : magazine_fixture;
         if (!source || !source->HasAnyFlags(Unreal::RF_ClassDefaultObject) || source->GetClassPrivate() != item_class ||
             (magazine && capacity != magazine->capacity) ||
-            (ammo_fixture ? capacity != units || !boolean(source, STR("Stacks"), true) : capacity < units))
+            (ammo_fixture ? capacity != units || !boolean(source, STR("Stacks"), true) :
+                flare ? !quantity || !boolean(source, STR("Stacks"), true) : capacity < units))
             return result(lua, false, "stock_guest_weapon_seed_schema_unavailable");
         AmmoStackSchema stack;
         if (ammo_fixture && (!stack.read(item_class, inventory) || !stack.qualifies(units)))
@@ -1783,6 +1803,176 @@ namespace
 
     constexpr int quick_slots = 8;
 
+    const FlareProfile* flare_profile(Unreal::UClass* type)
+    {
+        if (!live(type)) return nullptr;
+        const auto path = type->GetPathName();
+        const auto match = std::ranges::find_if(flares, [&](const auto& flare) { return path == flare.equipment; });
+        auto* base = match != std::ranges::end(flares) ? find<Unreal::UClass>(grenade_base_path) : nullptr;
+        return base && type->IsChildOf(base) ? &*match : nullptr;
+    }
+
+    bool supported_stack_equipment(Unreal::UClass* type, Unreal::UObject* defaults)
+    {
+        if (boolean(defaults, STR("Stacks"), false)) return true;
+        const auto* flare = flare_profile(type);
+        auto* projectile = flare ? object(defaults, STR("Projectile")) : nullptr;
+        return flare && boolean(defaults, STR("Stacks"), true) && live(projectile) &&
+            projectile->GetPathName() == flare->projectile;
+    }
+
+    struct FlareCall
+    {
+        Unreal::UFunction* function{};
+        Unreal::FBoolProperty* toss{};
+
+        explicit FlareCall(const Unreal::TCHAR* path)
+            : function(find<Unreal::UFunction>(path)), toss(input<Unreal::FBoolProperty>(function, STR("Toss"), 0)) {}
+
+        bool valid() const
+        {
+            return function && toss && function->GetNumParms() == 1 && function->GetParmsSize() == 1 &&
+                !function->GetReturnProperty() && function->GetOuterPrivate() == find<Unreal::UClass>(grenade_base_path);
+        }
+
+        void invoke(Unreal::UObject* actor, bool underhand) const
+        {
+            std::byte parameters{};
+            toss->SetPropertyValueInContainer(&parameters, underhand);
+            actor->ProcessEvent(function, &parameters);
+        }
+    };
+
+    struct LocalFlareIntent
+    {
+        Unreal::FWeakObjectPtr pawn, save;
+        Guid guid{};
+        const FlareProfile* profile{};
+        std::uint64_t sequence{};
+        bool toss{};
+        HoldClock::time_point deadline{};
+    };
+    LocalFlareIntent local_flare;
+    std::uint64_t flare_sequence{};
+    std::array flare_hooks{Hook::ERROR_ID, Hook::ERROR_ID};
+
+    void intercept_flare(HoldHook& iteration, Unreal::UObject* actor, Unreal::UFunction* function, void* parameters)
+    {
+        static const Unreal::FName spawn{STR("SpawnNade")};
+        if (!function || function->GetFName() != spawn || !parameters || !live(actor) ||
+            !Unreal::IsInGameThreadRaw()) return;
+        const auto* flare = flare_profile(actor->GetClassPrivate());
+        auto* pawn = flare ? object(actor, STR("Player_Ref")) : nullptr;
+        if (!pawn || silverfish::native_interaction_input::current_guest_pawn(reinterpret_cast<std::uintptr_t>(pawn)) != pawn ||
+            object(pawn, STR("EquipedItem")) != actor) return;
+        FlareCall call{grenade_spawn_path};
+        if (!call.valid() || call.function != function) return;
+        iteration.PreventOriginalFunctionCall();
+        if (!iteration.OriginalFunctionCallPrevented()) return;
+
+        const bool toss = call.toss->GetPropertyValueInContainer(parameters);
+        // The native throw completion restores the hand pose and its audio. An
+        // empty ThrownNade makes that branch return without consuming stock.
+        FlareCall cleanup{grenade_throw_path};
+        if (cleanup.valid() && !live(object(actor, STR("ThrownNade")))) cleanup.invoke(actor, toss);
+        if (flare_sequence >= (1ULL << 53) - 1) return;
+        Context context{};
+        context.pawn = pawn;
+        context.weapon = actor->GetClassPrivate();
+        context.save = object(pawn, STR("Save"));
+        context.world = static_cast<Unreal::AActor*>(pawn)->GetWorld();
+        context.instance = object(context.world, STR("OwningGameInstance"));
+        if (!live(context.save) || object(context.instance, STR("SaveSlot_Ref")) != context.save) return;
+        Inventory inventory;
+        if (!bind_inventory(context, inventory).empty()) return;
+        inventory.equipment_index = inventory.selected->GetPropertyValueInContainer(context.save);
+        Unreal::FScriptArrayHelper slots(inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(context.save));
+        if (inventory.equipment_index < 0 || inventory.equipment_index >= quick_slots ||
+            inventory.equipment_index >= slots.Num() || equipped(context, inventory) != actor) return;
+        const auto* row = slots.GetRawPtr(inventory.equipment_index);
+        const auto guid = inventory.identity(row);
+        const auto ammo = inventory.ammo->GetPropertyValueInContainer(row);
+        if (guid == Guid{} || inventory.row_class(row) != context.weapon || ammo < 1) return;
+        local_flare = {pawn, context.save, guid, flare, ++flare_sequence, toss, HoldClock::now() + std::chrono::seconds(2)};
+    }
+
+    void flare_script_pre(HoldHook& iteration, Unreal::UObject* actor, Unreal::FFrame& frame, void*)
+    {
+        intercept_flare(iteration, actor, frame.Node(), frame.Locals());
+    }
+
+    int take_flare(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto address = lua.get_integer();
+        auto* pawn = address > 0 ? silverfish::native_interaction_input::current_guest_pawn(address) : nullptr;
+        if (!pawn || pawn != local_flare.pawn.Get() || object(pawn, STR("Save")) != local_flare.save.Get() ||
+            !local_flare.profile || HoldClock::now() >= local_flare.deadline) return 0;
+        const auto intent = std::exchange(local_flare, {});
+        const auto& guid = intent.guid;
+        lua.set_integer(intent.sequence);
+        lua.set_string(std::format("{:08X}{:08X}{:08X}{:08X}", guid[0], guid[1], guid[2], guid[3]));
+        lua.set_bool(intent.toss);
+        lua.set_string(RC::to_utf8_string(intent.profile->equipment));
+        return 4;
+    }
+
+    int throw_flare(const Lua& lua)
+    {
+        const auto refuse = [&](std::string_view reason) { return result(lua, false, reason); };
+        if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE") || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 4 ||
+            !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3) || !lua.is_bool(4))
+            return refuse("native_guest_flare_refused_scope");
+        const auto pawn = lua.get_integer(), save = lua.get_integer();
+        Context context{};
+        if (pawn <= 0 || save <= 0 || !parse_guid(lua.get_string(), context.guid) ||
+            !resolve_owner(context, pawn, save).empty() || !ready_pawn(context))
+            return refuse("native_guest_flare_refused_owner");
+        const bool toss = lua.get_bool();
+        Inventory inventory;
+        if (!locate(context, inventory).empty() || !inventory.item || inventory.equipment_index < 0 ||
+            inventory.equipment_index >= quick_slots) return refuse("native_guest_flare_refused_slot");
+        context.weapon = Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item));
+        const auto* flare = flare_profile(context.weapon);
+        auto* actor = flare ? equipped(context, inventory) : nullptr;
+        auto* projectile_class = actor ? object(actor, STR("Projectile")) : nullptr;
+        auto* ammo = field<Unreal::FIntProperty>(actor, STR("Ammo"));
+        const auto before = inventory.ammo->GetPropertyValueInContainer(inventory.item);
+        if (!actor || !live(projectile_class) || projectile_class->GetPathName() != flare->projectile ||
+            !boolean(actor, STR("Stacks"), true) || !ammo || before < 1 ||
+            ammo->GetPropertyValueInContainer(actor) != before) return refuse("native_guest_flare_refused_equipment");
+        FlareCall call{grenade_spawn_path};
+        if (!call.valid()) return refuse("native_guest_flare_refused_schema");
+        const auto slot = inventory.equipment_index;
+        auto* previous = object(actor, STR("ThrownNade"));
+
+        using Value = std::unique_ptr<void, PropertyDeleter>;
+        auto* host_inventory = inventory.equipment->ContainerPtrToValuePtr<void>(context.stock);
+        Value prior_host_inventory(inventory.equipment->AllocateAndInitializeValue(), {inventory.equipment});
+        if (!prior_host_inventory) return refuse("native_guest_flare_refused_storage");
+        inventory.equipment->CopyCompleteValue(prior_host_inventory.get(), host_inventory);
+
+        call.invoke(actor, toss);
+        auto* spawned = object(actor, STR("ThrownNade"));
+        Unreal::FScriptArrayHelper slots(inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(context.save));
+        auto* after = slot < slots.Num() ? slots.GetRawPtr(slot) : nullptr;
+        const bool remaining = after && (before > 1
+            ? inventory.identity(after) == context.guid && inventory.row_class(after) == context.weapon &&
+                inventory.ammo->GetPropertyValueInContainer(after) == before - 1
+            : !inventory.row_class(after) && inventory.identity(after) == Guid{});
+        if (!ownership_current(context) || !remaining || !inventory.equipment->Identical(prior_host_inventory.get(), host_inventory) ||
+            !authority(spawned) || spawned == previous || spawned->GetClassPrivate() != projectile_class ||
+            static_cast<Unreal::AActor*>(spawned)->GetWorld() != context.world ||
+            object(spawned, STR("Owner")) != context.pawn || object(spawned, STR("Instigator")) != context.pawn)
+            return refuse("mutation_unverified_native_guest_flare_throw");
+        result(lua, true, "thrown");
+        lua.set_integer(before);
+        lua.set_integer(before - 1);
+        lua.set_string(RC::to_utf8_string(flare->equipment));
+        lua.set_string(RC::to_utf8_string(spawned->GetPathName()));
+        return 6;
+    }
+
     int select_stock_equipment(const Lua& lua)
     {
         const auto refuse = [&](std::string_view reason) { return result(lua, false, reason); };
@@ -1799,7 +1989,7 @@ namespace
         auto* base = find<Unreal::UClass>(equipment_base_path);
         auto* defaults = live(type) && base && type != base && type->IsChildOf(base) ? type->GetClassDefaultObject().Get() : nullptr;
         if (!defaults || defaults->GetClassPrivate() != type ||
-            !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) || !boolean(defaults, STR("Stacks"), false))
+            !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) || !supported_stack_equipment(type, defaults))
             return refuse("native_guest_selection_refused_equipment");
         context.weapon = type;
         const auto loaded = inventory.ammo->GetPropertyValueInContainer(inventory.item);
@@ -1934,7 +2124,7 @@ namespace
         auto* defaults = live(type) && base && type != base && type->IsChildOf(base) ? type->GetClassDefaultObject().Get() : nullptr;
         auto* item_type = field<Unreal::FByteProperty>(defaults, STR("ItemType"));
         auto* payload = field<Unreal::FStructProperty>(inventory.type->GetStruct().Get(), payload_name);
-        if (!defaults || !item_type || !boolean(defaults, STR("Stacks"), false) || !payload ||
+        if (!defaults || !item_type || !supported_stack_equipment(type, defaults) || !payload ||
             payload->GetStruct().Get() != find<Unreal::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct")))
             return result(lua, false, "native_inventory_equip_refused_item");
 
@@ -2441,6 +2631,11 @@ namespace
             if (!context.weapon) context.weapon = qualified_old_pipe(row_class, context);
             if (!context.weapon) context.weapon = qualified_blowtorch(row_class);
             if (!context.weapon) context.weapon = qualified_melee_item(row_class, crowbar_path);
+            if constexpr (operation == Operation::Inspect)
+            {
+                auto* item_type = Unreal::Cast<Unreal::UClass>(row_class);
+                if (!context.weapon && flare_profile(item_type)) context.weapon = item_type;
+            }
         }
         if (!context.weapon) return fail("guest_weapon_class_unqualified");
         if constexpr (operation == Operation::Equip) return equip(lua, context, inventory);
@@ -2461,6 +2656,14 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     {
         lua.register_function("SilverfishReadLocalGuestEquipmentSelection", read_local_selection);
         install_selection_hooks();
+        lua.register_function("SilverfishTakeLocalGuestFlare", take_flare);
+        if (flare_hooks[0] == Hook::ERROR_ID)
+        {
+            flare_hooks[0] = Hook::RegisterProcessEventPreCallback(
+                intercept_flare, {false, false, STR("SilverfishCoopNative"), STR("Route the stock guest flare spawn")});
+            flare_hooks[1] = Hook::RegisterProcessLocalScriptFunctionPreCallback(
+                flare_script_pre, {false, false, STR("SilverfishCoopNative"), STR("Route the stock guest flare call")});
+        }
     }
     if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE")) return;
     lua.register_function("SilverfishEquipNativeGuestWeapon", run<Operation::Equip>);
@@ -2472,6 +2675,7 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishSortNativeGuestBackpack", sort_backpack);
     lua.register_function("SilverfishStoreNativeGuestEquipment", store_stock_equipment);
     lua.register_function("SilverfishSelectNativeGuestEquipment", select_stock_equipment);
+    lua.register_function("SilverfishThrowNativeGuestFlare", throw_flare);
     if (env("SILVERFISH_COOP_NATIVE_FIXTURES"))
     {
         if (env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") && env("SILVERFISH_COOP_HEADLESS"))
@@ -2501,4 +2705,10 @@ void silverfish::native_guest_item::shutdown()
     }
     remove_hold_hooks();
     remove_selection_hooks();
+    for (auto& callback : flare_hooks)
+    {
+        if (callback != Hook::ERROR_ID) Hook::UnregisterCallback(callback);
+        callback = Hook::ERROR_ID;
+    }
+    local_flare = {};
 }

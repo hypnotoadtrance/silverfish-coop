@@ -30,6 +30,7 @@ from . import native_loot, native_world_loot
 from . import native_loose_pickup
 from . import native_mushrooms
 from . import native_prop_carry
+from . import native_flare
 from . import native_stock_enemy_drops
 from . import native_lantern, native_stock_door
 from . import native_player_avatar
@@ -2245,6 +2246,9 @@ class Bridge:
                     active[mushroom["id"]] = mushroom
                 elif fields[0] == native_mushrooms.CLAIM:
                     data[native_mushrooms.PROOF] = native_mushrooms.parse_claim(fields, data.get("state"), data.get("map"))
+                elif fields[0] in (native_flare.ACTION, native_flare.INPUT):
+                    key = native_flare.PROOF if fields[0] == native_flare.ACTION else native_flare.INTENT
+                    data[key] = native_flare.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] in (native_prop_carry.ACTION, native_prop_carry.FIXTURE, native_prop_carry.BARREL_ROW,
                                    "native-prop-carry-input", "native-prop-carry-target"):
                     prop = native_prop_carry.parse(fields, data.get("state"), data.get("map"))

@@ -49,6 +49,7 @@ from . import native_weapon_fire_view
 from . import native_loose_pickup
 from . import native_mushrooms
 from . import native_prop_carry
+from . import native_flare
 from . import native_stock_enemy_drops
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
 from . import native_prototype_drill
@@ -96,7 +97,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         *native_finite_shop.ACTIONS,
                         native_authored_pickup.ACTION, native_loose_pickup.CLAIM, native_enemy_loot.CLAIM, native_stock_enemy_drops.CLAIM,
                         native_mushrooms.CLAIM,
-                        native_prop_carry.ACTION,
+                        native_prop_carry.ACTION, native_flare.ACTION,
                         native_lantern.EXTINGUISH,
                         *native_guest_weapon.GUEST_ACTIONS, native_guest_weapon.SELECT_EQUIPMENT,
                         *native_guest_consumable.RESULT, native_guest_melee.SWING,
@@ -2022,6 +2023,8 @@ class Host:
                 result = await native_inventory.sort_backpack(self, bridge, character, target, request["operation_id"])
             elif action == native_inventory.STORE_EQUIPMENT:
                 result = await native_inventory.store_equipment(self, bridge, character, target, request["operation_id"])
+            elif action == native_flare.ACTION:
+                result = await native_flare.perform(self, bridge, character, target, request["operation_id"])
             elif action == native_guest_ui.ACTION:
                 result = await native_guest_ui.capture(self, bridge, character, target)
             elif action == "native-inventory-list":
@@ -4811,6 +4814,7 @@ class Client:
         self.game_visit: tuple[str, str, str] | None = None
         self.last_reload_intent = 0
         self.last_equipment_selection = 0
+        self.last_flare_intent = 0
         self.guest_primary_input = guest_primary_input
         self.guest_held_input = native_smg_hold.GuestInput(self) if invite.get("native_guest_held_fire") else None
         self.mindcore_carry = native_mindcore_carry.GuestInput(self) if invite.get("native_zones") else None
@@ -5296,9 +5300,10 @@ class Client:
         sequence, area, pawn, guid, item_class = entries[-1]
         view = self.last_game.get("native_guest_inventory_equip_view", {})
         armor = native_guest_armor.EQUIP_ACTIONS.get(item_class)
+        flare = item_class in native_flare.CLASSES
         if (view != {"sequence": sequence, "map": area, "pawn": pawn, "guid": guid, "state": "equipping"}
                 or area != self.last_game.get("map") or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")
-                or not native_gold.valid_guid(guid) or not (armor or item_class in native_guest_weapon.CLASS_PATHS)):
+                or not native_gold.valid_guid(guid) or not (armor or flare or item_class in native_guest_weapon.CLASS_PATHS)):
             return
         epoch = self.host_session, self.zone_epoch
         identifier = f"{epoch[0]}:{epoch[1]}:{pawn}:inventory-equip:{sequence}"
@@ -5316,7 +5321,7 @@ class Client:
             if ((self.host_session, self.zone_epoch) != epoch or current.get("native_guest_inventory_equip_view") != view
                     or native_inventory.displayed_offset(current, sequence, area, pawn) != offset):
                 raise ValueError("The inventory equip confirmation expired")
-            action = armor or "native-guest-weapon-equip"
+            action = armor or (native_inventory.STORE_EQUIPMENT if flare else "native-guest-weapon-equip")
             equipped = await self.gameplay_action(action, operation, guid)
             key = "native_guest_helmet" if action == native_guest_armor.HELMET_ACTION else "native_guest_armor"
             if armor and equipped.get(key, {}).get("class_path") != item_class:
@@ -6030,6 +6035,7 @@ class Client:
             await native_stash.service_view(self, active)
             await self.service_inventory_equip(active)
             await self.service_inventory_use(active)
+            await native_flare.service_input(self, active)
             await native_inventory.service_split_view(self, active)
             await native_guest_drop.service_view(self, active)
             world_version = self.last_game.get(native_world_loot.CAPABILITY, 0)
