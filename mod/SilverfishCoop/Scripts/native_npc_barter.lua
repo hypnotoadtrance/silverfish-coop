@@ -5,6 +5,7 @@ local wire = require("native_wire_quest")
 local npc_class = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local trader_class = "/Game/Classes/Actors/Barter_BP.Barter_BP_C"
 local merchant_class = "/Game/Classes/Libraries/DataAssets/Merchants/MerchantData.MerchantData_C"
+local barter_screen = "/Game/Classes/GUI/New/BarterScreen.BarterScreen_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local item_weight = "Weight_12_11AB9ED547504E78A849A692A36DC938"
@@ -67,11 +68,17 @@ local function host_context(state, phase, name, identifier, listing)
     local instance = state.world.OwningGameInstance
     local stock = valid(instance) and instance.SaveSlot_Ref
     local host_stack = valid(state.controller) and state.controller.MenuStack
+    local host_screen
     if host_stack and not listing then
         for index = 1, host_stack:GetArrayNum() do
             local menu = host_stack[index]
-            if exact(menu, "/Game/Classes/GUI/New/BarterScreen.BarterScreen_C") and same(menu.Trader, actor) then
-                fail("host_is_trading")
+            if exact(menu, barter_screen) and same(menu.Trader, actor) then
+                -- The stock UI reserves staged items by moving them out of both inventories.
+                if host_stack:GetArrayNum() ~= 1 or #menu.PlayerOffer ~= 0 or #menu.TraderOffer ~= 0
+                    or menu.PlayerCashOffer ~= 0 or not menu:GetIsEnabled() or not valid(menu.TraderInventoryPanel) then
+                    fail("host_is_trading")
+                end
+                host_screen = menu
             end
         end
     end
@@ -88,7 +95,7 @@ local function host_context(state, phase, name, identifier, listing)
         local allowed = math.tointeger(relation.Relationship)
         if not allowed or allowed < 0 or allowed > 2 then fail("faction") end
     end
-    return pawn, save, stock, instance, actor
+    return pawn, save, stock, instance, actor, host_screen
 end
 
 local function preferences(actor)
@@ -146,7 +153,6 @@ end
 local guest_scope = require("native_save_scope")
 local session
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_SHOP_VIEW") == "1"
-local barter_screen = "/Game/Classes/GUI/New/BarterScreen.BarterScreen_C"
 local confirmation_screen = "/Game/Classes/GUI/New/ConfirmationScreen.ConfirmationScreen_C"
 local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local item_base = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
@@ -429,7 +435,7 @@ function barter.command(fields, state, phase)
     local listing = action == "native-npc-barter-open"
     if #fields ~= (listing and 4 or 7) then fail("arguments") end
     local identifier = fields[4]
-    local pawn, save, stock, instance, actor = host_context(state, phase, fields[3], identifier, listing)
+    local pawn, save, stock, instance, actor, host_screen = host_context(state, phase, fields[3], identifier, listing)
     if listing then
         latest = catalog(state, pawn, instance, actor, identifier)
         return "exact native NPC barter stock read"
@@ -446,6 +452,13 @@ function barter.command(fields, state, phase)
     end
     latest = report
     latest.exchange, latest.before = receipt, before
+    if host_screen then
+        local refreshed, reason = pcall(function()
+            host_screen.TraderInventoryPanel:FullRefresh()
+            host_screen:UpdateBalance()
+        end)
+        if not refreshed then print("[SilverfishCoop] Could not refresh the open host barter screen", reason) end
+    end
     return "exact native NPC barter reconciled"
 end
 

@@ -149,6 +149,12 @@ async def verify(work, canary, offer):
                 assert commit["cash_before"] == 20000 and 1000 < 20000 - commit["cash"] < 12868, commit
             evidence = {"offer": offer, "commit": commit, "receipt": receipt, "checkpoint_revision": checkpoint["revision"],
                         "guest_stock_screen": view["game"]["native_npc_barter_view"], "guest_inventory": inventory}
+            if offer == "simultaneous":
+                before = next(line.split("\t") for line in tail(host) if line.startswith("host_browsing\t"))
+                changes = [line.split("\t") for line in tail(host) if line.startswith("host_stock_changed\t")]
+                assert changes and changes[-1][1:] == [str(int(before[1]) - 1), str(commit["cash"]), "true"]
+                evidence["open_host_screen"] = {"items_before": int(before[1]), "items_after": int(changes[-1][1]),
+                                                "cash": int(changes[-1][2]), "editable": True}
             if offer == "skinflint":
                 effect, = [line.split("\t") for line in tail(host) if line.startswith("skinflint\t")]
                 _, pawn, value, guest_before, guest_after, host_before, host_after = effect
@@ -178,6 +184,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
-    parser.add_argument("--offer", choices=("cash", "high-value", "donation", "refresh", "skinflint", "partial"), default="cash")
+    parser.add_argument("--offer", choices=("cash", "high-value", "donation", "refresh", "skinflint", "partial", "simultaneous"),
+                        default="cash")
     options = parser.parse_args()
     asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve(strict=True), options.offer))

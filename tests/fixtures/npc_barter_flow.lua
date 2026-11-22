@@ -17,6 +17,7 @@ local skinflint = mode == "skinflint"
 local partial = mode == "partial"
 local donation, high_value = mode == "donation", mode == "high-value" or skinflint or partial
 local refresh_test = mode == "refresh"
+local simultaneous = mode == "simultaneous"
 local payment = partial and bandage or donation and jewelry or high_value and peaches or nil
 local money = high_value and 20000 or 1200
 local next_attempt, armed, committed, pending_confirmation, refreshed = 0, false, false, false, false
@@ -64,6 +65,24 @@ local function prepare(state, phase, actor)
     state.world.OwningGameInstance:Give_PlayerCash(money, false)
     if high_value then seed(actor, actor.Inventory, jewelry, 8) end
     if payment then seed(actor, save.PlayerBackpack, payment, partial and 4 or donation and 12 or 1) end
+    if simultaneous then
+        seed(actor, actor.Inventory, bandage, 1)
+        local host = state.local_pawn.pawn
+        actor:SendInteractionToActor(host, actor.Box)
+        local screen = state.controller.MenuStack[1]
+        assert(valid(screen) and valid(screen.TraderInventoryPanel) and screen.Trader:GetAddress() == actor:GetAddress(),
+            "host stock barter screen did not open")
+        local address = screen.TraderInventoryPanel:GetAddress()
+        local before = actor.Inventory:GetArrayNum()
+        proof("host_browsing", before, money)
+        RegisterHook("/Game/Classes/GUI/New/Components/InventoryPanel.InventoryPanel_C:FullRefresh", function(context)
+            local panel = context:get()
+            if valid(panel) and panel:GetAddress() == address and actor.Inventory:GetArrayNum() == before - 1 then
+                local funds = host.Save.Flags:Find(FName("Player_Cash")):get()
+                proof("host_stock_changed", actor.Inventory:GetArrayNum(), funds, screen:GetIsEnabled())
+            end
+        end)
+    end
     if skinflint then
         local character = save.Character
         local key = "PermanentEffects_42_E298D351429CF6DCAE0911A4D1EEDB00"
@@ -111,7 +130,9 @@ local function confirm(state, screen, actor, payment_row)
         for index = 1, actor.Inventory:GetArrayNum() do
             local item = actor.Inventory[index]
             local path = item[item_class]:GetFullName()
-            if (high_value and path:find(jewelry, 1, true)) or (not high_value and not path:find("/Weapons/", 1, true)) then
+            if (high_value and path:find(jewelry, 1, true))
+                or (simultaneous and path:find(bandage, 1, true))
+                or (not high_value and not simultaneous and not path:find("/Weapons/", 1, true)) then
                 local price = price_for(item)
                 if (high_value and price > 1000 and price <= money) or (not high_value and price > 0 and price <= 1000) then
                     row, cash = item, price
