@@ -305,6 +305,20 @@ async def verify(work: Path, originals_path: Path, *, visible_projection=False, 
                       clients[recipient]: unclaimed["actor"].split(" ", 1)[1]}
             for directory, actor in actors.items():
                 assert await bandage_probe(directory, "actor", actor) == "present"
+            address = await bandage_probe(run, "grip", identity)
+            await asyncio.sleep(.45)
+            drop_height = float(await bandage_probe(run, "drop"))
+            async with asyncio.timeout(4):
+                while True:
+                    landed_height = float(await bandage_probe(run, "sample"))
+                    if drop_height - landed_height >= 12:
+                        break
+                    await asyncio.sleep(.08)
+            assert await bandage_probe(run, "reset") == address
+            evidence["shared_stock_physics_body"] = {
+                "identity": identity, "actor": actors[run], "address": address,
+                "release_height": drop_height, "lower_height": landed_height,
+            }
         if recipient == host:
             assert unclaimed["pawn"] == near["pawn"], unclaimed
         press = (await action(recipient, projection.FIXTURE, "--target", identity))[projection.KEY][identity]

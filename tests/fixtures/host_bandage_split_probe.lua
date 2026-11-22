@@ -9,6 +9,7 @@ local item_count = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local factory_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local previous, seeded
+local moving
 
 local function valid(value) return value and value:IsValid() end
 
@@ -21,7 +22,86 @@ local function guid(row)
     return ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
 end
 
+local function grip(pawn, identity)
+    assert(not moving and identity:match("^[a-f0-9]+$") and #identity == 32)
+    for slot = 1, 64 do
+        local shown, epoch, id, name = SilverfishReadNativeGuestDropProjection(slot)
+        if shown and id == identity then
+            local actor = StaticFindObject(name:match("^%S+ (.+)$"))
+            assert(valid(actor) and actor:GetFullName() == name and same(actor:GetWorld(), pawn:GetWorld())
+                and same(actor.Box, actor.RootComponent) and not valid(pawn.HeldObject))
+            local camera = pawn.Camera
+            local angle = camera.RelativeRotation
+            local old_angle = {Pitch = angle.Pitch, Yaw = angle.Yaw, Roll = angle.Roll}
+            local old_actor, old_distance = pawn.ActorBeingLookedAt, pawn.ActorLookedAt_Distance
+            local old_part = pawn.InteractionTarget_Component
+            local at, eye = actor:K2_GetActorLocation(), camera:K2_GetComponentLocation()
+            local facing = actor:K2_GetActorRotation()
+            local origin = {X = at.X, Y = at.Y, Z = at.Z}
+            local rotation = {Pitch = facing.Pitch, Yaw = facing.Yaw, Roll = facing.Roll}
+            local dx, dy, dz = at.X - eye.X, at.Y - eye.Y, at.Z - eye.Z
+            local horizontal = math.sqrt(dx * dx + dy * dy)
+            local distance = math.sqrt(horizontal * horizontal + dz * dz)
+            assert(distance < pawn.InteractionRange, ("fixture distance %.2f"):format(distance))
+            local ok, detail = SilverfishSetNativeWorldLootPhysics(slot, epoch, id, true)
+            assert(ok and detail == "stock_world_loot_physics_active"
+                and actor.Box:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)), detail)
+            local grabbed, error_detail = pcall(function()
+                camera:K2_SetWorldRotation({Pitch = math.deg(math.atan(dz, horizontal)),
+                    Yaw = math.deg(math.atan(dy, dx)), Roll = 0}, false, {}, true)
+                pawn.ActorBeingLookedAt, pawn.ActorLookedAt_Distance = actor, distance
+                pawn.InteractionTarget_Component = actor.Box
+                pawn:Grab_Release_Object(false, false, true)
+                assert(same(pawn.HeldObject, actor) and same(pawn.PhysicsHandle:GetGrabbedComponent(), actor.Box),
+                    "stock grip did not attach to the shared item")
+            end)
+            camera:K2_SetRelativeRotation(old_angle, false, {}, true)
+            pawn.ActorBeingLookedAt = valid(old_actor) and old_actor or nil
+            pawn.ActorLookedAt_Distance = old_distance
+            pawn.InteractionTarget_Component = valid(old_part) and old_part or nil
+            if not grabbed then
+                if same(pawn.HeldObject, actor) then pawn:Grab_Release_Object(false, true, false) end
+                SilverfishSetNativeWorldLootPhysics(slot, epoch, id, false)
+                error(error_detail)
+            end
+            moving = {pawn = pawn, actor = actor, position = origin, rotation = rotation, slot = slot, epoch = epoch, id = id}
+            return tostring(actor:GetAddress())
+        end
+    end
+    error("shared stock drop identity not found")
+end
+
+local function release(pawn, mode)
+    assert(moving and same(moving.pawn, pawn) and valid(moving.actor))
+    local actor = moving.actor
+    if mode == "drop" then
+        assert(same(pawn.HeldObject, actor))
+        local height = actor:K2_GetActorLocation().Z
+        local simulating = actor.Box:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find))
+        pawn:Grab_Release_Object(false, true, false)
+        local holding = same(pawn.HeldObject, actor)
+        local attached = same(pawn.PhysicsHandle:GetGrabbedComponent(), actor.Box)
+        local released = actor.Box:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find))
+        assert(not holding and not attached and released,
+            ("release held=%s attached=%s simulating=%s to %s collision=%s Physics=%s"):format(
+                tostring(holding), tostring(attached), tostring(simulating), tostring(released),
+                tostring(actor.Box:GetCollisionEnabled()), tostring(actor.Physics)))
+        return ("%.3f"):format(height)
+    elseif mode == "sample" then
+        assert(actor.Box:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)))
+        return ("%.3f"):format(actor:K2_GetActorLocation().Z)
+    end
+    assert(mode == "reset" and not valid(pawn.HeldObject))
+    assert(actor:K2_SetActorLocationAndRotation(moving.position, moving.rotation, false, {}, true))
+    local ok, detail = SilverfishSetNativeWorldLootPhysics(moving.slot, moving.epoch, moving.id, false)
+    assert(ok and not actor.Box:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)), detail)
+    moving = nil
+    return tostring(actor:GetAddress())
+end
+
 local function witness(world, pawn, mode, value)
+    if mode == "grip" then return grip(pawn, value) end
+    if mode == "drop" or mode == "sample" or mode == "reset" then return release(pawn, mode) end
     if mode == "actor" then
         local prefix = area .. ":PersistentLevel.Item_Bandage_C_"
         assert(value:sub(1, #prefix) == prefix and value:sub(#prefix + 1):match("^%d+$"))
