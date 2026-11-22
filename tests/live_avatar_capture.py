@@ -12,6 +12,7 @@ import sys
 import uuid
 
 from live_ai_smoke import wait
+from live_guest_held_fire_smoke import events
 from live_multi_smoke import CROSSROADS, saved_hashes
 
 
@@ -57,7 +58,7 @@ async def avatar_probe(run, operation):
             await asyncio.sleep(.1)
 
 
-async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: bool = False) -> None:
+async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: bool = False, melee: bool = False) -> None:
     profile = "avatar-" + uuid.uuid4().hex[:8]
     host_dir = work / "campaigns" / profile
     guest_dir = work / "clients" / profile
@@ -197,6 +198,32 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
                         ".SM_Head_UV_02_EarRing")
             await wait(guest_run, unarmed_host)
             evidence["host_holster_cleared"] = True
+        if melee:
+            await avatar_probe(host_run, "bat")
+            loaded = await wait(guest_run, lambda state: any(
+                any(mesh.endswith(".SM_Wep_Bat_01") for mesh in row.get("weapon_meshes", ()))
+                for row in (projections(state) or {}).values()))
+            pawn, = projections(loaded)
+            def authoritative_health(state):
+                pawns = state.get("game", {}).get("pawns", {})
+                health = {key: pawns.get(key, {}).get("health") for key in ("local", "guest")}
+                return health if all(type(value) in (int, float) for value in health.values()) else None
+            host_state = await wait(host_run, authoritative_health)
+            health = authoritative_health(host_state)
+            await avatar_probe(host_run, "swing")
+            def played(state):
+                row = state.get("game", {}).get("native_avatar_melee", {}).get(pawn, {})
+                return row if row.get("weapon_hand_motion_cm", 0) > 10 else None
+            observed = await wait(guest_run, played, timeout=10)
+            proof = played(observed)
+            cue, = events(guest_run, "native_avatar_melee_played")
+            assert (cue["serial"], cue["clip"]) == (proof["serial"], proof["clip"]), (cue, proof)
+            settled = await wait(guest_run, lambda state: (row := played(state)) and not row["active"], timeout=5)
+            assert settled["game"]["native_player_avatars"][pawn]["animation_mode"] == 0
+            after = await wait(host_run, lambda state: state["game"]["sequence"] > host_state["game"]["sequence"]
+                               and authoritative_health(state), timeout=5)
+            assert authoritative_health(after) == health
+            evidence["bat_swing"] = {"cue": cue, "motion": played(settled), "health": health}
         if lifecycle:
             await wait(host_run, lambda state: any(lease["character_id"] == identity and lease["state"] == "active"
                        for lease in state.get("campaign", {}).get("leases", ())))
@@ -240,7 +267,10 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--lifecycle", action="store_true", help="verify avatar removal upon leaving and restoration upon rejoin")
     parser.add_argument("--equipment", action="store_true", help="verify distinct saved faces and multipart held pistols on both peers")
+    parser.add_argument("--melee", action="store_true", help="verify a visible stock bat swing after the equipment checks")
     options = parser.parse_args()
+    if options.melee and (not options.equipment or options.lifecycle):
+        parser.error("--melee requires --equipment and runs independently of --lifecycle")
     work = options.work.resolve(strict=True)
     with installed_probe(work) if options.equipment else nullcontext():
-        asyncio.run(capture(work, options.vanilla_saved.resolve(strict=True), options.lifecycle, options.equipment))
+        asyncio.run(capture(work, options.vanilla_saved.resolve(strict=True), options.lifecycle, options.equipment, options.melee))

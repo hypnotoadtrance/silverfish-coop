@@ -70,7 +70,7 @@ local function equip(pawn, blueprint)
     local slots = save.PlayerEquipment
     assert(slots:GetArrayNum() >= 2 and not valid(slots[1][item_class]) and not valid(slots[2][item_class]),
         "avatar_probe_empty_equipment_slots_unavailable")
-    local expected = asset("/Game/Classes/Weapons/" .. blueprint .. "." .. blueprint .. "_C")
+    local expected = asset("/Game/Classes/Weapons/" .. blueprint .. "." .. blueprint:match("([^/]+)$") .. "_C")
     local out = {}
     asset(inventory):MakeDefaultItem(expected, pawn, out)
     local row = out.Item or out
@@ -128,6 +128,16 @@ local function run(operation)
         assert(valid(row[item_class]), "avatar_probe_stock_loadout_unavailable")
         host:GetWorld().OwningGameInstance:RemoveItemFromLoadout(row)
         assert(not valid(save.PlayerEquipment[index][item_class]), "avatar_probe_stock_holster_unavailable")
+    elseif operation == "bat" then
+        equip(host, "MeleeWeapons/MeleeWep_Bat")
+    elseif operation == "swing" then
+        local weapon = host.EquipedItem
+        assert(valid(weapon) and same(weapon.User, host) and weapon:GetClass():GetFullName():match("MeleeWep_Bat_C$"),
+            "avatar_probe_stock_bat_unavailable")
+        local eye, teammate = host:K2_GetActorLocation(), guest:K2_GetActorLocation()
+        host.Controller:SetControlRotation({Pitch = 0, Yaw = math.deg(math.atan(eye.Y - teammate.Y, eye.X - teammate.X)), Roll = 0})
+        weapon:Use_Item_Primary(true, 0)
+        weapon:Use_Item_Primary(false, 0)
     else
         error("avatar_probe_unknown_operation", 0)
     end

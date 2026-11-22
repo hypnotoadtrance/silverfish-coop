@@ -1,4 +1,4 @@
-"""Relay short-lived cosmetic cues from the host's stock firearm shots."""
+"""Relay short-lived cosmetic cues from host-authoritative weapon actions."""
 
 import asyncio
 import json
@@ -13,6 +13,8 @@ _MAILBOX = "native-weapon-shots"
 _MAX_MAILBOX = 16384
 _MAX_AGE = .25
 _STOCK_CLASS = re.compile(r"/Game/Classes/Weapons/(?:[\w-]+/)*([\w-]+)\.\1_C", re.ASCII)
+MELEE_CLIPS = {"slash": "Standing_Melee_Attack_Horizontal", "backhand": "Standing_Melee_Attack_Backhand",
+               "overhead": "Standing_Melee_Attack_Downward"}
 
 
 def valid_shot(cue):
@@ -27,6 +29,14 @@ def valid_shot(cue):
                     for value, (low, high) in zip(pose[6:], ((0, 10), (0, 10), (-26, 24)), strict=True)))
 
 
+def valid_melee(cue):
+    return (type(cue) is list and len(cue) == 6 and type(cue[0]) is int and 0 < cue[0] < 10**15
+            and cue[1] == "melee" and type(cue[2]) is int and 0 <= cue[2] <= 2147483647
+            and type(cue[3]) is str and cue[3] in MELEE_CLIPS
+            and type(cue[4]) in (int, float) and .25 <= cue[4] <= 1.5
+            and type(cue[5]) in (int, float) and 0 <= cue[5] <= .75)
+
+
 def _captured(data):
     lines = data.splitlines()
     if not data.endswith("\n") or not 1 < len(lines) <= LIMIT + 1:
@@ -35,7 +45,17 @@ def _captured(data):
     cues = []
     for row in rows:
         fields = row.split("|")
-        if len(fields) != 11 or not re.fullmatch(r"[1-9][0-9]{0,14}", fields[0]):
+        if not re.fullmatch(r"[1-9][0-9]{0,14}", fields[0]):
+            continue
+        if len(fields) == 6 and fields[1] == "melee" and re.fullmatch(r"[0-9]{1,10}", fields[2]):
+            try:
+                cue = [int(fields[0]), "melee", int(fields[2]), fields[3], *map(float, fields[4:])]
+            except ValueError:
+                continue
+            if valid_melee(cue):
+                cues.append(cue)
+            continue
+        if len(fields) != 11:
             continue
         serial, path, *pose = fields
         try:
@@ -81,8 +101,9 @@ async def relay(host, bridge, transport):
 
         for cue in fresh:
             # Quantize presentation only. Stock raycasts still use the original transform.
-            packet = json.dumps([area, epoch, cue[:2] + [round(axis, 2) for axis in cue[2:]]],
-                                separators=(",", ":")).encode("ascii")
+            payload = (cue[:4] + [round(value, 3) for value in cue[4:]] if cue[1] == "melee"
+                       else cue[:2] + [round(axis, 2) for axis in cue[2:]])
+            packet = json.dumps([area, epoch, payload], separators=(",", ":")).encode("ascii")
             transport.send_weapon_shot(packet, allowed)
 
 
@@ -106,12 +127,14 @@ class Playback:
                 continue
             if type(decoded) is list and len(decoded) == 3 and decoded[:2] == scope:
                 cue = decoded[2]
-                if valid_shot(cue) and cue[0] > self.last_played:
+                if (valid_melee(cue) or valid_shot(cue)) and cue[0] > self.last_played:
                     selected[cue[0]] = cue[1:]
         if not selected:
             return game
-        arguments = ["|".join((str(serial), path, *(f"{value:.2f}" for value in pose)))
-                     for serial, (path, *pose) in sorted(selected.items())]
+        arguments = []
+        for serial, (path, *parameters) in sorted(selected.items()):
+            values = map(str, parameters) if path == "melee" else (f"{value:.2f}" for value in parameters)
+            arguments.append("|".join((str(serial), path, *values)))
         try:
             result = await bridge.command("native-weapon-play-shots", game["map"], epoch, *arguments, timeout=1.5)
         except (OSError, RuntimeError, TimeoutError) as error:
@@ -119,8 +142,12 @@ class Playback:
             return game
         self.last_played = max(selected)
         for receipt in result.get("ack", {}).get("message", "").split(","):
+            hit = re.fullmatch(r"([0-9]{1,15}):([A-Za-z_]+)", receipt)
+            if hit and (source := selected.get(int(hit[1]))) and source[0] == "melee" and MELEE_CLIPS[source[2]] == hit[2]:
+                control.event("native_avatar_melee_played", serial=int(hit[1]), player_id=source[1], clip=hit[2])
+                continue
             match = re.fullmatch(r"([0-9]{1,15}):([01]):([01]):([01])", receipt)
-            if match and (serial := int(match[1])) in selected:
+            if match and (serial := int(match[1])) in selected and selected[serial][0] != "melee":
                 control.event("native_weapon_shot_played", serial=serial, weapon=selected[serial][0],
                               muzzle_flash=match[2] == "1", audio_component=match[3] == "1", stock_sound=match[4] == "1")
         return result

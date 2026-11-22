@@ -31,6 +31,7 @@ from . import native_loose_pickup
 from . import native_stock_enemy_drops
 from . import native_stock_door
 from . import native_player_avatar
+from . import native_weapon_fire_view
 from . import native_voice
 from . import native_anomaly_effects
 from .native_guest_creator import valid_profile
@@ -2722,6 +2723,14 @@ class Bridge:
                             avatar.update(pose_clip=None if clip == "-" else clip, weapon_socket_height=_finite(height),
                                           animation_mode=int(mode) if mode in ("0", "1", "2") else None)
                         data.setdefault("native_player_avatars", {})[pawn] = avatar
+                elif fields[0] == "native-avatar-melee" and len(fields) == 6:
+                    pawn, serial, clip, movement, active = fields[1:]
+                    movement = _finite(movement)
+                    if (pawn.startswith("Player_FP_C ") and re.fullmatch(r"[1-9][0-9]{0,14}", serial)
+                            and clip in native_weapon_fire_view.MELEE_CLIPS.values() and active in ("0", "1")
+                            and movement is not None and 0 <= movement <= 500):
+                        data.setdefault("native_avatar_melee", {})[pawn] = {
+                            "serial": int(serial), "clip": clip, "weapon_hand_motion_cm": movement, "active": active == "1"}
                 elif fields[0] == native_player_avatar.TAG:
                     player_id, outfit = native_player_avatar.parse(fields, data.get("state"), data.get("map"))
                     outfits = data.setdefault(native_player_avatar.KEY, {})

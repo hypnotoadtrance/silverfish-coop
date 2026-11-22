@@ -12,12 +12,15 @@ local crouched_idle = "Crouching_Idle"
 local crouched_walk = "Crouched_Walking"
 local firearm_class = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
 local aimed = {pistol = {"HandGun_Idle", "HandGun_Walk"}, rifle = {"Rifle_Aiming_Idle", "Rifle_Walk"}}
+local melee_clips = {slash = "Standing_Melee_Attack_Horizontal", backhand = "Standing_Melee_Attack_Backhand",
+    overhead = "Standing_Melee_Attack_Downward"}
 local identity = {
     Rotation = { X = 0, Y = 0, Z = 0, W = 1 },
     Translation = { X = 0, Y = 0, Z = 0 },
     Scale3D = { X = 1, Y = 1, Z = 1 },
 }
 local avatars = {}
+local swings = {}
 local observations, client_outfits = {}, {}
 local observed_weapons = {}
 local client_world, client_map, client_receipt
@@ -164,6 +167,7 @@ local function restore_locomotion(entry)
 end
 
 local function apply_locomotion(entry, aim)
+    if swings[entry] then return end
     local crouched = entry.pawn.bIsCrouched == true
     local profile = aimed[aim]
     if not crouched and not profile then
@@ -199,6 +203,7 @@ local function apply_locomotion(entry, aim)
 end
 
 local function remove(entry)
+    swings[entry] = nil
     weapon_view.clear(entry)
     character_view.clear(entry)
     if valid(entry.helmet) and valid(entry.pawn) then
@@ -219,6 +224,62 @@ local function remove(entry)
         entry.body:SetSkeletalMeshAsset(entry.original_asset)
         entry.body:SetCollisionEnabled(entry.collision)
         entry.body:SetGenerateOverlapEvents(entry.overlap)
+    end
+end
+
+function avatar.play_melee(world, id, kind, serial, duration, start_fraction)
+    local name = melee_clips[kind]
+    if not name then return end
+    for _, entry in pairs(avatars) do
+        if entry.id == id and entry.status == "default_body" and valid(entry.pawn)
+            and entry.pawn:GetWorld():GetAddress() == world:GetAddress()
+            and valid(entry.body) and entry.weapon_parts and #entry.weapon_parts > 0 then
+            local clip = asset(animation_root .. name .. "." .. name)
+            local mesh = entry.body.SkinnedAsset
+            if not valid(clip) or not valid(clip.Skeleton) or not valid(mesh) or not valid(mesh.Skeleton)
+                or clip.Skeleton:GetAddress() ~= mesh.Skeleton:GetAddress() then return end
+            local length = clip:GetPlayLength()
+            local clock = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+            if length <= 0 or not valid(clock) then return end
+            entry.body:SetAnimationMode(1, false)
+            entry.body:SetAnimation(clip)
+            entry.body:Stop()
+            -- Advance the mesh pose explicitly so stock combat notifies never
+            -- run on the observing player's replica.
+            local first = start_fraction * length
+            entry.body:SetPosition(first, false)
+            entry.pose_animation, entry.pose_mesh = name, mesh:GetAddress()
+            local hand = FName("Weapon_Socket01", EFindName.FNAME_Find)
+            local position = entry.body:GetSocketTransform(hand, 2).Translation
+            local swing = {serial = serial, clip = name, world = world:GetAddress(), start = clock:GetRealTimeSeconds(world),
+                first = first, length = length, duration = duration, hand = hand,
+                x = position.X, y = position.Y, z = position.Z, peak = 0}
+            swings[entry], entry.last_melee = swing, swing
+            return name
+        end
+    end
+end
+
+function avatar.animate_melee(get_world)
+    if not next(swings) then return end
+    local world = get_world()
+    if not valid(world) then return end
+    local clock = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    if not valid(clock) then return end
+    local now, scope = clock:GetRealTimeSeconds(world), world:GetAddress()
+    for entry, swing in pairs(swings) do
+        local mesh = valid(entry.body) and entry.body.SkinnedAsset
+        if swing.world ~= scope or not valid(mesh) or mesh:GetAddress() ~= entry.pose_mesh
+            or now - swing.start >= swing.duration then
+            swings[entry] = nil
+            restore_locomotion(entry)
+        else
+            local position = entry.body:GetSocketTransform(swing.hand, 2).Translation
+            swing.peak = math.max(swing.peak,
+                math.sqrt((position.X - swing.x)^2 + (position.Y - swing.y)^2 + (position.Z - swing.z)^2))
+            local fraction = math.max(0, now - swing.start) / swing.duration
+            entry.body:SetPosition(swing.first + fraction * (swing.length - swing.first), false)
+        end
     end
 end
 
@@ -438,6 +499,11 @@ function avatar.rows(row)
             entry.id or "-", entry.body_worn or "-", entry.head_worn or "-", entry.aim_roll or "-",
             entry.weapon_model or "-", entry.appearance or "-", entry.pose_animation or "-", entry.weapon_socket_height or "-",
             valid(entry.body) and entry.body.AnimationMode or "-")
+        if entry.last_melee then
+            local swing = entry.last_melee
+            rows[#rows + 1] = row("native-avatar-melee", entry.name, swing.serial, swing.clip, swing.peak,
+                swings[entry] and 1 or 0)
+        end
     end
     for id, outfit in pairs(observations) do
         rows[#rows + 1] = row("native-avatar-outfit", id, outfit.pawn, outfit.body, outfit.head, outfit.weapon,
@@ -448,6 +514,8 @@ function avatar.rows(row)
     if holding_aim ~= nil then rows[#rows + 1] = row("native-avatar-local-aim", holding_aim and 1 or 0) end
     return rows
 end
+
+avatar.player_id = player_id
 
 function avatar.visible(pawn)
     local entry = avatars[pawn:GetAddress()]

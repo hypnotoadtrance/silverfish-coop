@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import uuid
 
 from live_ai_smoke import wait
 from live_authored_route_matrix_smoke import select_routes
+from live_guest_held_fire_smoke import events
 from live_multi_smoke import saved_hashes
 
 REPO = Path(__file__).resolve().parents[1]
@@ -32,7 +34,7 @@ REFINERY_ROUTES = (
 
 
 async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, ordinary=False,
-                 second_cqc=False, refinery=False) -> None:
+                 second_cqc=False, refinery=False, remote_animation=False) -> None:
     mode = "ordinary-second-cqc-" if second_cqc else "ordinary-" if ordinary else "damage-" if stock_damage else ""
     if refinery:
         mode = "refinery-" + mode
@@ -44,6 +46,7 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
     originals = saved_hashes(vanilla_saved) if vanilla_saved else None
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
     processes, proof = [], {}
+    last_animation = 0
 
     async def ask(*arguments, expected=True):
         process = await asyncio.create_subprocess_exec(*cli, *arguments, cwd=REPO, stdout=asyncio.subprocess.PIPE,
@@ -62,9 +65,12 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
         return await ask("action", *owner, operation, *arguments, expected=expected)
 
     async def launch(kind, owner, *arguments):
+        env = dict(os.environ)
+        if remote_animation and kind == "host":
+            env["SILVERFISH_COOP_RENDER_CAPTURE"] = "host"
         with (host_run / f"{kind}.txt").open("wb") as log:
             process = await asyncio.create_subprocess_exec(*cli, kind, *owner, *arguments, cwd=REPO, stdout=log,
-                                                            stderr=log, creationflags=subprocess.CREATE_NO_WINDOW)
+                                                            stderr=log, env=env, creationflags=subprocess.CREATE_NO_WINDOW)
         processes.append((owner, process))
 
     async def inventory_item(character, guid):
@@ -87,6 +93,7 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
         return tuple(row.get(key) for key in ("map", "actor", "class_path", "state")) == (*SOURCES[OLD_PIPE], "available")
 
     async def normal_primary(guid, expected, target="-", *, allow_patrol_miss=False):
+        nonlocal last_animation
         press = (await action(guest, "native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
         assert (press["guid"], press["stock_wrappers"]) == (guid, 2), press
         for _ in range(50):
@@ -122,7 +129,17 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
                 native_host_save.verify_checkpoint(directory / "game-user", saved)
                 receipts = saved["world"]["party"]["receipts"][character]
                 assert any(item["id"] == event["operation_id"] and item["result"][SWING_KEY] == swing for item in receipts)
-                return {"stock_input": press, "host_receipt": swing, "replayed": True, "paired_checkpoint": True}
+                result = {"stock_input": press, "host_receipt": swing, "replayed": True, "paired_checkpoint": True}
+                if remote_animation:
+                    def presented(state):
+                        value = state.get("game", {}).get("native_avatar_melee", {}).get(swing["pawn"], {})
+                        return (value.get("serial", 0) > last_animation and not value["active"]
+                                and value["weapon_hand_motion_cm"] > 10)
+                    rendered = await wait(host_run, presented, timeout=8)
+                    result["host_animation"] = rendered["game"]["native_avatar_melee"][swing["pawn"]]
+                    last_animation = result["host_animation"]["serial"]
+                    assert not events(guest_run, "native_avatar_melee_played")
+                return result
             await asyncio.sleep(.16)
         raise RuntimeError(f"The real guest primary sequence {press['sequence']} did not return a stock Old Pipe receipt")
 
@@ -210,6 +227,10 @@ async def verify(work: Path, vanilla_saved: Path | None, *, stock_damage=False, 
         if ordinary:
             await wait(guest_run, lambda state: (scope := state.get("game", {}).get("native_guest_primary_scope", {}))
                        and (scope["map"], scope["guid"], scope["kind"]) == (area, guid, KIND))
+            if remote_animation:
+                await wait(host_run, lambda frame: any(
+                    name == equipped["pawn"] and any("SM_Wep_Pipe_" in mesh for mesh in row.get("weapon_meshes", ()))
+                    for name, row in frame.get("game", {}).get("native_player_avatars", {}).items()))
             proof["unassisted_primary_miss"] = await normal_primary(guid, "stock_miss_verified")
             lane = ("--amount", "2") if second_cqc else ()
             target = CQC_ZONES[area].actors[int(second_cqc)]
@@ -275,11 +296,14 @@ if __name__ == "__main__":
     modes.add_argument("--ordinary-primary", action="store_true", help="exercise the normal guest equip and primary input path")
     parser.add_argument("--second-cqc", action="store_true", help="stage the second registered CQC for ordinary primary")
     parser.add_argument("--refinery", action="store_true", help="use stock exits through Rail Yard and Slums to Refinery")
+    parser.add_argument("--remote-animation", action="store_true", help="render and verify the guest's stock swing on the host")
     options = parser.parse_args()
     if options.second_cqc and not options.ordinary_primary:
         parser.error("--second-cqc requires --ordinary-primary")
     if options.refinery and not options.ordinary_primary:
         parser.error("--refinery requires --ordinary-primary")
+    if options.remote_animation and not options.ordinary_primary:
+        parser.error("--remote-animation requires --ordinary-primary")
     asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve() if options.vanilla_saved else None,
                        stock_damage=options.stock_damage, ordinary=options.ordinary_primary, second_cqc=options.second_cqc,
-                       refinery=options.refinery))
+                       refinery=options.refinery, remote_animation=options.remote_animation))

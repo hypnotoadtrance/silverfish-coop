@@ -1,11 +1,16 @@
 local view = {}
 
 local weapon_base = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
+local melee_base = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C"
+local melee_clips = {Melee_Slash_01 = "slash", Melee_Slash_Combo01 = "backhand", Melee_Charged_Smash_01 = "overhead"}
+local melee_clip_root = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/MeleWep_Anim/"
+local attack_animation = "Animation_2_C8CAEADF40C9F2C76A885BA8E5E9AA27"
+local attack_rate = "SwingRate_17_17DEA9B2431C48BC143445BD3516142E"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local attenuation_path = "/Game/Assets/Sounds/SoundClasses/Weapon_Attenuation.Weapon_Attenuation"
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 local maximum, range = 36, 30000
-local current, hooked, visit, last_played
+local current, hooked, melee_hooked, visit, last_played
 local serial, published, pending = 0, 0, {}
 
 local function valid(object) return object and object:IsValid() end
@@ -32,32 +37,74 @@ local function bounded(n, minimum, maximum)
     return type(n) == "number" and n >= minimum and n <= maximum
 end
 
-local function capture(context)
+local function equipped_player(context)
     if not current then return end
     local weapon = context:get()
     if not valid(weapon) or not weapon:HasAuthority() or not same(weapon:GetWorld(), current.world) then return end
-    local pawn, muzzle = weapon.User, weapon.Arrow_Muzzle
+    local pawn = weapon.User
     local pawn_class = StaticFindObject("/Game/Classes/Player/Player_FP.Player_FP_C")
     if not valid(pawn) or not valid(pawn_class) or not pawn:IsA(pawn_class) or not pawn:HasAuthority()
-        or not same(pawn.EquipedItem, weapon) or not valid(muzzle) or not same(muzzle:GetOwner(), weapon) then return end
+        or not same(pawn.EquipedItem, weapon) then return end
+    return weapon, pawn
+end
+
+local function record(row)
+    pending[#pending + 1] = row
+    if #pending > maximum then table.remove(pending, 1) end
+end
+
+local function capture(context)
+    local weapon, pawn = equipped_player(context)
+    if not weapon then return end
+    local muzzle = weapon.Arrow_Muzzle
+    if not valid(muzzle) or not same(muzzle:GetOwner(), weapon) then return end
     local path = weapon:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
     if not stock_weapon(path) then return end
     local position, rotation = muzzle:K2_GetComponentLocation(), muzzle:K2_GetComponentRotation()
     local scale, volume, pitch = weapon.MuzzleFlash_Scale, weapon.Fire_Volume, weapon.Fire_PitchShift
     if not bounded(scale, 0, 10) or not bounded(volume, 0, 10) or not bounded(pitch, -24, 24) then return end
     serial = serial + 1
-    pending[#pending + 1] = {serial, path, position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw,
-        rotation.Roll, scale, volume, pitch - 2, expires = current.statics:GetRealTimeSeconds(pawn) + .25}
-    if #pending > maximum then table.remove(pending, 1) end
+    record({serial, path, position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw,
+        rotation.Roll, scale, volume, pitch - 2, expires = current.statics:GetRealTimeSeconds(pawn) + .25})
 end
 
-function view.sync(state, phase)
+local function capture_melee(context)
+    local weapon, pawn = equipped_player(context)
+    if not weapon then return end
+    local animator, mesh = weapon["As Melee Wep Anim BP"], weapon.Wep_Skeli
+    if not valid(animator) or not valid(mesh) or not same(mesh:GetAnimInstance(), animator)
+        or not same(animator.Wep_Object, weapon) or not animator.IsMidSwing then return end
+    local active = animator.ActiveAttack
+    local animation = active and active[attack_animation]
+    if not valid(animation) then return end
+    local path = animation:GetFullName():match("^AnimSequence (%S+)$")
+    local name = path and path:match("/([%w_]+)%.")
+    if not name or path ~= melee_clip_root .. name .. "." .. name then return end
+    local kind = melee_clips[name]
+    local avatar = current.avatar
+    local id = avatar.player_id({pawn = pawn, controller_object = pawn.Controller})
+    if not kind or not id then return end
+    local duration, fraction = .85, 0
+    local montage, length, rate = animator.ActiveMontage, animation:GetPlayLength(), active[attack_rate]
+    if valid(montage) and length > 0 and bounded(rate, .1, 10) then
+        local position = animator:Montage_GetPosition(montage)
+        if bounded(position, 0, length) then
+            duration = math.max(.25, math.min(1.5, (length - position) / rate))
+            fraction = math.min(.75, position / length)
+        end
+    end
+    serial = serial + 1
+    record({serial, "melee", id, kind, duration, fraction, expires = current.statics:GetRealTimeSeconds(pawn) + .25})
+    if not pawn:IsLocallyControlled() then avatar.play_melee(current.world, id, kind, serial, duration, fraction) end
+end
+
+function view.sync(state, phase, avatar)
     if phase ~= "hosting" or not valid(state.world) then
         current, pending = nil, {}
         return
     end
     if not current or not same(current.world, state.world) then
-        current = {world = state.world, map = state.map, statics = StaticFindObject(statics_path)}
+        current = {world = state.world, map = state.map, statics = StaticFindObject(statics_path), avatar = avatar}
         pending = {}
     end
     local path = weapon_base .. ":SpawnProjectile"
@@ -65,6 +112,11 @@ function view.sync(state, phase)
         -- The stock firearm calls this once, after CheckAmmoCost succeeds, even for a multi-pellet shot.
         RegisterHook(path, function(context) pcall(capture, context) end)
         hooked = true
+    end
+    local swing = melee_base .. ":SwingStart"
+    if not melee_hooked and valid(StaticFindObject(swing)) then
+        RegisterHook(swing, function(context) pcall(capture_melee, context) end)
+        melee_hooked = true
     end
 end
 
@@ -117,7 +169,7 @@ local function play(pawn, path, point, rotation, scale, volume, pitch, distance)
     return particles, audio, valid(sound) == true
 end
 
-function view.command(args, state, phase)
+function view.command(args, state, phase, avatar)
     if args[2] ~= "native-weapon-play-shots" then return end
     local pawn, epoch = state.local_pawn and state.local_pawn.pawn, args[4]
     if phase ~= "connected" or not valid(pawn) or not pawn:IsLocallyControlled() or not valid(state.world)
@@ -130,6 +182,17 @@ function view.command(args, state, phase)
         local values = {}
         for field in (args[index] .. "|"):gmatch("([^|]*)|") do values[#values + 1] = field end
         local id, path = math.tointeger(tonumber(values[1])), values[2]
+        if #values == 6 and id and id > last_played and path == "melee" then
+            local player = math.tointeger(tonumber(values[3]))
+            local duration, fraction = tonumber(values[5]), tonumber(values[6])
+            if player and player >= 0 and player <= 2147483647
+                and bounded(duration, .25, 1.5) and bounded(fraction, 0, .75) then
+                last_played = id
+                local ok, clip = pcall(avatar.play_melee, state.world, player, values[4], id, duration, fraction)
+                if ok and clip then receipts[#receipts + 1] = ("%d:%s"):format(id, clip) end
+            end
+            goto next_cue
+        end
         local x, y, z, pitch_angle, yaw, roll, scale, volume, pitch = table.unpack(values, 3, 11)
         x, y, z = tonumber(x), tonumber(y), tonumber(z)
         pitch_angle, yaw, roll = tonumber(pitch_angle), tonumber(yaw), tonumber(roll)
@@ -149,6 +212,7 @@ function view.command(args, state, phase)
                 end
             end
         end
+        ::next_cue::
     end
     return table.concat(receipts, ",")
 end
