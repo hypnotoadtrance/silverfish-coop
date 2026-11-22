@@ -26,7 +26,8 @@ SUPPORTED = {native_wire_quest.QUEST_ID, QUEST_ID, *native_computer_board.CONTRA
              native_flood_jammer.FLOOD.quest, native_flood_jammer.BLACK_LAKE.quest}
 EXPERIMENTAL = {native_flood_jammer.LENNY.quest, native_computer_board.MOLASSES.quest_id,
                 native_computer_board.SAVLO_KEYCARD.quest_id, native_subway_valve.QUEST,
-                native_computer_board.MISSING_CONTACT.quest_id, native_flood_jammer.SPRATT.quest}
+                native_computer_board.MISSING_CONTACT.quest_id, native_flood_jammer.SPRATT.quest,
+                native_flood_jammer.CROSSROADS_JAMMER.quest}
 
 
 def _pawn(host, character, area):

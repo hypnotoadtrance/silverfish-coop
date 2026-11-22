@@ -12,12 +12,14 @@ class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         pawn = "exact guest pawn"
         reader = runtime.Bridge(directory, None)
-        host = SimpleNamespace()
-        for spec, accepted, refused in ((jammer.FLOOD, "2", "8"), (jammer.BLACK_LAKE, "8", "2")):
+        cases = ((jammer.FLOOD, jammer.BOROUGH, "2", "8"), (jammer.BLACK_LAKE, jammer.BLACK_MARKET, "8", "2"),
+                 (jammer.BLACK_LAKE, jammer.OBSERVATORY, "8", "2"), (jammer.CROSSROADS_JAMMER, jammer.OBSERVATORY, "8", "2"))
+        for spec, area, accepted, refused in cases:
+            host = SimpleNamespace(last_game={"map": area})
             action = spec.command("preflight")
             stock = (
-                ("schema", "1"), ("session", "host", "hosting", spec.board_map, "1", "0"),
-                (spec.command(), action, spec.board_map, pawn, spec.board, spec.quest, "-", "-", "0", "0", "0", "0"),
+                ("schema", "1"), ("session", "host", "hosting", area, "1", "0"),
+                (spec.command(), action, area, pawn, spec.board_at(area), spec.quest, "-", "-", "0", "0", "0", "0"),
                 (spec.command("reputation"), "5", "0", "0"),
             )
             for faction in (accepted, refused):
@@ -82,8 +84,19 @@ class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.party["native_quests"][jammer.QUEST_ID]["step"], 1)
         host.checkpoint_native.assert_not_awaited()
 
+    async def test_crossroads_can_adopt_an_authored_objective_accepted_in_an_older_host_save(self):
+        spec = jammer.CROSSROADS_JAMMER
+        host = self.host(1, spec=spec)
+        del host.party["native_quests"]
+        await jammer.observe(host, object())
+        await jammer.observe(host, object())
+        record = host.party["native_quests"][spec.quest]
+        self.assertEqual((record["step"], record["actor"]), (2, "guest-character"))
+        self.assertEqual(host.party["economy"]["wallet"], 0)
+        host.checkpoint_native.assert_awaited_once()
+
     async def test_live_pose_matches_the_current_exact_host_actor(self):
-        for spec in (jammer.FLOOD, jammer.BLACK_LAKE):
+        for spec in (jammer.FLOOD, jammer.BLACK_LAKE, jammer.CROSSROADS_JAMMER):
             with self.subTest(spec=spec.key):
                 epoch = "e" * 32
                 original = {"position": [2, 3, 4], "rotation": [0, 90, 0], "scale": [1, 1, 1]}

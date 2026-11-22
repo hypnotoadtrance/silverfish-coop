@@ -65,7 +65,7 @@ local function trace(context, first, last, channel, complex, ignored)
 end
 
 local function floor_at(context, center, x, y, radius, height)
-    local top, bottom = {X = x, Y = y, Z = center.Z + 115}, {X = x, Y = y, Z = center.Z - 330}
+    local top, bottom = {X = x, Y = y, Z = center.Z + 115}, {X = x, Y = y, Z = center.Z - context.floor_depth}
     local floor = trace(context, top, bottom, 0, false, context.ignored)
     if not floor or not vector(floor.ImpactPoint) or not vector(floor.ImpactNormal) or floor.ImpactNormal.Z < 0.7
         or floor.ImpactPoint.Z >= top.Z - 1 or floor.ImpactPoint.Z <= bottom.Z then return end
@@ -88,7 +88,7 @@ local function align(context, center)
     for _, height in ipairs({0, 8, -8, 16, -16, 25}) do
         local target = {X = center.X, Y = center.Y, Z = center.Z + height}
         local aim, distance = look(muzzle, target)
-        if distance >= 75 and distance <= 550 and math.abs(aim.Pitch) < 56 then
+        if distance >= 75 and distance <= context.aim_range and math.abs(aim.Pitch) < context.aim_pitch then
             context.muzzle:K2_SetWorldRotation(aim, false, {}, true)
             local forward = context.muzzle:GetForwardVector()
             if vector(forward) and (forward.X * (target.X - muzzle.X) + forward.Y * (target.Y - muzzle.Y)
@@ -121,6 +121,8 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
     local context = equipped(state, phase, name, guid, tag)
     context.trace, context.target_capsule, context.target_mesh = StaticFindObject(trace_path), target_capsule, target_mesh
     context.ignored = {context.pawn, context.weapon, actor}
+    local rooftop = tag == "native-crossroads-jammer"
+    context.floor_depth, context.aim_range, context.aim_pitch = rooftop and 1800 or 330, rooftop and 1600 or 550, rooftop and 70 or 56
     local center = target_capsule:K2_GetComponentLocation()
     local radius, height = context.capsule:GetScaledCapsuleRadius(), context.capsule:GetScaledCapsuleHalfHeight()
     local original = {point = context.pawn:K2_GetActorLocation(), actor = rotation(context.pawn:K2_GetActorRotation()),
@@ -150,7 +152,7 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
         local current_distance, exact_hit = align(context, center)
         if exact_hit then return current_distance, exact_hit end
         local bearing = math.atan(original.point.Y - center.Y, original.point.X - center.X)
-        for _, range in ipairs({175, 245, 320, 410}) do
+        for _, range in ipairs(rooftop and {175, 245, 320, 410, 540, 670, 800, 1000, 1220} or {175, 245, 320, 410}) do
             for _, offset in ipairs({0, 30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180}) do
                 local direction = bearing + math.rad(offset)
                 local point = floor_at(context, center, center.X + math.cos(direction) * range,

@@ -165,6 +165,15 @@ local function in_reach(point, origin, anchor, reach)
         and distance_squared(point, anchor) <= reach ^ 2
 end
 
+local function speaker_in_reach(point, world, profile, reach)
+    if not profile.speaker or not vector(point) then return false end
+    local speaker = StaticFindObject(profile.speaker.path)
+    if not exact(speaker, profile.speaker.class) or not same(speaker:GetWorld(), world)
+        or not speaker:HasAuthority() or speaker:IsActorBeingDestroyed() or speaker.Alive ~= true then return false end
+    local location = speaker:K2_GetActorLocation()
+    return vector(location) and distance_squared(point, location) <= reach ^ 2
+end
+
 local function context_for(state, phase, name, approach, profile)
     profile = profile or wire_board
     if type(name) ~= "string" or #name > 512 or name:find("%c") or not name:match("^Player_FP_C ") then
@@ -204,8 +213,11 @@ local function context_for(state, phase, name, approach, profile)
 
     local board, box = live_board(world, instance, profile)
     local origin, anchor, reach = interaction_geometry(pawn, board, box)
-    if not approach and not in_reach(pawn:K2_GetActorLocation(), origin, anchor, reach) then
-        refused("board_out_of_reach")
+    if not approach then
+        local point = pawn:K2_GetActorLocation()
+        if not in_reach(point, origin, anchor, reach) and not speaker_in_reach(point, world, profile, reach) then
+            refused("board_out_of_reach")
+        end
     end
     return {world = world, host = host.pawn, instance = instance, save = save, interactor = pawn,
         receiving_save = receiving_save, board = board, key = fname(profile.quest_id, profile.quest_display_alias),

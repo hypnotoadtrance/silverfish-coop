@@ -198,6 +198,8 @@ function quest.command(fields, state, phase)
     if not tag then tag, operation = full_operation:match("^(native%-spratt)%-(.+)$") end
     local profile = profiles.by_tag[tag]
     if not profile then return end
+    local alternate = profiles.alternate[tag]
+    if alternate and state.map == alternate.map then profile = alternate end
     if operation == "aim" and profile.objective_map then
         if #fields ~= 4 or state.map ~= profile.objective_map then refuse(profile, "aim_arguments_unqualified") end
         return aim_fixture.aim(state, phase, fields[3], fields[4], profile)

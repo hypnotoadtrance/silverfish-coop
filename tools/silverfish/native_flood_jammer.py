@@ -6,7 +6,7 @@ import time
 from . import native_loot, native_rewards, native_spratt, native_wire_quest, party
 from .authored_loot import valid_item_transform
 from .native_gold import valid_guid
-from .travel import BLACK_MARKET, BOROUGH, LAKE, RAIL_YARD
+from .travel import BLACK_MARKET, BOROUGH, CROSSROADS, LAKE, OBSERVATORY, RAIL_YARD
 
 
 @dataclass(frozen=True)
@@ -19,10 +19,16 @@ class StockKillContract:
     cash: int
     factions: frozenset[str]
     fixture_xp: int | None = None
+    alternate_boards: tuple[tuple[str, str], ...] = ()
 
     def command(self, verb=""):
         base = self.key.replace("_", "-")
         return f"{base}-{verb}" if verb else base
+
+    def board_at(self, area):
+        if area == self.board_map:
+            return self.board
+        return next((board for target, board in self.alternate_boards if area == target), None)
 
 
 @dataclass(frozen=True)
@@ -43,12 +49,16 @@ class JammerProfile(StockKillContract):
 FLOOD_PLAINS = "/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"
 FLOOD = JammerProfile("Jmr_FloodPlains", "native_flood_jammer", BOROUGH, native_wire_quest.BOARD, FLOOD_PLAINS, 350, frozenset({"2", "5"}))
 BLACK_MARKET_BOARD = f"BountyBoard_BP_C {BLACK_MARKET}.Shop_BlackMarket_01:PersistentLevel.BountyBoard_BP_C_0"
-BLACK_LAKE = JammerProfile("Jmr_Lake", "native_lake_jammer", BLACK_MARKET, BLACK_MARKET_BOARD, LAKE, 400, frozenset({"5", "8"}))
+SIMMI_BOARD = f"BountyBoard_BP_C {OBSERVATORY}.Observitory_P:PersistentLevel.BountyBoard_BP_C_0"
+BLACK_LAKE = JammerProfile("Jmr_Lake", "native_lake_jammer", BLACK_MARKET, BLACK_MARKET_BOARD, LAKE, 400,
+                           frozenset({"5", "8"}), alternate_boards=((OBSERVATORY, SIMMI_BOARD),))
+CROSSROADS_JAMMER = JammerProfile("Jmr_CrossRoads", "native_crossroads_jammer", OBSERVATORY, SIMMI_BOARD, CROSSROADS,
+                                  200, frozenset({"5", "8"}))
 LENNY = StockKillContract("Asn_Lenny_01", "native_lenny", BLACK_MARKET, BLACK_MARKET_BOARD, RAIL_YARD, 2500, frozenset({"5", "8"}))
 SPRATT = StockKillContract(native_spratt.QUEST, "native_spratt", BLACK_MARKET, BLACK_MARKET_BOARD,
                            native_spratt.AREA, 5000, frozenset({"5", "8"}), fixture_xp=7)
-CONTRACTS = {spec.quest: spec for spec in (FLOOD, BLACK_LAKE, LENNY, SPRATT)}
-OBJECTIVES = {spec.objective_map: spec for spec in (FLOOD, BLACK_LAKE)}
+CONTRACTS = {spec.quest: spec for spec in (FLOOD, BLACK_LAKE, CROSSROADS_JAMMER, LENNY, SPRATT)}
+OBJECTIVES = {spec.objective_map: spec for spec in (FLOOD, BLACK_LAKE, CROSSROADS_JAMMER)}
 COMMANDS = {
     spec.command(verb): spec
     for spec in CONTRACTS.values() for verb in ("preflight", "approach", "start", "turn-in")
@@ -69,7 +79,7 @@ def _pawn(host, actor, spec):
     player = host.party["players"].get(actor)
     if (not host.native_profile or not host.native_zones or not host.native_guest
             or host.transitioning or host.stopping or host.native_checkpoint_unsafe or host.party["wipe"]
-            or host.last_game.get("state") != "hosting" or host.last_game.get("map") != spec.board_map
+            or host.last_game.get("state") != "hosting" or spec.board_at(host.last_game.get("map")) is None
             or time.monotonic() - host.last_seen > 3 or not player or player["downed"]
             or actor in host.party["pending_spawns"]):
         raise party.RuleError(f"{spec.key}_board_unavailable")
@@ -80,6 +90,10 @@ def _pawn(host, actor, spec):
 
 
 async def _command(host, bridge, action, pawn, spec):
+    area = host.last_game.get("map")
+    board = spec.board_at(area)
+    if board is None:
+        raise party.RuleError(f"{spec.key}_board_unavailable")
     try:
         snapshot = await bridge.command(action, pawn, timeout=8)
     except RuntimeError as error:
@@ -89,7 +103,7 @@ async def _command(host, bridge, action, pawn, spec):
         raise
     proof = snapshot.get(spec.key, {})
     if (snapshot.get("state"), snapshot.get("map"), *(proof.get(key) for key in ("operation", "map", "pawn", "board", "quest"))) != (
-            "hosting", spec.board_map, action, spec.board_map, pawn, spec.board, spec.quest
+            "hosting", area, action, area, pawn, board, spec.quest
     ) or proof.get("reputation", {}).keys() != spec.factions:
         raise RuntimeError("The stock jammer board did not report the exact authored contract")
     if (any(key not in proof or proof[key] not in STEPS for key in ("step_before", "step_after"))
@@ -115,11 +129,12 @@ async def approach(host, bridge, actor, spec=FLOOD):
     pawn = _pawn(host, actor, spec)
     if not host.fixtures:
         raise party.RuleError(f"{spec.key}_approach_unavailable")
+    area = host.last_game.get("map")
     snapshot = await bridge.command(spec.command("approach"), pawn, timeout=5)
-    if (snapshot.get("state"), snapshot.get("map")) != ("hosting", spec.board_map):
+    if (snapshot.get("state"), snapshot.get("map")) != ("hosting", area):
         raise RuntimeError("The stock jammer board approach left the qualified world")
     host.last_game, host.last_seen = snapshot, time.monotonic()
-    return {f"{spec.key}_approach": {"pawn": pawn, "board": spec.board}}
+    return {f"{spec.key}_approach": {"pawn": pawn, "board": spec.board_at(area)}}
 
 
 async def xp_fixture(host, bridge, spec):
@@ -203,12 +218,18 @@ async def act(host, bridge, actor, action):
     if not starting and current.get("step") == -10:
         return {"effect": "native_quest_already_settled", **current}
     expected = (None, 1, 0, 0) if starting else (2, -10, spec.cash, 1)
-    if not starting and not _objective_ready(current, spec):
+    # Older stock saves can already carry one of these two authored jammer
+    # bounties. The exact host row can qualify a turn-in when no party record
+    # exists, while a recorded co-op objective still needs its typed proof.
+    legacy_stock = not current and spec in (BLACK_LAKE, CROSSROADS_JAMMER)
+    if not starting and not legacy_stock and not _objective_ready(current, spec):
         raise party.RuleError(f"{spec.key}_objective_incomplete")
     host.transitioning = True
     try:
         before = await _command(host, bridge, spec.command("preflight"), pawn, spec)
         if before["step_after"] != expected[0]:
+            if not starting and legacy_stock:
+                raise party.RuleError(f"{spec.key}_objective_incomplete")
             raise party.RuleError(f"{spec.key}_stock_step_changed")
         if spec is SPRATT and starting and before["xp_after"] < spec.fixture_xp:
             raise party.RuleError("stock_spratt_quest_not_offered")
@@ -260,7 +281,8 @@ async def observe(host, bridge):
     if not expected:
         return
     current = host.party.get("native_quests", {}).get(spec.quest, {})
-    if current.get("step") != expected[0]:
+    legacy_active = not current and expected[0] == 1 and spec in (BLACK_LAKE, CROSSROADS_JAMMER)
+    if current.get("step") != expected[0] and not legacy_active:
         return
     if (any(type(proof.get(key)) is not int for key in ("xp_before", "xp_after"))
             or (proof.get("step_before"), proof.get("step_after"), proof["xp_after"] - proof["xp_before"]) != expected):

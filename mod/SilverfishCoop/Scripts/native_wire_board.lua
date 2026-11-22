@@ -4,6 +4,7 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_DEATH") == "cpp"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+local input_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
 local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough"
 local scientist = "/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01"
 local scav_bar = "/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P"
@@ -21,6 +22,7 @@ local pocket_watch = "Clt_Watch"
 local ring = "Clct_EvilEye"
 local pump_room = "Clt_EatherPumpTape"
 local lake_jammer = "Jmr_Lake"
+local crossroads_jammer = "Jmr_CrossRoads"
 local lenny = "Asn_Lenny_01"
 local spratt = "Asn_Spratt"
 local readings = "Clt_Tape_StoneMaze_01"
@@ -34,7 +36,8 @@ local function board_profile(area, level, suffix, id, quests, display_global)
 end
 local profiles = {
     [shopkeep] = board_profile(shopkeep, "Shop_ShopKeep_P", "1", 2, {molasses}),
-    [observatory] = board_profile(observatory, "Observitory_P", "0", 3, {keycard, dead_drop, black_box}, true),
+    [observatory] = board_profile(observatory, "Observitory_P", "0", 3, {keycard, dead_drop, black_box,
+        crossroads_jammer, lake_jammer}, true),
     [borough] = board_profile(borough, "Borough", "3", 5, {wire, computer, photo, report, flood_control}),
     [scientist] = board_profile(scientist, "Shop_Scientist_01", "2", 4, {computer, readings, prototype}),
     [scav_bar] = board_profile(scav_bar, "Shop_ScavBar_P", "2", 10, {depot, pocket_watch, ring}, true),
@@ -46,12 +49,15 @@ local titles = {[molasses] = "Get Molasses", [keycard] = "Hall Pass", [wire] = "
     [pocket_watch] = "Pocket Watch", [ring] = "Savlo's Ring", [pump_room] = "Pump Room", [lake_jammer] = "Signal Jammer: Black Lake",
     [lenny] = "Lenny's House", [flood_control] = "Flood Control", [stolen_bag] = "Stolen Goods",
     [dead_drop] = "CrossRoads Dead Drop", [black_box] = "Black Box", [missing_contact] = "Missing Contact",
-    [spratt] = "Kill Spratt", [prototype] = "Prototype Drill"}
+    [spratt] = "Kill Spratt", [prototype] = "Prototype Drill", [crossroads_jammer] = "Signal Jammer: Crossroads"}
 local board_class = "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local box_class = "/Script/Engine.BoxComponent"
 local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
+local quest_log_path = "/Game/Classes/GUI/Menu_QuestLog_Widget.Menu_QuestLog_Widget_C"
+local quest_details_path = "/Game/Classes/GUI/SubWidgets/Quest_DetailsWindow_Widget.Quest_DetailsWindow_Widget_C"
+local quest_turnin_path = "/Game/Classes/GUI/SubWidgets/Quest_TurnIn_Widget.Quest_TurnIn_Widget_C"
 local max_sequence = 2 ^ 53
 local prompt = {
     focused = "Interact to view the contract.",
@@ -155,6 +161,11 @@ local contract_prompt = {
         missing = "Disable the signal jammer at Black Lake.\nInteract to check the contract again.",
         ready = "Turn in the contract for 400 shared cash.\nInteract again to turn it in.",
     },
+    [crossroads_jammer] = {
+        offer = "Disable the signal jammer at Crossroads.\nInteract again to accept the contract.",
+        missing = "Disable the signal jammer at Crossroads.\nInteract to check the contract again.",
+        ready = "Turn in the contract for 200 shared cash.\nInteract again to turn it in.",
+    },
     [lenny] = {
         offer = "Find Lenny in the Rail Yard.\nInteract again to accept the contract.",
         missing = "Take out Lenny in the Rail Yard.\nInteract to check the contract again.",
@@ -178,7 +189,7 @@ local rendered_states = {
 }
 
 local events, heartbeat, is_downed
-local binding, session, widget, presented_text
+local binding, session, stock_session, widget, presented_text
 local selection, pending_move, navigation = 1, 0, false
 local last_sequence = 0
 
@@ -272,7 +283,7 @@ end
 function board_view.clear()
     hide()
     if binding and type(SilverfishClearNativeWireBoardScope) == "function" then SilverfishClearNativeWireBoardScope() end
-    binding, session = nil, nil
+    binding, session, stock_session = nil, nil, nil
     selection, pending_move = 1, 0
 end
 
@@ -319,10 +330,8 @@ local function present(current, status)
     return ok
 end
 
-local function emit(current, sequence, kind, now, fixture)
-    local open_sequence = kind == "view" and sequence or session.open
+local function write_event(current, sequence, open_sequence, kind, quest)
     local profile = current.profile
-    local quest = profile.quests[selection]
     local file = io.open(events, "ab")
     local success = false
     if file then
@@ -331,10 +340,84 @@ local function emit(current, sequence, kind, now, fixture)
         local closed = file:close()
         success = not not (written and closed)
     end
+    return success
+end
+
+local function emit(current, sequence, kind, now, fixture)
+    local open_sequence = kind == "view" and sequence or session.open
+    local quest = current.profile.quests[selection]
+    local success = write_event(current, sequence, open_sequence, kind, quest)
     local waiting = kind == "view" and "loading" or kind == "start" and "starting" or "redeeming"
     session = { open = open_sequence, sequence = sequence, kind = kind, quest = quest, fixture = fixture, expires = now + 30,
         state = success and waiting or "unavailable", pending = success }
     return success
+end
+
+local function current_stock_menu(current, now)
+    if not fresh(now) or current.controller.Loading ~= false or current.pawn.Dead ~= false
+        or type(is_downed) ~= "function" or is_downed(current.pawn) ~= false then return end
+    local stack = current.controller.MenuStack
+    local count = stack and stack:GetArrayNum()
+    local menu = count and count > 0 and stack[count]
+    if exact(menu, quest_log_path) and menu.BountyBoard == true and same(menu.BountyBoard_Ref, current.board) then return menu end
+end
+
+local function supported_stock_action(current, quest)
+    local map = current.profile.map
+    return quest == lake_jammer and (map == black_market or map == observatory)
+        or quest == crossroads_jammer and map == observatory
+end
+
+local function drain_stock(current, now)
+    local menu = current_stock_menu(current, now)
+    if stock_session and (stock_session.expires <= now or not same(menu, stock_session.menu)) then stock_session = nil end
+    if not menu or type(SilverfishTakeNativeStockBoardAction) ~= "function" then return end
+    local sequence, kind, quest = SilverfishTakeNativeStockBoardAction(current.pawn:GetAddress())
+    sequence = math.tointeger(sequence)
+    if not sequence or sequence <= last_sequence or sequence >= max_sequence then return end
+    last_sequence = sequence
+    if stock_session or not (kind == "stock-start" or kind == "stock-turnin")
+        or not supported_stock_action(current, quest) then return end
+    if write_event(current, sequence, sequence, kind, quest) then
+        stock_session = {sequence = sequence, quest = quest, menu = menu, expires = now + 30,
+            state = kind == "stock-start" and "starting" or "redeeming"}
+    end
+end
+
+local function stock_fixture(current, fields, now)
+    local quest, verb = fields[3], fields[4]
+    if not headless or not (input_fixtures or current.host and host_fixtures) or #fields ~= 4
+        or (verb ~= "start" and verb ~= "turnin") or not supported_stock_action(current, quest)
+        or not can_use(current, now) then error("wire_board_stock_fixture_scope", 0) end
+    current.board:Send_PowerSignal(true, current.pawn)
+    local menu = current_stock_menu(current, now)
+    if not menu then error("wire_board_stock_fixture_menu_missing", 0) end
+    if verb == "start" then
+        local stock = require("native_wire_quest")
+        local id = FName(quest, EFindName.FNAME_Find)
+        local offer = stock.stock_row(current.board.Contracts, id)
+        if not offer then error("wire_board_stock_fixture_offer_missing", 0) end
+        menu:ShowDetails_Quest(offer, id)
+        local details = menu.VerticalBox_Details:GetChildAt(0)
+        if not exact(details, quest_details_path) or not same(details.QuestLog_MenuRef, menu)
+            or details.Quest_ID:ToString() ~= quest then error("wire_board_stock_fixture_details_missing", 0) end
+        details:BndEvt__Quest_DetailsWindow_Widget_Button_Clear_Accept_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
+    else
+        menu:FillInCompletedQuests()
+        local list = menu.VerticalBox_CompletedList
+        local count = list:GetChildrenCount()
+        local selected
+        for index = 0, math.min(count, 64) - 1 do
+            local entry = list:GetChildAt(index)
+            if exact(entry, quest_turnin_path) and same(entry.QuestLog_MenuRef, menu)
+                and entry.Quest_IDTag:ToString() == quest then selected = entry; break end
+        end
+        if not selected then error("wire_board_stock_fixture_redemption_missing", 0) end
+        selected:BndEvt__Quest_TurnIn_Widget_Button_K2Node_ComponentBoundEvent_2_OnButtonReleasedEvent__DelegateSignature()
+    end
+    drain_stock(current, now)
+    if not stock_session or stock_session.quest ~= quest then error("wire_board_stock_fixture_action_unconsumed", 0) end
+    return "verified stock bounty button intercepted"
 end
 
 local function drain(current, allow, fixture, now)
@@ -387,6 +470,7 @@ function board_view.sync(state, phase)
         pending_move = 0
     end
     drain(current, allow, false, now)
+    drain_stock(current, now)
     if session then
         present(current, session.state)
     elseif allow and facing then
@@ -399,8 +483,24 @@ end
 
 function board_view.command(fields, state, phase)
     local action = fields[2]
-    if action ~= "native-wire-board-render" and action ~= "native-wire-board-fixture" then return end
+    if action ~= "native-wire-board-render" and action ~= "native-wire-board-fixture"
+        and action ~= "native-wire-board-stock-result" and action ~= "native-wire-board-stock-fixture" then return end
     local current, now = current_context(state, phase), os.time()
+    if action == "native-wire-board-stock-fixture" then
+        if not same_context(current, binding) then error("wire_board_stock_fixture_scope", 0) end
+        return stock_fixture(current, fields, now)
+    end
+    if action == "native-wire-board-stock-result" then
+        local sequence = fields[3] and fields[3]:match("^%d+$") and math.tointeger(tonumber(fields[3]))
+        local result = fields[7]
+        if #fields ~= 7 or not same_context(current, binding) or not stock_session or stock_session.sequence ~= sequence
+            or fields[4] ~= current.profile.map or fields[5] ~= current.name or fields[6] ~= stock_session.quest
+            or not (result == "accepted" or result == "completed" or result == "unavailable")
+            or not same(stock_session.menu, current_stock_menu(current, now)) then error("wire_board_stock_result_stale", 0) end
+        stock_session = nil
+        if result ~= "unavailable" then current.controller:CloseMenu({}) end
+        return "verified stock bounty action result " .. result
+    end
     local readings_pending = action == "native-wire-board-render" and session and session.quest == readings and session.pending
     if not same_context(current, binding) or not can_use(current, now, readings_pending) then error("wire_board_scope_unavailable", 0) end
     if action == "native-wire-board-fixture" then
@@ -444,8 +544,13 @@ function board_view.rows(state, phase, status_row)
     if not binding or state.map ~= binding.profile.map or phase ~= binding.phase or not same(state.world, binding.world)
         or not state.local_pawn or not same(state.local_pawn.pawn, binding.pawn) then return {} end
     local profile = binding.profile
-    return {status_row("native-wire-board", profile.map, binding.name, profile.name, profile.quests[selection], session and session.state or binding.status,
-        session and session.sequence or 0, session and session.open or 0)}
+    local rows = {status_row("native-wire-board", profile.map, binding.name, profile.name, profile.quests[selection],
+        session and session.state or binding.status, session and session.sequence or 0, session and session.open or 0)}
+    if stock_session then
+        rows[#rows + 1] = status_row("native-wire-board-stock", profile.map, binding.name, profile.name,
+            stock_session.quest, stock_session.state, stock_session.sequence, stock_session.sequence)
+    end
+    return rows
 end
 
 function board_view.start(bridge, downed)

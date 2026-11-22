@@ -11,7 +11,9 @@ from .travel import BLACK_MARKET, BOROUGH, OBSERVATORY, SCAV_BAR, SCIENTIST_SHOP
 
 HEARTBEAT = "native-wire-board-heartbeat"
 FIXTURE = "native-wire-board-fixture"
-WAITING = {"view": "loading", "start": "starting", "turnin": "redeeming"}
+STOCK_FIXTURE = "native-wire-board-stock-fixture"
+WAITING = {"view": "loading", "start": "starting", "turnin": "redeeming",
+           "stock-start": "starting", "stock-turnin": "redeeming"}
 QUEST = native_wire_quest.QUEST_ID
 BOARD = native_wire_quest.BOARD
 BOARDS = native_computer_board.BOARDS
@@ -19,12 +21,13 @@ MAPS = frozenset(BOARDS)
 COUP_REPORT = native_computer_board.COUP_REPORT
 DEPOT_DOCUMENTS = native_computer_board.DEPOT_DOCUMENTS
 LAKE_JAMMER = native_flood_jammer.BLACK_LAKE
+CROSSROADS_JAMMER = native_flood_jammer.CROSSROADS_JAMMER
 LENNY = native_flood_jammer.LENNY
 SPRATT = native_flood_jammer.SPRATT
 QUESTS = {
     SHOPKEEP: frozenset({native_computer_board.MOLASSES.quest_id}),
     OBSERVATORY: frozenset({native_computer_board.SAVLO_KEYCARD.quest_id, native_computer_board.DEAD_DROP.quest_id,
-                            native_computer_board.BLACK_BOX.quest_id}),
+                            native_computer_board.BLACK_BOX.quest_id, CROSSROADS_JAMMER.quest, LAKE_JAMMER.quest}),
     BOROUGH: frozenset({QUEST, native_computer_board.QUEST_ID, native_turret_photo.QUEST_ID, COUP_REPORT.quest_id,
                         native_subway_valve.QUEST}),
     SCIENTIST_SHOP: frozenset({native_computer_board.QUEST_ID, native_mosby_tape.MOSBY_QUEST, native_prototype_drill.QUEST_ID}),
@@ -38,6 +41,7 @@ QUESTS = {
 PREFLIGHTS = {
     native_subway_valve.QUEST: (native_subway_valve.PREFLIGHT, native_subway_valve.BOARD_KEY),
     LAKE_JAMMER.quest: (LAKE_JAMMER.command("preflight"), LAKE_JAMMER.key),
+    CROSSROADS_JAMMER.quest: (CROSSROADS_JAMMER.command("preflight"), CROSSROADS_JAMMER.key),
     LENNY.quest: (LENNY.command("preflight"), LENNY.key),
     SPRATT.quest: (SPRATT.command("preflight"), SPRATT.key),
     QUEST: (native_wire_quest.PREFLIGHT, "native_wire_quest"),
@@ -47,9 +51,11 @@ PREFLIGHTS = {
     **{spec.quest_id: (spec.command("preflight"), spec.key) for spec in native_computer_board.CONTRACTS.values()},
 }
 HIDDEN_OFFERS = {"stock_turret_photo_quest_not_offered", "stock_lake_jammer_quest_not_offered", "stock_lenny_quest_not_offered",
+                 "stock_crossroads_jammer_quest_not_offered",
                  "stock_spratt_quest_not_offered",
                  "stock_subway_valve_quest_not_offered",
                  *{f"stock_{spec.key.removeprefix('native_')}_quest_not_offered" for spec in native_computer_board.CONTRACTS.values()}}
+STOCK_MENU = {LAKE_JAMMER.quest: LAKE_JAMMER, CROSSROADS_JAMMER.quest: CROSSROADS_JAMMER}
 
 
 def fixture_selection(area, target):
@@ -58,6 +64,14 @@ def fixture_selection(area, target):
     if not isinstance(target, str) or target not in QUESTS.get(area, ()):
         raise party.RuleError("Choose a supported stock contract on the current board")
     return (target,)
+
+
+def stock_fixture_selection(area, target):
+    quest, separator, verb = target.partition("|") if isinstance(target, str) else ("", "", "")
+    profile = STOCK_MENU.get(quest)
+    if separator != "|" or verb not in ("start", "turnin") or profile is None or profile.board_at(area) is None:
+        raise party.RuleError("Choose a supported stock board action on the current map")
+    return quest, verb
 
 
 @dataclass(frozen=True)
@@ -87,8 +101,9 @@ class WireBoardView:
         if not self.pending:
             return snapshot
         pawn = snapshot.get("pawns", {}).get("local", {}).get("name")
-        shown = snapshot.get("native_wire_board", {})
         sequence, opened, kind, area, actor, board, quest = self.pending[2]
+        stock_menu = kind.startswith("stock-")
+        shown = snapshot.get("native_wire_board_stock" if stock_menu else "native_wire_board", {})
         if (sequence <= self.latest or area != snapshot.get("map") or actor != pawn or board != BOARDS.get(area)
                 or quest not in QUESTS[area]
                 or tuple(shown.get(name) for name in ("map", "pawn", "board", "quest", "state", "sequence", "open"))
@@ -97,6 +112,8 @@ class WireBoardView:
         self.pending = None
         self.latest = sequence
         operation = uuid.uuid5(self.bridge.input_namespace, f"{epoch}:{pawn}:wire-board:{sequence}").hex
+        if stock_menu:
+            return await self._stock_menu(snapshot, area, pawn, board, quest, kind, sequence, opened, operation, action)
         identity = (epoch, area, pawn, board, quest, opened)
         try:
             state = await self._perform(identity, kind, sequence, operation, action)
@@ -116,6 +133,28 @@ class WireBoardView:
             return rendered
         except (OSError, RuntimeError, ValueError) as error:
             self.opened = None
+            self.control.event("native_wire_board_render_rejected", operation_id=operation, reason=str(error))
+        return snapshot
+
+    async def _stock_menu(self, snapshot, area, pawn, board, quest, kind, sequence, opened, operation, action):
+        spec = STOCK_MENU.get(quest)
+        if spec is None or spec.board_at(area) != board or opened != sequence:
+            return snapshot
+        starting = kind == "stock-start"
+        verb, step, state = ("native-quest-start", 1, "accepted") if starting else ("native-quest-turnin", -10, "completed")
+        try:
+            result = await action(verb, operation, quest)
+            if (result.get("quest_id"), result.get("step")) != (quest, step):
+                raise RuntimeError("The host did not verify the stock board action")
+            self.control.event("native_wire_board_interaction", sequence=sequence, operation_id=operation,
+                               kind=kind, state=state, board=board, quest=quest)
+        except (OSError, RuntimeError, ValueError) as error:
+            state = "unavailable"
+            self.control.event("native_wire_board_interaction_rejected", sequence=sequence, operation_id=operation,
+                               kind=kind, reason=str(error), board=board, quest=quest)
+        try:
+            return await self.bridge.command("native-wire-board-stock-result", str(sequence), area, pawn, quest, state, timeout=2)
+        except (OSError, RuntimeError, ValueError) as error:
             self.control.event("native_wire_board_render_rejected", operation_id=operation, reason=str(error))
         return snapshot
 
@@ -163,7 +202,7 @@ class WireBoardView:
             return self._wire_status(proof)
         step = proof.get("step_after")
         last = 3 if quest == native_turret_photo.QUEST_ID else 2
-        if quest == LAKE_JAMMER.quest and step == -7:
+        if quest in (LAKE_JAMMER.quest, CROSSROADS_JAMMER.quest) and step == -7:
             return "completed"
         if "step_after" not in proof or step not in (None, -10, *range(1, last + 1)):
             raise RuntimeError("The host board report did not verify the selected stock quest step")
@@ -187,7 +226,8 @@ class WireBoardView:
             return "completed"
         if quest == SPRATT.quest:
             return "ready" if step == 2 and proof.get("objective_qualified") is True else "missing"
-        if quest in (native_turret_photo.QUEST_ID, LAKE_JAMMER.quest, LENNY.quest, native_subway_valve.QUEST):
+        if quest in (native_turret_photo.QUEST_ID, LAKE_JAMMER.quest, CROSSROADS_JAMMER.quest, LENNY.quest,
+                     native_subway_valve.QUEST):
             return "ready" if step == last else "missing"
         spec = native_computer_board.CONTRACTS[quest]
         if proof.get("can_turn_in") is not (area == spec.redeem_map):

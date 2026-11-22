@@ -20,7 +20,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
-from tools.silverfish.native_flood_jammer import BLACK_LAKE, FLOOD, LENNY, POSE, SPRATT, same_pose
+from tools.silverfish.native_flood_jammer import BLACK_LAKE, CROSSROADS_JAMMER, FLOOD, LENNY, POSE, SPRATT, same_pose
 from tools.silverfish import native_lenny, native_spratt, native_spratt_fixture
 from tools.silverfish.guest_weapon_profiles import NINE_MM_BALL, TWELVE_GAUGE_BUCK
 from tools.silverfish.travel import CROSSROADS
@@ -30,21 +30,24 @@ def quest_record(campaign, quest):
     return campaign.get("world", {}).get("party", {}).get("native_quests", {}).get(quest, {})
 
 
-async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=False, spec=FLOOD):
-    lake, lenny = spec == BLACK_LAKE, spec == LENNY
+async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=False, spec=FLOOD, stock_menu=False):
+    lake, crossroads, lenny = spec == BLACK_LAKE, spec == CROSSROADS_JAMMER, spec == LENNY
     spratt = spec == SPRATT
     assassination = lenny or spratt
-    stock_board_input = lake or assassination
+    stock_menu = stock_menu or crossroads
+    stock_board_input = lake or crossroads or assassination
     weapon = "sg-71-a" if assassination else "light-pistol"
     weapon_label = "shotgun" if assassination else "pistol"
     ammo = TWELVE_GAUGE_BUCK if assassination else NINE_MM_BALL
     quest, board_map, area = spec.quest, spec.board_map, spec.objective_map
     level = area + "." + area.rsplit("/", 1)[1] + ":PersistentLevel."
     objective_key = f"{spec.key}_objective"
-    objective_flags = ("Adv_Freelancer", "Adv_Coup") if lake else ("LennyDead", "Player_Kills") if assassination else ()
+    objective_flags = ("Adv_Freelancer", "Adv_Coup") if lake or crossroads else ("LennyDead", "Player_Kills") if assassination else ()
     faction = "8" if stock_board_input else "2"
     outbound = ((area, "BlackMarket"),) if lake else ((CITY, "City_Borough"), (RAIL, "Rail_City"), (RUINS, "Ry_Rf"))
     returning = ((board_map, "BlackMarket"),) if lake else ((RAIL, "Ry_Rf"), (CITY, "Rail_City"), (BOROUGH, "City_Borough"))
+    if crossroads:
+        outbound, returning = ((area, "Obsv_Etr"),), ((board_map, "Obsv_Etr"),)
     if lenny:
         lake_area = BLACK_LAKE.objective_map
         outbound = ((lake_area, "BlackMarket"), (area, "Depot_Lake"))
@@ -66,8 +69,11 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
     host_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones", "--native-expanded-zones")
+    if stock_menu:
+        host_flags += ("--native-shop-view",)
     client_flags = ("--headless", "--native-zones", "--native-guest-primary-input")
-    evidence = {"quest": quest, "routes": [], "shots": [], "stock_board_input": stock_board_input, "client_projection_requested": client_projection}
+    evidence = {"quest": quest, "routes": [], "shots": [], "stock_board_input": stock_board_input,
+                "stock_menu": stock_menu, "client_projection_requested": client_projection}
     processes = []
     character = None
 
@@ -157,6 +163,11 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
         assert (pressed["map"], pressed["board"], pressed["quest"], pressed["state"]) == (board_map, spec.board, quest, expected), pressed
         evidence.setdefault("board_presses", []).append(pressed)
 
+    async def stock_button(verb, expected):
+        pressed = (await action(client, "native-wire-board-stock-fixture", "--target", f"{quest}|{verb}"))["native_wire_board_stock"]
+        assert (pressed["map"], pressed["board"], pressed["quest"], pressed["state"]) == (board_map, spec.board, quest, expected), pressed
+        evidence.setdefault("board_presses", []).append(pressed)
+
     async def committed(step):
         result = await wait(run, lambda frame: quest_record(frame.get("campaign", {}), quest).get("step") == step)
         return quest_record(result["campaign"], quest)
@@ -193,7 +204,8 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
             raise
         target = evidence["stock_watch"]["target"] if assassination else spec.jammer
         assert (aim["map"], aim["target" if assassination else "jammer"], aim["guid"]) == (area, target, guid), aim
-        assert 75 <= aim["distance"] <= 550 and aim["component"].split(" ", 1)[-1].startswith(target.split(" ", 1)[-1] + "."), aim
+        max_range = 1600 if crossroads else 550
+        assert 75 <= aim["distance"] <= max_range and aim["component"].split(" ", 1)[-1].startswith(target.split(" ", 1)[-1] + "."), aim
         try:
             press = (await action(client, "native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
         except RuntimeError:
@@ -322,9 +334,12 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
             assert "stock_catalog" in evidence, catalog
             evidence["native_balances_at_offer"] = await balances()
             await board_state("armed", "focused", selected=False)
-            await board_press("loading")
-            await board_state("offer")
-            await board_press("starting")
+            if stock_menu:
+                await stock_button("start", "starting")
+            else:
+                await board_press("loading")
+                await board_state("offer")
+                await board_press("starting")
             accepted = await committed(1)
         else:
             accepted = await action(client, "native-quest-start", "--target", quest)
@@ -464,7 +479,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
             assert ready["reputation"]["5"]["after"] == offer["reputation"]["5"]["after"], (offer, ready)
         if stock_board_input:
             baseline = evidence["native_balances_at_offer"]
-            if lake:
+            if lake or crossroads:
                 assert before["host"]["Adv_Freelancer"] == baseline["host"]["Adv_Freelancer"] + 50, (baseline, before)
                 assert before["host"]["Adv_Coup"] == baseline["host"]["Adv_Coup"] - 10, (baseline, before)
             elif lenny:
@@ -479,11 +494,15 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
                 assert before["host"] == baseline["host"], (baseline, before)
             assert before["guest"] == baseline["guest"], (baseline, before)
             await board_state("armed", "focused", selected=False)
-            await board_press("loading")
-            await board_state("ready")
-            await board_press("redeeming")
+            if stock_menu:
+                await stock_button("turnin", "redeeming")
+            else:
+                await board_press("loading")
+                await board_state("ready")
+                await board_press("redeeming")
             settled = await committed(-10)
-            await board_state("completed")
+            if not stock_menu:
+                await board_state("completed")
             reputation_after = (await board())["reputation"]
             reputation = {key: {"before": row["after"], "after": reputation_after[key]["after"]}
                           for key, row in ready["reputation"].items()}
@@ -495,10 +514,13 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
         assert (settled["step"], settled["cash"], settled["xp"], settled["wallet"], set(settled["recipients"])) == (
             -10, spec.cash, 1, before["host"]["Player_Cash"] + spec.cash, {"host", character},
         ), settled
+        if stock_menu:
+            guest_paid = await wait(client_run, lambda state: state.get("game", {}).get("native_wallet") == settled["wallet"])
+            evidence["stock_guest_wallet"] = guest_paid["game"]["native_wallet"]
         assert settled["objective"] == proof, settled
         assert (reputation[faction]["after"] - reputation[faction]["before"],
                 reputation["5"]["after"] - reputation["5"]["before"]) == (
-                    (30, 50) if spratt else (15, 50) if lenny else (50, -40)), reputation
+                    (30, 50) if spratt else (15, 50) if lenny else (30, -30) if crossroads else (50, -40)), reputation
 
         def reward_materialized(state):
             players = state.get("campaign", {}).get("world", {}).get("party", {}).get("players", {})
@@ -575,13 +597,18 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, help="original Saved directory to hash before and after")
     parser.add_argument("--client-projection", action="store_true", help="require the exact client-local jammer to disappear after the stock kill")
     parser.add_argument("--pose-only", action="store_true", help="compare both authored jammer transforms before the bounty")
+    parser.add_argument("--stock-bounty-menu", action="store_true", help="use the stock Black Market bounty buttons")
     profiles = parser.add_mutually_exclusive_group()
     profiles.add_argument("--black-lake", action="store_true", help="run the authored Black Market and Black Lake contract")
+    profiles.add_argument("--simmi", action="store_true", help="accept and turn in the Crossroads jammer through Simmi's stock menu")
     profiles.add_argument("--lenny", action="store_true", help="run Lenny's House and its stock quest-gated NPC spawn")
     profiles.add_argument("--spratt", action="store_true", help="run Kill Spratt through its stock board, Cistern spawn, and redemption")
     arguments = parser.parse_args()
     if arguments.pose_only and (arguments.lenny or arguments.spratt):
         parser.error("The pose check requires an authored jammer")
+    if arguments.stock_bounty_menu and not (arguments.black_lake or arguments.simmi):
+        parser.error("The stock bounty menu fixture requires --black-lake or --simmi")
     asyncio.run(exercise(arguments.work.resolve(), arguments.vanilla_saved, client_projection=arguments.client_projection,
-                         pose_only=arguments.pose_only,
-                         spec=SPRATT if arguments.spratt else LENNY if arguments.lenny else BLACK_LAKE if arguments.black_lake else FLOOD))
+                         pose_only=arguments.pose_only, stock_menu=arguments.stock_bounty_menu,
+                         spec=SPRATT if arguments.spratt else LENNY if arguments.lenny else BLACK_LAKE if arguments.black_lake
+                         else CROSSROADS_JAMMER if arguments.simmi else FLOOD))

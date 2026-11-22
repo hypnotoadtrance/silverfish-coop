@@ -151,6 +151,11 @@ namespace
             STR("/Game/Classes/Maps/Maps_OverWorld/Lake_01_P.Lake_01_P:PersistentLevel.SignalJammer_BP_C_1"),
             STR("/Game/Classes/Maps/Maps_OverWorld/Lake_01_P.Lake_01_P:PersistentLevel.Quest_Trigger_BP_C_1"),
             STR("Jmr_Lake"), 343288032, 8, 50},
+        JammerProfile{
+            STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.SignalJammer_BP_C_1"),
+            STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.Quest_Trigger_BP_C_1"),
+            STR("Jmr_CrossRoads"), 524500608, 8, 50},
     };
 
     struct Snapshot { int step{absent}, cash{}, xp{}; };

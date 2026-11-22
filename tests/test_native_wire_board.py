@@ -7,6 +7,38 @@ from tools.silverfish import native_wire_board as wire
 
 
 class WireBoardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stock_jammer_click_uses_only_the_exact_host_board(self):
+        bridge = SimpleNamespace(input_namespace=uuid.uuid4(), native_wire_board_requests=Mock(), command=AsyncMock())
+        control = SimpleNamespace(event=Mock())
+        view = wire.WireBoardView(bridge, control)
+        action = AsyncMock()
+        pawn, area = "Player_FP_C guest-owner", wire.OBSERVATORY
+        board = wire.BOARDS[area]
+
+        async def press(sequence, kind, quest, target=board):
+            stock = dict(map=area, pawn=pawn, board=target, quest=quest, state=wire.WAITING[kind],
+                         sequence=sequence, open=sequence)
+            snapshot = {"map": area, "pawns": {"local": {"name": pawn}}, "native_wire_board_stock": stock}
+            bridge.native_wire_board_requests.return_value = [(sequence, sequence, kind, area, pawn, target, quest)]
+            bridge.command.return_value = snapshot
+            return await view.sync(snapshot, "epoch", True, action)
+
+        lake = wire.LAKE_JAMMER.quest
+        crossroads = wire.CROSSROADS_JAMMER.quest
+        await press(1, "stock-start", lake, wire.BOARDS[wire.BLACK_MARKET])
+        await press(2, "stock-start", wire.native_computer_board.BLACK_BOX.quest_id)
+        action.assert_not_awaited()
+        action.return_value = {"quest_id": lake, "step": 1}
+        await press(3, "stock-start", lake)
+        await press(3, "stock-start", lake)
+        action.assert_awaited_once()
+        self.assertEqual(action.await_args.args[0::2], ("native-quest-start", lake))
+        bridge.command.assert_awaited_once_with("native-wire-board-stock-result", "3", area, pawn, lake, "accepted", timeout=2)
+        action.return_value = {"quest_id": crossroads, "step": -10}
+        await press(4, "stock-turnin", crossroads)
+        self.assertEqual(action.await_args.args[0::2], ("native-quest-turnin", crossroads))
+        self.assertEqual(bridge.command.await_args.args[-1], "completed")
+
     async def test_board_requires_current_rendered_offer_before_accepting(self):
         pawn = "Player_FP_C test-owner"
 

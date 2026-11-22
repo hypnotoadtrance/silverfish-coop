@@ -3272,6 +3272,10 @@ class Host:
                     selection = native_wire_board.fixture_selection(self.last_game.get("map"), request.get("target"))
                     self.last_game = await bridge.command(native_wire_board.FIXTURE, *selection, timeout=4)
                     result = {"native_wire_board": self.last_game.get("native_wire_board", {})}
+                elif action == native_wire_board.STOCK_FIXTURE and self.wire_board_enabled and self.fixtures:
+                    selection = native_wire_board.stock_fixture_selection(self.last_game.get("map"), request.get("target"))
+                    self.last_game = await bridge.command(action, *selection, timeout=4)
+                    result = {"native_wire_board_stock": self.last_game.get("native_wire_board_stock", {})}
                 elif action in ("native-broker-issue-fixture", "native-broker-drill-issue-fixture") and self.fixtures:
                     quest_id = native_broker.DRILL_ID if action == "native-broker-drill-issue-fixture" else native_broker.QUEST_ID
                     result = await native_broker.action(self, bridge, request.get("target") or "host",
@@ -3816,6 +3820,8 @@ class Host:
                 return await native_prototype_drill.preflight(self, bridge, "host", action, target)
             if action in native_computer_board.PREFLIGHTS:
                 return await native_computer_board.preflight(self, bridge, "host", spec=native_computer_board.PREFLIGHTS[action])
+            if action in native_flood_jammer.PREFLIGHTS:
+                return await native_flood_jammer.preflight(self, bridge, "host", native_flood_jammer.COMMANDS[action])
             if action == native_turret_photo.PREFLIGHT:
                 return await native_turret_photo.preflight(self, bridge, "host")
             return await native_quest.action(self, bridge, "host", action, target)
@@ -5531,6 +5537,10 @@ class Client:
                     selection = native_wire_board.fixture_selection(self.last_game.get("map"), request.get("target"))
                     self.last_game = await self.bridge.command(native_wire_board.FIXTURE, *selection, timeout=4)
                     result = {"native_wire_board": self.last_game.get("native_wire_board", {})}
+                elif action == native_wire_board.STOCK_FIXTURE and self.wire_board:
+                    selection = native_wire_board.stock_fixture_selection(self.last_game.get("map"), request.get("target"))
+                    self.last_game = await self.bridge.command(action, *selection, timeout=4)
+                    result = {"native_wire_board_stock": self.last_game.get("native_wire_board_stock", {})}
                 elif action == "native-guest-reload-input-fixture":
                     pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
                     if not pawn or self.last_game.get("state") != "connected":

@@ -948,7 +948,8 @@ class Bridge:
         events = []
         for line in batch[:end].splitlines():
             fields = line.decode("utf-8", errors="replace").split("\t")
-            if (len(fields) == 8 and fields[0] == "wire-board" and fields[3] in ("view", "start", "turnin")
+            if (len(fields) == 8 and fields[0] == "wire-board"
+                    and fields[3] in ("view", "start", "turnin", "stock-start", "stock-turnin")
                     and all(value.isascii() and value.isdigit() and len(value) <= 16 and 0 < int(value) < 2**53
                             for value in fields[1:3])
                     and all(0 < len(value) <= 512 for value in fields[4:])):
@@ -1372,9 +1373,9 @@ class Bridge:
                 elif fields[0] == "native-broker-input" and len(fields) == 6:
                     data["native_broker_input"] = {"map": fields[1], "pawn": fields[2], "station": fields[3],
                                                    "state": fields[4], "sequence": int(fields[5])}
-                elif fields[0] == "native-wire-board" and len(fields) == 8:
-                    data["native_wire_board"] = dict(zip(("map", "pawn", "board", "quest", "state"), fields[1:6]),
-                                                     sequence=int(fields[6]), open=int(fields[7]))
+                elif fields[0] in ("native-wire-board", "native-wire-board-stock") and len(fields) == 8:
+                    data[fields[0].replace("-", "_")] = dict(zip(("map", "pawn", "board", "quest", "state"), fields[1:6]),
+                                                             sequence=int(fields[6]), open=int(fields[7]))
                 elif fields[0] == "native-turret-photo" and len(fields) == 16:
                     photo = dict(zip(("action", "map", "pawn", "quest", "target", "camera"), fields[1:7]))
                     photo["visibility"] = _finite(fields[7])

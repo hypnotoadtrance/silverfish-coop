@@ -47,6 +47,13 @@ namespace
     constexpr auto wire_board_class = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C");
     constexpr auto wire_interaction_path = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C:SendInteractionToActor");
     constexpr auto wire_script_path = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C:ExecuteUbergraph_BountyBoard_BP");
+    constexpr auto quest_log = STR("/Game/Classes/GUI/Menu_QuestLog_Widget.Menu_QuestLog_Widget_C");
+    constexpr auto quest_details = STR("/Game/Classes/GUI/SubWidgets/Quest_DetailsWindow_Widget.Quest_DetailsWindow_Widget_C");
+    constexpr auto quest_turnin = STR("/Game/Classes/GUI/SubWidgets/Quest_TurnIn_Widget.Quest_TurnIn_Widget_C");
+    constexpr auto quest_accept_function =
+        STR("/Game/Classes/GUI/SubWidgets/Quest_DetailsWindow_Widget.Quest_DetailsWindow_Widget_C:AddQuest");
+    constexpr auto quest_turnin_function =
+        STR("/Game/Classes/GUI/SubWidgets/Quest_TurnIn_Widget.Quest_TurnIn_Widget_C:TurnIn");
     constexpr auto subway_world = STR("/Game/Classes/Maps/Maps_Dungeons/Subway_01_P.Subway_01_P");
     constexpr auto subway_valve = STR("/Game/Classes/Maps/Maps_Dungeons/Subway_01_P.Subway_01_P:PersistentLevel.ValveSwitch_BP_C_1");
     constexpr auto valve_class = STR("/Game/Classes/ScriptingActors/ValveSwitch_BP.ValveSwitch_BP_C");
@@ -230,11 +237,20 @@ namespace
         Receipt pending{};
     };
 
+    struct StockBoardAction
+    {
+        Receipt receipt{};
+        Unreal::FWeakObjectPtr menu{};
+        std::string_view quest{};
+        bool turnin{};
+    };
+
     std::atomic<bool> installed{};
     std::atomic<std::uint64_t> generation{1};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
     Scope scope;
     ScopedInteraction wire_board, dialogue_input, valve_input, stash_input;
+    StockBoardAction stock_board_action;
     std::array<Receipt, pending_limit> receipts{};
     std::size_t first{}, count{}, event_depth{};
     std::uint64_t sequence{}, consumed_dispatches{};
@@ -502,6 +518,52 @@ namespace
         wire_board.pending = {++wire_sequence, Clock::now() + receipt_lifetime};
     }
 
+    Unreal::UObject* top_menu()
+    {
+        auto* controller = scope.controller.Get();
+        auto* stack = field<Unreal::FArrayProperty>(controller, STR("MenuStack"));
+        auto* object = stack ? Unreal::CastField<Unreal::FObjectProperty>(stack->GetInner()) : nullptr;
+        if (!object) return nullptr;
+        Unreal::FScriptArrayHelper entries(stack, stack->ContainerPtrToValuePtr<void>(controller));
+        return entries.Num() > 0 && entries.Num() <= 16 ? object->GetObjectPropertyValue(entries.GetRawPtr(entries.Num() - 1)) : nullptr;
+    }
+
+    void intercept_stock_board(Iteration& iteration, Unreal::UObject* widget, Unreal::UFunction* function)
+    {
+        if (!widget || !function || iteration.OriginalFunctionCallPrevented()) return;
+        static const Unreal::FName add{STR("AddQuest")}, turnin{STR("TurnIn")};
+        const auto name = function->GetFName();
+        if (name != add && name != turnin) return;
+        const bool redeem = name == turnin;
+        auto* type = find<Unreal::UClass>(redeem ? quest_turnin : quest_details);
+        if (!type || !live(widget) || widget->GetClassPrivate() != type || function->GetOuterPrivate() != type ||
+            function != find<Unreal::UFunction>(redeem ? quest_turnin_function : quest_accept_function) ||
+            function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) || function->GetReturnProperty() ||
+            function->GetNumParms() != (redeem ? 1 : 0) || function->GetParmsSize() != (redeem ? 1 : 0) ||
+            !live_scope(scope)) return;
+        auto* world = scope.world.Get();
+        auto* profile = wire_board_profile(world);
+        auto* log = object_field(widget, STR("QuestLog_MenuRef"));
+        auto* board = object_field(log, STR("BountyBoard_Ref"));
+        auto* bounty = field<Unreal::FBoolProperty>(log, STR("BountyBoard"));
+        if (!profile || (profile->turn_in_id != 1 && profile->turn_in_id != 3) ||
+            !live(log) || log->GetClassPrivate() != find<Unreal::UClass>(quest_log) ||
+            log != top_menu() || log->GetWorld() != world || widget->GetWorld() != world ||
+            !bounty || !bounty->GetPropertyValueInContainer(log) ||
+            !qualify_wire_board(world, *profile, board, object_field(board, STR("Box"))).empty()) return;
+        auto* quest = field<Unreal::FNameProperty>(widget, redeem ? STR("Quest_IDTag") : STR("Quest_ID"));
+        if (!quest) return;
+        const auto key = quest->GetPropertyValueInContainer(widget);
+        static const Unreal::FName lake{STR("Jmr_Lake")}, crossroads{STR("Jmr_CrossRoads")};
+        if (key != lake && (key != crossroads || profile->turn_in_id != 3)) return;
+        iteration.PreventOriginalFunctionCall();
+        const auto now = Clock::now();
+        if (!iteration.OriginalFunctionCallPrevented() || now >= scope.expires || !standing(scope.pawn.Get()) ||
+            (stock_board_action.receipt.sequence && now < stock_board_action.receipt.expires) || wire_sequence == max_sequence) return;
+        stock_board_action = {{++wire_sequence, now + receipt_lifetime}, log,
+            key == lake ? "Jmr_Lake" : "Jmr_CrossRoads", redeem};
+    }
+
     bool exact_dialogue_actor(const DialogueProfile& profile, Unreal::UObject* actor, Unreal::UObject* component)
     {
         auto* world = scope.world.Get();
@@ -670,6 +732,7 @@ namespace
     void route_interaction(Iteration& iteration, Unreal::UObject* actor, Unreal::UFunction* function, const void* parameters)
     {
         intercept_wire_board(iteration, actor, function, parameters);
+        intercept_stock_board(iteration, actor, function);
         intercept_sewer_overlap(iteration, actor, function, parameters);
         intercept_dialogue(iteration, actor, function, parameters);
         intercept_valve(iteration, actor, function, parameters);
@@ -848,9 +911,27 @@ namespace
 
     int take_wire_board_press(const Lua& lua) { return take_interaction_press(lua, wire_board); }
 
+    int take_stock_board_action(const Lua& lua)
+    {
+        if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1) ||
+            address(scope.pawn.Get()) != lua.get_integer() || !live_scope(scope)) return 0;
+        const auto action = stock_board_action;
+        stock_board_action = {};
+        if (!action.receipt.sequence || Clock::now() >= action.receipt.expires ||
+            !action.menu.Get() || action.menu.Get() != top_menu()) return 0;
+        lua.set_integer(static_cast<std::int64_t>(action.receipt.sequence));
+        lua.set_string(action.turnin ? "stock-turnin" : "stock-start");
+        lua.set_string(action.quest);
+        return 3;
+    }
+
     int clear_wire_board(const Lua&)
     {
-        if (Unreal::IsInGameThreadRaw()) wire_board = {};
+        if (Unreal::IsInGameThreadRaw())
+        {
+            wire_board = {};
+            stock_board_action = {};
+        }
         return 0;
     }
 
@@ -1147,6 +1228,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishClearNativeInteractScope", lua_clear);
         lua.register_function("SilverfishSetNativeWireBoardScope", set_wire_board);
         lua.register_function("SilverfishTakeNativeWireBoardPress", take_wire_board_press);
+        lua.register_function("SilverfishTakeNativeStockBoardAction", take_stock_board_action);
         lua.register_function("SilverfishClearNativeWireBoardScope", clear_wire_board);
         lua.register_function("SilverfishSetNativeDialogueInputScope", set_dialogue_scope);
         lua.register_function("SilverfishOpenNativeSewerDialogue", open_sewer_dialogue);
@@ -1166,6 +1248,7 @@ namespace silverfish::native_interaction_input
         if (!Unreal::IsInGameThreadRaw()) return;
         scope = {};
         wire_board = {};
+        stock_board_action = {};
         dialogue_input = {};
         sewer_answering = false;
         valve_input = {};
