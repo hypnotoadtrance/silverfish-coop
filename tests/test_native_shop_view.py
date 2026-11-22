@@ -89,6 +89,54 @@ class MerchantPageTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(host.native_checkpoint_unsafe)
                     self.assertEqual(host.checkpoint_native.await_args.kwargs["require_guest_frames"], frozenset({"guest"}))
 
+    async def test_exact_stock_quantity_is_charged_and_replayed_once(self):
+        guid, moved, pawn = "A" * 32, "B" * 32, "guest pawn"
+        actor = MERCHANTS[GUNSMITH]
+        game = {"state": "hosting", "map": GUNSMITH, "native_guest_save_retention": True}
+        for source, disposition in (("shelf", "stock_shelf"), ("limited", "limited_stock")):
+            with self.subTest(source=source):
+                row = {"guid": guid, "class_path": BALL_AMMO, "source": source, "stackable": True,
+                       "quantity": 200, "ammo": 200, "value": 600, "price": 750, "markup": 1.25}
+                listing = {"state": "listed", "map": GUNSMITH, "actor": actor, "pawn": pawn, "count": 1,
+                           "wallet_before": 1000, "wallet_after": 1000,
+                           "merchant_cash_before": 100, "merchant_cash_after": 100, "offers": [row]}
+                purchased = dict(listing, state="purchased", wallet_after=996, merchant_cash_after=104,
+                                 offers=[dict(row, guid=moved, quantity=1, ammo=1, value=3, price=4)])
+                host = SimpleNamespace(native_guest=True, native_zones=True, native_profile=object(), stopping=False,
+                                       transitioning=False, native_checkpoint_unsafe=False, last_game=game,
+                                       last_seen=time.monotonic(), control=Mock(), checkpoint_native=AsyncMock(),
+                                       pending_guest_saves={"guest": (pawn,)},
+                                       native_recipients=lambda: {"guest": {"pawn": pawn, "connected": True}},
+                                       party=party.load_party(None))
+                host.party["players"]["guest"] = {"downed": False}
+                bridge = SimpleNamespace(command=AsyncMock(side_effect=[dict(game, native_finite_shop=listing),
+                                                                          dict(game, native_finite_shop=purchased)]))
+                target, operation = f"{guid}@4/1", "b" * 32
+                args = host, bridge, "guest", "native-finite-shop-buy"
+                result = await native_finite_shop.perform(*args, target, operation)
+                receipt = result["native_finite_purchase"]
+                self.assertEqual((receipt["requested_quantity"], receipt["stock_source"], receipt["wallet_after"]),
+                                 (1, disposition, 996))
+                self.assertEqual(receipt.get("remaining_quantity"), 199 if source == "limited" else None)
+                self.assertEqual(await native_finite_shop.perform(*args, target, operation), result)
+                bridge.command.assert_awaited_with("native-finite-shop-buy-quantity", pawn, guid, "1", "4", "1000", timeout=7)
+                self.assertEqual(bridge.command.await_count, 2)
+                with self.assertRaisesRegex(party.RuleError, "operation_id_conflict"):
+                    await native_finite_shop.perform(*args, f"{guid}@4/2", operation)
+
+    def test_quantity_popup_quote_is_bound_to_current_stock_card(self):
+        guid = "A" * 32
+        scope = ("host", "visit", 1, GUNSMITH, "guest pawn", MERCHANTS[GUNSMITH])
+        view = ShopView()
+        view.rendered = (scope, 0, {guid: 750})
+        screen = {"stock": True, "guid": guid, "price": 4}
+        self.assertEqual(view._requested_offset("buy", {}, scope, guid, "4/1", screen), 0)
+        for raw in ("4/0", "4/", "4", "5/1", "4/1/2"):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                view._requested_offset("buy", {}, scope, guid, raw, screen)
+        with self.assertRaises(ValueError):
+            view._requested_offset("buy", {}, scope, guid, "4/1", dict(screen, stock=False))
+
     async def test_fresh_adjacent_page_and_current_quote_required(self):
         actor = MERCHANTS[GUNSMITH]
         pawn, sequence = "exact stock guest", 14

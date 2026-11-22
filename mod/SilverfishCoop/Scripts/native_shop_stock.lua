@@ -76,12 +76,14 @@ local function read_rows(path, expected)
     if #data > 90000 or #data > 0 and data:sub(-1) ~= "\n" then error("The merchant rows exceed their bounds", 0) end
     local rows, total, seen = {shelf = {}, limited = {}, buyback = {}}, 0, {}
     for line in data:gmatch("([^\n]+)\n") do
-        local guid, class, source, price, value, ammo, weight, never_drop = line:match(
-            "^([0-9A-F]+)\t(/Game/[%w_./%-]+_C)\t(%l+)\t(%d+)\t(%d+)\t(-?%d+)\t(%S+)\t([01])$")
+        local guid, class, source, price, value, ammo, weight, never_drop, markup = line:match(
+            "^([0-9A-F]+)\t(/Game/[%w_./%-]+_C)\t(%l+)\t(%d+)\t(%d+)\t(-?%d+)\t(%S+)\t([01])\t?(%S*)$")
         local kilograms = tonumber(weight)
+        local exact_markup = tonumber(markup)
         total = total + 1
         if total > expected or not guid or #guid ~= 32 or not guid:find("[^0]") or seen[guid] or not rows[source]
-            or #class > 512 or class:find("..", 1, true) or not kilograms or not (kilograms >= 0 and kilograms <= 100000) then
+            or #class > 512 or class:find("..", 1, true) or not kilograms or not (kilograms >= 0 and kilograms <= 100000)
+            or (markup ~= "" and (not exact_markup or not (exact_markup >= 0 and exact_markup < 1e8))) then
             error("Invalid authenticated merchant row", 0)
         end
         local type, base = load(class), load(item_base)
@@ -91,7 +93,8 @@ local function read_rows(path, expected)
             [item_weight] = kilograms, [item_never_drop] = never_drop == "1",
             [item_guid] = {A = tonumber(guid:sub(1, 8), 16), B = tonumber(guid:sub(9, 16), 16),
                 C = tonumber(guid:sub(17, 24), 16), D = tonumber(guid:sub(25), 16)}}
-        local row = {guid = guid, item = item, value = amount, price = total_price, source = source}
+        if exact_markup and math.ceil(exact_markup * amount) ~= total_price then error("Invalid stock merchant markup", 0) end
+        local row = {guid = guid, item = item, value = amount, price = total_price, source = source, markup = exact_markup}
         rows[source][#rows[source] + 1], seen[guid] = row, row
     end
     if total ~= expected then error("The merchant catalog is incomplete", 0) end
@@ -128,6 +131,8 @@ function stock.render(session, actor, state, phase, wallet, path, total)
         if not valid(screen) or not same(screen:GetOwningPlayer(), controller) then error("The game's shop screen is unavailable", 0) end
         session.screen, screen.Shop = screen, actor
         controller:AddMenu(screen)
+    elseif screen.ItemManager.IsSplittingStack == true then
+        screen.ItemManager:CancelSplitStack()
     end
     local address = screen:GetAddress()
     local inputs = {address}
@@ -161,14 +166,16 @@ function stock.render(session, actor, state, phase, wallet, path, total)
                 error("A native merchant card did not match the host's stock", 0)
             end
             rendered[guid] = true
-            if math.ceil(card.ShopMarkup * row.value) ~= row.price then
+            if row.markup and card.ShopMarkup ~= row.markup then
+                card.ShopMarkup = row.markup
+                card:FillInContents()
+            elseif math.ceil(card.ShopMarkup * row.value) ~= row.price then
                 card.ShopMarkup = row.price > 0 and row.value > 0 and (row.price - 0.25) / row.value or 0
                 card:FillInContents()
             end
             local label = "$" .. row.price
             card.Value:SetText(FText(label))
-            card:PriceCheck(wallet >= row.price and 2147483647 or 0)
-            card.IsLocked = wallet < row.price
+            card:PriceCheck(wallet)
             if math.ceil(card.ShopMarkup * row.value) ~= row.price or card.Value:GetText():ToString() ~= label then
                 error("A native merchant card changed the quote", 0)
             end
@@ -182,7 +189,7 @@ function stock.take(session)
     return SilverfishTakeNativeStashMove(session.screen:GetAddress())
 end
 
-function stock.move_fixture(session, side, wanted)
+function stock.move_fixture(session, side, wanted, gesture, amount)
     local screen, group = session.screen, cards[side]
     local rows = group and screen.ShopPanel[group] or screen.BackpackPanel.Cards
     for index = 1, rows:GetArrayNum() do
@@ -190,17 +197,37 @@ function stock.move_fixture(session, side, wanted)
         if valid(card) and identity(card.Item) == wanted then
             local count, manager = rows:GetArrayNum(), screen.ItemManager
             if group then
-                manager:OpenContextMenu(card)
-                local menu = manager.ItemContextMenu
-                if not valid(menu) or not same(menu["Item Card"], card) then error("The stock Buy menu did not select the card", 0) end
+                local popup = manager.SplitStackPopup
+                local already_open = manager.IsSplittingStack == true and valid(popup) and same(popup.ItemCard, card)
+                if not already_open then
+                    manager:OpenContextMenu(card)
+                    local menu = manager.ItemContextMenu
+                    if not valid(menu) or not same(menu["Item Card"], card) then error("The stock Buy menu did not select the card", 0) end
+                end
                 if card.Item[item_class]:GetCDO().Stacks and (card.IsInfinite or card.Item[item_ammo] > 1) then
-                    manager:ActionSplitStack()
-                    manager:ActionSplitStack()
+                    if not already_open then manager:ActionSplitStack() end
+                    popup = manager.SplitStackPopup
+                    if not valid(popup) or manager.IsSplittingStack ~= true or not same(popup.ItemCard, card) then
+                        error("The stock Buy menu did not open the quantity popup", 0)
+                    end
+                    if gesture == "open" then return end
+                    if gesture == "cancel" then
+                        manager:CancelSplitStack()
+                        if manager.IsSplittingStack ~= false then error("The stock quantity popup did not cancel", 0) end
+                        return
+                    end
+                    local quantity = amount or card.Item[item_ammo]
+                    popup:SetCount(quantity)
+                    if popup.Count ~= quantity then error("The stock quantity popup refused this count", 0) end
+                    manager:FinalSplitStack(quantity)
+                    manager:FinalSplitStack(quantity)
                 else
+                    if gesture or amount then error("The selected stock card does not have a quantity popup", 0) end
                     manager:ActionQuickMove()
                     manager:ActionQuickMove()
                 end
             else
+                if gesture or amount then error("The quantity popup fixture requires a merchant card", 0) end
                 manager:StartHoverCard(card)
                 manager:InitiateItemTake()
                 manager:EndHoverCard(card)

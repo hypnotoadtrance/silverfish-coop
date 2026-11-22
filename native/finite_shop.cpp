@@ -607,6 +607,7 @@ namespace
         int price{};
         int ammo{};
         double weight{};
+        double markup{1.0};
         bool never_drop{};
         bool stackable{};
         std::string_view source{"backpack"};
@@ -744,10 +745,10 @@ namespace
         layout.quote_item->InitializeValue(parameters.data());
         layout.quote_item->CopyCompleteValue(parameters.data(), row);
         context.panel->ProcessEvent(layout.quote, parameters.data());
-        const auto markup = layout.quote_result->GetPropertyValueInContainer(parameters.data());
+        result.markup = layout.quote_result->GetPropertyValueInContainer(parameters.data());
         layout.quote_item->DestroyValue(parameters.data());
-        const auto price = std::ceil(markup * result.value);
-        if (!std::isfinite(markup) || markup < 0 || !std::isfinite(price) || price > max_money)
+        const auto price = std::ceil(result.markup * result.value);
+        if (!std::isfinite(result.markup) || result.markup < 0 || !std::isfinite(price) || price > max_money)
             return "shop_native_quote_invalid";
         result.price = static_cast<int>(price);
         return {};
@@ -755,9 +756,9 @@ namespace
 
     std::string encode(const Offer& row)
     {
-        return std::format("{:08X}{:08X}{:08X}{:08X}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:d}\t{:d}\n",
+        return std::format("{:08X}{:08X}{:08X}{:08X}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:d}\t{:d}\t{}\n",
                            row.guid[0], row.guid[1], row.guid[2], row.guid[3], row.path, row.quantity, row.value, row.price,
-                           row.source, row.ammo, row.weight, row.never_drop, row.stackable);
+                           row.source, row.ammo, row.weight, row.never_drop, row.stackable, row.markup);
     }
 
     Guid parse_guid(std::string_view text)
@@ -787,7 +788,61 @@ namespace
         return 7;
     }
 
-    template <bool Buying>
+    bool stock_portion(const Context& context, const Layout& layout, const Offer& selected, const void* source,
+                       int quantity, bool shelf, Value& taken, Value& remainder)
+    {
+        auto* library = find<Unreal::UObject>(STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"));
+        auto* function = find<Unreal::UFunction>(shelf ?
+            STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:MakeItemStack") :
+            STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:SplitStack"));
+        if (!library || !library->HasAnyFlags(Unreal::RF_ClassDefaultObject) || !function ||
+            function->GetOuterPrivate() != library->GetClassPrivate() || function->GetReturnProperty() ||
+            function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return false;
+        alignas(16) std::array<std::byte, 0x108> bytes{};
+        if (shelf)
+        {
+            auto* defaults = selected.klass->GetClassDefaultObject().Get();
+            auto* base_units = field<Unreal::FIntProperty>(defaults, STR("Ammo"));
+            auto* type = parameter<Unreal::FClassProperty>(function, STR("Item_Class"), 0, false);
+            auto* count = parameter<Unreal::FIntProperty>(function, STR("Count"), 8, false);
+            auto* owner = parameter<Unreal::FObjectProperty>(function, STR("__WorldContext"), 16, false);
+            auto* out = parameter<Unreal::FStructProperty>(function, STR("Item"), 24, true);
+            if (!base_units || quantity > 10LL * base_units->GetPropertyValueInContainer(defaults) || !type ||
+                type->GetMetaClass().Get() != layout.item_base || !count || !owner || !layout.is_row(out) ||
+                function->GetNumParms() != 4 || function->GetParmsSize() != 104) return false;
+            out->InitializeValue_InContainer(bytes.data());
+            type->SetObjectPropertyValue(type->ContainerPtrToValuePtr<void>(bytes.data()), selected.klass);
+            count->SetPropertyValueInContainer(bytes.data(), quantity);
+            owner->SetObjectPropertyValue(owner->ContainerPtrToValuePtr<void>(bytes.data()), context.pawn);
+            library->ProcessEvent(function, bytes.data());
+            taken = copy(layout.row, out->ContainerPtrToValuePtr<void>(bytes.data()));
+            out->DestroyValue_InContainer(bytes.data());
+            return taken != nullptr;
+        }
+        auto* item = parameter<Unreal::FStructProperty>(function, STR("Item"), 0, false);
+        auto* count = parameter<Unreal::FIntProperty>(function, STR("AmountToTake"), 0x50, false);
+        auto* owner = parameter<Unreal::FObjectProperty>(function, STR("__WorldContext"), 0x58, false);
+        auto* out = parameter<Unreal::FStructProperty>(function, STR("NewItem"), 0x60, true);
+        auto* left = parameter<Unreal::FStructProperty>(function, STR("RemainingStack"), 0xB0, true);
+        auto* entire = parameter<Unreal::FBoolProperty>(function, STR("EntireStack"), 0x100, true);
+        auto* success = parameter<Unreal::FBoolProperty>(function, STR("Success"), 0x101, true);
+        if (!layout.is_row(item) || !count || !owner || !layout.is_row(out) || !layout.is_row(left) || !entire || !success ||
+            function->GetNumParms() != 7 || function->GetParmsSize() > bytes.size()) return false;
+        for (auto* row : {item, out, left}) row->InitializeValue_InContainer(bytes.data());
+        item->CopyCompleteValue(item->ContainerPtrToValuePtr<void>(bytes.data()), source);
+        count->SetPropertyValueInContainer(bytes.data(), quantity);
+        owner->SetObjectPropertyValue(owner->ContainerPtrToValuePtr<void>(bytes.data()), context.pawn);
+        library->ProcessEvent(function, bytes.data());
+        if (success->GetPropertyValueInContainer(bytes.data()) && !entire->GetPropertyValueInContainer(bytes.data()))
+        {
+            taken = copy(layout.row, out->ContainerPtrToValuePtr<void>(bytes.data()));
+            remainder = copy(layout.row, left->ContainerPtrToValuePtr<void>(bytes.data()));
+        }
+        for (auto* row : {item, out, left}) row->DestroyValue_InContainer(bytes.data());
+        return taken && remainder;
+    }
+
+    template <bool Buying, bool ExplicitQuantity = false>
     int transact(const Lua& lua)
     {
         constexpr int size = Buying ? 9 : 5;
@@ -882,6 +937,37 @@ namespace
         if constexpr (!Buying)
             return response(lua, true, "listed", rows, money, money, cash, cash);
         if (!source_property || index < 0) return response(lua, false, "shop_offer_no_longer_available");
+        const bool reusable = source_property == shelf;
+        auto* source = source_property->ContainerPtrToValuePtr<void>(context.shop);
+        Unreal::FScriptArrayHelper stock_rows(source_property, source);
+        Value taken, remainder;
+        if constexpr (ExplicitQuantity)
+        {
+            if (context.host || !selected.stackable || (!reusable && quantity > selected.quantity))
+                return response(lua, false, "shop_quantity_unavailable");
+            if (reusable || selected.quantity != quantity)
+            {
+                if (!stock_portion(context, layout, selected, stock_rows.GetRawPtr(index), quantity, reusable,
+                                   taken, remainder)) return response(lua, false, "shop_quantity_unavailable");
+                Offer portion;
+                if (!item_offer(layout, taken.get(), portion).empty() || !portion.stackable || portion.quantity != quantity ||
+                    portion.klass != selected.klass || seen.contains(portion.guid) ||
+                    layout.owner_has(context.guest, portion.guid) || layout.owner_has(context.stock, portion.guid))
+                    return response(lua, false, "shop_quantity_row_unverified");
+                if (remainder && (layout.identity(remainder.get()) != chosen ||
+                    layout.item_type(remainder.get()) != selected.klass ||
+                    layout.ammo->GetPropertyValueInContainer(remainder.get()) != selected.quantity - quantity))
+                    return response(lua, false, "shop_quantity_remainder_unverified");
+                portion.source = selected.source;
+                portion.markup = selected.markup;
+                const double price = std::ceil(portion.markup * portion.value);
+                if (!std::isfinite(price) || price < 0 || price > max_money)
+                    return response(lua, false, "shop_native_quote_invalid");
+                portion.price = static_cast<int>(price);
+                selected = std::move(portion);
+                rows = encode(selected);
+            }
+        }
         if (expected_wallet != money || selected.quantity != quantity || selected.price != expected_price)
             return response(lua, false, "shop_quote_changed");
         if (money < selected.price || cash > max_money - selected.price)
@@ -900,9 +986,7 @@ namespace
         if (!reputation.bind(context, wallet, selected.price))
             return response(lua, false, "shop_camera_reputation_unqualified");
 
-        const bool reusable = source_property == shelf;
-        auto* source = source_property->ContainerPtrToValuePtr<void>(context.shop);
-        Unreal::FScriptArrayHelper stock_rows(source_property, source);
+        const bool remove_offer = !reusable && !remainder;
         auto* target = layout.backpack->ContainerPtrToValuePtr<void>(context.guest);
         auto* saved = layout.saved_shops->ContainerPtrToValuePtr<void>(context.stock);
         auto* flags = layout.flags->ContainerPtrToValuePtr<void>(context.stock);
@@ -915,10 +999,10 @@ namespace
         auto target_before = copy(layout.backpack, target);
         auto saved_before = copy(layout.saved_shops, saved);
         auto flags_before = copy(layout.flags, flags);
-        auto transferred = copy(layout.row, stock_rows.GetRawPtr(index));
+        auto transferred = taken ? std::move(taken) : copy(layout.row, stock_rows.GetRawPtr(index));
         if (!source_before || !target_before || !saved_before || !flags_before || !transferred)
             return response(lua, false, "shop_before_image_unavailable");
-        if (reusable)
+        if (reusable && !ExplicitQuantity)
         {
             const auto minted = new_stock_guid(layout);
             if (minted == Guid{} || seen.contains(minted) || layout.owner_has(context.guest, minted) ||
@@ -933,12 +1017,13 @@ namespace
         if (add == old_size && backpack.Num() == old_size + 1)
         {
             layout.row->CopyCompleteValue(backpack.GetRawPtr(add), transferred.get());
-            if (!reusable) stock_rows.RemoveValues(index);
+            if (remove_offer) stock_rows.RemoveValues(index);
+            else if (remainder) layout.row->CopyCompleteValue(stock_rows.GetRawPtr(index), remainder.get());
             wallet.change(context.instance, selected.price, true);
             layout.merchant_cash->SetPropertyValueInContainer(context.shop, cash + selected.price);
             reputation.commit(context);
             context.shop->ProcessEvent(layout.save, nullptr);
-            bool verified = stock_rows.Num() == old_stock - (reusable ? 0 : 1) && backpack.Num() == old_size + 1 &&
+            bool verified = stock_rows.Num() == old_stock - (remove_offer ? 1 : 0) && backpack.Num() == old_size + 1 &&
                 layout.ident(backpack.GetRawPtr(add), transferred.get()) &&
                 wallet.amount(context.instance) == money - selected.price && reputation.verified(context, wallet) && qualified_connection(context) &&
                 read_object(context.pawn, STR("Save")) == context.guest &&
@@ -946,7 +1031,11 @@ namespace
                 layout.verify_saved(context, true);
             Unreal::FScriptArrayHelper previous_stock(source_property, source_before.get());
             for (int i = 0; verified && i < stock_rows.Num(); ++i)
-                verified = layout.ident(stock_rows.GetRawPtr(i), previous_stock.GetRawPtr(i + (!reusable && i >= index ? 1 : 0)));
+            {
+                const auto* expected = remainder && i == index ? remainder.get() :
+                    previous_stock.GetRawPtr(i + (remove_offer && i >= index ? 1 : 0));
+                verified = layout.ident(stock_rows.GetRawPtr(i), expected);
+            }
             Unreal::FScriptArrayHelper previous_bag(layout.backpack, target_before.get());
             for (int i = 0; verified && i < old_size; ++i)
                 verified = layout.ident(backpack.GetRawPtr(i), previous_bag.GetRawPtr(i));
@@ -1241,6 +1330,7 @@ namespace silverfish::finite_shop
         if (!enabled()) return;
         lua.register_function("SilverfishReadNativeFiniteShop", transact<false>);
         lua.register_function("SilverfishBuyNativeFiniteShop", transact<true>);
+        lua.register_function("SilverfishBuyNativeShopQuantity", transact<true, true>);
         lua.register_function("SilverfishQuoteNativeFiniteShopSale", sell<false>);
         lua.register_function("SilverfishSellNativeFiniteShop", sell<true>);
     }

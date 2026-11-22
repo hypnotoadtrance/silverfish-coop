@@ -44,6 +44,7 @@ local max_money, max_offers = 2147483647, 128
 local actions = {
     ["native-finite-shop-list"] = {native = "SilverfishReadNativeFiniteShop", fields = 3, result = "listed"},
     ["native-finite-shop-buy"] = {native = "SilverfishBuyNativeFiniteShop", fields = 7, result = "purchased"},
+    ["native-finite-shop-buy-quantity"] = {native = "SilverfishBuyNativeShopQuantity", fields = 7, result = "purchased"},
     ["native-finite-shop-sale-quote"] = {native = "SilverfishQuoteNativeFiniteShopSale", fields = 4, result = "sale-quote"},
     ["native-finite-shop-sell"] = {native = "SilverfishSellNativeFiniteShop", fields = 7, result = "sold"},
 }
@@ -203,17 +204,20 @@ local function offer_rows(encoded)
     if type(encoded) ~= "string" or #encoded > max_offers * 640 then return nil end
     local rows, seen = {}, {}
     for line in encoded:gmatch("[^\n]+") do
-        local key, class, quantity, value, price, source, ammo, weight, never_drop, stacks = line:match(
-            "^([0-9A-F]+)\t(/Game/[%w_./%-]+)\t(%d+)\t(%d+)\t(%d+)\t(%l+)\t(-?%d+)\t(%S+)\t([01])\t([01])$")
+        local key, class, quantity, value, price, source, ammo, weight, never_drop, stacks, markup = line:match(
+            "^([0-9A-F]+)\t(/Game/[%w_./%-]+)\t(%d+)\t(%d+)\t(%d+)\t(%l+)\t(-?%d+)\t(%S+)\t([01])\t([01])\t?(%S*)$")
         local units, kilograms = math.tointeger(tonumber(ammo)), tonumber(weight)
         if not guid(key) or seen[key] or #class > 512 or not integer(quantity, 1, max_money)
             or not integer(value, 0, max_money) or not integer(price, 0, max_money)
             or (source ~= "limited" and source ~= "shelf" and source ~= "buyback" and source ~= "backpack")
             or not units or units < -2147483648 or units > max_money
             or not finite(kilograms) or kilograms < 0 or kilograms > 100000
+            or (markup ~= "" and (not finite(tonumber(markup)) or tonumber(markup) < 0))
             or #rows >= max_offers then return nil end
         seen[key] = true
-        rows[#rows + 1] = {key, class, quantity, value, price, source, ammo, weight, never_drop, stacks}
+        local row = {key, class, quantity, value, price, source, ammo, weight, never_drop, stacks}
+        if markup ~= "" then row[#row + 1] = markup end
+        rows[#rows + 1] = row
     end
     if #rows == 0 and encoded ~= "" then return nil end
     return rows

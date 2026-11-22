@@ -41,14 +41,19 @@ def parse_summary(fields: list[str]) -> dict:
 def parse_item(fields: list[str]) -> dict:
     item = {"guid": fields[1], "class_path": fields[2], "quantity": int(fields[3]),
             "value": int(fields[4]), "price": int(fields[5])}
-    if len(fields) == 11:
-        source, raw_ammo, raw_weight, never_drop, stacks = fields[6:]
+    if len(fields) in (11, 12):
+        source, raw_ammo, raw_weight, never_drop, stacks = fields[6:11]
         ammo, weight = int(raw_ammo), float(raw_weight)
         if (source not in {"shelf", "limited", "buyback", "backpack"} or not -2**31 <= ammo <= MAX_PRICE
                 or not math.isfinite(weight) or not 0 <= weight <= 100000 or never_drop not in {"0", "1"}
                 or stacks not in {"0", "1"} or item["quantity"] != (ammo if stacks == "1" else 1)):
             raise ValueError("The merchant returned an invalid stock inventory row")
         item.update(source=source, ammo=ammo, weight=weight, never_drop=never_drop == "1", stackable=stacks == "1")
+        if len(fields) == 12:
+            markup = float(fields[11])
+            if not 0 <= markup < 1e8 or math.ceil(markup * item["value"]) != item["price"]:
+                raise ValueError("The merchant returned an invalid stock markup")
+            item["markup"] = markup
     return item
 
 
@@ -107,6 +112,7 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     listing_only = action == "native-finite-shop-list"
     quote_only = action == "native-finite-shop-sale-quote"
     sale = quote_only or action == "native-finite-shop-sell"
+    selected_quantity = None
     if area == SCIENTIST_SHOP and sale:
         raise party.RuleError("native_scientist_camera_purchase_only")
     if listing_only:
@@ -119,11 +125,17 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     else:
         if not isinstance(target, str):
             raise party.RuleError("native_finite_shop_requires_guid_and_price")
-        guid, separator, raw_price = target.partition("@")
+        guid, separator, raw_quote = target.partition("@")
+        raw_price, chosen_amount, raw_quantity = raw_quote.partition("/")
         if (not separator or not valid_guid(guid) or not raw_price.isascii() or not raw_price.isdigit()
                 or len(raw_price) > 10 or (price := int(raw_price)) > MAX_PRICE):
             raise party.RuleError("native_finite_shop_requires_guid_and_price")
         fingerprint = [action, guid, price]
+        if chosen_amount:
+            if (sale or not guest or not raw_quantity.isascii() or not raw_quantity.isdigit()
+                    or len(raw_quantity) > 10 or not 1 <= (selected_quantity := int(raw_quantity)) <= MAX_PRICE):
+                raise party.RuleError("native_finite_shop_invalid_quantity")
+            fingerprint.append(selected_quantity)
         for receipt in host.party["receipts"].get(character, []):
             if receipt["id"] == operation_id:
                 if receipt["request"] != fingerprint:
@@ -158,7 +170,11 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
                                   or offer.get("source") == "buyback"
                                   or offer["class_path"] == BLANK_CLASS and offer.get("source") not in (None, "shelf")):
         raise party.RuleError("native_scientist_purchase_profile_unavailable")
-    if price != offer["price"]:
+    quantity = offer["quantity"] if selected_quantity is None else selected_quantity
+    if selected_quantity is not None and (not offer.get("stackable") or "markup" not in offer
+                                          or offer.get("source") != "shelf" and quantity > offer["quantity"]):
+        raise party.RuleError("native_finite_shop_invalid_quantity")
+    if selected_quantity is None and price != offer["price"]:
         raise party.RuleError("native_finite_shop_quote_changed")
     wallet = listing["wallet_before"]
     merchant_cash = listing["merchant_cash_before"]
@@ -179,7 +195,8 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     host.native_checkpoint_unsafe = True
     try:
         try:
-            snapshot = await bridge.command(action, pawn, guid, str(offer["quantity"]), str(price), str(wallet), timeout=7)
+            invocation = "native-finite-shop-buy-quantity" if selected_quantity is not None else action
+            snapshot = await bridge.command(invocation, pawn, guid, str(quantity), str(price), str(wallet), timeout=7)
         except RuntimeError as error:
             if str(error).startswith("finite_shop_refused_"):
                 host.native_checkpoint_unsafe = False
@@ -190,16 +207,27 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         shelf_classes = {SCIENTIST_SHOP: (CAMERA, BLANK_CLASS), GUNSMITH: (BALL_AMMO,), SMUGGLER: (MRE_CLASS,)}
         reusable = offer.get("source") == "shelf"
         legacy_special = offer["class_path"] in shelf_classes.get(area, ())
-        if not sale and len(reported) == 1 and (reusable or legacy_special):
+        finite_split = selected_quantity is not None and not reusable and quantity < offer["quantity"]
+        if not sale and len(reported) == 1 and (reusable or legacy_special or finite_split):
             stock_guids = {row["guid"] for row in listing["offers"]}
             received_guid = reported[0]["guid"]
-            if (reusable and received_guid in stock_guids or
-                    not reusable and received_guid != guid and (offer.get("source") is not None or received_guid in stock_guids)):
+            if ((reusable or finite_split) and received_guid in stock_guids or
+                    not (reusable or finite_split) and received_guid != guid
+                    and (offer.get("source") is not None or received_guid in stock_guids)):
                 raise RuntimeError("The merchant did not verify an exact reusable shelf transfer")
             proof["offer_guid"] = guid
-            proof["stock_source"] = "limited_stock" if received_guid == guid else "stock_shelf"
+            proof["stock_source"] = "stock_shelf" if reusable or not finite_split and received_guid != guid else "limited_stock"
             reported = [dict(reported[0], guid=guid)]
-        if (reported != [offer] or proof["wallet_before"] != wallet or proof["wallet_after"] != wallet + wallet_change
+        exact_offer = reported == [offer]
+        if selected_quantity is not None and len(reported) == 1:
+            received = reported[0]
+            exact_offer = all(received.get(key) == offer.get(key) for key in
+                              ("guid", "class_path", "source", "stackable", "markup")) and (
+                                  received["quantity"], received["ammo"], received["price"]) == (quantity, quantity, price)
+            proof["requested_quantity"] = quantity
+            if not reusable:
+                proof["remaining_quantity"] = offer["quantity"] - quantity
+        if (not exact_offer or proof["wallet_before"] != wallet or proof["wallet_after"] != wallet + wallet_change
                 or proof["merchant_cash_before"] != merchant_cash or proof["merchant_cash_after"] != merchant_cash - wallet_change):
             raise RuntimeError("The finite merchant did not verify the exact transfer and wallet changes")
         host.last_game, host.last_seen = snapshot, time.monotonic()
@@ -227,5 +255,5 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         host.native_pickup.forget_committed_row(character, guid)
     host.native_checkpoint_unsafe = False
     host.control.event(f"{result_name}_committed", character_id=character, revision=revision,
-                       guid=guid, quantity=offer["quantity"], price=price, wallet=proof["wallet_after"])
+                       guid=guid, quantity=quantity, price=price, wallet=proof["wallet_after"])
     return result

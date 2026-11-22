@@ -225,10 +225,16 @@ end
 
 local function stock_action()
     if not session or not session.screen or session.state ~= "ready" or not stock.present(session, true) then return end
-    local guid, sell, value = stock.take(session)
+    local guid, sell, value, quantity = stock.take(session)
     if not guid then return end
     local quote = session.stock_offers[guid]
-    local price = sell and value or quote and quote.price
+    if math.type(quantity) ~= "integer" or quantity < 0
+        or (quantity > 0 and (sell or not quote or not quote.markup)) then
+        if not SilverfishSetNativeShopScreen(session.screen:GetAddress(), true) then close() end
+        return
+    end
+    local chosen = quantity > 0
+    local price = (sell or chosen) and value or quote and quote.price
     if math.type(price) ~= "integer" or price < 0 or price > max_money then
         close()
         return
@@ -238,7 +244,8 @@ local function stock_action()
         return
     end
     session.stock_selection = {guid = guid, price = price}
-    request(sell and "sell" or "buy", sell and "selling" or "buying", 0, guid, price)
+    request(sell and "sell" or "buy", sell and "selling" or "buying", 0, guid,
+        chosen and (tostring(price) .. "/" .. tostring(quantity)) or price)
 end
 
 function view.sync(state, phase)
@@ -408,8 +415,16 @@ local function fixture(current, action)
             close()
         else
             local source, guid = action:match("^stock:(%l+):([0-9A-F]+)$")
+            local gesture, amount
+            if not source then gesture, source, guid = action:match("^stock%-(%l+):(%l+):([0-9A-F]+)$") end
+            if not source then
+                source, guid, amount = action:match("^stock%-amount:(%l+):([0-9A-F]+):(%d+)$")
+                amount = math.tointeger(tonumber(amount))
+            end
             if not source or #guid ~= 32 then error("The stock merchant fixture needs an exact card", 0) end
-            stock.move_fixture(session, source, guid)
+            if gesture and gesture ~= "open" and gesture ~= "cancel" then error("Invalid merchant popup gesture", 0) end
+            stock.move_fixture(session, source, guid, gesture, amount)
+            if gesture then return "stock merchant quantity popup " .. gesture end
             stock_action()
             if session.state ~= "buying" and session.state ~= "selling" then
                 error("The stock merchant did not publish one trade", 0)

@@ -17,6 +17,7 @@ MAX_OFFERS = 128
 STOCK_RECHECK_INTERVAL = 4
 WAITING = {"open": "pending", "page": "paging", "buy": "buying", "sell": "selling"}
 _CARD = re.compile(r"stock:(shelf|limited|buyback|backpack):([0-9A-F]{32})\Z")
+_QUANTITY_CARD = re.compile(r"stock-(open|cancel|amount):(shelf|limited|buyback):([0-9A-F]{32})(?::([1-9][0-9]{0,9}))?\Z")
 _ITEM = re.compile(r"/Game/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+_C\Z")
 _REFRESH_AFTER_REFUSAL = {
     "native_finite_shop_quote_changed", "native_finite_shop_item_unavailable", "insufficient_funds",
@@ -24,6 +25,8 @@ _REFRESH_AFTER_REFUSAL = {
     "finite_shop_refused_shop_funds_unavailable", "finite_shop_refused_shop_offer_no_longer_available",
     "finite_shop_refused_shop_sale_stock_item_requires_special_handling",
     "native_scientist_purchase_profile_unavailable", "finite_shop_refused_shop_scientist_purchase_profile_unavailable",
+    "native_finite_shop_invalid_quantity", "finite_shop_refused_shop_quantity_unavailable",
+    "finite_shop_refused_shop_quantity_row_unverified", "finite_shop_refused_shop_quantity_remainder_unverified",
 }
 
 
@@ -31,8 +34,12 @@ def valid_fixture(target):
     if not isinstance(target, str):
         return False
     match = _CARD.fullmatch(target)
+    quantity = _QUANTITY_CARD.fullmatch(target)
     return (target in {"open", "up", "down", "enter", "back", "page-up", "page-down"}
-            or match is not None and valid_guid(match[2]))
+            or match is not None and valid_guid(match[2])
+            or quantity is not None and valid_guid(quantity[3])
+            and ((quantity[1] == "amount") == (quantity[4] is not None))
+            and (quantity[4] is None or int(quantity[4]) <= MAX_PRICE))
 
 
 def decimal(value, maximum):
@@ -157,10 +164,14 @@ class ShopView:
                     or destination != page.get("wanted_offset")):
                 raise ValueError("Choose an adjacent page from the current stock merchant view")
             return destination
-        amount = decimal(raw, MAX_PRICE)
+        raw_price, slash, raw_quantity = raw.partition("/")
+        amount = decimal(raw_price, MAX_PRICE)
+        quantity = decimal(raw_quantity, MAX_PRICE) if slash else None
+        if slash and (kind != "buy" or not view.get("stock") or not quantity):
+            raise ValueError("The stock merchant purchase has no confirmed quantity")
         if (amount is None or not valid_guid(guid) or view.get("guid") != guid
                 or view.get("price") != amount or kind == "sell" and not view.get("stock")
-                or kind == "buy" and self.rendered[2].get(guid) != amount):
+                or kind == "buy" and (guid not in self.rendered[2] or not slash and self.rendered[2][guid] != amount)):
             raise ValueError("The stock merchant selection did not match the displayed quote")
         return offset
 
@@ -216,15 +227,19 @@ class ShopView:
         for offer in offers:
             guid, path, source = offer["guid"], offer["class_path"], offer["source"]
             price, value, ammo, weight, protected = (offer[key] for key in ("price", "value", "ammo", "weight", "never_drop"))
+            markup = offer.get("markup")
             if (not valid_guid(guid) or guid in quotes or not _ITEM.fullmatch(path) or len(path) > 512
                     or source not in {"shelf", "limited", "buyback"}
                     or type(price) is not int or not 0 <= price <= MAX_PRICE
                     or type(value) is not int or not 0 <= value <= MAX_PRICE
                     or type(ammo) is not int or not -2**31 <= ammo <= MAX_PRICE or type(protected) is not bool
-                    or type(weight) not in {int, float} or not math.isfinite(weight) or not 0 <= weight <= 100000):
+                    or type(weight) not in {int, float} or not math.isfinite(weight) or not 0 <= weight <= 100000
+                    or markup is not None and (type(markup) not in {int, float} or not 0 <= markup < 1e8
+                                               or math.ceil(markup * value) != price)):
                 raise ValueError("The host returned an invalid native merchant card")
             quotes[guid] = price
-            lines.append(f"{guid}\t{path}\t{source}\t{price}\t{value}\t{ammo}\t{weight}\t{int(protected)}\n")
+            fields = f"{guid}\t{path}\t{source}\t{price}\t{value}\t{ammo}\t{weight}\t{int(protected)}"
+            lines.append((fields if markup is None else f"{fields}\t{markup!r}") + "\n")
         await client.guest_ui.refresh(client)
         if (client.host_session, client.zone_epoch) != (expected_host, expected_visit):
             raise ValueError("The merchant catalog belongs to another visit")
