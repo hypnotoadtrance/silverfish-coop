@@ -1,6 +1,8 @@
+import asyncio
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -284,6 +286,61 @@ class CampaignStoreTests(unittest.TestCase):
                 self.open_store()
         with self.open_store() as store:
             self.assertEqual(store.status()["revision"], 0)
+
+
+class AsyncCampaignCheckpointTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        scratch = self.enterContext(tempfile.TemporaryDirectory())
+        self.store = self.enterContext(CampaignStore(Path(scratch) / "campaign"))
+        self.entered = threading.Event()
+        self.resume = threading.Event()
+
+        real_write = self.store._write
+
+        def pause_first_primary(path, data):
+            if path == self.store.path and data["revision"] == 1:
+                self.entered.set()
+                if not self.resume.wait(5):
+                    raise TimeoutError("test did not release the campaign writer")
+            real_write(path, data)
+
+        self.enterContext(patch.object(self.store, "_write", side_effect=pause_first_primary))
+
+    async def test_reads_continue_until_an_ordered_checkpoint_publishes(self):
+        first = asyncio.create_task(self.store.checkpoint_async({"visit": 1}, {}))
+        try:
+            self.assertTrue(await asyncio.to_thread(self.entered.wait, 3))
+            second = asyncio.create_task(self.store.checkpoint_async({"visit": 2}, {}))
+            loop_pulse = asyncio.Event()
+            asyncio.get_running_loop().call_soon(loop_pulse.set)
+            await asyncio.wait_for(loop_pulse.wait(), timeout=1)
+            status = self.store.status()
+            self.assertEqual((status["revision"], status["world"]), (0, {}))
+            self.assertFalse(first.done())
+            self.assertFalse(second.done())
+        finally:
+            self.resume.set()
+        self.assertEqual(await first, 1)
+        self.assertEqual(await second, 2)
+        self.assertEqual(self.store.status()["world"], {"visit": 2})
+        self.assertEqual(json.loads(self.store.previous_path.read_bytes())["world"], {"visit": 1})
+
+    async def test_cancellation_drains_commit_before_allowing_another_write(self):
+        first = asyncio.create_task(self.store.checkpoint_async({"visit": 1}, {}))
+        try:
+            self.assertTrue(await asyncio.to_thread(self.entered.wait, 3))
+            first.cancel()
+            waiting = asyncio.create_task(self.store.wait_for_checkpoint())
+            await asyncio.sleep(0)
+            self.assertFalse(first.done())
+            self.assertFalse(waiting.done())
+        finally:
+            self.resume.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+        await waiting
+        self.assertEqual(self.store.status()["world"], {"visit": 1})
+        self.assertEqual(await self.store.checkpoint_async({"visit": 2}, {}), 2)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import errno
 import hashlib
@@ -148,6 +149,9 @@ class CampaignStore:
         self._verify_world = verify_world
         self._verify_checkpoint = verify_checkpoint
         self._mutex = threading.RLock()
+        self._writer = threading.Lock()
+        self._checkpoint_idle = asyncio.Event()
+        self._checkpoint_idle.set()
         self._lease_by_id: dict[str, _Lease] = {}
         self._lease_by_guest: dict[str, _Lease] = {}
         self._lock_file = self._lock_directory(self.directory)
@@ -166,7 +170,7 @@ class CampaignStore:
         self.close()
 
     def close(self):
-        with self._mutex:
+        with self._writer, self._mutex:
             if self._lock_file is not None:
                 self._lock_file.close()
                 self._lock_file = None
@@ -374,14 +378,19 @@ class CampaignStore:
                 temp_path.unlink(missing_ok=True)
 
     def _commit(self, candidate, *, verify_content=True):
-        self._require_open()
-        candidate["revision"] = self._data["revision"] + 1
+        # The caller holds _writer through publication. The prior checkpoint
+        # remains available to readers while validation and disk writes run.
+        with self._mutex:
+            self._require_open()
+            previous = self._data
+            candidate["revision"] = previous["revision"] + 1
         self._validate(candidate)
         if verify_content:
             self._verify_content(candidate)
-        self._write(self.previous_path, self._data)
+        self._write(self.previous_path, previous)
         self._write(self.path, candidate)
-        self._data = candidate
+        with self._mutex:
+            self._data = candidate
         return candidate["revision"]
 
     @staticmethod
@@ -406,7 +415,7 @@ class CampaignStore:
 
     def issue_guest(self, name):
         """Issue a campaign guest credential. The cleartext is returned once."""
-        with self._mutex:
+        with self._writer, self._mutex:
             self._require_open()
             name = _name(name)
             candidate = copy.deepcopy(self._data)
@@ -416,7 +425,7 @@ class CampaignStore:
 
     def register_direct_guest(self, guest_id: str, credential: str) -> None:
         """Enroll the same local guest across retries without replacing an existing owner."""
-        with self._mutex:
+        with self._writer, self._mutex:
             self._require_open()
             if not _is_uuid(guest_id) or type(credential) is not str or not _CREDENTIAL_RE.fullmatch(credential):
                 raise AuthenticationError("Campaign guest authentication failed.")
@@ -441,7 +450,7 @@ class CampaignStore:
 
     def issue_invitation(self, guest_name, character_name):
         """Create a guest and a starter character in the same save revision."""
-        with self._mutex:
+        with self._writer, self._mutex:
             self._require_open()
             guest_name = _name(guest_name)
             character_name = _name(character_name)
@@ -497,7 +506,7 @@ class CampaignStore:
 
             if appearance is None or not valid_profile(profile):
                 raise CharacterError("Invalid stock character profile.")
-        with self._mutex:
+        with self._writer, self._mutex:
             self._require_open()
             if guest_id not in self._data["guests"]:
                 raise AuthenticationError("Unknown campaign guest.")
@@ -531,7 +540,7 @@ class CampaignStore:
 
     def create_character(self, guest_id, credential, name, state=None):
         """Persist a new character for an authenticated guest."""
-        with self._mutex:
+        with self._writer, self._mutex:
             self._authenticate(guest_id, credential)
             name = _name(name)
             state = {} if state is None else state
@@ -602,28 +611,33 @@ class CampaignStore:
             self._expire_leases(self._clock())
             self._drop_lease(self._get_lease(lease_id))
 
-    def _checkpoint(self, world, character_states, unleased_states=None):
+    def _checkpoint_candidate(self, world, character_states, unleased_states=None):
         self._require_open()
         _validate_state(world)
         if type(character_states) is not dict:
             raise CampaignFormatError("Character snapshots must be keyed by lease ID.")
-        self._expire_leases(self._clock())
-        candidate = copy.deepcopy(self._data)
+        with self._mutex:
+            self._expire_leases(self._clock())
+            previous = self._data
+            leased = {lease.character_id for lease in self._lease_by_id.values()} if unleased_states else set()
+            assignments = {lease_id: lease.character_id for lease_id, lease in self._lease_by_id.items()}
+        candidate = copy.deepcopy(previous)
         candidate["world"] = copy.deepcopy(world)
         if unleased_states:
             if type(unleased_states) is not dict:
                 raise CampaignFormatError("Unleased character snapshots must be keyed by character ID.")
-            leased = {lease.character_id for lease in self._lease_by_id.values()}
             for character_id, state in unleased_states.items():
                 if character_id in leased or character_id not in candidate["characters"]:
                     raise LeaseError("The character is leased or no longer exists.")
                 _validate_state(state)
                 self._update_character_state(candidate["characters"][character_id], state)
         for lease_id, state in character_states.items():
-            lease = self._get_lease(lease_id)
+            character_id = assignments.get(lease_id) if type(lease_id) is str else None
+            if character_id is None:
+                raise LeaseError("The character lease is unavailable or expired.")
             _validate_state(state)
-            self._update_character_state(candidate["characters"][lease.character_id], state)
-        return self._commit(candidate)
+            self._update_character_state(candidate["characters"][character_id], state)
+        return candidate
 
     @staticmethod
     def _update_character_state(character, state):
@@ -634,15 +648,48 @@ class CampaignStore:
 
     def checkpoint(self, world, character_states, *, unleased_states=None):
         """Save a campaign and its exact character snapshots in one revision."""
-        with self._mutex:
-            return self._checkpoint(world, character_states, unleased_states)
+        with self._writer:
+            candidate = self._checkpoint_candidate(world, character_states, unleased_states)
+            return self._commit(candidate)
+
+    async def wait_for_checkpoint(self) -> None:
+        """Allow a relay callback to wait without occupying its event loop."""
+        while not self._checkpoint_idle.is_set():
+            await self._checkpoint_idle.wait()
+
+    async def checkpoint_async(self, world, character_states, *, unleased_states=None):
+        """Commit on a worker without leaving an orphaned writer on cancellation."""
+        await self.wait_for_checkpoint()
+        self._checkpoint_idle.clear()
+        try:
+            writer = asyncio.create_task(asyncio.to_thread(
+                self.checkpoint, world, character_states, unleased_states=unleased_states,
+            ))
+            try:
+                return await asyncio.shield(writer)
+            except asyncio.CancelledError:
+                # A cancelled request cannot cancel filesystem work already running.
+                # Drain it before opening the gate or allowing the host to close.
+                while not writer.done():
+                    try:
+                        await asyncio.shield(writer)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not writer.cancelled():
+                    writer.exception()
+                raise
+        finally:
+            self._checkpoint_idle.set()
 
     def save_character(self, lease_id, state):
         """Save a connected or grace-reserved character and return the revision."""
-        with self._mutex:
+        with self._writer:
             if type(lease_id) is not str:
                 raise LeaseError("The character lease is unavailable or expired.")
-            return self._checkpoint(self._data["world"], {lease_id: state})
+            candidate = self._checkpoint_candidate(self._data["world"], {lease_id: state})
+            return self._commit(candidate)
 
     def save_world(self, state):
         """Save world state and return the revision."""

@@ -538,7 +538,7 @@ async def verify_cloud_restore(first, second, session, game, processes):
 async def verify(work: Path, first_game: Path, second_game: Path, original: Path,
                  second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False,
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
-                 container_nearby: bool = False, steam_cloud: bool = False) -> None:
+                 container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False) -> None:
     roots = (work, first_game, second_game, original)
     if second_legacy_work is not None:
         roots += (second_legacy_work,)
@@ -608,6 +608,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         async def check_gameplay(host, guest, pawn):
             evidence = await verify_gameplay(host, guest, pawn, stock_drop=stock_drop, stock_split=stock_split,
                                              stock_equip=stock_equip, stock_nearby=stock_nearby, projected_nearby=projected_nearby)
+            if memory_bridge:
+                host_status = await wait(host.campaign / "run", lambda state: state.get("local_bridge") == "memory")
+                guest_status = await wait(guest.client / "run", lambda state: state.get("local_bridge") == "memory")
+                assert host_status["transport"]["schema_version"] == guest_status["transport"]["schema_version"] == 1
+                evidence["local_bridge"] = {"host": host_status["local_bridge"], "guest": guest_status["local_bridge"]}
             if container_nearby:
                 evidence["guest_stock_nearby_container_pickup"] = await verify_container_pickup(host, guest, pawn)
             return evidence
@@ -662,6 +667,7 @@ if __name__ == "__main__":
     parser.add_argument("--projected-nearby", action="store_true", help="reclaim a player drop through stock Nearby Items")
     parser.add_argument("--container-nearby", action="store_true", help="pick up live stock container loot through Nearby Items")
     parser.add_argument("--steam-cloud", action="store_true", help="test a copied cloud backup through Host Load Game")
+    parser.add_argument("--memory-bridge", action="store_true", help="verify both embedded workers use the native bridge")
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
@@ -672,4 +678,4 @@ if __name__ == "__main__":
                        args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy,
                        stock_drop=args.stock_drop, stock_split=args.stock_split, stock_equip=args.stock_equip,
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
-                       container_nearby=args.container_nearby, steam_cloud=args.steam_cloud))
+                       container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge))

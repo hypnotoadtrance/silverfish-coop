@@ -15,8 +15,9 @@ import zlib
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
+from time import perf_counter_ns
 from typing import Any
 
 from aioquic.asyncio import serve
@@ -334,15 +335,64 @@ def _decode_action(data: bytes) -> Action:
     return message
 
 
-def _encode_response(result: Action, *, snapshot: bool) -> bytes:
+@dataclass(slots=True)
+class _TransportStatistics:
+    """Cumulative local counters, with no peer identifiers or payload contents."""
+
+    schema_version: int = 1
+    quic_datagrams_sent: int = 0
+    quic_payload_bytes_sent: int = 0
+    quic_datagrams_received: int = 0
+    quic_payload_bytes_received: int = 0
+    quic_timer_callbacks: int = 0
+    quic_timer_late_max_ns: int = 0
+    game_packets_queued: int = 0
+    game_payload_bytes_queued: int = 0
+    game_fragments_queued: int = 0
+    game_fragments_received: int = 0
+    game_fragments_rejected: int = 0
+    game_packets_reassembled: int = 0
+    game_packets_delivered: int = 0
+    game_payload_bytes_delivered: int = 0
+    game_packets_not_delivered: int = 0
+    relay_queue_max_frames: int = 0
+    relay_queue_evicted_frames: int = 0
+    relay_queue_expired_frames: int = 0
+    weapon_cues_rejected_full_queue: int = 0
+    reassembly_expired_packets: int = 0
+    reassembly_max_pending_packets: int = 0
+    snapshot_responses_encoded: int = 0
+    snapshot_responses_compressed: int = 0
+    snapshot_plaintext_bytes: int = 0
+    snapshot_encoded_bytes: int = 0
+    snapshot_encode_total_ns: int = 0
+    snapshot_encode_max_ns: int = 0
+    snapshot_responses_decoded: int = 0
+    snapshot_received_bytes: int = 0
+    snapshot_decode_total_ns: int = 0
+    snapshot_decode_max_ns: int = 0
+
+
+def _encode_response(result: Action, *, snapshot: bool, stats: _TransportStatistics | None = None) -> bytes:
+    started = perf_counter_ns() if snapshot and stats is not None else None
     body = _encode_action(result, limit=_MAX_SNAPSHOT_BODY if snapshot else _MAX_ACTION_BODY)
-    frame = b'{"result":' + body + b"}"
-    if snapshot and len(frame) >= _COMPRESS_SNAPSHOT_MINIMUM:
+    frame = b"".join((b'{"result":', body, b"}"))
+    plaintext_size = len(frame)
+    if snapshot and plaintext_size >= _COMPRESS_SNAPSHOT_MINIMUM:
         compressed = _COMPRESSED_SNAPSHOT + zlib.compress(frame, level=1)
-        if len(compressed) < len(frame):
+        if len(compressed) < plaintext_size:
             frame = compressed
     if len(frame) > _MAX_ACTION_FRAME:
         raise LinkError("application response too large")
+    if started is not None:
+        assert stats is not None
+        elapsed = perf_counter_ns() - started
+        stats.snapshot_responses_encoded += 1
+        stats.snapshot_responses_compressed += len(frame) < plaintext_size
+        stats.snapshot_plaintext_bytes += plaintext_size
+        stats.snapshot_encoded_bytes += len(frame)
+        stats.snapshot_encode_total_ns += elapsed
+        stats.snapshot_encode_max_ns = max(stats.snapshot_encode_max_ns, elapsed)
     return frame
 
 
@@ -373,6 +423,7 @@ class _IncomingAction:
 @dataclass
 class _OutgoingAction:
     response: asyncio.Future[Action]
+    snapshot: bool = False
     body: bytearray = field(default_factory=bytearray)
 
 
@@ -384,39 +435,53 @@ class _PartialPacket:
 
 
 class _Reassembler:
-    def __init__(self) -> None:
+    def __init__(self, stats: _TransportStatistics) -> None:
         self._pending: dict[int, _PartialPacket] = {}
+        self._stats = stats
 
     def receive(self, frame: bytes, now: float) -> bytes | None:
+        stats = self._stats
+        stats.game_fragments_received += 1
         if len(frame) <= _FRAGMENT_HEADER.size:
+            stats.game_fragments_rejected += 1
             return None
         packet_id, size, index = _FRAGMENT_HEADER.unpack_from(frame)
         chunk = frame[_FRAGMENT_HEADER.size:]
         start = index * _FRAGMENT_SIZE
-        if not 0 < size <= _MAX_GAME_PACKET or start >= size:
+        if (not 0 < size <= _MAX_GAME_PACKET or start >= size
+                or len(chunk) != min(_FRAGMENT_SIZE, size - start)):
+            stats.game_fragments_rejected += 1
             return None
-        if len(chunk) != min(_FRAGMENT_SIZE, size - start):
-            return None
-        if size <= _FRAGMENT_SIZE:
-            return chunk
 
-        for key, packet in list(self._pending.items()):
-            if now - packet.created_at > _FRAGMENT_TTL:
-                del self._pending[key]
+        # Dict insertion order is creation order. Stop at the first live assembly.
+        while self._pending:
+            oldest = next(iter(self._pending))
+            if now - self._pending[oldest].created_at <= _FRAGMENT_TTL:
+                break
+            del self._pending[oldest]
+            stats.reassembly_expired_packets += 1
+
+        if size <= _FRAGMENT_SIZE:
+            stats.game_packets_reassembled += 1
+            return chunk
 
         partial = self._pending.get(packet_id)
         if partial is None:
             if len(self._pending) >= _MAX_ASSEMBLIES:
+                stats.game_fragments_rejected += 1
                 return None
             partial = _PartialPacket(size, now)
             self._pending[packet_id] = partial
+            stats.reassembly_max_pending_packets = max(stats.reassembly_max_pending_packets, len(self._pending))
         if partial.size != size:
+            stats.game_fragments_rejected += 1
             return None
         partial.chunks.setdefault(index, chunk)
         expected = (size + _FRAGMENT_SIZE - 1) // _FRAGMENT_SIZE
         if len(partial.chunks) != expected:
             return None
         del self._pending[packet_id]
+        stats.game_packets_reassembled += 1
         return b"".join(partial.chunks[index] for index in range(expected))
 
 
@@ -432,17 +497,50 @@ class _LocalUdp(asyncio.DatagramProtocol):
         pass
 
 
+class _MeasuredDatagramTransport:
+    """Count bytes submitted by aioquic without replacing its transmit/timer logic."""
+
+    def __init__(self, transport: asyncio.BaseTransport, stats: _TransportStatistics) -> None:
+        self._transport = transport
+        self._stats = stats
+
+    def sendto(self, data: bytes, address: Address | None = None) -> None:
+        self._transport.sendto(data, address)
+        self._stats.quic_datagrams_sent += 1
+        self._stats.quic_payload_bytes_sent += len(data)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._transport, name)
+
+
 class _LinkProtocol(QuicConnectionProtocol):
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, stats: _TransportStatistics, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        self._stats = stats
         self.terminated = False
         self.authorized = False
         self.game_access = False
         self._admission_buffer = bytearray()
         self._admission_finished = False
-        self._reassembler = _Reassembler()
+        self._reassembler = _Reassembler(stats)
         self._next_packet_id = 0
         self._game_queue_started: float | None = None
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        super().connection_made(_MeasuredDatagramTransport(transport, self._stats))
+
+    def datagram_received(self, data: bytes, addr: Any) -> None:
+        self._stats.quic_datagrams_received += 1
+        self._stats.quic_payload_bytes_received += len(data)
+        super().datagram_received(data, addr)
+
+    def _handle_timer(self) -> None:
+        stats = self._stats
+        stats.quic_timer_callbacks += 1
+        if self._timer_at is not None:
+            late = int((self._loop.time() - self._timer_at) * 1_000_000_000)
+            stats.quic_timer_late_max_ns = max(stats.quic_timer_late_max_ns, late)
+        super()._handle_timer()
 
     def send_admission(self, payload: bytes) -> None:
         self._quic.send_stream_data(_ADMISSION_STREAM, payload, end_stream=True)
@@ -457,10 +555,13 @@ class _LinkProtocol(QuicConnectionProtocol):
         pending = self._quic._datagrams_pending
         # Evict the oldest queued packet as a group when the path is congested.
         # Unreal implements its own reliability above this datagram transport.
+        stats = self._stats
+        before = len(pending)
         while len(pending) + count > _MAX_QUEUED_FRAMES:
             evicted = pending.popleft()[:6]
             while pending and pending[0][:6] == evicted:
                 pending.popleft()
+        stats.relay_queue_evicted_frames += before - len(pending)
         if not pending:
             self._game_queue_started = now
         packet_id = self._next_packet_id
@@ -469,6 +570,10 @@ class _LinkProtocol(QuicConnectionProtocol):
             start = index * _FRAGMENT_SIZE
             frame = _FRAGMENT_HEADER.pack(packet_id, len(data), index)
             self._quic.send_datagram_frame(frame + data[start:start + _FRAGMENT_SIZE])
+        stats.game_packets_queued += 1
+        stats.game_payload_bytes_queued += len(data)
+        stats.game_fragments_queued += count
+        stats.relay_queue_max_frames = max(stats.relay_queue_max_frames, len(pending))
         self.transmit()
 
     def forward_weapon_shot(self, data: bytes) -> None:
@@ -478,15 +583,19 @@ class _LinkProtocol(QuicConnectionProtocol):
         self._expire_game_queue(now)
         pending = self._quic._datagrams_pending
         if len(pending) >= _MAX_QUEUED_FRAMES:
+            self._stats.weapon_cues_rejected_full_queue += 1
             return
         if not pending:
             self._game_queue_started = now
         self._quic.send_datagram_frame(_WEAPON_SHOT_HEADER + data)
+        self._stats.relay_queue_max_frames = max(self._stats.relay_queue_max_frames, len(pending))
         self.transmit()
 
     def _expire_game_queue(self, now: float) -> None:
         if self._game_queue_started is not None and now - self._game_queue_started >= _GAME_QUEUE_AGE:
-            self._quic._datagrams_pending.clear()
+            pending = self._quic._datagrams_pending
+            self._stats.relay_queue_expired_frames += len(pending)
+            pending.clear()
             self._game_queue_started = None
 
     def transmit(self) -> None:
@@ -516,7 +625,7 @@ class _LinkProtocol(QuicConnectionProtocol):
 
 class _HostProtocol(_LinkProtocol):
     def __init__(self, host: HostLink, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__(host._stats, *args, **kwargs)
         self.host = host
         self.guest_id: str | None = None
         self.peer_ip = ""
@@ -671,6 +780,15 @@ class HostLink:
         self._lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[None]] = set()
         self._closed = False
+        self._stats = _TransportStatistics()
+
+    def statistics(self) -> dict[str, int]:
+        """Report cumulative counters across this host link's QUIC connections.
+
+        Outer byte counts are UDP payloads assigned to those connections. They
+        exclude IP/UDP headers and server Retry or version negotiation.
+        """
+        return asdict(self._stats)
 
     @property
     def address(self) -> Address:
@@ -897,7 +1015,7 @@ class HostLink:
                     result = await result
                 if not isinstance(result, dict):
                     raise LinkError("invalid application callback response")
-                return _encode_response(result, snapshot=payload.get("action") == "snapshot")
+                return _encode_response(result, snapshot=payload.get("action") == "snapshot", stats=self._stats)
         except TimeoutError:
             return _encode_action({"error": "timed_out"})
         except Exception:
@@ -949,11 +1067,16 @@ class HostLink:
     def _to_game(self, protocol: _HostProtocol, data: bytes) -> None:
         guest_id = protocol.guest_id
         if guest_id is None or self._protocols.get(guest_id) is not protocol:
+            self._stats.game_packets_not_delivered += 1
             return
         if protocol.authorized and protocol.game_access and self._native_route_permitted(guest_id):
             route = self._guest_routes.get(guest_id)
             if route is not None:
                 route.transport.sendto(data)
+                self._stats.game_packets_delivered += 1
+                self._stats.game_payload_bytes_delivered += len(data)
+                return
+        self._stats.game_packets_not_delivered += 1
 
     def _from_game(self, guest_id: str, data: bytes) -> None:
         protocol = self._protocols.get(guest_id)
@@ -1016,7 +1139,7 @@ async def start_host(
 
 class _ClientProtocol(_LinkProtocol):
     def __init__(self, client: ClientLink, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__(client._stats, *args, **kwargs)
         self.client = client
         self.handshake = asyncio.Event()
         self.reply = asyncio.Event()
@@ -1086,11 +1209,11 @@ class _ClientProtocol(_LinkProtocol):
         self._quic.send_stream_data(_END_SESSION_STREAM, _END_SESSION_ACK, end_stream=True)
         self.transmit()
 
-    async def request(self, body: bytes, timeout: float) -> Action:
+    async def request(self, body: bytes, timeout: float, *, snapshot: bool = False) -> Action:
         if len(self._actions) >= _MAX_ACTIONS:
             raise LinkError("too many application requests pending")
         stream_id = self._quic.get_next_available_stream_id()
-        action = self._actions[stream_id] = _OutgoingAction(self._loop.create_future())
+        action = self._actions[stream_id] = _OutgoingAction(self._loop.create_future(), snapshot=snapshot)
         try:
             self._quic.send_stream_data(stream_id, body, end_stream=True)
             self.transmit()
@@ -1120,9 +1243,16 @@ class _ClientProtocol(_LinkProtocol):
         if not event.end_stream:
             return
         try:
+            started = perf_counter_ns() if action.snapshot else None
             envelope = _decode_response(bytes(action.body))
             result = envelope.get("result")
             if envelope.keys() == {"result"} and isinstance(result, dict):
+                if started is not None:
+                    elapsed = perf_counter_ns() - started
+                    self._stats.snapshot_responses_decoded += 1
+                    self._stats.snapshot_received_bytes += len(action.body)
+                    self._stats.snapshot_decode_total_ns += elapsed
+                    self._stats.snapshot_decode_max_ns = max(self._stats.snapshot_decode_max_ns, elapsed)
                 action.response.set_result(result)
                 return
             error = envelope.get("error")
@@ -1207,6 +1337,11 @@ class ClientLink:
         self.game_local_datagrams = 0
         self.game_packets_sent = 0
         self.game_packets_received = 0
+        self._stats = _TransportStatistics()
+
+    def statistics(self) -> dict[str, int]:
+        """Report cumulative counters across this client link's reconnects."""
+        return asdict(self._stats)
 
     @property
     def runtime_id(self) -> str | None:
@@ -1305,7 +1440,7 @@ class ClientLink:
         protocol = self._protocol
         if protocol is None or not protocol.authorized or protocol.terminated:
             raise LinkError("link is not admitted")
-        return await protocol.request(_encode_action(payload), timeout)
+        return await protocol.request(_encode_action(payload), timeout, snapshot=payload.get("action") == "snapshot")
 
     def _from_game(self, data: bytes, address: Address) -> None:
         self.game_local_datagrams += 1
@@ -1356,6 +1491,10 @@ class ClientLink:
         if self._transport is not None and self._game_endpoint is not None and not self._closed:
             self._transport.sendto(data, self._game_endpoint)
             self.game_packets_received += 1
+            self._stats.game_packets_delivered += 1
+            self._stats.game_payload_bytes_delivered += len(data)
+        else:
+            self._stats.game_packets_not_delivered += 1
 
     def _receive_weapon_shot(self, data: bytes, now: float) -> None:
         if 0 < len(data) <= _FRAGMENT_SIZE:

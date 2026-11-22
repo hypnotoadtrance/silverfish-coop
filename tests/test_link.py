@@ -132,8 +132,60 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         if os.name == "nt":
             address = self.client._protocol._transport.get_extra_info("sockname")
             verify_loopback_socket(os.getpid(), address[1])
-        for size in (1, 1024, 1200, 4097, 16_384):
+        sizes = (1, 1024, 1200, 4097, 16_384)
+        for size in sizes:
             await self.exchange(size)
+        fragments = sum((size + link._FRAGMENT_SIZE - 1) // link._FRAGMENT_SIZE for size in sizes)
+        for relay in (self.host, self.client):
+            stats = relay.statistics()
+            self.assertEqual(stats["schema_version"], 1)
+            self.assertEqual(stats["game_packets_queued"], len(sizes))
+            self.assertEqual(stats["game_packets_reassembled"], len(sizes))
+            self.assertEqual(stats["game_packets_delivered"], len(sizes))
+            self.assertEqual(stats["game_payload_bytes_queued"], sum(sizes))
+            self.assertEqual(stats["game_payload_bytes_delivered"], sum(sizes))
+            self.assertEqual(stats["game_fragments_queued"], fragments)
+            self.assertEqual(stats["game_fragments_received"], fragments)
+            self.assertGreater(stats["quic_datagrams_sent"], 0)
+            self.assertGreater(stats["quic_datagrams_received"], 0)
+            self.assertGreater(stats["quic_payload_bytes_sent"], sum(sizes))
+            self.assertGreater(stats["quic_payload_bytes_received"], sum(sizes))
+            self.assertEqual(stats["relay_queue_expired_frames"], 0)
+            stats["game_packets_queued"] = 0
+            self.assertEqual(relay.statistics()["game_packets_queued"], len(sizes))
+
+    async def test_relay_statistics_count_overflow_and_expiry(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        protocol = self.client._protocol
+        payload = bytes(2 * link._FRAGMENT_SIZE)
+        now = protocol._loop.time()
+        with patch.object(protocol, "transmit"), patch.object(protocol._loop, "time", return_value=now):
+            for _ in range(link._MAX_QUEUED_FRAMES // 2 + 1):
+                protocol.forward_game_packet(payload)
+            protocol.forward_weapon_shot(b"full queue")
+            stats = self.client.statistics()
+            self.assertEqual(stats["game_fragments_queued"], link._MAX_QUEUED_FRAMES + 2)
+            self.assertEqual(stats["relay_queue_max_frames"], link._MAX_QUEUED_FRAMES)
+            self.assertEqual(stats["relay_queue_evicted_frames"], 2)
+            self.assertEqual(stats["weapon_cues_rejected_full_queue"], 1)
+            protocol._expire_game_queue(now + link._GAME_QUEUE_AGE + .001)
+            self.assertEqual(self.client.statistics()["relay_queue_expired_frames"], link._MAX_QUEUED_FRAMES)
+            self.assertFalse(protocol._quic._datagrams_pending)
+
+    def test_reassembly_expires_older_partial_packet_and_preserves_live_packet(self):
+        stats = link._TransportStatistics()
+        assembler = link._Reassembler(stats)
+        head = b"x" * link._FRAGMENT_SIZE
+        size = len(head) + 1
+        self.assertIsNone(assembler.receive(link._FRAGMENT_HEADER.pack(10, size, 0) + head, 0.0))
+        self.assertIsNone(assembler.receive(link._FRAGMENT_HEADER.pack(11, size, 0) + head, 0.5))
+        self.assertEqual(assembler.receive(link._FRAGMENT_HEADER.pack(11, size, 1) + b"y", 1.25), head + b"y")
+        self.assertIsNone(assembler.receive(link._FRAGMENT_HEADER.pack(12, size, 1) + b"yz", 1.25))
+        self.assertEqual(stats.reassembly_expired_packets, 1)
+        self.assertEqual(stats.reassembly_max_pending_packets, 2)
+        self.assertEqual(stats.game_packets_reassembled, 1)
+        self.assertEqual(stats.game_fragments_received, 4)
+        self.assertEqual(stats.game_fragments_rejected, 1)
 
     @unittest.skipUnless(os.name == "nt", "Windows UDP ownership tables are required")
     async def test_resident_client_refuses_wildcard_game_socket_before_pinning_peer(self):
@@ -517,6 +569,16 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.connect_guest())["accepted"])
         response, _ = await asyncio.gather(self.client.request({"action": "snapshot"}), self.exchange(1200))
         self.assertEqual(response, world)
+        host_stats = self.host.statistics()
+        client_stats = self.client.statistics()
+        self.assertEqual(host_stats["snapshot_responses_encoded"], 1)
+        self.assertEqual(host_stats["snapshot_responses_compressed"], 1)
+        self.assertGreater(host_stats["snapshot_plaintext_bytes"], link._MAX_ACTION_BODY)
+        self.assertLess(host_stats["snapshot_encoded_bytes"], 4_096)
+        self.assertEqual(client_stats["snapshot_responses_decoded"], 1)
+        self.assertEqual(client_stats["snapshot_received_bytes"], host_stats["snapshot_encoded_bytes"])
+        self.assertGreater(host_stats["snapshot_encode_total_ns"], 0)
+        self.assertGreater(client_stats["snapshot_decode_total_ns"], 0)
 
     async def test_weapon_cues_reach_current_game_guest_without_entering_unreal(self):
         guest_id = self.request["guest_id"]

@@ -74,7 +74,7 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.host.last_game = {"state": "hosting", "map": CROSSROADS,
                                "pawns": {"local": {"name": "host-pawn"}}, "native_paired_save_capture": True}
         self.host.guest_capture_targets = Mock(return_value={"first": "first-pawn", "second": "second-pawn"})
-        self.host.checkpoint = Mock(return_value=19)
+        self.host.commit_checkpoint = AsyncMock(return_value=19)
         self.host.control = Mock()
         self.host.store = SimpleNamespace(path=root / "campaign.json", previous_path=root / "previous.json")
         self.missing_proof = self.missing_file = False
@@ -100,7 +100,7 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, 19)
         self.bridge.command.assert_awaited_once()
         self.assertEqual(self.bridge.command.await_args.args[2], "dig-token")
-        recorded = self.host.checkpoint.call_args.kwargs
+        recorded = self.host.commit_checkpoint.await_args.kwargs
         self.assertEqual(recorded["native_record"]["eather_remainder"], .25)
         self.assertEqual(recorded["require_guest_frames"], {"second"})
         self.assertEqual({key: frame["character_id"] for key, frame in recorded["guest_records"].items()},
@@ -110,10 +110,10 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.missing_proof = True
         with self.assertRaisesRegex(RuntimeError, "exact detached guest save"):
             await self.host.checkpoint_native(self.bridge)
-        self.host.checkpoint.assert_not_called()
+        self.host.commit_checkpoint.assert_not_awaited()
 
     async def test_missing_generation_never_publishes_campaign(self):
         self.missing_file = True
         with self.assertRaisesRegex(CampaignFormatError, "Cannot read the isolated Unreal save"):
             await self.host.checkpoint_native(self.bridge)
-        self.host.checkpoint.assert_not_called()
+        self.host.commit_checkpoint.assert_not_awaited()

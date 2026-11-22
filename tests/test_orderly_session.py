@@ -29,6 +29,7 @@ class OrderlySessionTests(unittest.IsolatedAsyncioTestCase):
         host.session_stop_reason = None
         host.expired_characters = set()
         host.smg_holds = None
+        host.pickup_audio = Mock(frame=Mock(return_value=None))
         host.party = party.new_party()
         host.native_requests = asyncio.Queue(maxsize=8)
         host.prepared_guest_leaves = {}

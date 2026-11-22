@@ -49,15 +49,17 @@ class KillVolumeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(bridge.snapshot())
 
     def test_unresolved_crossing_preserves_previous_checkpoint(self):
-        host = SimpleNamespace(last_game={"state": "hosting", "map": CROSSROADS, volume.KEY: {"state": "pending"}},
-                               store=Mock(), stopping=False, native_checkpoint_unsafe=False)
+        host = Host.__new__(Host)
+        host.last_game = {"state": "hosting", "map": CROSSROADS, volume.KEY: {"state": "pending"}}
+        host.store = Mock()
+        host.stopping = host.native_checkpoint_unsafe = False
         with self.assertRaisesRegex(RuntimeError, volume.PENDING):
-            Host.checkpoint(host)
+            host.checkpoint()
         host.store.status.assert_not_called()
         self.assertFalse(host.stopping or host.native_checkpoint_unsafe)
         host.last_game[volume.KEY] = {"state": "fault", "fault": "safe_floor_unavailable"}
         with self.assertRaisesRegex(RuntimeError, "safe_floor_unavailable"):
-            Host.checkpoint(host)
+            host.checkpoint()
         host.store.status.assert_not_called()
         self.assertTrue(host.stopping and host.native_checkpoint_unsafe)
 

@@ -112,6 +112,7 @@ class Enrollment:
                 reason = "direct_wrong_password" if password else "direct_password_required"
                 return {"accepted": False, "reason": reason}
             self._attempts.pop(peer, None)
+        await self._store.wait_for_checkpoint()
         try:
             self._store.register_direct_guest(request["guest_id"], request["credential"])
         except CampaignError:

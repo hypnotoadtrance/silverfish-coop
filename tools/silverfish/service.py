@@ -439,17 +439,35 @@ class Host:
         self.guest["disconnected"] = time.monotonic()
         self.store.disconnect(self.guest["lease_id"])
         if not self.transitioning and not self.native_checkpoint_unsafe:
-            try:
-                self.checkpoint()
-            except (OSError, RuntimeError) as error:
-                with contextlib.suppress(OSError):
-                    self.control.event("disconnect_checkpoint_error", error_type=type(error).__name__)
+            self.next_save = 0.0
         with contextlib.suppress(OSError):
             self.control.event("guest_link_lost", guest_id=guest_id, grace_seconds=DEFAULT_RECONNECT_GRACE)
 
     def checkpoint(self, proposed_party: dict | None = None, *, native_record: dict | None = None,
                    guest_records: dict[str, dict] | None = None, unleased_states: dict | None = None,
                    require_guest_frames: frozenset[str] = frozenset()) -> int:
+        world, changes = self.checkpoint_contents(proposed_party, native_record=native_record,
+                                                  guest_records=guest_records, unleased_states=unleased_states,
+                                                  require_guest_frames=require_guest_frames)
+        return self.store.checkpoint(world, changes, unleased_states=unleased_states)
+
+    async def commit_checkpoint(self, proposed_party: dict | None, *, native_record: dict | None = None,
+                                guest_records: dict[str, dict] | None = None, unleased_states: dict | None = None,
+                                require_guest_frames: frozenset[str] = frozenset()) -> int:
+        await self.store.wait_for_checkpoint()
+        world, changes = self.checkpoint_contents(proposed_party, native_record=native_record,
+                                                  guest_records=guest_records, unleased_states=unleased_states,
+                                                  require_guest_frames=require_guest_frames)
+        try:
+            return await self.store.checkpoint_async(world, changes, unleased_states=unleased_states)
+        except asyncio.CancelledError:
+            # The disk commit may have completed without its caller applying the
+            # proposed party in memory. Shutdown must not overwrite that commit.
+            self.native_checkpoint_unsafe = True
+            raise
+
+    def checkpoint_contents(self, proposed_party, *, native_record, guest_records,
+                            unleased_states, require_guest_frames) -> tuple[dict, dict]:
         if self.last_game.get("state") != "hosting":
             raise RuntimeError("Wait for the host map to finish loading")
         native_kill_volume.fence(self)
@@ -498,7 +516,7 @@ class Host:
             guard.checkpoint(status, world, set(self.roles().values()), self.native_recipients(),
                              paired=native_record is not None, captures=captures, changes=changes,
                              unleased=unleased_states or {})
-        return self.store.checkpoint(world, changes, unleased_states=unleased_states)
+        return world, changes
 
     def checkpoint_guest_changes(self, status: dict, guest_records: dict[str, dict]) -> dict[str, dict]:
         guest = _pawn(self.last_game, "guest")
@@ -603,7 +621,8 @@ class Host:
                                 require_guest_frames: frozenset[str] = frozenset(),
                                 dig_token: str | None = None) -> int:
         if self.native_profile is None:
-            return self.checkpoint(proposed_party, unleased_states=unleased_states, require_guest_frames=require_guest_frames)
+            return await self.commit_checkpoint(proposed_party, unleased_states=unleased_states,
+                                                require_guest_frames=require_guest_frames)
         source = self.last_game.get("map")
         pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
         if self.last_game.get("state") != "hosting" or not pawn or source not in self.allowed_maps:
@@ -645,8 +664,8 @@ class Host:
         self.last_seen = time.monotonic()
         if not guests:
             guest_records = await self.capture_guest_records(bridge)
-        revision = self.checkpoint(proposed_party, native_record=record, guest_records=guest_records,
-                                   unleased_states=unleased_states, require_guest_frames=require_guest_frames)
+        revision = await self.commit_checkpoint(proposed_party, native_record=record, guest_records=guest_records,
+                                                unleased_states=unleased_states, require_guest_frames=require_guest_frames)
         try:
             keep = {entry["slot"] for path in (self.store.path, self.store.previous_path)
                     for entry in native_host_save.references(read_json(path))}
@@ -1770,12 +1789,7 @@ class Host:
         if request.get("action") == "create-character" and set(request) in (
                 {"action", "name", "operation_id"}, {"action", "name", "operation_id", "appearance"},
                 {"action", "name", "operation_id", "appearance", "profile"}):
-            try:
-                created = self.store.create_linked_character(guest_id, request["name"], request["operation_id"],
-                                                             appearance=request.get("appearance"), profile=request.get("profile"))
-            except CampaignError as error:
-                return {"ok": False, "error": str(error)}
-            return {"ok": True, "character": created}
+            return self.create_guest_character(guest_id, request)
         identity = self.authenticated_guest(guest_id)
         if not identity:
             return {"ok": False, "error": "guest_not_active"}
@@ -1820,6 +1834,29 @@ class Host:
             return self.enqueue_native_request(guest_id, request)
         if action not in ("interact", "buy", "keep") or set(request) - {"action", "operation_id", "target", "retained"}:
             return {"ok": False, "error": "action_unavailable"}
+        return self.guest_party_action(guest_id, character, self.zone_epoch, request)
+
+    async def create_guest_character(self, guest_id: str, request: dict) -> dict:
+        await self.store.wait_for_checkpoint()
+        if self.stopping:
+            return {"ok": False, "error": "host_stopping"}
+        try:
+            created = self.store.create_linked_character(guest_id, request["name"], request["operation_id"],
+                                                         appearance=request.get("appearance"), profile=request.get("profile"))
+        except CampaignError as error:
+            return {"ok": False, "error": str(error)}
+        return {"ok": True, "character": created}
+
+    async def guest_party_action(self, guest_id: str, character: str, epoch: str, request: dict) -> dict:
+        await self.store.wait_for_checkpoint()
+        identity = self.authenticated_guest(guest_id)
+        if not identity or identity[1] != character:
+            return {"ok": False, "error": "guest_not_active"}
+        if epoch != self.zone_epoch:
+            return {"ok": False, "error": "game_snapshot_unavailable"}
+        if self.guest_leave_pending(guest_id):
+            return {"ok": False, "error": "native_session_leave_pending"}
+        action = request["action"]
         try:
             result = self.act(character, request.get("operation_id"),
                               action, request.get("target"), retained=request.get("retained"))
@@ -1827,7 +1864,7 @@ class Host:
             if action == "interact" and request.get("target") is None and str(error) == "no_interaction_in_range":
                 bag = native_inventory_death.nearby_bag(self, character)
                 if bag:
-                    return self.enqueue_native_request(guest_id, {"action": "native-wipe-recover", "target": bag,
+                    return await self.enqueue_native_request(guest_id, {"action": "native-wipe-recover", "target": bag,
                                                                   "operation_id": request.get("operation_id")})
             return {"ok": False, "error": str(error)}
         return {"ok": True, **result}
@@ -3728,13 +3765,13 @@ class Host:
                 raise
             if dig_pending:
                 self.refresh_native_zone_heartbeat(bridge, time.monotonic())
-                self.publish_host_status(transport)
+                self.publish_host_status(transport, bridge)
                 await asyncio.sleep(.25)
                 continue
             native_kill_volume.fence(self)
             if native_kill_volume.pending(self.last_game):
                 self.refresh_native_zone_heartbeat(bridge, time.monotonic())
-                self.publish_host_status(transport)
+                self.publish_host_status(transport, bridge)
                 await asyncio.sleep(.25)
                 continue
             if pause_exit is not None:
@@ -3939,17 +3976,19 @@ class Host:
                     await self.checkpoint_native(bridge)
                 except (OSError, RuntimeError) as error:
                     self.control.event("native_host_checkpoint_error", reason=str(error))
-            self.publish_host_status(transport)
+            self.publish_host_status(transport, bridge)
             await bridge.wait_for_interaction(
                 .25, wake_if=lambda: not self.native_checkpoint_unsafe and not self.native_requests.empty(),
             )
 
-    def publish_host_status(self, transport):
+    def publish_host_status(self, transport, bridge):
         self.control.status(active=not self.stopping, role="host", state="hosting", game=self.last_game,
                             endpoint={"address": self.bind, "port": self.port},
                             campaign=self.store.status(), gameplay=self.public_gameplay(),
                             zone_epoch=self.zone_epoch, awaiting_zone_guest=self.awaiting_zone_guest,
-                            link_connected=self.game_link_connected(transport))
+                            link_connected=self.game_link_connected(transport),
+                            transport=transport.statistics() if isinstance(transport, link.HostLink) else {},
+                            local_bridge="memory" if bridge.local_bridge is not None else "file")
 
 
 def _embedded_features(work: Path, headless: bool, internal_port: int | None, options: dict, *,
@@ -4411,7 +4450,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             enrollment = (None if direct_password is None else
                           direct_ip.Enrollment(store, identity, game_build, PROTOCOL, controller.guest_features(), direct_password))
 
-            def admit_guest(request):
+            async def admit_guest(request):
+                if request.get("catalog") is not True:
+                    await store.wait_for_checkpoint()
                 guest = request["guest_id"]
                 if store.is_direct_guest(guest) and (enrollment is None or not enrollment.authorized(guest)):
                     return {"accepted": False, "reason": "direct_enrollment_required"}
@@ -5824,6 +5865,8 @@ class Client:
                                 state="connected" if active else "reconnecting",
                                 link_connected=self.transport.connected, reconnect_suspended=self.suspended,
                                 unreal_local_port=self.transport.unreal_local_port,
+                                transport=self.transport.statistics() if isinstance(self.transport, link.ClientLink) else {},
+                                local_bridge="memory" if self.bridge.local_bridge is not None else "file",
                                 character_id=self.invite["character_id"], host_session=self.host_session,
                                 game=self.last_game, gameplay=self.gameplay,
                                 gameplay_fresh=active and time.monotonic() - self.gameplay_seen < 3,
