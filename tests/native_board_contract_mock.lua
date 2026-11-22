@@ -132,8 +132,8 @@ end
 
 denied("not_offered", "start", "inspect", eye)
 fresh = true
-local function catalog()
-    mod.command({"1", "native-board-contract-catalog", "Guest", "Board"}, state, "hosting")
+local function catalog(specialist)
+    mod.command({"1", "native-board-contract-catalog", "Guest", "Board", specialist}, state, "hosting")
     return proof()
 end
 assert(catalog()[7] == "Asn_EggHead,Clt_Eye_02" and catalog()[8] == "-")
@@ -165,6 +165,7 @@ board.AcceptAllGlobalContracts = true
 denied("objective_not_complete", "turnin", "inspect", kill)
 kill_recipe[step] = 2
 kill_recipe[items] = array({class})
+assert(catalog()[8] == "-" and catalog(kill)[8] == kill)
 denied("specialized_recipe", "turnin", "inspect", kill)
 kill_recipe[items] = array({})
 action("turnin", "inspect", kill)

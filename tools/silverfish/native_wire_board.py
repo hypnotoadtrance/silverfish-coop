@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import time
 import uuid
 
-from . import native_computer_board, native_flood_jammer, native_mosby_tape, native_subway_valve, native_turret_photo, native_wire_quest, party
+from . import native_board_contract, native_computer_board, native_flood_jammer, native_mosby_tape, native_subway_valve, native_turret_photo, native_wire_quest, party
 from . import native_prototype_drill
 from .native_gold import valid_guid
 from .travel import BLACK_MARKET, BOROUGH, OBSERVATORY, SCAV_BAR, SCIENTIST_SHOP, SHOPKEEP
@@ -12,8 +12,9 @@ from .travel import BLACK_MARKET, BOROUGH, OBSERVATORY, SCAV_BAR, SCIENTIST_SHOP
 HEARTBEAT = "native-wire-board-heartbeat"
 FIXTURE = "native-wire-board-fixture"
 STOCK_FIXTURE = "native-wire-board-stock-fixture"
+STOCK_F_FIXTURE = "native-wire-board-stock-f-fixture"
 WAITING = {"view": "loading", "start": "starting", "turnin": "redeeming",
-           "stock-start": "starting", "stock-turnin": "redeeming"}
+           "stock-view": "loading", "stock-start": "starting", "stock-turnin": "redeeming"}
 QUEST = native_wire_quest.QUEST_ID
 BOARD = native_wire_quest.BOARD
 BOARDS = native_computer_board.BOARDS
@@ -58,6 +59,11 @@ HIDDEN_OFFERS = {"stock_turret_photo_quest_not_offered", "stock_lake_jammer_ques
 STOCK_MENU = {LAKE_JAMMER.quest: LAKE_JAMMER, CROSSROADS_JAMMER.quest: CROSSROADS_JAMMER}
 
 
+def catalog_specialists(area):
+    # These contracts still use the existing authored action handlers.
+    return QUESTS.get(area, frozenset()) - {native_mosby_tape.MOSBY_QUEST, native_prototype_drill.QUEST_ID}
+
+
 def fixture_selection(area, target):
     if target is None:
         return ()
@@ -66,10 +72,13 @@ def fixture_selection(area, target):
     return (target,)
 
 
-def stock_fixture_selection(area, target):
+def stock_fixture_selection(area, target, projected=False):
     quest, separator, verb = target.partition("|") if isinstance(target, str) else ("", "", "")
     profile = STOCK_MENU.get(quest)
-    if separator != "|" or verb not in ("start", "turnin") or profile is None or profile.board_at(area) is None:
+    supported = profile and profile.board_at(area) is not None
+    if projected and area in MAPS:
+        supported = native_board_contract.quest_id(quest)
+    if separator != "|" or verb not in ("start", "turnin") or not supported:
         raise party.RuleError("Choose a supported stock board action on the current map")
     return quest, verb
 
@@ -81,18 +90,26 @@ class Confirmation:
     expires: float
 
 
+@dataclass(frozen=True)
+class StockMenu:
+    identity: tuple
+    offers: frozenset
+    turnins: frozenset
+
+
 class WireBoardView:
     def __init__(self, bridge, control):
         self.bridge, self.control = bridge, control
         self.latest = 0
         self.opened = None
+        self.stock_open = None
         self.pending = None
 
     async def sync(self, snapshot, epoch, active, action):
         events = self.bridge.native_wire_board_requests()
         now = time.monotonic()
         if not active or not epoch or snapshot.get("map") not in MAPS:
-            self.opened = self.pending = None
+            self.opened = self.stock_open = self.pending = None
             return snapshot
         if events:
             self.pending = (epoch, now, events[-1])
@@ -104,16 +121,20 @@ class WireBoardView:
         sequence, opened, kind, area, actor, board, quest = self.pending[2]
         stock_menu = kind.startswith("stock-")
         shown = snapshot.get("native_wire_board_stock" if stock_menu else "native_wire_board", {})
+        expected_quest = (quest == "-" and opened == sequence if kind == "stock-view" else
+                          native_board_contract.quest_id(quest) if stock_menu else quest in QUESTS[area])
         if (sequence <= self.latest or area != snapshot.get("map") or actor != pawn or board != BOARDS.get(area)
-                or quest not in QUESTS[area]
+                or not expected_quest
                 or tuple(shown.get(name) for name in ("map", "pawn", "board", "quest", "state", "sequence", "open"))
                 != (area, actor, board, quest, WAITING[kind], sequence, opened)):
             return snapshot
         self.pending = None
         self.latest = sequence
         operation = uuid.uuid5(self.bridge.input_namespace, f"{epoch}:{pawn}:wire-board:{sequence}").hex
+        if kind == "stock-view":
+            return await self._open_stock_menu(snapshot, epoch, area, pawn, board, sequence, operation, action)
         if stock_menu:
-            return await self._stock_menu(snapshot, area, pawn, board, quest, kind, sequence, opened, operation, action)
+            return await self._stock_menu(snapshot, epoch, area, pawn, board, quest, kind, sequence, opened, operation, action)
         identity = (epoch, area, pawn, board, quest, opened)
         try:
             state = await self._perform(identity, kind, sequence, operation, action)
@@ -136,16 +157,53 @@ class WireBoardView:
             self.control.event("native_wire_board_render_rejected", operation_id=operation, reason=str(error))
         return snapshot
 
-    async def _stock_menu(self, snapshot, area, pawn, board, quest, kind, sequence, opened, operation, action):
-        spec = STOCK_MENU.get(quest)
-        if spec is None or spec.board_at(area) != board or opened != sequence:
+    async def _open_stock_menu(self, snapshot, epoch, area, pawn, board, sequence, operation, action):
+        self.opened = self.stock_open = None
+        try:
+            catalog = (await action(native_board_contract.CATALOG, operation, board))[native_board_contract.CATALOG_KEY]
+            if (catalog.get("map"), catalog.get("board")) != (area, board) or not catalog.get("pawn"):
+                raise RuntimeError("The host board catalog did not identify the requested board")
+            offers, turnins = catalog["offers"], catalog["turnins"]
+            if (not isinstance(offers, list) or not isinstance(turnins, list)
+                    or len(offers) > 128 or len(turnins) > 128
+                    or not all(native_board_contract.quest_id(quest) for quest in (*offers, *turnins))
+                    or len(set(offers + turnins)) != len(offers) + len(turnins)):
+                raise RuntimeError("The host board catalog contains invalid options")
+            rendered = await self.bridge.command("native-wire-board-stock-open", str(sequence), area, pawn,
+                                                  ",".join(offers) or "-", ",".join(turnins) or "-", timeout=3)
+            report = rendered.get("native_wire_board_stock", {})
+            if tuple(report.get(name) for name in ("map", "pawn", "board", "quest", "state", "sequence", "open")) != (
+                    area, pawn, board, "-", "visible", sequence, sequence):
+                raise RuntimeError("The game did not verify the native bounty board menu")
+            self.stock_open = StockMenu((epoch, area, pawn, board, sequence), frozenset(offers), frozenset(turnins))
+            self.control.event("native_wire_board_stock_opened", operation_id=operation, board=board, sequence=sequence,
+                               offers=len(offers), turnins=len(turnins))
+            return rendered
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
+            self.control.event("native_wire_board_stock_unavailable", operation_id=operation, board=board, reason=str(error))
             return snapshot
+
+    async def _stock_menu(self, snapshot, epoch, area, pawn, board, quest, kind, sequence, opened, operation, action):
         starting = kind == "stock-start"
-        verb, step, state = ("native-quest-start", 1, "accepted") if starting else ("native-quest-turnin", -10, "completed")
+        menu = self.stock_open
+        projected = opened < sequence and menu and menu.identity == (epoch, area, pawn, board, opened)
+        if projected:
+            authorized = menu.offers if starting else menu.turnins
+            if quest not in authorized:
+                return snapshot
+        else:
+            spec = STOCK_MENU.get(quest)
+            if spec is None or spec.board_at(area) != board or opened != sequence:
+                return snapshot
+        verb, state = ("native-quest-start", "accepted") if starting else ("native-quest-turnin", "completed")
         try:
             result = await action(verb, operation, quest)
-            if (result.get("quest_id"), result.get("step")) != (quest, step):
+            step = result.get("step")
+            valid_step = type(step) is int and (step > 0 if projected and starting else step == (1 if starting else -10))
+            if result.get("quest_id") != quest or not valid_step:
                 raise RuntimeError("The host did not verify the stock board action")
+            if projected:
+                self.stock_open = None
             self.control.event("native_wire_board_interaction", sequence=sequence, operation_id=operation,
                                kind=kind, state=state, board=board, quest=quest)
         except (OSError, RuntimeError, ValueError) as error:

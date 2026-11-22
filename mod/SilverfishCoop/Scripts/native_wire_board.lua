@@ -58,6 +58,7 @@ local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleTex
 local quest_log_path = "/Game/Classes/GUI/Menu_QuestLog_Widget.Menu_QuestLog_Widget_C"
 local quest_details_path = "/Game/Classes/GUI/SubWidgets/Quest_DetailsWindow_Widget.Quest_DetailsWindow_Widget_C"
 local quest_turnin_path = "/Game/Classes/GUI/SubWidgets/Quest_TurnIn_Widget.Quest_TurnIn_Widget_C"
+local quest_listed_path = "/Game/Classes/GUI/SubWidgets/Quest_Listed_Widget.Quest_Listed_Widget_C"
 local max_sequence = 2 ^ 53
 local prompt = {
     focused = "Interact to view the contract.",
@@ -189,7 +190,7 @@ local rendered_states = {
 }
 
 local events, heartbeat, is_downed
-local binding, session, stock_session, widget, presented_text
+local binding, session, stock_session, stock_pending, stock_projection, widget, presented_text
 local selection, pending_move, navigation = 1, 0, false
 local last_sequence = 0
 
@@ -283,7 +284,7 @@ end
 function board_view.clear()
     hide()
     if binding and type(SilverfishClearNativeWireBoardScope) == "function" then SilverfishClearNativeWireBoardScope() end
-    binding, session, stock_session = nil, nil, nil
+    binding, session, stock_session, stock_pending, stock_projection = nil, nil, nil, nil, nil
     selection, pending_move = 1, 0
 end
 
@@ -368,6 +369,90 @@ local function supported_stock_action(current, quest)
         or quest == crossroads_jammer and map == observatory
 end
 
+local function queue_stock_view(current, sequence, now, fixture)
+    if stock_pending or not write_event(current, sequence, sequence, "stock-view", "-") then return false end
+    stock_pending = {sequence = sequence, expires = now + 12, fixture = fixture}
+    session = nil
+    hide()
+    return true
+end
+
+local function stock_ids(raw)
+    if raw == "-" then return {}, {} end
+    if type(raw) ~= "string" or #raw > 8192 or not raw:match("^[A-Za-z0-9_,]+$") then
+        error("wire_board_catalog_invalid", 0)
+    end
+    local names, allowed = {}, {}
+    for id in raw:gmatch("[^,]+") do
+        local key = #id <= 96 and FName(id, EFindName.FNAME_Find)
+        if not key or key:GetComparisonIndex() == 0 or key:ToString() ~= id or allowed[id] or #names >= 128 then
+            error("wire_board_catalog_invalid", 0)
+        end
+        names[#names + 1] = key
+        allowed[id] = true
+    end
+    if #names == 0 then error("wire_board_catalog_invalid", 0) end
+    return names, allowed
+end
+
+local function read_menu_rows(menu, list, class, allowed, expected)
+    if not valid(list) or list:GetChildrenCount() ~= expected then return false end
+    local seen = {}
+    for index = 0, expected - 1 do
+        local row = list:GetChildAt(index)
+        if not exact(row, class) or not same(row.QuestLog_MenuRef, menu) then return false end
+        local id = row.Quest_IDTag:ToString()
+        if not allowed[id] or seen[id] then return false end
+        seen[id] = true
+    end
+    return true
+end
+
+local function show_stock_menu(current, sequence, offers_arg, ready_arg, now)
+    local offer_names, offers = stock_ids(offers_arg)
+    local ready_names, ready = stock_ids(ready_arg)
+    local table_data = require("native_wire_quest").stock_quest_table()
+    local templates = {}
+    for index, key in ipairs(offer_names) do
+        local id = key:ToString()
+        local row = table_data:FindRow(id)
+        if not row or ready[id] then error("wire_board_catalog_row_missing", 0) end
+        templates[index] = row
+    end
+
+    current.board:Send_PowerSignal(true, current.pawn)
+    local menu = current_stock_menu(current, now)
+    if not menu then error("wire_board_stock_menu_missing", 0) end
+    local pawn_address, menu_address = current.pawn:GetAddress(), menu:GetAddress()
+    local started = SilverfishRenderNativeStockBoard(pawn_address, menu_address, true)
+    local drawn, reason
+    if started == true then
+        drawn, reason = pcall(function()
+            local contracts, previous = current.board.Contracts, {}
+            if #contracts > 128 then error("wire_board_stock_offers_extent", 0) end
+            contracts:ForEach(function(key) previous[#previous + 1] = key:get() end)
+            for _, key in ipairs(previous) do contracts:Remove(key) end
+            for index, key in ipairs(offer_names) do contracts:Add(key, templates[index]) end
+            if #contracts ~= #offer_names then error("wire_board_stock_offers_unverified", 0) end
+            current.board["Validated Quests"] = ready_names
+
+            -- Stock Add_Contracts also calls FillInCompletedQuests. During this repaint
+            -- the native guard keeps the authority's redemption set in place.
+            menu:Add_Contracts()
+            if not read_menu_rows(menu, menu.VerticalBox_ContractsList, quest_listed_path, offers, #offer_names)
+                or not read_menu_rows(menu, menu.VerticalBox_CompletedList, quest_turnin_path, ready, #ready_names) then
+                error("wire_board_stock_rows_unverified", 0)
+            end
+        end)
+    end
+    local finished, validations = SilverfishRenderNativeStockBoard(pawn_address, menu_address, false)
+    if not drawn or finished ~= true or validations ~= 1 or not same(current_stock_menu(current, now), menu) then
+        if same(current_stock_menu(current, now), menu) then current.controller:CloseMenu({}) end
+        error(reason or "wire_board_stock_menu_unverified", 0)
+    end
+    stock_projection = {menu = menu, sequence = sequence, offers = offers, ready = ready}
+end
+
 local function drain_stock(current, now)
     local menu = current_stock_menu(current, now)
     if stock_session and (stock_session.expires <= now or not same(menu, stock_session.menu)) then stock_session = nil end
@@ -376,21 +461,36 @@ local function drain_stock(current, now)
     sequence = math.tointeger(sequence)
     if not sequence or sequence <= last_sequence or sequence >= max_sequence then return end
     last_sequence = sequence
-    if stock_session or not (kind == "stock-start" or kind == "stock-turnin")
-        or not supported_stock_action(current, quest) then return end
-    if write_event(current, sequence, sequence, kind, quest) then
-        stock_session = {sequence = sequence, quest = quest, menu = menu, expires = now + 30,
+    if stock_session or not (kind == "stock-start" or kind == "stock-turnin") then return end
+    local open_sequence = sequence
+    if stock_projection and same(stock_projection.menu, menu) then
+        local allowed = kind == "stock-start" and stock_projection.offers or stock_projection.ready
+        if not allowed[quest] then return end
+        open_sequence = stock_projection.sequence
+    elseif not supported_stock_action(current, quest) then
+        return
+    end
+    if write_event(current, sequence, open_sequence, kind, quest) then
+        stock_session = {sequence = sequence, open = open_sequence, quest = quest, menu = menu, expires = now + 30,
             state = kind == "stock-start" and "starting" or "redeeming"}
     end
 end
 
 local function stock_fixture(current, fields, now)
     local quest, verb = fields[3], fields[4]
-    if not headless or not (input_fixtures or current.host and host_fixtures) or #fields ~= 4
-        or (verb ~= "start" and verb ~= "turnin") or not supported_stock_action(current, quest)
-        or not can_use(current, now) then error("wire_board_stock_fixture_scope", 0) end
-    current.board:Send_PowerSignal(true, current.pawn)
     local menu = current_stock_menu(current, now)
+    local projected = stock_projection and same(menu, stock_projection.menu)
+    local allowed = projected and (verb == "start" and stock_projection.offers or stock_projection.ready)
+    if not headless or not (input_fixtures or current.host and host_fixtures) or #fields ~= 4
+        or (verb ~= "start" and verb ~= "turnin")
+        or projected and not allowed[quest]
+        or not projected and (not supported_stock_action(current, quest) or not can_use(current, now)) then
+        error("wire_board_stock_fixture_scope", 0)
+    end
+    if not projected then
+        current.board:Send_PowerSignal(true, current.pawn)
+        menu = current_stock_menu(current, now)
+    end
     if not menu then error("wire_board_stock_fixture_menu_missing", 0) end
     if verb == "start" then
         local stock = require("native_wire_quest")
@@ -403,7 +503,7 @@ local function stock_fixture(current, fields, now)
             or details.Quest_ID:ToString() ~= quest then error("wire_board_stock_fixture_details_missing", 0) end
         details:BndEvt__Quest_DetailsWindow_Widget_Button_Clear_Accept_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
     else
-        menu:FillInCompletedQuests()
+        if not projected then menu:FillInCompletedQuests() end
         local list = menu.VerticalBox_CompletedList
         local count = list:GetChildrenCount()
         local selected
@@ -425,6 +525,9 @@ local function drain(current, allow, fixture, now)
     if not sequence or sequence <= last_sequence or sequence >= max_sequence then return false end
     last_sequence = sequence
     if not allow or (not fixture and not focused(current)) or session and session.pending then return false end
+    if not fixture and type(SilverfishRenderNativeStockBoard) == "function" then
+        return queue_stock_view(current, sequence, now, false)
+    end
     local kind = "view"
     if session and session.expires > now then
         if session.state == "offer" then kind = "start" end
@@ -460,6 +563,10 @@ function board_view.sync(state, phase)
         return
     end
     local facing = focused(current)
+    if stock_pending and stock_pending.expires <= now then stock_pending = nil end
+    if stock_projection and not same(current_stock_menu(current, now), stock_projection.menu) then
+        stock_projection = nil
+    end
     local readings_pending = session and session.quest == readings and session.pending and can_use(current, now, true)
     if session and (session.expires <= now or not allow and not readings_pending or (not facing and not session.fixture)) then session = nil end
     if pending_move ~= 0 then
@@ -473,7 +580,7 @@ function board_view.sync(state, phase)
     drain_stock(current, now)
     if session then
         present(current, session.state)
-    elseif allow and facing then
+    elseif allow and facing and type(SilverfishRenderNativeStockBoard) ~= "function" then
         present(current, "focused")
     else
         hide()
@@ -481,11 +588,44 @@ function board_view.sync(state, phase)
     binding.status = allow and (facing and "focused" or "armed") or "waiting"
 end
 
+local function probe_press(current)
+    local pawn, controller = current.pawn, current.controller
+    local original, cursor = pawn.InteractionTarget_Component, controller.bShowMouseCursor
+    pawn.InteractionTarget_Component = current.box
+    local invoked, ok, reason = pcall(SilverfishProbeNativeInteractInput, pawn:GetAddress(), true)
+    pawn.InteractionTarget_Component = valid(original) and original or nil
+    return invoked and ok == true and reason == "stock_started_consumed" and controller.MenuStack:GetArrayNum() == 0
+        and controller.bShowMouseCursor == cursor
+end
+
 function board_view.command(fields, state, phase)
     local action = fields[2]
     if action ~= "native-wire-board-render" and action ~= "native-wire-board-fixture"
-        and action ~= "native-wire-board-stock-result" and action ~= "native-wire-board-stock-fixture" then return end
+        and action ~= "native-wire-board-stock-result" and action ~= "native-wire-board-stock-fixture"
+        and action ~= "native-wire-board-stock-open" and action ~= "native-wire-board-stock-f-fixture" then return end
     local current, now = current_context(state, phase), os.time()
+    if action == "native-wire-board-stock-open" then
+        local sequence = fields[3] and fields[3]:match("^%d+$") and math.tointeger(tonumber(fields[3]))
+        if #fields ~= 7 or not same_context(current, binding) or not stock_pending or sequence ~= stock_pending.sequence
+            or stock_pending.expires <= now or fields[4] ~= current.profile.map or fields[5] ~= current.name
+            or not can_use(current, now) or (not stock_pending.fixture and not focused(current))
+            or type(SilverfishRenderNativeStockBoard) ~= "function" then error("wire_board_stock_open_stale", 0) end
+        stock_pending = nil
+        show_stock_menu(current, sequence, fields[6], fields[7], now)
+        return "verified the host options in the native bounty board menu"
+    end
+    if action == "native-wire-board-stock-f-fixture" then
+        if #fields ~= 2 or not headless or not (input_fixtures or current and current.host and host_fixtures)
+            or not same_context(current, binding) or not can_use(current, now) or not arm(current, true)
+            or type(SilverfishProbeNativeInteractInput) ~= "function" or not probe_press(current) then
+            error("wire_board_stock_f_fixture_scope", 0)
+        end
+        local sequence = math.tointeger((SilverfishTakeNativeWireBoardPress(current.pawn:GetAddress())))
+        if not sequence or sequence <= last_sequence or sequence >= max_sequence then error("wire_board_stock_f_fixture_receipt", 0) end
+        last_sequence = sequence
+        if not queue_stock_view(current, sequence, now, true) then error("wire_board_stock_f_fixture_unverified", 0) end
+        return "verified stock bounty board Interact press"
+    end
     if action == "native-wire-board-stock-fixture" then
         if not same_context(current, binding) then error("wire_board_stock_fixture_scope", 0) end
         return stock_fixture(current, fields, now)
@@ -515,13 +655,7 @@ function board_view.command(fields, state, phase)
         if not selected or not headless or (current.host and not host_fixtures) or not arm(current, true)
             or type(SilverfishProbeNativeInteractInput) ~= "function" then error("wire_board_fixture_unavailable", 0) end
         if selected ~= selection then selection, session = selected, nil end
-        local pawn, controller = current.pawn, current.controller
-        local original, cursor = pawn.InteractionTarget_Component, controller.bShowMouseCursor
-        pawn.InteractionTarget_Component = current.box
-        local invoked, ok, reason = pcall(SilverfishProbeNativeInteractInput, pawn:GetAddress(), true)
-        pawn.InteractionTarget_Component = valid(original) and original or nil
-        if not invoked or ok ~= true or reason ~= "stock_started_consumed" or controller.MenuStack:GetArrayNum() ~= 0
-            or controller.bShowMouseCursor ~= cursor or not drain(current, true, true, now) then
+        if not probe_press(current) or not drain(current, true, true, now) then
             error("wire_board_stock_press_unverified", 0)
         end
         return quests[selected] == wire and "exact stock Copper Stop board press verified"
@@ -548,7 +682,13 @@ function board_view.rows(state, phase, status_row)
         session and session.state or binding.status, session and session.sequence or 0, session and session.open or 0)}
     if stock_session then
         rows[#rows + 1] = status_row("native-wire-board-stock", profile.map, binding.name, profile.name,
-            stock_session.quest, stock_session.state, stock_session.sequence, stock_session.sequence)
+            stock_session.quest, stock_session.state, stock_session.sequence, stock_session.open)
+    elseif stock_pending then
+        rows[#rows + 1] = status_row("native-wire-board-stock", profile.map, binding.name, profile.name,
+            "-", "loading", stock_pending.sequence, stock_pending.sequence)
+    elseif stock_projection then
+        rows[#rows + 1] = status_row("native-wire-board-stock", profile.map, binding.name, profile.name,
+            "-", "visible", stock_projection.sequence, stock_projection.sequence)
     end
     return rows
 end

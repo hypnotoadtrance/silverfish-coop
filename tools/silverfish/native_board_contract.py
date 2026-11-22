@@ -104,10 +104,11 @@ def _receipt(actor, before, result):
     return record
 
 
-async def catalog(host, bridge, actor, selected_board=None):
+async def catalog(host, bridge, actor, selected_board=None, *, specialized=()):
     area, pawn, board = scope(host, actor, selected_board)
+    known = (",".join(sorted(specialized)),) if specialized else ()
     try:
-        snapshot = await bridge.command(CATALOG, pawn, board, timeout=5)
+        snapshot = await bridge.command(CATALOG, pawn, board, *known, timeout=5)
     except RuntimeError as error:
         if str(error).startswith(REFUSAL):
             raise party.RuleError(str(error)) from error

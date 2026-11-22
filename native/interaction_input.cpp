@@ -10,7 +10,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <string>
 #include <string_view>
+#include <utility>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
@@ -48,6 +50,8 @@ namespace
     constexpr auto wire_board_class = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C");
     constexpr auto wire_interaction_path = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C:SendInteractionToActor");
     constexpr auto wire_script_path = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C:ExecuteUbergraph_BountyBoard_BP");
+    constexpr auto wire_validate_contracts =
+        STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C:TurnIn_Contracts");
     constexpr auto quest_log = STR("/Game/Classes/GUI/Menu_QuestLog_Widget.Menu_QuestLog_Widget_C");
     constexpr auto quest_details = STR("/Game/Classes/GUI/SubWidgets/Quest_DetailsWindow_Widget.Quest_DetailsWindow_Widget_C");
     constexpr auto quest_turnin = STR("/Game/Classes/GUI/SubWidgets/Quest_TurnIn_Widget.Quest_TurnIn_Widget_C");
@@ -255,10 +259,19 @@ namespace
     {
         Receipt receipt{};
         Unreal::FWeakObjectPtr menu{};
-        std::string_view quest{};
+        std::string quest{};
         bool turnin{};
     };
 
+
+    struct StockBoardMenu
+    {
+        Unreal::FWeakObjectPtr board{};
+        Unreal::FWeakObjectPtr menu{};
+        Clock::time_point render_lease{};
+        unsigned validation_calls{};
+        bool ready{};
+    };
 
     struct SewerTradeInput
     {
@@ -281,6 +294,7 @@ namespace
     std::array<Unreal::FWeakObjectPtr, 2> npc_barter_backups;
     std::uint64_t npc_barter_sequence{};
     StockBoardAction stock_board_action;
+    StockBoardMenu stock_board_menu;
     std::array<Receipt, pending_limit> receipts{};
     std::size_t first{}, count{}, event_depth{};
     std::uint64_t sequence{}, consumed_dispatches{};
@@ -559,6 +573,34 @@ namespace
         return entries.Num() > 0 && entries.Num() <= 16 ? object->GetObjectPropertyValue(entries.GetRawPtr(entries.Num() - 1)) : nullptr;
     }
 
+    Unreal::UObject* stock_menu_board(Unreal::UObject* log)
+    {
+        auto* world = scope.world.Get();
+        auto* profile = wire_board_profile(world);
+        auto* board = object_field(log, STR("BountyBoard_Ref"));
+        auto* bounty = field<Unreal::FBoolProperty>(log, STR("BountyBoard"));
+        if (!profile || !live_scope(scope) || !live(log) ||
+            log->GetClassPrivate() != find<Unreal::UClass>(quest_log) ||
+            log != top_menu() || log->GetWorld() != world ||
+            !bounty || !bounty->GetPropertyValueInContainer(log) ||
+            !qualify_wire_board(world, *profile, board, object_field(board, STR("Box"))).empty()) return nullptr;
+        return board;
+    }
+
+    void intercept_stock_board_validation(Iteration& call, Unreal::UObject* actor, Unreal::UFunction* function)
+    {
+        if (!actor || !function || actor != stock_board_menu.board.Get() ||
+            Clock::now() >= stock_board_menu.render_lease || call.OriginalFunctionCallPrevented()) return;
+        static const Unreal::FName validate{STR("TurnIn_Contracts")};
+        if (function->GetFName() != validate || function != find<Unreal::UFunction>(wire_validate_contracts) ||
+            function->GetOuterPrivate() != actor->GetClassPrivate() ||
+            function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
+            function->GetNumParms() != 0 || function->GetParmsSize() != 0 || function->GetReturnProperty() ||
+            stock_menu_board(stock_board_menu.menu.Get()) != actor) return;
+        call.PreventOriginalFunctionCall();
+        if (call.OriginalFunctionCallPrevented()) ++stock_board_menu.validation_calls;
+    }
+
     void intercept_stock_board(Iteration& iteration, Unreal::UObject* widget, Unreal::UFunction* function)
     {
         if (!widget || !function || iteration.OriginalFunctionCallPrevented()) return;
@@ -575,24 +617,35 @@ namespace
         auto* world = scope.world.Get();
         auto* profile = wire_board_profile(world);
         auto* log = object_field(widget, STR("QuestLog_MenuRef"));
-        auto* board = object_field(log, STR("BountyBoard_Ref"));
-        auto* bounty = field<Unreal::FBoolProperty>(log, STR("BountyBoard"));
-        if (!profile || (profile->turn_in_id != 1 && profile->turn_in_id != 3) ||
-            !live(log) || log->GetClassPrivate() != find<Unreal::UClass>(quest_log) ||
-            log != top_menu() || log->GetWorld() != world || widget->GetWorld() != world ||
-            !bounty || !bounty->GetPropertyValueInContainer(log) ||
-            !qualify_wire_board(world, *profile, board, object_field(board, STR("Box"))).empty()) return;
+        auto* board = stock_menu_board(log);
+        const bool projected = board && log == stock_board_menu.menu.Get() && board == stock_board_menu.board.Get();
+        if (!board || !profile || widget->GetWorld() != world ||
+            (!projected && profile->turn_in_id != 1 && profile->turn_in_id != 3)) return;
         auto* quest = field<Unreal::FNameProperty>(widget, redeem ? STR("Quest_IDTag") : STR("Quest_ID"));
         if (!quest) return;
         const auto key = quest->GetPropertyValueInContainer(widget);
         static const Unreal::FName lake{STR("Jmr_Lake")}, crossroads{STR("Jmr_CrossRoads")};
-        if (key != lake && (key != crossroads || profile->turn_in_id != 3)) return;
+        if (!projected && key != lake && (key != crossroads || profile->turn_in_id != 3)) return;
         iteration.PreventOriginalFunctionCall();
         const auto now = Clock::now();
-        if (!iteration.OriginalFunctionCallPrevented() || now >= scope.expires || !standing(scope.pawn.Get()) ||
+        if (!iteration.OriginalFunctionCallPrevented() || (projected && !stock_board_menu.ready) ||
+            now >= scope.expires || !standing(scope.pawn.Get()) ||
             (stock_board_action.receipt.sequence && now < stock_board_action.receipt.expires) || wire_sequence == max_sequence) return;
-        stock_board_action = {{++wire_sequence, now + receipt_lifetime}, log,
-            key == lake ? "Jmr_Lake" : "Jmr_CrossRoads", redeem};
+
+        std::string id;
+        if (projected)
+        {
+            const auto text = key.ToString();
+            if (key.IsNone() || text.empty() || text.size() > 96) return;
+            for (const auto ch : text)
+            {
+                if (!((ch >= L'A' && ch <= L'Z') || (ch >= L'a' && ch <= L'z') ||
+                      (ch >= L'0' && ch <= L'9') || ch == L'_')) return;
+                id.push_back(static_cast<char>(ch));
+            }
+        }
+        else id = key == lake ? "Jmr_Lake" : "Jmr_CrossRoads";
+        stock_board_action = {{++wire_sequence, now + receipt_lifetime}, log, std::move(id), redeem};
     }
 
     bool exact_dialogue_actor(const DialogueProfile& profile, Unreal::UObject* actor, Unreal::UObject* component)
@@ -922,6 +975,7 @@ namespace
     {
         intercept_wire_board(iteration, actor, function, parameters);
         intercept_npc_barter(iteration, actor, function);
+        intercept_stock_board_validation(iteration, actor, function);
         intercept_stock_board(iteration, actor, function);
         intercept_sewer_trade(iteration, actor, function, parameters);
         intercept_sewer_overlap(iteration, actor, function, parameters);
@@ -1132,12 +1186,41 @@ namespace
         return 3;
     }
 
+    int render_stock_board(const Lua& lua)
+    {
+        const auto result = [&](bool ok, unsigned count = 0) {
+            lua.set_bool(ok);
+            lua.set_integer(count);
+            return 2;
+        };
+        if (!available() || lua.get_stack_size() != 3 || !lua.is_integer(1) ||
+            !lua.is_integer(2) || !lua.is_bool(3)) return result(false);
+        const auto pawn = lua.get_integer(), menu_address = lua.get_integer();
+        const auto start = lua.get_bool();
+        auto* menu = top_menu();
+        auto* board = stock_menu_board(menu);
+        if (!board || board != wire_board.actor.Get() || !standing(scope.pawn.Get()) ||
+            pawn != address(scope.pawn.Get()) || menu_address != address(menu)) return result(false);
+
+        if (start)
+        {
+            stock_board_menu = {board, menu, Clock::now() + receipt_lifetime};
+            stock_board_action = {};
+            return result(true);
+        }
+        if (board != stock_board_menu.board.Get() || menu != stock_board_menu.menu.Get()) return result(false);
+        stock_board_menu.render_lease = {};
+        stock_board_menu.ready = stock_board_menu.validation_calls > 0;
+        return result(stock_board_menu.ready, stock_board_menu.validation_calls);
+    }
+
     int clear_wire_board(const Lua&)
     {
         if (Unreal::IsInGameThreadRaw())
         {
             wire_board = {};
             stock_board_action = {};
+            stock_board_menu = {};
         }
         return 0;
     }
@@ -1559,6 +1642,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishSetNativeWireBoardScope", set_wire_board);
         lua.register_function("SilverfishTakeNativeWireBoardPress", take_wire_board_press);
         lua.register_function("SilverfishTakeNativeStockBoardAction", take_stock_board_action);
+        lua.register_function("SilverfishRenderNativeStockBoard", render_stock_board);
         lua.register_function("SilverfishClearNativeWireBoardScope", clear_wire_board);
         lua.register_function("SilverfishSetNativeDialogueInputScope", set_dialogue_scope);
 
@@ -1588,6 +1672,7 @@ namespace silverfish::native_interaction_input
         scope = {};
         wire_board = {};
         stock_board_action = {};
+        stock_board_menu = {};
         dialogue_input = {};
         sewer_answering = false;
         sewer_trade = {};

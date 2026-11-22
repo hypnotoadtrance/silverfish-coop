@@ -151,9 +151,35 @@ local function unchanged(context, state, phase, pawn, board, quest)
         and same(context.interactor, after.interactor)
 end
 
+local function specialist_ready(context, row)
+    local step, final = row[keys.step], row[keys.final]
+    if not int(step) or step <= 0 or not int(final) or final < 1 then return false end
+    local objectives = row[keys.objective]
+    local count = len(objectives)
+    if not int(count) or count < 0 or count > 16 then return false end
+    if count == 0 then return step >= final end
+    local backpack = context.receiving_save.PlayerBackpack
+    local size = len(backpack)
+    if not int(size) or size < 0 or size > 4096 then return false end
+    for index = 1, count do
+        local wanted, present = objectives[index], false
+        if not valid(wanted) then return false end
+        for item = 1, size do
+            local entry = backpack[item]
+            if entry and same(entry[class_key], wanted) then present = true; break end
+        end
+        if not present then return false end
+    end
+    return true
+end
+
 local function catalog(fields, state, phase)
     local pawn, board_name = fields[3], fields[4]
-    if #fields ~= 4 or type(board_name) ~= "string" or #board_name > 512 then refuse("arguments") end
+    local raw = fields[5]
+    if (#fields ~= 4 and #fields ~= 5) or type(board_name) ~= "string" or #board_name > 512
+        or (raw and (#raw > 2048 or not raw:match("^[A-Za-z0-9_,]+$"))) then refuse("arguments") end
+    local special = {}
+    if raw then for id in raw:gmatch("[A-Za-z0-9_]+") do special[id] = true end end
     local context = stock_context(state, phase, pawn, board_name)
     context.board:Configure_Stock()
     local offers, ready = {}, {}
@@ -163,6 +189,15 @@ local function catalog(fields, state, phase)
         local key, row = raw_key:get(), raw_row:get()
         local id = name(key)
         if type(id) ~= "string" or #id > 96 or not id:match("^[A-Za-z0-9_]+$") then return end
+        if special[id] then
+            local live_step = row[keys.step]
+            if int(live_step) and live_step > 0 and
+                (accepting and not wire.stock_row(active, key)
+                    or not accepting and board_accepts(context.board, key, row) and specialist_ready(context, row)) then
+                target[#target + 1] = id
+            end
+            return
+        end
         local supported, contract = pcall(shape, row)
         if not supported or contract.step <= 0 then return end
         if accepting then

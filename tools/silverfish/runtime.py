@@ -960,7 +960,7 @@ class Bridge:
         for line in batch[:end].splitlines():
             fields = line.decode("utf-8", errors="replace").split("\t")
             if (len(fields) == 8 and fields[0] == "wire-board"
-                    and fields[3] in ("view", "start", "turnin", "stock-start", "stock-turnin")
+                    and fields[3] in ("view", "start", "turnin", "stock-view", "stock-start", "stock-turnin")
                     and all(value.isascii() and value.isdigit() and len(value) <= 16 and 0 < int(value) < 2**53
                             for value in fields[1:3])
                     and all(0 < len(value) <= 512 for value in fields[4:])):

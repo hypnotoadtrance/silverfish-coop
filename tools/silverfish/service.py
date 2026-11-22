@@ -2179,7 +2179,8 @@ class Host:
             elif action == native_turret_photo.BOARD_LIST:
                 result = await native_turret_photo.offers(self, bridge, character, target)
             elif action == native_board_contract.CATALOG:
-                result = await native_board_contract.catalog(self, bridge, character, target)
+                result = await native_board_contract.catalog(
+                    self, bridge, character, target, specialized=native_wire_board.catalog_specialists(self.last_game["map"]))
             elif action == native_turret_photo.SHUTTER:
                 result = await native_turret_photo.shutter(self, bridge, character, target, request["operation_id"])
             elif action in native_computer_board.PREFLIGHTS and target is None:
@@ -3341,7 +3342,9 @@ class Host:
                 elif action == native_turret_photo.BOARD_LIST:
                     result = await native_turret_photo.offers(self, bridge, "host", request.get("target"))
                 elif action == native_board_contract.CATALOG:
-                    result = await native_board_contract.catalog(self, bridge, actor, request.get("target"))
+                    result = await native_board_contract.catalog(
+                        self, bridge, actor, request.get("target"),
+                        specialized=native_wire_board.catalog_specialists(self.last_game["map"]))
                 elif action == native_turret_photo.XP_FIXTURE and self.fixtures and request.get("target") is None:
                     result = await native_turret_photo.xp_fixture(self, bridge)
                 elif action in native_computer_board.PREFLIGHTS and request.get("target") is None:
@@ -3454,8 +3457,13 @@ class Host:
                     selection = native_wire_board.fixture_selection(self.last_game.get("map"), request.get("target"))
                     self.last_game = await bridge.command(native_wire_board.FIXTURE, *selection, timeout=4)
                     result = {"native_wire_board": self.last_game.get("native_wire_board", {})}
+                elif action == native_wire_board.STOCK_F_FIXTURE and self.wire_board_enabled and self.fixtures:
+                    self.last_game = await bridge.command(native_wire_board.STOCK_F_FIXTURE, timeout=4)
+                    result = {"native_wire_board_stock": self.last_game.get("native_wire_board_stock", {})}
                 elif action == native_wire_board.STOCK_FIXTURE and self.wire_board_enabled and self.fixtures:
-                    selection = native_wire_board.stock_fixture_selection(self.last_game.get("map"), request.get("target"))
+                    selection = native_wire_board.stock_fixture_selection(
+                        self.last_game.get("map"), request.get("target"),
+                        self.last_game.get("native_wire_board_stock", {}).get("state") == "visible")
                     self.last_game = await bridge.command(action, *selection, timeout=4)
                     result = {"native_wire_board_stock": self.last_game.get("native_wire_board_stock", {})}
                 elif action in ("native-broker-issue-fixture", "native-broker-drill-issue-fixture") and self.fixtures:
@@ -4011,6 +4019,9 @@ class Host:
             return await self.end_session(bridge, transport)
 
         async def wire_action(action, _operation, target):
+            if action == native_board_contract.CATALOG:
+                return await native_board_contract.catalog(
+                    self, bridge, "host", target, specialized=native_wire_board.catalog_specialists(self.last_game["map"]))
             if action == native_wire_quest.PREFLIGHT:
                 return await native_wire_quest.preflight(self, bridge, "host")
             if action == native_mosby_tape.READINGS_PREFLIGHT:
@@ -5801,8 +5812,13 @@ class Client:
                     selection = native_wire_board.fixture_selection(self.last_game.get("map"), request.get("target"))
                     self.last_game = await self.bridge.command(native_wire_board.FIXTURE, *selection, timeout=4)
                     result = {"native_wire_board": self.last_game.get("native_wire_board", {})}
+                elif action == native_wire_board.STOCK_F_FIXTURE and self.wire_board:
+                    self.last_game = await self.bridge.command(native_wire_board.STOCK_F_FIXTURE, timeout=4)
+                    result = {"native_wire_board_stock": self.last_game.get("native_wire_board_stock", {})}
                 elif action == native_wire_board.STOCK_FIXTURE and self.wire_board:
-                    selection = native_wire_board.stock_fixture_selection(self.last_game.get("map"), request.get("target"))
+                    selection = native_wire_board.stock_fixture_selection(
+                        self.last_game.get("map"), request.get("target"),
+                        self.last_game.get("native_wire_board_stock", {}).get("state") == "visible")
                     self.last_game = await self.bridge.command(action, *selection, timeout=4)
                     result = {"native_wire_board_stock": self.last_game.get("native_wire_board_stock", {})}
                 elif action == "native-guest-reload-input-fixture":

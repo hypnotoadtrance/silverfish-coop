@@ -4,7 +4,7 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish import native_rewards, native_turret_photo as photo, native_wire_board as wire, party
+from tools.silverfish import native_board_contract, native_rewards, native_turret_photo as photo, native_wire_board as wire, party
 
 
 class WireBoardTests(unittest.IsolatedAsyncioTestCase):
@@ -89,6 +89,56 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
         await press(4, "stock-turnin", crossroads)
         self.assertEqual(action.await_args.args[0::2], ("native-quest-turnin", crossroads))
         self.assertEqual(bridge.command.await_args.args[-1], "completed")
+
+    async def test_interact_opens_verified_stock_menu_for_unregistered_offer_and_deposit(self):
+        area, pawn = wire.SHOPKEEP, "Player_FP_C ClientView"
+        board = wire.BOARDS[area]
+        quest = "Clt_Eye_02"
+        other = "Clt_Molasis"
+        bridge = SimpleNamespace(input_namespace=uuid.uuid4(), native_wire_board_requests=Mock(), command=AsyncMock())
+        control = SimpleNamespace(event=Mock())
+        view = wire.WireBoardView(bridge, control)
+        self.assertNotIn(quest, wire.QUESTS[area])
+        action = AsyncMock()
+
+        def frame(shown, sequence, opened, id):
+            return {"map": area, "pawns": {"local": {"name": pawn}}, "native_wire_board_stock": {
+                "map": area, "pawn": pawn, "board": board, "quest": id, "state": shown, "sequence": sequence, "open": opened,
+            }}
+
+        async def press(kind, sequence, opened, id, epoch="visit"):
+            snapshot = frame(wire.WAITING[kind], sequence, opened, id)
+            bridge.native_wire_board_requests.return_value = [(sequence, opened, kind, area, pawn, board, id)]
+            return await view.sync(snapshot, epoch, True, action)
+
+        action.return_value = {native_board_contract.CATALOG_KEY: {
+            "map": area, "pawn": "Player_FP_C AuthorityGuest", "board": board, "offers": [quest], "turnins": [],
+        }}
+        bridge.command.return_value = frame("visible", 1, 1, "-")
+        self.assertEqual((await press("stock-view", 1, 1, "-"))["native_wire_board_stock"]["state"], "visible")
+        bridge.command.assert_awaited_once_with("native-wire-board-stock-open", "1", area, pawn, quest, "-", timeout=3)
+
+        await press("stock-start", 2, 1, other)
+        await press("stock-start", 3, 1, quest, epoch="stale visit")
+        self.assertEqual(action.await_count, 1)
+        action.return_value = {"quest_id": quest, "step": 1}
+        await press("stock-start", 4, 1, quest)
+        self.assertEqual(action.await_args.args[0::2], ("native-quest-start", quest))
+        self.assertEqual(bridge.command.await_args.args, ("native-wire-board-stock-result", "4", area, pawn, quest, "accepted"))
+        await press("stock-start", 4, 1, quest)
+        self.assertEqual(action.await_count, 2)
+
+        action.return_value = {native_board_contract.CATALOG_KEY: {
+            "map": area, "pawn": "Player_FP_C AuthorityGuest", "board": board, "offers": [], "turnins": [quest],
+        }}
+        bridge.command.return_value = frame("visible", 5, 5, "-")
+        self.assertEqual((await press("stock-view", 5, 5, "-"))["native_wire_board_stock"]["state"], "visible")
+        self.assertEqual(bridge.command.await_args.args, ("native-wire-board-stock-open", "5", area, pawn, "-", quest))
+        action.return_value = {"quest_id": quest, "step": -10}
+        await press("stock-turnin", 6, 5, quest)
+        self.assertEqual(action.await_args.args[0::2], ("native-quest-turnin", quest))
+        self.assertEqual(bridge.command.await_args.args, ("native-wire-board-stock-result", "6", area, pawn, quest, "completed"))
+        self.assertIsNone(view.stock_open)
 
     async def test_board_requires_current_rendered_offer_before_accepting(self):
         pawn = "Player_FP_C test-owner"
