@@ -1,9 +1,9 @@
 # Project Silverfish Co-op
 
 > [!IMPORTANT]
-> **Proof of concept in heavy development.** Release candidates are for invited testers in this private repository. Public playtesting will wait until the core campaign systems have stronger coverage. Expect bugs, incomplete features, and changes between builds.
+> **Proof of concept in heavy development.** Use release candidates only if you plan to test and report bugs. For regular play, wait for a stable release. Expect incomplete features and changes between builds.
 >
-> Invited testers are encouraged to try the candidate, reproduce errors, and [open a GitHub issue](https://github.com/hypnotoadtrance/silverfish-coop/issues/new). Maintainers can assign reproducible reports to coding agents for investigation and draft pull requests.
+> If you find a bug, [open a GitHub issue](https://github.com/hypnotoadtrance/silverfish-coop/issues/new) with the release tag, map, reproduction steps, and what each player saw. Maintainers can assign reproducible reports to coding agents for investigation and draft pull requests.
 
 An unofficial UE4SS mod that adds Direct IP co-op to the Windows Steam version of Project Silverfish. Open **Multiplayer** from the game’s title screen to host a campaign or join a friend. The mod runs in the existing Steam installation and keeps multiplayer campaigns separate from singleplayer saves.
 
