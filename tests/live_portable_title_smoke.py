@@ -503,7 +503,9 @@ async def verify_cloud_restore(first, second, session, game, processes):
     assert hosted["campaign"]["campaign_id"] == restored["campaign_id"]
     assert hosted["game"]["save_scope"] == campaign_id
     identity = direct_ip.read_resident_identity(first.campaign.parent.parent, first.campaign)
-    build = runtime.read_json(game / runtime.PORTABLE_STAGE_MANIFEST)["game_build"]
+    work = second.campaign.parent.parent
+    with runtime.installed_content(work, game):
+        build = runtime.staged_build(work)
     pin = sha256(identity["certificate"].encode("utf-8")).hexdigest()
     guest_connection = await direct_ip.connect(second.client, "127.0.0.1", second.port, "", build, PROTOCOL,
                                                verified_fingerprint=pin)
@@ -522,7 +524,8 @@ async def verify_cloud_restore(first, second, session, game, processes):
     assert checkpoint() == newer, "The old cloud backup replaced a newer local campaign"
     await second.bridge.command(form, "cancel")
     await second.bridge.command(form, "cancel")
-    await second.bridge.command("native-title-button-fixture", "modes")
+    modes = await second.bridge.command("native-title-button-fixture", "modes")
+    await second.bridge.wait_for(lambda frame: frame["sequence"] > modes["sequence"])
     observed_solo = stock_save_hashes(second.profile)
     observed_solo.pop("Config.sav", None)
     assert observed_solo == solo and await stock_profile(second.bridge) == preferences
