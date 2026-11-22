@@ -105,6 +105,7 @@ namespace
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto probe_timeout = std::chrono::seconds(2);
     constexpr auto scope_timeout = std::chrono::milliseconds(1250);
+    constexpr auto fall_sample_interval = std::chrono::milliseconds(50);
     constexpr std::uint8_t autonomous_role = 2; // ENetRole::ROLE_AutonomousProxy in UE 5.4.
     constexpr std::uint8_t authority_role = 3; // ENetRole::ROLE_Authority in UE 5.4.
     constexpr std::uint8_t falling_mode = 3; // EMovementMode::MOVE_Falling in UE 5.4.
@@ -237,6 +238,7 @@ namespace
         Unreal::FWeakObjectPtr world;
         Unreal::UFunction* fall_mode{};
         Unreal::UFunction* fall_landed{};
+        Clock::time_point next_fall_sample{};
         Unreal::UFunction* die{};
         std::uint64_t generation{};
         std::int64_t token{};
@@ -933,9 +935,49 @@ namespace
         return params.result;
     }
 
+    void start_fall(ScopedGuest& guest, Unreal::UWorld* world)
+    {
+        const auto& binding = guest.fall;
+        const auto now = game_seconds(binding, world);
+        const auto dilation = binding.time_dilation->GetPropertyValueInContainer(guest.pawn.object.Get());
+        if (std::isfinite(now) && now >= 0 && std::isfinite(dilation) && dilation > 0)
+        {
+            guest.fall_episode = {now, dilation};
+            ++guest.fall_status.starts;
+        }
+    }
+
+    void sample_authoritative_falls()
+    {
+        if (!Unreal::IsInGameThreadRaw() || !fall_scope_current() || !death_scope.fall_landed) return;
+        const auto now = Clock::now();
+        if (now < death_scope.next_fall_sample) return;
+        death_scope.next_fall_sample = now + fall_sample_interval;
+        auto* world = static_cast<Unreal::UWorld*>(death_scope.world.Get());
+        for (auto& guest : death_scope.guests())
+        {
+            const auto& binding = guest.fall;
+            if (!binding.landed) continue;
+            auto* pawn = guest.pawn.object.Get();
+            auto* movement = binding.movement.Get();
+            if (!live_object(movement) || read_object(binding.pawn_movement, pawn) != movement) continue;
+            const auto mode = binding.movement_mode->GetPropertyValueInContainer(movement);
+            guest.fall_status.mode = mode;
+            if (mode != falling_mode)
+            {
+                guest.fall_episode = {};
+                continue;
+            }
+            // A guest may already be airborne when the scope binds or renews.
+            // Recover timing from the authority pawn without accepting client damage claims.
+            if (guest.fall_episode.start < 0 && !binding.just_teleported->GetPropertyValueInContainer(movement) &&
+                qualified_roster(death_scope))
+                start_fall(guest, world);
+        }
+    }
+
     void observe_mode_change(ScopedGuest& guest, Unreal::UWorld* world, Unreal::UObject* movement, const void* parameters)
     {
-        auto* pawn = guest.pawn.object.Get();
         auto& status = guest.fall_status;
         const auto& binding = guest.fall;
         const auto previous = binding.previous_mode->GetPropertyValueInContainer(parameters);
@@ -947,18 +989,7 @@ namespace
             guest.fall_episode = {};
             return;
         }
-        if (previous == falling_mode)
-        {
-            return;
-        }
-        guest.fall_episode = {};
-        const auto now = game_seconds(binding, world);
-        const auto dilation = binding.time_dilation->GetPropertyValueInContainer(pawn);
-        if (std::isfinite(now) && now >= 0 && std::isfinite(dilation) && dilation > 0)
-        {
-            guest.fall_episode = {now, dilation};
-            ++status.starts;
-        }
+        if (previous != falling_mode && guest.fall_episode.start < 0) start_fall(guest, world);
     }
 
     void observe_landing(ScopedGuest& guest, Unreal::UWorld* world, Unreal::UObject* movement, const void* parameters)
@@ -988,11 +1019,7 @@ namespace
 
         const auto* hit = binding.hit->ContainerPtrToValuePtr<void>(parameters);
         const auto health = binding.guest_health->GetPropertyValueInContainer(guest.ownership.save.Get());
-        if (status.actor_tick_enabled)
-        {
-            status.reason = "stock_actor_tick_enabled";
-        }
-        else if (!std::isfinite(original_fall_time) || original_fall_time < 0 || original_fall_time > stock_fall_duration)
+        if (!std::isfinite(original_fall_time) || original_fall_time < 0 || original_fall_time > stock_fall_duration)
         {
             status.reason = "stock_fall_time_preserved";
         }
@@ -1621,6 +1648,10 @@ namespace
                 scope_hooks_ready.store(scoped_events && hooks[3] != Hook::ERROR_ID, std::memory_order_release);
                 client_damage_hooks_ready.store(client_damage && hooks[0] != Hook::ERROR_ID && hooks[3] != Hook::ERROR_ID,
                     std::memory_order_release);
+                if (scoped_events)
+                    hooks[4] = Hook::RegisterEngineTickPreCallback(
+                        [](Iteration&, Unreal::UEngine*, float, bool) { sample_authoritative_falls(); },
+                        {false, false, mod_name, STR("Track authoritative guest falls before stock landing")});
             }
         }
 
@@ -1752,7 +1783,7 @@ namespace
         bool enabled{};
         bool scoped_events{};
         bool client_damage{};
-        std::array<Hook::GlobalCallbackId, 4> hooks{};
+        std::array<Hook::GlobalCallbackId, 5> hooks{};
         Unreal::UFunction* jump_shake{};
         std::pair<int, int> jump_shake_hook{};
     };
