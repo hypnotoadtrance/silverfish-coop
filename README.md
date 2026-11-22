@@ -5,7 +5,7 @@
 >
 > Invited testers are encouraged to try the candidate, reproduce errors, and [open a GitHub issue](https://github.com/hypnotoadtrance/silverfish-coop/issues/new). Maintainers can assign reproducible reports to coding agents for investigation and draft pull requests.
 
-An unofficial Windows mod that adds Direct IP co-op to the Steam version of Project Silverfish. Open **Multiplayer** from the game’s title screen to host a campaign or join a friend. The mod runs in the existing Steam installation and keeps multiplayer campaigns separate from singleplayer saves.
+An unofficial UE4SS mod that adds Direct IP co-op to the Windows Steam version of Project Silverfish. Open **Multiplayer** from the game’s title screen to host a campaign or join a friend. The mod runs in the existing Steam installation and keeps multiplayer campaigns separate from singleplayer saves.
 
 [Download the release candidate](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-d9978a3) · [Player guide](docs/PLAYING-COOP.md) · [18-rule design](docs/DESIGN.md) · [Contribute with a coding agent](CONTRIBUTING.md) · [Build and publish a release](docs/RELEASING.md)
 
