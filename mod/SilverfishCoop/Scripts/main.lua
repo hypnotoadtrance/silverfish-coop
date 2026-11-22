@@ -9,6 +9,7 @@ local native_replication_budget = require("native_replication_budget")
 local native_zone_loading = require("native_zone_loading")
 local native_pickup_audio = require("native_pickup_audio")
 local native_voice = require("native_voice")
+local native_weapon_fire_view = require("native_weapon_fire_view")
 local native_time_shift = require("native_time_shift")
 local native_avatar_capture_fixture = require("native_avatar_capture_fixture")
 local native_bed = require("native_bed")
@@ -1072,6 +1073,7 @@ local function run_command(fields, state, current_phase)
         or native_player_avatar.command(fields, state, current_phase)
         or native_pickup_audio.command(fields, state, current_phase)
         or native_voice.command(fields, state, current_phase)
+        or native_weapon_fire_view.command(fields, state, current_phase)
         or native_time_shift.command(fields, state, current_phase)
         or native_cistern_lockpick.command(fields, state, current_phase)
         or native_mindcore_fixture.command(fields, state, current_phase)
@@ -1178,6 +1180,7 @@ local function write_status(state, current_phase, failure, fields)
     end
     for _, row in ipairs(native_player_avatar.rows(status_row)) do rows[#rows + 1] = row end
     for _, row in ipairs(native_voice.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+    for _, row in ipairs(native_weapon_fire_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
     for _, row in ipairs(native_replication_budget.rows(status_row)) do rows[#rows + 1] = row end
     for _, row in ipairs(native_zone_loading.rows(status_row)) do rows[#rows + 1] = row end
     local guest_save_row = guest_save.row(status_row)
@@ -1434,6 +1437,7 @@ local function tick(fields)
     pcall(native_zone_loading.sync, state, current_phase)
     native_title_panel.sync(state, current_phase)
     pcall(native_voice.sync, state, current_phase)
+    pcall(native_weapon_fire_view.sync, state, current_phase)
     pcall(native_time_shift.sync, state, current_phase)
     native_guest_armor.sync(state, current_phase)
     native_world_view.sync(state, current_phase)

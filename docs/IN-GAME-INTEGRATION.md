@@ -113,7 +113,7 @@ Keep a local, versioned JSON interface alongside the menu. It should expose sess
 - Replicate entity death and the transition to the stock corpse or ragdoll on peers. Cover the boar and other enemy types killed by the host.
 - Play the player-hit screen effect only for the struck player. When a target is downed, hostile NPCs should disengage and acquire an eligible standing player.
 - Extend anomaly synchronization to more field and map-placed hazard types, including their active effects. Drive health, downing, and game-over from the host so a guest-side anomaly cannot kill a remote player or trigger a party wipe.
-- Verify the remote firing animation and muzzle effects when a shot hits an explosive prop. Extend coverage to fires spawned by fixed explosive props.
+- Replicate third-person aim, firing, and melee animations. Extend coverage to fires spawned by fixed explosive props.
 - Replicate a thrown flare's lit world actor after it leaves the equipped hand. Check the throw and light on both peers through expiry.
 - Compare frame times and network traffic at the Observatory and Crossroads. Measure the client projection and host discovery work separately from packet arrival before changing update pacing.
 
@@ -150,6 +150,8 @@ The host runs the stock Electrode arming timer, overlap, and damage bursts. Gues
 Stock propane canisters use host-authoritative physics, ignition, rupture, and damage. Guests see the fire and blast effects, and the mod reconciles destroyed map-placed canisters by their stock actor paths. In muted loopback tests, stock pistol rounds ruptured a burning small canister in Crossroads and started the tall Cistern canister's jet. The moving Cistern tank was within 5 cm on the two peers at one sampled point. Each test observed one host blast and one guest effect, with the tank still gone after reconnect. [Canister tests](../tests/live_explosive_canister_smoke.py)
 
 Fixed explosive props project the host's destroyed flag and the matching stock mesh by actor path. The guest plays the host's qualified blast cue separately from the state update. In the muted Dry Dock test, four stock pistol rounds destroyed a power box. The watching guest saw one blast and the broken mesh while keeping full health. A new guest received the broken mesh after joining the running campaign. [Fixed explosive test](../tests/live_fixed_explosives_smoke.py)
+
+Stock firearm shots carry the host's muzzle transform and weapon class in a short-lived batch on the existing gameplay snapshot. The guest plays the weapon's muzzle flash and spatial firing sound locally. The Dry Dock test verified one flash per host pistol round and one flash for a guest shotgun round that produced nine pellets on the host. It also checked stock sound selection and that a later join did not replay the shots. Host fixture submission to guest playback took 592–1,059 ms, including the test command and snapshot interval. Audio output was muted, so the audible mix still needs a foreground playtest. [Firearm effects test](../tests/live_fixed_explosives_smoke.py)
 
 Stock door interactions now apply the exact host receipt on the initiating guest as soon as it arrives. The normal world snapshot still reconciles doors on both peers. Stock stash discovery caches site positions for status reporting between censuses. Transfers still check the participant's current distance from the live stash.
 

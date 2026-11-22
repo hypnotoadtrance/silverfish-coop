@@ -33,6 +33,7 @@ from . import native_stock_door
 from . import native_player_avatar
 from . import native_voice
 from . import native_anomaly_effects
+from . import native_weapon_fire_view
 from .native_guest_creator import valid_profile
 from . import native_host_stack_drop
 from . import native_black_box
@@ -1627,6 +1628,13 @@ class Bridge:
                     data["native_guest_stock_creator"] = {"state": creator_state, "attempt": attempt,
                                                           "appearance": None if appearance == "-" else appearance,
                                                           "profile": None if profile == "-" else profile}
+                elif fields[0] == "native-weapon-shot" and len(fields) == 12 and data.get("state") == "hosting":
+                    serial, path, *pose = fields[1:]
+                    shots = data.setdefault(native_weapon_fire_view.KEY, [])
+                    if len(shots) < native_weapon_fire_view.LIMIT and re.fullmatch(r"[1-9][0-9]{0,14}", serial):
+                        cue = [int(serial), path, *map(_finite, pose)]
+                        if native_weapon_fire_view.valid_shot(cue):
+                            shots.append(cue)
                 elif fields[0] == "native-voice-speaker" and len(fields) == 4 and data.get("state") == "hosting":
                     name, personality, pitch = fields[1:]
                     pitch = _finite(pitch)

@@ -7,15 +7,17 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 import uuid
 
 from live_ai_smoke import status, wait
-from live_guest_held_fire_smoke import events
+from live_guest_held_fire_smoke import events, wait_event
 from live_multi_smoke import saved_hashes
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from tools.silverfish.control import submit
+from tools.silverfish.guest_weapon_profiles import FIREARMS, TWELVE_GAUGE_BUCK
 from tools.silverfish.native_anomaly_effects import FIXED_EXPLOSIVES
 
 AREA = "/Game/Classes/Maps/Maps_Dungeons/DryDock_P"
@@ -23,6 +25,8 @@ TARGET = f"{AREA}.DryDock_P:PersistentLevel.Prop_Explosive_PowerBox_C_5"
 WORKING = "/Game/Assets/StaticMeshes/Mesh_Misc/SM_Powerbox_Working.SM_Powerbox_Working"
 BROKEN = "/Game/Assets/StaticMeshes/Mesh_Misc/SM_Powerbox_Broken.SM_Powerbox_Broken"
 CUE = "native_fixed_explosive_effect_played"
+SHOT = "native_weapon_shot_played"
+PISTOL = "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"
 
 
 async def verify(work, vanilla):
@@ -61,7 +65,8 @@ async def verify(work, vanilla):
                                                          cwd=REPO, creationflags=subprocess.CREATE_NO_WINDOW)
         payload, _ = await asyncio.wait_for(invitation.communicate(), 20)
         assert invitation.returncode == 0
-        return await launch(run, role, "join", "--profile", run.parent.name, "--invite", json.loads(payload)["invite_file"])
+        return await launch(run, role, "join", "--profile", run.parent.name, "--invite", json.loads(payload)["invite_file"],
+                            "--native-guest-primary-input")
 
     async def action(run, verb, **args):
         result = await submit(run, verb, **args)
@@ -85,7 +90,9 @@ async def verify(work, vanilla):
         bound = await wait(host, lambda frame: frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
         guest_health = bound["game"]["pawns"]["guest"]["health"]
         await action(host, "native-fixed-explosive-prepare-fixture", target=TARGET)
+        shot_times = []
         for _ in range(7):
+            shot_times.append(time.time())
             await action(host, "native-fixed-explosive-shoot-fixture", target=TARGET)
             proof["rounds_fired"] += 1
             await asyncio.sleep(.4)
@@ -93,17 +100,38 @@ async def verify(work, vanilla):
                 break
         destroyed = await wait(host, broken, timeout=10)
         witnessed = await wait(guest, lambda frame: broken(frame) and events(guest, CUE), timeout=12)
+        await wait(guest, lambda _: len(events(guest, SHOT)) >= proof["rounds_fired"], timeout=8)
+        shots = events(guest, SHOT)
+        assert len(shots) == len({shot["serial"] for shot in shots}) == proof["rounds_fired"], shots
+        assert all(shot["weapon"] == PISTOL and shot["muzzle_flash"] and shot["stock_sound"] for shot in shots), shots
         cue, = events(guest, CUE)
         assert cue["cue"] == "powerbox" and cue["particles"], cue
         assert destroyed["game"]["native_fixed_explosive_capture"] == 1
         assert destroyed["game"]["pawns"]["guest"]["health"] == guest_health and not destroyed["gameplay"]["wipe"]
-        proof.update(host=prop(destroyed), guest=prop(witnessed), cue=cue, guest_health_preserved=guest_health)
+        proof.update(host=prop(destroyed), guest=prop(witnessed), cue=cue, shots=shots, guest_health_preserved=guest_health,
+                     host_fixture_to_guest_milliseconds=[round((shot["time_unix"] - stamp) * 1000)
+                                                        for shot, stamp in zip(shots, shot_times, strict=True)])
+
+        # A stock guest shotgun fires multiple pellets but relays one cosmetic cue for the round.
+        weapon = next(profile for profile in FIREARMS if profile.kind == "sg-71-a")
+        guid = uuid.uuid4().hex.upper()
+        await action(host, "native-guest-weapon-seed", target="guest", kind=weapon.kind, item_guid=guid)
+        await action(guest, "native-guest-weapon-equip", target=guid)
+        await wait(guest, lambda frame: frame.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
+        trigger = (await action(guest, "native-guest-primary-input-fixture"))["native_guest_primary_fixture"]
+        executed = await wait_event(guest, "native_guest_primary_input", lambda row: row["sequence"] == trigger["sequence"])
+        spent = executed["native_guest_weapon"]
+        assert spent["before"] - spent["after"] == 1 and spent["projectiles"] == TWELVE_GAUGE_BUCK.projectile_count, spent
+        observed = await wait_event(guest, SHOT, lambda row: row["weapon"] == weapon.path)
+        assert observed["muzzle_flash"] and observed["stock_sound"], observed
+        proof["guest_shot"] = {"stock": spent, "effect": observed}
+        assert len(events(guest, SHOT)) == proof["rounds_fired"] + 1
 
         await action(guest, "leave-session")
         await asyncio.wait_for(watcher.wait(), 15)
         await join(late, "late")
         late_frame = await wait(late, broken)
-        assert not events(late, CUE)
+        assert not events(late, CUE) and not events(late, SHOT)
         proof["late_join"] = prop(late_frame)
         proof["verified"] = True
     except BaseException as failure:

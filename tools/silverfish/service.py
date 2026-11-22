@@ -44,6 +44,7 @@ from . import native_player_avatar
 from . import native_pickup_audio
 from . import native_voice
 from . import native_anomaly_effects
+from . import native_weapon_fire_view
 from . import native_loose_pickup
 from . import native_stock_enemy_drops
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
@@ -1715,6 +1716,8 @@ class Host:
             self.voice_audio.observed(self.last_game, self.zone_epoch)
             if voice_frame := self.voice_audio.frame(self.last_game, self.zone_epoch, pawn):
                 gameplay[native_voice.KEY] = voice_frame
+            if shots := self.last_game.get(native_weapon_fire_view.KEY):
+                gameplay[native_weapon_fire_view.KEY] = {"map": self.last_game["map"], "epoch": self.zone_epoch, "cues": shots}
             if cues := self.last_game.get(native_anomaly_effects.KEY):
                 gameplay[native_anomaly_effects.KEY] = {
                     "map": self.last_game["map"], "epoch": self.zone_epoch, "cues": cues,
@@ -4577,6 +4580,7 @@ class Client:
         self.pickup_playback = native_pickup_audio.Playback()
         self.voice_playback = native_voice.Playback()
         self.anomaly_playback = native_anomaly_effects.Playback()
+        self.weapon_shot_playback = native_weapon_fire_view.Playback()
         self.snapshot_request: asyncio.Task | None = None
         self.next_snapshot = 0.0
         self.next_projection = 0.0
@@ -5238,6 +5242,10 @@ class Client:
                         self.control.event("zone_rejoin_requested", zone_epoch=epoch)
                     self.zone_epoch = epoch
                     self.expected_zone = reply["zone"]
+                    if (not self.needs_travel and not self.server_transitioning
+                            and self.last_game.get("state") == "connected"):
+                        self.last_game = await self.weapon_shot_playback.sync(
+                            self.bridge, self.control, self.last_game, self.gameplay.get(native_weapon_fire_view.KEY), epoch)
             except (OSError, RuntimeError) as error:
                 self.control.event("gameplay_snapshot_unavailable", error_type=type(error).__name__)
         if project:
