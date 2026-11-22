@@ -64,6 +64,11 @@ namespace
     constexpr auto lantern_interaction = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:SendInteractionToActor");
     constexpr auto lantern_ignite = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:SetOnFire");
     constexpr auto lantern_extinguish = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:Extinguish");
+
+    constexpr auto sewer_screen_class = STR("/Game/Classes/GUI/Menu_Trade_Widget.Menu_Trade_Widget_C");
+    constexpr auto sewer_card_class = STR("/Game/Classes/GUI/SubWidgets/TradeOffer_Widget.TradeOffer_Widget_C");
+    constexpr int sewer_confirm_entry = 3258;
+    constexpr int sewer_offer_count = 26;
     constexpr int wire_menu_entry = 0x15b;
     constexpr auto lease = std::chrono::milliseconds(1500);
     constexpr auto receipt_lifetime = std::chrono::milliseconds(1500);
@@ -250,6 +255,17 @@ namespace
         bool turnin{};
     };
 
+
+    struct SewerTradeInput
+    {
+        Unreal::FWeakObjectPtr screen{};
+        std::array<Unreal::FWeakObjectPtr, sewer_offer_count> cards{};
+        Clock::time_point expires{};
+        Receipt pending{};
+        int ordinal{};
+    };
+
+    SewerTradeInput sewer_trade;
     std::atomic<bool> installed{};
     std::atomic<std::uint64_t> generation{1};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
@@ -641,6 +657,118 @@ namespace
         return true;
     }
 
+    void intercept_sewer_trade(Iteration& call, Unreal::UObject* card, Unreal::UFunction* function, const void* parameters)
+    {
+        if (!card || !function || call.OriginalFunctionCallPrevented()) return;
+        static const Unreal::FName pressed{STR("BndEvt__TradeOffer_Widget_Button_ConfirmTrade_K2Node_ComponentBoundEvent_0_Pressed__DelegateSignature")};
+        static const Unreal::FName script{STR("ExecuteUbergraph_TradeOffer_Widget")};
+        const auto name = function->GetFName();
+        if (name != pressed && name != script) return;
+        auto* card_type = find<Unreal::UClass>(sewer_card_class);
+        auto* screen = object_field(card, STR("ParentWidget"));
+        if (!live(card) || card->GetClassPrivate() != card_type || function->GetOuterPrivate() != card_type ||
+            !live(screen) || screen->GetClassPrivate() != find<Unreal::UClass>(sewer_screen_class) ||
+            object_field(screen, STR("Shop"))) return;
+        auto* world = screen->GetWorld();
+        if (!live(world) || world->GetPathName() != sewer_world) return;
+        if (name == script)
+        {
+            auto* entry = input<Unreal::FIntProperty>(function, STR("EntryPoint"), 0);
+            if (parameters && entry && function->GetNumParms() == 1 && function->GetParmsSize() == sizeof(std::int32_t) &&
+                entry->GetPropertyValueInContainer(parameters) == sewer_confirm_entry)
+                call.PreventOriginalFunctionCall();
+            return;
+        }
+        if (function->GetNumParms() != 0 || function->GetParmsSize() != 0 || function->GetReturnProperty() ||
+            function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
+        // A detached stock screen never runs the local inventory-spending Blueprint.
+        call.PreventOriginalFunctionCall();
+        const auto now = Clock::now();
+        if (!call.OriginalFunctionCallPrevented() || screen != sewer_trade.screen.Get() || scope.host ||
+            now >= sewer_trade.expires || now >= scope.expires || !live_scope(scope) || !standing(scope.pawn.Get()) ||
+            top_menu() != screen || dialogue_sequence == max_sequence ||
+            (sewer_trade.pending.sequence && now < sewer_trade.pending.expires)) return;
+        for (std::size_t i = 0; i < sewer_trade.cards.size(); ++i)
+        {
+            if (card != sewer_trade.cards[i].Get()) continue;
+            sewer_trade.ordinal = static_cast<int>(i) + 1;
+            sewer_trade.pending = {++dialogue_sequence, now + receipt_lifetime};
+            sewer_trade.expires = {};
+            break;
+        }
+    }
+
+    int set_sewer_trade_screen(const Lua& lua)
+    {
+        const auto respond = [&](bool value) { lua.set_bool(value); return 1; };
+        const auto arguments = lua.get_stack_size();
+        if (!available() || arguments < 1 || arguments > 2 * sewer_offer_count + 1 ||
+            arguments % 2 == 0 || !lua.is_integer(1) || scope.host || Clock::now() >= scope.expires ||
+            !live_scope(scope) || !standing(scope.pawn.Get())) return respond(false);
+        auto* world = scope.world.Get();
+        auto* screen = top_menu();
+        if (world->GetPathName() != sewer_world || !live(screen) || address(screen) != lua.get_integer(1) ||
+            screen->GetClassPrivate() != find<Unreal::UClass>(sewer_screen_class) || screen->GetWorld() != world ||
+            object_field(screen, STR("Shop"))) return respond(false);
+        SewerTradeInput next;
+        next.screen = screen;
+        std::array<Address, sewer_offer_count> requested{};
+        auto* card_type = find<Unreal::UClass>(sewer_card_class);
+        if (!card_type) return respond(false);
+        int needed{};
+        for (int index = 2; index < arguments; index += 2)
+        {
+            if (!lua.is_integer(1) || !lua.is_integer(2)) return respond(false);
+            const auto ordinal = lua.get_integer();
+            const auto candidate = lua.get_integer();
+            if (ordinal < 1 || ordinal > sewer_offer_count || candidate <= 0 || requested[ordinal - 1])
+                return respond(false);
+            for (auto address : requested)
+                if (candidate == address) return respond(false);
+            requested[ordinal - 1] = candidate;
+            ++needed;
+        }
+        if (needed)
+        {
+            Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* card, int, int) {
+                if (!live(card) || card->GetClassPrivate() != card_type ||
+                    object_field(card, STR("ParentWidget")) != screen)
+                    return RC::LoopAction::Continue;
+                for (std::size_t i = 0; i < requested.size(); ++i)
+                {
+                    if (address(card) != requested[i]) continue;
+                    next.cards[i] = card;
+                    --needed;
+                    break;
+                }
+                return needed ? RC::LoopAction::Continue : RC::LoopAction::Break;
+            });
+        }
+        if (needed) return respond(false);
+        next.expires = Clock::now() + lease;
+        sewer_trade = next;
+        return respond(true);
+    }
+
+    int take_sewer_trade_press(const Lua& lua)
+    {
+        if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1) || scope.host ||
+            Clock::now() >= scope.expires || !live_scope(scope) || !standing(scope.pawn.Get()) ||
+            sewer_trade.screen.Get() != top_menu() || !sewer_trade.screen.Get() ||
+            address(sewer_trade.screen.Get()) != lua.get_integer(1)) return 0;
+        const auto now = Clock::now();
+        const auto pending = sewer_trade.pending;
+        sewer_trade.pending = {};
+        if (!pending.sequence)
+        {
+            if (now < sewer_trade.expires) sewer_trade.expires = now + lease;
+            return 0;
+        }
+        if (now >= pending.expires) return 0;
+        lua.set_integer(static_cast<std::int64_t>(pending.sequence));
+        lua.set_integer(sewer_trade.ordinal);
+        return 2;
+    }
     bool exact_valve(Unreal::UObject* actor)
     {
         auto* world = scope.world.Get();
@@ -782,6 +910,7 @@ namespace
     {
         intercept_wire_board(iteration, actor, function, parameters);
         intercept_stock_board(iteration, actor, function);
+        intercept_sewer_trade(iteration, actor, function, parameters);
         intercept_sewer_overlap(iteration, actor, function, parameters);
         intercept_dialogue(iteration, actor, function, parameters);
         intercept_valve(iteration, actor, function, parameters);
@@ -1085,6 +1214,7 @@ namespace
         if (Unreal::IsInGameThreadRaw())
         {
             dialogue_input = {};
+            sewer_trade = {};
             sewer_answering = false;
         }
         return 0;
@@ -1282,6 +1412,9 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishTakeNativeStockBoardAction", take_stock_board_action);
         lua.register_function("SilverfishClearNativeWireBoardScope", clear_wire_board);
         lua.register_function("SilverfishSetNativeDialogueInputScope", set_dialogue_scope);
+
+        lua.register_function("SilverfishSetNativeSewerTradeScreen", set_sewer_trade_screen);
+        lua.register_function("SilverfishTakeNativeSewerTradePress", take_sewer_trade_press);
         lua.register_function("SilverfishOpenNativeSewerDialogue", open_sewer_dialogue);
         lua.register_function("SilverfishTakeNativeDialogueInput", take_dialogue_press);
         lua.register_function("SilverfishClearNativeDialogueInputScope", clear_dialogue_scope);
@@ -1303,6 +1436,7 @@ namespace silverfish::native_interaction_input
         stock_board_action = {};
         dialogue_input = {};
         sewer_answering = false;
+        sewer_trade = {};
         valve_input = {};
         stash_input = {};
         lantern_input = {};

@@ -74,6 +74,33 @@ def parse(header: list[str], rows: list[list[str]]) -> tuple[str, dict]:
                        "wallet_before": wallet, "wallet_after": wallet}
 
 
+
+def projection_arguments(offers: list[dict]) -> tuple[str, ...]:
+    if not isinstance(offers, list) or len(offers) != COUNT:
+        raise ValueError("The Sewer Thing's stock projection is incomplete")
+
+    def recipe(item: dict) -> tuple[str, str]:
+        if not isinstance(item, dict) or type(item.get("quantity")) is not int or not isinstance(item.get("class_path"), str):
+            raise ValueError("Invalid Sewer Thing stock item")
+        checked = _item(item["class_path"], str(item["quantity"]))
+        return checked["class_path"], str(checked["quantity"])
+
+    rows = []
+    for ordinal, offer in enumerate(offers, 1):
+        if (not isinstance(offer, dict) or type(offer.get("ordinal")) is not int or offer["ordinal"] != ordinal
+                or type(offer.get("affordable")) is not bool or type(offer.get("hidden")) is not bool
+                or not isinstance(offer.get("give"), list) or not 1 <= len(offer["give"]) <= 3
+                or not isinstance(offer.get("receive"), list) or len(offer["receive"]) != 1):
+            raise ValueError("Invalid Sewer Thing stock recipe")
+        payment = sorted(recipe(item) for item in offer["give"])
+        if len({path for path, _ in payment}) != len(payment):
+            raise ValueError("Repeated Sewer Thing stock payment")
+        fields = (str(int(offer["affordable"])), str(int(offer["hidden"])), *recipe(offer["receive"][0]),
+                  *(value for item in payment for value in item))
+        rows.append("|".join(fields))
+    return ("typed-v1", *rows)
+
+
 def _member(host, character: str) -> tuple:
     sessions = host.dialogue_sessions
     if not sessions or CISTERN not in sessions.maps:

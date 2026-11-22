@@ -72,6 +72,7 @@ async def exercise(work: Path, original: Path):
         pending = (await action(profile, dialogue.FIXTURE, "1"))["native_dialogue_view"]
         rendered = await wait(client_run, lambda row: view(row).get("row") == dialogue.SEWER_OFFERS
                               and view(row).get("sequence") == pending["sequence"] and view(row).get("state") == "open")
+        assert view(rendered)["surface"] == "stock", view(rendered)
         return view(rendered)
 
     try:
@@ -89,31 +90,45 @@ async def exercise(work: Path, original: Path):
             await wait(run, lambda row: row.get("gameplay", {}).get("players", {}).get("guest" if index == 1 else "guest2", {})
                        .get("character_id") == character)
 
-        for index, (profile, client_run, character) in enumerate(zip(profiles, client_runs, identities, strict=True)):
+        async def approach(index):
+            profile, client_run, character = profiles[index], client_runs[index], identities[index]
             await action(host, dialogue.APPROACH, character)
             greet = dialogue.SEWER_FIRST if index == 0 else dialogue.SEWER_ROOT
             greeted = await wait(client_run, lambda row: view(row).get("row") == greet and view(row).get("state") == "open")
             assert (await wait(run, lambda row: in_cistern(row, "hosting")))["game"].get("native_dialogue_sewer_host_menu") is None
             trade = await open_trade(profile, client_run)
             evidence["guests"].append({"character": character, "greeting": view(greeted)["row"], "trade": trade})
+            return trade["token"]
 
-        first, second = [entry["trade"]["token"] for entry in evidence["guests"]]
-        assert first != second
-        denied = await action(profiles[1], dialogue.CHOOSE, f"{first}@2", expected=False)
-        assert denied["error"] == "native_dialogue_choice_expired", denied
+        await approach(0)
         seeded = (await action(host, "native-sewer-mushroom-fixture", identities[0]))["native_sewer_mushroom_fixture"]
+        reopened = (await action(profiles[0], dialogue.FIXTURE, "open"))["native_dialogue_view"]
+        await wait(client_runs[0], lambda row: view(row).get("row") == dialogue.SEWER_ROOT
+                   and view(row).get("sequence") == reopened["sequence"] and view(row).get("state") == "open")
+        first = (await open_trade(profiles[0], client_runs[0]))["token"]
         pending = (await action(profiles[0], dialogue.FIXTURE, "2"))["native_dialogue_view"]
         traded = await wait(client_runs[0], lambda row: view(row).get("row") == dialogue.SEWER_OFFERS
                             and view(row).get("sequence") == pending["sequence"] and view(row).get("state") == "open")
-        events = (json.loads(line) for line in (client_runs[0] / "events.jsonl").read_text(encoding="utf-8").splitlines())
-        receipt, = [event for event in events if event.get("event") == "native_sewer_trade_interaction"
-                    and event.get("sequence") == pending["sequence"]]
+        for _ in range(25):
+            events = (json.loads(line) for line in (client_runs[0] / "events.jsonl").read_text(encoding="utf-8").splitlines())
+            matches = [event for event in events if event.get("event") == "native_sewer_trade_interaction"
+                       and event.get("sequence") == pending["sequence"]]
+            if matches:
+                break
+            await asyncio.sleep(.1)
+        receipt, = matches
         operation, exchange = receipt["operation_id"], receipt["native_sewer_trade"]
         assert exchange["ordinal"] == 2, exchange
         assert exchange["receive"]["class_path"].endswith(".Eqp_LockPick_C"), exchange
         assert exchange["spent"][0]["guid"] == seeded["guid"], exchange
         replay = await action(profiles[0], dialogue.CHOOSE, f"{first}@2", operation=operation)
         assert replay["native_sewer_trade"] == exchange and replay["native_dialogue"]["token"] == view(traded)["token"]
+        await action(host, dialogue.APPROACH, f"{identities[0]}@exit")
+        await wait(client_runs[0], lambda row: view(row).get("state") == "waiting")
+        second = await approach(1)
+        assert first != second
+        denied = await action(profiles[1], dialogue.CHOOSE, f"{first}@2", expected=False)
+        assert denied["error"] == "native_dialogue_choice_expired", denied
         refused = await action(profiles[1], dialogue.CHOOSE, f"{second}@2", expected=False)
         assert refused["error"] == "sewer_trade_refused_unaffordable", refused
         evidence["trade"] = {"seeded": seeded, "exchange": exchange, "operation_id": operation,

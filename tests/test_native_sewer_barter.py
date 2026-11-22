@@ -35,6 +35,21 @@ class SewerBarterReportTests(unittest.TestCase):
         self.assertEqual((key, proof["pawn"], len(proof["offers"])), (barter.OFFERS_KEY, PAWN, 26))
         self.assertEqual([item["quantity"] for item in proof["offers"][19]["give"]], [1, 2, 5])
 
+
+    def test_projection_uses_typed_paths_and_orders_costs(self):
+        offers = barter.parse(*offer_frames())[1]["offers"]
+        offers[19]["hidden"] = True
+        offers[19]["affordable"] = False
+        arguments = barter.projection_arguments(offers)
+        self.assertEqual((arguments[0], len(arguments)), ("typed-v1", 27))
+        self.assertEqual(arguments[20].split("|"),
+                         ["0", "1", LOCKPICK, "1", barter.MUSHROOM, "1", MOLASSES, "2", MASK, "5"])
+        with self.assertRaises(ValueError):
+            barter.projection_arguments(offers[:-1])
+        offers[19]["give"][1] = offers[19]["give"][0]
+        with self.assertRaises(ValueError):
+            barter.projection_arguments(offers)
+
     def test_offer_report_must_have_exact_scope_and_order(self):
         header, rows = offer_frames()
         for index, value in [(1, "/WrongMap"), (2, "Player_FP_C /WrongMap.Pawn_1"), (4, "27")]:

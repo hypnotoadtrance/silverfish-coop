@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import time
 import uuid
 
-from . import party
+from . import native_sewer_barter, party
 from .travel import BOROUGH, CISTERN, OBSERVATORY, SCIENTIST_SHOP, SHOPKEEP
 
 
@@ -296,11 +296,15 @@ class DialogueSessions:
         return stock
 
     async def approach(self, host, bridge, character: str) -> dict:
-        if not host.fixtures:
+        if not host.fixtures or not isinstance(character, str):
             raise party.RuleError("native_dialogue_approach_unavailable")
+        character, separator, destination = character.partition("@")
         scope = self._scope(host, character, time.monotonic())
         profile = PROFILES[scope[2]]
-        snapshot = await bridge.command(APPROACH, scope[-1], timeout=5)
+        if separator and (profile.map != CISTERN or destination != "exit"):
+            raise party.RuleError("native_dialogue_approach_unavailable")
+        arguments = (scope[-1], "exit") if separator else (scope[-1],)
+        snapshot = await bridge.command(APPROACH, *arguments, timeout=5)
         if (snapshot.get("state"), snapshot.get("map")) != ("hosting", profile.map):
             raise RuntimeError("The stock dialogue approach left its qualified zone")
         host.last_game, host.last_seen = snapshot, time.monotonic()
@@ -445,8 +449,6 @@ class DialogueSessions:
                     or session.scope != scope or session.expires <= now):
                 raise party.RuleError("native_dialogue_choice_expired")
             if session.row == SEWER_OFFERS and profile.id == SEWER:
-                from . import native_sewer_barter
-
                 if choice not in SEWER_ORDINALS or int(choice) not in session.allowed:
                     raise party.RuleError("native_dialogue_choice_unavailable")
                 destination = None
@@ -481,8 +483,6 @@ class DialogueSessions:
                 stock, effect = observed, "trade-granted"
                 host.control.event("native_borough_mama_trade_granted", character_id=character, row=session.row, ordinal=ordinal)
             elif profile.id == SEWER and session.row in SEWER_ROWS and ordinal == 1:
-                from . import native_sewer_barter
-
                 observed = await self._read(host, bridge, profile, scope[-2], command=SEWER_TRADE,
                                             arguments=(session.row, str(ordinal), scope[-1]))
                 if (observed["connection"] != scope[-1]
@@ -568,9 +568,11 @@ class DialogueView:
                     raise RuntimeError("The ShopKeep dialogue did not open its exact local merchant")
             else:
                 if row == SEWER_OFFERS:
-                    choices = sewer_menu_choices({"map": CISTERN, "offers": reply.get("offers")})
+                    offers = reply.get("offers")
+                    choices = sewer_menu_choices({"map": CISTERN, "offers": offers})
                     message = tuple(value for choice in choices for value in (str(choice["ordinal"]), choice["text"]))
-                    rendered = await self.bridge.command(SEWER_VIEW, str(sequence), next_token, *message, timeout=3)
+                    recipes = native_sewer_barter.projection_arguments(offers)
+                    rendered = await self.bridge.command(SEWER_VIEW, str(sequence), next_token, *recipes, *message, timeout=3)
                 else:
                     rendered = await self.bridge.command(RENDER, str(sequence), row or "-", next_token or "-", *text, timeout=2)
                 proof = rendered.get("native_dialogue_view", {})

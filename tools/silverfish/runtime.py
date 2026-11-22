@@ -1387,8 +1387,8 @@ class Bridge:
                     balances = ("cash_before", "cash_after", "xp_before", "xp_after", "rep_before", "rep_after")
                     photo.update(zip(balances, map(int, fields[10:])))
                     data["native_turret_photo"] = photo
-                elif fields[0] == "native-dialogue-view" and len(fields) == 6:
-                    pawn, state, serial, row, token = fields[1:]
+                elif fields[0] == "native-dialogue-view" and len(fields) in (6, 7):
+                    pawn, state, serial, row, token = fields[1:6]
                     sequence = int(serial)
                     profile = native_dialogue.PROFILES.get(data.get("map"))
                     has_row = profile and native_dialogue.view_row(profile, row) and native_dialogue.valid_token(token)
@@ -1397,7 +1397,12 @@ class Bridge:
                             or not (has_row or (row, token) == ("-", "-")) or (state == "open" and not has_row)
                             or (has_row and state not in ("pending", "open"))):
                         raise ValueError("Invalid local stock dialogue view")
-                    data["native_dialogue_view"] = dict(pawn=pawn, state=state, sequence=sequence, row=row, token=token)
+                    view = dict(pawn=pawn, state=state, sequence=sequence, row=row, token=token)
+                    if len(fields) == 7:
+                        if fields[6] != "stock" or row != native_dialogue.SEWER_OFFERS or data.get("map") != native_dialogue.CISTERN:
+                            raise ValueError("Invalid local stock trade surface")
+                        view["surface"] = "stock"
+                    data["native_dialogue_view"] = view
                 elif fields[0] == "native-dialogue-stock":
                     if dialogue_frame is not None:
                         raise ValueError("Duplicate stock dialogue frame")
