@@ -2838,6 +2838,10 @@ class Bridge:
                     data.setdefault("native_rules", {})[fields[1]] = None if fields[2] == "-" else int(fields[2])
                 elif fields[0] == "native-reputation" and len(fields) == 3:
                     data.setdefault("native_reputation", {})[fields[1]] = int(fields[2])
+                elif fields[0] == native_board_contract.CATALOG:
+                    if native_board_contract.CATALOG_KEY in data:
+                        raise ValueError("Repeated stock board catalog")
+                    data[native_board_contract.CATALOG_KEY] = native_board_contract.parse_catalog(fields)
                 elif fields[0] == native_board_contract.COMMAND:
                     if native_board_contract.KEY in data:
                         raise ValueError("Repeated native board result")

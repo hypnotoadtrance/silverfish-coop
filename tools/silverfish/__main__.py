@@ -259,7 +259,7 @@ def parser() -> argparse.ArgumentParser:
         "native-wire-board-stock-fixture", "native-crossroads-jammer-preflight", "native-crossroads-jammer-approach",
         "native-crossroads-jammer-aim",
         "native-turret-photo-preflight", "native-turret-photo-capture", "native-turret-photo-capture-fixture", "native-turret-photo-shutter",
-        "native-turret-photo-xp-fixture", "native-bounty-board-list", "native-host-camera-input-fixture",
+        "native-turret-photo-xp-fixture", "native-bounty-board-list", "native-board-contract-catalog", "native-host-camera-input-fixture",
         "native-host-camera-aim-fixture", "native-host-camera-equip-fixture", "refresh-invite",
         "native-host-landmine-prepare-fixture", "native-host-landmine-deploy-fixture", "native-host-landmine-inspect-fixture",
         "native-host-dig-acquire-fixture", "native-host-dig-fixture", "native-host-dig-inspect-fixture",

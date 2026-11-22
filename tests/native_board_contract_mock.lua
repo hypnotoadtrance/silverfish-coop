@@ -53,7 +53,7 @@ local function quest(at, class_value, payout, flag_values, rep_values)
 end
 
 local eye_recipe, kill_recipe = quest(2, class, 801), quest(0, nil, 3000, {BountyDone = 1}, {[8] = 20})
-local store = object({ActiveQuests = {}, PlayerBackpack = array({}), PlayerEquipment = array({})})
+local store = object({ActiveQuests = map({}), PlayerBackpack = array({}), PlayerEquipment = array({})})
 local player = object({Save = store})
 local bag = object({PlayerBackpack = array({}), PlayerEquipment = array({})})
 local guest = object({Save = bag})
@@ -66,7 +66,7 @@ local board = object({TurnIn_ID = 2, RedeemableQuests = array({}), BountyBoard_R
     AcceptAllGlobalContracts = false})
 local fresh = false
 board.Configure_Stock = function(self)
-    self.Contracts = {}
+    self.Contracts = map({})
     if fresh and not store.ActiveQuests[eye] then self.Contracts[eye] = eye_recipe end
     if fresh and not store.ActiveQuests[kill] then self.Contracts[kill] = kill_recipe end
 end
@@ -132,6 +132,11 @@ end
 
 denied("not_offered", "start", "inspect", eye)
 fresh = true
+local function catalog()
+    mod.command({"1", "native-board-contract-catalog", "Guest", "Board"}, state, "hosting")
+    return proof()
+end
+assert(catalog()[7] == "Asn_EggHead,Clt_Eye_02" and catalog()[8] == "-")
 action("start", "inspect", eye)
 assert(proof()[8] == "qualified" and proof()[9] == "-" and proof()[11] == 1)
 action("start", "apply", eye, "-")
@@ -141,7 +146,9 @@ store.PlayerBackpack[1] = row_item
 denied("missing_objective", "turnin", "inspect", eye)
 store.PlayerBackpack = array({})
 bag.PlayerBackpack[1] = row_item
+assert(catalog()[7] == kill and catalog()[8] == eye)
 board.TurnIn_ID = 1
+assert(catalog()[8] == "-")
 denied("wrong_turnin", "turnin", "inspect", eye)
 board.TurnIn_ID = 2
 action("turnin", "inspect", eye)

@@ -220,7 +220,8 @@ local function context_for(state, phase, name, approach, profile)
         end
     end
     return {world = world, host = host.pawn, instance = instance, save = save, interactor = pawn,
-        receiving_save = receiving_save, board = board, key = fname(profile.quest_id, profile.quest_display_alias),
+        receiving_save = receiving_save, board = board,
+        key = profile.quest_id and fname(profile.quest_id, profile.quest_display_alias),
         origin = origin, anchor = anchor, reach = reach}
 end
 

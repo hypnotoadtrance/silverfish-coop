@@ -127,6 +127,23 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(host.pending_host_save, True)
         host.checkpoint_native.assert_not_awaited()
 
+    async def test_catalog_binds_both_sets_to_exact_board_and_actor(self):
+        host = self.host()
+        fields = (board.CATALOG, SHOPKEEP, PAWN, BOARD, "1", "1", UNREGISTERED_KILL, EYE)
+        view = board.parse_catalog(fields)
+        bridge = SimpleNamespace(command=AsyncMock(return_value={
+            "state": "hosting", "map": SHOPKEEP, board.CATALOG_KEY: view,
+        }))
+        self.assertEqual(await board.catalog(host, bridge, "guest", BOARD), {board.CATALOG_KEY: {
+            "map": SHOPKEEP, "pawn": PAWN, "board": BOARD, "offers": [UNREGISTERED_KILL], "turnins": [EYE],
+        }})
+        bridge.command.assert_awaited_once_with(board.CATALOG, PAWN, BOARD, timeout=5)
+        host.checkpoint_native.assert_not_awaited()
+        with self.assertRaisesRegex(ValueError, "both offered and ready"):
+            board.parse_catalog((*fields[:-1], UNREGISTERED_KILL))
+        with self.assertRaisesRegex(ValueError, "Invalid stock board catalog entries"):
+            board.parse_catalog((*fields[:4], "2", *fields[5:]))
+
     def test_repeated_proof_rows_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             bridge = runtime.Bridge(Path(directory), None)

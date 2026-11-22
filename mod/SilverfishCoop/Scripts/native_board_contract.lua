@@ -24,6 +24,7 @@ local units_key = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local guid_key = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local completed_step = -10
 local operation = "native-board-contract"
+local catalog_operation = "native-board-contract-catalog"
 local last
 
 local function refuse(detail) error("stock_board_contract_" .. detail, 0) end
@@ -150,7 +151,52 @@ local function unchanged(context, state, phase, pawn, board, quest)
         and same(context.interactor, after.interactor)
 end
 
+local function catalog(fields, state, phase)
+    local pawn, board_name = fields[3], fields[4]
+    if #fields ~= 4 or type(board_name) ~= "string" or #board_name > 512 then refuse("arguments") end
+    local context = stock_context(state, phase, pawn, board_name)
+    context.board:Configure_Stock()
+    local offers, ready = {}, {}
+    local active, contracts = context.save.ActiveQuests, context.board.Contracts
+    if not active or not contracts or #active > 128 or #contracts > 128 then refuse("catalog_extent") end
+    local function descriptor(raw_key, raw_row, target, accepting)
+        local key, row = raw_key:get(), raw_row:get()
+        local id = name(key)
+        if type(id) ~= "string" or #id > 96 or not id:match("^[A-Za-z0-9_]+$") then return end
+        local supported, contract = pcall(shape, row)
+        if not supported or contract.step <= 0 then return end
+        if accepting then
+            if contract.step > contract.final or wire.stock_row(active, key) then return end
+        else
+            if not board_accepts(context.board, key, row) then return end
+            if contract.objective then
+                local permitted, guid = pcall(backpack_objective, context.receiving_save, contract)
+                if not permitted or not guid then return end
+                if not same(context.save, context.receiving_save) then
+                    local known, other = pcall(backpack_objective, context.save, contract)
+                    if not known or other then return end
+                end
+            elseif contract.step < contract.final then
+                return
+            end
+            if not pcall(expected_effects, context, row) then return end
+        end
+        target[#target + 1] = id
+    end
+    contracts:ForEach(function(key, row) descriptor(key, row, offers, true) end)
+    active:ForEach(function(key, row) descriptor(key, row, ready, false) end)
+    if not unchanged(context, state, phase, pawn, board_name) then refuse("catalog_scope_changed") end
+    table.sort(offers)
+    table.sort(ready)
+    last = {mode = "catalog", pawn = pawn, board = board_name, context = context, offers = offers, ready = ready}
+    return "Verified the current stock board options"
+end
+
 function board_contract.command(fields, state, phase)
+    if fields[2] == catalog_operation then
+        last = nil
+        return catalog(fields, state, phase)
+    end
     if fields[2] ~= operation then return end
     last = nil
     local verb, mode, pawn, board, quest = fields[3], fields[4], fields[5], fields[6], fields[7]
@@ -255,6 +301,11 @@ function board_contract.rows(state, phase, status_row)
         or not same(last.context.interactor.Save, last.context.receiving_save) then
         last = nil
         return {}
+    end
+    if last.mode == "catalog" then
+        return {status_row(catalog_operation, state.map, last.pawn, last.board, #last.offers, #last.ready,
+            #last.offers > 0 and table.concat(last.offers, ",") or "-",
+            #last.ready > 0 and table.concat(last.ready, ",") or "-")}
     end
     return {status_row(operation, last.verb, last.mode, state.map, last.pawn, last.board, last.quest,
         last.state, last.before, last.after, last.expected_step or "-", last.cash_before, last.cash_after,

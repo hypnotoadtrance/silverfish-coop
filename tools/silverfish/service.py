@@ -15,6 +15,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
+from . import native_board_contract
 from . import (direct_ip, link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dialogue, native_downed_markers,
                native_dream, native_enemy_loot, native_enemy_shells, native_finite_shop, native_flood_jammer, native_lenny,
                native_gold, native_green, native_guest_armor, native_guest_clock, native_guest_consumable, native_guest_npc, native_guest_stack_drop,
@@ -80,7 +81,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         *native_mosby_tape.PREFLIGHTS, *native_mosby_tape.CONVERSIONS, native_mosby_tape.READINGS_PREFLIGHT,
                         native_mindcore.PREFLIGHT, native_mindcore.UPLOAD,
                         native_prototype_drill.PREFLIGHT,
-                        native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
+                        native_board_contract.CATALOG, native_broker.INTERACT, native_wire_quest.PREFLIGHT, native_turret_photo.PREFLIGHT,
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
                         *native_computer_board.PREFLIGHTS, *native_flood_jammer.PREFLIGHTS, native_meet_broker.PREFLIGHT,
                         native_subway_valve.PREFLIGHT, native_subway_valve.ACTIVATE,
@@ -2177,6 +2178,8 @@ class Host:
                 result = await native_turret_photo.advance(self, bridge, character, action, target)
             elif action == native_turret_photo.BOARD_LIST:
                 result = await native_turret_photo.offers(self, bridge, character, target)
+            elif action == native_board_contract.CATALOG:
+                result = await native_board_contract.catalog(self, bridge, character, target)
             elif action == native_turret_photo.SHUTTER:
                 result = await native_turret_photo.shutter(self, bridge, character, target, request["operation_id"])
             elif action in native_computer_board.PREFLIGHTS and target is None:
@@ -3337,6 +3340,8 @@ class Host:
                                                                  request.get("operation_id") or path.stem)
                 elif action == native_turret_photo.BOARD_LIST:
                     result = await native_turret_photo.offers(self, bridge, "host", request.get("target"))
+                elif action == native_board_contract.CATALOG:
+                    result = await native_board_contract.catalog(self, bridge, actor, request.get("target"))
                 elif action == native_turret_photo.XP_FIXTURE and self.fixtures and request.get("target") is None:
                     result = await native_turret_photo.xp_fixture(self, bridge)
                 elif action in native_computer_board.PREFLIGHTS and request.get("target") is None:

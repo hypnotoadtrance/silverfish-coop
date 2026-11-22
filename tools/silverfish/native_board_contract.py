@@ -8,6 +8,8 @@ from .native_gold import valid_guid
 
 COMMAND = "native-board-contract"
 KEY = "native_board_contract"
+CATALOG = "native-board-contract-catalog"
+CATALOG_KEY = "native_board_contract_catalog"
 REFUSAL = "stock_board_contract_"
 QUEST_ID = re.compile(r"[A-Za-z0-9_]{1,96}")
 COMPLETE = -10
@@ -32,6 +34,24 @@ def parse(fields):
             or min(proof["cash"], proof["xp"]) < 0):
         raise ValueError("Unqualified native board result")
     return proof
+
+
+def parse_catalog(fields):
+    if len(fields) != 8:
+        raise ValueError("Invalid stock board catalog")
+
+    def ids(raw, size):
+        records = [] if raw == "-" else raw.split(",")
+        if (not size.isascii() or not size.isdigit() or len(size) > 3 or int(size) > 128
+                or len(records) != int(size) or not all(map(quest_id, records)) or len(set(records)) != len(records)):
+            raise ValueError("Invalid stock board catalog entries")
+        return records
+
+    area, pawn, board, offers_count, ready_count, offers, ready = fields[1:]
+    offers, ready = ids(offers, offers_count), ids(ready, ready_count)
+    if set(offers) & set(ready):
+        raise ValueError("A board contract cannot be both offered and ready")
+    return {"map": area, "pawn": pawn, "board": board, "offers": offers, "turnins": ready}
 
 
 def scope(host, actor, selected_board):
@@ -82,6 +102,22 @@ def _receipt(actor, before, result):
         if result["guid"] != "-":
             record.update(consumed_guid=result["guid"], objective_owner=actor)
     return record
+
+
+async def catalog(host, bridge, actor, selected_board=None):
+    area, pawn, board = scope(host, actor, selected_board)
+    try:
+        snapshot = await bridge.command(CATALOG, pawn, board, timeout=5)
+    except RuntimeError as error:
+        if str(error).startswith(REFUSAL):
+            raise party.RuleError(str(error)) from error
+        raise
+    proof = snapshot.get(CATALOG_KEY, {})
+    if (snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"), proof.get("board")) != (
+            "hosting", area, area, pawn, board):
+        raise RuntimeError("The stock board catalog did not identify the current actor and board")
+    host.last_game, host.last_seen = snapshot, time.monotonic()
+    return {CATALOG_KEY: proof}
 
 
 async def perform(host, bridge, actor, verb, quest, *, board=None):
