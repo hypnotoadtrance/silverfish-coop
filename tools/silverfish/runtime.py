@@ -2882,6 +2882,9 @@ class Bridge:
                 elif (fields[0] == "native-avatar-local-aim" and len(fields) == 2
                       and data.get("state") == "connected" and fields[1] in ("0", "1")):
                     data[native_player_avatar.LOCAL_AIM] = fields[1] == "1"
+                elif (fields[0] == "player-local-sprint" and len(fields) == 2
+                      and data.get("state") == "connected" and fields[1] in ("0", "1")):
+                    data["player_local_sprint"] = fields[1] == "1"
             if data.get("schema") == 1 and "state" in data:
                 local_input = data.get("player_local_input")
                 if local_input and local_input["pawn"] != data["pawns"].get("local", {}).get("name"):

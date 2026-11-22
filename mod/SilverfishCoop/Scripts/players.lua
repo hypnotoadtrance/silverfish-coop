@@ -40,6 +40,7 @@ local markers = {}
 local marker_frame
 local location_markers = {}
 local local_player
+local guest_sprints = {}
 local local_input_status
 local restoring_gate
 local walking
@@ -63,6 +64,38 @@ end
 
 local function active(phase)
     return phase == "hosting" or phase == "connected"
+end
+
+local function sync_guest_sprints(state, slots, phase)
+    if phase ~= "hosting" then
+        guest_sprints = {}
+        return
+    end
+    local instance = valid(state.world) and state.world.OwningGameInstance
+    local canonical = valid(instance) and instance.SaveSlot_Ref
+    for slot, details in pairs(slots) do
+        local pawn = details.pawn
+        local entry = guest_sprints[details.name]
+        if slot ~= "local" and entry and valid(canonical) and valid(pawn.Save) and not same(canonical, pawn.Save)
+            and not pawn:IsLocallyControlled() and pawn.Dead == false and valid(pawn.CharacterMovement) then
+            if desired[details.name] or applied[details.name] then
+                entry.applied = nil
+            else
+                local sprint = entry.sprint and pawn.MoveInputs_Enabled and not pawn.Stunned
+                    and pawn.CharacterMovement.MovementMode ~= 0
+                if sprint then
+                    local can = {}
+                    pawn:Check_CanSprint(can)
+                    sprint = can.CanSprint == true
+                end
+                sprint = sprint == true
+                if entry.applied ~= sprint or pawn.Sprinting ~= sprint then
+                    pawn:Action_Sprint(sprint)
+                    entry.applied = sprint
+                end
+            end
+        end
+    end
 end
 
 local function write_interaction(pawn, pickup_source)
@@ -731,6 +764,7 @@ function players.sync(state, phase)
     for name in pairs(markers) do
         if not desired[name] then sync_marker(name, nil) end
     end
+    sync_guest_sprints(state, slots, phase)
     pcall(native_downed_ai.sync, state, phase, desired)
     sync_local_input(state, phase)
     sync_location_markers(state, phase)
@@ -754,6 +788,28 @@ end
 
 function players.command(fields, state, phase)
     local command = fields[2]
+    if command == "player-guest-sprints" then
+        if phase ~= "hosting" or state.map ~= fields[3] or #fields > 11 or (#fields - 3) % 2 ~= 0 then
+            error("Invalid guest sprint state", 0)
+        end
+        local slots = roster(state, phase)
+        local next_sprints = {}
+        for slot, details in pairs(slots) do
+            if slot ~= "local" and guest_sprints[details.name] then
+                local entry = guest_sprints[details.name]
+                next_sprints[details.name] = {sprint = false, applied = entry.applied}
+            end
+        end
+        for index = 4, #fields, 2 do
+            local name, flag = fields[index], fields[index + 1]
+            if flag ~= "0" and flag ~= "1" then error("Invalid guest sprint state", 0) end
+            local old = guest_sprints[name]
+            next_sprints[name] = {sprint = flag == "1", applied = old and old.applied}
+        end
+        guest_sprints = next_sprints
+        sync_guest_sprints(state, slots, phase)
+        return "Guest sprint intent accepted"
+    end
     if command == "native-stock-door-input-fixture" and #fields == 3 then
         local pawn = local_player and local_player.pawn
         if not valid(pawn) or desired[local_player.name] or native_interact_address ~= pawn:GetAddress()
@@ -836,6 +892,9 @@ end
 
 function players.rows(status_row)
     local rows = {}
+    if local_player and valid(local_player.pawn) then
+        rows[#rows + 1] = status_row("player-local-sprint", local_player.pawn.Sprinting and 1 or 0)
+    end
     for slot, details in pairs(slot_pawns) do
         local name = details.name
         local pawn, record, marker = details.pawn, applied[name], markers[name]

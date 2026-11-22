@@ -2,8 +2,9 @@
 local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
 local pose_fixture = os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_POSE") == "1"
 local rifle_fixture = os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_RIFLE") == "1"
+local sprint_fixture = os.getenv("SILVERFISH_COOP_MOVEMENT_PROBE") == "1"
 local guest_fixture = mailbox and mailbox:match("[/\\]clients[/\\]avatar%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
-    and (pose_fixture or rifle_fixture or os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_EQUIPMENT") == "1")
+    and (pose_fixture or rifle_fixture or sprint_fixture or os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_EQUIPMENT") == "1")
 local host_fixture = mailbox and mailbox:match("[/\\]campaigns[/\\]avatar%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not (guest_fixture or host_fixture) then return end
@@ -162,12 +163,89 @@ local function rifle_profile(weapon)
         tostring(defaults.Action_OnRelease), tostring(defaults.SingleReload), projectile:GetFullName()}, "\t")
 end
 
+local trace_color = {R = 0, G = 0, B = 0, A = 0}
+
+local function prepare_lane(pawn, y)
+    local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local x = 4600
+    local hit = {}
+    local found = trace:LineTraceSingle(pawn, {X = x, Y = y, Z = 500}, {X = x, Y = y, Z = -450}, 0,
+        false, {pawn}, 0, hit, true, trace_color, trace_color, 0)
+    assert(found, "avatar_probe_lane_floor_unavailable")
+    local floor = (hit.OutHit or hit).ImpactPoint
+    local point = {X = x, Y = y, Z = floor.Z + pawn.CapsuleComponent:GetScaledCapsuleHalfHeight() + 5}
+    assert(pawn:K2_SetActorLocation(point, false, {}, true), "avatar_probe_lane_position_unavailable")
+end
+
+local function face_open_lane(pawn, teammate)
+    local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local point = pawn:K2_GetActorLocation()
+    local capsule = pawn.CapsuleComponent
+    local radius, height = capsule:GetScaledCapsuleRadius(), capsule:GetScaledCapsuleHalfHeight()
+    local start = {X = point.X, Y = point.Y, Z = point.Z + 12}
+    for _, length in ipairs({1800, 900, 500}) do
+        for yaw = 0, 345, 15 do
+            local radians = math.rad(yaw)
+            local target = {X = point.X + length * math.cos(radians), Y = point.Y + length * math.sin(radians), Z = start.Z}
+            local blocked = trace:CapsuleTraceSingle(pawn, start, target, radius, height - 10, 0, false,
+                {pawn, teammate}, 0, {}, true, trace_color, trace_color, 0)
+            local top = {X = target.X, Y = target.Y, Z = start.Z + 150}
+            local floor = {X = target.X, Y = target.Y, Z = start.Z - height - 180}
+            if not blocked and trace:LineTraceSingle(pawn, top, floor, 0, false,
+                {pawn, teammate}, 0, {}, true, trace_color, trace_color, 0) then
+                pawn.Controller:SetControlRotation({Pitch = 0, Yaw = yaw, Roll = 0})
+                return math.cos(radians), math.sin(radians)
+            end
+        end
+    end
+    error("avatar_probe_open_lane_unavailable", 0)
+end
+
+local function movement_row(pawn)
+    local movement = pawn.CharacterMovement
+    local point = pawn:K2_GetActorLocation()
+    local mesh = pawn.Mesh:K2_GetComponentLocation()
+    local velocity = pawn:GetVelocity()
+    return table.concat({pawn.Sprinting and 1 or 0, movement.MaxWalkSpeed, pawn.Speed_Walking,
+        pawn.Speed_Sprinting, pawn.MovementSpeedMod, valid(pawn.Save) and pawn.Save.PlayerFood or -1,
+        math.sqrt(velocity.X^2 + velocity.Y^2), point.X, point.Y, point.Z, mesh.X, mesh.Y}, "\t")
+end
+
+local function movement_probe(operation, local_pawn, remote_pawn)
+    assert(valid(local_pawn) and valid(remote_pawn), "avatar_probe_movement_pawns_unavailable")
+    if operation == "localmovement" then return movement_row(local_pawn) end
+    if operation == "remotemovement" then return movement_row(remote_pawn) end
+    if operation == "preparemovement" then
+        for _, pawn in ipairs({local_pawn, remote_pawn}) do
+            if valid(pawn.Save) and (pawn:HasAuthority() or same(pawn, local_pawn)) then
+                pawn.Save.PlayerFood = 100
+            end
+        end
+        if local_pawn:HasAuthority() then
+            prepare_lane(local_pawn, 16060)
+            prepare_lane(remote_pawn, 16240)
+        end
+    elseif operation == "walk" or operation == "run" then
+        assert(local_pawn.CharacterMovement:IsMovingOnGround() and not local_pawn.bIsCrouched
+            and local_pawn.MoveInputs_Enabled, "avatar_probe_walk_ground_unavailable")
+        local x, y = face_open_lane(local_pawn, remote_pawn)
+        local_pawn.MovementInput = {X = 0, Y = 1}
+        local_pawn:Action_Sprint(operation == "run")
+        return string.format("%.5f\t%.5f", x, y)
+    elseif operation == "stopmovement" then
+        local_pawn.MovementInput = {X = 0, Y = 0}
+        local_pawn:Action_Sprint(false)
+    else
+        error("avatar_probe_unknown_movement_operation", 0)
+    end
+end
+
 local function run(operation)
     if guest_fixture then
         local clip_index, clip_sample = operation:match("^clip([1-4])([01])$")
         local rig_operation = pose_fixture and (operation == "rig" or operation == "wrists" or clip_index)
         assert(operation == "aim" or operation == "lower" or rig_operation
-            or pose_fixture and operation == "jump" or rifle_fixture and operation == "selectrifle",
+            or pose_fixture and operation == "jump" or rifle_fixture and operation == "selectrifle" or sprint_fixture,
             "avatar_probe_unknown_guest_operation")
         local viewport = FindFirstOf("GameViewportClient")
         local world = valid(viewport) and viewport.World
@@ -181,12 +259,13 @@ local function run(operation)
                 if candidate:IsLocallyControlled() then
                     assert(not local_pawn, "avatar_probe_duplicate_local_guest")
                     local_pawn = candidate
-                elseif rig_operation then
+                elseif rig_operation or sprint_fixture then
                     assert(not remote_pawn, "avatar_probe_duplicate_remote_host")
                     remote_pawn = candidate
                 end
             end
         end
+        if sprint_fixture then return movement_probe(operation, local_pawn, remote_pawn) end
         if rig_operation then
             assert(remote_pawn, "avatar_probe_rig_pending")
             if operation == "rig" then return rig(remote_pawn) end
@@ -230,6 +309,7 @@ local function run(operation)
         return
     end
     local host, guest = player_pair()
+    if sprint_fixture then return movement_probe(operation, host, guest) end
     if rifle_fixture and operation == "seedrifle" then
         local class = asset(break_action)
         local rows = guest.Save.PlayerEquipment
@@ -316,7 +396,7 @@ local function run(operation)
 end
 
 local last
-LoopInGameThreadWithDelay(pose_fixture and 40 or 250, function()
+LoopInGameThreadWithDelay(sprint_fixture and 16 or pose_fixture and 40 or 250, function()
     local file = io.open(command, "rb")
     if not file then return false end
     local content = file:read(100) or ""

@@ -263,6 +263,8 @@ class Host:
         self.pickup_audio, self.pickup_playback = native_pickup_audio.PickupAudio(), native_pickup_audio.Playback()
         self.voice_audio, self.voice_playback = native_voice.VoiceQueue(), native_voice.Playback()
         self.guest_avatar_aims = {}
+        self.guest_sprints = {}
+        self.applied_guest_sprints = None
         self.native_zone_walls = native_zone_walls
         self.native_profile = native_profile
         self.persist_native_guest = persist_native_guest
@@ -1822,6 +1824,27 @@ class Host:
         return {"ok": True, "gameplay": gameplay, "zone_epoch": self.zone_epoch, "viewer_role": role,
                 "zone": self.last_game["map"], "travel_in_progress": self.transitioning}
 
+    async def project_guest_sprints(self, bridge):
+        if not self.guest_sprints and self.applied_guest_sprints is None:
+            return
+        now = time.monotonic()
+        area = self.last_game.get("map")
+        if not area or self.last_game.get("state") != "hosting":
+            return
+        members = self.native_recipients()
+        active = {}
+        for character, record in self.guest_sprints.items():
+            epoch, pawn, sprinting, expires = record
+            member = members.get(character)
+            if epoch == self.zone_epoch and expires > now and member and member["connected"] and member["pawn"] == pawn:
+                active[character] = record
+        self.guest_sprints = active
+        states = tuple(sorted((record[1], "1" if record[2] else "0") for record in active.values()))
+        receipt = (self.zone_epoch, states)
+        if receipt != self.applied_guest_sprints:
+            await bridge.command("player-guest-sprints", area, *(value for state in states for value in state), timeout=2)
+            self.applied_guest_sprints = receipt
+
     def guest_request(self, guest_id: str, request: dict):
         """Derive character identity from the authenticated link, never the payload."""
         if self.stopping:
@@ -1837,7 +1860,9 @@ class Host:
         if not identity:
             return {"ok": False, "error": "guest_not_active"}
         role, character = identity
-        if request.get("action") == "snapshot" and request.keys() <= {"action", "voice_events", "avatar_aim", "zone_epoch"}:
+        if request.get("action") == "snapshot" and request.keys() <= {
+            "action", "voice_events", "avatar_aim", "sprinting", "zone_epoch",
+        }:
             if request.get("zone_epoch") == self.zone_epoch and not self.transitioning:
                 member = self.native_recipients().get(character) if self.native_guest else None
                 if member and member["connected"] and time.monotonic() - self.last_seen < 2:
@@ -1846,6 +1871,10 @@ class Host:
                         self.voice_audio.received(self.last_game, self.zone_epoch, member["pawn"], request["voice_events"])
                     if type(request.get("avatar_aim")) is bool:
                         native_player_avatar.guest_aim(self, character, member, request["avatar_aim"])
+                    if type(request.get("sprinting")) is bool:
+                        self.guest_sprints[character] = (
+                            self.zone_epoch, member["pawn"], request["sprinting"], time.monotonic() + 1.5,
+                        )
             return self.snapshot_for_guest(guest_id, role)
         action = request.get("action")
         if action in (link.GUEST_LEAVE, link.GUEST_LEAVE_CONFIRM):
@@ -3856,6 +3885,8 @@ class Host:
             if not self.transitioning:
                 with contextlib.suppress(OSError, RuntimeError, TimeoutError):
                     self.last_game = await native_player_avatar.project_host(self, bridge)
+                with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                    await self.project_guest_sprints(bridge)
             if self.mindcore_carry:
                 self.mindcore_carry.maintain()
             try:
@@ -4750,6 +4781,7 @@ class Client:
         self.weapon_shot_playback = native_weapon_fire_view.Playback()
         self.snapshot_request: asyncio.Task | None = None
         self.next_snapshot = 0.0
+        self.last_sprint_sent = None
         self.next_projection = 0.0
         self.gameplay_seen = 0.0
         self.guest_clock = native_guest_clock.GuestClockView() if guest_clock else None
@@ -5382,14 +5414,21 @@ class Client:
         if self.check_host_end():
             return
         now = time.monotonic()
-        if self.snapshot_request is None and now >= self.next_snapshot:
+        active = self.zone_epoch and not self.needs_travel and not self.server_transitioning
+        sprint = self.last_game.get("player_local_sprint") if active else None
+        sprint_update = (self.zone_epoch, sprint) if type(sprint) is bool else None
+        sprint_changed = sprint_update is not None and sprint_update != self.last_sprint_sent
+        if self.snapshot_request is None and (now >= self.next_snapshot or sprint_changed):
             self.next_snapshot = now + 0.5
             request = {"action": "snapshot"}
-            if not self.needs_travel and not self.server_transitioning and self.zone_epoch:
+            if active:
                 if events := native_voice.client_events(self.last_game):
                     request.update(voice_events=events, zone_epoch=self.zone_epoch)
                 if native_player_avatar.LOCAL_AIM in self.last_game:
                     request.update(avatar_aim=self.last_game[native_player_avatar.LOCAL_AIM], zone_epoch=self.zone_epoch)
+                if sprint_update is not None:
+                    request.update(sprinting=sprint, zone_epoch=self.zone_epoch)
+            self.last_sprint_sent = sprint_update
             self.snapshot_request = asyncio.create_task(self.transport.request(request, timeout=2))
         if self.snapshot_request is not None and (wait or self.snapshot_request.done()):
             pending, self.snapshot_request = self.snapshot_request, None

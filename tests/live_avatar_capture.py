@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+from statistics import median
 import subprocess
 import sys
 import uuid
@@ -116,9 +117,53 @@ async def verify_pose(host_run, guest_run):
             "airborne": airborne, "landed": landed, "aim_clip_wrist_positions": wrists}
 
 
+async def capture_movement(host_run, guest_run, command, host, guest):
+    fields = ("sprinting", "walk_cap", "base_walk", "base_sprint", "speed_modifier", "food",
+              "speed", "x", "y", "z", "mesh_x", "mesh_y")
+
+    async def read(run, operation):
+        result = await avatar_probe(run, operation)
+        return dict(zip(fields, map(float, result), strict=True))
+
+    await avatar_probe(host_run, "preparemovement")
+    await asyncio.sleep(.75)
+    await avatar_probe(guest_run, "preparemovement")
+    evidence = {}
+    for role, runner, observer, target in (("guest", guest_run, host_run, guest), ("host", host_run, guest_run, host)):
+        modes = {}
+        for pace in ("walk", "run"):
+            x, y = await avatar_probe(runner, pace)
+            before = await read(runner, "localmovement")
+            started = await command("action", *target, "walk", "--continuous", f"--x={x}", f"--y={y}", "--milliseconds", "1600")
+            assert started["ok"], started
+            await asyncio.sleep(.4)
+            samples = []
+            for _ in range(5):
+                own, observed = await asyncio.gather(read(runner, "localmovement"), read(observer, "remotemovement"))
+                samples.append({"runner": own, "observer": observed})
+                await asyncio.sleep(.12)
+            await avatar_probe(runner, "stopmovement")
+            await asyncio.sleep(.7)
+            stopped = await read(observer, "remotemovement")
+            modes[pace] = {"start": before, "samples": samples, "observer_after_release": stopped}
+        evidence[role] = modes
+    guest_movement = evidence["guest"]
+    for pace, sprinting in (("walk", False), ("run", True)):
+        phase = guest_movement[pace]
+        settled = phase["samples"][-3:]
+        speeds = [median(row[peer]["speed"] for row in settled) for peer in ("runner", "observer")]
+        assert all(row["runner"]["sprinting"] == row["observer"]["sprinting"] == sprinting
+                   and abs(row["runner"]["walk_cap"] - row["observer"]["walk_cap"]) < 1 for row in settled), phase
+        assert min(speeds) > 500 and abs(speeds[0] - speeds[1]) < 40, speeds
+        assert phase["observer_after_release"]["sprinting"] == 0, phase
+    assert (guest_movement["run"]["samples"][-1]["observer"]["walk_cap"]
+            > guest_movement["walk"]["samples"][-1]["observer"]["walk_cap"])
+    return evidence
+
+
 async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: bool = False,
                   melee: bool = False, pose: bool = False, rifle: bool = False,
-                  consumable: bool = False) -> None:
+                  consumable: bool = False, movement: bool = False) -> None:
     profile = "avatar-" + uuid.uuid4().hex[:8]
     host_dir = work / "campaigns" / profile
     guest_dir = work / "clients" / profile
@@ -131,6 +176,8 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
         env["SILVERFISH_COOP_RENDER_CAPTURE_RIFLE"] = "1"
     if equipment:
         env["SILVERFISH_COOP_RENDER_CAPTURE_EQUIPMENT"] = "1"
+    if movement:
+        env["SILVERFISH_COOP_MOVEMENT_PROBE"] = "1"
     base = (sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work))
     before = saved_hashes(vanilla_saved)
     processes = []
@@ -180,6 +227,9 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             assert all(row["state"] == "default_body" for row in evidence[role].values()), evidence
         if lifecycle:
             identity = invitation["character_id"]
+        if movement:
+            await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+            evidence["stock_movement"] = await capture_movement(host_run, guest_run, command, host, guest)
         if consumable:
             await avatar_probe(host_run, "consume")
             async with asyncio.timeout(8):
@@ -400,6 +450,7 @@ if __name__ == "__main__":
     parser.add_argument("--pose", action="store_true", help="verify the centered rig and stock attachments through a turn and jump")
     parser.add_argument("--rifle", action="store_true", help="verify a guest's stock break-action quick-slot selection")
     parser.add_argument("--consumable", action="store_true", help="verify positional sound after stock host Bandage use")
+    parser.add_argument("--movement", action="store_true", help="sample stock walk and sprint on the runner and the observing peer")
     options = parser.parse_args()
     if options.melee and (not options.equipment or options.lifecycle):
         parser.error("--melee requires --equipment and runs independently of --lifecycle")
@@ -408,7 +459,9 @@ if __name__ == "__main__":
     if options.rifle and (options.pose or options.equipment or options.lifecycle):
         parser.error("--rifle verifies stock guest equipment selection independently")
     work = options.work.resolve(strict=True)
-    with installed_probe(work) if any((options.equipment, options.pose, options.rifle, options.consumable)) else nullcontext():
+    with installed_probe(work) if any(
+        (options.equipment, options.pose, options.rifle, options.consumable, options.movement)
+    ) else nullcontext():
         asyncio.run(capture(work, options.vanilla_saved.resolve(strict=True),
                             options.lifecycle, options.equipment, options.melee, options.pose,
-                            options.rifle, options.consumable))
+                            options.rifle, options.consumable, options.movement))
