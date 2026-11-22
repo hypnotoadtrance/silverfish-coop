@@ -1466,10 +1466,6 @@ namespace
         scope.not_deer.counts = {};
         scope.boars.counts = {};
         scope.not_deer_replica.Reset();
-        auto* husk = find<U::UClass>(npc_class);
-        auto* flayer = find<U::UClass>(flayer_class);
-        auto* not_deer = operate_not_deer ? find<U::UClass>(not_deer_class) : nullptr;
-        auto* boar = operate_boars ? find<U::UClass>(boar_class) : nullptr;
         auto* antfarm = find<U::UClass>(antfarm_class);
 
         if (auto* base = find<U::UClass>(npc_base))
@@ -1478,13 +1474,13 @@ namespace
             U::UGameplayStatics::GetAllActorsOfClass(active.world, base, npcs);
             for (auto* actor : npcs)
             {
-                if (!actor) continue;
-                auto* type = actor->GetClassPrivate();
-                if ((type != husk && type != flayer && type != not_deer && type != boar) || !in_level(actor, active.world))
-                    continue;
-                auto& counts = type == flayer ? scope.flayers.counts : type == not_deer ? scope.not_deer.counts :
-                    type == boar ? scope.boars.counts : scope.counts;
-                if (type == not_deer && byte_field(actor, STR("Faction")) != not_deer_profile.faction)
+                // Identify loaded classes from the actors. Looking up an unloaded optional class can scan the object array.
+                const auto family = npc_family(actor);
+                if (family == NpcFamily::Unknown || (family == NpcFamily::NotDeer && !operate_not_deer) ||
+                    !in_level(actor, active.world)) continue;
+                auto* cohort = antfarm_cohort(family);
+                auto& counts = cohort ? cohort->counts : scope.counts;
+                if (family == NpcFamily::NotDeer && byte_field(actor, STR("Faction")) != not_deer_profile.faction)
                 {
                     ++counts.other;
                     continue;
@@ -1501,7 +1497,7 @@ namespace
                 {
                     ++counts.simulated;
                     if (live(object(actor, STR("Controller")))) ++counts.simulated_controllers;
-                    if (type == not_deer)
+                    if (family == NpcFamily::NotDeer)
                     {
                         if (counts.simulated == 1) scope.not_deer_replica = actor;
                         else scope.not_deer_replica.Reset();
@@ -1522,7 +1518,7 @@ namespace
                     continue;
                 ++scope.counts.antfarm_initialized;
                 ++scope.flayers.counts.antfarm_initialized;
-                if (not_deer) ++scope.not_deer.counts.antfarm_initialized;
+                if (operate_not_deer) ++scope.not_deer.counts.antfarm_initialized;
             }
         }
     }

@@ -119,7 +119,17 @@ local function enroll_placed_props(state, phase)
             and actor.bNetLoadOnClient == true and actor:HasAuthority() and not actor:IsActorBeingDestroyed()
             and same(actor:GetWorld(), state.world) and same(actor:GetOuter(), state.world.PersistentLevel)
             and mesh:IsSimulatingPhysics(bone) == true and publish_motion(actor) and carry.enroll(actor) then
-            scan.actors[actor:GetFullName()] = actor
+            if fixtures then
+                local name = actor:GetFullName()
+                local class = actor:GetClass():GetFullName():match("^%S+ (.+)$")
+                local mass = mesh:GetMass()
+                local stem = name:match("^(Prop_%w+)_C ")
+                local labels = barrel_types[stem]
+                if mass > 0 and mass <= 10000 then
+                    scan.actors[name] = {actor = actor, class = class, mass = mass,
+                        barrel = labels and authored_index(name, labels) ~= nil}
+                end
+            end
         end
     end
     scan.index = finish + 1
@@ -143,18 +153,13 @@ function props.rows(state, phase, row)
         end
     end
     if fixtures and placed_props and same(placed_props.world, state.world) then
-        for name, actor in pairs(placed_props.actors) do
-            local mesh = valid(actor) and not actor:IsActorBeingDestroyed() and root_mesh(actor)
-            if mesh then
-                local class = actor:GetClass():GetFullName():match("^%S+ (.+)$")
-                local mass = mesh:GetMass()
-                if class and mass > 0 and mass <= 10000 then
-                    result[#result + 1] = row("native-authored-physics-prop", state.map, name, class, mass)
+        for name, entry in pairs(placed_props.actors) do
+            if valid(entry.actor) and not entry.actor:IsActorBeingDestroyed() then
+                if entry.class then
+                    result[#result + 1] = row("native-authored-physics-prop", state.map, name, entry.class, entry.mass)
                 end
-                local stem = name:match("^(Prop_%w+)_C ")
-                local labels = barrel_types[stem]
-                if labels and authored_index(name, labels) and mass > 0 and mass <= 10000 then
-                    result[#result + 1] = row("native-authored-physics-barrel", state.map, name, mass)
+                if entry.barrel then
+                    result[#result + 1] = row("native-authored-physics-barrel", state.map, name, entry.mass)
                 end
             end
         end

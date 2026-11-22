@@ -13,7 +13,7 @@ local color = {R = 0, G = 0, B = 0, A = 0}
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local world, state, phase, hook, mailbox, sequence, next_read
 local enrolled, holdings, edges, local_hold, latest = {}, {}, {}, nil, nil
-local fixture_actor
+local fixture_actor, loose_fixtures = nil, {}
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local fixtures = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local offering_fixture = headless and observers.enabled and os.getenv("SILVERFISH_COOP_OBSERVER_THROW_FIXTURE") == "1"
@@ -185,7 +185,14 @@ function carry.enroll_loose(actor)
     if not actor.bReplicates then actor:SetReplicates(true) end
     if not actor.bReplicateMovement then actor:SetReplicateMovement(true) end
     actor:ForceNetUpdate()
-    return carry.enroll(actor)
+    if not carry.enroll(actor) then return end
+    if fixtures then
+        local mass, class = box:GetMass(), actor_class(actor)
+        if class and mass > 0 and mass <= 10000 then
+            loose_fixtures[actor:GetAddress()] = {actor = actor, name = actor:GetFullName(), class = class, mass = mass}
+        end
+    end
+    return true
 end
 
 function carry.item_is_held(actor)
@@ -646,13 +653,9 @@ function carry.rows(current, seat, row)
     local rows = {}
     if not enabled or not same(world, current.world) then return rows end
     if seat == "hosting" and fixtures then
-        for _, actor in pairs(enrolled) do
-            local body = item_body(actor)
-            if body and placed_item(actor) then
-                local mass, class = body:GetMass(), actor_class(actor)
-                if class and mass > 0 and mass <= 10000 then
-                    rows[#rows + 1] = row("native-authored-physics-prop", current.map, actor:GetFullName(), class, mass)
-                end
+        for address, entry in pairs(loose_fixtures) do
+            if same(enrolled[address], entry.actor) and not entry.actor:IsActorBeingDestroyed() then
+                rows[#rows + 1] = row("native-authored-physics-prop", current.map, entry.name, entry.class, entry.mass)
             end
         end
     end
@@ -690,7 +693,7 @@ function carry.sync(current, seat, bridge)
     if not enabled then return end
     if not same(world, current.world) then
         world, enrolled, holdings, edges, local_hold, latest = current.world, {}, {}, {}, nil, nil
-        fixture_actor, next_read = nil, nil
+        fixture_actor, loose_fixtures, next_read = nil, {}, nil
     end
     state, phase, mailbox = current, seat, bridge and bridge .. "/native-prop-carry-poses"
     if not hook and type(RegisterHook) == "function" and valid(StaticFindObject(grab_path)) then
