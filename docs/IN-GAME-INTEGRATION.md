@@ -201,6 +201,8 @@ A muted pair dragged a blowtorch into the guest's stock Utility slot 7. The host
 
 The host now samples the guest's stock movement mode to keep track of falls. A muted trial downed the guest from a stock landing and verified a stock poison gas hit, revive, reconnect, and restart. The reported acid surface and Observatory NPC retarget behavior still need focused checks.
 
+Ordinary authored zone travel gives the host and guest the stock fade widget and transition sound before loading. The guest keeps an opaque cover through the intermediate title world. A muted Observatory–Crossroads round trip observed one stock cue dispatch per seat on each crossing, checked the guest's cover during the title handoff, and verified that both covers cleared on arrival. Foreground sound and first-frame presentation still need a two-PC check. [Authored route trial](../tests/live_authored_route_matrix_smoke.py)
+
 ### Steam hosting options
 
 - The in-game Host flow offers a transport choice. Direct IP uses the configured port and address. Steam Networking opens a Steam lobby when the campaign is ready.

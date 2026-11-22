@@ -42,7 +42,7 @@ def select_routes(selectors):
 
 
 async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=False, insomnia=False,
-                 check_network_budget=False):
+                 check_network_budget=False, check_transition_presentation=False):
     name = "authored-route-" + uuid.uuid4().hex[:8]
     campaign = ("--campaign", name)
     profile = ("--profile", name)
@@ -214,12 +214,23 @@ async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=Fals
             ), arrival
             leg["arrival"] = arrival
             leg["destination_epoch"] = current["zone_epoch"]
-        if check_network_budget:
+        if check_network_budget or check_transition_presentation:
             journal = (client_run / "events.jsonl").read_text(encoding="utf-8").splitlines()
             covered = [entry for line in journal if (entry := json.loads(line)).get("event") == "native_zone_loading_transition"]
             assert [entry["destination"] for entry in covered] == [route.destination for route in routes], covered
             assert all(entry["covered"] for entry in covered), covered
             evidence["loading_cover"] = covered
+        if check_transition_presentation:
+            expected = [route.destination for route in routes]
+            for seat, owner in (("host", run), ("guest", client_run)):
+                journal = (owner / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                presented = [entry for line in journal
+                             if (entry := json.loads(line)).get("event") == "zone_transition_presentation"]
+                assert [entry["destination"] for entry in presented] == expected, presented
+                assert all(entry["covered"] and entry["cue"] for entry in presented), presented
+                await wait(owner, lambda state: state.get("game", {}).get("map") == expected[-1]
+                           and "native_zone_loading_cover" not in state["game"], timeout=10)
+                evidence.setdefault("transition_presentation", {})[seat] = presented
         if sleep_and_wipe:
             await act("native-guest-damage", target="guest")
             await wait(run, lambda state: state.get("gameplay", {}).get("players", {}).get("guest", {}).get("downed"))
@@ -259,6 +270,7 @@ if __name__ == "__main__":
     parser.add_argument("--route", action="append", required=True, metavar="MAP@ENTRANCE[@ACTOR]")
     parser.add_argument("--verify-regroup-message", action="store_true")
     parser.add_argument("--verify-network-budget", action="store_true")
+    parser.add_argument("--verify-transition-presentation", action="store_true")
     parser.add_argument("--sleep-and-wipe", action="store_true",
                         help="sleep at the starting map's stock bed and return there after a wipe")
     parser.add_argument("--stock-insomnia", action="store_true", help="verify the stock Insomnia roll at a neutral bed")
@@ -273,4 +285,4 @@ if __name__ == "__main__":
         parser.error(str(error))
     asyncio.run(verify(config.work.resolve(), config.vanilla_saved.resolve(), selected,
                        config.verify_regroup_message, config.sleep_and_wipe, config.stock_insomnia,
-                       config.verify_network_budget))
+                       config.verify_network_budget, config.verify_transition_presentation))

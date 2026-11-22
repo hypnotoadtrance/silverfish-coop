@@ -1,6 +1,6 @@
 import time
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.link import HostLink
@@ -178,6 +178,9 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(acknowledgement=acknowledgement):
                 host = self.host(route.source, route.destination)
                 host.internal_port = 17000
+                host.last_game["native_zone_loading_support"] = True
+                host.zone_epoch = "source"
+                host.public_gameplay = Mock(return_value={})
                 transport = HostLink(("127.0.0.1", 17000), Mock(), None)
                 transport.restrict_game_routes({"old-guest"})
                 source = self.frame(route.source, 3, 1500, guarded=True)
@@ -185,7 +188,17 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
                 bridge = self.bridge(self.frame(route.source, 2, 1500), source)
                 host.authored_arrival = AsyncMock(return_value=destination)
 
-                async def depart(*fields):
+                async def depart(*fields, **options):
+                    if fields[0] == "native-zone-loading-start":
+                        self.assertEqual(host.snapshot_for_guest("peer", "guest")["loading_zone"], route.destination)
+                        host.checkpoint_native.assert_awaited_once_with(bridge)
+                        self.assertTrue(transport._native_route_permitted("old-guest"))
+                        return {"native_zone_loading_cover": route.destination, "native_zone_loading_cue": {
+                            "destination": route.destination, "seat": "host", "dispatched": True,
+                        }}
+                    if fields[0] == "native-zone-loading-clear":
+                        self.assertNotIn("loading_zone", host.snapshot_for_guest("peer", "guest"))
+                        return {}
                     self.assertEqual(fields, ("travel-party", route.destination, route.source,
                                               str(route.travel_time_step or 0), "d1", "host-pawn", "host-controller",
                                               "c1", "IpConnection game-guest", "PlayerControler_FP_C guest-controller",
@@ -214,8 +227,16 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
                 bridge.wait_for.side_effect = wait_for
                 host.begin_zone_guests.side_effect = retire
                 host.reopen_zone_guests = AsyncMock(side_effect=reopen)
-                with patch("tools.silverfish.service.verify_loopback_socket"):
+                with (patch("tools.silverfish.service.verify_loopback_socket"),
+                      patch("tools.silverfish.service.asyncio.sleep", new_callable=AsyncMock) as fade):
                     result = await host.travel_authored(bridge, transport, route)
+                fade.assert_awaited_once_with(1)
+                self.assertEqual(bridge.command.await_args_list[0],
+                                 call("native-zone-loading-start", route.destination, timeout=2))
+                self.assertEqual(bridge.command.await_args_list[-1],
+                                 call("native-zone-loading-clear", route.destination, timeout=2))
+                host.control.event.assert_any_call("zone_transition_presentation", destination=route.destination,
+                                                   seat="host", cue=True, covered=True)
                 self.assertTrue(transport._native_route_permitted("old-guest"))
                 self.assertFalse(transport._native_route_permitted("other-guest"))
                 self.assertFalse(host.transitioning)

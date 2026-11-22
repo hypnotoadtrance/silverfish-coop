@@ -106,6 +106,18 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GameplayStatusTests(unittest.TestCase):
+    def test_transition_cover_and_cue_are_independent_bridge_receipts(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        destination = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+        frame = ("schema\t1\nseq\t20\nsession\tclient\tconnected\tObservatory\t1\t1\n"
+                 "native-zone-loading-support\t1\n"
+                 f"native-zone-loading-cover\t{destination}\n"
+                 f"native-zone-loading-cue\t{destination}\tguest\t0\n")
+        status = bridge._parse_status(frame)
+        self.assertTrue(status["native_zone_loading_support"])
+        self.assertEqual(status["native_zone_loading_cover"], destination)
+        self.assertEqual(status["native_zone_loading_cue"], {"destination": destination, "seat": "guest", "dispatched": False})
+
     def test_repeated_diagnostics_yield_to_gameplay_and_link_changes_publish_immediately(self):
         with TemporaryDirectory() as temporary, Control(Path(temporary)) as control:
             with patch("tools.silverfish.control.time.monotonic", side_effect=(1, 1.01, 1.02, 1.03, 1.30)):

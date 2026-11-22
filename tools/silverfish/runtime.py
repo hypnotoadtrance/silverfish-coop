@@ -2908,6 +2908,13 @@ class Bridge:
                 elif (fields[0] == "native-zone-loading-cover" and len(fields) == 2
                       and fields[1].startswith("/Game/Classes/Maps/")):
                     data["native_zone_loading_cover"] = fields[1]
+                elif fields == ["native-zone-loading-support", "1"]:
+                    data["native_zone_loading_support"] = True
+                elif (fields[0] == "native-zone-loading-cue" and len(fields) == 4
+                      and fields[1].startswith("/Game/Classes/Maps/") and fields[2] in ("host", "guest")
+                      and fields[3] in ("0", "1")):
+                    data["native_zone_loading_cue"] = {"destination": fields[1], "seat": fields[2],
+                                                       "dispatched": fields[3] == "1"}
                 elif fields[0] == "native-replication-rate" and len(fields) == 4 and data.get("state") == "hosting":
                     before, effective = _finite(fields[2]), _finite(fields[3])
                     if fields[1].startswith("Player_FP_C ") and 0 < effective <= before <= 1000:

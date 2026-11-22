@@ -989,6 +989,21 @@ local function run_command(fields, state, current_phase)
         role = "client"
         was_connected = false
         return "client travel requested"
+    elseif command == "native-zone-loading-start" or command == "native-zone-loading-clear" then
+        if #fields ~= 3 or not supported_map(argument) or (role ~= "host" and role ~= "client") then
+            error("Expected a qualified co-op transition presentation", 0)
+        end
+        if command == "native-zone-loading-clear" then
+            native_zone_loading.clear(argument)
+            return "zone transition presentation cleared"
+        end
+        if (current_phase ~= "hosting" and current_phase ~= "connected") or state.map == argument then
+            error("The co-op transition source is unavailable", 0)
+        end
+        if not native_zone_loading.begin(state, current_phase, argument) then
+            error("The co-op transition presentation could not start", 0)
+        end
+        return "zone transition presentation started"
     elseif command == "leave" then
         local destination = fields[4]
         if #fields > 4 or (argument and argument ~= main_menu)
@@ -996,7 +1011,7 @@ local function run_command(fields, state, current_phase)
             error("Expected the packaged title-screen map", 0)
         end
         native_death.clear_client()
-        if destination then native_zone_loading.begin(state, destination) else native_zone_loading.clear() end
+        if destination then native_zone_loading.begin(state, current_phase, destination) else native_zone_loading.clear() end
         native_anomaly_fields.guest(false)
         native_loot_actions.release_pending()
         guest_save.clear()
@@ -1235,6 +1250,7 @@ local function write_status(state, current_phase, failure, fields, pending)
     for _, row in ipairs(native_player_avatar.rows(status_row)) do rows[#rows + 1] = row end
     for _, row in ipairs(native_voice.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
     for _, row in ipairs(native_replication_budget.rows(status_row)) do rows[#rows + 1] = row end
+    rows[#rows + 1] = status_row("native-zone-loading-support", 1)
     for _, row in ipairs(native_zone_loading.rows(status_row)) do rows[#rows + 1] = row end
     local guest_save_row = guest_save.row(status_row)
     if guest_save_row then rows[#rows + 1] = guest_save_row end
@@ -1669,6 +1685,7 @@ native_guest_smg_hold.start_fast(bridge, status_row, function(state)
 end)
 local next_snapshot = 0
 LoopInGameThreadWithDelay(25, function()
+    pcall(native_zone_loading.refresh, current_world)
     if not leaving then pcall(native_prop_carry.update) end
     if role == "host" and not leaving then pcall(native_weapon_fire_view.flush, current_world) end
     if not leaving then pcall(native_player_avatar.animate_head, current_world) end

@@ -3,9 +3,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 from tools.silverfish import native_stock_door, runtime, service
+from tools.silverfish.travel import PLAYTEST_MAPS
 
 
 class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
@@ -49,6 +50,37 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         await client.refresh_gameplay(project=False, wait=False)
         self.assertEqual(client.gameplay, {})
         self.assertIsNone(client.snapshot_request)
+
+    async def test_zone_loading_hint_is_idempotent_until_abort_or_departure(self):
+        source, destination = sorted(PLAYTEST_MAPS)
+        reply = {"ok": True, "gameplay": {}, "zone_epoch": "current", "zone": source,
+                 "travel_in_progress": True, "loading_zone": destination}
+        request = AsyncMock(side_effect=[
+            {**reply, "loading_zone": []}, reply, reply,
+            {**reply, "loading_zone": None, "travel_in_progress": False}, reply,
+            {**reply, "loading_zone": None, "zone_epoch": "next", "zone": destination},
+        ])
+        client = self.guest(request)
+        client.host_session, client.zone_epoch, client.expected_zone = "session", "current", source
+        client.last_game = {"state": "connected", "map": source, "native_zone_loading_support": True}
+        client.bridge.command = AsyncMock(return_value={
+            "native_zone_loading_cover": destination,
+            "native_zone_loading_cue": {"destination": destination, "seat": "guest", "dispatched": True},
+        })
+        for _ in range(6):
+            client.next_snapshot = 0
+            await client.refresh_gameplay(project=False)
+        self.assertEqual(client.bridge.command.await_args_list, [
+            call("native-zone-loading-start", destination, timeout=2),
+            call("native-zone-loading-clear", destination, timeout=2),
+            call("native-zone-loading-start", destination, timeout=2),
+        ])
+        self.assertEqual(client.loading_zone, destination)
+        self.assertTrue(client.needs_travel)
+        presentations = [event for event in client.control.event.call_args_list
+                         if event.args[0] == "zone_transition_presentation"]
+        self.assertEqual(presentations, [call("zone_transition_presentation", destination=destination,
+                                              seat="guest", cue=True, covered=True)] * 2)
 
     async def test_stock_door_receipt_projects_before_the_next_world_snapshot(self):
         door = native_stock_door

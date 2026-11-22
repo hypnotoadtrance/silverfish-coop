@@ -130,6 +130,21 @@ def _pawn(state: dict, role: str) -> dict:
             "health": max(0, health) if health is not None else None}
 
 
+def _zone_loading_cue(frame: dict, destination: str, seat: str) -> bool:
+    proof = frame.get("native_zone_loading_cue", {})
+    return (proof.get("destination"), proof.get("seat"), proof.get("dispatched")) == (destination, seat, True)
+
+
+async def _start_zone_loading(bridge: Bridge, control: Control, destination: str, seat: str) -> None:
+    try:
+        frame = await bridge.command("native-zone-loading-start", destination, timeout=2)
+    except (OSError, RuntimeError, ValueError):
+        return
+    control.event("zone_transition_presentation", destination=destination, seat=seat,
+                  cue=_zone_loading_cue(frame, destination, seat),
+                  covered=frame.get("native_zone_loading_cover") == destination)
+
+
 @dataclass(frozen=True)
 class GuestLeave:
     character: str
@@ -332,6 +347,7 @@ class Host:
         self.next_projection = 0.0
         self.zone_epoch = uuid.uuid4().hex
         self.transitioning = False
+        self.loading_zone: str | None = None
         self.awaiting_zone_guest = None
         self.expired_characters: set[str] = set()
         self.native_restart_candidate: tuple[int, tuple[str, str], float] | None = None
@@ -1161,7 +1177,16 @@ class Host:
                     return {"ok": False, "error": "native_roster_unavailable"}
                 step = str(authored_plan.travel_time_step or 0) if authored_plan else "-"
                 departure_proof = (current, step, driver, observed_host["name"], observed_host["controller"], *exact_guests)
+        stock_loading = (departure_proof is not None and (authored_plan is not None or entrance is not None)
+                         and source_frame.get("native_zone_loading_support") is True
+                         and not (gold_guid or blue_plan or dream_plan or random_plan or matrix_plan or respawn_plan))
         try:
+            if stock_loading:
+                self.loading_zone = destination
+                await _start_zone_loading(bridge, self.control, destination, "host")
+                # Paint the stock fade while the game routes remain open. The
+                # native departure command still checks the live party after it.
+                await asyncio.sleep(1)
             authorization = ("blue", blue_plan["guid"]) if blue_plan else (gold_guid,) if gold_guid else ()
             if random_plan:
                 cube, itinerary = random_plan
@@ -1265,6 +1290,11 @@ class Host:
         except (OSError, RuntimeError, ValueError):
             self.stopping = True
             raise
+        finally:
+            if stock_loading:
+                self.loading_zone = None
+                with contextlib.suppress(OSError, RuntimeError, ValueError):
+                    await bridge.command("native-zone-loading-clear", destination, timeout=2)
         arrival = observed.get("native_authored_arrival") if authored_plan else None
         self.control.event("zone_travel_ready", source=current, destination=destination,
                            entrance=entrance, epoch=self.zone_epoch, revision=revision,
@@ -1883,8 +1913,11 @@ class Host:
             if (native_gold.valid_guid(equipped.get("guid")) and kind == "camera" and self.last_game["map"] == DEAD_BRIDGE
                     and self.party.get("native_quests", {}).get(native_turret_photo.QUEST_ID, {}).get("step") in (1, 2)):
                 gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=DEAD_BRIDGE, quest=native_turret_photo.QUEST_ID)
-        return {"ok": True, "gameplay": gameplay, "zone_epoch": self.zone_epoch, "viewer_role": role,
-                "zone": self.last_game["map"], "travel_in_progress": self.transitioning}
+        reply = {"ok": True, "gameplay": gameplay, "zone_epoch": self.zone_epoch, "viewer_role": role,
+                 "zone": self.last_game["map"], "travel_in_progress": self.transitioning}
+        if self.transitioning and (destination := getattr(self, "loading_zone", None)) and destination != reply["zone"]:
+            reply["loading_zone"] = destination
+        return reply
 
     async def project_guest_sprints(self, bridge):
         if not self.guest_sprints and self.applied_guest_sprints is None:
@@ -4825,6 +4858,7 @@ class Client:
         self.suspended = False
         self.host_session = None
         self.needs_travel = False
+        self.loading_zone: str | None = None
         self.last_game = {}
         self.gameplay = {}
         self.zone_epoch = None
@@ -4913,6 +4947,7 @@ class Client:
             await self.transport.disconnect()
             raise RuntimeError("Host did not return a valid session ID")
         if self.host_session and self.host_session != session:
+            await self.clear_zone_loading()
             self.needs_travel = True
             self.gameplay = {}
             self.zone_epoch = None
@@ -4969,6 +5004,7 @@ class Client:
                                local_datagrams=self.transport.game_local_datagrams)
             raise
         self.needs_travel = False
+        self.loading_zone = None
         self.game_visit = (self.host_session, self.zone_epoch, self.expected_zone) if self.invite.get("native_zones") else None
         self.empty_zone_retry.clear()
 
@@ -4980,6 +5016,7 @@ class Client:
                                                         and snapshot["sequence"] > left["sequence"], timeout=15)
             if cover is not None:
                 self.control.event("native_zone_loading_transition", destination=cover,
+                                   cue=_zone_loading_cue(self.last_game, cover, "guest"),
                                    covered=self.last_game.get("native_zone_loading_cover") == cover)
 
     async def reconcile_game(self) -> None:
@@ -5472,6 +5509,27 @@ class Client:
             with contextlib.suppress(asyncio.CancelledError, OSError, RuntimeError):
                 await pending
 
+    async def clear_zone_loading(self) -> None:
+        if destination := getattr(self, "loading_zone", None):
+            self.loading_zone = None
+            with contextlib.suppress(OSError, RuntimeError, ValueError):
+                await self.bridge.command("native-zone-loading-clear", destination, timeout=2)
+
+    async def sync_zone_loading(self, destination: object) -> None:
+        if (not self.host_session or not self.zone_epoch or self.needs_travel
+                or self.last_game.get("state") != "connected" or self.last_game.get("map") != self.expected_zone):
+            return
+        if not self.server_transitioning:
+            await self.clear_zone_loading()
+            return
+        if (self.last_game.get("native_zone_loading_support") is not True
+                or not isinstance(destination, str) or destination not in self.allowed_maps
+                or destination == self.expected_zone or destination == self.loading_zone):
+            return
+        await self.clear_zone_loading()
+        self.loading_zone = destination
+        await _start_zone_loading(self.bridge, self.control, destination, "guest")
+
     async def refresh_gameplay(self, *, project: bool = True, wait: bool = True) -> None:
         if self.check_host_end():
             return
@@ -5514,6 +5572,7 @@ class Client:
                         self.control.event("zone_rejoin_requested", zone_epoch=epoch)
                     self.zone_epoch = epoch
                     self.expected_zone = reply["zone"]
+                    await self.sync_zone_loading(reply.get("loading_zone"))
             except (OSError, RuntimeError) as error:
                 self.control.event("gameplay_snapshot_unavailable", error_type=type(error).__name__)
         if project:
