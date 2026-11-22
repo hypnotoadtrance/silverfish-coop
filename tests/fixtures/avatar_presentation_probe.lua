@@ -184,7 +184,7 @@ local function face_open_lane(pawn, teammate)
     local capsule = pawn.CapsuleComponent
     local radius, height = capsule:GetScaledCapsuleRadius(), capsule:GetScaledCapsuleHalfHeight()
     local start = {X = point.X, Y = point.Y, Z = point.Z + 12}
-    for _, length in ipairs({1800, 900, 500}) do
+    for _, length in ipairs({2900, 1800, 900, 500}) do
         for yaw = 0, 345, 15 do
             local radians = math.rad(yaw)
             local target = {X = point.X + length * math.cos(radians), Y = point.Y + length * math.sin(radians), Z = start.Z}
@@ -212,10 +212,23 @@ local function movement_row(pawn)
         math.sqrt(velocity.X^2 + velocity.Y^2), point.X, point.Y, point.Z, mesh.X, mesh.Y}, "\t")
 end
 
+local movement_operations = {localmovement = true, remotemovement = true, preparemovement = true,
+    walk = true, run = true, stopmovement = true, resetlane = true, faceteammate = true, readpose = true}
+
 local function movement_probe(operation, local_pawn, remote_pawn)
     assert(valid(local_pawn) and valid(remote_pawn), "avatar_probe_movement_pawns_unavailable")
     if operation == "localmovement" then return movement_row(local_pawn) end
     if operation == "remotemovement" then return movement_row(remote_pawn) end
+    if operation == "readpose" then
+        local body = remote_pawn.Mesh
+        local animation = body.AnimationData.AnimToPlay
+        local mesh = body.SkinnedAsset
+        local socket = FName("Weapon_Socket01", EFindName.FNAME_Find)
+        local hand = body:GetSocketTransform(socket, 2).Translation
+        return table.concat({valid(animation) and animation:GetFullName() or "-", body:GetPosition(),
+            tostring(body:IsPlaying()), body.VisibilityBasedAnimTickOption, valid(mesh) and mesh:GetFullName() or "-",
+            tostring(body:DoesSocketExist(socket)), hand.Z}, "\t")
+    end
     if operation == "preparemovement" then
         for _, pawn in ipairs({local_pawn, remote_pawn}) do
             if valid(pawn.Save) and (pawn:HasAuthority() or same(pawn, local_pawn)) then
@@ -242,6 +255,10 @@ local function movement_probe(operation, local_pawn, remote_pawn)
             end
             pawn:ApplyDynamicStats()
         end
+    elseif operation == "resetlane" then
+        assert(local_pawn:HasAuthority())
+        prepare_lane(local_pawn, 16060)
+        prepare_lane(remote_pawn, 16240)
     elseif operation == "walk" or operation == "run" then
         assert(local_pawn.CharacterMovement:IsMovingOnGround() and not local_pawn.bIsCrouched
             and local_pawn.MoveInputs_Enabled, "avatar_probe_walk_ground_unavailable")
@@ -252,17 +269,22 @@ local function movement_probe(operation, local_pawn, remote_pawn)
     elseif operation == "stopmovement" then
         local_pawn.MovementInput = {X = 0, Y = 0}
         local_pawn:Action_Sprint(false)
+    elseif operation == "faceteammate" then
+        local look = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+        local target = remote_pawn:K2_GetActorLocation()
+        local_pawn.Controller:SetControlRotation(look:FindLookAtRotation(local_pawn.Camera:K2_GetComponentLocation(), target))
     else
         error("avatar_probe_unknown_movement_operation", 0)
     end
 end
 
 local function run(operation)
+    local movement_operation = sprint_fixture and movement_operations[operation]
     if guest_fixture then
         local clip_index, clip_sample = operation:match("^clip([1-4])([01])$")
         local rig_operation = pose_fixture and (operation == "rig" or operation == "wrists" or clip_index)
         assert(operation == "aim" or operation == "lower" or rig_operation
-            or pose_fixture and operation == "jump" or rifle_fixture and operation == "selectrifle" or sprint_fixture,
+            or pose_fixture and operation == "jump" or rifle_fixture and operation == "selectrifle" or movement_operation,
             "avatar_probe_unknown_guest_operation")
         local viewport = FindFirstOf("GameViewportClient")
         local world = valid(viewport) and viewport.World
@@ -276,13 +298,13 @@ local function run(operation)
                 if candidate:IsLocallyControlled() then
                     assert(not local_pawn, "avatar_probe_duplicate_local_guest")
                     local_pawn = candidate
-                elseif rig_operation or sprint_fixture then
+                elseif rig_operation or movement_operation then
                     assert(not remote_pawn, "avatar_probe_duplicate_remote_host")
                     remote_pawn = candidate
                 end
             end
         end
-        if sprint_fixture then return movement_probe(operation, local_pawn, remote_pawn) end
+        if movement_operation then return movement_probe(operation, local_pawn, remote_pawn) end
         if rig_operation then
             assert(remote_pawn, "avatar_probe_rig_pending")
             if operation == "rig" then return rig(remote_pawn) end
@@ -326,7 +348,7 @@ local function run(operation)
         return
     end
     local host, guest = player_pair()
-    if sprint_fixture then return movement_probe(operation, host, guest) end
+    if movement_operation then return movement_probe(operation, host, guest) end
     if rifle_fixture and operation == "seedrifle" then
         local class = asset(break_action)
         local rows = guest.Save.PlayerEquipment

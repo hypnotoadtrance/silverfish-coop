@@ -26,7 +26,7 @@ _NPC = "/Game/Classes/NPCs/NPC_Assets/"
 _HELMET_MESHES = "/Game/Classes/Player/PlayerAssets/HelmetMeshes/"
 _APPEARANCE = ("face", "plumage", "body", "tail_static", "tail_skeletal", "scale_pattern", "skin_color",
                "plumage_color", "eye_color", "eye_style")
-_OUTFIT = ("body", "head", "weapon", "appearance", "aim", "firearm", "sprinting")
+_OUTFIT = ("body", "head", "weapon", "appearance", "aim", "firearm", "sprinting", "moving")
 _AIM = ("-", "pistol", "rifle")
 
 
@@ -112,7 +112,7 @@ def character_appearance(model):
 
 
 def parse(fields, phase, area):
-    if not 5 <= len(fields) <= 11 or phase != "hosting":
+    if not 5 <= len(fields) <= 12 or phase != "hosting":
         raise ValueError("Invalid authoritative outfit row")
     _, player_id, pawn, body, head = fields[:5]
     weapon = fields[5] if len(fields) >= 6 else "-"
@@ -120,15 +120,18 @@ def parse(fields, phase, area):
     aim = fields[7] if len(fields) >= 8 else "-"
     gun = fields[8] if len(fields) >= 9 else aim
     firearm = fields[9] if len(fields) >= 10 else "-"
-    sprint = fields[10] if len(fields) == 11 else "0"
+    sprint = fields[10] if len(fields) >= 11 else "0"
+    moving = fields[11] if len(fields) == 12 else "-"
     if (not valid_id(player_id) or not pawn.startswith("Player_FP_C ") or actor_map(pawn) != area
             or not all(map(valid_path, (body, head))) or weapon_meshes(weapon) is None
             or character_appearance(appearance) is None or aim not in ("-", gun)
             or gun not in _AIM or gun != "-" and weapon == "-" or sprint not in ("0", "1")
+            or moving not in ("0", "1", "-")
             or firearm != "-" and (weapon == "-" or not stock_weapon_class(firearm))):
         raise ValueError("Invalid authoritative outfit identity")
     return player_id, {"pawn": pawn, "body": body, "head": head, "weapon": weapon, "appearance": appearance,
-                       "aim": aim, "gun": gun, "firearm": firearm, "sprinting": sprint == "1"}
+                       "aim": aim, "gun": gun, "firearm": firearm, "sprinting": sprint == "1",
+                       "moving": None if moving == "-" else moving == "1"}
 
 
 def guest_aim(host, character, member, pressed):
@@ -157,6 +160,7 @@ def frame(host):
         if pawn in allowed or pawn == lead:
             row = {key: outfit.get(key, "-") for key in _OUTFIT}
             row["sprinting"] = outfit.get("sprinting") is True
+            row["moving"] = outfit.get("moving")
             if pawn in allowed:
                 standing = host.party["players"].get(allowed[pawn], {}).get("downed") is False
                 aiming = pawn in host.guest_avatar_aims and standing and not host.party.get("wipe")
@@ -189,16 +193,20 @@ async def project(bridge, game, incoming, epoch):
         return game
     outfits = incoming.get("outfits")
     if (not isinstance(outfits, dict) or len(outfits) > 5 or any(
-            not valid_id(key) or not isinstance(row, dict) or set(row) != set(_OUTFIT)
+            not valid_id(key) or not isinstance(row, dict) or set(row) | {"moving"} != set(_OUTFIT)
             or not all(map(valid_path, (row["body"], row["head"]))) or weapon_meshes(row["weapon"]) is None
             or character_appearance(row["appearance"]) is None or row["aim"] not in _AIM
             or row["aim"] != "-" and row["weapon"] == "-" or type(row["sprinting"]) is not bool
+            or row.get("moving") is not None and type(row["moving"]) is not bool
             or row["firearm"] != "-" and (row["weapon"] == "-" or not stock_weapon_class(row["firearm"]))
             for key, row in outfits.items())):
         return game
     receipt = hashlib.sha256(json.dumps([area, epoch, outfits], sort_keys=True).encode()).hexdigest()[:32]
     if game.get(RECEIPT) == receipt:
         return game
-    arguments = [value for player_id, row in sorted(outfits.items())
-                 for value in (player_id, *(row[key] for key in _OUTFIT[:-1]), "1" if row["sprinting"] else "0")]
+    arguments = []
+    for player_id, row in sorted(outfits.items()):
+        motion = row.get("moving")
+        arguments.extend((player_id, *(row[key] for key in _OUTFIT[:-2]), str(int(row["sprinting"])),
+                          "-" if motion is None else str(int(motion))))
     return await bridge.command("native-avatar-outfits", area, receipt, *arguments, timeout=4)

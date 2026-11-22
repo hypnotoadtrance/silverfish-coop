@@ -117,7 +117,7 @@ async def verify_pose(host_run, guest_run):
             "airborne": airborne, "landed": landed, "aim_clip_wrist_positions": wrists}
 
 
-async def capture_movement(host_run, guest_run, command, host, guest, with_trait):
+async def capture_movement(host_run, guest_run, command, host, guest, with_trait, sprint_clips):
     fields = ("sprinting", "walk_cap", "base_walk", "base_sprint", "speed_modifier", "food",
               "speed", "x", "y", "z", "mesh_x", "mesh_y")
 
@@ -125,7 +125,7 @@ async def capture_movement(host_run, guest_run, command, host, guest, with_trait
         result = await avatar_probe(run, operation)
         return dict(zip(fields, map(float, result), strict=True))
 
-    def guest_pose(state):
+    def remote_pose(state):
         game = state.get("game", {})
         pawn = game.get("pawns", {}).get("guest", {}).get("name")
         return game.get("native_player_avatars", {}).get(pawn, {})
@@ -136,28 +136,31 @@ async def capture_movement(host_run, guest_run, command, host, guest, with_trait
     evidence = {}
     for role, runner, observer, target in (("guest", guest_run, host_run, guest), ("host", host_run, guest_run, host)):
         modes = {}
-        for pace in ("walk", "run"):
+        for phase, pace in (("walk", "walk"), ("run", "run"), ("restart", "run")):
+            await avatar_probe(host_run, "resetlane")
+            await asyncio.sleep(.55)
             x, y = await avatar_probe(runner, pace)
             before = await read(runner, "localmovement")
-            started = await command("action", *target, "walk", "--continuous", f"--x={x}", f"--y={y}", "--milliseconds", "1600")
+            started = await command("action", *target, "walk", "--continuous", f"--x={x}", f"--y={y}", "--milliseconds", "2500")
             assert started["ok"], started
-            await asyncio.sleep(.4)
+            await asyncio.sleep(.7)
             samples = []
-            for _ in range(5):
+            for _ in range(7):
                 own, observed = await asyncio.gather(read(runner, "localmovement"), read(observer, "remotemovement"))
-                sample = {"runner": own, "observer": observed}
-                if role == "guest":
-                    state = json.loads((observer / "status.json").read_text(encoding="utf-8"))
-                    sample["avatar"] = guest_pose(state)
+                state = json.loads((observer / "status.json").read_text(encoding="utf-8"))
+                sample = {"runner": own, "observer": observed, "avatar": remote_pose(state)}
                 samples.append(sample)
-                await asyncio.sleep(.12)
+                await asyncio.sleep(.13)
             await avatar_probe(runner, "stopmovement")
             await asyncio.sleep(.7)
             stopped = await read(observer, "remotemovement")
-            modes[pace] = {"start": before, "samples": samples, "observer_after_release": stopped}
+            released = await wait(observer, lambda state: (avatar := remote_pose(state))
+                                  and avatar.get("pose_clip") != sprint_clips[role], timeout=5)
+            modes[phase] = {"start": before, "samples": samples, "observer_after_release": stopped,
+                            "avatar_after_release": remote_pose(released)}
         evidence[role] = modes
     guest_movement = evidence["guest"]
-    for pace, sprinting in (("walk", False), ("run", True)):
+    for pace, sprinting in (("walk", False), ("run", True), ("restart", True)):
         phase = guest_movement[pace]
         settled = phase["samples"][-3:]
         if with_trait:
@@ -168,15 +171,19 @@ async def capture_movement(host_run, guest_run, command, host, guest, with_trait
                    and abs(row["runner"]["walk_cap"] - row["observer"]["walk_cap"]) < 1 for row in settled), phase
         assert min(speeds) > 500 and abs(speeds[0] - speeds[1]) < 40, speeds
         assert phase["observer_after_release"]["sprinting"] == 0, phase
-        clips = {row["avatar"].get("pose_clip") for row in phase["samples"]}
-        assert ("Running_Unarmed" in clips) == sprinting, clips
-    await wait(host_run, lambda state: guest_pose(state)
-               and guest_pose(state).get("pose_clip") != "Running_Unarmed", timeout=4)
+        for role, modes in evidence.items():
+            samples = modes[pace]["samples"]
+            clips = {row["avatar"].get("pose_clip") for row in samples}
+            assert (sprint_clips[role] in clips) == sprinting, (
+                role, pace, sprint_clips[role], clips,
+                [(row["runner"]["sprinting"], row["runner"]["speed"], row["observer"]["speed"]) for row in samples],
+            )
     if with_trait:
         assert all(abs(row["runner"]["speed_modifier"] - 1.0) < .01
                    for phase in evidence["host"].values() for row in phase["samples"]), evidence["host"]
     assert (guest_movement["run"]["samples"][-1]["observer"]["walk_cap"]
             > guest_movement["walk"]["samples"][-1]["observer"]["walk_cap"])
+    (host_run / "stock-movement-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
     return evidence
 
 
@@ -248,9 +255,10 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             assert all(row["state"] == "default_body" for row in evidence[role].values()), evidence
         if lifecycle:
             identity = invitation["character_id"]
-        if movement:
+        if movement and not (equipment or rifle):
             await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
-            evidence["stock_movement"] = await capture_movement(host_run, guest_run, command, host, guest, movement_traits)
+            evidence["stock_movement"] = await capture_movement(host_run, guest_run, command, host, guest, movement_traits,
+                {"host": "Running_Unarmed", "guest": "Running_Unarmed"})
         if consumable:
             await avatar_probe(host_run, "consume")
             async with asyncio.timeout(8):
@@ -290,8 +298,19 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             fields = ("magazine", "caliber", "fire_rate", "burst_length", "action_on_release", "single_reload", "projectile")
             evidence["guest_rifle_selection"] = {"receipt": receipt, "observer": projections(mounted),
                 "stock_profile": dict(zip(fields, authority_profile, strict=True))}
-            await wait(guest_run, lambda state: state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
-            await command("action", *guest, "native-guest-primary-input-fixture")
+            if movement:
+                evidence["stock_movement"] = await capture_movement(host_run, guest_run, command, host, guest, movement_traits,
+                    {"host": "Running_Unarmed", "guest": "Rifle_Run_Forward"})
+            async with asyncio.timeout(8):
+                while True:
+                    await wait(guest_run, lambda state: state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
+                    try:
+                        await command("action", *guest, "native-guest-primary-input-fixture")
+                        break
+                    except RuntimeError as error:
+                        if "Equip an authenticated stock guest weapon before exercising primary input" not in str(error):
+                            raise
+                    await asyncio.sleep(.2)
             async with asyncio.timeout(10):
                 while not (shots := events(guest_run, "native_guest_primary_input")):
                     await asyncio.sleep(.1)
@@ -345,6 +364,11 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
                                           on_host=(role == "host"))
                 for role, run in (("host", host_run), ("guest", guest_run))
             }
+            if movement:
+                evidence["stock_movement"] = await capture_movement(host_run, guest_run, command, host, guest, movement_traits,
+                    {"host": "HandGun_Run", "guest": "HandGun_Run"})
+                await avatar_probe(host_run, "faceteammate")
+                await avatar_probe(guest_run, "faceteammate")
             def aimed_pistol(state, *, on_host):
                 peer = equipped_projection(state, on_host=on_host)
                 if (peer and peer.get("pose_clip") == "HandGun_Idle_3" and peer.get("animation_mode") == 1
@@ -352,7 +376,12 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
                     return peer
 
             await avatar_probe(host_run, "aim")
-            aimed_host = await wait(guest_run, lambda state: aimed_pistol(state, on_host=False), timeout=10)
+            try:
+                aimed_host = await wait(guest_run, lambda state: aimed_pistol(state, on_host=False), timeout=10)
+            except RuntimeError:
+                if movement:
+                    print("Host aim pose:", await avatar_probe(guest_run, "readpose"), flush=True)
+                raise
             evidence["aimed_pistol"] = aimed_pistol(aimed_host, on_host=False)
             await avatar_probe(host_run, "lower")
             await wait(guest_run, lambda state: (peer := equipped_projection(state, on_host=False))
@@ -362,7 +391,14 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             await wait(guest_run, lambda state: state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
             await avatar_probe(guest_run, "aim")
             await wait(guest_run, lambda state: state.get("game", {}).get("native_avatar_local_aim") is True, timeout=8)
-            aimed_guest = await wait(host_run, lambda state: aimed_pistol(state, on_host=True), timeout=10)
+            try:
+                aimed_guest = await wait(host_run, lambda state: aimed_pistol(state, on_host=True), timeout=10)
+            except RuntimeError:
+                if movement:
+                    print("Guest aim pose:", await avatar_probe(host_run, "readpose"), flush=True)
+                    await asyncio.sleep(.45)
+                    print("Guest aim pose:", await avatar_probe(host_run, "readpose"), flush=True)
+                raise
             evidence["guest_aimed_pistol"] = aimed_pistol(aimed_guest, on_host=True)
             await avatar_probe(guest_run, "lower")
             await wait(guest_run, lambda state: state.get("game", {}).get("native_avatar_local_aim") is False, timeout=8)
