@@ -252,6 +252,16 @@ local function command(operation, world, driver, host, local_pawn, argument)
         local guest = driver.ClientConnections[1].PlayerController.Pawn
         assert(valid(guest) and guest:K2_TeleportTo(selected.retreat, guest:K2_GetActorRotation()))
         return guest:GetFullName()
+    elseif angler and operation == "anglerholdguest" then
+        assert(host and selected and #driver.ClientConnections == 1)
+        local guest = driver.ClientConnections[1].PlayerController.Pawn
+        assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled())
+        local parking = {X = selected.entry.X + 1050, Y = selected.entry.Y, Z = selected.entry.Z}
+        guest.CharacterMovement:StopMovementImmediately()
+        guest.CharacterMovement:SetMovementMode(0, 0)
+        assert(guest:K2_SetActorLocation(parking, false, {}, true))
+        guest:ForceNetUpdate()
+        return ("%.2f|%.2f|%.2f"):format(parking.X, parking.Y, parking.Z)
     elseif angler and operation == "anglerviewpoint" then
         assert(not host and valid(local_pawn.Camera))
         local camera = local_pawn.Camera

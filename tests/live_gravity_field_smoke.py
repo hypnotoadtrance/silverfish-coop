@@ -122,6 +122,9 @@ def angler_rows(raw):
 
 
 async def verify_angler(guest, host_box, guest_box, probe):
+    parking = list(map(float, (await probe(host_box, "anglerholdguest")).split("|")))
+    await wait(guest, lambda view: math.dist(
+        view.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), parking) < 70)
     vetoes = blocked_triggers(status(guest))
     assert await probe(guest_box, "guestguard") == "0"
     guarded = await wait(guest, lambda view: blocked_triggers(view) >= vetoes + 5, timeout=5)
