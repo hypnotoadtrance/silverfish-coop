@@ -79,6 +79,7 @@ class SewerBarterCommitTests(unittest.IsolatedAsyncioTestCase):
         self.original = {"players": {"guest": {"native_inventory": {PAYMENT: {}}},
                                      "another": {"native_inventory": {PAYMENT: {}}}}, "receipts": {}}
         self.host = SimpleNamespace(
+            last_game={},
             dialogue_sessions=SimpleNamespace(maps={barter.CISTERN}, member_scope=Mock(return_value=scope)),
             party=self.original, checkpoint_native=AsyncMock(return_value=15),
             native_pickup=SimpleNamespace(forget_committed_row=Mock()), control=SimpleNamespace(event=Mock()),

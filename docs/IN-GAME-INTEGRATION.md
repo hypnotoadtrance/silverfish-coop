@@ -160,7 +160,9 @@ Private stash transfers use the live authoritative inventory and the game's stas
 
 Placed quest items and cash update the live inventory or shared wallet on pickup. In muted City trials, host and guest pickups left the campaign files unchanged. An explicit save preserved their items, claimed locations, and shared balance through restart. [Placed-item trial](../tests/live_authored_pickup_input_smoke.py) · [Cash trial](../tests/live_authored_cash_smoke.py)
 
-Player and enemy drop storage, some special container actions, merchant transactions, and quest reward templates still have gameplay-time save calls. They need to share the explicit save boundaries before the campaign-wide save policy is complete.
+Merchant purchases and sales, NPC barter, Sewer Thing exchanges, and Borough or workbench trades update the live campaign. The Observatory purchase and sale left the campaign files unchanged. An explicit save preserved the merchant's buyback item and shared wallet through restart. A separate stock barter screen trial persisted an exact partial-stack trade only after an explicit save. [Merchant trial](../tests/live_finite_shop_smoke.py) · [Barter trial](../tests/live_npc_barter_smoke.py)
+
+Player and enemy drop storage, some special container actions, and some quest transitions and reward templates still have gameplay-time save calls. They need to share the explicit save boundaries before the campaign-wide save policy is complete.
 
 ### Steam hosting options
 

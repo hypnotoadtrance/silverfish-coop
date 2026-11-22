@@ -143,7 +143,11 @@ async def exchange(host, bridge, character: str, target: str, operation_id: str)
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
 
-    await host.checkpoint_native(bridge)
+    from .native_inventory import retain_guest_save
+
+    defer_save = await retain_guest_save(host, bridge, character, scope[3])
+    if not defer_save:
+        await host.checkpoint_native(bridge)
     if _member(host, character) != scope:
         raise party.RuleError("native_sewer_trade_guest_scope_changed")
     host.native_checkpoint_unsafe = True
@@ -165,7 +169,9 @@ async def exchange(host, bridge, character: str, target: str, operation_id: str)
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation_id, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+        revision = None
+        if not defer_save:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
         host.party = candidate
         for guid in changed:
             host.native_pickup.forget_committed_row(character, guid)

@@ -202,7 +202,11 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
             if receipt["request"] != fingerprint:
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
-    await host.checkpoint_native(bridge)
+    from .native_inventory import retain_guest_save
+
+    defer_save = await retain_guest_save(host, bridge, character, scope[2])
+    if not defer_save:
+        await host.checkpoint_native(bridge)
     if _scope(host, character) != scope:
         raise party.RuleError("native_npc_barter_guest_scope_changed")
     host.native_checkpoint_unsafe = True
@@ -227,7 +231,9 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         proof = {STOCK: result}
         recorded.append({"id": operation, "request": fingerprint, "result": proof})
         del recorded[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, before, require_guest_frames=frozenset({character}))
+        revision = None
+        if not defer_save:
+            revision = await host.checkpoint_native(bridge, before, require_guest_frames=frozenset({character}))
         host.party = before
         for guid in detached:
             host.native_pickup.forget_committed_row(character, guid)

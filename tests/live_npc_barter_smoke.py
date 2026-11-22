@@ -120,6 +120,12 @@ async def verify(work, canary, offer):
             inventory = events(guest, "native_guest_ui_projected")[-1]
             if offer != "donation":
                 assert inventory["items"] > 0, inventory
+            assert commit["revision"] is None, commit
+            saved = json.loads((campaign / "save" / "campaign.json").read_bytes())
+            prior_receipts = saved["world"].get("party", {}).get("receipts", {}).get(commit["character_id"], ())
+            assert not any(row["request"][0] == native_npc_barter.EXCHANGE for row in prior_receipts)
+            checkpoint_request = await submit(host, "checkpoint")
+            assert checkpoint_request.get("ok") is True, checkpoint_request
             checkpoint = json.loads((campaign / "save" / "campaign.json").read_bytes())
             native_host_save.verify_checkpoint(campaign / "game-user", checkpoint)
             receipt, = [row for row in checkpoint["world"]["party"]["receipts"][commit["character_id"]]

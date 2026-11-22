@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from hashlib import sha256
 import json
 from pathlib import Path
 import subprocess
@@ -104,6 +105,11 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
             balances[owner] = {"cash": flags.get("Player_Cash", 0), "xp": flags.get("Player_Xp", 0), "faction": faction}
         return balances
 
+    def save_hashes():
+        paths = list((campaign / "save").glob("campaign*.json"))
+        paths.extend((campaign / "game-user").rglob("*.sav"))
+        return {path.relative_to(campaign): sha256(path.read_bytes()).hexdigest() for path in paths}
+
     async def rendered_page(identity, listing, offset, previous_event, wallet):
         def rendered(state):
             game = state.get("game", {})
@@ -174,6 +180,8 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
         if verify_balances:
             before_balances = await saved_balances(invite["character_id"])
             assert before_balances["host"]["cash"] == listing["wallet_before"], before_balances
+        baseline = save_hashes()
+        assert baseline
         guid, price = offer["guid"], offer["price"]
         stale = await act(guest_target, "native-finite-shop-buy", "--target", f"{guid}@{price + 1}", expected=False)
         assert stale["error"] == "native_finite_shop_quote_changed", stale
@@ -194,6 +202,7 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
                 assert (await stock_ready(0))["sequence"] == opened["sequence"]
                 await act(host_target, "native-finite-shop-wallet-fixture", "--amount", "100000")
                 assert (await stock_ready(100_000))["sequence"] == opened["sequence"]
+                baseline = save_hashes()
                 submit = (await act(guest_target, "native-shop-view-fixture", "--target",
                                     f"stock:{offer['source']}:{guid}"))["native_shop_view"]
                 assert (submit["guid"], submit["price"]) == (guid, price), submit
@@ -249,6 +258,7 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
         acquired, = [row for row in inventory["items"] if row["guid"] == acquire_guid]
         assert acquired["class_path"] == offer["class_path"] and acquired["quantity"] == offer["quantity"], acquired
         expected_wallet = purchase["wallet_after"]
+        assert save_hashes() == baseline, "A merchant purchase wrote to disk before an explicit save"
         if verify_balances:
             assert inventory["owner"] == invite["character_id"] and acquired["source"] == "backpack", inventory
             assert acquired["stackable"] is (not scientist_blank), acquired
@@ -268,6 +278,7 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
             denied_host = await act(host_target, "native-finite-shop-buy", "--target", f"{guid}@{price}", expected=False)
             assert denied_host["error"] == "native_scientist_purchase_profile_unavailable", denied_host
         if sell:
+            baseline = save_hashes()
             quote = (await act(guest_target, "native-finite-shop-sale-quote", "--target", guid))["native_finite_sale_quote"]
             quote_row, = quote["offers"]
             sale_price = quote_row["price"]
@@ -292,6 +303,7 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
             assert (await act(guest_target, *sale_command))["native_finite_sale"] == sale
             unsold = (await act(guest_target, "native-inventory-list"))["native_inventory"]
             assert not any(row["guid"] == guid for row in unsold["items"]), unsold
+            assert save_hashes() == baseline, "A merchant sale wrote to disk before an explicit save"
 
         await act(host_target, "stop")
         assert await asyncio.wait_for(host.wait(), 12) == 0, host.returncode

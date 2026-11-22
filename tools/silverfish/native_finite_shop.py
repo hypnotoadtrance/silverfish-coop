@@ -168,7 +168,14 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         raise party.RuleError("insufficient_merchant_funds")
     wallet_change = price if sale else -price
     result_name = "native_finite_sale" if sale else "native_finite_purchase"
-    await host.checkpoint_native(bridge)
+    if guest:
+        from .native_inventory import retain_guest_save
+
+        defer_save = await retain_guest_save(host, bridge, character, pawn)
+    else:
+        defer_save = host.last_game.get("native_guest_save_retention") is True
+    if not defer_save:
+        await host.checkpoint_native(bridge)
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -204,8 +211,13 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation_id, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        required = frozenset({character}) if guest else frozenset()
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=required)
+        revision = None
+        if defer_save:
+            if not guest:
+                host.pending_host_save = True
+        else:
+            required = frozenset({character}) if guest else frozenset()
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=required)
     except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
