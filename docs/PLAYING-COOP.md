@@ -42,6 +42,12 @@ Choose **Multiplayer** and **Join by Direct IP**. Enter the host's numeric IP an
 
 The game asks you to confirm trust on a first connection or when a known host’s identity changes. Once accepted, the connection remains encrypted. The default resident co-op workspace is `%LOCALAPPDATA%\SilverfishCoop\Resident`. Each loaded host campaign has its own character list.
 
+### Steam Cloud backups
+
+The installed mod mirrors each hosted campaign as a complete backup under `%LOCALAPPDATA%\SilverFish\Saved\SaveGames\SilverfishCoopCloud`. The backup includes the host’s world and characters saved on the host. Steam Auto-Cloud uploads these files on exit and downloads them on launch when Steam Cloud is enabled for Project Silverfish. The mod reads downloaded backups when you open the Host campaign picker. The same Steam account and a compatible mod build are required on the other PC.
+
+Use **Multiplayer → Host → Load Game** on the other PC. The mod restores missing campaigns and newer revisions. An equal or older revision leaves the local campaign in place. Live multiplayer saves keep their own storage and Singleplayer continues to use the original save slots. Guests keep their progress with the host’s campaign.
+
 ## Host and join from the development CLI
 
 On the host, bind to the host machine's LAN address and choose the UDP port the guest will use. Replace the example address with the address of your host.

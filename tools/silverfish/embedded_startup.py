@@ -5,7 +5,6 @@ from contextlib import contextmanager
 import ctypes
 from ctypes import wintypes
 from dataclasses import asdict, dataclass
-from functools import partial
 import hashlib
 from ipaddress import ip_address
 import json
@@ -420,7 +419,7 @@ def _reserve_campaign(work: Path, campaign_root: Path) -> Path:
 
 
 def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, default_port, *,
-                        automatic_campaigns=False, host_options=None):
+                        automatic_campaigns=False, host_options=None, cloud_backups=None):
     from . import service
     from .control import select_run
     from .title_host_campaigns import saved_campaign
@@ -450,12 +449,16 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
                 raise RuntimeError("A distinct private Unreal port was not available")
             engine = EmbeddedEngine(os.getpid(), mailbox, saved, private, session_directory=selected)
             await engine.observe_title()
-            await service.host_game(
+            session = service.host_game(
                 work, selected, bind, port, headless, resident_engine=engine,
                 direct_password=password, stock_creator=use_creator, resume_existing=resume_area is not None,
                 max_guests=service.MENU_HOST_GUEST_LIMIT, **host_options,
                 **({"start_preset": mode} if mode == "wanderer" and not use_creator else {}),
             )
+            if cloud_backups is None:
+                await session
+            else:
+                await cloud_backups.mirror_host(selected, session)
 
         def status():
             return runtime.read_json(selected / "run" / "status.json")
@@ -605,23 +608,32 @@ async def _resident_unified(work: Path, seat: Path, mailbox: Path, saved: Path, 
     if _current_startup(tuple(required)).environment != required:
         raise ValueError("The unified title lacks the standard native co-op capabilities")
 
+    from .steam_cloud import CloudBackups
+
     defaults = HostDefaults(name, settings["bind"], settings["port"])
+    cloud = CloudBackups(campaign.parent, saved.parent) if os.environ.get(INSTALLED_ENV) == "1" else None
     host = _resident_host_plan(work, campaign, mailbox, saved, headless, defaults.bind, defaults.port,
-                               automatic_campaigns=True, host_options=host_options)
+                               automatic_campaigns=True, host_options=host_options, cloud_backups=cloud)
     join, join_settings = _resident_direct_join_plan(work, guest, mailbox, saved, headless, available=options)
     try:
         await _resident_title(mailbox, saved, seat, {"host": host, "join": join}, join_settings=join_settings,
-                              host_campaign=campaign, host_defaults=defaults)
+                              host_campaign=campaign, host_defaults=defaults, cloud_backups=cloud)
     finally:
         await join_settings.close()
 
 
-async def _resident_title(mailbox, saved, directory, plans, *, join_settings=None, host_campaign=None, host_defaults=None):
+async def _resident_title(mailbox, saved, directory, plans, *, join_settings=None, host_campaign=None,
+                          host_defaults=None, cloud_backups=None):
     from .title_host_campaigns import campaign_entries
     from .title_session import TitleSession
 
     title = EmbeddedEngine(os.getpid(), mailbox, saved, None, session_directory=directory)
-    host_campaign_scan = partial(campaign_entries, host_campaign, saved) if host_campaign is not None else None
+    def scan_campaigns():
+        if cloud_backups is not None:
+            cloud_backups.restore()
+        return campaign_entries(host_campaign, saved)
+
+    host_campaign_scan = scan_campaigns if host_campaign is not None else None
     await TitleSession(title.bridge, plans, resident=True, title_saved_directory=saved,
                        on_title_ready=lambda: None, join_settings=join_settings,
                        host_campaign_scan=host_campaign_scan, host_defaults=host_defaults).run()

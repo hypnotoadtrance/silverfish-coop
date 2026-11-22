@@ -150,7 +150,7 @@ class CampaignStore:
         self._mutex = threading.RLock()
         self._lease_by_id: dict[str, _Lease] = {}
         self._lease_by_guest: dict[str, _Lease] = {}
-        self._lock_file = self._lock_directory()
+        self._lock_file = self._lock_directory(self.directory)
         self.recovered = False
         try:
             self._data = self._load_or_create(require_existing, verify_initial_checkpoint, max_read_bytes)
@@ -175,8 +175,9 @@ class CampaignStore:
         if self._lock_file is None:
             raise CampaignError("The campaign store is closed.")
 
-    def _lock_directory(self):
-        handle = (self.directory / ".campaign.lock").open("a+b")
+    @staticmethod
+    def _lock_directory(directory):
+        handle = (directory / ".campaign.lock").open("a+b")
         try:
             if os.name == "nt":
                 import msvcrt
@@ -274,11 +275,43 @@ class CampaignStore:
                 if len(body) > max_read_bytes:
                     raise CampaignFormatError("The campaign checkpoint exceeds the title picker size limit.")
                 body = body.decode("utf-8")
-            data = json.loads(body, object_pairs_hook=_unique_object)
         except (ValueError, RecursionError) as exc:
             raise CampaignFormatError(f"Invalid campaign JSON in {path.name}.") from exc
-        CampaignStore._validate(data)
+        return CampaignStore.decode(body)
+
+    @staticmethod
+    def decode(body):
+        try:
+            data = json.loads(body, object_pairs_hook=_unique_object)
+            CampaignStore._validate(data)
+        except (ValueError, RecursionError) as exc:
+            raise CampaignFormatError("Invalid campaign JSON.") from exc
         return data
+
+    @classmethod
+    def restore_backup(cls, directory, checkpoint, install_generations, *, max_read_bytes):
+        """Publish a newer backup after its native files are committed.
+
+        Read both local revisions without requiring their native files. A
+        damaged native file must not make an older backup eligible to restore.
+        """
+        cls._validate(checkpoint)
+        primary, previous = (directory / name for name in ("campaign.json", "campaign.previous.json"))
+        with cls._lock_directory(directory):
+            local = []
+            for path in (primary, previous):
+                try:
+                    local.append(cls._read(path, max_read_bytes=max_read_bytes))
+                except FileNotFoundError:
+                    continue
+            if any(value["campaign_id"] != checkpoint["campaign_id"] or value["revision"] >= checkpoint["revision"]
+                   for value in local):
+                return False
+            install_generations()
+            if local:
+                cls._write(previous, max(local, key=lambda value: value["revision"]))
+            cls._write(primary, checkpoint)
+            return True
 
     @staticmethod
     def _validate(data):
