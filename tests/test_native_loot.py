@@ -176,7 +176,7 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         return SimpleNamespace(last_game=self.game(area), last_seen=time.monotonic(), native_zones=True,
                                native_loot_input=True, fixtures=False, native_profile=self.root, stopping=False,
                                transitioning=False, native_checkpoint_unsafe=False, party=state, control=Mock(),
-                               checkpoint_native=AsyncMock(return_value=2), pending_host_pickup_save=None)
+                               checkpoint_native=AsyncMock(return_value=2), pending_native_loot_save=None)
 
     def frame(self, area, slot=None):
         slot = slot or native_host_save.new_slot()
@@ -528,13 +528,13 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
                  "merge": dict(guid=item["guid"], inventory_guid="B" * 32, amount=4, before=7, after=11)}
         bridge = SimpleNamespace(command=AsyncMock(return_value=self.game(CROSSROADS, native_loot=proof)))
         args = (host, bridge, "host", "claim", f"{item['guid']}@{OTHER_CRATE}")
-        result = await native_loot.perform(*args, OPERATION, defer_host_save=True)
-        self.assertTrue(host.pending_host_pickup_save)
+        result = await native_loot.perform(*args, OPERATION, defer_save=True)
+        self.assertTrue(host.pending_native_loot_save)
         self.assertFalse(host.native_checkpoint_unsafe)
         self.assertEqual(result["native_loot_claim"]["claimed_by"], "host")
-        self.assertEqual(await native_loot.perform(*args, OPERATION, defer_host_save=True), result)
+        self.assertEqual(await native_loot.perform(*args, OPERATION, defer_save=True), result)
         with self.assertRaisesRegex(party.RuleError, "native_loot_already_claimed"):
-            await native_loot.perform(*args, "2" * 32, defer_host_save=True)
+            await native_loot.perform(*args, "2" * 32, defer_save=True)
         host.checkpoint_native.assert_not_awaited()
         bridge.command.assert_awaited_once()
 

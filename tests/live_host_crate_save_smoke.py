@@ -70,16 +70,18 @@ async def verify(work: Path, canary: Path) -> None:
     try:
         process, started = await start(0, "host")
         assert not started.get("link_connected")
+        before = checkpoint()
         await local("native-loot-approach", target=f"host@{crate}")
         await local("native-loot-crate-fixture", target=crate)
         opened = await wait(run, lambda state: crate in state.get("gameplay", {}).get(native_loot.STATE_KEY, {}))
+        assert checkpoint() == before
+        proof.update(revision_before_open=before["revision"], revision_after_open=checkpoint()["revision"])
         roll = opened["gameplay"][native_loot.STATE_KEY][crate]
         item = next(row for row in roll["items"] if row["class_path"] not in native_loot.CASH_RANGES)
         guid = item["guid"]
         identity = native_world_loot.crate_identity(roll["id"], guid)
         await wait(run, lambda state: identity in state.get("game", {}).get(native_world_loot.KEY, {}))
         await local(native_world_loot.APPROACH, target=f"host@{identity}")
-        before = checkpoint()
         await local(native_world_loot.FIXTURE, target=identity)
         live = await wait(run, lambda state: state.get("native_inventory_checkpoint_pending") is True
                           and item_claim(state.get("gameplay", {}), guid) == "host"

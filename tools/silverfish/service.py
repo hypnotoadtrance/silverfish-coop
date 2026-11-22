@@ -301,8 +301,8 @@ class Host:
             self.allowed_maps |= EXPANDED_MAPS
         self.next_zone_heartbeat = 0.0
         self.native_checkpoint_unsafe = False
-        # None means clean. A pending pickup batch records whether it needs typed readback.
-        self.pending_host_pickup_save: bool | None = None
+        # None means clean. A pending loot batch records whether it needs typed readback.
+        self.pending_native_loot_save: bool | None = None
         self.matrix_supported = matrix_supported
         self.world_flush_supported = world_flush_supported
         self.native_guest_health = None
@@ -472,8 +472,8 @@ class Host:
     def checkpoint(self, proposed_party: dict | None = None, *, native_record: dict | None = None,
                    guest_records: dict[str, dict] | None = None, unleased_states: dict | None = None,
                    require_guest_frames: frozenset[str] = frozenset()) -> int:
-        if self.pending_host_pickup_save is not None:
-            # The existing native generation omits in-memory pickups. Keep new party changes
+        if self.pending_native_loot_save is not None:
+            # The existing native generation omits in-memory loot changes. Keep new party changes
             # eligible for the next paired save instead of writing a mismatched revision.
             return self.store.status()["revision"]
         world, changes = self.checkpoint_contents(proposed_party, native_record=native_record,
@@ -679,9 +679,9 @@ class Host:
                 raise RuntimeError("The typed inventory requires a stock campaign checkpoint")
             return await self.commit_checkpoint(proposed_party, unleased_states=unleased_states,
                                                 require_guest_frames=require_guest_frames)
-        pending_pickups = self.pending_host_pickup_save is not None
-        if pending_pickups:
-            typed_inventory = typed_inventory or self.pending_host_pickup_save
+        pending_loot = self.pending_native_loot_save is not None
+        if pending_loot:
+            typed_inventory = typed_inventory or self.pending_native_loot_save
         source = self.last_game.get("map")
         pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
         if self.last_game.get("state") != "hosting" or not pawn or source not in self.allowed_maps:
@@ -728,8 +728,8 @@ class Host:
             guest_records = await self.capture_guest_records(bridge)
         revision = await self.commit_checkpoint(proposed_party, native_record=record, guest_records=guest_records,
                                                 unleased_states=unleased_states, require_guest_frames=require_guest_frames)
-        if pending_pickups:
-            self.pending_host_pickup_save = None
+        if pending_loot:
+            self.pending_native_loot_save = None
         self.disconnect_save_requests.difference_update(require_guest_frames, unleased_states or {})
         return revision
 
@@ -2036,7 +2036,7 @@ class Host:
                 result = await native_guest_consumable.use(self, bridge, character, target, request["operation_id"], action=action)
             elif action in ("native-loot-inspect", "native-loot-open", "native-loot-claim"):
                 result = await native_loot.perform(self, bridge, character, action.removeprefix("native-loot-"),
-                                                   target, request["operation_id"])
+                                                   target, request["operation_id"], defer_save=True)
             elif action in native_loot.PRY_TOOL_ACTIONS.values():
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                     result = await native_loot.use_vehicle_pry_tool(self, bridge, character, target, request["operation_id"], action)
@@ -3904,7 +3904,7 @@ class Host:
         package_journal = native_package_handoff_journal.Journal() if self.native_host_dig_live else None
 
         async def claim_crate(operation, guid):
-            return await native_loot.perform(self, bridge, "host", "claim", guid, operation, defer_host_save=True)
+            return await native_loot.perform(self, bridge, "host", "claim", guid, operation, defer_save=True)
 
         async def frozen_items(offset):
             return native_inventory_death.items(self, "host", offset)
@@ -4036,7 +4036,8 @@ class Host:
                     self.last_crate_intent = sequence
                     operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.control.generation}:{epoch}:host-crate:{sequence}:{crate}").hex
                     try:
-                        await native_loot.perform(self, bridge, "host", "open", crate, operation, pried=entry == "pried")
+                        await native_loot.perform(self, bridge, "host", "open", crate, operation, pried=entry == "pried",
+                                                  defer_save=True)
                         self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, crate=crate, entry=entry)
                     except (OSError, ValueError, RuntimeError) as error:
                         self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, crate=crate, reason=str(error))
@@ -4056,7 +4057,7 @@ class Host:
                                 result = await native_guest_drop.perform(self, bridge, "host", action, claim, operation_id)
                         else:
                             result = await native_loot.perform(self, bridge, "host", "claim", claim, operation_id,
-                                                               defer_host_save=True)
+                                                               defer_save=True)
                         self.control.event("local_interaction", operation_id=operation_id, **result)
                         try:
                             self.last_game = await self.world_loot.retire_claim(bridge, self.last_game, world_loot)
@@ -4181,7 +4182,7 @@ class Host:
                             campaign=self.store.status(), gameplay=self.public_gameplay(),
                             zone_epoch=self.zone_epoch, awaiting_zone_guest=self.awaiting_zone_guest,
                             link_connected=linked,
-                            native_inventory_checkpoint_pending=self.pending_host_pickup_save is not None,
+                            native_inventory_checkpoint_pending=self.pending_native_loot_save is not None,
                             transport=transport.statistics() if isinstance(transport, link.HostLink) else {},
                             local_bridge="memory" if bridge.local_bridge is not None else "file")
 
@@ -5109,8 +5110,8 @@ class Client:
         if not reply.get("ok"):
             raise ValueError(reply.get("error", "interaction_refused"))
         if (self.last_game.get("map"), self.zone_epoch) == (area, epoch) and epoch:
-            # The request already returned the committed roll or pickup. Feed it
-            # to the normal projection before the next periodic host snapshot.
+            # Feed the confirmed roll or pickup to the normal projection before
+            # the next periodic host snapshot.
             roll = reply.get("native_loot_roll")
             if (action == "native-loot-open" and isinstance(roll, dict)
                     and (roll.get("map"), roll.get("crate")) == (area, target)

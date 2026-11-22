@@ -515,7 +515,7 @@ def verified_stack_merge(proof: dict, source_guid: str, source_count: int | None
 
 async def perform(host, bridge, character: str, action: str, target: str, operation_id: str, *,
                   fixture_nonempty: bool = False, pried: bool = False, tool_receipt=None,
-                  power_sequence: int | None = None, defer_host_save: bool = False) -> dict:
+                  power_sequence: int | None = None, defer_save: bool = False) -> dict:
     area = host.last_game.get("map")
     if (not host.native_zones or not (host.fixtures or host.native_loot_input) or host.native_profile is None
             or host.stopping or host.transitioning or (host.native_checkpoint_unsafe and tool_receipt is None)
@@ -688,11 +688,20 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 receipts = candidate["receipts"].setdefault(character, [])
                 receipts.append({"id": operation_id, "request": request, "result": result})
                 del receipts[:-party.RECENT_ACTIONS]
-            revision = (await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
-                        if tool_receipt else await host.checkpoint_native(bridge, candidate))
+            deferred = defer_save and not (fixture_nonempty or pried or tool_receipt or power_sequence is not None)
+            if deferred:
+                # The typed item escrow exists, but the world change belongs to the next stock checkpoint.
+                host.pending_native_loot_save = bool(host.pending_native_loot_save)
+            elif tool_receipt:
+                revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+            else:
+                revision = await host.checkpoint_native(bridge, candidate)
             host.party = candidate
             host.native_checkpoint_unsafe = False
-            host.control.event("native_loot_roll_committed", revision=revision, **public_roll(roll))
+            if deferred:
+                host.control.event("native_loot_roll_accepted", **result["native_loot_roll"])
+            else:
+                host.control.event("native_loot_roll_committed", revision=revision, **result["native_loot_roll"])
             if fixture_nonempty:
                 result["native_loot_fixture"] = proof
             return result
@@ -717,9 +726,9 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             receipts = candidate["receipts"].setdefault(character, [])
             receipts.append({"id": operation_id, "request": fingerprint, "result": result})
             del receipts[:-party.RECENT_ACTIONS]
-            deferred = defer_host_save and character == "host"
+            deferred = defer_save and character == "host"
             if deferred:
-                host.pending_host_pickup_save = bool(host.pending_host_pickup_save or merge)
+                host.pending_native_loot_save = bool(host.pending_native_loot_save or merge)
             else:
                 revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}),
                                                         typed_inventory=bool(merge))
