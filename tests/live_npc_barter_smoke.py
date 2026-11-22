@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -49,7 +50,7 @@ def events(run, name):
             if (record := json.loads(line)).get("event") == name]
 
 
-async def verify(work, canary):
+async def verify(work, canary, offer):
     profile = "npc-barter-flow-" + uuid.uuid4().hex[:8]
     campaign, client = work / "campaigns" / profile, work / "clients" / profile
     host, guest = campaign / "run", client / "run"
@@ -58,12 +59,13 @@ async def verify(work, canary):
     baseline = saved_hashes(canary)
     assert baseline
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
+    environment = dict(os.environ, SILVERFISH_COOP_BARTER_PROBE=offer)
     jobs = []
 
     async def start(run, *args):
         with (host / f"{args[0]}.txt").open("wb") as stream:
             child = await asyncio.create_subprocess_exec(*cli, *args, stdout=stream, stderr=stream,
-                                                        cwd=ROOT, creationflags=subprocess.CREATE_NO_WINDOW)
+                                                        cwd=ROOT, env=environment, creationflags=subprocess.CREATE_NO_WINDOW)
         jobs.append((run, child))
 
     def tail(run):
@@ -94,13 +96,25 @@ async def verify(work, canary):
             view = await wait(guest, lambda state: (screen := state.get("game", {}).get("native_npc_barter_view", {}))
                               and screen.get("state") == "ready" and screen.get("sequence", 0) > 1, timeout=8)
             inventory = events(guest, "native_guest_ui_projected")[-1]
-            assert inventory["items"] > 0, inventory
+            if offer != "donation":
+                assert inventory["items"] > 0, inventory
             checkpoint = json.loads((campaign / "save" / "campaign.json").read_bytes())
             native_host_save.verify_checkpoint(campaign / "game-user", checkpoint)
             receipt, = [row for row in checkpoint["world"]["party"]["receipts"][commit["character_id"]]
                         if row["request"][0] == native_npc_barter.EXCHANGE]
-            assert receipt["result"]["native_npc_barter"]["transfers"] == commit["transfers"], receipt
-            evidence = {"commit": commit, "receipt": receipt, "checkpoint_revision": checkpoint["revision"],
+            result = receipt["result"]["native_npc_barter"]
+            assert result["transfers"] == commit["transfers"], receipt
+            transfers = {(row["direction"], row["class_path"].rsplit(".", 1)[-1], row["quantity"])
+                         for row in commit["transfers"]}
+            if offer == "donation":
+                assert transfers == {("give", "Item_Jewely_C", 12)} and commit["cash_before"] == commit["cash"] == 1200, commit
+                reputation = commit["reputation"]
+                assert result["reputation"] == reputation and reputation["flag"] == "Rep_Freelancer", reputation
+                assert reputation["after"] > reputation["before"] and any(line.startswith("confirmation\t") for line in tail(guest))
+            elif offer == "high-value":
+                assert transfers == {("receive", "Item_Jewely_C", 8), ("give", "Item_CannedPeaches_C", 1)}, transfers
+                assert commit["cash_before"] == 20000 and 1000 < 20000 - commit["cash"] <= 20000, commit
+            evidence = {"offer": offer, "commit": commit, "receipt": receipt, "checkpoint_revision": checkpoint["revision"],
                         "guest_stock_screen": view["game"]["native_npc_barter_view"], "guest_inventory": inventory}
             (host / "npc-barter-flow.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
             print(host / "npc-barter-flow.json", flush=True)
@@ -123,5 +137,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--offer", choices=("cash", "high-value", "donation"), default="cash")
     options = parser.parse_args()
-    asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve(strict=True)))
+    asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve(strict=True), options.offer))
