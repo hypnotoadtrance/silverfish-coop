@@ -145,10 +145,9 @@ async def verify(work, family):
                 except RuntimeError:
                     if attempt == 5:
                         raise
-            if family == "pyrogeist":
-                anchor = list(map(float, (await probe(host_box, "prepare")).split("|")))
-                await wait(host, lambda view: math.dist(
-                    view.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), anchor) < 1400)
+            anchor = list(map(float, (await probe(host_box, "prepare")).split("|")))
+            await wait(host, lambda view: math.dist(
+                view.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), anchor) < 1500)
             invite = await command("invite", "--campaign", profile, "--name", "Anomaly observer", "--character", "Observer")
             await start(guest, "join", "--profile", profile, "--invite", invite["invite_file"], "--headless", "--native-zones")
             guest_state = await wait(guest, lambda view: view.get("state") == "connected" and view.get("gameplay_fresh"))
@@ -158,8 +157,6 @@ async def verify(work, family):
             before, after = map(int, attempted.split("|"))
             assert before == after, attempted
             await wait(guest, lambda view: view.get("game", {}).get("native_anomaly_field", {}).get("suppressed", 0) > old)
-            if family == "gravity":
-                anchor = list(map(float, (await probe(host_box, "approach")).split("|")))
             tolerance = 150 if family == "pyrogeist" else 3
             async with asyncio.timeout(12):
                 while True:

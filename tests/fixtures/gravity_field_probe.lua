@@ -171,25 +171,20 @@ local function command(operation, world, driver, host, local_pawn)
             end
         end
         error("No floor for the Crossroads Pyrogeist test lane")
-    elseif operation == "approach" then
-        assert(host and #current > 0 and #driver.ClientConnections == 1)
-        local guest = driver.ClientConnections[1].PlayerController.Pawn
-        assert(valid(guest) and guest:HasAuthority() and same(guest:GetWorld(), world))
-        local players = {local_pawn, guest}
+    elseif operation == "prepare" then
+        assert(host and #current > 0 and #driver.ClientConnections == 0)
+        local players = {local_pawn}
         for _, well in ipairs(current) do
             local point = well.Sphere:K2_GetComponentLocation()
-            local entry = floor_position(guest, point.Z, point.X, point.Y, players)
+            local entry = floor_position(local_pawn, point.Z, point.X, point.Y, players)
             if entry then
-                local radius = well.Sphere:GetScaledSphereRadius() + 140
+                local radius = well.Sphere:GetScaledSphereRadius() + 240
                 for _, offset in ipairs({{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) do
                     local x, y = point.X + radius * offset[1], point.Y + radius * offset[2]
                     local placement = floor_position(local_pawn, point.Z, x, y, players)
-                    local remote = floor_position(guest, point.Z, x - 110 * offset[2], y + 110 * offset[1], players)
-                    if placement and remote and local_pawn:K2_TeleportTo(placement, local_pawn:K2_GetActorRotation())
-                        and guest:K2_TeleportTo(remote, guest:K2_GetActorRotation()) then
+                    if placement and local_pawn:K2_TeleportTo(placement, local_pawn:K2_GetActorRotation()) then
                         selected = {well = well, entry = entry}
                         local_pawn:ForceNetUpdate()
-                        guest:ForceNetUpdate()
                         return ("%.2f|%.2f|%.2f"):format(point.X, point.Y, point.Z)
                     end
                 end
