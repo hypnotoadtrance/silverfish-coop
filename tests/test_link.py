@@ -518,6 +518,35 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         response, _ = await asyncio.gather(self.client.request({"action": "snapshot"}), self.exchange(1200))
         self.assertEqual(response, world)
 
+    async def test_weapon_cues_reach_current_game_guest_without_entering_unreal(self):
+        guest_id = self.request["guest_id"]
+        self.assertTrue((await self.connect_guest())["accepted"])
+        self.host.send_weapon_shot(b"wrong guest", lambda _: False)
+        self.host.restrict_game_routes(set())
+        self.host.send_weapon_shot(b"during travel", lambda _: True)
+        self.host.restrict_game_routes(None)
+        self.host.send_weapon_shot(b"live cue", lambda admitted: admitted == guest_id)
+        await self.exchange(1200)
+        self.assertEqual(self.client.take_weapon_shots(), [b"live cue"])
+        self.assertEqual(self.client.take_weapon_shots(), [])
+
+        self.host.send_weapon_shot(b"queued cue", lambda _: True)
+        async with asyncio.timeout(1):
+            while not self.client.weapon_shots_ready():
+                await asyncio.sleep(.01)
+        await asyncio.sleep(.3)
+        self.assertEqual(self.client.take_weapon_shots(), [])
+
+        self.host.send_weapon_shot(b"before disconnect", lambda _: True)
+        async with asyncio.timeout(1):
+            while not self.client.weapon_shots_ready():
+                await asyncio.sleep(.01)
+        await self.client.disconnect()
+        self.assertFalse(self.client.weapon_shots_ready())
+        await asyncio.wait_for(self.disconnected.get(), 3)
+        self.assertTrue((await self.connect_guest())["accepted"])
+        self.assertEqual(self.client.take_weapon_shots(), [])
+
     async def test_application_invalid_body_and_handler_error_keep_link_usable(self):
         async def on_request(_, payload):
             if payload.get("fail"):

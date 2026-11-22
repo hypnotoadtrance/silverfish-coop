@@ -1716,8 +1716,6 @@ class Host:
             self.voice_audio.observed(self.last_game, self.zone_epoch)
             if voice_frame := self.voice_audio.frame(self.last_game, self.zone_epoch, pawn):
                 gameplay[native_voice.KEY] = voice_frame
-            if shots := self.last_game.get(native_weapon_fire_view.KEY):
-                gameplay[native_weapon_fire_view.KEY] = {"map": self.last_game["map"], "epoch": self.zone_epoch, "cues": shots}
             if cues := self.last_game.get(native_anomaly_effects.KEY):
                 gameplay[native_anomaly_effects.KEY] = {
                     "map": self.last_game["map"], "epoch": self.zone_epoch, "cues": cues,
@@ -3659,15 +3657,20 @@ class Host:
         pause_exit = (native_session_exit.PauseExit(bridge.directory, self.control, "host", engine=engine)
                       if engine is not None and self.native_zones else None)
         heartbeat = asyncio.create_task(self.renew_native_scope(bridge)) if self.native_events else None
+        weapon_shots = (asyncio.create_task(native_weapon_fire_view.relay(self, bridge, transport))
+                        if self.native_guest else None)
         if self.wipe_view_enabled:
             self.wipe_view = native_wipe_view.WipeView(bridge, self.control, "host")
         try:
             await self.run_session(bridge, transport, invites, pause_exit=pause_exit)
         finally:
-            if heartbeat:
-                heartbeat.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await heartbeat
+            for task in (heartbeat, weapon_shots):
+                if task:
+                    task.cancel()
+            for task in (heartbeat, weapon_shots):
+                if task:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
             if invites is not None:
                 invites.close()
             if pause_exit is not None:
@@ -5242,10 +5245,6 @@ class Client:
                         self.control.event("zone_rejoin_requested", zone_epoch=epoch)
                     self.zone_epoch = epoch
                     self.expected_zone = reply["zone"]
-                    if (not self.needs_travel and not self.server_transitioning
-                            and self.last_game.get("state") == "connected"):
-                        self.last_game = await self.weapon_shot_playback.sync(
-                            self.bridge, self.control, self.last_game, self.gameplay.get(native_weapon_fire_view.KEY), epoch)
             except (OSError, RuntimeError) as error:
                 self.control.event("gameplay_snapshot_unavailable", error_type=type(error).__name__)
         if project:
@@ -5678,6 +5677,10 @@ class Client:
                     self.next_retry = time.monotonic() + self.auto_delay
             active = (self.transport.connected and self.last_game.get("state") == "connected"
                       and not self.needs_travel and not self.server_transitioning)
+            shots = self.transport.take_weapon_shots()
+            if active and shots and self.last_game.get("map") == self.expected_zone:
+                self.last_game = await self.weapon_shot_playback.sync(
+                    self.bridge, self.control, self.last_game, shots, self.zone_epoch)
             if pause_exit is not None:
                 pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
                 can_leave = (active and self.transport.game_access and self.host_session and self.zone_epoch
@@ -5815,7 +5818,8 @@ class Client:
                                 game=self.last_game, gameplay=self.gameplay,
                                 gameplay_fresh=active and time.monotonic() - self.gameplay_seen < 3,
                                 zone_epoch=self.zone_epoch)
-            await self.bridge.wait_for_interaction(.25, wake_if=self.gameplay_snapshot_ready, guest=True)
+            await self.bridge.wait_for_interaction(
+                .25, wake_if=lambda: self.gameplay_snapshot_ready() or self.transport.weapon_shots_ready(), guest=True)
 
 
 def guest_engine_options(work: Path, invite: dict, *, native_zones: bool = False,

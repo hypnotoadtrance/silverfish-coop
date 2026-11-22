@@ -3,9 +3,10 @@ local view = {}
 local weapon_base = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local attenuation_path = "/Game/Assets/Sounds/SoundClasses/Weapon_Attenuation.Weapon_Attenuation"
+local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 local maximum, range = 36, 30000
 local current, hooked, visit, last_played
-local serial, pending = 0, {}
+local serial, published, pending = 0, 0, {}
 
 local function valid(object) return object and object:IsValid() end
 local function same(first, second)
@@ -46,7 +47,7 @@ local function capture(context)
     if not bounded(scale, 0, 10) or not bounded(volume, 0, 10) or not bounded(pitch, -24, 24) then return end
     serial = serial + 1
     pending[#pending + 1] = {serial, path, position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw,
-        rotation.Roll, scale, volume, pitch - 2, expires = current.statics:GetRealTimeSeconds(pawn) + 1.15}
+        rotation.Roll, scale, volume, pitch - 2, expires = current.statics:GetRealTimeSeconds(pawn) + .25}
     if #pending > maximum then table.remove(pending, 1) end
 end
 
@@ -56,7 +57,7 @@ function view.sync(state, phase)
         return
     end
     if not current or not same(current.world, state.world) then
-        current = {world = state.world, statics = StaticFindObject(statics_path)}
+        current = {world = state.world, map = state.map, statics = StaticFindObject(statics_path)}
         pending = {}
     end
     local path = weapon_base .. ":SpawnProjectile"
@@ -67,12 +68,27 @@ function view.sync(state, phase)
     end
 end
 
-function view.rows(state, phase, row)
-    if phase ~= "hosting" or not current or not same(state.world, current.world) or #pending == 0 then return {} end
-    local now, rows = current.statics:GetRealTimeSeconds(state.world), {}
+function view.flush(get_world)
+    if not current or not bridge or published == serial or #pending == 0 then return end
+    local world = get_world()
+    if not same(world, current.world) then return end
+    local now, rows = current.statics:GetRealTimeSeconds(world), {current.map}
     while pending[1] and pending[1].expires <= now do table.remove(pending, 1) end
-    for _, entry in ipairs(pending) do rows[#rows + 1] = row("native-weapon-shot", table.unpack(entry)) end
-    return rows
+    if #pending == 0 then return end
+    for _, entry in ipairs(pending) do rows[#rows + 1] = table.concat(entry, "|") end
+    local target = bridge .. "/native-weapon-shots"
+    local temporary = target .. ".tmp"
+    local file = io.open(temporary, "wb")
+    if not file then return end
+    local written = file:write(table.concat(rows, "\n"), "\n")
+    local closed = file:close()
+    if written and closed then
+        if not os.rename(temporary, target) then
+            os.remove(target)
+            if not os.rename(temporary, target) then return end
+        end
+        published = serial
+    end
 end
 
 local function play(pawn, path, point, rotation, scale, volume, pitch, distance)

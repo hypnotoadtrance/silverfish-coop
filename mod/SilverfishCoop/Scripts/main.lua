@@ -1180,7 +1180,6 @@ local function write_status(state, current_phase, failure, fields)
     end
     for _, row in ipairs(native_player_avatar.rows(status_row)) do rows[#rows + 1] = row end
     for _, row in ipairs(native_voice.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
-    for _, row in ipairs(native_weapon_fire_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
     for _, row in ipairs(native_replication_budget.rows(status_row)) do rows[#rows + 1] = row end
     for _, row in ipairs(native_zone_loading.rows(status_row)) do rows[#rows + 1] = row end
     local guest_save_row = guest_save.row(status_row)
@@ -1585,6 +1584,7 @@ native_guest_smg_hold.start_fast(bridge, status_row, function(state)
 end)
 local next_snapshot = 0
 LoopInGameThreadWithDelay(25, function()
+    if role == "host" and not leaving then pcall(native_weapon_fire_view.flush, current_world) end
     local fields = read_command()
     local now = os.clock()
     if not fields and now < next_snapshot then return end

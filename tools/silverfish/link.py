@@ -12,6 +12,7 @@ import secrets
 import ssl
 import struct
 import zlib
+from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
@@ -94,6 +95,10 @@ _KEEPALIVE_INTERVAL = 3.0
 _MAX_GAME_PACKET = 65507
 _FRAGMENT_SIZE = 1024
 _FRAGMENT_HEADER = struct.Struct("!IHH")
+# Unreal fragments always declare a nonzero size. The reserved header carries
+# small, host-to-guest cosmetic events on the same authenticated connection.
+_WEAPON_SHOT_HEADER = _FRAGMENT_HEADER.pack(0, 0, 1)
+_WEAPON_SHOT_MAX_AGE = .25
 _FRAGMENT_TTL = 1.0
 _MAX_ASSEMBLIES = 32
 _MAX_QUEUED_FRAMES = 96
@@ -453,8 +458,8 @@ class _LinkProtocol(QuicConnectionProtocol):
         # Evict the oldest queued packet as a group when the path is congested.
         # Unreal implements its own reliability above this datagram transport.
         while len(pending) + count > _MAX_QUEUED_FRAMES:
-            evicted = pending.popleft()[:4]
-            while pending and pending[0][:4] == evicted:
+            evicted = pending.popleft()[:6]
+            while pending and pending[0][:6] == evicted:
                 pending.popleft()
         if not pending:
             self._game_queue_started = now
@@ -464,6 +469,19 @@ class _LinkProtocol(QuicConnectionProtocol):
             start = index * _FRAGMENT_SIZE
             frame = _FRAGMENT_HEADER.pack(packet_id, len(data), index)
             self._quic.send_datagram_frame(frame + data[start:start + _FRAGMENT_SIZE])
+        self.transmit()
+
+    def forward_weapon_shot(self, data: bytes) -> None:
+        if not self.authorized or not self.game_access or self.terminated or not 0 < len(data) <= _FRAGMENT_SIZE:
+            return
+        now = self._loop.time()
+        self._expire_game_queue(now)
+        pending = self._quic._datagrams_pending
+        if len(pending) >= _MAX_QUEUED_FRAMES:
+            return
+        if not pending:
+            self._game_queue_started = now
+        self._quic.send_datagram_frame(_WEAPON_SHOT_HEADER + data)
         self.transmit()
 
     def _expire_game_queue(self, now: float) -> None:
@@ -942,6 +960,11 @@ class HostLink:
         if protocol is not None and self._native_route_permitted(guest_id):
             protocol.forward_game_packet(data)
 
+    def send_weapon_shot(self, data: bytes, allowed: Callable[[str], bool]) -> None:
+        for guest_id, protocol in self._protocols.items():
+            if self.connected(guest_id) and self._native_route_permitted(guest_id) and allowed(guest_id):
+                protocol.forward_weapon_shot(data)
+
     async def close(self) -> None:
         if self._closed:
             return
@@ -1026,6 +1049,10 @@ class _ClientProtocol(_LinkProtocol):
             if action is not None and not action.response.done():
                 action.response.set_exception(LinkError("application request stream closed"))
         elif isinstance(event, events.DatagramFrameReceived):
+            if event.data.startswith(_WEAPON_SHOT_HEADER):
+                if self.authorized and self.game_access and not self.terminated:
+                    self.client._receive_weapon_shot(event.data[len(_WEAPON_SHOT_HEADER):], self._loop.time())
+                return
             packet = self._game_payload(event)
             if packet is not None:
                 self.client._to_game(packet)
@@ -1176,6 +1203,7 @@ class ClientLink:
         self._context = None
         self._keepalive: asyncio.Task[None] | None = None
         self._game_endpoint: Address | None = None
+        self._weapon_shots: deque[tuple[float, bytes]] = deque(maxlen=36)
         self.game_local_datagrams = 0
         self.game_packets_sent = 0
         self.game_packets_received = 0
@@ -1329,7 +1357,21 @@ class ClientLink:
             self._transport.sendto(data, self._game_endpoint)
             self.game_packets_received += 1
 
+    def _receive_weapon_shot(self, data: bytes, now: float) -> None:
+        if 0 < len(data) <= _FRAGMENT_SIZE:
+            self._weapon_shots.append((now, data))
+
+    def weapon_shots_ready(self) -> bool:
+        return bool(self._weapon_shots)
+
+    def take_weapon_shots(self) -> list[bytes]:
+        now = asyncio.get_running_loop().time()
+        result = [data for received, data in self._weapon_shots if now - received <= _WEAPON_SHOT_MAX_AGE]
+        self._weapon_shots.clear()
+        return result
+
     async def _disconnect_locked(self) -> None:
+        self._weapon_shots.clear()
         if self._keepalive is not None:
             self._keepalive.cancel()
             await asyncio.gather(self._keepalive, return_exceptions=True)
