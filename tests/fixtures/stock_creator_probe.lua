@@ -2,9 +2,8 @@
 local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not mailbox
     or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") ~= "1" then return end
-local seat, nonce = mailbox:match("[/\\]titles[/\\]title%-host%-settings%-(%x+)[/\\]run[/\\]game%-bridge[/\\](%x+)$")
-if not seat then seat, nonce = mailbox:match("[/\\]titles[/\\](local)[/\\]run[/\\]game%-bridge[/\\](%x+)$") end
-if not seat or (seat ~= "local" and #seat ~= 8) or #nonce ~= 32 then return end
+local seat, nonce = mailbox:match("[/\\]titles[/\\]([a-zA-Z0-9][a-zA-Z0-9_%-]*)[/\\]run[/\\]game%-bridge[/\\]([0-9a-f]+)$")
+if not seat or #seat > 64 or #nonce ~= 32 then return end
 
 local command = mailbox .. "/stock-creator-probe-command.tsv"
 local reply = mailbox .. "/stock-creator-probe-reply.tsv"
