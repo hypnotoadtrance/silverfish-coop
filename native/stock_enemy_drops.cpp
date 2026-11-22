@@ -1,4 +1,5 @@
 #include "stock_enemy_drops.hpp"
+#include "enemy_loot.hpp"
 #include "shared_loot.hpp"
 
 #include <algorithm>
@@ -47,7 +48,7 @@ namespace
     struct Observation
     {
         U::FFrame* frame{};
-        U::FWeakObjectPtr npc, world;
+        U::FWeakObjectPtr npc, world, killer_pawn, killer_save;
         std::array<U::FObjectProperty*, 5> deferred{};
         std::vector<U::FWeakObjectPtr> items;
         std::string killer;
@@ -213,7 +214,14 @@ namespace
         if (live(killer) && killer->GetClassPrivate() == find<U::UClass>(pawn_path) &&
             silverfish::shared_loot::qualify_escrow_owner_in_world(world, address(killer),
                 address(object(killer, STR("Save"))), address(stock), participant))
+        {
             next.killer = RC::to_utf8_string(killer->GetFullName());
+            if (participant.save != participant.stock)
+            {
+                next.killer_pawn = participant.pawn;
+                next.killer_save = participant.save;
+            }
+        }
         next.frame = &frame;
         next.npc = npc;
         next.world = world;
@@ -225,6 +233,22 @@ namespace
         if (!available() || !observing.frame) return;
         if (&frame != observing.frame)
         {
+            static const U::FName passive_name{STR("FindPassiveEffect")};
+            auto* killer = observing.killer_pawn.Get();
+            if (killer && frame.Node() && frame.Node()->GetFName() == passive_name &&
+                frame.PreviousFrame() && frame.PreviousFrame()->PreviousFrame() == observing.frame &&
+                !call.OriginalFunctionCallPrevented())
+            {
+                auto* world = static_cast<U::UWorld*>(observing.world.Get());
+                auto* instance = listen_instance(world);
+                silverfish::shared_loot::EscrowOwner participant{};
+                if (instance && receiver == instance && silverfish::shared_loot::qualify_escrow_owner_in_world(
+                        world, address(killer), address(observing.killer_save.Get()),
+                        address(object(instance, STR("SaveSlot_Ref"))), participant))
+                    silverfish::native_enemy_loot::apply_stock_guest_bounty(frame, *observing.frame,
+                        observing.npc.Get(), instance, participant);
+                return;
+            }
             if (!call.OriginalFunctionCallPrevented() && frame.PreviousFrame() == observing.frame &&
                 frame.Node() == find<U::UFunction>(spawn_item) &&
                 receiver == listen_instance(static_cast<U::UWorld*>(observing.world.Get())))

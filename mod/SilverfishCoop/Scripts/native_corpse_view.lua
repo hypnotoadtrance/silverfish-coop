@@ -4,6 +4,7 @@ local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local marker_path = "/Script/Engine.TargetPoint"
 local npc_class, marker_class, clock, death_hook
 local active_world, markers, numbered, mirrors, ended, anchors = nil, {}, {}, {}, {}, {}
+local pending = {}
 local next_sample, corpse_number = 0, 0
 local sample_period = .1
 local byte_angle = 360 / 256
@@ -135,17 +136,19 @@ local function publish(actor)
     markers[address], numbered[corpse_number] = marker, marker
 end
 
-local function apply(marker)
-    if not valid(marker) or not same(marker:GetClass(), marker_class) or marker:GetLocalRole() ~= 1 then return end
+local function apply(marker, world)
+    if not valid(marker) or not same(marker:GetWorld(), world) then return true end
     local actor = marker:GetOwner()
-    local world = world_driver(marker, true)
-    if not world or not valid(actor) or not valid(npc_class) or not actor:IsA(npc_class)
-        or not same(actor:GetWorld(), world) or actor:GetLocalRole() ~= 1 or actor:IsActorBeingDestroyed() then return end
+    if not valid(actor) or not actor:IsA(npc_class) or not same(actor:GetWorld(), world)
+        or actor:IsActorBeingDestroyed() then return true end
+    -- The owner, simulated role and first movement update can arrive in separate frames.
+    if marker:GetLocalRole() ~= 1 or actor:GetLocalRole() ~= 1 or not same(world_driver(marker, true), world)
+        or marker_number(marker) == 0 then return end
     local mesh, capsule, movement = actor.Mesh, actor.CapsuleComponent, actor.CharacterMovement
     if not valid(mesh) or not valid(capsule) or not valid(movement) then return end
     local key = actor:GetAddress()
     if not mirrors[key] or not same(mirrors[key].marker, marker) then mirrors[key] = {marker = marker} end
-    if actor.Alive == false and mesh:IsAnySimulatingPhysics() then return end
+    if actor.Alive == false and mesh:IsAnySimulatingPhysics() then return true end
     movement:SetMovementMode(0, 0)
     capsule:SetCollisionEnabled(0)
     mesh:K2_DetachFromComponent(1, 1, 1, false)
@@ -159,6 +162,7 @@ local function apply(marker)
     actor.Alive = false
     actor.Agro = false
     actor.Tags = {FName("Dead", EFindName.FNAME_Find)}
+    return true
 end
 
 local function mirror_positions(world, pawn)
@@ -209,14 +213,18 @@ function corpses.start(role)
     clock = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     if not valid(marker_class) then return end
     RegisterHook("/Script/Engine.Actor:OnRep_Owner", function(context)
-        if role() == "client" then pcall(apply, context:get()) end
+        if role() ~= "client" then return end
+        local marker = context:get()
+        if valid(marker) and same(marker:GetClass(), marker_class) and valid(marker:GetOwner()) then
+            pending[marker:GetAddress()] = marker
+        end
     end)
     RegisterEndPlayPreHook(function(context)
-        if next(markers) == nil and next(mirrors) == nil then return end
+        if next(markers) == nil and next(mirrors) == nil and next(pending) == nil then return end
         local actor = context:get()
         if not valid(actor) then return end
         local address = actor:GetAddress()
-        mirrors[address], anchors[address] = nil, nil
+        mirrors[address], anchors[address], pending[address] = nil, nil, nil
         local marker = markers[address]
         if valid(marker) and same(marker:GetOwner(), actor) then
             numbered[marker_number(marker)] = nil
@@ -230,8 +238,8 @@ function corpses.sync(state, phase)
     local hosting = phase == "hosting" and state.listening and not state.server
     local world = (hosting or phase == "connected" and state.server) and state.world or nil
     if not same(world, active_world) then
-        active_world, markers, numbered, ended, anchors, next_sample, corpse_number = world, {}, {}, {}, {}, 0, 0
-        if hosting then mirrors = {} end
+        active_world, markers, numbered, mirrors, ended, anchors, next_sample, corpse_number =
+            world, {}, {}, {}, {}, {}, 0, 0
     end
     if not valid(world) then return end
     if not valid(npc_class) then npc_class = StaticFindObject(npc_path) end
@@ -245,13 +253,16 @@ function corpses.sync(state, phase)
         ended[address] = nil
         if valid(marker) and same(marker:GetWorld(), world) then marker:K2_DestroyActor() end
     end
-    if next(hosting and markers or mirrors) ~= nil then
+    if next(hosting and markers or mirrors) ~= nil or not hosting and next(pending) ~= nil then
         local now = clock:GetRealTimeSeconds(world)
         if now >= next_sample then
             next_sample = now + sample_period
             if hosting then
                 publish_positions(world)
             else
+                for address, marker in pairs(pending) do
+                    if apply(marker, world) then pending[address] = nil end
+                end
                 mirror_positions(world, state.local_pawn and state.local_pawn.pawn)
             end
         end
