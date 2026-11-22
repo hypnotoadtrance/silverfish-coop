@@ -318,6 +318,7 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         assert duplicate.get("error") == "loose_pickup_already_claimed", duplicate
     drop_reclaim_proof = None
     if projected_nearby:
+        before_reclaim = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
         clicked = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=dropped_actor)
         count = stock_drop_proof["quantity"]
         expected = "stock Nearby Items card requested" + (f" x{count}" if count > 1 else "")
@@ -332,7 +333,9 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         inventory_guid = drop_reclaim_proof.get("inventory_guid", stock_drop_proof["guid"])
         merge = drop_reclaim_proof.get("stack_merge", {})
         if stock_split:
-            assert inventory_guid == split_proof["new_guid"] and merge.get("amount") == count, drop_reclaim_proof
+            existing, = [row for row in before_reclaim["items"] if row["guid"] == inventory_guid]
+            assert existing["class_path"] == stock_drop_proof["class_path"], existing
+            assert merge == {"amount": count, "before": existing["quantity"], "after": existing["quantity"] + count}, drop_reclaim_proof
         display = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE,
                                target=f"{dropped_actor}@{inventory_guid}")
         assert display["ok"] and display["proof"] == "verified stock Nearby Items transfer", display
@@ -340,6 +343,8 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
         assert drop_reclaim_proof["claimed_by"] == guest_inventory["owner"]
         returned = [row["quantity"] for row in guest_inventory["items"] if row["guid"] == inventory_guid]
         assert returned == [merge.get("after", count)], guest_inventory
+        if merge:
+            assert all(row["guid"] != stock_drop_proof["guid"] for row in guest_inventory["items"]), guest_inventory
         assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before["native_inventory"]
     normal_tab_proof = None
     if stock_drop:
