@@ -64,7 +64,7 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.party["players"]["host"]["quest_xp"], 1)
         self.assertNotIn(native_rewards.PENDING, host.party["players"]["offline"])
         self.assertEqual(host.party["economy"]["wallet"], 818)
-        self.assertTrue(host.pending_host_save)
+        self.assertIs(host.pending_host_save, False)
         self.assertFalse(host.native_checkpoint_unsafe)
         self.assertEqual(bridge.command.await_count, 4)
         host.checkpoint_native.assert_not_awaited()
@@ -85,6 +85,7 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
             retain.assert_not_awaited()
         self.assertEqual((paid["step"], paid["cash"]), (-10, 3000))
         self.assertNotIn("consumed_guid", paid)
+        self.assertIs(host.pending_host_save, False)
         host.checkpoint_native.assert_not_awaited()
 
     async def test_refuses_wrong_board_and_missing_retention_without_mutation(self):
@@ -112,6 +113,18 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
             await board.perform(host, bridge, "guest", "turnin", UNREGISTERED_KILL)
         self.assertEqual(host.party.get("native_quests", {}), {})
         self.assertTrue(host.native_checkpoint_unsafe and host.stopping)
+        host.checkpoint_native.assert_not_awaited()
+
+    async def test_host_objective_only_marks_deferred_typed_inventory_capture(self):
+        host = self.host()
+        host.last_game["pawns"] = {"local": {"name": PAWN}}
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            result(EYE, "turnin", "inspect", 1, -10, cash=801, xp=1, guid=GUID),
+            result(EYE, "turnin", "apply", 1, -10, cash=801, xp=1, guid=GUID),
+        ]))
+        paid = await board.perform(host, bridge, "host", "turnin", EYE)
+        self.assertEqual(paid["objective_owner"], "host")
+        self.assertIs(host.pending_host_save, True)
         host.checkpoint_native.assert_not_awaited()
 
     def test_repeated_proof_rows_are_rejected(self):

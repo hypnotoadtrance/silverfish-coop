@@ -125,7 +125,7 @@ async def perform(host, bridge, actor, verb, quest, *, board=None):
             candidate["economy"].update(wallet=record["wallet"], native_wallet_active=True)
         candidate.setdefault("native_quests", {})[quest] = record
         host.party = candidate
-        host.pending_host_save = True
+        host.pending_host_save = bool(host.pending_host_save or (actor == "host" and "consumed_guid" in record))
         host.native_checkpoint_unsafe = False
         host.control.event("native_board_contract_applied", board=board, **record)
         return {"effect": "native_quest_changed", **record}
