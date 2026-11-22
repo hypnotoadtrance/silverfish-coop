@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 
 from tools.silverfish import runtime, service
 
-from . import install_stage, install_stock, release_bundle, release_setup as layout, resident_release
+from . import install_stage, install_stock, release_bundle, release_setup as layout
 from .resident_install import _GAME_BUILD
 
 
@@ -35,6 +35,8 @@ _START = r"""Project Silverfish Co-op | Windows Direct IP trial {version}
 2. Copy the SilverFish folder from this ZIP into the open game folder.
    Merge it with the existing SilverFish folder and replace the mod
    files when Windows asks. Use the same steps for future updates.
+   If you previously enabled the F7 prototype, disable its
+   SilverfishCoopBootstrap module in UE4SS before launching.
 3. Launch the game through Steam and choose Multiplayer. Choose Host to
    start or load a campaign, or Join by Direct IP to enter the host's IP,
    UDP port, and password if the host uses one.
@@ -119,7 +121,7 @@ def assemble(output: Path, *, version: str, revision: str, shipping: Path, cpp_a
         return Path(os.path.abspath(path))
 
     shipping_sha = _shipping_hash(absolute(shipping))
-    sources = release_bundle._sources(release_bundle.REPO, revision)
+    sources = release_bundle._sources(release_bundle.REPO, revision, fixed_sources=layout.GAMEPLAY_SOURCES)
     package, embedded = release_bundle._runtime(absolute(embedded_runtime), absolute(embedded_addon), sources)
     if _PORTABLE.encode("utf-16-le") not in embedded:
         raise ValueError("The embedded add-on does not support portable startup")
@@ -169,7 +171,7 @@ def assemble(output: Path, *, version: str, revision: str, shipping: Path, cpp_a
         payload[_EMBEDDED / _PORTABLE] = _json({"schema": 1, "shipping_sha256": shipping_sha,
                                                 "features": features, "isolated_features": isolated})
         archive = scratch / "release.zip"
-        resident_release._archive(archive, {path.as_posix(): data for path, data in payload.items()})
+        layout.write_zip(archive, {path.as_posix(): data for path, data in payload.items()})
         with archive.open("rb") as stream:
             digest = file_digest(stream, "sha256").hexdigest()
         if os.name == "nt":

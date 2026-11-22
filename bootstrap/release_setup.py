@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import sys
-from zipfile import BadZipFile
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 
 MANIFEST = "release.json"
@@ -24,13 +24,15 @@ LOADER_FILES = frozenset({
     LOADER + "/dwmapi.dll", LOADER + "/ue4ss/UE4SS.dll", LOADER + "/ue4ss/UE4SS-settings.ini",
     LOADER + "/ue4ss/LICENSE", SIGNATURES + "/FText_Constructor.lua",
 })
-FIXED_SOURCES = frozenset({
-    "bootstrap/release_setup.py", "bootstrap/install_stage.py", "bootstrap/install_stock.py",
-    "bootstrap/package.py", "bootstrap/SilverfishCoopBootstrap/Scripts/main.lua",
+GAMEPLAY_SOURCES = frozenset({
     "mod/SilverfishCoop/Scripts/main.lua", "mod/SilverfishCoop/Scripts/native_title_entry.lua",
     "mod/SilverfishCoop/Scripts/native_title_display.lua", "tools/__init__.py", "tools/silverfish/__init__.py",
     "tools/silverfish/embedded_startup.py",
 })
+INSTALLER_SOURCES = frozenset({
+    "bootstrap/release_setup.py", "bootstrap/install_stage.py", "bootstrap/install_stock.py", "bootstrap/package.py",
+})
+FIXED_SOURCES = GAMEPLAY_SOURCES | INSTALLER_SOURCES | {"bootstrap/SilverfishCoopBootstrap/Scripts/main.lua"}
 SETUP_FILES = FIXED_SOURCES | LOADER_FILES | {
     "Install.cmd", "Setup.ps1", "START-HERE.txt", STOCK_BOOTSTRAP, GAMEPLAY_ADDON, EMBEDDED_ADDON,
     PYTHON, RUNTIME + "/runtime-manifest.json",
@@ -59,10 +61,32 @@ def release_name(path: str) -> PurePosixPath:
     return PurePosixPath(path)
 
 
-def permitted_source(path: str) -> bool:
-    return path in FIXED_SOURCES or any(
+def permitted_source(path: str, fixed_sources: frozenset[str] = FIXED_SOURCES) -> bool:
+    return path in fixed_sources or any(
         path.startswith(prefix) and path.endswith(extension) for prefix, extension in SOURCE_PREFIXES.items()
     )
+
+
+def write_zip(output: Path, files: dict[str, bytes]) -> None:
+    """Write a deterministic ZIP with Windows-safe paths and bounded contents."""
+    paths = set()
+    total = 0
+    for name, data in files.items():
+        path = release_name(name)
+        paths.add(path.as_posix())
+        paths.update(parent.as_posix() for parent in path.parents[:-1])
+        total += len(data)
+        if len(data) > FILE_LIMIT:
+            raise ValueError(f"Resident release file exceeds its size limit at {name}")
+    if (len(paths) >= ENTRY_LIMIT or total > TOTAL_LIMIT
+            or len(paths) != len({path.casefold() for path in paths})):
+        raise ValueError("Resident release contains conflicting paths or exceeds its size limit")
+    with ZipFile(output, "x", ZIP_DEFLATED) as archive:
+        for name, data in sorted(files.items()):
+            member = ZipInfo(name)
+            member.compress_type = ZIP_DEFLATED
+            member.external_attr = 0o100644 << 16
+            archive.writestr(member, data)
 
 
 def permitted_member(path: str) -> bool:

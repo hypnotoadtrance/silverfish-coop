@@ -9,11 +9,35 @@ import unittest
 from unittest.mock import patch
 from zipfile import ZipFile
 
-from bootstrap import install_stage, install_stock, release_bundle as bundle, release_setup as setup
+from bootstrap import install_stage, install_stock, release_bundle as bundle, release_setup as setup, resident_release
 from tools.silverfish import runtime
 
 
 class BundleTests(unittest.TestCase):
+    def test_gameplay_and_resident_installer_sources_do_not_require_the_f7_entry(self):
+        names = resident_release._RESIDENT_SOURCES | {"tools/silverfish/extra.py", "tests/private.py"}
+        rows = [f"100644 blob {number:040x}\t{name}".encode() for number, name in enumerate(sorted(names))]
+        tree = b"\0".join(rows) + b"\0"
+
+        def read_git(_repo, *args):
+            if args[0] == "ls-tree":
+                return tree
+            if args[:2] == ("cat-file", "-t"):
+                return b"commit"
+            if args[:2] == ("cat-file", "blob"):
+                return b"fixture"
+            self.fail(f"Unexpected Git request {args}")
+
+        with patch.object(bundle, "git", side_effect=read_git):
+            revision = "a" * 40
+            gameplay = bundle._sources(bundle.REPO, revision, fixed_sources=setup.GAMEPLAY_SOURCES)
+            installer = bundle._sources(bundle.REPO, revision, fixed_sources=resident_release._RESIDENT_SOURCES)
+            with self.assertRaisesRegex(ValueError, "missing required setup or mod sources"):
+                bundle._sources(bundle.REPO, revision)
+
+        self.assertEqual(gameplay.keys(), setup.GAMEPLAY_SOURCES | {"tools/silverfish/extra.py"})
+        self.assertEqual(installer.keys(), resident_release._RESIDENT_SOURCES | {"tools/silverfish/extra.py"})
+
     def test_archive_is_repeatable_and_detects_tampering(self):
         files = {name: ("fixture " + name).encode() for name in setup.SETUP_FILES}
         files["Setup.ps1"] = bundle.SETUP

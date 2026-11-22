@@ -1,26 +1,30 @@
-# Stock title bootstrap
+# Install and test the co-op mod
 
-## Installed resident title
+## Current Steam installation
 
 Close Project Silverfish. In Steam, choose **Manage → Browse local files**. Copy the ZIP's `SilverFish` folder into the folder containing `SilverFish.exe` and merge it with the existing `SilverFish` folder. Use the same ZIP for a first install or an update. It includes the pinned UE4SS v4.0.0 loader and Silverfish signature. Replace files when prompted. The ZIP replaces the bundled UE4SS settings INI during an update. Updates use the existing co-op workspace. The default location is `%LOCALAPPDATA%\SilverfishCoop\Resident`.
 
-Launch the game through Steam after extraction. The first screen offers **Singleplayer** and **Multiplayer**. Choose **Host** to create a save through the stock character creator or load an existing save. Choose **Join by Direct IP** to connect to a host. Run `python -m bootstrap.resident_drop --help` for the matched artifacts required to build the ZIP. Steam launch against the original installation and two-PC play remain pending. [Drag-and-drop packager](resident_drop.py) · [Portable cold-start test](../tests/live_portable_title_smoke.py)
+Launch the game through Steam after extraction. The first screen offers **Singleplayer** and **Multiplayer**. Choose **Host** to create or load a campaign, or **Join by Direct IP** to connect to a host. Maintainers build this ZIP with `python -m bootstrap.resident_drop`. [Release build instructions](../docs/RELEASING.md)
 
-If you already installed the matching gameplay modules and pinned embedded runtime, configure their native startup directly. Disable the older `SilverfishCoopBootstrap` entry in the UE4SS Mods list before configuring.
+An overwrite preserves your co-op workspace and any existing `resident-install.json` settings. The bundled add-on uses the versioned runtime directory that matches its manifest pin, so an older runtime can coexist on disk. If you previously enabled the F7 prototype, disable only `SilverfishCoopBootstrap` in `SilverFish/Binaries/Win64/ue4ss/Mods/mods.txt`. If that module has its own `enabled.txt` marker, rename the marker to `disabled-by-upgrade.txt` before launching. [Older installed-layout upgrade fixture](../tests/live_portable_title_smoke.py)
+
+## Maintainer setup for test layouts
+
+Use the native startup helper when configuring already installed gameplay modules and a matching embedded runtime for a specific test workspace.
 
 ```powershell
 python -m bootstrap.resident_boot_config --game $game --work $workspace
 ```
 
-The helper verifies the stock executable and packages, checks the installed runtime, and writes the native startup descriptor. The workspace holds the co-op session records and must be separate from the game. The default mode retains the normal Windows player profile. The `--isolated` option is for headless replicas with a dedicated Unreal user directory.
+The helper verifies the stock executable and packages, checks the installed runtime, and writes the native startup descriptor. The workspace holds the co-op session records and must be separate from the game. The default mode retains the normal Windows player profile. The `--isolated` option is for headless replicas with a dedicated Unreal user directory. The older installer-based resident ZIP uses `bootstrap.resident_release` and `bootstrap.resident_install` for labs that still exercise that installation path.
 
-## Legacy coordinator
+## Historical F7 coordinator fixtures
 
-This opt-in UE4SS Lua mod presents **Open Co-op** on the stock Project Silverfish title. It needs the exact standalone title with its normal menu mounted and in front. On a packaged coordinator offer, a fresh F7 press submits a one-use request. The title shows **Coordinator unavailable** until a compatible coordinator supplies a valid offer.
+Use the following tools when reproducing a staged coordinator or F7 handoff test. This opt-in UE4SS Lua mod presents **Open Co-op** on the stock Project Silverfish title. It needs the exact standalone title with its normal menu mounted and in front. On a packaged coordinator offer, a fresh F7 press submits a one-use request. The title shows **Coordinator unavailable** until a compatible coordinator supplies a valid offer.
 
-The bootstrap only reads the title and adds its own passive text widget. The coordinator will own isolated game startup and the handoff.
+The bootstrap reads the title and adds a passive text widget. The coordinator starts the isolated game and manages the handoff.
 
-### Legacy package
+### Assemble the historical bootstrap package
 
 From a checkout, run `python bootstrap/package.py <new-archive.zip>` to assemble the standalone mod. The archive includes the bootstrap entry and the same stock title qualification and display code used by the staged game. Its three Lua files load through UE4SS's absolute per-mod script search path.
 
@@ -30,7 +34,7 @@ Build the test coordinator with a matching Windows x64 Python environment, the r
 
 Build the [native title bridge](native/README.md) with the coordinator's SHA-256 pin. Run `python bootstrap/package.py <new-archive.zip> --native-dll <main.dll> --coordinator <SilverfishCoopCoordinator.exe>` to package the matching pair beside the three Lua scripts. The same opt-in UE4SS mod entry loads the complete bootstrap.
 
-### Install from a legacy trial ZIP
+### Set up a historical staged trial
 
 Close Project Silverfish, extract the matched Windows trial ZIP, and double-click `Install.cmd`. It finds the Steam game and stages the co-op profile under `%LOCALAPPDATA%\SilverfishCoop\Trials`. It asks for the game folder if Steam's library list does not lead to the installation. The pinned UE4SS v4.0.0 loader, license, and Project Silverfish signature are included.
 
@@ -44,7 +48,7 @@ The ZIP supplies the isolated Python runtime, coordinator, title and gameplay mo
 
 To assemble the ZIP from validated local artifacts, use `python -m bootstrap.release_bundle --help`. The recipe checks the versioned dependency lock, the native manifest and coordinator pins, and the game worker sources before writing the archive.
 
-## Install the stock title entry
+### Install the historical stock title entry
 
 Prepare the matched private embedded stage first. Close both the stock game and the private stage before setup. From the matched checkout, use the pinned UE4SS release, the Project Silverfish signature folder, and the full bootstrap archive.
 
@@ -56,15 +60,15 @@ To enable the in-game Join form, supply `--join-profile $profile`. The guest can
 
 Open the game with **Play** in Steam, then use **Open Co-op** on the title to reach the isolated Host and Join controls. The interactive Steam startup and handoff still need foreground verification. [Private stage setup](../native/embedded_runtime/README.md)
 
-## Coordinator calls
+### Coordinator calls
 
 - `SilverfishReadCoopBootstrapOffer()` returns integer protocol version `1` and the current generation. A generation is a nonzero string of 32 lowercase hexadecimal characters. The coordinator issues a new ID for each new offer.
 - `SilverfishRequestCoopBootstrapOpen(generation, request_id)` accepts the exact generation plus a fresh 32-character request ID in the same format. It returns `true` once the request has been queued. The coordinator consumes that generation once and verifies the isolated title's panel and effective save path before acknowledging readiness.
 
 Both callbacks run on the game thread. The selection callback queues the launch and readiness checks on a worker thread. **Opening Co-op** stays visible while the isolated game starts. After the matching readiness receipt, the original unchanged stock title uses the stock Quit action. A refused or unverified reply leaves that title available. A new attempt requires a fresh coordinator offer.
 
-## Isolated stock-layout check
+### Isolated stock-layout check
 
 1. Use an independently staged stock copy with the matching UE4SS runtime and Project Silverfish signature. Enable only the bootstrap Lua mod in that copy. Give the replica a fresh standalone `-userdir` outside the Steam install and original save directory. Start with no inherited Silverfish co-op environment or special Steam launch options. Run one case with the executable's directory as the working directory and another from a different directory.
 2. Verify the mounted stock title shows **Open Co-op** and **Coordinator unavailable**. The loader log should show `[SilverfishCoopBootstrap] state=unavailable` after mount and text verification. A title or display failure reports `state=error`. Press F7 and check that the title stays usable and the process tree stays the same. Open a stock title dialog and verify the prompt disappears until the title is back on top. Check the archive remains inactive with its `mods.txt` entry absent.
-3. Record the original save hashes before and after the isolated run. Record the replica's effective profile and distinguish stock title configuration writes from the bootstrap. Exercise the future coordinator separately by providing one bounded offer and verifying one real F7 edge delivers the typed request. The Lua mock covers that callback contract today.
+3. Record the original save hashes before and after the isolated run. Record the replica's effective profile and distinguish stock title configuration writes from the bootstrap. Exercise the coordinator separately by providing one bounded offer and verifying one real F7 edge delivers the typed request. The Lua mock covers that callback contract today.

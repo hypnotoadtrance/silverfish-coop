@@ -121,6 +121,39 @@ class ResidentDropTests(unittest.TestCase):
                 (binary / "ue4ss" / install_stock.SIGNATURE).as_posix(),
             })
 
+    def test_overwrite_preserves_previous_runtime_and_local_configuration(self):
+        installed = self.root / "previous install"
+        with ZipFile(self.assemble("previous.zip", include_loader=True)["file"]) as archive:
+            archive.extractall(installed)
+
+        bin_dir = installed / runtime.SHIPPING.parent
+        mods = bin_dir / "ue4ss/Mods"
+        embedded = mods / install_stage.MOD
+        old_runtime = embedded / self.runtime_folder
+        workspace_records = {
+            embedded / "resident-install.json": b'{"schema":1,"work":"prior_workspace"}',
+            mods / "mods.txt": b"UnrelatedMod : 1",
+            mods / "UnrelatedMod/Scripts/main.lua": b"print('keep')",
+            bin_dir / runtime.SHIPPING.name: b"original stock binary",
+        }
+        for file, contents in workspace_records.items():
+            self.write(file, contents)
+
+        new_manifest = b'{"schema":1,"version":"next"}'
+        new_folder = "runtime-" + sha256(new_manifest).hexdigest()[:16]
+        new_dll = self.embedded + b"next"
+        self.packed.return_value = ({
+            f"{release_setup.RUNTIME}/{install_stage.MANIFEST}": new_manifest,
+            f"{release_setup.RUNTIME}/python314.dll": b"new runtime",
+        }, new_dll)
+        with ZipFile(self.assemble("overwrite.zip", include_loader=True)["file"]) as archive:
+            archive.extractall(installed)
+
+        self.assertEqual((embedded / "dlls/main.dll").read_bytes(), new_dll)
+        self.assertEqual((embedded / new_folder / install_stage.MANIFEST).read_bytes(), new_manifest)
+        self.assertEqual((old_runtime / install_stage.MANIFEST).read_bytes(), self.runtime[f"{release_setup.RUNTIME}/{install_stage.MANIFEST}"])
+        self.assertEqual({file: file.read_bytes() for file in workspace_records}, workspace_records)
+
     def test_rejects_old_native_addon_and_mismatched_stock(self):
         self.packed.return_value = self.runtime, b"resident-portable.json"
         with self.assertRaisesRegex(ValueError, "does not support portable startup"):

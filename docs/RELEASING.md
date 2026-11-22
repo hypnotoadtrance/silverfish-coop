@@ -8,7 +8,7 @@ Use a local Windows x64 machine with the qualified Steam installation, the pinne
 
 1. Build the gameplay native DLL with the pinned UE4SS toolchain.
 2. Build the embedded Python runtime from the same Git revision and link the embedded startup DLL with that runtime manifest’s SHA-256.
-3. Run the drag-and-drop packager from the repository root. Set the paths in the example to your matching local artifacts. Use a new output filename.
+3. Run `bootstrap.resident_drop` from the repository root. Set the paths in the example to your matching local artifacts. Use a new output filename. The older installer-based and F7 packagers are still available for their test layouts. [Legacy tooling](../bootstrap/README.md#maintainer-setup-for-test-layouts)
 
 ```powershell
 $sfRevision = (git rev-parse HEAD).Trim()
@@ -25,7 +25,7 @@ $sfTag = "rc-$($sfRevision.Substring(0,7))"
 
 ## Verify and publish
 
-1. Apply the exact ZIP to isolated test installs. At minimum, check that the Steam-style entry reaches the title menu, both seats can host and join, and singleplayer saves remain isolated. Run focused checks for the changed mechanics. [Portable title test](../tests/live_portable_title_smoke.py)
+1. Apply the exact ZIP to a clean isolated install and over an older supported resident install. Check that the game reaches the in-game title menu, both seats can host and join, the upgraded copy can load an existing co-op campaign, and singleplayer saves remain isolated. Keep the upgrade replica's old runtime directory and local descriptor so the test exercises the overwrite players perform. Run focused checks for the changed mechanics. [Portable title test](../tests/live_portable_title_smoke.py)
 2. On GitHub, open **Releases → Draft a new release**. Use a tag such as `rc-d9978a3` and target the exact source commit used for the ZIP.
 3. State that the candidate is for testing and bug reports. Summarize changes, supported game build, installation, known issues, and the ZIP’s SHA-256. Record automated checks and human playtesting separately. If the exact ZIP is awaiting human verification, say so.
 4. Attach `Silverfish-Coop-RC-*.zip` under the release assets and select **This is a pre-release**. Publish once the upload is complete, then open the release and verify the asset name and checksum. Keep the automatically generated **Source code** downloads available for readers who need the source snapshot.

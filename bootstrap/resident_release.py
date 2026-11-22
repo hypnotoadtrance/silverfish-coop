@@ -1,4 +1,4 @@
-"""Build a Windows co-op ZIP that installs into the original game."""
+"""Build the installer-based resident ZIP used by older Windows test layouts."""
 
 import argparse
 from hashlib import file_digest, sha256
@@ -7,13 +7,11 @@ import os
 from pathlib import Path
 from subprocess import CalledProcessError
 from tempfile import TemporaryDirectory
-from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from . import release_bundle, release_setup as layout
-from .embedded_runtime_build import git
 
 
-_RESIDENT_SOURCES = {
+_RESIDENT_SOURCES = layout.GAMEPLAY_SOURCES | layout.INSTALLER_SOURCES | {
     "bootstrap/embedded_runtime_build.py",
     "bootstrap/release_bundle.py",
     "bootstrap/resident_boot_config.py",
@@ -86,49 +84,6 @@ https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/v4.0.0
 """
 
 
-def _sources(repo: Path, revision: str) -> dict[str, bytes]:
-    sources = release_bundle._sources(repo, revision)
-    sources.pop("bootstrap/SilverfishCoopBootstrap/Scripts/main.lua")
-    tree = git(repo, "ls-tree", "-r", "-z", revision, "--", *sorted(_RESIDENT_SOURCES))
-    extra = {}
-    for row in tree.rstrip(b"\0").split(b"\0"):
-        if not row:
-            continue
-        metadata, name_bytes = row.split(b"\t", 1)
-        mode, kind, object_id = metadata.decode("ascii").split()
-        name = name_bytes.decode("ascii")
-        if name not in _RESIDENT_SOURCES or mode not in {"100644", "100755"} or kind != "blob":
-            raise ValueError(f"Expected an ordinary installer source at {name}")
-        contents = git(repo, "cat-file", "blob", object_id)
-        if len(contents) > release_bundle.SOURCE_LIMIT:
-            raise ValueError(f"Installer source exceeds its size limit at {name}")
-        extra[name] = contents
-    if extra.keys() != _RESIDENT_SOURCES:
-        raise ValueError("Release revision is missing resident installer sources")
-    return sources | extra
-
-
-def _archive(output: Path, files: dict[str, bytes]) -> None:
-    paths = set()
-    total = 0
-    for name, data in files.items():
-        path = layout.release_name(name)
-        paths.add(path.as_posix())
-        paths.update(parent.as_posix() for parent in path.parents[:-1])
-        total += len(data)
-        if len(data) > layout.FILE_LIMIT:
-            raise ValueError(f"Resident release file exceeds its size limit at {name}")
-    if (len(paths) >= layout.ENTRY_LIMIT or total > layout.TOTAL_LIMIT
-            or len(paths) != len({path.casefold() for path in paths})):
-        raise ValueError("Resident release contains conflicting paths or exceeds its size limit")
-    with ZipFile(output, "x", ZIP_DEFLATED) as archive:
-        for name, data in sorted(files.items()):
-            member = ZipInfo(name)
-            member.compress_type = ZIP_DEFLATED
-            member.external_attr = 0o100644 << 16
-            archive.writestr(member, data)
-
-
 def assemble(output: Path, *, version: str, revision: str, cpp_addon: Path, embedded_addon: Path,
              embedded_runtime: Path, ue4ss: Path, signatures: Path,
              cpp_addon_sha256: str | None = None) -> dict:
@@ -142,7 +97,7 @@ def assemble(output: Path, *, version: str, revision: str, cpp_addon: Path, embe
     cpp_addon, embedded_addon, embedded_runtime, ue4ss, signatures = (
         Path(os.path.abspath(path)) for path in (cpp_addon, embedded_addon, embedded_runtime, ue4ss, signatures)
     )
-    sources = _sources(release_bundle.REPO, revision)
+    sources = release_bundle._sources(release_bundle.REPO, revision, fixed_sources=_RESIDENT_SOURCES)
     runtime, addon = release_bundle._runtime(embedded_runtime, embedded_addon, sources)
     gameplay = release_bundle._read(cpp_addon, layout.FILE_LIMIT)
     release_bundle._pe(gameplay, dll=True, name="gameplay add-on")
@@ -159,7 +114,7 @@ def assemble(output: Path, *, version: str, revision: str, cpp_addon: Path, embe
              layout.MANIFEST: (json.dumps(summary, indent=2) + "\n").encode("ascii")}
     with TemporaryDirectory(prefix=".resident-release-", dir=output.parent) as temporary:
         archive = Path(temporary) / "release.zip"
-        _archive(archive, files)
+        layout.write_zip(archive, files)
         with archive.open("rb") as stream:
             digest = file_digest(stream, "sha256").hexdigest()
         if os.name == "nt":

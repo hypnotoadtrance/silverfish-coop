@@ -2,6 +2,7 @@
 
 import hashlib
 from io import BytesIO
+import os
 from pathlib import Path
 import stat
 from tempfile import TemporaryDirectory
@@ -47,7 +48,7 @@ class RuntimeRecipeTests(unittest.TestCase):
                 writer.write(recipe.relative_name("runtime/second.dll"), b"two")
 
     def test_source_tree_reads_the_selected_git_object(self):
-        with TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"GIT_CONFIG_COUNT": "0"}):
             source = Path(directory)
             recipe.git(source, "init", "--quiet")
             for relative in recipe.APP_FILES:

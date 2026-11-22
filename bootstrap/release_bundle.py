@@ -1,4 +1,4 @@
-"""Assemble a matched Silverfish co-op ZIP without game files."""
+"""Assemble the historical staged co-op ZIP and verify shared release inputs."""
 
 import argparse
 from hashlib import file_digest, sha256
@@ -88,7 +88,7 @@ def _read(path: Path, maximum: int) -> bytes:
     return payload
 
 
-def _sources(repo: Path, revision: str) -> dict[str, bytes]:
+def _sources(repo: Path, revision: str, *, fixed_sources: frozenset[str] = layout.FIXED_SOURCES) -> dict[str, bytes]:
     if not layout.REVISION.fullmatch(revision) or git(repo, "cat-file", "-t", revision).strip() != b"commit":
         raise ValueError("Supply the full Git commit for the release sources")
     tree = git(repo, "ls-tree", "--full-tree", "-r", "-z", revision, "--", "bootstrap", "tools", "mod/SilverfishCoop")
@@ -98,7 +98,7 @@ def _sources(repo: Path, revision: str) -> dict[str, bytes]:
             continue
         metadata, name_bytes = row.split(b"\t", 1)
         name = name_bytes.decode("utf-8")
-        if not layout.permitted_source(name):
+        if not layout.permitted_source(name, fixed_sources):
             continue
         layout.release_name(name)
         mode, kind, object_id = metadata.decode("ascii").split()
@@ -108,7 +108,7 @@ def _sources(repo: Path, revision: str) -> dict[str, bytes]:
         if len(contents) > SOURCE_LIMIT:
             raise ValueError(f"Release source exceeds its size limit at {name}")
         sources[name] = contents
-    if not layout.FIXED_SOURCES.issubset(sources):
+    if not fixed_sources.issubset(sources):
         raise ValueError("Release commit is missing required setup or mod sources")
     return sources
 
