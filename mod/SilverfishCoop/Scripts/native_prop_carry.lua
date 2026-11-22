@@ -335,7 +335,7 @@ local function fixture(fields, current, seat)
         local output = {}
         api:GetAllActorsOfClass(world, class, output)
         local candidates = output.OutActors or output
-        local expected = mode == "pickup" and math.tointeger(fields[5])
+        local expected = (mode == "pickup" or mode == "grab") and math.tointeger(fields[5])
         if expected and #candidates ~= expected then
             error("native_prop_carry_fixture_actor_count:" .. #candidates .. ":" .. expected, 0)
         end
@@ -384,7 +384,7 @@ local function fixture(fields, current, seat)
             reason = status
         end
         if not held(pawn, picked, handle(pawn)) then error("native_prop_carry_fixture_input:" .. tostring(reason), 0) end
-        return "normal stock Interact grabbed the crate prop"
+        return "Stock input grabbed the selected physics prop"
     end
     if seat == "connected" and local_hold and (mode == "turn" or mode == "throw" or mode == "drop") then
         if mode == "turn" then

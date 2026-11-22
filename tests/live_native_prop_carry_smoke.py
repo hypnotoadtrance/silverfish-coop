@@ -103,10 +103,11 @@ async def exercise(work, untouched, kind="crate"):
 
     try:
         assert original
-        area = {"barrel": DEAD_BRIDGE, "fuel-drum": CROSSROADS}.get(kind, OBSERVATORY)
+        fuel_drum = kind in ("fuel-drum", "fuel-drum-grab")
+        area = CROSSROADS if fuel_drum else DEAD_BRIDGE if kind == "barrel" else OBSERVATORY
         await start("host", host, "host", *host, "--port", "0", "--headless", "--fixtures", "--native-events",
                     "--native-guest", "--native-zones", "--native-expanded-zones", "--start-zone", area)
-        barrel_class = {"barrel": "Prop_PlasticBarrel_C ", "fuel-drum": "Prop_FuelDrum_C "}.get(kind)
+        barrel_class = "Prop_FuelDrum_C " if fuel_drum else "Prop_PlasticBarrel_C " if kind == "barrel" else None
 
         def barrels_of_class(state):
             return [item for item in state.get("game", {}).get(carry.BARRELS, {}).values()
@@ -131,7 +132,7 @@ async def exercise(work, untouched, kind="crate"):
             evidence = await verify_fuel_drum(initial)
             (hrun / "fuel-drum-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
             return
-        await fixture(host, "approach@guest")
+        await fixture(host, "approach-placed@guest" if fuel_drum else "approach@guest")
         await asyncio.sleep(.65)
         if kind == "lantern":
             await command("action", *host, lantern.FIXTURE, "--target", "ignite")
@@ -141,9 +142,9 @@ async def exercise(work, untouched, kind="crate"):
             await wait(grun, lambda state: lamp(state) is False)
             await command("action", *host, lantern.FIXTURE, "--target", "ignite")
             await wait(grun, lambda state: lamp(state) is True)
-        input_mode = "grab" if kind == "crate" else "pickup"
+        input_mode = "grab" if kind == "crate" or fuel_drum else "pickup"
         target = initial["class_path"]
-        if input_mode == "pickup":
+        if input_mode == "pickup" or fuel_drum:
             occupants = 1 if kind == "lantern" else len(barrels)
             target = f"{target}|{occupants}|{initial['actor']}"
         await fixture(guest, f"{input_mode}@{target}")
@@ -180,6 +181,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", required=True, type=Path)
     parser.add_argument("--vanilla-saved", required=True, type=Path)
-    parser.add_argument("--kind", choices=("crate", "lantern", "barrel", "fuel-drum"), default="crate")
+    parser.add_argument("--kind", choices=("crate", "lantern", "barrel", "fuel-drum", "fuel-drum-grab"), default="crate")
     options = parser.parse_args()
     asyncio.run(exercise(options.work.resolve(), options.vanilla_saved.resolve(), options.kind))
