@@ -171,20 +171,22 @@ async def verify_observer(guest, host_box, guest_box, probe):
 
 
 async def verify_observer_offering(host, guest, host_box, guest_box, probe, approach, character):
-    await probe(host_box, "observerpose", "far" if approach == "contact" else "guest")
+    await probe(host_box, "observerpose", "guest" if approach in ("flight", "loot") else "far")
     source = await probe(host_box, "observeroffering", approach)
     assert source.startswith("Item_Jewely_C ")
     async with asyncio.timeout(8):
         while await probe(guest_box, "observerrewards") != "1|":
             await asyncio.sleep(.15)
     assert await probe(host_box, "observerrewards") == "1|"
-    if approach != "contact":
+    if approach == "input":
+        launch = await stock_observer_throw(host, guest, host_box, guest_box, probe, source)
+    elif approach != "contact":
         launch = await probe(host_box, "observerlaunch")
         assert launch.startswith("true|"), launch
     else:
         launch = await probe(host_box, "observerimpact")
         assert launch == "entered stock capsule"
-    if approach == "loot":
+    if approach in ("loot", "input"):
         return await verify_observer_reward_pickup(host, guest, host_box, guest_box, probe, character, source, launch)
     host_result = guest_result = ""
     try:
@@ -206,6 +208,37 @@ async def verify_observer_offering(host, guest, host_box, guest_box, probe, appr
     except TimeoutError as error:
         extra = await probe(host_box, "observerofferingprobe")
         raise RuntimeError(f"Stock offering did not settle on both peers. Host {host_result!r}. Guest {guest_result!r}. Stock {extra}.") from error
+
+
+async def stock_observer_throw(host, guest, host_box, guest_box, probe, source):
+    from tools.silverfish import native_prop_carry
+    from tools.silverfish.control import submit
+
+    async def fixture(run, target):
+        reply = await submit(run, native_prop_carry.FIXTURE, target=target)
+        if not reply.get("ok"):
+            raise RuntimeError(f"{target}: {reply.get('error')}")
+        return reply
+
+    def carries():
+        return [entry for entry in events(host, "native_prop_carry_action") if entry.get("actor") == source]
+
+    await fixture(host, "select@" + source.partition(" ")[2])
+    coordinates = await probe(host_box, "observerofferpoint")
+    location = list(map(float, coordinates.split("|")))
+    await wait(guest, lambda view: math.dist(view["game"]["pawns"]["local"]["location"], location) < 175, timeout=7)
+    count, name = (await probe(guest_box, "observerofferidentity", coordinates.replace("|", ","))).split("|")
+    await probe(guest_box, "observerlootcamera", "position:30")
+    try:
+        await fixture(guest, f"pickup@/Game/Classes/Items/Item_Jewely.Item_Jewely_C|{count}|{name}")
+        await wait(host, lambda _: any(entry["edge"] == "grab" for entry in carries()), timeout=8)
+        assert await probe(host_box, "observerthrowaim") == "ready"
+        assert await probe(guest_box, "observerthrowaim") == "aimed"
+        await fixture(guest, "throw")
+        await wait(host, lambda _: any(entry["edge"] == "throw" for entry in carries()), timeout=8)
+    finally:
+        assert await probe(guest_box, "observerlootcamera", "reset") == "restored"
+    return carries()
 
 
 async def verify_observer_reward_pickup(host, guest, host_box, guest_box, probe, character, source, launch):
@@ -231,6 +264,10 @@ async def verify_observer_reward_pickup(host, guest, host_box, guest_box, probe,
     reward, = rewards
     guid, kind = reward["guid"], reward["class_path"]
     assert "/Artifacts/Art_Tesseract_" in kind, reward
+    cue_kind = "observer" + kind.rsplit(".", 1)[0].rsplit("_", 1)[1].lower()
+    await wait(guest, lambda _: events(guest, "native_observer_absorb_played"), timeout=5)
+    cue, = events(guest, "native_observer_absorb_played")
+    assert cue["cue"] == cue_kind and cue["particles"], cue
     identity = native_world_loot.stock_enemy_identity(guid)
 
     def projected(view):
@@ -261,9 +298,9 @@ async def verify_observer_reward_pickup(host, guest, host_box, guest_box, probe,
     inventory = (await action(guest, "native-inventory-list"))["native_inventory"]["items"]
     item, = [item for item in inventory if item["guid"] == guid and item["class_path"] == kind]
     assert await probe(host_box, "observerabsorptions") == "1"
-    assert len(banked()) == 1
+    assert len(banked()) == 1 and events(guest, "native_observer_absorb_played") == [cue]
     assert (await probe(guest_box, "observerrewards")).startswith("0|")
-    return {"offering": source, "launch": launch, "stock_reward_count": 1, "reward": reward, "claim": claim(),
+    return {"offering": source, "launch": launch, "stock_reward_count": 1, "reward": reward, "claim": claim(), "absorb_cue": cue,
             "guest_inventory_item": item, "competing_claim": rival["error"]}
 
 
@@ -355,8 +392,10 @@ async def verify(work, family, observer_offering=None):
             env["SILVERFISH_COOP_ANGLER_LAMP_FIXTURE"] = "1"
         if family == "observer":
             env["SILVERFISH_COOP_OBSERVER_FIXTURE"] = "1"
-            if observer_offering == "loot":
+            if observer_offering in ("loot", "input"):
                 env["SILVERFISH_COOP_OBSERVER_LOOT_FIXTURE"] = "1"
+            if observer_offering == "input":
+                env["SILVERFISH_COOP_OBSERVER_THROW_FIXTURE"] = "1"
         with (host / f"{args[0]}.log").open("wb") as log:
             child = await asyncio.create_subprocess_exec(*cli, *args, stdout=log, stderr=log,
                 creationflags=flags, env=env)
@@ -499,7 +538,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--family", choices=("gravity", "pyrogeist", "shadow-sphere", "angler-lamp", "observer"), default="gravity")
-    parser.add_argument("--observer-offering", nargs="?", const="contact", choices=("contact", "flight", "loot"))
+    parser.add_argument("--observer-offering", nargs="?", const="contact", choices=("contact", "flight", "loot", "input"))
     args = parser.parse_args()
     if args.observer_offering and args.family != "observer":
         parser.error("--observer-offering requires --family observer")

@@ -12,6 +12,7 @@ local color = {R = 0, G = 0, B = 0, A = 0}
 local visuals = {}
 local fixture_box = os.getenv("SILVERFISH_COOP_BRIDGE")
 local last_fixture_report
+local active_observers
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -149,12 +150,14 @@ local function gaze_distance(actor, pawn, point, trace)
 end
 
 function observers.target(active, state, phase)
+    active_observers = nil
     if not observers.enabled or phase ~= "hosting" or not state.listening or state.server or state.map ~= crossroads
         or type(SilverfishSetNativeObserverTarget) ~= "function" or #(state.guests or {}) == 0 then return end
     local host = state.local_pawn and state.local_pawn.pawn
     if not valid(host) or not host:IsLocallyControlled() then return end
     local trace, clock = StaticFindObject(trace_path), StaticFindObject(clock_path)
     if not valid(trace) or not valid(clock) then return end
+    active_observers = active
     local now = clock:GetTimeSeconds(state.world)
     for _, entry in pairs(active) do
         local actor = entry.actor
@@ -176,6 +179,19 @@ function observers.target(active, state, phase)
                 local accepted = path and SilverfishSetNativeObserverTarget(path, nearest or "")
                 entry.observer_target = accepted and nearest or nil
             end
+        end
+    end
+end
+
+function observers.catch_offering(state, pawn, item, direction)
+    if not active_observers or not state or state.map ~= crossroads or not guest_save.matches(pawn)
+        or not valid(item) or not item:HasAuthority() or not same(item:GetWorld(), state.world) then return end
+    local point = item:K2_GetActorLocation()
+    for _, entry in pairs(active_observers) do
+        local actor = entry.actor
+        if entry.kind == "observer" and valid(actor) and actor:HasAuthority() and not actor:IsActorBeingDestroyed()
+            and same(actor:GetWorld(), state.world) and difference(point, actor:K2_GetActorLocation()) < 8000^2 then
+            actor:TryCatchItem(item, direction)
         end
     end
 end

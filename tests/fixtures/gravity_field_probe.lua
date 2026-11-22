@@ -428,18 +428,26 @@ local function command(operation, world, driver, host, local_pawn, argument)
         local body, guest = selected.well, driver.ClientConnections[1].PlayerController.Pawn
         local point = body:K2_GetActorLocation()
         local start = {X = point.X + 265, Y = point.Y, Z = point.Z}
-        if argument == "flight" or argument == "loot" then
+        if argument == "flight" or argument == "loot" or argument == "input" then
             local clear
-            local heights = argument == "loot" and {700, 1000, 1500} or {3000, 2500, 2000, 1500, 1000, 700}
+            local heights = argument == "flight" and {3000, 2500, 2000, 1500, 1000, 700} or {700, 1000, 1500}
             for _, height in ipairs(heights) do
                 local target = {X = point.X, Y = point.Y, Z = test_lane.Z + height}
                 start = {X = target.X + 265, Y = target.Y, Z = target.Z}
-                if clear_offering_lane(body, start, target, {body, local_pawn, guest}) then
+                local ignore = {body, local_pawn, guest}
+                local guest_eye = {X = target.X + 385, Y = target.Y, Z = target.Z + 30}
+                if clear_offering_lane(body, start, target, ignore)
+                    and (argument ~= "input" or clear_offering_lane(body, guest_eye, start, ignore)) then
                     assert(body:K2_SetActorLocation(target, false, {}, true))
-                    if argument == "loot" then
+                    if argument == "loot" or argument == "input" then
                         for index, pawn in ipairs({local_pawn, guest}) do
-                            assert(pawn:K2_SetActorLocation({X = target.X + 600, Y = target.Y + 100 * index, Z = target.Z},
-                                false, {}, true))
+                            local guest_throw = argument == "input" and index == 2
+                            local parked = {X = target.X + (guest_throw and 385 or 600),
+                                Y = target.Y + (guest_throw and 0 or 100 * index), Z = target.Z}
+                            assert(pawn:K2_SetActorLocation(parked, false, {}, true))
+                            if guest_throw then
+                                pawn.Camera:K2_SetWorldLocation({X = parked.X, Y = parked.Y, Z = parked.Z + 30}, false, {}, true)
+                            end
                             pawn:ForceNetUpdate()
                         end
                     end
@@ -504,6 +512,41 @@ local function command(operation, world, driver, host, local_pawn, argument)
     elseif observer and operation == "observerabsorptions" then
         assert(host and selected and selected.absorptions)
         return tostring(selected.absorptions)
+    elseif observer and operation == "observerofferpoint" then
+        assert(host and selected and valid(selected.offering))
+        local at = selected.offering:K2_GetActorLocation()
+        return ("%.3f|%.3f|%.3f"):format(at.X, at.Y, at.Z)
+    elseif observer and operation == "observerofferidentity" then
+        assert(not host)
+        local candidates = FindAllOf("Item_Jewely_C") or {}
+        for _, item in ipairs(candidates) do
+            if valid(item) and same(item:GetWorld(), world) and item:GetLocalRole() == 1 and not item:IsActorBeingDestroyed() then
+                local at = item:K2_GetActorLocation()
+                if (at.X - test_lane.X)^2 + (at.Y - test_lane.Y)^2 < 450^2 then
+                    local x, y, z = argument:match("^([^,]+),([^,]+),([^,]+)$")
+                    x, y, z = tonumber(x), tonumber(y), tonumber(z)
+                    assert(x and y and z and math.abs(x - at.X) < 60 and math.abs(y - at.Y) < 60 and math.abs(z - at.Z) < 220)
+                    item.Box:SetEnableGravity(false)
+                    item.Box:SetPhysicsLinearVelocity({X = 0, Y = 0, Z = 0}, false, FName("None"))
+                    assert(item:K2_SetActorLocation({X = x, Y = y, Z = z}, false, {}, true))
+                    return ("%d|%s"):format(#candidates, item:GetFullName())
+                end
+            end
+        end
+        return ""
+    elseif observer and operation == "observerthrowaim" then
+        if host then
+            assert(selected and valid(selected.offering) and #driver.ClientConnections == 1
+                and same(driver.ClientConnections[1].PlayerController.Pawn.HeldObject, selected.offering))
+            selected.offering.Box:SetEnableGravity(true)
+            return "ready"
+        end
+        assert(valid(local_pawn.HeldObject) and local_pawn:IsLocallyControlled())
+        local_pawn.HeldObject.Box:SetEnableGravity(true)
+        local angle = {Pitch = -8, Yaw = 180, Roll = 0}
+        local_pawn.Controller:SetControlRotation(angle)
+        local_pawn.Camera:K2_SetWorldRotation(angle, false, {}, true)
+        return "aimed"
     elseif observer and operation == "observerlootcamera" then
         assert(not host and local_pawn:IsLocallyControlled() and valid(local_pawn.Camera))
         local camera = local_pawn.Camera
@@ -513,11 +556,13 @@ local function command(operation, world, driver, host, local_pawn, argument)
             reward_camera = nil
             return "restored"
         end
-        assert(argument == "position" and not reward_camera)
+        assert((argument == "position" or argument:match("^position:%d+$")) and not reward_camera)
         local at, relative = local_pawn:K2_GetActorLocation(), camera.RelativeLocation
         reward_camera = {camera = camera, location = {X = relative.X, Y = relative.Y, Z = relative.Z}}
         -- The suspended test pawn's normal camera remains at the pre-teleport point.
-        camera:K2_SetWorldLocation({X = at.X, Y = at.Y, Z = at.Z + 52}, false, {}, true)
+        local height = tonumber(argument:match("^position:(%d+)$")) or 52
+        assert(height <= 70)
+        camera:K2_SetWorldLocation({X = at.X, Y = at.Y, Z = at.Z + height}, false, {}, true)
         local eye = camera:K2_GetComponentLocation()
         return ("%.3f|%.3f|%.3f"):format(eye.X, eye.Y, eye.Z)
     elseif observer and operation == "observerofferingprobe" then
