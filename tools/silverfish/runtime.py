@@ -767,6 +767,7 @@ class Bridge:
                 continue
             decoded = target.decode("ascii") if target is not None else None
             if (target is not None and decoded != native_subway_valve.INPUT
+                    and not native_lantern.target_angles(decoded)
                     and target not in AUTHORED_PICKUP_TARGETS and not native_enemy_shells.target_parts(decoded)
                     and not native_guest_drop_projection.target_parts(decoded)
                     and not native_world_loot.target_parts(decoded)
@@ -2239,13 +2240,15 @@ class Bridge:
                     active[mushroom["id"]] = mushroom
                 elif fields[0] == native_mushrooms.CLAIM:
                     data[native_mushrooms.PROOF] = native_mushrooms.parse_claim(fields, data.get("state"), data.get("map"))
-                elif fields[0] in (native_prop_carry.ACTION, native_prop_carry.FIXTURE,
+                elif fields[0] in (native_prop_carry.ACTION, native_prop_carry.FIXTURE, native_prop_carry.BARREL_ROW,
                                    "native-prop-carry-input", "native-prop-carry-target"):
                     prop = native_prop_carry.parse(fields, data.get("state"), data.get("map"))
                     if fields[0] == "native-prop-carry-input":
                         data.setdefault(native_prop_carry.INPUT, []).append(prop)
                     elif fields[0] == native_prop_carry.FIXTURE:
                         data[native_prop_carry.FIXTURE] = prop
+                    elif fields[0] == native_prop_carry.BARREL_ROW:
+                        data.setdefault(native_prop_carry.BARRELS, {})[prop["actor"]] = prop
                     else:
                         key = native_prop_carry.PROOF if fields[0] == native_prop_carry.ACTION else native_prop_carry.TARGET
                         data[key] = prop

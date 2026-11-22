@@ -97,6 +97,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_authored_pickup.ACTION, native_loose_pickup.CLAIM, native_enemy_loot.CLAIM, native_stock_enemy_drops.CLAIM,
                         native_mushrooms.CLAIM,
                         native_prop_carry.ACTION,
+                        native_lantern.EXTINGUISH,
                         *native_guest_weapon.GUEST_ACTIONS, native_guest_weapon.SELECT_EQUIPMENT,
                         *native_guest_consumable.RESULT, native_guest_melee.SWING,
                         native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION)
@@ -2087,6 +2088,8 @@ class Host:
                 result = await native_mushrooms.claim(self, bridge, character, target, request["operation_id"])
             elif action == native_prop_carry.ACTION:
                 result = await self.prop_carry.operate(bridge, character, target)
+            elif action == native_lantern.EXTINGUISH:
+                result = await native_lantern.extinguish(self, bridge, character, target)
             elif action == native_authored_pickup.ACTION:
                 result = await native_authored_pickup.claim(self, bridge, character, target, request["operation_id"])
             elif action == native_stock_enemy_drops.CLAIM:
@@ -2754,7 +2757,7 @@ class Host:
                     mode, _, target = (request.get("target") or "").partition("@")
                     if mode == "approach":
                         target = native_loot._scope(self, self.roles().get(target))
-                    if mode not in {"spawn", "approach"} or not target:
+                    if mode not in {"spawn", "approach", "select"} or not target:
                         raise party.RuleError("native_prop_carry_fixture_unavailable")
                     self.last_game = await bridge.command(action, mode, target, timeout=6)
                     self.last_seen = time.monotonic()
@@ -3116,7 +3119,7 @@ class Host:
                     result = {"native_standing_fuel_tanks": self.last_game["native_standing_fuel_tanks"]}
                 elif action == native_lantern.FIXTURE and self.fixtures:
                     target = request.get("target")
-                    if target not in ("toggle", "impulse") or native_lantern.KEY not in self.last_game:
+                    if target not in ("toggle", "ignite", "impulse") or native_lantern.KEY not in self.last_game:
                         raise party.RuleError("native_observatory_lantern_fixture_unavailable")
                     self.last_game = await bridge.command(action, target, timeout=4)
                     self.last_seen = time.monotonic()
@@ -5683,9 +5686,10 @@ class Client:
                     )
                 elif action == native_prop_carry.FIXTURE:
                     mode, _, target = (request.get("target") or "").partition("@")
-                    if mode not in {"grab", "turn", "throw", "drop"}:
+                    if mode not in {"grab", "pickup", "lamp-use", "turn", "throw", "drop"}:
                         raise party.RuleError("native_prop_carry_fixture_unavailable")
-                    self.last_game = await self.bridge.command(action, mode, *((target,) if target else ()), timeout=6)
+                    arguments = target.split("|") if target else []
+                    self.last_game = await self.bridge.command(action, mode, *arguments, timeout=6)
                     result = {"input": mode}
                 elif action == "native-client-remote-damage-fixture":
                     if not self.last_game.get("native_client_damage"):
@@ -5954,6 +5958,15 @@ class Client:
                             continue
                         if door := native_stock_door.target_actor(target):
                             result = await self.gameplay_action(native_stock_door.ACTION, operation_id, door)
+                            self.control.event("local_interaction", operation_id=operation_id, **result)
+                            continue
+                        if native_lantern.target_angles(target):
+                            result = await self.gameplay_action(native_lantern.EXTINGUISH, operation_id,
+                                                                f"{self.zone_epoch}@{target}")
+                            await self.cancel_gameplay_snapshot()
+                            self.gameplay[native_lantern.KEY] = result[native_lantern.KEY]
+                            self.last_game = await native_lantern.project(
+                                self.bridge, self.last_game, result[native_lantern.KEY], self.zone_epoch)
                             self.control.event("local_interaction", operation_id=operation_id, **result)
                             continue
                         action = (native_authored_pickup.ACTION if target in native_authored_pickup.SOURCES

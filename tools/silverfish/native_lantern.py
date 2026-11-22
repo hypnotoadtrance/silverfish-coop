@@ -1,14 +1,41 @@
-"""Project the authored Observatory lantern's stock light state."""
+"""Route the authored Observatory lantern's stock interaction and light state."""
 
-from . import party
+import re
+
+from . import native_loot, party
 from .travel import OBSERVATORY
 
 
 TAG = "native-observatory-lantern"
 KEY = "native_observatory_lantern"
 ACTION = "native-observatory-lantern-light"
+EXTINGUISH = "native-observatory-lantern-extinguish"
 FIXTURE = "native-observatory-lantern-fixture"
 ACTOR = f"Prop_Lantern_01_C {OBSERVATORY}.Observitory_P:PersistentLevel.Prop_Lantern_01_C_1"
+_INTENT = re.compile(r"observatory-lantern:(-?[0-9]{1,3}\.[0-9]{2}):(-?[0-9]{1,3}\.[0-9]{2})\Z")
+
+
+def target_angles(target):
+    match = _INTENT.fullmatch(target) if isinstance(target, str) else None
+    if match and abs(float(match[1])) <= 89.9 and abs(float(match[2])) <= 180:
+        return match.groups()
+    return None
+
+
+async def extinguish(host, bridge, character, requested):
+    epoch, _, target = requested.partition("@") if isinstance(requested, str) else ("", "", "")
+    angles = target_angles(target)
+    player = host.party["players"].get(character, {})
+    pawn = native_loot._scope(host, character)
+    if (not angles or not pawn or not player or player.get("downed") or host.party.get("wipe") or host.transitioning
+            or host.stopping or epoch != host.zone_epoch or host.last_game.get("map") != OBSERVATORY):
+        raise party.RuleError("native_observatory_lantern_extinguish_unavailable")
+    snapshot = await bridge.command(EXTINGUISH, pawn, *angles, timeout=4)
+    result = frame(snapshot, epoch)
+    if not result or result["lit"] is not False:
+        raise RuntimeError("The host could not verify the stock lantern interaction")
+    host.last_game = snapshot
+    return {KEY: result}
 
 
 def parse(fields, phase, area):

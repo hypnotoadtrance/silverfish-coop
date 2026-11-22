@@ -1,4 +1,10 @@
 package.path = "mod/SilverfishCoop/Scripts/?.lua;" .. package.path
+local enrolled = 0
+package.loaded.native_prop_carry = {enroll = function()
+    enrolled = enrolled + 1
+    return true
+end}
+package.loaded.guest_save = {}
 
 local getenv = os.getenv
 os.getenv = function(name)
@@ -49,13 +55,21 @@ local function make_scene(server)
         self.bReplicateMovement = value
     end
     function actor:ForceNetUpdate() self.updates = self.updates + 1 end
-    local mesh, sphere = object(), object({overlaps = true})
+    local mesh, sphere = object({response = 0}), object({overlaps = true})
     function mesh:GetClass() return mesh_type end
     function sphere:GetClass() return sphere_type end
     function mesh:GetOwner() return actor end
     function sphere:GetOwner() return actor end
     function sphere:GetGenerateOverlapEvents() return self.overlaps end
     function sphere:SetGenerateOverlapEvents(value) self.overlaps = value end
+    function mesh:GetCollisionResponseToChannel(channel)
+        assert(channel == 16)
+        return self.response
+    end
+    function mesh:SetCollisionResponseToChannel(channel, response)
+        assert(channel == 16)
+        self.response = response
+    end
     function actor:SetLitUnlit(lit, sound)
         assert(server and sphere.overlaps == false and sound == false)
         self.Lit = lit
@@ -72,10 +86,12 @@ lantern.sync(host_state, "hosting")
 assert(host_actor.bReplicates and host_actor.bReplicateMovement and host_actor.updates == 1)
 lantern.sync(host_state, "hosting")
 assert(host_actor.updates == 1, "steady stock physics must use Unreal's normal movement schedule")
+assert(enrolled == 1)
 host_actor.Lit, host_actor.BeingHeld, host_actor.x = true, true, 99
 lantern.sync(host_state, "hosting")
 local observed = lantern.status(host_state, "hosting", row)
 assert(observed[4] == 1 and observed[5] == 1 and observed[6] == 1 and observed[7] == "99.00")
+assert(host_actor.PropMesh.response == 2, "the lit co-op lantern must expose stock Interact")
 assert(host_actor.updates == 2, "a host grab should wake movement replication")
 host_actor.BeingHeld = false
 lantern.sync(host_state, "hosting")
@@ -86,9 +102,21 @@ local on = {"request", "native-observatory-lantern-light", map, name, "1"}
 assert(not pcall(lantern.command, on, guest_state, "connected"), "the guest fire sensor must be guarded first")
 lantern.sync(guest_state, "connected")
 assert(guest_actor.Sphere.overlaps == false and guest_actor.Lit == false)
+assert(host_actor.PropMesh.response == 0, "leaving the lantern world must restore the response")
 assert(lantern.command(on, guest_state, "connected") and guest_actor.Lit and not guest_actor.Sphere.overlaps)
+lantern.sync(guest_state, "connected")
+assert(guest_actor.PropMesh.response == 2 and not guest_actor.Sphere.overlaps)
 local foreign = {"request", "native-observatory-lantern-light", map, name .. "_other", "0"}
 assert(not pcall(lantern.command, foreign, guest_state, "connected") and guest_actor.Lit)
 local off = {"request", "native-observatory-lantern-light", map, name, "0"}
 assert(lantern.command(off, guest_state, "connected") and not guest_actor.Lit)
+lantern.sync(guest_state, "connected")
+assert(guest_actor.PropMesh.response == 0, "extinguished lamps keep pickup targeting")
+assert(lantern.command(on, guest_state, "connected"))
+lantern.sync(guest_state, "connected")
+assert(guest_actor.PropMesh.response == 2)
+guest_state.listening = false
+lantern.sync(guest_state, "standalone")
+assert(guest_actor.PropMesh.response == 0, "singleplayer must keep the authored collision response")
+assert(guest_actor.Sphere.overlaps, "singleplayer must retain its stock fire overlaps")
 assert(not guest_actor.bReplicates and not guest_actor.bReplicateMovement, "guests must never start prop replication")

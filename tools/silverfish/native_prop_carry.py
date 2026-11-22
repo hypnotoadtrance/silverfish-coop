@@ -12,6 +12,8 @@ from . import native_loot, party
 ACTION = "native-prop-carry"
 AIM = "native-prop-carry-aim"
 FIXTURE = "native-prop-carry-fixture"
+BARRELS = "native_authored_physics_barrels"
+BARREL_ROW = "native-authored-physics-barrel"
 INPUT = "native_prop_carry_input"
 TARGET = "native_prop_carry_target"
 PROOF = "native_prop_carry"
@@ -58,6 +60,16 @@ def parse(fields, phase, area):
         if len(fields) == 15:
             report.update(sample=_serial(fields[11]), grip=_numbers(fields[12:], (1e7,) * 3))
         return report
+    if fields[0] == BARREL_ROW:
+        if (len(fields) != 4 or phase != "hosting"
+                or not re.fullmatch(r"Prop_PlasticBarrel_C /Game/[A-Za-z0-9_./]+:PersistentLevel\."
+                                    r"(?:Prop_PlasticBarrel_GEN_VARIABLE_Prop_PlasticBarrel_C_CAT_|Prop_PlasticBarrel_C_)[0-9]+",
+                                    fields[2])):
+            raise ValueError("Invalid authored physics barrel")
+        mass, = _numbers(fields[3:], (10000,))
+        if mass <= 0:
+            raise ValueError("Invalid authored physics barrel mass")
+        return dict(actor=fields[2], mass=mass)
     if phase != "connected":
         raise ValueError("Physics carry input belongs to the guest")
     if fields[0] == "native-prop-carry-input":

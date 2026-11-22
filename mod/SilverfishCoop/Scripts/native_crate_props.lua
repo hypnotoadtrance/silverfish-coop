@@ -5,13 +5,16 @@ local spawner_path = "/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C
 local container_path = "/Game/Classes/Actors/Lootables/LootContainer_Master_BP.LootContainer_Master_BP_C"
 local prop_path = "/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C"
 local fuel_class_path = "/Game/Assets/StaticMeshes/Mesh_Props/Prop_Standing_FuelTank.Prop_Standing_FuelTank_C"
+local barrel_class_path = "/Game/Assets/StaticMeshes/Mesh_Props/Prop_PlasticBarrel.Prop_PlasticBarrel_C"
 local fuel_maps = {
     ["/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"] = true,
     ["/Game/Classes/Maps/Maps_OverWorld/Quarry_01_P"] = true,
     ["/Game/Classes/Maps/Maps_Dungeons/Anex_01_P"] = true,
 }
 local world, spawner_class, container_class, prop_class, hooked
-local placed
+local placed, barrels
+local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+    and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -78,10 +81,43 @@ local function placed_tanks(state, phase)
     placed = {world = state.world, phase = phase, actors = found}
 end
 
-function props.rows(state, phase, row)
-    if not placed or placed.phase ~= phase or not same(placed.world, state.world) then return {} end
+local function placed_barrels(state, phase)
+    if phase ~= "hosting" or not valid(state.world) or not state.listening or state.server ~= false then
+        barrels = nil
+        return
+    end
+    if barrels and same(barrels.world, state.world) then return end
+    local class = StaticFindObject(barrel_class_path)
+    local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    if not valid(class) or not valid(api) then return end
     local result = {}
-    for name, actor in pairs(placed.actors) do
+    api:GetAllActorsOfClass(state.world, class, result)
+    local matches = result.OutActors or result
+    local active = {}
+    if #matches <= 96 then
+        local bone = FName("None", EFindName.FNAME_Find)
+        for _, actor in ipairs(matches) do
+            if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+            local mesh = valid(actor) and root_mesh(actor)
+            local name = mesh and actor:GetFullName()
+            local authored = name and (name:match(":PersistentLevel%.Prop_PlasticBarrel_C_(%d+)$")
+                or name:match(":PersistentLevel%.Prop_PlasticBarrel_GEN_VARIABLE_Prop_PlasticBarrel_C_CAT_(%d+)$"))
+            -- Runtime-spawned stock class copies use the high-name counter. Those follow their crate's enrollment.
+            if authored and tonumber(authored) < 10000 and same(actor:GetClass(), class)
+                and actor.bNetLoadOnClient == true and actor:HasAuthority() and not actor:IsActorBeingDestroyed()
+                and same(actor:GetWorld(), state.world) and same(actor:GetOuter(), state.world.PersistentLevel)
+                and mesh:IsSimulatingPhysics(bone) == true and publish_motion(actor) and carry.enroll(actor) then
+                active[name] = actor
+            end
+        end
+    end
+    barrels = {world = state.world, actors = active}
+end
+
+function props.rows(state, phase, row)
+    local result = {}
+    local tanks = placed and placed.phase == phase and same(placed.world, state.world) and placed.actors
+    for name, actor in pairs(tanks or {}) do
         local mesh = valid(actor) and not actor:IsActorBeingDestroyed() and root_mesh(actor)
         if mesh then
             local rotation = actor:K2_GetActorRotation()
@@ -92,6 +128,12 @@ function props.rows(state, phase, row)
                     string.format("%.2f", rotation.Pitch), string.format("%.2f", rotation.Yaw),
                     string.format("%.2f", rotation.Roll))
             end
+        end
+    end
+    if fixtures and barrels and same(barrels.world, state.world) then
+        for name, actor in pairs(barrels.actors) do
+            local mesh = valid(actor) and not actor:IsActorBeingDestroyed() and root_mesh(actor)
+            if mesh then result[#result + 1] = row("native-authored-physics-barrel", state.map, name, mesh:GetMass()) end
         end
     end
     return result
@@ -126,6 +168,7 @@ end
 
 function props.sync(state, phase)
     placed_tanks(state, phase)
+    placed_barrels(state, phase)
     world = phase == "hosting" and state.listening and not state.server and state.world or nil
     if hooked or not valid(world) or type(RegisterHook) ~= "function" then return end
     local spawn = spawner_path .. ":SpawnLoot"

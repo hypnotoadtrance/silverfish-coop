@@ -102,6 +102,7 @@ end
 function carry.enroll(actor)
     if phase ~= "hosting" or not mesh(actor) or not actor:HasAuthority() or actor.bReplicateMovement ~= true then return end
     enrolled[actor:GetAddress()] = actor
+    return true
 end
 
 local function trace(pawn, pitch, yaw)
@@ -145,6 +146,11 @@ end
 local function remove(entry, kind, pitch, yaw)
     local pawn, actor, grip = entry.pawn, entry.actor, entry.grip
     if held(pawn, actor, grip) then stock(pawn, kind, actor, 0, pitch, yaw) end
+    if not valid(pawn) and mesh(actor) and actor:HasAuthority() and actor.BeingHeld == true
+        and not valid(actor["Holding Actor"]) then
+        actor:PickUp_Object(false, nil)
+        if actor.BeingHeld ~= false then return false end
+    end
     if valid(grip) and same(grip:GetGrabbedComponent(), mesh(actor)) then return false end
     if valid(pawn) and same(pawn.HeldObject, actor) then return false end
     if valid(actor) and same(actor["Holding Actor"], pawn) then return false end
@@ -164,6 +170,14 @@ local function fixture(fields, current, seat)
     local pawn = current.local_pawn and current.local_pawn.pawn
     if not (fixtures or headless and seat == "connected") or not same(world, current.world) or not valid(pawn) then
         error("native_prop_carry_fixture_unavailable", 0)
+    end
+    if seat == "hosting" and mode == "select" and #fields == 4 and not valid(fixture_actor) then
+        local actor = StaticFindObject(fields[4])
+        if not mesh(actor) or not same(actor, enrolled[actor:GetAddress()]) then
+            error("native_prop_carry_fixture_authored_prop_unavailable", 0)
+        end
+        fixture_actor = actor
+        return "selected the enrolled authored physics prop"
     end
     if seat == "hosting" and mode == "spawn" and not valid(fixture_actor) then
         local crate = StaticFindObject(fields[4])
@@ -207,30 +221,61 @@ local function fixture(fields, current, seat)
         end
         error("native_prop_carry_fixture_approach", 0)
     end
-    if seat == "connected" and mode == "grab" then
+    if seat == "connected" and (mode == "grab" or mode == "pickup" or mode == "lamp-use") then
         local class = StaticFindObject(fields[4])
         local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
         if not valid(class) or not valid(api) then error("native_prop_carry_fixture_class", 0) end
         local output = {}
         api:GetAllActorsOfClass(world, class, output)
+        local candidates = output.OutActors or output
+        local expected = mode == "pickup" and math.tointeger(fields[5])
+        if expected and #candidates ~= expected then
+            error("native_prop_carry_fixture_actor_count:" .. #candidates .. ":" .. expected, 0)
+        end
         local origin, picked, best = pawn:K2_GetActorLocation(), nil, 250^2
-        for _, candidate in ipairs(output.OutActors or output) do
+        for _, candidate in ipairs(candidates) do
             if candidate and type(candidate.type) == "function" and candidate:type() == "RemoteUnrealParam" then candidate = candidate:get() end
-            if mesh(candidate) and candidate.bReplicateMovement == true then
+            if mesh(candidate) and candidate.bReplicateMovement == true
+                and (not expected or candidate:GetFullName() == fields[6]) then
                 local distance = dist2(origin, candidate:K2_GetActorLocation())
                 if distance < best then best, picked = distance, candidate end
             end
         end
         if not picked then error("native_prop_carry_fixture_prop_unavailable", 0) end
-        local angle = aim_point(pawn, picked:K2_GetActorLocation())
-        pawn.Controller:SetControlRotation(angle)
-        pawn.Camera:K2_SetWorldRotation(angle, false, {}, true)
-        pawn:LookTrace()
+        local function aim(center)
+            local angle = aim_point(pawn, center)
+            pawn.Controller:SetControlRotation(angle)
+            pawn.Camera:K2_SetWorldRotation(angle, false, {}, true)
+            pawn:LookTrace()
+        end
+        if mode == "lamp-use" then
+            aim(picked.PropMesh:K2_GetComponentLocation())
+            local component = pawn.InteractionTarget_Component
+            if not valid(component) or not same(component:GetOwner(), picked)
+                or type(SilverfishTakeNativeLanternPress) ~= "function" then
+                local focused = pawn.ActorBeingLookedAt
+                error("native_prop_carry_fixture_lamp_focus:" .. (valid(component) and component:GetFullName() or "none")
+                    .. ":" .. (valid(focused) and focused:GetFullName() or "none")
+                    .. ":interact=" .. tostring(picked.PropMesh:GetCollisionResponseToChannel(16)), 0)
+            end
+            local _, reason = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
+            if reason ~= "stock_started_consumed" or picked.Lit ~= true then
+                error("native_prop_carry_fixture_lamp_input:" .. tostring(reason), 0)
+            end
+            return "normal stock Interact submitted the lantern action"
+        end
+        aim(picked:K2_GetActorLocation())
         if not same(pawn.ActorBeingLookedAt, picked) then
             local target = pawn.ActorBeingLookedAt
             error("native_prop_carry_fixture_focus:" .. (valid(target) and target:GetFullName() or "none"), 0)
         end
-        local invoked, reason = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
+        local reason = "stock_pickup_function"
+        if mode == "pickup" then
+            pawn:Grab_Release_Object(false, false, true)
+        else
+            local _, status = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
+            reason = status
+        end
         if not held(pawn, picked, handle(pawn)) then error("native_prop_carry_fixture_input:" .. tostring(reason), 0) end
         return "normal stock Interact grabbed the crate prop"
     end
