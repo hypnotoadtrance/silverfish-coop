@@ -21,7 +21,7 @@ local max_seconds = 922337203685
 local tolerance = 0.025
 local weather_tolerance = 0.0001
 local lease_seconds = 3
-local lease, receipt
+local lease, receipt, warning_receipts
 local weather_fields = {
     { "fog_density", 0, 1 }, { "fog_falloff", 0, 2 }, { "cloud_bottom_km", 1, 10 },
     { "cloud_height_km", 3, 20 }, { "cloud_density_offset", 0, 1 },
@@ -508,11 +508,15 @@ function view.play_siren(state, phase, epoch, sequence, source, cue, remaining)
         or not math.tointeger(sequence) or sequence < 1 or sequence >= 2^53 then
         error("guest_weather_siren_scope_unavailable", 0)
     end
-    if sequence <= (lease.last_siren or 0) then return "weather siren already played" end
+    local world = lease.context.world
+    if not warning_receipts or not same(warning_receipts.world, world) or warning_receipts.epoch ~= epoch then
+        warning_receipts = {world = world, epoch = epoch, sources = {}}
+    end
+    if sequence <= (warning_receipts.sources[source] or 0) then return "weather siren already played" end
     if not weather_view.play_siren(lease.context, source, cue, remaining) then
         error("guest_weather_siren_source_unavailable", 0)
     end
-    lease.last_siren = sequence
+    warning_receipts.sources[source] = sequence
     return "stock weather siren played"
 end
 

@@ -242,17 +242,21 @@ class Playback:
         except (OSError, RuntimeError, TimeoutError) as error:
             control.event("native_anomaly_effect_unavailable", reason=str(error))
             return game
-        self.seen.extend(selected)
         for receipt in snapshot.get("ack", {}).get("message", "").split(","):
-            parts = receipt.split(":")
-            if len(parts) != 3:
+            number, *result = receipt.split(":")
+            if not number.isascii() or not number.isdecimal() or len(number) > 15:
                 continue
-            number, particles, animated = parts
-            if number.isascii() and number.isdecimal() and len(number) <= 15 and {particles, animated} <= {"0", "1"}:
-                serial = int(number)
-                if serial in selected:
-                    kind, position, scale, volume = selected.pop(serial)
-                    control.event(CUE_EVENTS.get(kind, "native_starburst_effect_played"),
-                                  cue=kind, serial=serial, location=position, map=area, particles=particles == "1",
-                                  animated=animated == "1", scale=scale, volume=volume)
+            serial = int(number)
+            if serial not in selected:
+                continue
+            if result == ["already"]:
+                self.seen.append(serial)
+                selected.pop(serial)
+            elif len(result) == 2 and set(result) <= {"0", "1"}:
+                self.seen.append(serial)
+                kind, position, scale, volume = selected.pop(serial)
+                particles, animated = result
+                control.event(CUE_EVENTS.get(kind, "native_starburst_effect_played"),
+                              cue=kind, serial=serial, location=position, map=area, particles=particles == "1",
+                              animated=animated == "1", scale=scale, volume=volume)
         return snapshot

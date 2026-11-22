@@ -121,16 +121,21 @@ function view.apply_rain(current_world, frame, lease)
         view.destroy_rain(lease)
         error(issue, 0)
     end
-    if not lease.audio_started then
-        lease.audio_started = true
-        pcall(function()
-            local sound = asset(rain_sound)
-            if not sound or not sound:IsValid() then return end
-            lease.audio = current_world.statics:SpawnSoundAttached(sound, root, FName("None"), zero, rotation,
-                0, true, 1, 1, 0, nil, nil, true)
-        end)
+    local audio_started = false
+    if not valid(lease.audio) then
+        local now = current_world.statics:GetRealTimeSeconds(pawn)
+        if now >= (lease.next_audio_attempt or 0) then
+            lease.next_audio_attempt = now + 1
+            pcall(function()
+                local sound = asset(rain_sound)
+                if not valid(sound) then return end
+                lease.audio = current_world.statics:SpawnSoundAttached(sound, root, FName("None"), zero, rotation,
+                    0, true, 1, 1, 0, nil, nil, true)
+                audio_started = valid(lease.audio)
+            end)
+        end
     end
-    if changed_intensity and exact(lease.audio, audio_class) then
+    if (changed_intensity or audio_started) and exact(lease.audio, audio_class) then
         pcall(function() lease.audio:SetFloatParameter(FName("StormIntensity"), frame.rain_intensity) end)
     end
     view.copy_rain(lease, frame)
@@ -159,6 +164,12 @@ local function capture(actor, sound, duration)
     for cue, path in ipairs(siren_cues) do
         if sound:GetFullName() == "SoundCue " .. path then
             serial = serial + 1
+            for index, previous in ipairs(sirens) do
+                if previous.source == source then
+                    table.remove(sirens, index)
+                    break
+                end
+            end
             sirens[#sirens + 1] = {id = serial, source = source, cue = cue, until_time = os.time() + duration}
             if #sirens > 4 then table.remove(sirens, 1) end
             return

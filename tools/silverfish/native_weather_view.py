@@ -47,9 +47,9 @@ def siren_frame(game, area):
 class SirenPlayback:
     def __init__(self):
         self.scope = None
-        self.last = 0
+        self.last_by_source = {}
 
-    async def sync(self, bridge, control, game, incoming, epoch):
+    async def sync(self, bridge, control, game, incoming, epoch, snapshot_age=0.0):
         view = game.get("native_world_view", {})
         if (game.get("state") != "connected" or view.get("mode") != "applied"
                 or view.get("epoch") != epoch or view.get("map") != game.get("map")
@@ -57,20 +57,29 @@ class SirenPlayback:
             return game
         scope = game["map"], epoch
         if self.scope != scope:
-            self.scope, self.last = scope, 0
-        for serial, source, cue, remaining in sorted(
-            (row for row in incoming if valid_siren(row) and 0.2 <= row[-1] <= 120), key=lambda row: row[0]
-        ):
-            if serial <= self.last:
+            self.scope = scope
+            self.last_by_source.clear()
+        latest = {}
+        for row in incoming:
+            if valid_siren(row) and (row[1] not in latest or row[0] > latest[row[1]][0]):
+                latest[row[1]] = row
+        started = time.monotonic()
+        for serial, source, cue, remaining in latest.values():
+            if not 0.2 <= remaining <= 120:
                 continue
-            self.last = serial
+            remaining -= snapshot_age + time.monotonic() - started
+            if serial <= self.last_by_source.get(source, 0) or remaining < 0.2:
+                continue
             try:
                 result = await bridge.command("native-weather-siren-play", epoch, str(serial), source,
-                                              str(cue), str(remaining), timeout=1.5)
+                                              str(cue), str(round(remaining, 3)), timeout=1.5)
             except (OSError, RuntimeError) as error:
                 control.event("native_weather_siren_unavailable", reason=str(error))
                 continue
-            if result.get("ack", {}).get("message") == "stock weather siren played":
-                control.event("native_weather_siren_played", cue=cue, source=source, serial=serial)
+            receipt = result.get("ack", {}).get("message")
+            if receipt in {"stock weather siren played", "weather siren already played"}:
+                self.last_by_source[source] = serial
+                if receipt == "stock weather siren played":
+                    control.event("native_weather_siren_played", cue=cue, source=source, serial=serial)
             game = result
         return game

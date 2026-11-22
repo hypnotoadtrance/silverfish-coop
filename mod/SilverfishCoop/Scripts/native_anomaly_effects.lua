@@ -211,7 +211,9 @@ function effects.command(args, state, phase, animate_vortex)
     for index = 5, #args do
         local id, kind, x, y, z, scale, volume = args[index]:match("^(%d+)|(%l+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)|([^|]+)$")
         x, y, z, scale, volume = tonumber(x), tonumber(y), tonumber(z), tonumber(scale), tonumber(volume)
-        if id and #id <= 15 and not seen[id] and assets[kind] and x and y and z and scale and scale > 0 and scale <= 10
+        if id and #id <= 15 and seen[id] then
+            played[#played + 1] = id .. ":already"
+        elseif id and #id <= 15 and assets[kind] and x and y and z and scale and scale > 0 and scale <= 10
             and volume and volume >= 0 and volume <= 10
             and (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= audio_range[kind]^2 then
             local point = {X = x, Y = y, Z = z}

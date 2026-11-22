@@ -5562,6 +5562,7 @@ class Client:
                 self.last_game = await self.weather_sirens.sync(
                     self.bridge, self.control, self.last_game,
                     self.gameplay.get("host_world", {}).get(native_weather_view.KEY), self.zone_epoch,
+                    snapshot_age=time.monotonic() - self.gameplay_seen,
                 )
                 if self.guest_clock:
                     await self.guest_clock.sync(self)
