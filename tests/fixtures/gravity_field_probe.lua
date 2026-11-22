@@ -22,6 +22,7 @@ local test_lane = {X = 13850, Y = -200, Z = 132}
 local previous, lift, hooked, selected
 local watched, damage_hooked
 local gaze_hooked
+local reward_camera
 
 local function valid(object)
     return object and object:IsValid()
@@ -427,13 +428,21 @@ local function command(operation, world, driver, host, local_pawn, argument)
         local body, guest = selected.well, driver.ClientConnections[1].PlayerController.Pawn
         local point = body:K2_GetActorLocation()
         local start = {X = point.X + 265, Y = point.Y, Z = point.Z}
-        if argument == "flight" then
+        if argument == "flight" or argument == "loot" then
             local clear
-            for _, height in ipairs({3000, 2500, 2000, 1500, 1000, 700}) do
+            local heights = argument == "loot" and {700, 1000, 1500} or {3000, 2500, 2000, 1500, 1000, 700}
+            for _, height in ipairs(heights) do
                 local target = {X = point.X, Y = point.Y, Z = test_lane.Z + height}
                 start = {X = target.X + 265, Y = target.Y, Z = target.Z}
                 if clear_offering_lane(body, start, target, {body, local_pawn, guest}) then
                     assert(body:K2_SetActorLocation(target, false, {}, true))
+                    if argument == "loot" then
+                        for index, pawn in ipairs({local_pawn, guest}) do
+                            assert(pawn:K2_SetActorLocation({X = target.X + 600, Y = target.Y + 100 * index, Z = target.Z},
+                                false, {}, true))
+                            pawn:ForceNetUpdate()
+                        end
+                    end
                     clear = true
                     break
                 end
@@ -495,6 +504,22 @@ local function command(operation, world, driver, host, local_pawn, argument)
     elseif observer and operation == "observerabsorptions" then
         assert(host and selected and selected.absorptions)
         return tostring(selected.absorptions)
+    elseif observer and operation == "observerlootcamera" then
+        assert(not host and local_pawn:IsLocallyControlled() and valid(local_pawn.Camera))
+        local camera = local_pawn.Camera
+        if argument == "reset" then
+            assert(reward_camera and same(reward_camera.camera, camera))
+            camera:K2_SetRelativeLocation(reward_camera.location, false, {}, true)
+            reward_camera = nil
+            return "restored"
+        end
+        assert(argument == "position" and not reward_camera)
+        local at, relative = local_pawn:K2_GetActorLocation(), camera.RelativeLocation
+        reward_camera = {camera = camera, location = {X = relative.X, Y = relative.Y, Z = relative.Z}}
+        -- The suspended test pawn's normal camera remains at the pre-teleport point.
+        camera:K2_SetWorldLocation({X = at.X, Y = at.Y, Z = at.Z + 52}, false, {}, true)
+        local eye = camera:K2_GetComponentLocation()
+        return ("%.3f|%.3f|%.3f"):format(eye.X, eye.Y, eye.Z)
     elseif observer and operation == "observerofferingprobe" then
         assert(host and selected and selected.absorptions)
         local record = io.open(box .. "/observer-native-reward", "r")

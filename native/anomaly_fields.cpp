@@ -1,6 +1,7 @@
 #include "anomaly_fields.hpp"
 
 #include "guest_regen.hpp"
+#include "stock_enemy_drops.hpp"
 
 #include <algorithm>
 #include <array>
@@ -70,6 +71,7 @@ namespace
     bool shadow_replication{};
     bool angler_replication{};
     bool observer_fixture{};
+    bool observer_loot_fixture{};
     H::GlobalCallbackId observer_script_post = H::ERROR_ID, observer_internal_post = H::ERROR_ID;
     H::GlobalCallbackId observer_actor_begin = H::ERROR_ID;
     U::FName patch_name;
@@ -266,7 +268,7 @@ namespace
         if (actor->GetWorld() == observer_offering.world.Get()) observer_offering.reward = actor;
     }
 
-    void end_observer_offering(Iteration& call, U::FFrame& frame)
+    void end_observer_offering(Iteration& call, U::UObject* observer_actor, U::FFrame& frame)
     {
         if (observer_offering.frame != &frame) return;
         auto* item = observer_offering.reward.Get();
@@ -275,6 +277,11 @@ namespace
         if (call.OriginalFunctionCallPrevented()) return;
         auto* base = U::UObjectGlobals::StaticFindObject<U::UClass*>(nullptr, nullptr, item_class);
         if (!item || !base || !item->IsA(base) || static_cast<U::AActor*>(item)->GetWorld() != world) return;
+        if (observer_loot_fixture)
+        {
+            if (silverfish::stock_enemy_drops::track_observer_reward(observer_actor, item)) ++observer_reward_results;
+            return;
+        }
         ++observer_reward_results;
         if (std::ranges::any_of(observer_rewards, [&](const auto& entry) { return entry.Get() == item; })) return;
         auto slot = std::ranges::find_if(observer_rewards, [](const auto& entry) { return !entry.Get(); });
@@ -537,6 +544,7 @@ namespace silverfish::native_anomaly_fields
             U::FName{STR("SubtractLook"), U::FNAME_Add},
         };
         observer_fixture = opt_in("SILVERFISH_COOP_HEADLESS") && opt_in("SILVERFISH_COOP_OBSERVER_FIXTURE");
+        observer_loot_fixture = observer_fixture && opt_in("SILVERFISH_COOP_OBSERVER_LOOT_FIXTURE");
         observer = U::FName{STR("Observers_BP_C"), U::FNAME_Add};
         observer_check = U::FName{STR("CheckPlayerLooking"), U::FNAME_Add};
         observer_absorb = U::FName{STR("AbsorbItem"), U::FNAME_Add};
@@ -632,7 +640,7 @@ namespace silverfish::native_anomaly_fields
         {
             const auto stock_result = [](Iteration& call, U::UObject* actor, U::FFrame& frame, void* result) {
                 end_observer_check(call, actor, frame, result);
-                end_observer_offering(call, frame);
+                end_observer_offering(call, actor, frame);
             };
             observer_script_post = H::RegisterProcessLocalScriptFunctionPostCallback(
                 stock_result, {false, false, owner, STR("Read stock Observer gaze and offering results")});

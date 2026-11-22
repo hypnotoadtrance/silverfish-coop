@@ -170,20 +170,22 @@ async def verify_observer(guest, host_box, guest_box, probe):
             "stock_psy_attack_recipients": attack_log.read_text().splitlines()}
 
 
-async def verify_observer_offering(host_box, guest_box, probe, approach):
-    await probe(host_box, "observerpose", "guest" if approach == "flight" else "far")
+async def verify_observer_offering(host, guest, host_box, guest_box, probe, approach, character):
+    await probe(host_box, "observerpose", "far" if approach == "contact" else "guest")
     source = await probe(host_box, "observeroffering", approach)
     assert source.startswith("Item_Jewely_C ")
     async with asyncio.timeout(8):
         while await probe(guest_box, "observerrewards") != "1|":
             await asyncio.sleep(.15)
     assert await probe(host_box, "observerrewards") == "1|"
-    if approach == "flight":
+    if approach != "contact":
         launch = await probe(host_box, "observerlaunch")
         assert launch.startswith("true|"), launch
     else:
         launch = await probe(host_box, "observerimpact")
         assert launch == "entered stock capsule"
+    if approach == "loot":
+        return await verify_observer_reward_pickup(host, guest, host_box, guest_box, probe, character, source, launch)
     host_result = guest_result = ""
     try:
         async with asyncio.timeout(10):
@@ -204,6 +206,65 @@ async def verify_observer_offering(host_box, guest_box, probe, approach):
     except TimeoutError as error:
         extra = await probe(host_box, "observerofferingprobe")
         raise RuntimeError(f"Stock offering did not settle on both peers. Host {host_result!r}. Guest {guest_result!r}. Stock {extra}.") from error
+
+
+async def verify_observer_reward_pickup(host, guest, host_box, guest_box, probe, character, source, launch):
+    from tools.silverfish import native_stock_enemy_drops, native_world_loot
+    from tools.silverfish.control import submit
+
+    def banked():
+        return [entry for entry in events(host, "native_stock_enemy_loot_banked") if ".Observers_BP_C_" in entry["source"]]
+
+    async def action(run, command, target=None):
+        reply = await submit(run, command, target=target)
+        if not reply.get("ok"):
+            raise RuntimeError(f"{command}: {reply.get('error')}")
+        return reply
+
+    try:
+        async with asyncio.timeout(15):
+            while not (rewards := banked()):
+                await asyncio.sleep(.15)
+    except TimeoutError as error:
+        extra = await probe(host_box, "observerofferingprobe")
+        raise RuntimeError(f"The stock Observer reward was not banked. Stock {extra}.") from error
+    reward, = rewards
+    guid, kind = reward["guid"], reward["class_path"]
+    assert "/Artifacts/Art_Tesseract_" in kind, reward
+    identity = native_world_loot.stock_enemy_identity(guid)
+
+    def projected(view):
+        return view.get("game", {}).get(native_world_loot.KEY, {}).get(identity, {})
+
+    for run in (host, guest):
+        await wait(run, lambda view: projected(view).get("class_path") == kind, timeout=12)
+    await action(host, native_world_loot.APPROACH, f"guest@{identity}")
+    await wait(guest, lambda view: math.dist(
+        view["game"]["pawns"]["local"]["location"], reward["transform"]["position"]) < 180, timeout=7)
+    eye = list(map(float, (await probe(guest_box, "observerlootcamera", "position")).split("|")))
+    try:
+        assert math.dist(eye, reward["transform"]["position"]) < 210
+        press = (await action(guest, native_world_loot.FIXTURE, identity))[native_world_loot.KEY][identity]
+    finally:
+        assert await probe(guest_box, "observerlootcamera", "reset") == "restored"
+    assert press["sequence"] > 0
+
+    def claim():
+        return next((entry for entry in events(host, "native_stock_enemy_loot_claimed") if entry.get("guid") == guid), None)
+
+    await wait(host, lambda _: claim(), timeout=12)
+    assert claim()["claimed_by"] == character
+    for run in (host, guest):
+        await wait(run, lambda view: not projected(view), timeout=12)
+    rival = await submit(host, native_stock_enemy_drops.CLAIM, target=guid)
+    assert rival.get("error") == "stock_enemy_loot_already_claimed", rival
+    inventory = (await action(guest, "native-inventory-list"))["native_inventory"]["items"]
+    item, = [item for item in inventory if item["guid"] == guid and item["class_path"] == kind]
+    assert await probe(host_box, "observerabsorptions") == "1"
+    assert len(banked()) == 1
+    assert (await probe(guest_box, "observerrewards")).startswith("0|")
+    return {"offering": source, "launch": launch, "stock_reward_count": 1, "reward": reward, "claim": claim(),
+            "guest_inventory_item": item, "competing_claim": rival["error"]}
 
 
 async def verify_angler(guest, host_box, guest_box, probe):
@@ -294,6 +355,8 @@ async def verify(work, family, observer_offering=None):
             env["SILVERFISH_COOP_ANGLER_LAMP_FIXTURE"] = "1"
         if family == "observer":
             env["SILVERFISH_COOP_OBSERVER_FIXTURE"] = "1"
+            if observer_offering == "loot":
+                env["SILVERFISH_COOP_OBSERVER_LOOT_FIXTURE"] = "1"
         with (host / f"{args[0]}.log").open("wb") as log:
             child = await asyncio.create_subprocess_exec(*cli, *args, stdout=log, stderr=log,
                 creationflags=flags, env=env)
@@ -389,7 +452,8 @@ async def verify(work, family, observer_offering=None):
                 return
             if family == "observer":
                 if observer_offering:
-                    common.update(await verify_observer_offering(host_box, guest_box, probe, observer_offering))
+                    common.update(await verify_observer_offering(
+                        host, guest, host_box, guest_box, probe, observer_offering, invite["character_id"]))
                     evidence = host / "live-observer-offering.json"
                 else:
                     common.update(await verify_observer(guest, host_box, guest_box, probe))
@@ -435,7 +499,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--family", choices=("gravity", "pyrogeist", "shadow-sphere", "angler-lamp", "observer"), default="gravity")
-    parser.add_argument("--observer-offering", nargs="?", const="contact", choices=("contact", "flight"))
+    parser.add_argument("--observer-offering", nargs="?", const="contact", choices=("contact", "flight", "loot"))
     args = parser.parse_args()
     if args.observer_offering and args.family != "observer":
         parser.error("--observer-offering requires --family observer")
