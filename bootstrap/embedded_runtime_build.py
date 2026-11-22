@@ -207,7 +207,7 @@ def notice_document(wheels, certifi_source):
     lines = [
         "# Third-party runtime notices",
         "",
-        "This private prototype redistributes the official CPython 3.14.6 Windows x64 embeddable package.",
+        "This mod redistributes the official CPython 3.14.6 Windows x64 embeddable package.",
         "The upstream PSF and bundled-component notices are in LICENSE.txt.",
         "The change to the upstream layout is a relative python314._pth containing app and site-packages.",
         "CPython binaries and its standard library ZIP are unchanged.",
