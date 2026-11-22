@@ -9,7 +9,7 @@ local item_count = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local factory_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local previous, seeded
-local moving
+local carry = require("world_loot_carry_probe")
 
 local function valid(value) return value and value:IsValid() end
 
@@ -22,71 +22,10 @@ local function guid(row)
     return ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
 end
 
-local function grip(pawn, identity)
-    assert(not moving and identity:match("^[a-f0-9]+$") and #identity == 32)
-    for slot = 1, 64 do
-        local shown, _, id, name = SilverfishReadNativeGuestDropProjection(slot)
-        if shown and id == identity then
-            local actor = StaticFindObject(name:match("^%S+ (.+)$"))
-            assert(valid(actor) and actor:GetFullName() == name and same(actor:GetWorld(), pawn:GetWorld())
-                and same(actor.Box, actor.RootComponent) and not valid(pawn.HeldObject))
-            local camera = pawn.Camera
-            local angle = camera.RelativeRotation
-            local old_angle = {Pitch = angle.Pitch, Yaw = angle.Yaw, Roll = angle.Roll}
-            local old_actor, old_distance = pawn.ActorBeingLookedAt, pawn.ActorLookedAt_Distance
-            local old_part = pawn.InteractionTarget_Component
-            local at, eye = actor:K2_GetActorLocation(), camera:K2_GetComponentLocation()
-            local dx, dy, dz = at.X - eye.X, at.Y - eye.Y, at.Z - eye.Z
-            local horizontal = math.sqrt(dx * dx + dy * dy)
-            local distance = math.sqrt(horizontal * horizontal + dz * dz)
-            assert(distance < pawn.InteractionRange, ("fixture distance %.2f"):format(distance))
-            local grabbed, error_detail = pcall(function()
-                camera:K2_SetWorldRotation({Pitch = math.deg(math.atan(dz, horizontal)),
-                    Yaw = math.deg(math.atan(dy, dx)), Roll = 0}, false, {}, true)
-                pawn.ActorBeingLookedAt, pawn.ActorLookedAt_Distance = actor, distance
-                pawn.InteractionTarget_Component = actor.Box
-                pawn:Grab_Release_Object(false, false, true)
-                assert(same(pawn.HeldObject, actor) and same(pawn.PhysicsHandle:GetGrabbedComponent(), actor.Box),
-                    "stock grip did not attach to the shared item")
-                assert(actor.Box:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)),
-                    "stock carry input did not activate the projected item")
-            end)
-            camera:K2_SetRelativeRotation(old_angle, false, {}, true)
-            pawn.ActorBeingLookedAt = valid(old_actor) and old_actor or nil
-            pawn.ActorLookedAt_Distance = old_distance
-            pawn.InteractionTarget_Component = valid(old_part) and old_part or nil
-            if not grabbed then
-                if same(pawn.HeldObject, actor) then pawn:Grab_Release_Object(false, true, false) end
-                error(error_detail)
-            end
-            moving = {pawn = pawn, actor = actor}
-            return tostring(actor:GetAddress())
-        end
-    end
-    error("shared stock drop identity not found")
-end
-
-local function release(pawn, throwing)
-    assert(moving and same(moving.pawn, pawn) and valid(moving.actor))
-    local actor = moving.actor
-    assert(same(pawn.HeldObject, actor) and actor.Box:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)))
-    local position = actor:K2_GetActorLocation()
-    pawn:Grab_Release_Object(throwing, not throwing, false)
-    assert(not same(pawn.HeldObject, actor) and not same(pawn.PhysicsHandle:GetGrabbedComponent(), actor.Box),
-        "stock drop did not release the shared item")
-    moving = nil
-    return ("%.4f,%.4f,%.4f"):format(position.X, position.Y, position.Z)
-end
-
 local function witness(world, pawn, mode, value)
-    if mode == "grip" then return grip(pawn, value) end
-    if mode == "drop" or mode == "throw" then return release(pawn, mode == "throw") end
-    if mode == "pose" then
-        local actor = StaticFindObject(value)
-        assert(valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed())
-        local position = actor:K2_GetActorLocation()
-        return ("%d,%.4f,%.4f,%.4f"):format(actor:GetAddress(), position.X, position.Y, position.Z)
-    end
+    if mode == "grip" then return carry.grip(pawn, value) end
+    if mode == "drop" or mode == "throw" then return carry.release(pawn, mode == "throw") end
+    if mode == "pose" then return carry.pose(world, value) end
     if mode == "actor" then
         local prefix = area .. ":PersistentLevel.Item_Bandage_C_"
         assert(value:sub(1, #prefix) == prefix and value:sub(#prefix + 1):match("^%d+$"))

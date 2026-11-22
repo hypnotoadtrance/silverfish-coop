@@ -33,14 +33,19 @@ def staged_bandage_probe(work):
     scripts = work / "stage/SilverFish/Binaries/Win64/ue4ss/Mods/SilverfishCoop/Scripts"
     main, fixture = scripts / "main.lua", scripts / "host_bandage_split_probe.lua"
     original = main.read_bytes()
-    with fixture.open("xb") as stream:
-        stream.write((Path(__file__).with_name("fixtures") / fixture.name).read_bytes())
+    carry = scripts / "world_loot_carry_probe.lua"
+    copied = []
     try:
+        for target in (fixture, carry):
+            with target.open("xb") as stream:
+                copied.append(target)
+                stream.write((Path(__file__).with_name("fixtures") / target.name).read_bytes())
         main.write_bytes(original + b'\nrequire("host_bandage_split_probe")\n')
         yield
     finally:
         main.write_bytes(original)
-        fixture.unlink()
+        for target in copied:
+            target.unlink()
 
 
 async def bandage_probe(run, verb, value=""):

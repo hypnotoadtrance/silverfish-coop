@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import shutil
@@ -26,6 +27,7 @@ from tools.silverfish.authored_loot import (CRATES, GUARANTEED_CRATES, GUARANTEE
                                            lockable_container, loot_capacity, random_lid, valid_lid_angle, valid_loot_trait_calls, vehicle_lock)
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.travel import BLACK_MARKET, CISTERN, CITY, CROSSROADS, DEAD_BRIDGE, FOREST, LAB_E206, LAKE, OBSERVATORY, RAIL_YARD
+from live_world_loot_carry import carry_and_throw, staged_carry_probe
 
 
 SCENES = {
@@ -169,7 +171,8 @@ def stock_input_result(run: Path, crate: str, sequence: int) -> dict | None:
 
 
 async def exercise(work: Path, name: str, original_save: Path | None, baseline: str | None = None,
-                   force_stock_roll: bool = False, require_cash: bool = False, natural_lab_roll: bool = False) -> None:
+                   force_stock_roll: bool = False, require_cash: bool = False, natural_lab_roll: bool = False,
+                   carry_loot: bool = False) -> None:
     if force_stock_roll and (name != "rail-yard" or original_save is None):
         raise ValueError("The exact Rail Yard forced stock draw requires single-player save verification")
     if natural_lab_roll and (name != CABINET_SCENE or baseline or force_stock_roll):
@@ -641,8 +644,8 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                 guid = selected["guid"]
                 target = f"{guid}@{crate}"
                 operation = uuid.uuid4().hex
-                if family:
-                    identity = uuid.uuid5(uuid.NAMESPACE_OID, f"{roll['id']}:{guid}").hex
+                if family or carry_loot:
+                    identity = native_world_loot.crate_identity(roll["id"], guid)
 
                     def world_item(state):
                         return state.get("game", {}).get("native_world_loot_items", {}).get(identity)
@@ -652,6 +655,15 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                         assert world_item(present)["class_path"] == selected["class_path"]
                         assert not present["game"].get("native_loot_view")
                     await command("action", *host, "native-world-loot-approach", "--target", f"guest@{identity}")
+                    if carry_loot:
+                        def settled(state):
+                            return next((item["transform"] for item in (public_roll(state, crate) or {}).get("items", ())
+                                         if item["guid"] == guid and not item.get("claimed_by")), None)
+
+                        carry = await carry_and_throw(run, guest_run, identity, selected["transform"], settled, wait)
+                        evidence["stock_carry_and_throw"] = carry
+                        selected["transform"] = carry["settled_transform"]
+                        await command("action", *host, "native-world-loot-approach", "--target", f"guest@{identity}")
                     press = await command("action", *guest, "native-world-loot-fixture", "--target", identity)
                     assert press["native_world_loot_items"][identity]["sequence"] > 0, press
                     for directory in (run, guest_run):
@@ -781,9 +793,12 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
 
 
 async def main(arguments):
-    for name in arguments.area or DEFAULT_SCENES:
-        await exercise(arguments.work.resolve(), name, arguments.vanilla_saved, arguments.baseline,
-                       arguments.force_stock_roll, arguments.require_cash, arguments.natural_lab_roll)
+    work = arguments.work.resolve()
+    with staged_carry_probe(work) if arguments.carry_loot else nullcontext():
+        for name in arguments.area or DEFAULT_SCENES:
+            await exercise(work, name, arguments.vanilla_saved, arguments.baseline,
+                           arguments.force_stock_roll, arguments.require_cash, arguments.natural_lab_roll,
+                           carry_loot=arguments.carry_loot)
 
 
 if __name__ == "__main__":
@@ -796,6 +811,7 @@ if __name__ == "__main__":
     parser.add_argument("--require-cash", action="store_true", help="require a stock cash roll and verify its shared balance after restart")
     parser.add_argument("--natural-lab-roll", action="store_true",
                         help="start a seeded Wanderer campaign, take the stock route into Lab E206, and require a nonempty cabinet")
+    parser.add_argument("--carry-loot", action="store_true", help="throw the actual guaranteed Observatory crate item before pickup")
     arguments = parser.parse_args()
     if arguments.require_cash and (not arguments.vanilla_saved or not arguments.area or len(arguments.area) != 1):
         parser.error("--require-cash requires one --area and --vanilla-saved")
@@ -810,4 +826,6 @@ if __name__ == "__main__":
         parser.error("--baseline requires exactly one --area")
     if arguments.natural_lab_roll and (arguments.area != [CABINET_SCENE] or arguments.baseline or arguments.force_stock_roll):
         parser.error("--natural-lab-roll requires --area lab-small-cabinet and a fresh campaign")
+    if arguments.carry_loot and arguments.area != ["guaranteed-observatory"]:
+        parser.error("--carry-loot requires --area guaranteed-observatory")
     asyncio.run(main(arguments))
