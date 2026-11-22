@@ -2,6 +2,7 @@ local fields = {}
 local effects = require("native_anomaly_effects")
 local electrodes = require("native_electrode_view")
 local canisters = require("native_explosive_canisters")
+local fixed = require("native_fixed_explosives")
 
 local classes = {
     starburst = "/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C",
@@ -121,7 +122,9 @@ function fields.start(role)
         if not valid(actor) then return end
         local class = actor:GetClass():GetFullName()
         if seat == "host" then
-            if class == effects.blast_class and in_world(actor, world) then effects.observe_blast(actor, active, canisters.blast_source) end
+            if class == effects.blast_class and in_world(actor, world) then
+                effects.observe_blast(actor, active, canisters.blast_source)
+            end
         elseif kinds[class] or class == fire_jet then
             local _, local_copy = placement(actor)
             if local_copy or replica(actor) then actor:SetActorEnableCollision(false) end
@@ -134,6 +137,7 @@ function fields.start(role)
         if not valid(actor) or actor:IsActorBeingDestroyed() then return end
         local class = actor:GetClass():GetFullName()
         canisters.created(actor, class, seat, replica)
+        fixed.created(actor, class, seat)
         local kind = kinds[class]
         if not kind and class ~= fire_jet then return end
         local placed, local_copy
@@ -166,6 +170,7 @@ function fields.start(role)
             end
             active[address], pending[address], fires[address], pending_fires[address] = nil, nil, nil, nil
             canisters.ended(address, destroyed)
+            fixed.ended(address)
         end)
     end
 end
@@ -180,6 +185,8 @@ function fields.command(args, state, phase)
     if electrode ~= nil then return electrode end
     local canister = canisters.command(args, state, phase)
     if canister ~= nil then return canister end
+    local explosive = fixed.command(args, state, phase)
+    if explosive ~= nil then return explosive end
     local effect = effects.command(args, state, phase, animate_vortex)
     if effect ~= nil then return effect end
     if args[2] == "native-anomaly-trigger-fixture" or args[2] == "native-placed-anomaly-guest-fixture"
@@ -331,9 +338,9 @@ function fields.rows(state, phase, row)
             active[address] = nil
         end
     end
-    local skipped, blocked, blocked_canisters = 0, 0, 0
+    local skipped, blocked, blocked_canisters, blocked_fixed = 0, 0, 0, 0
     if phase == "connected" and type(SilverfishReadNativeAnomalySkips) == "function" then
-        skipped, blocked, blocked_canisters = SilverfishReadNativeAnomalySkips(world:GetAddress())
+        skipped, blocked, blocked_canisters, blocked_fixed = SilverfishReadNativeAnomalySkips(world:GetAddress())
     end
     rows[#rows + 1] = row("native-anomaly-field", live, skipped, blocked or 0)
     for address, fire in pairs(fires) do
@@ -350,9 +357,11 @@ function fields.rows(state, phase, row)
         for _, electrode in ipairs(electrodes.retired_rows(row)) do rows[#rows + 1] = electrode end
     else
         rows[#rows + 1] = row("native-canister-blocked", blocked_canisters or 0)
+        rows[#rows + 1] = row("native-fixed-explosive-blocked", blocked_fixed or 0)
         effects.retire_charges()
     end
     for _, canister in ipairs(canisters.rows(state, phase, row)) do rows[#rows + 1] = canister end
+    for _, item in ipairs(fixed.rows(state, phase, row)) do rows[#rows + 1] = item end
     return rows
 end
 

@@ -2,7 +2,8 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish.native_anomaly_effects import (
-    CANISTERS, ELECTRODE_PHASES, Playback, VORTEX_SENSORS, project_canisters, project_electrodes, project_sensors,
+    CANISTERS, ELECTRODE_PHASES, FIXED_EXPLOSIVES, Playback, VORTEX_SENSORS,
+    project_canisters, project_electrodes, project_fixed_explosives, project_sensors,
 )
 
 
@@ -86,3 +87,21 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         await project_canisters(bridge, game, frame, epoch)
         bridge.command.assert_awaited_once_with(
             "native-canister-apply", "Crossroads", epoch, "Removed|2", "Igniting|1", timeout=1.5)
+
+    async def test_fixed_prop_projection_repairs_both_stock_flag_and_mesh(self):
+        epoch = "c" * 32
+        game = {"state": "connected", "map": "Dry Dock", FIXED_EXPLOSIVES: {
+            "Broken": {"destroyed": False, "damaged_mesh": False},
+            "Reset": {"destroyed": True, "damaged_mesh": True},
+            "WrongMesh": {"destroyed": True, "damaged_mesh": False},
+            "Matching": {"destroyed": True, "damaged_mesh": True},
+        }}
+        frame = {"map": "Dry Dock", "epoch": epoch, "props": {
+            "Broken": True, "Reset": False, "WrongMesh": True, "Matching": True, "Unknown": True,
+        }}
+        bridge = Mock(command=AsyncMock(return_value=game))
+        await project_fixed_explosives(bridge, game, frame, "b" * 32)
+        bridge.command.assert_not_awaited()
+        await project_fixed_explosives(bridge, game, frame, epoch)
+        bridge.command.assert_awaited_once_with(
+            "native-fixed-explosives-apply", "Dry Dock", epoch, "Broken|1", "Reset|0", "WrongMesh|1", timeout=1.5)

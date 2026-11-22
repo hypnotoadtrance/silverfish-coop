@@ -2407,6 +2407,24 @@ class Bridge:
                     blocked = int(fields[1])
                     if blocked >= 0:
                         data["native_canister_blocked"] = blocked
+                elif fields[0] in {"native-fixed-explosive-capture", "native-fixed-explosive-blocked"} and len(fields) == 2:
+                    state = "hosting" if fields[0].endswith("capture") else "connected"
+                    count = int(fields[1])
+                    if data.get("state") == state and count >= 0:
+                        data[fields[0].replace("-", "_")] = count
+                elif fields[0] == "native-fixed-explosive" and len(fields) == 6 and data.get("state") in {"hosting", "connected"}:
+                    props = data.setdefault(native_anomaly_effects.FIXED_EXPLOSIVES, {})
+                    area = data.get("map", "")
+                    path, destroyed, damaged, mesh, health = fields[1:]
+                    prefix = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel."
+                    if (area.startswith("/Game/Classes/Maps/") and path.startswith(prefix) and len(path) <= 512
+                            and len(props) < native_anomaly_effects.MAX_SENSORS
+                            and all(bit in {"0", "1"} for bit in (destroyed, damaged))
+                            and re.fullmatch(r"(Prop_Explosive_PowerBox|Explosive_Prop_Master_BP|Z_TestExplosiveObject)_C(?:_[0-9]+)?",
+                                             path[len(prefix):])
+                            and len(mesh) <= 512 and (mesh == "-" or mesh.startswith("/Game/"))):
+                        props[path] = {"destroyed": destroyed == "1", "damaged_mesh": damaged == "1",
+                                       "mesh": mesh, "health": _finite(health)}
                 elif fields[0] == "native-explosive-canister" and len(fields) == 9 and data.get("state") in {"hosting", "connected"}:
                     props = data.setdefault(native_anomaly_effects.CANISTERS, {})
                     area = data.get("map", "")

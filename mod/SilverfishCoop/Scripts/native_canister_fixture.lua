@@ -44,13 +44,20 @@ local function prepare(state, pawn, class)
     end
 end
 
-local function shoot(state, pawn, canister, class)
+local function shoot(state, pawn, component, center, class)
     local weapon = equipped(pawn, class)
-    local muzzle, component = valid(weapon) and weapon.Arrow_Muzzle, canister.PropMesh
+    local muzzle = valid(weapon) and weapon.Arrow_Muzzle
     local trace = StaticFindObject(system_path)
     if not valid(muzzle) or not same(muzzle:GetOwner(), weapon) or not valid(component) or not valid(trace)
         or type(weapon.Ammo) ~= "number" or weapon.Ammo < 1 then error("The stock loaded pistol muzzle is unavailable", 0) end
-    local center = component:GetCenterOfMass(FName("None"))
+    if center then
+        local origin = {}
+        trace:GetComponentBounds(component, origin, {}, {})
+        local bounds = origin.Origin or origin
+        if bounds.X then center = bounds end
+    else
+        center = component:GetCenterOfMass(FName("None"))
+    end
     local original, view = pawn:K2_GetActorLocation(), state.controller:GetControlRotation()
     local aim, before_muzzle
     for _, angle in ipairs({0, 45, 90, 135, 180, 225, 270, 315}) do
@@ -64,7 +71,8 @@ local function shoot(state, pawn, canister, class)
             local dx, dy, dz = center.X - origin.X, center.Y - origin.Y, center.Z - origin.Z
             local horizontal = math.sqrt(dx * dx + dy * dy)
             local hit = {}
-            if horizontal > 100 and trace:LineTraceSingle(pawn, origin, center, 0, false, {pawn, weapon},
+            local extended = {X = center.X + dx * .3, Y = center.Y + dy * .3, Z = center.Z + dz * .3}
+            if horizontal > 100 and trace:LineTraceSingle(pawn, origin, extended, 0, false, {pawn, weapon},
                 0, hit, true, blank, blank, 0) then
                 hit = hit.OutHit or hit
                 if hit.Component and same(hit.Component:Get(), component) then
@@ -90,10 +98,12 @@ local function shoot(state, pawn, canister, class)
     return "Fired one stock pistol round toward the canister"
 end
 
-function fixture.command(args, state, phase, canister)
+function fixture.command(args, state, phase, canister, component, center)
     local action = args[2]
     if action ~= "native-canister-prepare-fixture" and action ~= "native-canister-shoot-fixture"
-        and action ~= "native-canister-guest-guard-fixture" and action ~= "native-canister-ignite-fixture" then return end
+        and action ~= "native-canister-guest-guard-fixture" and action ~= "native-canister-ignite-fixture"
+        and action ~= "native-fixed-explosive-prepare-fixture" and action ~= "native-fixed-explosive-shoot-fixture"
+        and action ~= "native-fixed-explosive-guest-guard-fixture" then return end
     local pawn = state.local_pawn and state.local_pawn.pawn
     if #args ~= 3 or not valid(pawn) or not pawn:IsLocallyControlled() or not valid(canister) then
         error("The exact stock canister fixture is unavailable", 0)
@@ -103,6 +113,11 @@ function fixture.command(args, state, phase, canister)
         canister:PropBroken(canister:K2_GetActorLocation(), pawn)
         return "Invoked the stock canister ignition and rupture calls on the guest"
     end
+    if action == "native-fixed-explosive-guest-guard-fixture" and phase == "connected" then
+        canister:IgniteOnFire(100)
+        canister:Hit_Dmg_Feedback(true, {}, pawn)
+        return "Invoked the stock explosive ignition and rupture calls on the guest"
+    end
     if not host_enabled or phase ~= "hosting" or not canister:HasAuthority() then
         error("The stock canister shot requires the isolated fixture host", 0)
     end
@@ -111,11 +126,11 @@ function fixture.command(args, state, phase, canister)
         return "Invoked the stock canister ignition on the host"
     end
     local class = pistol_class()
-    if action == "native-canister-prepare-fixture" then
+    if action == "native-canister-prepare-fixture" or action == "native-fixed-explosive-prepare-fixture" then
         prepare(state, pawn, class)
         return "Stock isolated host pistol equipped"
     end
-    return shoot(state, pawn, canister, class)
+    return shoot(state, pawn, component or canister.PropMesh, center, class)
 end
 
 return fixture

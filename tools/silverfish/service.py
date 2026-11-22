@@ -1737,6 +1737,12 @@ class Host:
                 gameplay[native_anomaly_effects.CANISTERS] = {
                     "map": self.last_game["map"], "epoch": self.zone_epoch, "props": props,
                 }
+            fixed = {path: row["destroyed"] for path, row in self.last_game.get(native_anomaly_effects.FIXED_EXPLOSIVES, {}).items()
+                     if row["destroyed"] == row["damaged_mesh"]}
+            if fixed:
+                gameplay[native_anomaly_effects.FIXED_EXPLOSIVES] = {
+                    "map": self.last_game["map"], "epoch": self.zone_epoch, "props": fixed,
+                }
             equipped = self.last_game.get("native_guest_equipped_weapons", {}).get(pawn, {})
             kind = equipped.get("kind")
             if native_gold.valid_guid(equipped.get("guid")) and kind in native_guest_weapon.FIRE_CLASSES:
@@ -3240,7 +3246,8 @@ class Host:
                     result = await self.native_hazard(bridge, action)
                 elif action in {"native-anomaly-field-fixture", "native-anomaly-trigger-fixture", "native-electrode-retire-fixture",
                                 "native-canister-prepare-fixture", "native-canister-shoot-fixture",
-                                "native-canister-ignite-fixture"} and self.fixtures:
+                                "native-canister-ignite-fixture", "native-fixed-explosive-prepare-fixture",
+                                "native-fixed-explosive-shoot-fixture"} and self.fixtures:
                     snapshot = await bridge.command(action, request.get("target") or "-", timeout=4)
                     result = {"native_anomaly_field": snapshot.get("native_anomaly_field", {})}
                 elif action == "native-fall-position" and self.native_guest and self.fixtures:
@@ -5263,6 +5270,8 @@ class Client:
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.ELECTRODE_PHASES), self.zone_epoch)
                     self.last_game = await native_anomaly_effects.project_canisters(
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.CANISTERS), self.zone_epoch)
+                    self.last_game = await native_anomaly_effects.project_fixed_explosives(
+                        self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.FIXED_EXPLOSIVES), self.zone_epoch)
                     self.last_game = await self.pickup_playback.sync(
                         self.bridge, self.control, self.last_game, self.gameplay.get(native_pickup_audio.KEY),
                         self.zone_epoch, self.host_session)
@@ -5573,7 +5582,8 @@ class Client:
                 elif action == "native-interaction-fixture":
                     self.last_game = await self.bridge.command(action, timeout=5)
                     result = {"native_interaction_fixture": True}
-                elif action in {"native-anomaly-field-fixture", "native-placed-anomaly-guest-fixture", "native-canister-guest-guard-fixture"}:
+                elif action in {"native-anomaly-field-fixture", "native-placed-anomaly-guest-fixture", "native-canister-guest-guard-fixture",
+                                "native-fixed-explosive-guest-guard-fixture"}:
                     self.last_game = await self.bridge.command(action, request.get("target") or "-", timeout=4)
                     result = {"native_anomaly_field": self.last_game.get("native_anomaly_field", {})}
                 elif action == native_enemy_shells.FIXTURE and self.transport.game_access:

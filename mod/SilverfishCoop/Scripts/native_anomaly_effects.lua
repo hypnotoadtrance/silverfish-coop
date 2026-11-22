@@ -16,7 +16,11 @@ local assets = {
         "/Game/Assets/Sounds/MetaSounds/MS_Blast_Pop.MS_Blast_Pop",
         "/Game/Assets/Sounds/SoundClasses/Blast_Attenuation.Blast_Attenuation"},
 }
-local audio_range = {charge = 4000, blast = 500100, vortex = 500100, electrode = 8100, canister = 500100}
+assets.fixedtank = assets.blast
+assets.powerbox = {assets.electrode[1], assets.electrode[2], assets.blast[3]}
+assets.fixedfire = {assets.blast[1], "/Game/Assets/Sounds/MetaSounds/MS_Blast_Firey.MS_Blast_Firey", assets.blast[3]}
+local audio_range = {charge = 4000, blast = 500100, vortex = 500100, electrode = 8100, canister = 500100,
+    powerbox = 500100, fixedtank = 500100, fixedfire = 500100}
 local blasts = {starburst = "blast", vortex = "vortex", electrode = "electrode"}
 effects.blast_class = "BlueprintGeneratedClass /Game/Classes/Actors/ExplosionActor_BP.ExplosionActor_BP_C"
 local history, pending, serial, seen, visit = {}, {}, 0, {}, nil
@@ -55,7 +59,7 @@ end
 
 local function record(kind, point, scale, volume)
     serial = serial + 1
-    captured[kind] = captured[kind] + 1
+    captured[kind] = (captured[kind] or 0) + 1
     local now = os.clock()
     pending[#pending + 1] = {serial, kind, point.X, point.Y, point.Z, scale, volume or 1, expires = now + 1.25}
     if #pending > 12 then table.remove(pending, 1) end
@@ -76,16 +80,20 @@ function effects.observe_charge(entry)
     entry.charged = charged
 end
 
-local function stock_blast(actor, cue)
-    local pfx, sfx = actor.PFX, actor.SFX
-    local scale, volume = actor["PFX Scale"], actor["SFX Vol"]
+local function stock_blast(cue, point, pfx, sfx, scale, volume)
     if not valid(pfx) or not valid(sfx)
         or type(scale) ~= "number" or not (scale > 0 and scale <= 10)
         or type(volume) ~= "number" or not (volume >= 0 and volume <= 10) then return end
     if pfx:GetFullName() == "NiagaraSystem " .. assets[cue][1]
         and sfx:GetFullName():match("^%S+ (.+)$") == assets[cue][2] then
-        record(cue, actor:K2_GetActorLocation(), scale, volume)
+        record(cue, point, scale, volume)
         return true
+    end
+end
+
+function effects.observe_fixed_blast(cue, point, pfx, sfx, scale, volume, attenuation)
+    if valid(attenuation) and attenuation:GetFullName() == "SoundAttenuation " .. assets[cue][3] then
+        stock_blast(cue, point, pfx, sfx, scale, volume)
     end
 end
 
@@ -93,9 +101,10 @@ local function observe_canister(actor, registered_source)
     local sound = actor.SFX
     if not valid(sound) or sound:GetFullName():match("^%S+ (.+)$") ~= assets.canister[2] then return end
     local attenuation = actor["Attenuation Settings"]
+    local point = actor:K2_GetActorLocation()
     if valid(attenuation) and attenuation:GetFullName() == "SoundAttenuation " .. assets.canister[3]
-        and registered_source(actor:K2_GetActorLocation()) then
-        return stock_blast(actor, "canister")
+        and registered_source(point) then
+        return stock_blast("canister", point, actor.PFX, sound, actor["PFX Scale"], actor["SFX Vol"])
     end
 end
 
@@ -109,7 +118,8 @@ function effects.observe_blast(actor, active, registered_canister)
         local source = ignored[index]
         local entry = valid(source) and active[source:GetAddress()]
         local cue = entry and blasts[entry.kind]
-        if cue and entry.actor:GetAddress() == source:GetAddress() and stock_blast(actor, cue) then
+        if cue and entry.actor:GetAddress() == source:GetAddress()
+            and stock_blast(cue, actor:K2_GetActorLocation(), actor.PFX, actor.SFX, actor["PFX Scale"], actor["SFX Vol"]) then
             if cue == "blast" then entry.charged = true end
             return
         end
@@ -119,7 +129,10 @@ end
 function effects.rows(row)
     local now = os.clock()
     while pending[1] and pending[1].expires <= now do table.remove(pending, 1) end
-    local rows = {row("native-anomaly-capture", captured.charge, captured.blast, captured.vortex, captured.electrode, captured.canister)}
+    local rows = {
+        row("native-anomaly-capture", captured.charge, captured.blast, captured.vortex, captured.electrode, captured.canister),
+        row("native-fixed-explosive-capture", (captured.powerbox or 0) + (captured.fixedtank or 0) + (captured.fixedfire or 0)),
+    }
     for _, entry in ipairs(pending) do
         rows[#rows + 1] = row("native-anomaly-cue", table.unpack(entry))
     end

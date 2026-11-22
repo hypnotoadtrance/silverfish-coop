@@ -10,9 +10,12 @@ KEY = "native_anomaly_cues"
 VORTEX_SENSORS = "native_vortex_sensors"
 ELECTRODE_PHASES = "native_electrode_phases"
 CANISTERS = "native_explosive_canisters"
-KINDS = {"charge": 4000, "blast": 500100, "vortex": 500100, "electrode": 8100, "canister": 500100}
+FIXED_EXPLOSIVES = "native_fixed_explosives"
+FIXED_CUES = ("powerbox", "fixedtank", "fixedfire")
+KINDS = {"charge": 4000, "blast": 500100, "vortex": 500100, "electrode": 8100, "canister": 500100,
+         **dict.fromkeys(FIXED_CUES, 500100)}
 CUE_EVENTS = {"vortex": "native_vortex_effect_played", "electrode": "native_electrode_effect_played",
-              "canister": "native_canister_effect_played"}
+              "canister": "native_canister_effect_played", **dict.fromkeys(FIXED_CUES, "native_fixed_explosive_effect_played")}
 MAX_CUES = 12
 MAX_SENSORS = 256
 
@@ -91,6 +94,26 @@ async def project_canisters(bridge, game, frame, epoch):
     if not arguments:
         return game
     return await bridge.command("native-canister-apply", area, epoch, *arguments, timeout=1.5)
+
+
+async def project_fixed_explosives(bridge, game, frame, epoch):
+    if not isinstance(frame, dict) or not valid_id(epoch) or game.get("state") != "connected":
+        return game
+    area = game.get("map")
+    props = frame.get("props")
+    if (frame.get("map"), frame.get("epoch")) != (area, epoch) or not isinstance(props, dict) or len(props) > MAX_SENSORS:
+        return game
+    local = game.get(FIXED_EXPLOSIVES, {})
+    arguments = []
+    for path, destroyed in props.items():
+        prop = local.get(path)
+        if prop and type(destroyed) is bool and (prop["destroyed"] != destroyed or prop["damaged_mesh"] != destroyed):
+            arguments.append(f"{path}|{int(destroyed)}")
+            if len(arguments) == 32:
+                break
+    if not arguments:
+        return game
+    return await bridge.command("native-fixed-explosives-apply", area, epoch, *arguments, timeout=1.5)
 
 
 class Playback:
