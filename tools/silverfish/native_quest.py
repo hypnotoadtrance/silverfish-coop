@@ -1,7 +1,7 @@
 """Host-owned actions for the staged Signal Jammer quest."""
 
 from . import native_broker, native_computer_board, native_flood_jammer, native_meet_broker, native_wire_quest, native_rewards, native_turret_photo, party
-from . import native_mosby_tape, native_prototype_drill, native_subway_valve
+from . import native_board_contract, native_mosby_tape, native_prototype_drill, native_subway_valve
 from .travel import CROSSROADS
 
 QUEST_ID = "Jmr_CrossRoads"
@@ -76,6 +76,8 @@ async def action(host, bridge, actor: str, verb: str, target: str | None) -> dic
         return await native_flood_jammer.act(host, bridge, actor, operation)
     if isinstance(target, str) and target in native_broker.QUESTS:
         return await native_broker.action(host, bridge, actor, verb, quest_id=target)
+    if native_board_contract.quest_id(target) and verb in ("native-quest-start", "native-quest-turnin"):
+        return await native_board_contract.perform(host, bridge, actor, verb.removeprefix("native-quest-"), target)
     roles = host.roles()
     player = host.party["players"].get(actor)
     if (not host.fixtures or not player or actor not in host.authoritative_pawns(roles)

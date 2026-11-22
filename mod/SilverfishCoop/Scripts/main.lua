@@ -47,6 +47,7 @@ local native_mindcore_view = require("native_mindcore_view")
 local native_prototype_drill = require("native_prototype_drill_turnin")
 local native_mosby_station = require("native_mosby_station_view")
 local native_computer_board = require("native_computer_board")
+local native_board_contract = require("native_board_contract")
 local native_meet_broker = require("native_meet_broker")
 local native_flood_jammer = require("native_flood_jammer")
 local native_lenny = require("native_lenny")
@@ -1127,6 +1128,7 @@ local function run_command(fields, state, current_phase)
         or native_prototype_drill.command(fields, state, current_phase)
         or native_mosby_station.command(fields, state, current_phase)
         or native_computer_board.command(fields, state, current_phase)
+        or native_board_contract.command(fields, state, current_phase)
         or native_meet_broker.command(fields, state, current_phase)
         or native_flood_jammer.command(fields, state, current_phase)
         or native_lenny.command(fields, state, current_phase)
@@ -1347,6 +1349,7 @@ local function write_status(state, current_phase, failure, fields, pending)
         for _, row in ipairs(native_prototype_drill.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mosby_station.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_computer_board.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_board_contract.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_meet_broker.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_flood_jammer.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_lenny.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end

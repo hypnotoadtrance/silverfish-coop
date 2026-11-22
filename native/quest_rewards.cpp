@@ -719,41 +719,16 @@ namespace
     constexpr ObjectiveQuest prototype_drill_objective{"prototype_drill", PartyWorld::scientist, prototype_drill_id,
         prototype_drill_item, 10000, prototype_drill_armor, 3};
 
-    template <const ObjectiveQuest& Quest>
-    int stage_objective(const Lua& lua)
+    template <typename Check, typename Fail>
+    int stage_objective_transfer(const Lua& lua, const Check& matches_recipe, const Fail& fail,
+                                 const std::array<Address, 3>& args, PartyWorld location, Party& party,
+                                 const Inventory& inventory, U::UClass* wanted, const Guid& objective_id,
+                                 bool stackable_unit, bool sealed_package)
     {
-        constexpr bool copper_stop = &Quest == &copper_stop_objective;
-        const auto fail = [&](std::string_view reason) {
-            if constexpr (!copper_stop)
-            {
-                const auto wire = reason.find("wire_objective");
-                if (wire != std::string_view::npos)
-                    return reply(lua, false, std::format("{}{}_{}", reason.substr(0, wire), Quest.fault, reason.substr(wire + 5)));
-            }
-            return reply(lua, false, reason);
-        };
-        constexpr auto location = Quest.world;
-        std::array<Address, 3> args{};
-        if (!available(lua, 4) || !lua.is_string(4) || !read_addresses(lua, args)) return fail("wire_objective_stage_unavailable");
-        const auto objective_id = read_guid(lua.get_string());
-        if (objective_id == Guid{}) return fail("wire_objective_guid_required");
-        Party party;
-        Inventory inventory;
-        if (!party.read(args[0], args[1], args[2], true, location)) return fail("wire_objective_exact_detached_guest_required");
-        auto* wanted = find<U::UClass>(Quest.item);
-        const auto matches_recipe = [&] {
-            if constexpr (copper_stop)
-                return wire_recipe(party.stock, inventory.weapon_class, inventory.ammo_class, WirePhase::active);
-            auto* reward = Quest.reward ? find<U::UClass>(Quest.reward) : nullptr;
-            return (!Quest.reward || reward) && objective_recipe(party.stock, Quest.id, wanted, Quest.cash, reward,
-                nullptr, WirePhase::active, 2, Quest.xp, 0, Quest.display_alias);
-        };
-        if (!inventory.bind(copper_stop) || !matches_recipe())
-            return fail("wire_objective_active_recipe_required");
         auto* defaults = wanted ? wanted->GetClassDefaultObject().Get() : nullptr;
         if (!wanted || !wanted->IsChildOf(inventory.base_class) || !defaults || !defaults->HasAnyFlags(U::RF_ClassDefaultObject) ||
-            !bool_value(defaults, STR("Stacks"), Quest.stackable_unit))
-            return fail(Quest.stackable_unit ? "wire_objective_stackable_stock_class_required" :
+            !bool_value(defaults, STR("Stacks"), stackable_unit))
+            return fail(stackable_unit ? "wire_objective_stackable_stock_class_required" :
                 "wire_objective_nonstackable_stock_class_required");
         const auto is_objective = [&](const void* row) { return inventory.klass(row) == wanted; };
 
@@ -761,8 +736,8 @@ namespace
         if (!inventory.locate(party.detached, objective_id, source) || source.count != 1 || source.backpack_index < 0 ||
             !is_objective(source.row)) return fail("wire_objective_exact_guest_backpack_item_required");
         const auto ammo = inventory.ammo->GetPropertyValueInContainer(source.row);
-        if (ammo < (Quest.stackable_unit ? 1 : 0) || ammo > 1) return fail("wire_objective_single_item_required");
-        if constexpr (&Quest == &missing_contact_objective)
+        if (ammo < (stackable_unit ? 1 : 0) || ammo > 1) return fail("wire_objective_single_item_required");
+        if (sealed_package)
         {
             std::string stock_guid;
             if (!silverfish::loot_escrow::sealed_package_guid(party.detached, stock_guid) ||
@@ -846,6 +821,82 @@ namespace
             return fail(protected_unchanged(0) ? "wire_objective_transfer_rolled_back" : "mutation_unverified_wire_objective_rollback");
         }
         return reply(lua, true, "staged");
+    }
+
+    template <const ObjectiveQuest& Quest>
+    int stage_objective(const Lua& lua)
+    {
+        constexpr bool copper_stop = &Quest == &copper_stop_objective;
+        const auto fail = [&](std::string_view reason) {
+            if constexpr (!copper_stop)
+            {
+                const auto wire = reason.find("wire_objective");
+                if (wire != std::string_view::npos)
+                    return reply(lua, false, std::format("{}{}_{}", reason.substr(0, wire), Quest.fault, reason.substr(wire + 5)));
+            }
+            return reply(lua, false, reason);
+        };
+        constexpr auto location = Quest.world;
+        std::array<Address, 3> args{};
+        if (!available(lua, 4) || !lua.is_string(4) || !read_addresses(lua, args)) return fail("wire_objective_stage_unavailable");
+        const auto objective_id = read_guid(lua.get_string());
+        if (objective_id == Guid{}) return fail("wire_objective_guid_required");
+        Party party;
+        Inventory inventory;
+        if (!party.read(args[0], args[1], args[2], true, location)) return fail("wire_objective_exact_detached_guest_required");
+        auto* wanted = find<U::UClass>(Quest.item);
+        const auto matches_recipe = [&] {
+            if constexpr (copper_stop)
+                return wire_recipe(party.stock, inventory.weapon_class, inventory.ammo_class, WirePhase::active);
+            auto* reward = Quest.reward ? find<U::UClass>(Quest.reward) : nullptr;
+            return (!Quest.reward || reward) && objective_recipe(party.stock, Quest.id, wanted, Quest.cash, reward,
+                nullptr, WirePhase::active, 2, Quest.xp, 0, Quest.display_alias);
+        };
+        if (!inventory.bind(copper_stop) || !matches_recipe())
+            return fail("wire_objective_active_recipe_required");
+        return stage_objective_transfer(lua, matches_recipe, fail, args, location, party, inventory,
+            wanted, objective_id, Quest.stackable_unit, &Quest == &missing_contact_objective);
+    }
+
+    int stage_board_objective(const Lua& lua)
+    {
+        const auto fail = [&](std::string_view reason) { return reply(lua, false, reason); };
+        std::array<Address, 3> addresses{};
+        if (!available(lua, 9) || !lua.is_string(4) || !lua.is_string(5) || !lua.is_string(6) ||
+            !lua.is_integer(7) || !lua.is_integer(8) || !lua.is_integer(9) || !read_addresses(lua, addresses))
+            return fail("board_objective_arguments_unqualified");
+        const auto objective_id = read_guid(lua.get_string());
+        const std::string quest{lua.get_string()}, class_path{lua.get_string()};
+        const auto final_step = lua.get_integer(), cash = lua.get_integer(), xp = lua.get_integer();
+        constexpr auto max_value = 2147483647;
+        const auto word = [](char value) {
+            return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') ||
+                (value >= '0' && value <= '9') || value == '_';
+        };
+        if (objective_id == Guid{} || quest.empty() || quest.size() > 96 || !std::ranges::all_of(quest, word) ||
+            !class_path.starts_with("/Game/") || class_path.size() > 256 ||
+            !std::ranges::all_of(class_path, [&](char v) { return word(v) || v == '/' || v == '.' || v == '-'; }) ||
+            final_step < 1 || final_step > max_value || cash < 0 || cash > max_value || xp < 0 || xp > max_value)
+            return fail("board_objective_arguments_unqualified");
+
+        constexpr auto location = PartyWorld::current_campaign;
+        Party party;
+        Inventory inventory;
+        if (!party.read(addresses[0], addresses[1], addresses[2], true, location) || !inventory.bind(false))
+            return fail("board_objective_exact_detached_guest_required");
+        const std::wstring quest_name(quest.begin(), quest.end()), stock_class(class_path.begin(), class_path.end());
+        auto* wanted = find<U::UClass>(stock_class.c_str());
+        if (!wanted || !wanted->IsChildOf(inventory.base_class)) return fail("board_objective_class_unavailable");
+        const auto matches_recipe = [&] {
+            return objective_recipe(party.stock, quest_name.c_str(), wanted, static_cast<int>(cash),
+                nullptr, nullptr, WirePhase::active, static_cast<int>(final_step), static_cast<int>(xp));
+        };
+        if (!matches_recipe()) return fail("board_objective_active_recipe_required");
+        auto* default_item = wanted->GetClassDefaultObject().Get();
+        auto* stacks = field<U::FBoolProperty>(default_item, STR("Stacks"));
+        if (!stacks) return fail("board_objective_stack_layout_unqualified");
+        return stage_objective_transfer(lua, matches_recipe, fail, addresses, location, party, inventory,
+            wanted, objective_id, stacks->GetPropertyValueInContainer(default_item), false);
     }
 
     template <bool MeetBroker>
@@ -1532,6 +1583,7 @@ void silverfish::native_quest_rewards::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStagePocketWatchObjective", stage_objective<pocket_watch_objective>);
     lua.register_function("SilverfishStageSavloRingObjective", stage_objective<savlo_ring_objective>);
     lua.register_function("SilverfishStageMolassesObjective", stage_objective<molasses_objective>);
+    lua.register_function("SilverfishStageBoardObjective", stage_board_objective);
     lua.register_function("SilverfishStageSavloKeycardObjective", stage_objective<savlo_keycard_objective>);
     lua.register_function("SilverfishStagePumpRoomObjective", stage_objective<pump_room_objective>);
     lua.register_function("SilverfishStageStoneMazeObjective", stage_objective<stone_maze_objective>);

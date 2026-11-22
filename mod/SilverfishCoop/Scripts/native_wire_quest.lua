@@ -130,9 +130,9 @@ local function live_board(world, instance, profile)
     if not exact(board, board_class) or board:GetFullName() ~= profile.board_name
         or not same(board:GetWorld(), world) or not board:HasAuthority() or board:IsActorBeingDestroyed()
         or not same(board["As Game Instance FP"], instance)
-        or board.TurnIn_ID ~= profile.board_id or board.BountyBoard_RedeemableHere ~= true
-        or board.AcceptAllGlobalContracts ~= true or board.Display_GlobalContracts ~= (profile.global_contracts == true)
-        or board.ShowAllContracts ~= false then
+        or (not profile.dynamic and (board.TurnIn_ID ~= profile.board_id or board.BountyBoard_RedeemableHere ~= true
+            or board.AcceptAllGlobalContracts ~= true or board.Display_GlobalContracts ~= (profile.global_contracts == true)
+            or board.ShowAllContracts ~= false)) then
         refused("board_unqualified")
     end
     local box = board.Box
@@ -401,6 +401,20 @@ local function approach_board(state, phase, name, profile)
 end
 
 meet.stock_board_context = context_for
+
+function meet.live_stock_board_context(state, phase, name, full_board_name, quest)
+    local map = state.map
+    local leaf = type(map) == "string" and map:match("^/Game/Classes/Maps/[%w_/]+/([%w_]+)$")
+    local world = leaf and map .. "." .. leaf
+    local prefix = world and "BountyBoard_BP_C " .. world .. ":PersistentLevel."
+    local actor = prefix and type(full_board_name) == "string" and full_board_name:sub(#prefix + 1)
+    if not actor or full_board_name:sub(1, #prefix) ~= prefix or not actor:match("^BountyBoard_BP_C_[0-9]+$") then
+        refused("board_unqualified")
+    end
+    return context_for(state, phase, name, false, {map = map, world_path = world,
+        board_path = full_board_name:sub(#"BountyBoard_BP_C " + 1), board_name = full_board_name,
+        quest_id = quest, dynamic = true})
+end
 meet.stock_board_approach = approach_board
 meet.stock_quest_table = stock_quest_table
 meet.stock_row = row_for

@@ -21,6 +21,7 @@ import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
+from . import native_board_contract
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
 from . import native_npc_barter
 from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore, native_mindcore_carry, native_mindcore_fixture, native_mindcore_view
@@ -2837,6 +2838,10 @@ class Bridge:
                     data.setdefault("native_rules", {})[fields[1]] = None if fields[2] == "-" else int(fields[2])
                 elif fields[0] == "native-reputation" and len(fields) == 3:
                     data.setdefault("native_reputation", {})[fields[1]] = int(fields[2])
+                elif fields[0] == native_board_contract.COMMAND:
+                    if native_board_contract.KEY in data:
+                        raise ValueError("Repeated native board result")
+                    data[native_board_contract.KEY] = native_board_contract.parse(fields)
                 elif fields[0] in ("native-quest-catalog", "native-quest-entry", "native-quest-reward-item"):
                     (board_rows if len(fields) >= 2 and fields[1] == "board" else quest_rows).append(fields)
                 elif fields[0] == "native-matrix" or fields[0].startswith("native-matrix-"):
