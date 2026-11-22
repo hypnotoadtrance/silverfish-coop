@@ -3,6 +3,7 @@ local effects = require("native_anomaly_effects")
 local electrodes = require("native_electrode_view")
 local canisters = require("native_explosive_canisters")
 local fixed = require("native_fixed_explosives")
+local pyrogeist = require("native_pyrogeist_view")
 
 local classes = {
     starburst = "/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C",
@@ -36,9 +37,18 @@ local function in_world(actor, current)
 end
 
 local function trap_kind(actor, class)
-    if class ~= gravity then return kinds[class] end
-    local at = actor:GetWorld()
-    if valid(at) and at:GetFullName() == "World " .. crossroads .. ".CrossRoads_P" then return "gravity" end
+    if class == gravity or class == pyrogeist.body then
+        local at = actor:GetWorld()
+        if valid(at) and at:GetFullName() == "World " .. crossroads .. ".CrossRoads_P" then
+            return class == gravity and "gravity" or "pyrogeist"
+        end
+        return
+    end
+    return kinds[class]
+end
+
+local function disables_replica_tick(kind)
+    return kind == "gravity" or kind == "pyrogeist"
 end
 
 local function replica(actor)
@@ -133,6 +143,11 @@ function fields.start(role)
             if class == effects.blast_class and in_world(actor, world) then
                 effects.observe_blast(actor, active, canisters.blast_source)
             end
+        elseif class == pyrogeist.jet then
+            if pyrogeist.in_scope(actor) and replica(actor) then
+                actor:SetActorEnableCollision(false)
+                actor:SetActorTickEnabled(false)
+            end
         elseif trap_kind(actor, class) or class == fire_jet then
             local _, local_copy = placement(actor)
             if local_copy or replica(actor) then actor:SetActorEnableCollision(false) end
@@ -144,6 +159,10 @@ function fields.start(role)
         local actor = context:get()
         if not valid(actor) or actor:IsActorBeingDestroyed() then return end
         local class = actor:GetClass():GetFullName()
+        if class == pyrogeist.jet then
+            pyrogeist.created(actor, seat, replica)
+            return
+        end
         canisters.created(actor, class, seat, replica)
         fixed.created(actor, class, seat)
         local kind = trap_kind(actor, class)
@@ -152,7 +171,7 @@ function fields.start(role)
         if kind then placed, local_copy = placement(actor) end
         if seat == "host" and not actor:HasAuthority() then return end
         if seat == "client" and not local_copy and not replica(actor) then
-            if kind == "gravity" and actor:GetLocalRole() == 1 then
+            if disables_replica_tick(kind) and actor:GetLocalRole() == 1 then
                 pending[actor:GetAddress()] = {actor = actor, kind = kind}
             end
             return
@@ -160,7 +179,7 @@ function fields.start(role)
         if seat == "client" then
             actor:SetActorEnableCollision(false)
             if kind == "electrode" then electrodes.suspend(actor) end
-            if kind == "gravity" then actor:SetActorTickEnabled(false) end
+            if disables_replica_tick(kind) then actor:SetActorTickEnabled(false) end
         end
         local address = actor:GetAddress()
         if class == fire_jet then
@@ -183,6 +202,7 @@ function fields.start(role)
                 electrodes.retire(entry)
             end
             active[address], pending[address], fires[address], pending_fires[address] = nil, nil, nil, nil
+            pyrogeist.ended(address)
             canisters.ended(address, destroyed)
             fixed.ended(address)
         end)
@@ -286,18 +306,22 @@ function fields.rows(state, phase, row)
         electrodes.clear()
         -- Initial replicated actors can finish BeginPlay while the new driver is still pending.
         if phase == "connected" and state.map == crossroads then
-            for _, actor in ipairs(FindAllOf("GravityAnomaly_BP_C") or {}) do
-                if in_world(actor, world) and actor:GetClass():GetFullName() == gravity and replica(actor) then
-                    pending[actor:GetAddress()] = {actor = actor, kind = "gravity"}
+            for _, name in ipairs({"GravityAnomaly_BP_C", "Pyrogeist_BP_C"}) do
+                for _, actor in ipairs(FindAllOf(name) or {}) do
+                    if in_world(actor, world) and replica(actor) then
+                        local kind = trap_kind(actor, actor:GetClass():GetFullName())
+                        if disables_replica_tick(kind) then pending[actor:GetAddress()] = {actor = actor, kind = kind} end
+                    end
                 end
             end
+            pyrogeist.recover(world, replica)
         end
     end
     for address, entry in pairs(pending) do
         local actor = entry.actor
         if in_world(actor, world) then
             if phase == "connected" then
-                if entry.kind == "gravity" and replica(actor) then
+                if disables_replica_tick(entry.kind) and replica(actor) then
                     actor:SetActorEnableCollision(false)
                     actor:SetActorTickEnabled(false)
                 end
@@ -311,6 +335,9 @@ function fields.rows(state, phase, row)
                     if entry.kind == "vortex" then
                         local sensor = vortex_sensor(actor)
                         if sensor then sensor:SetIsReplicated(true) end
+                    elseif entry.kind == "pyrogeist" then
+                        local sphere = actor.Sphere
+                        if valid(sphere) and same(sphere:GetOwner(), actor) then sphere:SetIsReplicated(true) end
                     end
                     actor:ForceNetUpdate()
                     active[address] = entry
@@ -319,6 +346,7 @@ function fields.rows(state, phase, row)
         end
         pending[address] = nil
     end
+    pyrogeist.apply(world, phase, active, replica)
     for address, fire in pairs(pending_fires) do
         if in_world(fire, world) then
             if phase == "hosting" then
