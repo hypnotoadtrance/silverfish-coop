@@ -46,10 +46,10 @@ RESULT = {action: action.replace("-", "_") for action in COMMANDS.values()}
 
 
 def parse_meal(fields: list[str]) -> dict:
-    if len(fields) != 17:
+    if len(fields) not in (17, 19):
         raise ValueError("Invalid stock food report size")
     (tag, status, area, pawn, guid, initial, remaining, food_before, food_after,
-     regen_before, regen_after, hp, maximum, intox_before, intox_after, host_intox, hemophilia) = fields
+     regen_before, regen_after, hp, maximum, intox_before, intox_after, host_intox, hemophilia, *food_traits) = fields
     meal = MEALS.get(tag)
     if (meal is None or status != "used" or not valid_guid(guid) or len(pawn) > 512
             or not pawn.startswith("Player_FP_C " + area + ".") or hemophilia not in ("0", "1")):
@@ -58,19 +58,27 @@ def parse_meal(fields: list[str]) -> dict:
     food, restored, regen, buffered, health, max_health = map(float, (food_before, food_after, regen_before, regen_after, hp, maximum))
     intox_start, intox_end, shared_intox = map(int, (intox_before, intox_after, host_intox))
     trait = hemophilia == "1"
-    gain = meal.gain * (0.6 if trait else 1)
-    detox = meal.food // 10
+    gourmand, healthy_eating = map(int, food_traits) if food_traits else (0, 0)
+    if not (0 <= gourmand <= 1025 and 0 <= healthy_eating <= 1025):
+        raise ValueError("Invalid stock food traits")
+    appetite = meal.food * (1 - gourmand * 0.2)
+    gain = meal.gain + healthy_eating * appetite * 0.3
+    if trait and gain > 0:
+        gain *= 0.6
+    intoxication_delta = math.trunc(appetite * -0.1)
     if (not 1 <= count <= (2**31 - 1) // meal.unit_value or after != count - 1
             or not all(math.isfinite(value) for value in (food, restored, regen, buffered, health, max_health))
             or not 25 <= max_health <= 10_000 or not 0 < health <= max_health
-            or not 0 <= food <= 200 or restored != min(food + meal.food, 200)
+            or not 0 <= food <= 200 or restored != min(max(food + appetite, 0), 200)
             or not 0 <= regen <= max_health or buffered != min(max(regen + gain, 25), max_health)
-            or not 0 <= intox_start <= 100 or intox_end != max(intox_start - detox, 0) or not 0 <= shared_intox <= 100):
+            or not 0 <= intox_start <= 100 or intox_end != min(max(intox_start + intoxication_delta, 0), 100)
+            or not 0 <= shared_intox <= 100):
         raise ValueError("Invalid stock food effect proof")
     return {"state": status, "map": area, "pawn": pawn, "guid": guid, "class_path": meal.class_path,
             "quantity_before": count, "quantity_after": after, "food_before": food, "food_after": restored,
             "regen_before": regen, "regen_after": buffered, "health_before": health, "health_after": health,
-            "max_health": max_health, "hemophilia": trait, "intox_before": intox_start, "intox_after": intox_end,
+            "max_health": max_health, "hemophilia": trait, "gourmand": gourmand, "healthy_eating": healthy_eating,
+            "intox_before": intox_start, "intox_after": intox_end,
             "host_intox_before": shared_intox, "host_intox_after": shared_intox}
 
 

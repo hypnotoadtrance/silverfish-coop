@@ -66,6 +66,16 @@ class NativeMreTests(unittest.IsolatedAsyncioTestCase):
             status.write_text(prefix + "\t".join(peaches) + "\n", encoding="utf-8")
             self.assertEqual(bridge.snapshot()["native_guest_canned_peaches"], expected)
 
+    def test_guest_food_proof_checks_both_food_traits_and_hemophilia(self):
+        frame = [consume.MRE, "used", BOROUGH, PAWN, GUID, "1", "0", "17", "41",
+                 "230", str(230 + (10 + 24 * 0.3) * 0.6), "210", "250", "42", "40", "4", "1", "1", "1"]
+        self.assertEqual(consume.parse_meal(frame)["gourmand"], 1)
+        for column, change in ((8, "47"), (16, "0"), (17, "0"), (18, "1026")):
+            with self.subTest(column=column), self.assertRaises(ValueError):
+                invalid = frame.copy()
+                invalid[column] = change
+                consume.parse_meal(invalid)
+
     def test_stock_beans_and_mushroom_keep_exact_food_and_intoxication(self):
         for action, food_after, intox_after in ((consume.CANNED_BEANS, "31", "41"),
                                                 (consume.BROWN_MUSHROOM, "20.5", "42")):

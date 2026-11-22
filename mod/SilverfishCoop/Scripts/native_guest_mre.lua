@@ -99,31 +99,47 @@ function mre.command(fields, state, phase)
             or not same(host.Save, stock) or stock.PlayerHealth ~= host_health or stock.PlayerRegen ~= host_regen then
             error("mutation_unverified_guest_mre_fixture_wound_baseline", 0)
         end
+        local effects = "PermanentEffects_42_E298D351429CF6DCAE0911A4D1EEDB00"
+        local character = detached.Character
+        character[effects] = {FName("Gourmand"), FName("HealthyEating"), FName("Hemophilia")}
+        detached.Character = character
+        local stored = detached.Character[effects]
+        if stored[1]:ToString() ~= "Gourmand" or stored[2]:ToString() ~= "HealthyEating"
+            or stored[3]:ToString() ~= "Hemophilia" then
+            error("mutation_unverified_guest_mre_fixture_traits", 0)
+        end
         fixture = {map = state.map, name = name, food = food, intox = intox, stock_intox = stock_intox,
             hp_before = hp_before, hp_after = hp_after, regen_before = regen_before, regen_after = regen_after}
         return "isolated guest MRE wound and food baseline verified"
     end
     local called, used, status, before, after, food_before, food_after, regen_before, regen_after,
-        health, maximum, intox_before, intox_after, host_intox, trait =
+        health, maximum, intox_before, intox_after, host_intox, trait, gourmand, healthy_eating =
         pcall(use, pawn:GetAddress(), detached:GetAddress(), stock:GetAddress(), guid)
     if not called then error(unverified .. "call", 0) end
     if used == false and type(status) == "string" and (status:match("^" .. refused .. "[a-z0-9_]+$")
         or status:match("^" .. unverified .. "[a-z0-9_]+$")) then error(status, 0) end
+    if math.type(gourmand) ~= "integer" or not bounded(gourmand, 0, 1025)
+        or math.type(healthy_eating) ~= "integer" or not bounded(healthy_eating, 0, 1025) then
+        error(unverified .. "food_traits", 0)
+    end
+    local appetite = meal.food * (1 - gourmand * 0.2)
+    local gain = meal.gain + healthy_eating * appetite * 0.3
+    if trait and gain > 0 then gain = gain * 0.6 end
     if used ~= true or status ~= "used" or math.type(before) ~= "integer" or before < 1
         or math.type(after) ~= "integer" or after ~= before - 1 or not bounded(maximum, 25, 10000)
         or not bounded(health, 0, maximum) or health == 0 or not bounded(food_before, 0, 200)
-        or food_after ~= math.min(food_before + meal.food, 200) or not bounded(regen_before, 0, maximum)
+        or food_after ~= math.min(math.max(food_before + appetite, 0), 200) or not bounded(regen_before, 0, maximum)
         or type(trait) ~= "boolean"
-        or regen_after ~= math.min(math.max(regen_before + meal.gain * (trait and 0.6 or 1), 25), maximum)
+        or regen_after ~= math.min(math.max(regen_before + gain, 25), maximum)
         or math.type(intox_before) ~= "integer" or not bounded(intox_before, 0, 100)
-        or math.type(intox_after) ~= "integer" or intox_after ~= math.max(intox_before - math.floor(meal.food / 10), 0)
+        or math.type(intox_after) ~= "integer" or intox_after ~= math.min(math.max(intox_before + math.modf(appetite * -0.1), 0), 100)
         or math.type(host_intox) ~= "integer" or not bounded(host_intox, 0, 100) then
         error(unverified .. "proof", 0)
     end
     observation = {verb = verb, map = state.map, name = name, guid = guid, before = before, after = after,
         food_before = food_before, food_after = food_after, regen_before = regen_before, regen_after = regen_after,
         health = health, maximum = maximum, intox_before = intox_before, intox_after = intox_after,
-        host_intox = host_intox, trait = trait}
+        host_intox = host_intox, trait = trait, gourmand = gourmand, healthy_eating = healthy_eating}
     pcall(use_presentation.consumed, pawn, string.format("/Game/Classes/Items/%s.%s_C", meal.blueprint, meal.blueprint), false)
     return "exact stock guest food effects verified"
 end
@@ -140,7 +156,8 @@ function mre.rows(state, phase, status_row)
     if row and row.map == state.map then
         rows[#rows + 1] = status_row(row.verb, "used", row.map, row.name, row.guid, row.before, row.after,
             real(row.food_before), real(row.food_after), real(row.regen_before), real(row.regen_after),
-            real(row.health), real(row.maximum), row.intox_before, row.intox_after, row.host_intox, row.trait and 1 or 0)
+            real(row.health), real(row.maximum), row.intox_before, row.intox_after, row.host_intox, row.trait and 1 or 0,
+            row.gourmand, row.healthy_eating)
     end
     return rows
 end
