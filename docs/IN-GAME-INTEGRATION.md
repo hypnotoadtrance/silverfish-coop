@@ -158,6 +158,8 @@ Stock inventory sorting and both direct and popup stack splitting also leave sav
 
 Private stash transfers use the live authoritative inventory and the game's stash screen. In a muted run, dragging a suppressed pistol into a Dead Bridge stash left the save files unchanged. Travel and an explicit save preserved it, and the guest withdrew it at Observatory after restart with all seven rounds. Loose level pickups also defer their campaign write. The Observatory test hid a claimed bolt for both players and recovered the guest's copy after an explicit save and restart. [Stash trial](../tests/live_stash_smoke.py) · [Loose-pickup trial](../tests/live_loose_pickup_smoke.py)
 
+Placed quest items and cash update the live inventory or shared wallet on pickup. In muted City trials, host and guest pickups left the campaign files unchanged. An explicit save preserved their items, claimed locations, and shared balance through restart. [Placed-item trial](../tests/live_authored_pickup_input_smoke.py) · [Cash trial](../tests/live_authored_cash_smoke.py)
+
 Player and enemy drop storage, some special container actions, merchant transactions, and quest reward templates still have gameplay-time save calls. They need to share the explicit save boundaries before the campaign-wide save policy is complete.
 
 ### Steam hosting options

@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from hashlib import sha256
 import json
 from pathlib import Path
 import subprocess
@@ -99,6 +100,11 @@ async def verify(work: Path, original: Path, case="city"):
         slots = native_host_save.slot_path(profile, authority["slot"]).parent
         return saved["world"]["party"], stock_flags(slots, authority, area), stock_flags(slots, detached, area)
 
+    def save_hashes():
+        paths = list((root / "save").glob("campaign*.json"))
+        paths.extend((root / "game-user").rglob("*.sav"))
+        return {path.relative_to(root): sha256(path.read_bytes()).hexdigest() for path in paths}
+
     try:
         authority = await launch(host_run, "host", "host", *host_args, "--port", "0", "--start-zone", area)
         await wait(host_run, lambda packet: packet.get("state") == "hosting")
@@ -111,6 +117,8 @@ async def verify(work: Path, original: Path, case="city"):
         _, authority_base, guest_base = checkpoint(character)
         balance = authority_base.get("Player_Cash", 0)
         before = {directory: await inventory(directory) for directory in (host_run, guest_run)}
+        baseline = save_hashes()
+        assert baseline
 
         for source, role in sources:
             placement = pickup.STOCK_CASH[source]
@@ -128,16 +136,26 @@ async def verify(work: Path, original: Path, case="city"):
                       "stock_flag": placement.stock_flag}
             assert claim == {"source": source, "map": area, "actor": placement.actor, "class_path": placement.item.class_path,
                              "owner": owner, "wallet_credit": credit}, claim
-            saved, host_flags, guest_flags = checkpoint(character)
-            receipts = [item for item in saved["receipts"][owner] if item["request"] == [pickup.ACTION, source, None]]
-            assert len(receipts) == 1 and receipts[0]["result"]["native_authored_pickup_claim"] == claim, receipts
-            assert host_flags.get(credit["stock_flag"]) == 1 and host_flags.get("Player_Cash") == credit["after"], host_flags
-            assert guest_flags.get(credit["stock_flag"]) == guest_base.get(credit["stock_flag"]) and (
-                guest_flags.get("Player_Cash") == guest_base.get("Player_Cash")), guest_flags
             balance = credit["after"]
             await wait(guest_run, lambda packet: packet.get("gameplay", {}).get("shared_wallet") == balance
                        and published(packet, source).get("state") == "claimed")
-            proof["claims"][source] = {"stock_input": stock, "receipt": claim, "operation_id": receipts[0]["id"]}
+            proof["claims"][source] = {"stock_input": stock, "receipt": claim}
+
+        assert save_hashes() == baseline, "A stock cash pickup wrote to disk before an explicit save"
+        proof["no_save_on_pickup"] = True
+        await action(host_run, "checkpoint")
+        saved, host_flags, guest_flags = checkpoint(character)
+        assert host_flags.get("Player_Cash") == balance, host_flags
+        for source, role in sources:
+            owner = character if role == "guest" else "host"
+            claim = proof["claims"][source]["receipt"]
+            credit = claim["wallet_credit"]
+            receipts = [item for item in saved["receipts"][owner] if item["request"] == [pickup.ACTION, source, None]]
+            assert len(receipts) == 1 and receipts[0]["result"]["native_authored_pickup_claim"] == claim, receipts
+            assert host_flags.get(credit["stock_flag"]) == 1, host_flags
+            assert guest_flags.get(credit["stock_flag"]) == guest_base.get(credit["stock_flag"]) and (
+                guest_flags.get("Player_Cash") == guest_base.get("Player_Cash")), guest_flags
+            proof["claims"][source]["operation_id"] = receipts[0]["id"]
 
         for directory in (host_run, guest_run):
             assert before[directory] == await inventory(directory)

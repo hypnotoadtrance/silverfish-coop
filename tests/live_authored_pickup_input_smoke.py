@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from hashlib import sha256
 import json
 import math
 from pathlib import Path
@@ -31,7 +32,8 @@ CITY_POSITIONS = {
 async def exercise(work: Path, vanilla_saved: Path | None, *, host_second=False) -> None:
     name = "stock-city-pickup-" + uuid.uuid4().hex[:8]
     campaign, profile = ("--campaign", name), ("--profile", name)
-    host_run = work / "campaigns" / name / "run"
+    campaign_root = work / "campaigns" / name
+    host_run = campaign_root / "run"
     guest_run = work / "clients" / name / "run"
     host_run.mkdir(parents=True)
     print(host_run, flush=True)
@@ -74,7 +76,12 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, host_second=False)
         return state.get("game", {}).get(SOURCES_KEY, {}).get(source, {})
 
     def ledger(state):
-        return state.get("campaign", {}).get("world", {}).get("party", {}).get(STATE_KEY, {})
+        return state.get("gameplay", {}).get(STATE_KEY, {})
+
+    def save_hashes():
+        paths = list((campaign_root / "save").glob("campaign*.json"))
+        paths.extend((campaign_root / "game-user").rglob("*.sav"))
+        return {path.relative_to(campaign_root): sha256(path.read_bytes()).hexdigest() for path in paths}
 
     def source_state(state, source, expected):
         row = game_source(state, source)
@@ -152,6 +159,9 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, host_second=False)
         unspecified = await action(profile, STOCK_FIXTURE, expected=False)
         assert unspecified["error"] == "authored_pickup_exact_source_required", unspecified
 
+        await action(campaign, "checkpoint")
+        saved = save_hashes()
+        assert saved
         await press(CITY_WIRE, character)
         await wait(guest_run, lambda state: source_state(state, CITY_BRANDY, "available"))
         contested = await action(campaign, "native-authored-pickup-claim", "--target", CITY_WIRE, expected=False)
@@ -171,6 +181,8 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, host_second=False)
             item = owned[row["guid"]]
             assert (item["class_path"], item["source"], item["quantity"]) == (row["class_path"], "backpack", 1), item
             assert row["guid"] not in other, other
+        assert save_hashes() == saved, "A placed stock pickup wrote to disk before an explicit save"
+        proof["no_save_on_pickup"] = True
         await action(campaign, "checkpoint")
         await stop(host, campaign)
         await stop(guest, profile)

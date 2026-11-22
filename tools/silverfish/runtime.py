@@ -2319,10 +2319,16 @@ class Bridge:
                             or not pawn or not 0 < int(serial) < 2**53 or entry not in ("fixture", "stock")):
                         raise ValueError("Invalid authored pickup interaction status")
                     intents[source] = {"source": source, "map": area, "pawn": pawn, "sequence": int(serial), "entry": entry}
-                elif fields[0] == "native-authored-pickup-claim" and len(fields) == 9:
+                elif fields == ["native-authored-pickup-memory", "1"] and data.get("state") == "hosting":
+                    data[native_authored_pickup.MEMORY_CAPABILITY] = True
+                elif fields[0] == "native-authored-pickup-claim" and len(fields) in (9, 10):
                     data["native_authored_pickup_claim"] = {"source": fields[1], "map": fields[2], "pawn": fields[3],
                                                             "ok": fields[4] == "1", "applied": fields[5] == "1",
                                                             "status": fields[6], "guid": fields[7], "slot": fields[8]}
+                    if len(fields) == 10:
+                        if fields[9] not in ("disk", "memory"):
+                            raise ValueError("Invalid authored pickup save mode")
+                        data["native_authored_pickup_claim"]["memory"] = fields[9] == "memory"
                 elif fields[0] == native_authored_pickup.EFFECT_TAG:
                     if native_authored_pickup.EFFECT_KEY in data:
                         raise ValueError("Repeated level pickup effect receipt")

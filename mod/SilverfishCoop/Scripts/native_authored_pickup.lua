@@ -453,7 +453,7 @@ local function claim(fields, state, phase, profile)
     if type(SilverfishCaptureNativeAuthoredPickup) ~= "function" or type(SilverfishVerifyNativeAuthoredPickup) ~= "function"
         or type(SilverfishRecoverNativeInventoryBag) ~= "function" then error("authored_pickup_claim_arguments", 0) end
     local save_class = StaticFindObject(save_path)
-    local memory = profile.loose and type(SilverfishVerifyNativeStashSave) == "function"
+    local memory = type(SilverfishVerifyNativeStashSave) == "function"
     if not valid(pawn) or not valid(save_class) or not memory and statics:DoesSaveGameExist(slot, 0) then
         report.status = "authored_pickup_claimant_or_slot_unavailable"
         return "authored loose pickup reported"
@@ -532,7 +532,7 @@ local function claim(fields, state, phase, profile)
         end
     end
     local status, merged = "append", nil
-    if memory then status, merged = ground_stack.merge(pawn, save, stock, source, item) end
+    if memory and profile.loose then status, merged = ground_stack.merge(pawn, save, stock, source, item) end
     if status == "append" then
         local applied, outcome, count = SilverfishRecoverNativeInventoryBag(source:GetAddress(), save:GetAddress(), pawn:GetAddress())
         report.applied = applied == true or tostring(outcome):match("^mutation_unverified_") ~= nil
@@ -840,6 +840,9 @@ function pickup.rows(state, phase, status_row)
     local rows = {}
     local host = phase == "hosting" and state.server == false
     local client = phase == "connected" and state.server == true
+    if host and type(SilverfishVerifyNativeStashSave) == "function" then
+        rows[#rows + 1] = status_row("native-authored-pickup-memory", 1)
+    end
     local detail = state.local_pawn
     if state.map == dead_drop.map and state.listening and (host or client) and detail and valid(detail.pawn) then
         local observe = SilverfishObserveNativeCrossroadsDeadDrop
@@ -904,7 +907,8 @@ function pickup.rows(state, phase, status_row)
             report.memory and "memory" or "disk", table.unpack(evidence))
     elseif report and phase == "hosting" then
         rows[#rows + 1] = status_row("native-authored-pickup-claim", report.source, state.map, report.pawn,
-            report.ok and 1 or 0, report.applied and 1 or 0, report.status, report.guid or "-", report.slot)
+            report.ok and 1 or 0, report.applied and 1 or 0, report.status, report.guid or "-", report.slot,
+            (report.memory or report.cash) and "memory" or "disk")
         if report.effect then
             rows[#rows + 1] = status_row("native-authored-pickup-effect", report.source, state.map, report.pawn,
                 report.slot, report.effect)
