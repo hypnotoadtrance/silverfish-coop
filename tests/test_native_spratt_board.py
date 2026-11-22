@@ -44,7 +44,7 @@ class SprattBoardTests(unittest.IsolatedAsyncioTestCase):
         return SimpleNamespace(
             party=state, last_game={"map": area, "state": "hosting", "pawns": {"local": {"name": HOST_PAWN}}},
             last_seen=time.monotonic(), native_profile=True, native_guest=True, native_zones=True,
-            stopping=False, transitioning=False, native_checkpoint_unsafe=False, fixtures=False,
+            stopping=False, transitioning=False, native_checkpoint_unsafe=False, pending_host_save=None, fixtures=False,
             roles=lambda: {"host": "host", "guest": GUEST}, native_recipients=lambda: {GUEST: {"pawn": PAWN, "connected": True}},
             checkpoint_native=AsyncMock(return_value=5), control=Mock(),
         )
@@ -65,6 +65,7 @@ class SprattBoardTests(unittest.IsolatedAsyncioTestCase):
         accepted = await stock.act(host, bridge, GUEST, start)
         self.assertEqual((accepted["quest_id"], accepted["step"], accepted["actor"]), (SPEC.quest, 1, GUEST))
         self.assertEqual(host.party["economy"]["wallet"], 0)
+        host.checkpoint_native.assert_not_awaited()
 
     async def test_only_verified_stock_death_can_redeem_and_pay_once(self):
         host = self.host()
@@ -86,7 +87,8 @@ class SprattBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.party["players"][GUEST][native_rewards.PENDING], 1)
         replay = await stock.act(host, bridge, GUEST, turn_in)
         self.assertEqual((replay["effect"], replay["wallet"]), ("native_quest_already_settled", 5020))
-        self.assertEqual(host.checkpoint_native.await_count, 2)
+        host.checkpoint_native.assert_not_awaited()
+        self.assertIs(host.pending_host_save, False)
 
     async def test_xp_setup_is_fixture_only_and_quest_absent(self):
         host = self.host()

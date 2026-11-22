@@ -107,11 +107,6 @@ async def observe(host, bridge):
     candidate = party.load_party(host.party)
     record = {**previous, "quest_id": SPEC.quest, "step": 2, "actor": actor, "objective": objective}
     candidate["native_quests"][SPEC.quest] = record
-    host.native_checkpoint_unsafe = True
-    try:
-        revision = await host.checkpoint_native(bridge, candidate)
-    except (OSError, RuntimeError, ValueError):
-        host.stopping = True
-        raise
-    host.party, host.native_checkpoint_unsafe = candidate, False
-    host.control.event(f"{KEY}_objective_committed", revision=revision, **record)
+    host.party = candidate
+    host.pending_host_save = bool(host.pending_host_save)
+    host.control.event(f"{KEY}_objective_committed", revision=None, **record)

@@ -18,7 +18,7 @@ class LennyObjectiveTests(unittest.IsolatedAsyncioTestCase):
         gameplay["native_quests"] = {lenny.SPEC.quest: {"quest_id": lenny.SPEC.quest, "step": 1}}
         return SimpleNamespace(
             native_profile="private", native_guest=True, native_zones=True, stopping=False,
-            transitioning=False, native_checkpoint_unsafe=False, party=gameplay,
+            transitioning=False, native_checkpoint_unsafe=False, pending_host_save=None, party=gameplay,
             last_game={"state": "hosting", "map": lenny.AREA, "native_lenny_objective": proof},
             native_recipients=lambda: {"guest-character": {"pawn": "exact guest"}},
             checkpoint_native=AsyncMock(return_value=33), control=Mock(),
@@ -34,7 +34,7 @@ class LennyObjectiveTests(unittest.IsolatedAsyncioTestCase):
         (directory / "status.tsv").write_text("\n".join("\t".join(row) for row in rows), encoding="utf-8")
         return runtime.Bridge(directory, None).snapshot()["native_lenny_objective"]
 
-    async def test_verified_stock_death_commits_once_and_corpse_retirement_does_not_change_receipt(self):
+    async def test_verified_stock_death_records_once_without_a_save(self):
         proof = self.proof()
         host = self.host(proof)
         await lenny.observe(host, object())
@@ -45,7 +45,9 @@ class LennyObjectiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.party["economy"]["wallet"], 0)
         proof["health"] = None
         await lenny.observe(host, object())
-        host.checkpoint_native.assert_awaited_once()
+        host.checkpoint_native.assert_not_awaited()
+        host.control.event.assert_called_once_with(f"{lenny.KEY}_objective_committed", revision=None, **record)
+        self.assertIs(host.pending_host_save, False)
         self.assertFalse(host.native_checkpoint_unsafe)
 
     async def test_target_alias_and_wrong_death_flag_do_not_commit(self):

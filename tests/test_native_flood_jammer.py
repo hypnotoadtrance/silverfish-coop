@@ -66,7 +66,7 @@ class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.party["economy"]["wallet"], 0)
         self.assertNotIn(native_rewards.PENDING, host.party["players"]["guest-character"])
 
-    async def test_forced_stock_xp_is_queued_once_for_the_active_guest(self):
+    async def test_forced_stock_xp_is_queued_once_for_the_active_guest_without_a_save(self):
         host = self.host(None, forced=True)
         bridge = object()
         await jammer.observe(host, bridge)
@@ -77,7 +77,9 @@ class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.party["players"]["host"]["quest_xp"], 1)
         self.assertEqual(host.party["players"]["guest-character"][native_rewards.PENDING], 1)
         self.assertNotIn(native_rewards.PENDING, host.party["players"]["offline-character"])
-        host.checkpoint_native.assert_awaited_once()
+        host.checkpoint_native.assert_not_awaited()
+        host.control.event.assert_called_once_with(f"{jammer.FLOOD.key}_objective_committed", revision=None, **updated)
+        self.assertIs(host.pending_host_save, False)
 
     async def test_wrong_authored_target_cannot_record_progress(self):
         host = self.host(1)
@@ -86,8 +88,8 @@ class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.party["native_quests"][jammer.QUEST_ID]["step"], 1)
         host.checkpoint_native.assert_not_awaited()
 
-    async def test_simmi_and_lake_board_progress_and_payout_do_not_write(self):
-        for spec in (jammer.CROSSROADS_JAMMER, jammer.BLACK_LAKE):
+    async def test_stock_jammer_board_progress_and_payout_do_not_write(self):
+        for spec in (jammer.CROSSROADS_JAMMER, jammer.BLACK_LAKE, jammer.FLOOD):
             with self.subTest(spec=spec.key):
                 host = self.host(1, spec=spec)
                 objective_snapshot = host.last_game

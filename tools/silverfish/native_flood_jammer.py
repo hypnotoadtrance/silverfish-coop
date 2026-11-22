@@ -1,4 +1,4 @@
-"""Verify authored signal jammer objectives and settle their stock bounties once."""
+"""Verify authored kill objectives and settle their stock bounties once."""
 
 from dataclasses import dataclass
 import time
@@ -59,7 +59,6 @@ SPRATT = StockKillContract(native_spratt.QUEST, "native_spratt", BLACK_MARKET, B
                            native_spratt.AREA, 5000, frozenset({"5", "8"}), fixture_xp=7)
 CONTRACTS = {spec.quest: spec for spec in (FLOOD, BLACK_LAKE, CROSSROADS_JAMMER, LENNY, SPRATT)}
 OBJECTIVES = {spec.objective_map: spec for spec in (FLOOD, BLACK_LAKE, CROSSROADS_JAMMER)}
-DEFERRED_SAVE_BOUNTIES = (BLACK_LAKE, CROSSROADS_JAMMER)
 COMMANDS = {
     spec.command(verb): spec
     for spec in CONTRACTS.values() for verb in ("preflight", "approach", "start", "turn-in")
@@ -222,7 +221,6 @@ async def act(host, bridge, actor, action):
     # Older stock saves can already carry one of these two authored jammer
     # bounties. The exact host row can qualify a turn-in when no party record
     # exists, while a recorded co-op objective still needs its typed proof.
-    defer_save = spec in DEFERRED_SAVE_BOUNTIES
     legacy_stock = not current and spec in (BLACK_LAKE, CROSSROADS_JAMMER)
     if not starting and not legacy_stock and not _objective_ready(current, spec):
         raise party.RuleError(f"{spec.key}_objective_incomplete")
@@ -235,8 +233,6 @@ async def act(host, bridge, actor, action):
             raise party.RuleError(f"{spec.key}_stock_step_changed")
         if spec is SPRATT and starting and before["xp_after"] < spec.fixture_xp:
             raise party.RuleError("stock_spratt_quest_not_offered")
-        if not defer_save:
-            await host.checkpoint_native(bridge)
         host.native_checkpoint_unsafe = True
         proof = await _command(host, bridge, action, pawn, spec)
         cash = proof["cash_after"] - proof["cash_before"]
@@ -255,13 +251,9 @@ async def act(host, bridge, actor, action):
             record.update(recipients=recipients, cash=cash, xp=xp, wallet=proof["cash_after"],
                           reputation={key: row["after"] for key, row in proof["reputation"].items()})
         candidate.setdefault("native_quests", {})[spec.quest] = record
-        revision = None
-        if defer_save:
-            host.pending_host_save = bool(host.pending_host_save)
-        else:
-            revision = await host.checkpoint_native(bridge, candidate)
+        host.pending_host_save = bool(host.pending_host_save)
         host.party, host.native_checkpoint_unsafe = candidate, False
-        host.control.event(f"{spec.key}_board_committed", operation=action, revision=revision, **record)
+        host.control.event(f"{spec.key}_board_committed", operation=action, revision=None, **record)
         return {"effect": "native_quest_changed", **record, spec.key: proof}
     except (OSError, RuntimeError, ValueError, KeyError):
         if host.native_checkpoint_unsafe:
@@ -288,7 +280,6 @@ async def observe(host, bridge):
     if not expected:
         return
     current = host.party.get("native_quests", {}).get(spec.quest, {})
-    defer_save = spec in DEFERRED_SAVE_BOUNTIES
     legacy_active = not current and expected[0] == 1 and spec in (BLACK_LAKE, CROSSROADS_JAMMER)
     if current.get("step") != expected[0] and not legacy_active:
         return
@@ -312,18 +303,9 @@ async def observe(host, bridge):
     if expected[2]:
         record.update(recipients=_credit(host, candidate, expected[2]), xp=expected[2], cash=0)
     candidate.setdefault("native_quests", {})[spec.quest] = record
-    host.native_checkpoint_unsafe = True
-    try:
-        revision = None
-        if defer_save:
-            host.pending_host_save = bool(host.pending_host_save)
-        else:
-            revision = await host.checkpoint_native(bridge, candidate)
-    except (OSError, RuntimeError, ValueError):
-        host.stopping = True
-        raise
-    host.party, host.native_checkpoint_unsafe = candidate, False
-    host.control.event(f"{spec.key}_objective_committed", revision=revision, **record)
+    host.party = candidate
+    host.pending_host_save = bool(host.pending_host_save)
+    host.control.event(f"{spec.key}_objective_committed", revision=None, **record)
 
 
 def _pose_matches_scope(pose, spec):

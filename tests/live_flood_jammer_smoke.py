@@ -22,7 +22,7 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.native_flood_jammer import (
-    BLACK_LAKE, CROSSROADS_JAMMER, DEFERRED_SAVE_BOUNTIES, FLOOD, LENNY, POSE, SPRATT, same_pose,
+    BLACK_LAKE, CROSSROADS_JAMMER, FLOOD, LENNY, POSE, SPRATT, same_pose,
 )
 from tools.silverfish import native_lenny, native_spratt, native_spratt_fixture
 from tools.silverfish.guest_weapon_profiles import NINE_MM_BALL, TWELVE_GAUGE_BUCK
@@ -39,7 +39,6 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
     assassination = lenny or spratt
     stock_menu = stock_menu or crossroads
     stock_board_input = lake or crossroads or assassination
-    defer_save = spec in DEFERRED_SAVE_BOUNTIES
     weapon = "sg-71-a" if assassination else "light-pistol"
     weapon_label = "shotgun" if assassination else "pistol"
     ammo = TWELVE_GAUGE_BUCK if assassination else NINE_MM_BALL
@@ -184,8 +183,6 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
 
     def save_files():
         hashes = {}
-        if not defer_save:
-            return hashes
         for folder in ("save", "game-user/Saved/SaveGames"):
             for path in (campaign / folder).rglob("*"):
                 # The campaign lease exclusively locks a byte while the host runs.
@@ -195,9 +192,8 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
         return hashes
 
     def require_deferred_save(phase, before):
-        if defer_save:
-            assert save_files() == before, f"The stock bounty wrote save files during {phase}"
-            evidence.setdefault("no_save_during_bounty", []).append(phase)
+        assert save_files() == before, f"The stock bounty wrote save files during {phase}"
+        evidence.setdefault("no_save_during_bounty", []).append(phase)
 
     async def balances():
         await action(host, "checkpoint")

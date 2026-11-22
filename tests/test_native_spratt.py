@@ -41,10 +41,11 @@ class NativeSprattTests(unittest.IsolatedAsyncioTestCase):
         party.add_player(state, OWNER)
         return SimpleNamespace(party=state, last_game=game, last_seen=time.monotonic(),
                                native_profile=True, native_guest=True, native_zones=True, stopping=False,
-                               transitioning=False, native_checkpoint_unsafe=False, checkpoint_native=AsyncMock(return_value=4),
+                               transitioning=False, native_checkpoint_unsafe=False, pending_host_save=None,
+                               checkpoint_native=AsyncMock(return_value=4),
                                native_recipients=lambda: {OWNER: {"pawn": PAWN}} if enrolled else {}, control=Mock())
 
-    async def test_exact_stock_callback_only_adopts_objective_once(self):
+    async def test_exact_stock_callback_adopts_objective_once_without_a_save(self):
         with tempfile.TemporaryDirectory() as temp:
             game = self.proof(Path(temp))
         host = self.host(game)
@@ -55,7 +56,9 @@ class NativeSprattTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("cash", entry)
         self.assertEqual(host.party["economy"]["wallet"], 0)
         await spratt.observe(host, bridge)
-        host.checkpoint_native.assert_awaited_once_with(bridge, host.party)
+        host.checkpoint_native.assert_not_awaited()
+        host.control.event.assert_called_once_with("native_spratt_objective_committed", revision=None, **entry)
+        self.assertIs(host.pending_host_save, False)
 
     async def test_missing_callback_or_unauthenticated_shooter_blocks_checkpoint(self):
         with tempfile.TemporaryDirectory() as temp:
