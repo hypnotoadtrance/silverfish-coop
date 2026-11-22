@@ -113,7 +113,7 @@ Keep a local, versioned JSON interface alongside the menu. It should expose sess
 - Replicate entity death and the transition to the stock corpse or ragdoll on peers. Cover the boar and other enemy types killed by the host.
 - Play the player-hit screen effect only for the struck player. When a target is downed, hostile NPCs should disengage and acquire an eligible standing player.
 - Extend anomaly synchronization to more field and map-placed hazard types, including their active effects. Drive health, downing, and game-over from the host so a guest-side anomaly cannot kill a remote player or trigger a party wipe.
-- Propagate the host's explosive-canister destruction and explosion to connected guests. Exercise it with stock ranged fire so the receiving view shows the shot and the resulting world change.
+- Verify the remote firing animation and muzzle effects when a shot hits an explosive prop. Cover destructible power boxes and other fixed explosive props as well as propane tanks.
 - Replicate a thrown flare's lit world actor after it leaves the equipped hand. Check the throw and light on both peers through expiry.
 - Compare frame times and network traffic at the Observatory and Crossroads. Measure the client projection and host discovery work separately from packet arrival before changing update pacing.
 
@@ -146,6 +146,8 @@ Starbursts and Burner Traps loaded directly from a map use the same co-op author
 Vortex Traps also use the host's trigger offset. The stock scanner reads that sphere's world position, which can differ from the actor origin. The mod replicates the sphere component for generated traps and applies its host-relative offset to matching placed actors, including copies outside ordinary replication range. The muted trials matched a generated Crossroads trigger and all 12 placed Funnel triggers through reconnect. In each trial, the guest played the stock singularity effect and animation and took damage while the host's health stayed unchanged. [Vortex trap tests](../tests/live_anomaly_fields_smoke.py)
 
 The host runs the stock Electrode arming timer, overlap, and damage bursts. Guests display the host's sparks, burst particles, and positional audio calls. The muted Crossroads and Lab East Wing trials saw all three stock bursts on the guest and verified guest damage with unchanged host health. The Lab test also verified that a destroyed placed Electrode stayed absent after reconnect. [Electrode tests](../tests/live_anomaly_fields_smoke.py)
+
+Stock propane canisters use host-authoritative physics, ignition, rupture, and damage. Guests see the fire and blast effects, and the mod reconciles destroyed map-placed canisters by their stock actor paths. In muted loopback tests, stock pistol rounds ruptured a burning small canister in Crossroads and started the tall Cistern canister's jet. The moving Cistern tank was within 5 cm on the two peers at one sampled point. Each test observed one host blast and one guest effect, with the tank still gone after reconnect. [Canister tests](../tests/live_explosive_canister_smoke.py)
 
 Stock door interactions now apply the exact host receipt on the initiating guest as soon as it arrives. The normal world snapshot still reconciles doors on both peers. Stock stash discovery caches site positions for status reporting between censuses. Transfers still check the participant's current distance from the live stash.
 

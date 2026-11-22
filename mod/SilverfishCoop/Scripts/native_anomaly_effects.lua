@@ -12,12 +12,15 @@ local assets = {
     electrode = {"/Game/Assets/PFX/FX_Blast_PulseGrenade_Converted.FX_Blast_PulseGrenade_Converted",
         "/Game/Assets/Sounds/MetaSounds/MS_ElectricBlast.MS_ElectricBlast",
         "/Game/Assets/Sounds/SoundClasses/Weapon_ShortRange_Attenuation.Weapon_ShortRange_Attenuation"},
+    canister = {"/Game/Assets/PFX/FX_Blast_FragGrenade_Converted.FX_Blast_FragGrenade_Converted",
+        "/Game/Assets/Sounds/MetaSounds/MS_Blast_Pop.MS_Blast_Pop",
+        "/Game/Assets/Sounds/SoundClasses/Blast_Attenuation.Blast_Attenuation"},
 }
-local audio_range = {charge = 4000, blast = 500100, vortex = 500100, electrode = 8100}
+local audio_range = {charge = 4000, blast = 500100, vortex = 500100, electrode = 8100, canister = 500100}
 local blasts = {starburst = "blast", vortex = "vortex", electrode = "electrode"}
 effects.blast_class = "BlueprintGeneratedClass /Game/Classes/Actors/ExplosionActor_BP.ExplosionActor_BP_C"
 local history, pending, serial, seen, visit = {}, {}, 0, {}, nil
-local captured = {charge = 0, blast = 0, vortex = 0, electrode = 0}
+local captured = {charge = 0, blast = 0, vortex = 0, electrode = 0, canister = 0}
 local charging = {}
 
 local function valid(object) return object and object:IsValid() end
@@ -61,7 +64,7 @@ end
 function effects.clear()
     for index = #charging, 1, -1 do remove_charge(index) end
     history, pending, seen, visit = {}, {}, {}, nil
-    captured = {charge = 0, blast = 0, vortex = 0, electrode = 0}
+    captured = {charge = 0, blast = 0, vortex = 0, electrode = 0, canister = 0}
 end
 
 function effects.observe_charge(entry)
@@ -73,23 +76,41 @@ function effects.observe_charge(entry)
     entry.charged = charged
 end
 
-function effects.observe_blast(actor, active)
-    if not actor:HasAuthority() then return end
-    local ignored, pfx, sfx = actor["Actors to Ignore"], actor.PFX, actor.SFX
-    local count = ignored and ignored:GetArrayNum() or 0
+local function stock_blast(actor, cue)
+    local pfx, sfx = actor.PFX, actor.SFX
     local scale, volume = actor["PFX Scale"], actor["SFX Vol"]
-    if count < 1 or count > 8 or not valid(pfx) or not valid(sfx)
+    if not valid(pfx) or not valid(sfx)
         or type(scale) ~= "number" or not (scale > 0 and scale <= 10)
         or type(volume) ~= "number" or not (volume >= 0 and volume <= 10) then return end
+    if pfx:GetFullName() == "NiagaraSystem " .. assets[cue][1]
+        and sfx:GetFullName():match("^%S+ (.+)$") == assets[cue][2] then
+        record(cue, actor:K2_GetActorLocation(), scale, volume)
+        return true
+    end
+end
+
+local function observe_canister(actor, registered_source)
+    local sound = actor.SFX
+    if not valid(sound) or sound:GetFullName():match("^%S+ (.+)$") ~= assets.canister[2] then return end
+    local attenuation = actor["Attenuation Settings"]
+    if valid(attenuation) and attenuation:GetFullName() == "SoundAttenuation " .. assets.canister[3]
+        and registered_source(actor:K2_GetActorLocation()) then
+        return stock_blast(actor, "canister")
+    end
+end
+
+function effects.observe_blast(actor, active, registered_canister)
+    if not actor:HasAuthority() then return end
+    if registered_canister and observe_canister(actor, registered_canister) then return end
+    local ignored = actor["Actors to Ignore"]
+    local count = ignored and ignored:GetArrayNum() or 0
+    if count < 1 or count > 8 then return end
     for index = 1, count do
         local source = ignored[index]
         local entry = valid(source) and active[source:GetAddress()]
         local cue = entry and blasts[entry.kind]
-        if cue and entry.actor:GetAddress() == source:GetAddress()
-            and pfx:GetFullName() == "NiagaraSystem " .. assets[cue][1]
-            and sfx:GetFullName():match("^%S+ (.+)$") == assets[cue][2] then
+        if cue and entry.actor:GetAddress() == source:GetAddress() and stock_blast(actor, cue) then
             if cue == "blast" then entry.charged = true end
-            record(cue, actor:K2_GetActorLocation(), scale, volume)
             return
         end
     end
@@ -98,7 +119,7 @@ end
 function effects.rows(row)
     local now = os.clock()
     while pending[1] and pending[1].expires <= now do table.remove(pending, 1) end
-    local rows = {row("native-anomaly-capture", captured.charge, captured.blast, captured.vortex, captured.electrode)}
+    local rows = {row("native-anomaly-capture", captured.charge, captured.blast, captured.vortex, captured.electrode, captured.canister)}
     for _, entry in ipairs(pending) do
         rows[#rows + 1] = row("native-anomaly-cue", table.unpack(entry))
     end

@@ -9,8 +9,10 @@ from .native_guest_drop_record import valid_id, valid_position
 KEY = "native_anomaly_cues"
 VORTEX_SENSORS = "native_vortex_sensors"
 ELECTRODE_PHASES = "native_electrode_phases"
-KINDS = {"charge": 4000, "blast": 500100, "vortex": 500100, "electrode": 8100}
-CUE_EVENTS = {"vortex": "native_vortex_effect_played", "electrode": "native_electrode_effect_played"}
+CANISTERS = "native_explosive_canisters"
+KINDS = {"charge": 4000, "blast": 500100, "vortex": 500100, "electrode": 8100, "canister": 500100}
+CUE_EVENTS = {"vortex": "native_vortex_effect_played", "electrode": "native_electrode_effect_played",
+              "canister": "native_canister_effect_played"}
 MAX_CUES = 12
 MAX_SENSORS = 256
 
@@ -70,6 +72,25 @@ async def project_electrodes(bridge, game, frame, epoch):
     if not arguments:
         return game
     return await bridge.command("native-electrode-apply-phase", area, epoch, *arguments, timeout=1.5)
+
+
+async def project_canisters(bridge, game, frame, epoch):
+    if not isinstance(frame, dict) or not valid_id(epoch) or game.get("state") != "connected":
+        return game
+    area = game.get("map")
+    phases = frame.get("props")
+    if (frame.get("map"), frame.get("epoch")) != (area, epoch) or not isinstance(phases, dict) or len(phases) > MAX_SENSORS:
+        return game
+    local = game.get(CANISTERS, {})
+    arguments = []
+    for path, mode in phases.items():
+        if path in local and type(mode) is int and 0 <= mode <= 2 and local[path]["phase"] != mode:
+            arguments.append(f"{path}|{mode}")
+            if len(arguments) == 32:
+                break
+    if not arguments:
+        return game
+    return await bridge.command("native-canister-apply", area, epoch, *arguments, timeout=1.5)
 
 
 class Playback:

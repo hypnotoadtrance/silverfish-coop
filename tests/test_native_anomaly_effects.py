@@ -1,7 +1,9 @@
 import unittest
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish.native_anomaly_effects import ELECTRODE_PHASES, Playback, VORTEX_SENSORS, project_electrodes, project_sensors
+from tools.silverfish.native_anomaly_effects import (
+    CANISTERS, ELECTRODE_PHASES, Playback, VORTEX_SENSORS, project_canisters, project_electrodes, project_sensors,
+)
 
 
 class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
@@ -69,3 +71,18 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         await project_electrodes(bridge, game, frame, epoch)
         bridge.command.assert_awaited_once_with(
             "native-electrode-apply-phase", "Lab", epoch, "Destroyed|10|0|0|2", "-|20|0|0|1", timeout=1.5)
+
+    async def test_canister_projection_only_sends_changed_actors_in_the_current_guest_visit(self):
+        epoch = "b" * 32
+        game = {"state": "connected", "map": "Crossroads", CANISTERS: {
+            "Removed": {"phase": 1}, "Igniting": {"phase": 0}, "StillCold": {"phase": 0}, "Invalid": {"phase": 0},
+        }}
+        frame = {"map": "Crossroads", "epoch": epoch, "props": {
+            "Removed": 2, "Igniting": 1, "StillCold": 0, "Missing": 1, "Invalid": True,
+        }}
+        bridge = Mock(command=AsyncMock(return_value=game))
+        await project_canisters(bridge, game, frame, "a" * 32)
+        bridge.command.assert_not_awaited()
+        await project_canisters(bridge, game, frame, epoch)
+        bridge.command.assert_awaited_once_with(
+            "native-canister-apply", "Crossroads", epoch, "Removed|2", "Igniting|1", timeout=1.5)

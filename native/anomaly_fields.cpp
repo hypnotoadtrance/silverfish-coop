@@ -29,6 +29,11 @@ namespace
     constexpr auto field_class = STR("/Game/Classes/Actors/AnomalyField_BP.AnomalyField_BP_C");
     constexpr auto trap_overlap = STR("BndEvt__Starburst_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature");
     constexpr auto electrode_class = STR("/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C");
+    constexpr auto physics_prop = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
+    constexpr std::array<std::wstring_view, 2> canister_classes{
+        STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_PropaneTank_Small.Prop_PropaneTank_Small_C"),
+        STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_PropaneTank_Tall.Prop_PropaneTank_Tall_C"),
+    };
     constexpr std::array<std::wstring_view, 4> replicated_classes{
         STR("/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C"),
         STR("/Game/Classes/Anomalies/BurnerTrap_BP.BurnerTrap_BP_C"),
@@ -38,9 +43,11 @@ namespace
     std::array<H::GlobalCallbackId, 5> hooks{H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID};
     U::FName spawn_field, overlap, electrode;
     std::array<U::FName, 6> electrode_events;
+    std::array<U::FName, 2> canister_names;
+    std::array<U::FName, 14> canister_events;
     thread_local bool guest_session{};
     thread_local U::FWeakObjectPtr observed_world;
-    thread_local std::int64_t skipped{}, blocked_triggers{};
+    thread_local std::int64_t skipped{}, blocked_triggers{}, blocked_canister_calls{};
 
     struct PendingLoad
     {
@@ -74,6 +81,14 @@ namespace
         return std::ranges::find(replicated_classes, std::wstring_view{path}) != replicated_classes.end();
     }
 
+    bool canister_class(U::UObject* type)
+    {
+        if (!type) return false;
+        for (std::size_t index = 0; index < canister_names.size(); ++index)
+            if (type->GetFName() == canister_names[index]) return type->GetPathName() == canister_classes[index];
+        return false;
+    }
+
     bool replicated_field(U::UObject* field)
     {
         auto* roster = property<U::FArrayProperty>(field, STR("Anomalies"));
@@ -104,23 +119,33 @@ namespace
     {
         if (!guest_session || !actor || !function) return;
         const auto name = function->GetFName();
-        if ((name != spawn_field && name != overlap &&
-             std::find(electrode_events.begin(), electrode_events.end(), name) == electrode_events.end()) ||
-            !U::IsInGameThreadRaw() ||
+        const bool field = name == spawn_field;
+        const bool trap = name == overlap ||
+            std::find(electrode_events.begin(), electrode_events.end(), name) != electrode_events.end();
+        const bool prop_event = !field && std::find(canister_events.begin(), canister_events.end(), name) != canister_events.end();
+        if ((!field && !trap && !prop_event) || !U::IsInGameThreadRaw() ||
             call.OriginalFunctionCallPrevented() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
         auto* type = actor->GetClassPrivate();
-        if (!type || function->GetOuterPrivate() != type) return;
-        const bool field = name == spawn_field;
+        if (!type) return;
+        const auto class_name = type->GetFName();
+        const bool canister = prop_event && (class_name == canister_names[0] || class_name == canister_names[1]);
+        if (!field && !trap && !canister) return;
+        auto* binding = function->GetOuterPrivate();
+        if (canister)
+        {
+            if (!canister_class(type) || !binding || (binding != type && binding->GetPathName() != physics_prop)) return;
+        }
+        else if (binding != type) return;
         if (field)
         {
             if (type->GetPathName() != field_class || function->GetNumParms() != 0 || !replicated_field(actor)) return;
         }
-        else if (type->GetFName() == electrode)
+        else if (!canister && class_name == electrode)
         {
             // Keep arming, blast creation, and queued graph continuations on the host.
             if (type->GetPathName() != electrode_class) return;
         }
-        else if (function->GetNumParms() != 6 || !trap_class(type)) return;
+        else if (!canister && (function->GetNumParms() != 6 || !trap_class(type))) return;
         auto* world = static_cast<U::AActor*>(actor)->GetWorld();
         if (!guest_world(world)) return;
 
@@ -129,12 +154,15 @@ namespace
             observed_world = world;
             skipped = 0;
             blocked_triggers = 0;
+            blocked_canister_calls = 0;
         }
-        if (field) ++skipped; else ++blocked_triggers;
+        if (field) ++skipped;
+        else if (canister) ++blocked_canister_calls;
+        else ++blocked_triggers;
         call.PreventOriginalFunctionCall();
     }
 
-    int placed_trap(const Lua& lua)
+    int qualify_placed(const Lua& lua, bool (*matches)(U::UObject*))
     {
         U::UObject* placed{};
         if (U::IsInGameThreadRaw() && lua.get_stack_size() == 1 && lua.is_string(1))
@@ -144,7 +172,7 @@ namespace
                 placed = U::UObjectGlobals::StaticFindObject<U::UObject*>(nullptr, nullptr, path.c_str());
         }
         const bool qualified = placed && placed->HasAnyFlags(U::RF_WasLoaded) && !placed->IsUnreachable() &&
-            trap_class(placed->GetClassPrivate());
+            matches(placed->GetClassPrivate());
         auto* world = qualified ? static_cast<U::AActor*>(placed)->GetWorld() : nullptr;
         lua.set_bool(world != nullptr);
         lua.set_bool(guest_world(world));
@@ -162,6 +190,7 @@ namespace
                 observed_world = U::FWeakObjectPtr{};
                 skipped = 0;
                 blocked_triggers = 0;
+                blocked_canister_calls = 0;
                 loading = {};
             }
         }
@@ -175,7 +204,8 @@ namespace
             reinterpret_cast<std::uintptr_t>(observed_world.Get()) == static_cast<std::uintptr_t>(lua.get_integer());
         lua.set_integer(current ? skipped : 0);
         lua.set_integer(current ? blocked_triggers : 0);
-        return 2;
+        lua.set_integer(current ? blocked_canister_calls : 0);
+        return 3;
     }
 }
 
@@ -194,6 +224,26 @@ namespace silverfish::native_anomaly_fields
             U::FName{STR("Burst"), U::FNAME_Add},
             U::FName{STR("EMP"), U::FNAME_Add},
             U::FName{STR("Shock"), U::FNAME_Add},
+        };
+        canister_names = {
+            U::FName{STR("Prop_PropaneTank_Small_C"), U::FNAME_Add},
+            U::FName{STR("Prop_PropaneTank_Tall_C"), U::FNAME_Add},
+        };
+        canister_events = {
+            U::FName{STR("DealDamage"), U::FNAME_Add},
+            U::FName{STR("InstantKill"), U::FNAME_Add},
+            U::FName{STR("PersistantDeath"), U::FNAME_Add},
+            U::FName{STR("PropBroken"), U::FNAME_Add},
+            U::FName{STR("SetOnFire"), U::FNAME_Add},
+            U::FName{STR("Extinguish"), U::FNAME_Add},
+            U::FName{STR("Ignite"), U::FNAME_Add},
+            U::FName{STR("Shock"), U::FNAME_Add},
+            U::FName{STR("EMP"), U::FNAME_Add},
+            U::FName{STR("Start_Jet"), U::FNAME_Add},
+            U::FName{STR("AlightThruster"), U::FNAME_Add},
+            U::FName{STR("ExecuteUbergraph_Prop_PropaneTank_Small"), U::FNAME_Add},
+            U::FName{STR("ExecuteUbergraph_Prop_PropaneTank_Tall"), U::FNAME_Add},
+            U::FName{STR("BndEvt__PhysicsProp_Master_BP_PropMesh_K2Node_ComponentBoundEvent_0_ComponentHitSignature__DelegateSignature"), U::FNAME_Add},
         };
         const auto script = [](Iteration& call, U::UObject* actor, U::FFrame& frame, void*) {
             intercept(call, actor, frame.Node());
@@ -238,6 +288,9 @@ namespace silverfish::native_anomaly_fields
     {
         lua.register_function("SilverfishSetNativeAnomalyGuest", set_guest);
         lua.register_function("SilverfishReadNativeAnomalySkips", count);
-        lua.register_function("SilverfishQualifyNativePlacedTrap", placed_trap);
+        lua.register_function("SilverfishQualifyNativePlacedTrap",
+            [](const Lua& current) { return qualify_placed(current, trap_class); });
+        lua.register_function("SilverfishQualifyNativePlacedCanister",
+            [](const Lua& current) { return qualify_placed(current, canister_class); });
     }
 }

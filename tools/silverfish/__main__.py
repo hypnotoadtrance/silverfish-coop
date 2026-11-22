@@ -295,6 +295,8 @@ def parser() -> argparse.ArgumentParser:
         "native-hazard-position", "native-hazard-start", "native-hazard-return",
         "native-anomaly-field-fixture", "native-anomaly-trigger-fixture", "native-placed-anomaly-guest-fixture",
         "native-electrode-retire-fixture",
+        "native-canister-prepare-fixture", "native-canister-shoot-fixture", "native-canister-guest-guard-fixture",
+        "native-canister-ignite-fixture",
         "native-fall-position", "native-fall-return", "native-kill-volume-fall-fixture",
         "native-door-position", "native-door-probe", "native-cistern-keypad",
         "native-transport-probe",
