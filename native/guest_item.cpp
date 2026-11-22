@@ -70,14 +70,15 @@ namespace
     {
         const Unreal::TCHAR* equipment;
         const Unreal::TCHAR* projectile;
+        std::string_view fixture_kind;
     };
     constexpr FlareProfile flares[]{
         {STR("/Game/Classes/Equipment/Eqp_Flare.Eqp_Flare_C"),
-         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Flare_Projectile_BP.Flare_Projectile_BP_C")},
+         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Flare_Projectile_BP.Flare_Projectile_BP_C"), "stock-flare"},
         {STR("/Game/Classes/Equipment/Eqp_Flare_Blue.Eqp_Flare_Blue_C"),
-         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Blue_Flare_Projectile_BP.Blue_Flare_Projectile_BP_C")},
+         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Blue_Flare_Projectile_BP.Blue_Flare_Projectile_BP_C"), "stock-flare-blue"},
         {STR("/Game/Classes/Equipment/Eqp_Flare_Yellow.Eqp_Flare_Yellow_C"),
-         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Yellow_Flare_Projectile_BP.Yellow_Flare_Projectile_BP_C")},
+         STR("/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/Yellow_Flare_Projectile_BP.Yellow_Flare_Projectile_BP_C"), "stock-flare-yellow"},
     };
     constexpr auto old_pipe_path = STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C");
     constexpr auto weapon_base_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C");
@@ -348,7 +349,8 @@ namespace
             const auto kind = lua.get_string();
             if (kind == "blowtorch") seed_selection->path = blowtorch_path;
             else if (kind == "crowbar") seed_selection->path = crowbar_path;
-            else if (kind == "stock-flare") seed_selection->path = flares[0].equipment;
+            else if (const auto flare = std::ranges::find(flares, kind, &FlareProfile::fixture_kind); flare != std::end(flares))
+                seed_selection->path = flare->equipment;
             else
             {
                 seed_selection->full_magazine = kind == "smg-standard-full";
@@ -731,7 +733,8 @@ namespace
         auto* source = item_class->GetClassDefaultObject().Get();
         const bool blowtorch = item_class == find<Unreal::UClass>(blowtorch_path);
         const bool crowbar = item_class == find<Unreal::UClass>(crowbar_path);
-        const bool flare = item_class->GetPathName() == flares[0].equipment;
+        const auto class_path = item_class->GetPathName();
+        const bool flare = std::ranges::any_of(flares, [&](const auto& profile) { return class_path == profile.equipment; });
         auto* quantity = field<Unreal::FIntProperty>(source, ammo_fixture || blowtorch || crowbar || flare ? STR("Ammo") : STR("MagSize"));
         const auto capacity = quantity ? quantity->GetPropertyValueInContainer(source) : -1;
         const auto* magazine = ammo_fixture ? nullptr : stock_magazine(item_class);
@@ -1942,7 +1945,8 @@ namespace
             !boolean(actor, STR("Stacks"), true) || !ammo || before < 1 ||
             ammo->GetPropertyValueInContainer(actor) != before) return refuse("native_guest_flare_refused_equipment");
         FlareCall call{grenade_spawn_path};
-        if (!call.valid()) return refuse("native_guest_flare_refused_schema");
+        auto* equipped_property = field<Unreal::FObjectProperty>(context.pawn, STR("EquipedItem"));
+        if (!call.valid() || !equipped_property) return refuse("native_guest_flare_refused_schema");
         const auto slot = inventory.equipment_index;
         auto* previous = object(actor, STR("ThrownNade"));
 
@@ -1965,6 +1969,15 @@ namespace
             static_cast<Unreal::AActor*>(spawned)->GetWorld() != context.world ||
             object(spawned, STR("Owner")) != context.pawn || object(spawned, STR("Instigator")) != context.pawn)
             return refuse("mutation_unverified_native_guest_flare_throw");
+        if (before == 1 && object(context.pawn, STR("EquipedItem")) == actor)
+        {
+            // Stock depletion can leave the retired hand actor in an empty detached slot.
+            // Keep any replacement that stock equipment selection already installed.
+            if (live(actor)) static_cast<Unreal::AActor*>(actor)->K2_DestroyActor();
+            auto* held = equipped_property->ContainerPtrToValuePtr<void>(context.pawn);
+            if (equipped_property->GetObjectPropertyValue(held) == actor)
+                equipped_property->SetObjectPropertyValue(held, nullptr);
+        }
         result(lua, true, "thrown");
         lua.set_integer(before);
         lua.set_integer(before - 1);
