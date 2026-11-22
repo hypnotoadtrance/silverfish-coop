@@ -104,7 +104,9 @@ _FRAGMENT_HEADER = struct.Struct("!IHH")
 _WEAPON_SHOT_HEADER = _FRAGMENT_HEADER.pack(0, 0, 1)
 _LOOT_MOTION_HEADER = _FRAGMENT_HEADER.pack(0, 0, 2)
 _PROP_POSE_HEADER = _FRAGMENT_HEADER.pack(0, 0, 3)
+_AVATAR_POSE_HEADER = _FRAGMENT_HEADER.pack(0, 0, 4)
 _WEAPON_SHOT_MAX_AGE = .25
+_AVATAR_POSE_MAX_AGE = .25
 _FRAGMENT_TTL = 1.0
 _MAX_ASSEMBLIES = 32
 _MAX_QUEUED_FRAMES = 96
@@ -123,6 +125,7 @@ OnDisconnect = Callable[[str], None | Awaitable[None]]
 Action = dict[str, Any]
 OnRequest = Callable[[str, Action], Action | Awaitable[Action]]
 OnPropPose = Callable[[str, bytes], None]
+OnAvatarPose = Callable[[str, bytes], None]
 
 _ACTION_ERRORS = {
     "disabled": "application requests are disabled",
@@ -368,6 +371,9 @@ class _TransportStatistics:
     prop_pose_datagrams_queued: int = 0
     prop_pose_datagrams_replaced: int = 0
     prop_pose_datagrams_received: int = 0
+    avatar_pose_datagrams_queued: int = 0
+    avatar_pose_datagrams_replaced: int = 0
+    avatar_pose_datagrams_received: int = 0
     reassembly_expired_packets: int = 0
     reassembly_max_pending_packets: int = 0
     snapshot_responses_encoded: int = 0
@@ -592,12 +598,15 @@ class _LinkProtocol(QuicConnectionProtocol):
         self._expire_game_queue(now)
         pending = self._quic._datagrams_pending
         frame = header + data
-        if header == _PROP_POSE_HEADER:
+        if header in (_PROP_POSE_HEADER, _AVATAR_POSE_HEADER):
             for index, queued in enumerate(pending):
                 if queued.startswith(header):
-                    # Preserve this slot without queuing obsolete targets under congestion.
+                    # Preserve the channel's queue position while discarding the older pose.
                     pending[index] = frame
-                    self._stats.prop_pose_datagrams_replaced += 1
+                    if header == _PROP_POSE_HEADER:
+                        self._stats.prop_pose_datagrams_replaced += 1
+                    else:
+                        self._stats.avatar_pose_datagrams_replaced += 1
                     self.transmit()
                     return True
         if len(pending) >= _MAX_QUEUED_FRAMES:
@@ -609,6 +618,8 @@ class _LinkProtocol(QuicConnectionProtocol):
         self._quic.send_datagram_frame(frame)
         if header == _PROP_POSE_HEADER:
             self._stats.prop_pose_datagrams_queued += 1
+        elif header == _AVATAR_POSE_HEADER:
+            self._stats.avatar_pose_datagrams_queued += 1
         self._stats.relay_queue_max_frames = max(self._stats.relay_queue_max_frames, len(pending))
         self.transmit()
         return True
@@ -696,6 +707,9 @@ class _HostProtocol(_LinkProtocol):
         elif isinstance(event, events.DatagramFrameReceived):
             if event.data.startswith(_PROP_POSE_HEADER):
                 self.host._receive_prop_pose(self, event.data[_FRAGMENT_HEADER.size:])
+                return
+            if event.data.startswith(_AVATAR_POSE_HEADER):
+                self.host._receive_avatar_pose(self, event.data[_FRAGMENT_HEADER.size:])
                 return
             packet = self._game_payload(event)
             if packet is not None:
@@ -798,6 +812,7 @@ class HostLink:
         self._disconnect_callback = on_disconnect
         self._request_callback = on_request
         self._prop_pose_handler: OnPropPose | None = None
+        self._avatar_pose_handler: OnAvatarPose | None = None
         self._enroll = enroll
         self._guest_routes: dict[str, _GameRoute] = {}
         self._protocols: dict[str, _HostProtocol] = {}
@@ -1113,14 +1128,36 @@ class HostLink:
         """Set the synchronous recipient of transient, admitted guest prop poses."""
         self._prop_pose_handler = handler
 
+    def _pose_source(self, protocol: _HostProtocol, data: bytes) -> str | None:
+        guest_id = protocol.guest_id
+        if (not self._closed and guest_id is not None and protocol.authorized and protocol.game_access
+                and not protocol.terminated and self._protocols.get(guest_id) is protocol
+                and guest_id in self._guest_routes and self._native_route_permitted(guest_id)
+                and 0 < len(data) <= _FRAGMENT_SIZE):
+            return guest_id
+        return None
+
     def _receive_prop_pose(self, protocol: _HostProtocol, data: bytes) -> None:
-        handler, guest_id = self._prop_pose_handler, protocol.guest_id
-        if (handler is not None and not self._closed and guest_id is not None
-                and protocol.authorized and protocol.game_access and not protocol.terminated
-                and self._protocols.get(guest_id) is protocol and guest_id in self._guest_routes
-                and self._native_route_permitted(guest_id) and 0 < len(data) <= _FRAGMENT_SIZE):
+        handler = self._prop_pose_handler
+        if handler is not None and (guest_id := self._pose_source(protocol, data)) is not None:
             self._stats.prop_pose_datagrams_received += 1
             handler(guest_id, data)
+
+    def set_avatar_pose_handler(self, handler: OnAvatarPose | None) -> None:
+        """Set the synchronous recipient of transient, admitted guest avatar poses."""
+        self._avatar_pose_handler = handler
+
+    def _receive_avatar_pose(self, protocol: _HostProtocol, data: bytes) -> None:
+        handler = self._avatar_pose_handler
+        if handler is not None and (guest_id := self._pose_source(protocol, data)) is not None:
+            self._stats.avatar_pose_datagrams_received += 1
+            handler(guest_id, data)
+
+    def send_avatar_pose(self, data: bytes, allowed: Callable[[str], bool]) -> None:
+        """Offer one replaceable pose frame to each eligible guest game link."""
+        if isinstance(data, bytes) and 0 < len(data) <= _FRAGMENT_SIZE:
+            self._send_presentation(_AVATAR_POSE_HEADER, data,
+                                    lambda guest_id: guest_id in self._guest_routes and allowed(guest_id))
 
     def send_weapon_shot(self, data: bytes, allowed: Callable[[str], bool]) -> None:
         self._send_presentation(_WEAPON_SHOT_HEADER, data, allowed)
@@ -1192,6 +1229,7 @@ class _ClientProtocol(_LinkProtocol):
         self._actions: dict[int, _OutgoingAction] = {}
         self._session_end_bytes = bytearray()
         self.session_end: tuple[str, int] | None = None
+        self.avatar_pose: tuple[float, bytes] | None = None
 
     def quic_event_received(self, event: events.QuicEvent) -> None:
         if isinstance(event, events.HandshakeCompleted):
@@ -1218,6 +1256,13 @@ class _ClientProtocol(_LinkProtocol):
                 action.response.set_exception(LinkError("application request stream closed"))
         elif isinstance(event, events.DatagramFrameReceived):
             header = event.data[:_FRAGMENT_HEADER.size]
+            if header == _AVATAR_POSE_HEADER:
+                payload = event.data[_FRAGMENT_HEADER.size:]
+                if (self.client._protocol is self and self.authorized and self.game_access and not self.terminated
+                        and self.session_end is None and 0 < len(payload) <= _FRAGMENT_SIZE):
+                    self.avatar_pose = (self._loop.time(), payload)
+                    self._stats.avatar_pose_datagrams_received += 1
+                return
             if header in (_WEAPON_SHOT_HEADER, _LOOT_MOTION_HEADER):
                 if self.authorized and self.game_access and not self.terminated:
                     payload = event.data[_FRAGMENT_HEADER.size:]
@@ -1560,11 +1605,28 @@ class ClientLink:
         self._weapon_shots.clear()
         return result
 
-    def send_prop_pose(self, data: bytes) -> bool:
-        """Queue one transient prop pose on the current authenticated game link."""
+    def _send_pose(self, header: bytes, data: bytes) -> bool:
         protocol = self._protocol
         return bool(protocol is not None and not self._closed and protocol.session_end is None
-                    and isinstance(data, bytes) and protocol._forward_presentation(_PROP_POSE_HEADER, data))
+                    and isinstance(data, bytes) and protocol._forward_presentation(header, data))
+
+    def send_prop_pose(self, data: bytes) -> bool:
+        """Queue one transient prop pose on the current authenticated game link."""
+        return self._send_pose(_PROP_POSE_HEADER, data)
+
+    def send_avatar_pose(self, data: bytes) -> bool:
+        """Queue one transient avatar pose on the current authenticated game link."""
+        return self._send_pose(_AVATAR_POSE_HEADER, data)
+
+    def take_avatar_pose(self) -> bytes | None:
+        """Consume the most recent arrival on the current link if it is still fresh."""
+        protocol = self._protocol
+        if not self.game_access or protocol is None or self._closed or protocol.session_end is not None:
+            return None
+        pose, protocol.avatar_pose = protocol.avatar_pose, None
+        if pose is not None and 0 <= protocol._loop.time() - pose[0] <= _AVATAR_POSE_MAX_AGE:
+            return pose[1]
+        return None
 
     def _receive_loot_motion(self, data: bytes, now: float) -> None:
         if 0 < len(data) <= _FRAGMENT_SIZE:

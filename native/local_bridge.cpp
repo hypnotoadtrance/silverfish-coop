@@ -20,6 +20,7 @@ namespace
     constexpr std::uint32_t input_limit = 1024;
     constexpr std::size_t input_capacity = 64;
     constexpr std::uint32_t prop_poses_limit = 4 * 257;
+    constexpr std::uint32_t avatar_poses_limit = 512;
 
     enum class State { idle, queued, taken, running, replied, too_large };
     std::mutex mutex;
@@ -36,6 +37,8 @@ namespace
     std::uint64_t status_revision{};
     std::deque<std::string> input;
     std::string prop_poses;
+    std::string local_avatar_pose;
+    std::string remote_avatar_poses;
     std::int64_t native_events_heartbeat{};
 
     void clear()
@@ -160,19 +163,41 @@ namespace
         return 2;
     }
 
-    int take_prop_poses(const Lua& lua)
+    int take_presentation(const Lua& lua, std::string& mailbox)
     {
         bool active{};
         std::string frame;
         {
             std::lock_guard lock(mutex);
             active = attached;
-            frame.swap(prop_poses);
+            frame.swap(mailbox);
         }
         lua.set_bool(active);
         if (frame.empty()) return 1;
         lua.set_string(frame);
         return 2;
+    }
+
+    int take_prop_poses(const Lua& lua)
+    {
+        return take_presentation(lua, prop_poses);
+    }
+
+    int take_avatar_poses(const Lua& lua)
+    {
+        return take_presentation(lua, remote_avatar_poses);
+    }
+
+    int publish_avatar_pose(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 1 || !lua.is_string()) return 0;
+        const auto frame = lua.get_string();
+        std::lock_guard lock(mutex);
+        if (attached && !frame.empty() && frame.size() <= avatar_poses_limit)
+        {
+            local_avatar_pose.assign(frame);
+        }
+        return 0;
     }
 }
 
@@ -192,6 +217,8 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
     status_frame.clear();
     input.clear();
     prop_poses.clear();
+    local_avatar_pose.clear();
+    remote_avatar_poses.clear();
     native_events_heartbeat = 0;
     clear();
 }
@@ -258,6 +285,25 @@ extern "C" __declspec(dllexport) int SilverfishBridgePublishPropPosesV1(const ch
     return 1;
 }
 
+extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeTakeAvatarPoseV1(char* buffer, std::uint32_t capacity)
+{
+    std::lock_guard lock(mutex);
+    if (!attached || !buffer || local_avatar_pose.empty() || capacity < local_avatar_pose.size()) return 0;
+    const auto size = static_cast<std::uint32_t>(local_avatar_pose.size());
+    std::memcpy(buffer, local_avatar_pose.data(), size);
+    local_avatar_pose.clear();
+    return size;
+}
+
+extern "C" __declspec(dllexport) int SilverfishBridgePublishAvatarPosesV1(const char* data, std::uint32_t size)
+{
+    if (!data || !size || size > avatar_poses_limit) return 0;
+    std::lock_guard lock(mutex);
+    if (!attached) return 0;
+    remote_avatar_poses.assign(data, size);
+    return 1;
+}
+
 extern "C" __declspec(dllexport) std::int64_t SilverfishBridgeSubmitV1(const char* data, std::uint32_t size)
 {
     if (!data || !size || size > command_limit) return 0;
@@ -304,6 +350,8 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishPublishLocalBridgeStatus", publish_status);
         lua.register_function("SilverfishEnqueueLocalBridgeInput", enqueue_input);
         lua.register_function("SilverfishTakeLocalPropPoses", take_prop_poses);
+        lua.register_function("SilverfishPublishLocalAvatarPose", publish_avatar_pose);
+        lua.register_function("SilverfishTakeRemoteAvatarPoses", take_avatar_poses);
         lua.register_function("SilverfishReadLocalNativeEventsHeartbeat", read_native_events_heartbeat);
     }
 
@@ -316,6 +364,8 @@ namespace silverfish::local_bridge
         status_frame.clear();
         input.clear();
         prop_poses.clear();
+        local_avatar_pose.clear();
+        remote_avatar_poses.clear();
         native_events_heartbeat = 0;
         clear();
     }

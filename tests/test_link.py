@@ -194,6 +194,28 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stats["prop_pose_datagrams_queued"], 1)
             self.assertEqual(stats["prop_pose_datagrams_replaced"], 1)
 
+    async def test_avatar_poses_coalesce_independently_from_prop_and_unreal_frames(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        guest_id = self.request["guest_id"]
+        upstream, downstream = self.client._protocol, self.host._protocols[guest_id]
+        peers = ((upstream, self.client.send_avatar_pose),
+                 (downstream, lambda packet: self.host.send_avatar_pose(packet, lambda current: current == guest_id)))
+        with patch.object(upstream._loop, "time", return_value=upstream._loop.time()):
+            for protocol, send in peers:
+                with self.subTest(seat=type(protocol).__name__), patch.object(protocol, "transmit"):
+                    send(b"old body pose")
+                    protocol._forward_presentation(link._PROP_POSE_HEADER, b"grip pose")
+                    for _ in range(link._MAX_QUEUED_FRAMES - 2):
+                        protocol.forward_game_packet(b"Unreal")
+                    pending = protocol._quic._datagrams_pending
+                    unrelated = list(pending)[1:]
+                    send(b"latest body pose")
+                    self.assertEqual(list(pending), [link._AVATAR_POSE_HEADER + b"latest body pose", *unrelated])
+        for seat in (self.client, self.host):
+            stats = seat.statistics()
+            self.assertEqual(stats["avatar_pose_datagrams_queued"], 1)
+            self.assertEqual(stats["avatar_pose_datagrams_replaced"], 1)
+
     def test_reassembly_expires_older_partial_packet_and_preserves_live_packet(self):
         stats = link._TransportStatistics()
         assembler = link._Reassembler(stats)
@@ -651,14 +673,86 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host.statistics()["prop_pose_datagrams_received"], 2)
         await self.exchange(1200)
 
-    async def test_catalog_admission_cannot_send_prop_poses(self):
+    async def test_avatar_poses_reach_only_fresh_authenticated_game_connections(self):
+        guest_id = self.request["guest_id"]
+        inbound = asyncio.Queue()
+        self.host.set_avatar_pose_handler(lambda guest, data: inbound.put_nowait((guest, data)))
+        self.assertFalse(self.client.send_avatar_pose(b"pre-admission"))
+        self.assertTrue((await self.connect_guest())["accepted"])
+        self.assertFalse(self.client.send_avatar_pose(b""))
+        self.assertFalse(self.client.send_avatar_pose(bytes(link._FRAGMENT_SIZE + 1)))
+        self.assertFalse(self.client.send_avatar_pose("not bytes"))
+        self.assertTrue(self.client.send_avatar_pose(b"guest pose"))
+        self.assertEqual(await asyncio.wait_for(inbound.get(), 3), (guest_id, b"guest pose"))
+
+        with self.host.hold_game_routes():
+            with patch.object(self.host, "_receive_avatar_pose", wraps=self.host._receive_avatar_pose) as receive:
+                self.assertTrue(self.client.send_avatar_pose(b"travel pose"))
+                async with asyncio.timeout(1):
+                    while not receive.called:
+                        await asyncio.sleep(.01)
+            self.host.send_avatar_pose(b"host travel pose", lambda _: True)
+        self.assertTrue(inbound.empty())
+        self.host.send_avatar_pose(b"wrong guest", lambda _: False)
+        self.host.send_avatar_pose(b"", lambda _: True)
+        self.host.send_avatar_pose(bytes(link._FRAGMENT_SIZE + 1), lambda _: True)
+        async def received_host_poses(count):
+            async with asyncio.timeout(1):
+                while self.client.statistics()["avatar_pose_datagrams_received"] < count:
+                    await asyncio.sleep(.01)
+
+        self.host.send_avatar_pose(b"host previous pose", lambda _: True)
+        await received_host_poses(1)
+        self.host.send_avatar_pose(b"host latest pose", lambda admitted: admitted == guest_id)
+        await received_host_poses(2)
+        self.assertEqual(self.client.take_avatar_pose(), b"host latest pose")
+        self.assertIsNone(self.client.take_avatar_pose())
+        self.assertTrue(self.host_inbox.messages.empty())
+        self.assertTrue(self.client_inbox.messages.empty())
+
+        old_host, old_client = self.host._protocols[guest_id], self.client._protocol
+
+        def avatar_frame(data):
+            return DatagramFrameReceived(link._AVATAR_POSE_HEADER + data)
+
+        for data in (b"", bytes(link._FRAGMENT_SIZE + 1)):
+            old_host.quic_event_received(avatar_frame(data))
+            old_client.quic_event_received(avatar_frame(data))
+        self.assertTrue(inbound.empty())
+        self.assertIsNone(self.client.take_avatar_pose())
+        old_client.quic_event_received(avatar_frame(b"stale pose"))
+        later = old_client._loop.time() + link._AVATAR_POSE_MAX_AGE + .01
+        with patch.object(old_client._loop, "time", return_value=later):
+            self.assertIsNone(self.client.take_avatar_pose())
+        old_client.quic_event_received(avatar_frame(b"before reconnect"))
+        await self.client.disconnect()
+        await asyncio.wait_for(self.disconnected.get(), 3)
+        self.assertTrue((await self.connect_guest())["accepted"])
+        with (patch.object(old_host, "authorized", True), patch.object(old_host, "game_access", True),
+              patch.object(old_host, "terminated", False), patch.object(old_client, "authorized", True),
+              patch.object(old_client, "game_access", True), patch.object(old_client, "terminated", False)):
+            old_host.quic_event_received(avatar_frame(b"stale client"))
+            old_client.quic_event_received(avatar_frame(b"stale host"))
+        self.assertTrue(inbound.empty())
+        self.assertIsNone(self.client.take_avatar_pose())
+        self.assertTrue(self.client.send_avatar_pose(b"rejoined guest"))
+        self.assertEqual(await asyncio.wait_for(inbound.get(), 3), (guest_id, b"rejoined guest"))
+        self.assertEqual(self.host.statistics()["avatar_pose_datagrams_received"], 2)
+        await self.exchange(1200)
+
+    async def test_catalog_admission_cannot_send_latest_poses(self):
         guest_id = self.request["guest_id"]
         recipient = Mock()
         self.host.set_prop_pose_handler(recipient)
+        self.host.set_avatar_pose_handler(recipient)
         self.assertTrue((await self.connect_guest(dict(self.request, catalog=True)))["accepted"])
         self.assertFalse(self.client.send_prop_pose(b"catalog grip"))
+        self.assertFalse(self.client.send_avatar_pose(b"catalog body"))
         protocol = self.host._protocols[guest_id]
         protocol.quic_event_received(DatagramFrameReceived(link._PROP_POSE_HEADER + b"catalog grip"))
+        protocol.quic_event_received(DatagramFrameReceived(link._AVATAR_POSE_HEADER + b"catalog body"))
+        self.host.send_avatar_pose(b"catalog host", lambda _: True)
+        self.assertIsNone(self.client.take_avatar_pose())
         recipient.assert_not_called()
 
     async def test_weapon_cues_reach_current_game_guest_without_entering_unreal(self):

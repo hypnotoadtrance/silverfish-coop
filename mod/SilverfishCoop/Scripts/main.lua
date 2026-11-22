@@ -111,6 +111,7 @@ local native_transport = require("native_transport")
 local native_world = require("native_world")
 local native_zone = require("native_zone")
 local players = require("players")
+local native_avatar_lean_bridge = require("native_avatar_lean_bridge")
 local vitals = require("vitals")
 local wallet = require("wallet")
 local weapon_inventory = require("weapon_inventory")
@@ -1622,6 +1623,7 @@ local function tick(fields, pending)
         players.sync(state, current_phase)
         native_stash_view.sync(state, current_phase)
         native_player_avatar.sync(state, current_phase)
+        native_avatar_lean_bridge.sync(state, current_phase)
         native_replication_budget.sync(state, current_phase)
         native_avatar_capture_fixture.sync(state, current_phase, native_player_avatar)
         native_host_invite.sync(state, current_phase)
@@ -1690,6 +1692,7 @@ LoopInGameThreadWithDelay(25, function()
     pcall(native_zone_loading.refresh, current_world)
     if not leaving then pcall(native_prop_carry.update) end
     if role == "host" and not leaving then pcall(native_weapon_fire_view.flush, current_world) end
+    if native_avatar_lean_bridge.enabled then pcall(native_avatar_lean_bridge.update, current_world, role, leaving) end
     if not leaving then pcall(native_player_avatar.animate_head, current_world) end
     if not leaving then pcall(native_player_avatar.animate_melee, current_world) end
     if not leaving then pcall(native_player_avatar.animate_recoil, current_world) end

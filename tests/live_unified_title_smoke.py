@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -110,11 +111,17 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
             "title_return_and_sockets_closed": True, **gameplay}
 
 
-async def verify(work, original):
+async def verify(work, original, *, lean=False):
     before = saved_hashes(original)
     if ("steamapps" in {part.casefold() for part in work.parts} or work.is_relative_to(original)
-            or original.is_relative_to(work) or not before or not embedded_title_plan.installed(work)):
+            or original.is_relative_to(work) or not before):
         raise ValueError("Use the qualified private game replica and the original save folder")
+    if lean:
+        from live_portable_title_smoke import qualify_release
+
+        qualify_release(work / "stage", None)
+    elif not embedded_title_plan.installed(work):
+        raise ValueError("The private game replica is missing the staged embedded runtime")
     case = work / "title-probes" / ("unified-" + uuid.uuid4().hex[:8])
     case.mkdir(parents=True)
     print(case, flush=True)
@@ -148,17 +155,22 @@ async def verify(work, original):
             baselines.append((files, await stock_profile(seat.bridge)))
 
         first, second = seats
-        proof["sessions"].append(await start_pair(first, second, "Second seat scout"))
-        proof["sessions"].append(await start_pair(second, first, "First seat scout"))
-        assert proof["sessions"][0]["host_pid"] == proof["sessions"][1]["guest_pid"]
-        assert proof["sessions"][0]["guest_pid"] == proof["sessions"][1]["host_pid"]
-        assert len({row["campaign_id"] for row in proof["sessions"]}) == 2
+        if lean:
+            from avatar_lean_probe import verify_lean
+
+            proof["sessions"].append(await start_pair(first, second, "Lean test scout", on_join=verify_lean))
+        else:
+            proof["sessions"].append(await start_pair(first, second, "Second seat scout"))
+            proof["sessions"].append(await start_pair(second, first, "First seat scout"))
+            assert proof["sessions"][0]["host_pid"] == proof["sessions"][1]["guest_pid"]
+            assert proof["sessions"][0]["guest_pid"] == proof["sessions"][1]["host_pid"]
+            assert len({row["campaign_id"] for row in proof["sessions"]}) == 2
         for seat, (files, preferences) in zip(seats, baselines, strict=True):
             observed = stock_save_hashes(seat.profile)
             del observed["Config.sav"]
             assert observed == files and await stock_profile(seat.bridge) == preferences
             assert seat.bridge.process.poll() is None
-        proof.update(verified=True, solo_slots_and_settings_preserved=True, both_titles_reused=True)
+        proof.update(verified=True, solo_slots_and_settings_preserved=True, both_titles_reused=not lean)
     finally:
         for seat in reversed(seats):
             if seat.bridge.process.poll() is None:
@@ -173,5 +185,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--lean", action="store_true", help="verify stock lean input and peer presentation in one muted pair")
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(strict=True), args.vanilla_saved.resolve(strict=True)))
+    work, original = args.work.resolve(strict=True), args.vanilla_saved.resolve(strict=True)
+    if args.lean:
+        from avatar_lean_probe import installed_probe
+
+        os.environ.update(SILVERFISH_COOP_AVATAR_LEAN="1", SILVERFISH_COOP_AVATAR_LEAN_PROBE="1")
+        with installed_probe(work / "stage"):
+            asyncio.run(verify(work, original, lean=True))
+    else:
+        asyncio.run(verify(work, original))

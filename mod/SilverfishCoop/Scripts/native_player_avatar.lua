@@ -5,6 +5,8 @@ local avatar = {}
 
 local body_path = "/Game/Classes/NPCs/NPC_Assets/CharacterModels/Player_NoArmor.Player_NoArmor"
 local head_path = "/Game/Classes/Player/PlayerAssets/HelmetMeshes/SM_Head_UV_01.SM_Head_UV_01"
+local player_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
+local lean_arrow_class = "/Script/Engine.ArrowComponent"
 local head_class = "/Script/Engine.StaticMeshComponent"
 local scene_class = "/Script/Engine.SceneComponent"
 local animation_root = "/Game/Classes/NPCs/NPC_Assets/Animations/"
@@ -12,6 +14,11 @@ local crouched_idle = "Crouching_Idle"
 local crouched_walk = "Crouched_Walking"
 local firearm_class = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
 local gameplay_statics = "/Script/Engine.Default__GameplayStatics"
+local math_library = "/Script/Engine.Default__KismetMathLibrary"
+local max_lean = 40
+local lean_timeout = .45
+local zero_rotation = {Pitch = 0, Yaw = 0, Roll = 0}
+local zero_location = {X = 0, Y = 0, Z = 0}
 local aimed = {pistol = {"HandGun_Idle_3", "HandGun_Walk"}, rifle = {"Rifle_Aiming_Idle", "Rifle_Walk"}}
 local lowered = {pistol = "HandGun_Idle", rifle = "Rifle_Idle_1_"}
 local running = {pistol = "HandGun_Run", rifle = "Rifle_Run_Forward"}
@@ -35,6 +42,48 @@ local armor_root = "/Game/Classes/Armor_Items/"
 
 local function valid(object)
     return object ~= nil and object:IsValid()
+end
+
+local function same(first, second)
+    return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function valid_lean(roll)
+    return type(roll) == "number" and roll >= -max_lean and roll <= max_lean
+end
+
+function avatar.local_lean(pawn, world)
+    if not valid(pawn) or not same(pawn:GetClass(), StaticFindObject(player_path)) or not pawn:IsLocallyControlled()
+        or pawn:IsActorBeingDestroyed() or pawn.Dead == true or not same(pawn:GetWorld(), world) then return end
+    local arrow = pawn.LeanPivotArrow
+    if not valid(arrow) or not same(arrow:GetClass(), StaticFindObject(lean_arrow_class))
+        or not same(arrow:GetOwner(), pawn) or not same(arrow:GetAttachParent(), pawn.CapsuleComponent) then return end
+    local roll = arrow.RelativeRotation.Roll
+    if valid_lean(roll) then return roll end
+end
+
+function avatar.set_remote_lean(world, id, roll)
+    if not valid(world) or type(id) ~= "number" or not math.tointeger(id) or id < 0 or id > 2147483647
+        or not valid_lean(roll) then return false end
+    local scope, target = world:GetAddress(), nil
+    for _, entry in pairs(avatars) do
+        if entry.world == scope and entry.id == id and entry.status == "default_body" and valid(entry.body)
+            and valid(entry.pawn) and not entry.pawn:IsActorBeingDestroyed() and not entry.pawn:IsLocallyControlled()
+            and same(entry.pawn:GetWorld(), world) then
+            if target then return false end
+            target = entry
+        end
+    end
+    if not target then return false end
+    if roll == 0 then
+        target.lean_target, target.lean_until = nil, nil
+        return true
+    end
+    local clock = StaticFindObject(gameplay_statics)
+    if not valid(clock) then return false end
+    target.lean_target = roll
+    target.lean_until = clock:GetRealTimeSeconds(world) + lean_timeout
+    return true
 end
 
 local function asset(path)
@@ -180,10 +229,10 @@ local function position_head(entry)
     if entry.body:GetBoneIndex(head_bone) < 0 or not entry.body:DoesSocketExist(helmet_socket) then
         error("Remote avatar head anchors were unavailable")
     end
-    local math_library = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+    local math_api = StaticFindObject(math_library)
     local origin = entry.body:GetSocketTransform(helmet_socket, 0)
     local neck = entry.body:GetSocketLocation(head_bone)
-    local offset = math_library:InverseTransformLocation(origin, neck)
+    local offset = math_api:InverseTransformLocation(origin, neck)
     entry.head:K2_SetRelativeLocation({X = -offset.X, Y = -offset.Y, Z = -offset.Z}, false, {}, true)
 end
 
@@ -453,7 +502,39 @@ local function angle_delta(target, current)
     return (target - current + 180) % 360 - 180
 end
 
-local function aim_head(entry, now)
+local function apply_lean(entry, now, math_api)
+    if entry.lean_until and entry.lean_until <= now then entry.lean_target, entry.lean_until = nil, nil end
+    local before, target = entry.displayed_lean or 0, entry.lean_target or 0
+    if before == 0 and target == 0 then return false end
+    local elapsed = entry.lean_time and now - entry.lean_time or .025
+    entry.lean_time = now
+    if elapsed <= 0 then return false end
+    local roll = target + (before - target) * math.exp(-elapsed / .045)
+    if math.abs(roll - target) < .05 then roll = target end
+    local pawn = entry.pawn
+    local crouched = pawn.bIsCrouched == true
+    if roll == before and crouched == entry.lean_crouched then return false end
+    if roll == 0 then
+        entry.body:K2_SetRelativeLocationAndRotation(zero_location, zero_rotation, false, {}, true)
+        entry.lean_rotation, entry.lean_time = nil, nil
+    else
+        local base, basis = pawn:GetBaseTranslationOffset(), pawn:GetBaseRotationOffsetRotator()
+        local pivot = math_api:LessLess_VectorRotator({X = -base.X, Y = -base.Y,
+            Z = (crouched and -20 or 0) - base.Z}, basis)
+        -- The cooked stock pivot drops 20 cm when crouched. Express that
+        -- pivot and forward-axis roll in the smoothed mesh's authored frame.
+        local lean = {Pitch = 0, Yaw = 0, Roll = roll}
+        local relative = math_api:ComposeRotators(math_api:ComposeRotators(basis, lean), math_api:NegateRotator(basis))
+        local rotated = math_api:GreaterGreater_VectorRotator(pivot, relative)
+        entry.body:K2_SetRelativeLocationAndRotation({X = pivot.X - rotated.X, Y = pivot.Y - rotated.Y,
+            Z = pivot.Z - rotated.Z}, relative, false, {}, true)
+        entry.lean_rotation = relative
+    end
+    entry.displayed_lean, entry.lean_crouched = roll, crouched
+    return true
+end
+
+local function aim_head(entry, now, lean_changed, math_api)
     local rotation = entry.pawn:GetBaseAimRotation()
     local pitch = math.max(-45, math.min(45, (rotation.Pitch + 180) % 360 - 180))
     local yaw, previous = rotation.Yaw, entry.head_aim
@@ -467,8 +548,16 @@ local function aim_head(entry, now)
             yaw = (previous.yaw + angle_delta(yaw, previous.yaw) * fraction + 180) % 360 - 180
         end
     end
-    if not previous or math.abs(pitch - previous.pitch) > .01 or math.abs(angle_delta(yaw, previous.yaw)) > .01 then
-        entry.head_pivot:K2_SetWorldRotation({Pitch = pitch, Yaw = yaw, Roll = 0}, false, {}, true)
+    if lean_changed or entry.lean_rotation or not previous or math.abs(pitch - previous.pitch) > .01
+        or math.abs(angle_delta(yaw, previous.yaw)) > .01 then
+        local aim = {Pitch = pitch, Yaw = yaw, Roll = 0}
+        if entry.lean_rotation then
+            local basis = entry.movement_mesh:K2_GetComponentRotation()
+            local lean = math_api:ComposeRotators(
+                math_api:ComposeRotators(math_api:NegateRotator(basis), entry.lean_rotation), basis)
+            aim = math_api:ComposeRotators(aim, lean)
+        end
+        entry.head_pivot:K2_SetWorldRotation(aim, false, {}, true)
         entry.aim_roll = entry.head_pivot:K2_GetComponentRotation().Roll
         entry.head_aim = {pitch = pitch, yaw = yaw, time = now}
     end
@@ -479,10 +568,18 @@ function avatar.animate_head(get_world)
     local world, clock = get_world(), StaticFindObject(gameplay_statics)
     if not valid(world) or not valid(clock) then return end
     local scope, now = world:GetAddress(), clock:GetRealTimeSeconds(world)
+    local math_api
     for _, entry in pairs(avatars) do
         if entry.world == scope and valid(entry.head_pivot) and valid(entry.pawn)
             and not entry.pawn:IsActorBeingDestroyed() then
-            aim_head(entry, now)
+            local lean_changed = false
+            if entry.lean_until or entry.lean_rotation then
+                math_api = math_api or StaticFindObject(math_library)
+                if valid(math_api) and valid(entry.body) and valid(entry.movement_mesh) then
+                    lean_changed = apply_lean(entry, now, math_api)
+                end
+            end
+            aim_head(entry, now, lean_changed, math_api)
         end
     end
 end
@@ -604,7 +701,7 @@ function avatar.sync(state, phase)
                 local address = pawn:GetAddress()
                 seen[address] = true
                 local entry = avatars[address]
-                if not entry or not valid(entry.pawn) or entry.name ~= details.name then
+                if not entry or not valid(entry.pawn) or entry.name ~= details.name or entry.world ~= state.world:GetAddress() then
                     entry = { pawn = pawn, name = details.name, map = state.map, world = state.world:GetAddress() }
                     avatars[address] = entry
                     local ok, failure = pcall(create, entry)
@@ -710,6 +807,7 @@ function avatar.rows(row)
             rows[#rows + 1] = row("native-avatar-melee", entry.name, swing.serial, swing.clip, swing.peak,
                 swings[entry] and 1 or 0)
         end
+        if entry.displayed_lean then rows[#rows + 1] = row("native-avatar-lean", entry.name, entry.displayed_lean) end
         if entry.last_use then
             local use = entry.last_use
             rows[#rows + 1] = row("native-avatar-use", entry.name, use.serial, use.item, use.mesh,

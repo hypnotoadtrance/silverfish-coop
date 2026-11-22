@@ -49,6 +49,7 @@ from . import native_weapon_fire_view
 from . import native_loose_pickup
 from . import native_mushrooms
 from . import native_prop_carry
+from . import native_avatar_lean
 from . import native_flare
 from . import native_stock_enemy_drops
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
@@ -3963,6 +3964,8 @@ class Host:
                         if self.native_guest else None)
         loot_motion = (asyncio.create_task(native_stock_enemy_drops.relay_motion(self, transport))
                        if self.native_events else None)
+        lean = (asyncio.create_task(native_avatar_lean.relay(self, bridge, transport))
+                if pose_link and self.native_guest and native_avatar_lean.enabled(bridge) else None)
         if self.wipe_view_enabled:
             self.wipe_view = native_wipe_view.WipeView(bridge, self.control, "host")
         try:
@@ -3971,10 +3974,10 @@ class Host:
             self.prop_carry_bridge = None
             if pose_link:
                 transport.set_prop_pose_handler(None)
-            for task in (heartbeat, weapon_shots, loot_motion):
+            for task in (heartbeat, weapon_shots, loot_motion, lean):
                 if task:
                     task.cancel()
-            for task in (heartbeat, weapon_shots, loot_motion):
+            for task in (heartbeat, weapon_shots, loot_motion, lean):
                 if task:
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
@@ -6053,6 +6056,8 @@ class Client:
         pause_exit = (native_session_exit.PauseExit(self.bridge.directory, self.control, "guest", engine=engine)
                       if engine is not None and self.invite.get("native_zones") else None)
         held = asyncio.create_task(self.guest_held_input.run()) if self.guest_held_input else None
+        lean = (asyncio.create_task(native_avatar_lean.follow(self))
+                if native_avatar_lean.enabled(self.bridge) else None)
         try:
             await self.run_session(pause_exit=pause_exit)
         finally:
@@ -6063,10 +6068,11 @@ class Client:
             if self.mindcore_carry:
                 self.mindcore_carry.close()
             self.prop_carry.close()
-            if held:
-                held.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await held
+            for task in (held, lean):
+                if task:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
 
     async def run_session(self, *, pause_exit=None) -> None:
         async def claim_crate(operation, guid):

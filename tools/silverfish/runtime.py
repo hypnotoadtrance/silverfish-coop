@@ -2996,6 +2996,10 @@ class Bridge:
                 elif (fields[0] == "native-avatar-host-aim-receipt" and len(fields) == 2
                       and data.get("state") == "hosting" and native_player_avatar.REQUEST_ID.fullmatch(fields[1])):
                     data[native_player_avatar.HOST_AIM_RECEIPT] = fields[1]
+                elif fields[0] == "native-avatar-lean" and len(fields) == 3:
+                    pawn, displayed = fields[1], float(fields[2])
+                    if pawn.startswith("Player_FP_C ") and -40 <= displayed <= 40:
+                        data.setdefault("native_avatar_lean", {})[pawn] = displayed
                 elif (fields[0] == "native-avatar-local-aim" and len(fields) == 2
                       and data.get("state") == "connected" and fields[1] in ("0", "1")):
                     data[native_player_avatar.LOCAL_AIM] = fields[1] == "1"
