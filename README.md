@@ -5,7 +5,7 @@
 >
 > If you find a bug, [open a GitHub issue](https://github.com/hypnotoadtrance/silverfish-coop/issues/new) with the release tag, map, reproduction steps, and what each player saw. Maintainers can assign reproducible reports to coding agents for investigation and draft pull requests.
 
-**AI disclosure.** Much of this mod was made with AI, including OpenAI Codex. Human maintainers direct the work, playtest builds together, and use that feedback to guide development. As the mod maintainers understand it, Project Silverfish developer Siris Pendrake opposes generative AI. If you want to respect that position, we encourage you to skip this mod. [Project Silverfish’s AI disclosure](https://siris-pendrake.itch.io/project-silverfish)
+**AI disclosure.** Much of this mod was made with AI, including OpenAI Codex. Human maintainers direct the work, playtest builds together, and use that feedback to guide development. As the mod maintainers understand it, Project Silverfish developer Siris Pendrake opposes generative AI. If you want to respect that position, we encourage you to skip this mod.
 
 Anyone is free to use, modify, fork, and redistribute the original mod code for any purpose. Third-party components retain their own terms. [BSD Zero Clause License](LICENSE)
 
