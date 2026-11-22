@@ -1297,6 +1297,80 @@ namespace
         return true;
     }
 
+
+    bool npc_barter_passive(const NpcBarter& barter, const U::TCHAR* name, int& count, int& size)
+    {
+        auto* save = barter.owner.save;
+        std::int32_t bonus{};
+        if (!silverfish::native_enemy_loot::count_save_passive(save, U::FName{name}, count) ||
+            (count > 0 && !silverfish::native_guest_sickness::read_passive_amplification(save, bonus))) return false;
+        size = count + bonus;
+        return true;
+    }
+
+    struct NpcBarterReputation
+    {
+        U::FName flag{};
+        U::UFunction* apply{};
+        int before{}, after{};
+
+        bool prepare(const NpcBarter& barter, std::uint8_t faction_id, double gain)
+        {
+            if (!std::isfinite(gain) || gain > std::numeric_limits<int>::max()) return false;
+            const auto reward = static_cast<int>(std::floor(std::max(0.0, gain)));
+            if (!reward) return true;
+            auto* library = find<U::UObject>(STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Characters.Default__FL_Characters_C"));
+            auto* compose = find<U::UFunction>(
+                STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Characters.FL_Characters_C:Compose_FactionRep_FlagName"));
+            if (!library || !compose || !library->HasAnyFlags(U::RF_ClassDefaultObject) ||
+                compose->GetOuterPrivate() != library->GetClassPrivate() || compose->GetNumParms() != 3 ||
+                compose->GetParmsSize() != 24 || !parameter<U::FByteProperty>(compose, STR("Faction"), 0, false) ||
+                !parameter<U::FObjectProperty>(compose, STR("__WorldContext"), 8, false) ||
+                !parameter<U::FNameProperty>(compose, STR("Name"), 16, true)) return false;
+            struct Key { std::uint8_t faction; U::UObject* context; U::FName name; } key{faction_id, barter.instance, {}};
+            static_assert(sizeof(Key) == 24 && offsetof(Key, name) == 16);
+            library->ProcessEvent(compose, &key);
+            if (key.name.IsNone() || !key.name.ToString().starts_with(STR("Rep_"))) return false;
+            apply = find<U::UFunction>(STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:Add_PointTo_SaveFlag"));
+            if (!apply || apply->GetOuterPrivate() != barter.instance->GetClassPrivate() || apply->GetNumParms() != 4 ||
+                apply->GetParmsSize() < 14 || apply->GetParmsSize() > 16 ||
+                !parameter<U::FNameProperty>(apply, STR("KeyID"), 0, false) ||
+                !parameter<U::FIntProperty>(apply, STR("Value"), 8, false) ||
+                !parameter<U::FBoolProperty>(apply, STR("Overwrite"), 12, false) ||
+                !parameter<U::FBoolProperty>(apply, STR("Force_Decrease"), 13, false)) return false;
+            flag = key.name;
+            const auto [prior, exists] = barter.wallet.flag_value(barter.instance, flag.ToString().c_str());
+            int count{}, intensity{};
+            if (exists && !npc_barter_passive(barter, STR("IntensePersonality"), count, intensity)) return false;
+            const auto result = static_cast<std::int64_t>(prior) + static_cast<std::int64_t>(reward) * (1LL + intensity);
+            if (result > std::numeric_limits<int>::max()) return false;
+            before = prior;
+            after = static_cast<int>(result);
+            return true;
+        }
+
+        void commit(const NpcBarter& barter) const
+        {
+            if (!apply) return;
+            struct Write { U::FName key; int result; bool overwrite; bool decrease; };
+            static_assert(sizeof(Write) == 16 && offsetof(Write, overwrite) == 12);
+            Write arguments{flag, after, true, false};
+            barter.instance->ProcessEvent(apply, &arguments);
+        }
+
+        bool verified(const NpcBarter& barter) const
+        {
+            if (!apply) return true;
+            const auto [actual, found] = barter.wallet.flag_value(barter.instance, flag.ToString().c_str());
+            return found && actual == after;
+        }
+
+        std::string receipt() const
+        {
+            return apply ? std::format("reputation|{}|{}|{}\n", RC::to_utf8_string(flag.ToString()), before, after) : std::string{};
+        }
+    };
+
     int npc_barter_execute(const Lua& lua)
     {
         const auto reply = [&](bool okay, std::string_view status, const std::string& rows = {}, int before = 0, int after = 0) {
@@ -1322,12 +1396,18 @@ namespace
         if (pawn <= 0 || save <= 0 || stock <= 0 || trader <= 0 || !barter.bind(pawn, save, stock, trader, identity))
             return reply(false, "barter_refused_exact_owner_and_trader");
         const auto funds = barter.money();
-        if (cash < 0 || cash > 1000 || cash > funds ||
-            (cash && !bool_value(barter.actor, STR("AcceptCash"), barter.actor, true)))
+        if (cash < 0 || cash > funds || (cash && !bool_value(barter.actor, STR("AcceptCash"), barter.actor, true)))
             return reply(false, "barter_refused_wallet");
+        if (cash > 1000)
+        {
+            std::int32_t skinflint{};
+            if (!silverfish::native_enemy_loot::count_save_passive(barter.owner.save, U::FName{STR("Skinflint")}, skinflint) ||
+                skinflint != 0) return reply(false, "barter_refused_skinflint_cash_effect");
+        }
         std::vector<BarterSelection> give, receive;
         if (!selections(player_selection, give) || !selections(trader_selection, receive) ||
-            (give.empty() && cash == 0) || receive.empty()) return reply(false, "barter_refused_selection");
+            (give.empty() && cash == 0) || (give.empty() && receive.empty()))
+            return reply(false, "barter_refused_selection");
         auto* bag = barter.layout.backpack;
         void* stock_list = barter.inventory->ContainerPtrToValuePtr<void>(barter.actor);
         void* bag_list = bag->ContainerPtrToValuePtr<void>(barter.owner.save);
@@ -1376,25 +1456,34 @@ namespace
             const auto floor = best->GetPropertyValueInContainer(target);
             base_minimum = floor + (ceiling - floor) * fraction;
         }
-        auto* guest_save = barter.owner.save;
-        std::int32_t count{}, bonus{};
-        if (!silverfish::native_enemy_loot::count_save_passive(guest_save, U::FName{STR("Haggler")}, count) ||
-            (count > 0 && !silverfish::native_guest_sickness::read_passive_amplification(guest_save, bonus)))
+        int haggler{}, amplitude{};
+        if (!npc_barter_passive(barter, STR("Haggler"), haggler, amplitude))
             return reply(false, "barter_refused_passive_quote");
-        const auto minimum = count ? base_minimum * (0.7 * (count + bonus)) : base_minimum;
-        player_value += cash * cash_factor->GetPropertyValueInContainer(barter.data);
-        const auto balance = player_value / (player_value + trade_value);
+        const auto minimum = haggler ? base_minimum * (0.7 * amplitude) : base_minimum;
+        const auto cash_value = cash * cash_factor->GetPropertyValueInContainer(barter.data);
+        player_value += cash_value;
+        const auto total = player_value + trade_value;
+        const auto balance = player_value / total;
         if (!std::isfinite(minimum) || minimum <= 0.0 || minimum > 0.95 || !std::isfinite(balance) ||
-            balance < minimum || balance > minimum + 0.05)
-            return reply(false, std::format("barter_refused_native_balance:{:.5f}:{:.5f}:{}:{}:{:.5f}",
-                minimum, balance, count, count + bonus, base_minimum));
+            balance < minimum || balance > 1.0) return reply(false, "barter_refused_native_balance");
+        NpcBarterReputation reputation;
+        const auto ideal = minimum + 0.05;
+        if (balance > ideal)
+        {
+            auto* factor = field<U::FDoubleProperty>(barter.data, STR("BarterRepFactor"));
+            if (!factor) return reply(false, "barter_refused_reputation_schema");
+            const auto surplus = (balance - ideal) / (1.0 - ideal) * total;
+            const auto gain = (surplus - cash_value) * factor->GetPropertyValueInContainer(barter.data);
+            if (!reputation.prepare(barter, faction_id, gain)) return reply(false, "barter_refused_reputation_effect");
+        }
         bag->CopyCompleteValue(bag_list, new_bag.get());
         barter.inventory->CopyCompleteValue(stock_list, new_stock.get());
+        reputation.commit(barter);
         if (cash) barter.wallet.change(barter.instance, static_cast<int>(cash), true);
         barter.actor->ProcessEvent(barter.save_inventory, nullptr);
         if (bag->Identical(bag_list, new_bag.get()) && barter.inventory->Identical(stock_list, new_stock.get()) &&
-            barter.money() == funds - cash && barter.saved_matches())
-            return reply(true, "exchanged", receipt, funds, barter.money());
+            barter.money() == funds - cash && reputation.verified(barter) && barter.saved_matches())
+            return reply(true, "exchanged", receipt + reputation.receipt(), funds, barter.money());
         bag->CopyCompleteValue(bag_list, old_bag.get());
         barter.inventory->CopyCompleteValue(stock_list, old_stock.get());
         barter.saved->CopyCompleteValue(records, old_records.get());

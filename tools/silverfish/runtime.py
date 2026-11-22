@@ -1147,7 +1147,8 @@ class Bridge:
             data = {"pawns": {}, "player_effects": {}, "loot_actors": []}
             quest_rows, board_rows = [], []
             dialogue_frame, dialogue_progress, dialogue_lines, dialogue_choices = None, None, [], []
-            npc_barter_frame, npc_barter_items, npc_barter_transfers, npc_barter_preferences = None, [], [], []
+            npc_barter_frame, npc_barter_reputation = None, None
+            npc_barter_items, npc_barter_transfers, npc_barter_preferences = [], [], []
             sewer_frame, sewer_rows = None, []
             mosby_frame, mosby_reputation = None, []
             drill_frame, drill_reputation = None, []
@@ -1400,6 +1401,10 @@ class Bridge:
                     npc_barter_preferences.append(fields)
                 elif fields[0] == "native-npc-barter-transfer":
                     npc_barter_transfers.append(fields)
+                elif fields[0] == "native-npc-barter-reputation":
+                    if npc_barter_reputation is not None:
+                        raise ValueError("Duplicate NPC barter reputation")
+                    npc_barter_reputation = fields
                 elif fields[0] == "native-npc-barter-view":
                     if native_npc_barter.VIEW in data or len(fields) != 9 or data.get("map") != fields[1]:
                         raise ValueError("Invalid NPC barter view")
@@ -2961,12 +2966,13 @@ class Bridge:
                         data["native_authored_pickup"] = placed[source]
                     if source in intents:
                         data["native_authored_pickup_interaction"] = intents[source]
-                if npc_barter_frame or npc_barter_items or npc_barter_transfers or npc_barter_preferences:
+                if npc_barter_frame or npc_barter_items or npc_barter_transfers or npc_barter_preferences or npc_barter_reputation:
                     if (not npc_barter_frame or len(npc_barter_frame) != 10 or data.get("state") != "hosting"
                             or data.get("map") != npc_barter_frame[1]):
                         raise ValueError("Invalid host NPC barter frame")
                     data[native_npc_barter.STOCK] = native_npc_barter.parse(npc_barter_frame, npc_barter_items,
-                                                                          npc_barter_transfers, npc_barter_preferences)
+                                                                          npc_barter_transfers, npc_barter_preferences,
+                                                                          npc_barter_reputation)
                 if dialogue_frame or dialogue_progress or dialogue_lines or dialogue_choices:
                     if not dialogue_frame or len(dialogue_frame) != 6 or data.get("state") != "hosting" or data.get("map") != dialogue_frame[1]:
                         raise ValueError("Stock dialogue frame has no qualified listen world")

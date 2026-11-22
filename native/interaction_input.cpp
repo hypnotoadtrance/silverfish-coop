@@ -1160,6 +1160,16 @@ namespace
         return npc && save && (trader == npc_barter_input.actor.Get() || save->GetPropertyValueInContainer(trader));
     }
 
+    bool npc_barter_menu_active(Unreal::UObject* screen)
+    {
+        auto* top = top_menu();
+        if (!live(screen) || !live(top)) return false;
+        if (top == screen) return true;
+        auto* tree = top->GetOuterPrivate();
+        auto* confirmation = silverfish::npc_barter::type(STR("/Game/Classes/GUI/New/ConfirmationScreen.ConfirmationScreen_C"));
+        return confirmation && top->GetClassPrivate() == confirmation && live(tree) && tree->GetOuterPrivate() == screen;
+    }
+
     void intercept_npc_barter(Iteration& call, Unreal::UObject* object, Unreal::UFunction* function)
     {
         if (!object || !function || call.OriginalFunctionCallPrevented()) return;
@@ -1172,7 +1182,7 @@ namespace
         call.PreventOriginalFunctionCall();
         const auto now = Clock::now();
         if (call.OriginalFunctionCallPrevented() && object == npc_barter_screen.Get() && now < npc_barter_input.expires &&
-            now < scope.expires && live_scope(scope) && standing(scope.pawn.Get()) && top_menu() == object &&
+            now < scope.expires && live_scope(scope) && standing(scope.pawn.Get()) && npc_barter_menu_active(object) &&
             !npc_barter_confirm.pending.sequence && npc_barter_sequence < max_sequence)
             npc_barter_confirm.pending = {++npc_barter_sequence, now + receipt_lifetime};
     }
@@ -1195,7 +1205,8 @@ namespace
             scope.host || Clock::now() >= scope.expires || !live_scope(scope)) return respond(false);
         auto* pawn = scope.pawn.Get();
         if (address(pawn) != lua.get_integer()) return respond(false);
-        auto* screen = top_menu();
+        auto* screen = npc_barter_screen.Get();
+        if (!npc_barter_menu_active(screen)) screen = top_menu();
         auto* actor = object_field(screen, STR("Trader"));
         if (address(actor) != lua.get_integer() || !stock_npc_barter_menu(screen)) return respond(false);
         auto* box = object_field(actor, STR("Box"));

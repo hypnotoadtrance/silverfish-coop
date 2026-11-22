@@ -147,6 +147,7 @@ local guest_scope = require("native_save_scope")
 local session
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_SHOP_VIEW") == "1"
 local barter_screen = "/Game/Classes/GUI/New/BarterScreen.BarterScreen_C"
+local confirmation_screen = "/Game/Classes/GUI/New/ConfirmationScreen.ConfirmationScreen_C"
 local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local item_base = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
 
@@ -176,6 +177,15 @@ local function top(context, screen)
     return stack and stack:GetArrayNum() == 1 and same(stack[1], screen)
 end
 
+local function confirmation(context, screen)
+    local stack = valid(context.controller) and context.controller.MenuStack
+    if stack and stack:GetArrayNum() == 2 and same(stack[1], screen) and exact(stack[2], confirmation_screen) then
+        local modal = stack[2]
+        local tree = modal:GetOuter()
+        if valid(tree) and same(tree:GetOuter(), screen) then return modal end
+    end
+end
+
 local function copy_items(from, to)
     local count = from:GetArrayNum()
     to:Empty()
@@ -191,6 +201,10 @@ local function close_stock(committed)
         if committed then
             current.screen.PlayerOffer:Empty()
             current.screen.TraderOffer:Empty()
+        end
+        local modal = confirmation(current, current.screen)
+        if modal then
+            modal:BndEvt__ConfirmationScreen_Button_Cancel_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
         end
         if top(current, current.screen) then current.controller:CloseMenu({}) end
         if current.screen:IsInViewport() then current.screen:RemoveFromParent() end
@@ -326,7 +340,8 @@ function barter.sync(state, phase)
     local current = local_context(state, phase)
     if not current then close_stock(); return end
     if session and (session.expires < os.time() or not same(current.pawn, session.pawn)
-        or not same(current.actor, session.actor) or session.screen and not top(current, session.screen)) then close_stock() end
+        or not same(current.actor, session.actor) or session.screen and not top(current, session.screen)
+            and not confirmation(current, session.screen)) then close_stock() end
     local stack = current.controller.MenuStack
     local opened = stack:GetArrayNum() == 1 and stack[1]
     local accepting = not session and current.controller.Loading == false and exact(opened, barter_screen)
@@ -348,7 +363,7 @@ function barter.sync(state, phase)
                 return choices(session.screen.PlayerOffer), choices(session.screen.TraderOffer)
             end)
             local cash = math.tointeger(session.screen.PlayerCashOffer)
-            if not okay or not cash or cash < 0 or cash > 1000 then close_stock(); return end
+            if not okay or not cash or cash < 0 or cash > 2147483647 then close_stock(); return end
             session.screen:SetIsEnabled(false)
             session.sequence, session.state, session.expires = sequence, "confirming", os.time() + 25
             session.give, session.receive, session.cash = give, receive, cash
@@ -399,7 +414,11 @@ function barter.rows(state, phase, row)
         for line in latest.exchange:gmatch("[^\n]+") do
             local fields = {}
             for value in line:gmatch("[^|]+") do fields[#fields + 1] = value end
-            result[#result + 1] = row("native-npc-barter-transfer", table.unpack(fields))
+            if fields[1] == "reputation" then
+                result[#result + 1] = row("native-npc-barter-reputation", table.unpack(fields, 2))
+            else
+                result[#result + 1] = row("native-npc-barter-transfer", table.unpack(fields))
+            end
         end
     end
     return result

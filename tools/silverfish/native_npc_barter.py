@@ -17,6 +17,8 @@ CLOSE = "native-npc-barter-close"
 STOCK = "native_npc_barter"
 VIEW = "native_npc_barter_view"
 MAX_ITEMS = 128
+MAX_CASH = 2**31 - 1
+REPUTATION_FLAG = re.compile(r"Rep_[A-Za-z0-9_ -]{1,120}")
 ITEM = re.compile(r"/Game/Classes/[A-Za-z0-9_./-]+_C")
 MAP = re.compile(r"/Game/Classes/Maps(?:/[A-Za-z0-9_-]+)+")
 PAWN_SUFFIX = re.compile(r"[0-9]+")
@@ -41,7 +43,8 @@ def item_key(path: str, guid: str) -> bool:
     return valid_guid(guid) and 0 < len(path) <= 512 and ".." not in path and ITEM.fullmatch(path) is not None
 
 
-def parse(frame: list[str], items: list[list[str]], moved: list[list[str]], preferences: list[list[str]]) -> dict:
+def parse(frame: list[str], items: list[list[str]], moved: list[list[str]], preferences: list[list[str]],
+          reputation: list[str] | None = None) -> dict:
     if len(frame) != 10 or not valid_guid(frame[2]) or not pawn_in_map(frame[3], frame[1]):
         raise ValueError("Invalid native NPC barter scope")
     seed = integer(frame[8], -(2**31), 2**31 - 1)
@@ -82,9 +85,17 @@ def parse(frame: list[str], items: list[list[str]], moved: list[list[str]], pref
         if not math.isfinite(value) or not 0 < value <= 100:
             raise ValueError("Invalid native NPC barter preference")
         taste[row[1]] = value
-    return {"map": frame[1], "trader": frame[2], "pawn": frame[3], "cash": current, "accepts_cash": frame[5] == "1",
-            "stock": available, "cash_before": before, "transfers": transfers, "seed": seed, "preferences": taste,
-            "minimum_weapon_value": minimum}
+    proof = {"map": frame[1], "trader": frame[2], "pawn": frame[3], "cash": current, "accepts_cash": frame[5] == "1",
+             "stock": available, "cash_before": before, "transfers": transfers, "seed": seed, "preferences": taste,
+             "minimum_weapon_value": minimum}
+    if reputation is not None:
+        if (len(reputation) != 4 or not any(row["direction"] == "give" for row in transfers)
+                or not REPUTATION_FLAG.fullmatch(reputation[1])):
+            raise ValueError("Invalid native NPC barter reputation")
+        prior = integer(reputation[2], -(2**31), 2**31 - 1)
+        after = integer(reputation[3], prior + 1, 2**31 - 1)
+        proof["reputation"] = {"flag": reputation[1], "before": prior, "after": after}
+    return proof
 
 
 def selection(encoded: str) -> dict[str, int]:
@@ -104,12 +115,13 @@ def parse_view(fields: list[str]) -> dict:
     mode = fields[4]
     if mode not in {"opening", "ready", "confirming", "closed"}:
         raise ValueError("Invalid native barter screen state")
+    cash = integer(fields[8], 0, MAX_CASH)
     if mode == "confirming":
-        if not selection(fields[7]) or not selection(fields[6]) and fields[8] == "0":
-            raise ValueError("An NPC barter exchange needs a payment and reward")
+        give, receive = selection(fields[6]), selection(fields[7])
+        if not give and not (receive and cash):
+            raise ValueError("An NPC barter exchange needs an item offer or cash payment for an item")
     elif fields[6:] != ["-", "-", "0"]:
         raise ValueError("The stock barter view returned an unexpected trade")
-    cash = integer(fields[8], 0, 1000)
     return {"map": fields[1], "pawn": fields[2], "sequence": integer(fields[3], 1, 2**53 - 1),
             "state": mode, "trader": fields[5], "give": fields[6], "receive": fields[7], "cash": cash}
 
@@ -154,9 +166,9 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     if action == OPEN:
         return {STOCK: await _report(host, bridge, OPEN, scope[1], scope[2], trader)}
     payment, offered, wanted = proposal
-    cash = integer(payment, 0, 1000)
+    cash = integer(payment, 0, MAX_CASH)
     expected = {"give": selection(offered), "receive": selection(wanted)}
-    if not expected["receive"] or not expected["give"] and not cash:
+    if not expected["give"] and not (expected["receive"] and cash):
         raise party.RuleError("native_npc_barter_invalid_exchange")
     fingerprint = [EXCHANGE, target, None]
     for receipt in host.party["receipts"].get(character, []):

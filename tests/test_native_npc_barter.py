@@ -47,6 +47,31 @@ class BarterFrameTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             barter.parse(summary, stock, moved, preferences)
 
+    def test_positive_reputation_is_bound_to_an_item_contribution(self):
+        summary, stock, moved, preferences = exchange()
+        reputation = ["native-npc-barter-reputation", "Rep_Loners", "-20", "9"]
+        proof = barter.parse(summary, stock, moved[:1], preferences, reputation)
+        self.assertEqual(proof["reputation"], {"flag": "Rep_Loners", "before": -20, "after": 9})
+        for invalid in (reputation[:3], [reputation[0], "Player_Cash", "-20", "9"],
+                        [*reputation[:3], "-20"]):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                barter.parse(summary, stock, moved[:1], preferences, invalid)
+        with self.assertRaises(ValueError):
+            barter.parse(summary, stock, moved[1:], preferences, reputation)
+
+    def test_stock_confirm_supports_item_only_offers_and_full_signed_wallet_range(self):
+        view = [barter.VIEW, OBSERVATORY, PAWN, "2", "confirming", TRADER,
+                f"{PAYMENT}:2", "-", "0"]
+        self.assertEqual(barter.parse_view(view)["give"], f"{PAYMENT}:2")
+        view[6:] = ["-", f"{OFFER}:1", str(barter.MAX_CASH)]
+        self.assertEqual(barter.parse_view(view)["cash"], barter.MAX_CASH)
+        view[8] = str(barter.MAX_CASH + 1)
+        with self.assertRaises(ValueError):
+            barter.parse_view(view)
+        view[6:] = ["-", "-", "800"]
+        with self.assertRaises(ValueError):
+            barter.parse_view(view)
+
     def test_duplicate_guid_and_malformed_amount_are_refused(self):
         for encoded in (f"{OFFER}:2,{OFFER}:2", f"{OFFER}:0", f"{OFFER}:01", f"{OFFER}:1,"):
             with self.subTest(encoded=encoded), self.assertRaises(ValueError):
@@ -80,6 +105,22 @@ class BarterCommitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.host.checkpoint_native.await_args.kwargs["require_guest_frames"], {"guest"})
         self.assertEqual(self.host.party["players"]["guest"]["native_inventory"], {})
         self.assertFalse(self.host.native_checkpoint_unsafe)
+
+    async def test_item_donation_commits_reputation_once_without_spending_cash(self):
+        from copy import deepcopy
+
+        summary, stock, moved, preferences = exchange()
+        summary[4] = summary[7] = "400"
+        reputation = ["native-npc-barter-reputation", "Rep_Loners", "100", "150"]
+        self.bridge.command.return_value[barter.STOCK] = barter.parse(summary, stock, moved[:1], preferences, reputation)
+        target = f"{EPOCH}@{TRADER}@0@{PAYMENT}:2@-"
+        with patch.object(party, "load_party", side_effect=deepcopy):
+            first = await barter.perform(self.host, self.bridge, "guest", barter.EXCHANGE, target, OPERATION)
+            replay = await barter.perform(self.host, self.bridge, "guest", barter.EXCHANGE, target, OPERATION)
+        self.assertEqual(first, replay)
+        self.assertEqual(first[barter.STOCK]["reputation"]["after"], 150)
+        self.bridge.command.assert_awaited_once_with(barter.EXCHANGE, PAWN, TRADER, f"{PAYMENT}:2", "-", "0", timeout=7)
+        self.assertEqual(self.host.party["receipts"]["guest"][0]["result"], first)
 
     async def test_ordinary_quote_refusal_preserves_the_writable_campaign(self):
         self.bridge.command.side_effect = RuntimeError("barter_refused_native_balance")
