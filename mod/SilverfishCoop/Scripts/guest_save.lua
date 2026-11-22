@@ -1,4 +1,5 @@
 local guest_save = {}
+local heartbeat = require("native_event_heartbeat")
 local vitals = require("vitals")
 local zones = require("zone_maps")
 
@@ -50,15 +51,7 @@ local function inventory_counts(save)
 end
 
 local function heartbeat_fresh()
-    if not heartbeat_path then return false end
-    local file = io.open(heartbeat_path, "rb")
-    if not file then return false end
-    local contents = file:read(32)
-    file:close()
-    local timestamp = tonumber(contents and contents:match("^([0-9]+)%s*$"))
-    if not timestamp then return false end
-    local age = os.time() - timestamp
-    return age >= 0 and age <= 2
+    return heartbeat.fresh(heartbeat_path)
 end
 
 local function controlled(pawn, controller, world, local_controller)

@@ -3922,10 +3922,14 @@ class Host:
             if game and game.get("sequence") != sequence:
                 sequence, seen = game.get("sequence"), now
             if game and game.get("state") == "hosting" and now - seen < 1.5:
-                stamp = f"{int(time.time())}\n"
+                timestamp = int(time.time())
+                stamp = f"{timestamp}\n"
                 if self.should_keep_native_scope():
-                    with contextlib.suppress(OSError):
-                        write_text(bridge.directory / "native-events-heartbeat", stamp)
+                    if bridge.local_bridge is not None:
+                        bridge.local_bridge.publish_native_events_heartbeat(timestamp)
+                    elif not isinstance(bridge.process, EmbeddedEngine):
+                        with contextlib.suppress(OSError):
+                            write_text(bridge.directory / "native-events-heartbeat", stamp)
                 if self.wire_board_enabled and game.get("map") in native_wire_board.MAPS:
                     with contextlib.suppress(OSError):
                         write_text(bridge.directory / native_wire_board.HEARTBEAT, stamp)

@@ -3,7 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 import uuid
 
 from test_title_handoff import ready
@@ -51,6 +51,41 @@ class StockBridge:
             assert self.state == "ready" and arguments == (self.save_scope,)
             self.save_scope = None
         return self.snapshot()
+
+
+class NativeEventHeartbeatTests(unittest.IsolatedAsyncioTestCase):
+    async def test_host_heartbeat_uses_the_process_local_bridge_and_preserves_diagnostics(self):
+        for mode, allowed in (("memory", True), ("detached", True), ("external", True), ("memory", False)):
+            with self.subTest(mode=mode, allowed=allowed), TemporaryDirectory() as temporary:
+                host = SimpleNamespace(stopping=False, wire_board_enabled=False, native_host_dig_live=False,
+                                       should_keep_native_scope=lambda: allowed)
+                process = Mock(spec=embedded.EmbeddedEngine if mode != "external" else object)
+                process.poll = Mock(return_value=None)
+                inbox = Mock() if mode == "memory" else None
+                bridge = SimpleNamespace(
+                    process=process, local_bridge=inbox, directory=Path(temporary),
+                    snapshot=lambda: {"state": "hosting", "sequence": 1, "map": OBSERVATORY},
+                )
+
+                async def stop_after_poll(delay):
+                    self.assertEqual(delay, .4)
+                    host.stopping = True
+
+                with (patch.object(service.time, "time", return_value=1_800_000_000.8),
+                      patch.object(service.asyncio, "sleep", side_effect=stop_after_poll)):
+                    await service.Host.renew_native_scope(host, bridge)
+
+                file = bridge.directory / "native-events-heartbeat"
+                if mode == "external":
+                    self.assertEqual(file.read_text(encoding="ascii"), "1800000000\n")
+                else:
+                    self.assertFalse(file.exists())
+                if inbox is not None:
+                    publish = inbox.publish_native_events_heartbeat
+                    if allowed:
+                        publish.assert_called_once_with(1_800_000_000)
+                    else:
+                        publish.assert_not_called()
 
 
 class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):

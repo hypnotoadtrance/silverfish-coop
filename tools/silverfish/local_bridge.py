@@ -29,6 +29,10 @@ class LocalBridge:
         self._input_ready.argtypes, self._input_ready.restype = [], ctypes.c_int
         self._read_input = library.SilverfishBridgeReadInputV1
         self._read_input.argtypes, self._read_input.restype = [ctypes.c_void_p, ctypes.c_uint32], ctypes.c_uint32
+        self._native_events_heartbeat = getattr(library, "SilverfishBridgePublishNativeEventsHeartbeatV1", None)
+        if self._native_events_heartbeat is not None:
+            self._native_events_heartbeat.argtypes = [ctypes.c_int64]
+            self._native_events_heartbeat.restype = ctypes.c_int
         self._prop_poses = getattr(library, "SilverfishBridgePublishPropPosesV1", None)
         if self._prop_poses is not None:
             self._prop_poses.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
@@ -119,6 +123,9 @@ class LocalBridge:
     def input_ready(self):
         return bool(self._input_ready())
 
+    def publish_native_events_heartbeat(self, stamp: int) -> bool:
+        return self._native_events_heartbeat is not None and bool(self._native_events_heartbeat(stamp))
+
     def publish_prop_poses(self, frame: str) -> bool:
         if self._prop_poses is None:
             return False
@@ -136,4 +143,5 @@ class LocalBridge:
         return records
 
     def close(self):
+        self._native_events_heartbeat = None
         self._close()

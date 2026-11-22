@@ -142,4 +142,39 @@ stock_health, damage_pending = 0, true
 native.sync(state, "hosting")
 native.project_host(state, "hosting", "standing")
 assert(stock_health == 25 and detached.PlayerHealth == 250 and replications == 2 and damage_events == 1)
-print("native restored host revive proof passed")
+local host_heartbeat = require("native_event_heartbeat")
+local file_reads, file_stamp = 0, "1234\n"
+os.time = function() return 1234 end
+io.open = function(path, mode)
+    assert(path == "mock/native-events-heartbeat" and mode == "rb")
+    file_reads = file_reads + 1
+    return { read = function(_, size) assert(size == 32); return file_stamp end,
+        close = function() end }
+end
+local heartbeat_path = "mock/native-events-heartbeat"
+assert(host_heartbeat.fresh(heartbeat_path))
+file_stamp = "0000000001234\n"
+assert(host_heartbeat.fresh(heartbeat_path) and not host_heartbeat.fresh(heartbeat_path, 12))
+file_stamp = "bad input"
+assert(not host_heartbeat.fresh(heartbeat_path))
+
+environment.SILVERFISH_COOP_EMBEDDED_ENGINE = "1"
+package.loaded.native_event_heartbeat = nil
+local local_heartbeat = require("native_event_heartbeat")
+local attached, local_stamp = true, 1232
+SilverfishReadLocalNativeEventsHeartbeat = function() return attached, local_stamp end
+file_stamp = "1234\n"
+local reads_before_local = file_reads
+assert(local_heartbeat.fresh(heartbeat_path, 12))
+local_stamp = 1231
+assert(not local_heartbeat.fresh(heartbeat_path, 12))
+local_stamp = 1235
+assert(not local_heartbeat.fresh(heartbeat_path, 12))
+local_stamp = nil
+assert(not local_heartbeat.fresh(heartbeat_path, 12))
+attached, local_stamp = false, 1234
+assert(not local_heartbeat.fresh(heartbeat_path, 12))
+SilverfishReadLocalNativeEventsHeartbeat = nil
+assert(not local_heartbeat.fresh(heartbeat_path, 12))
+assert(reads_before_local == file_reads)
+print("native restored host revive and heartbeat proof passed")

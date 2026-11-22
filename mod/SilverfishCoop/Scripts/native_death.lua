@@ -1,5 +1,6 @@
 local native_death = {}
 local guest_save = require("guest_save")
+local heartbeat = require("native_event_heartbeat")
 local host_save = require("native_host_save")
 local players = require("players")
 local vitals = require("vitals")
@@ -146,14 +147,7 @@ local function restored_owner(state, record, save)
 end
 
 local function heartbeat_fresh()
-    local file = io.open(heartbeat_path, "rb")
-    if not file then return false end
-    local value = file:read(32)
-    file:close()
-    local timestamp = value and value:match("^(%d+)%s*$")
-    if not timestamp or #timestamp > 12 then return false end
-    local age = os.time() - tonumber(timestamp)
-    return age >= 0 and age <= 2
+    return heartbeat.fresh(heartbeat_path, 12)
 end
 
 local function clear_scope(force)

@@ -36,6 +36,7 @@ namespace
     std::uint64_t status_revision{};
     std::deque<std::string> input;
     std::string prop_poses;
+    std::int64_t native_events_heartbeat{};
 
     void clear()
     {
@@ -144,6 +145,21 @@ namespace
         return 1;
     }
 
+    int read_native_events_heartbeat(const Lua& lua)
+    {
+        bool active{};
+        std::int64_t stamp{};
+        {
+            std::lock_guard lock(mutex);
+            active = attached;
+            stamp = native_events_heartbeat;
+        }
+        lua.set_bool(active);
+        if (!active || !stamp) return 1;
+        lua.set_integer(stamp);
+        return 2;
+    }
+
     int take_prop_poses(const Lua& lua)
     {
         bool active{};
@@ -176,6 +192,7 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
     status_frame.clear();
     input.clear();
     prop_poses.clear();
+    native_events_heartbeat = 0;
     clear();
 }
 
@@ -221,6 +238,15 @@ extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeReadInputV1(char*
     std::memcpy(buffer, record.data(), size);
     input.pop_front();
     return size;
+}
+
+extern "C" __declspec(dllexport) int SilverfishBridgePublishNativeEventsHeartbeatV1(std::int64_t stamp)
+{
+    if (stamp <= 0) return 0;
+    std::lock_guard lock(mutex);
+    if (!attached) return 0;
+    native_events_heartbeat = stamp;
+    return 1;
 }
 
 extern "C" __declspec(dllexport) int SilverfishBridgePublishPropPosesV1(const char* data, std::uint32_t size)
@@ -278,6 +304,7 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishPublishLocalBridgeStatus", publish_status);
         lua.register_function("SilverfishEnqueueLocalBridgeInput", enqueue_input);
         lua.register_function("SilverfishTakeLocalPropPoses", take_prop_poses);
+        lua.register_function("SilverfishReadLocalNativeEventsHeartbeat", read_native_events_heartbeat);
     }
 
     void stop()
@@ -289,6 +316,7 @@ namespace silverfish::local_bridge
         status_frame.clear();
         input.clear();
         prop_poses.clear();
+        native_events_heartbeat = 0;
         clear();
     }
 }
