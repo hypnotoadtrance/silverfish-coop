@@ -75,7 +75,7 @@ namespace
         return opt_in("SILVERFISH_COOP_NATIVE_ZONE") && opt_in("SILVERFISH_COOP_NATIVE_GUEST_SAVE");
     }
 
-    bool sickness_routing{}, shadow_routing{};
+    bool sickness_routing{}, crossroads_routing{}, shadow_routing{};
     U::FName shadow_graph, resolve_psy_name;
 
     template <typename T>
@@ -446,7 +446,7 @@ namespace
     {
         if (!U::IsInGameThreadRaw() || iteration.OriginalFunctionCallPrevented()) return;
         if (redirect_psy(iteration, receiver, frame)) return;
-        if (!sickness_routing || !schema_bound) return;
+        if (!(sickness_routing || crossroads_routing) || !schema_bound) return;
         const bool lookup = frame.Node() == schema.check_flag;
         if (!lookup && frame.Node() != schema.add_flag) return;
         auto* caller = frame.PreviousFrame();
@@ -456,6 +456,12 @@ namespace
         auto* entry = entry_for(caller->Object());
         auto* locals = frame.Locals();
         if (!entry || !locals || receiver != entry->instance.Get()) return;
+        if (!sickness_routing)
+        {
+            auto* pawn = entry->pawn.Get();
+            auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
+            if (!world || world->GetPathName() != crossroads) return;
+        }
         const auto key = (lookup ? schema.check_key : schema.add_key)->GetPropertyValueInContainer(locals);
         if (key != schema.sickness && (!lookup || !infect || key != schema.fatigue)) return;
 
@@ -697,6 +703,8 @@ void silverfish::native_guest_sickness::install_hooks()
     if (callback != Hook::ERROR_ID) return;
     sickness_routing = enabled();
     shadow_routing = shadow_enabled();
+    // Default Crossroads Flayers can infect a guest through the shared GameInstance.
+    crossroads_routing = shadow_routing && opt_in("SILVERFISH_COOP_NATIVE_CROSSROADS_ROSTER");
     if (!sickness_routing && !shadow_routing) return;
     callback = Hook::RegisterProcessLocalScriptFunctionPreCallback(
         redirect, {false, false, owner, STR("Redirect exact guest Sickness flag effects")});

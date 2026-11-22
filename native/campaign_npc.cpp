@@ -604,6 +604,7 @@ namespace
     bool veto_flayer_spawns{};
     bool operate_not_deer{};
     bool watch_combat{};
+    bool watch_flayer_projectiles{};
     bool refresh_fixture{};
 
     void update_scope(const Network& active)
@@ -1152,7 +1153,8 @@ namespace
             || function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)
             || byte_field(receiver, STR("Role")) != 1 || !bool_field(receiver, STR("bReplicates"), true)) return false;
         const auto family = npc_family(receiver);
-        if (family != NpcFamily::Husk && family != NpcFamily::Boar) return false;
+        if (!publishes(family) ||
+            (family == NpcFamily::NotDeer && byte_field(receiver, STR("Faction")) != not_deer_profile.faction)) return false;
         const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld());
         if (active.seat != Seat::Client || !in_level(receiver, active.world) ||
             (frame && frame->Object() != receiver)) return false;
@@ -1255,7 +1257,7 @@ namespace
         if (name == damage_name)
         {
             if (watch_combat) before_stock_melee(receiver, frame);
-            if (publish_flayers && veto_flayer_spawns) before_flayer_projectile(receiver, frame);
+            if (watch_flayer_projectiles) before_flayer_projectile(receiver, frame);
             return;
         }
         if (name != spawn_name && name != load_name && name != init_name && name != perceive_name) return;
@@ -1926,12 +1928,13 @@ namespace silverfish::campaign_npc
         if (!env("SILVERFISH_COOP_NATIVE_ZONE") || !env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC") ||
             installed.load(std::memory_order_acquire)) return;
         operate = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE");
-        publish_flayers = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_PUBLISH");
-        veto_flayer_spawns = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO");
-        operate_not_deer = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER");
         production_roster = env("SILVERFISH_COOP_NATIVE_CROSSROADS_ROSTER");
+        publish_flayers = production_roster || env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_PUBLISH");
+        veto_flayer_spawns = production_roster || env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO");
+        operate_not_deer = env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER");
         operate_boars = production_roster || (env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_NATIVE_BOAR_FIXTURE"));
         const bool headless_fixture = env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_NATIVE_FIXTURES");
+        watch_flayer_projectiles = headless_fixture && publish_flayers && veto_flayer_spawns;
         watch_combat = headless_fixture && env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT");
         refresh_fixture = headless_fixture && env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH");
         callbacks[0] = Hook::RegisterProcessLocalScriptFunctionPreCallback(
@@ -2023,7 +2026,7 @@ namespace silverfish::campaign_npc
         lua.register_function("SilverfishReadCampaignNpc", report);
         lua.register_function("SilverfishClearCampaignNpc", reset);
         if (production_roster) lua.register_function("SilverfishReadCampaignNpcHostRoster", report_host_roster);
-        if (publish_flayers && veto_flayer_spawns)
+        if (watch_flayer_projectiles)
             lua.register_function("SilverfishReadCampaignFlayerProjectile", read_flayer_projectile);
         if (refresh_fixture) lua.register_function("SilverfishStockCampaignNpcRefresh", stock_refresh);
         if (watch_combat)

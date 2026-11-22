@@ -3971,8 +3971,8 @@ class Host:
                                         for row in self.last_game.get("native_guest_regen", {}).values()):
                 self.native_checkpoint_unsafe = True
                 raise RuntimeError("A stock guest regeneration update failed authority readback")
-            if self.guest_sickness and any(row["state"].startswith("mutation_unverified_")
-                                           for row in self.last_game.get("native_guest_sickness", {}).values()):
+            if any(row["state"].startswith("mutation_unverified_")
+                   for row in self.last_game.get("native_guest_sickness", {}).values()):
                 self.native_checkpoint_unsafe = True
                 raise RuntimeError("A stock guest sickness update failed authority readback")
             now = time.monotonic()

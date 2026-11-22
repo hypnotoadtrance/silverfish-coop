@@ -538,8 +538,8 @@ def game_environment(work: Path, headless: bool, port: int | None = None, *,
         if (backend == "cpp" and (native_guest or guest_inventory_view)
                 and "SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC" not in env
                 and staged_script(work, "native_campaign_npc.lua", "NPC_NotDeer_C")):
-            env.update(SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC="1", SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER="1",
-                       SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW="notdeer")
+            env.update(SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC="1", SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER="1")
+            env.setdefault("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW", "notdeer")
             if staged_script(work, "native_campaign_npc.lua", "SilverfishReadCampaignNpcHostRoster"):
                 env["SILVERFISH_COOP_NATIVE_CROSSROADS_ROSTER"] = "1"
         if host_role and native_fixtures:

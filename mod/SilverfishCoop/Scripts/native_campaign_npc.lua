@@ -12,6 +12,7 @@ local fixture = enabled and (os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPL
     and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local combat_fixture = fixture and combat_enabled
 local detached_sickness = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SICKNESS") == "1"
+    or os.getenv("SILVERFISH_COOP_NATIVE_CROSSROADS_ROSTER") == "1"
 local refresh_fixture = fixture and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH") == "1"
 local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local level = map .. ".CrossRoads_P:PersistentLevel."
