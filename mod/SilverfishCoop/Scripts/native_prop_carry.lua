@@ -296,6 +296,38 @@ local function fixture(fields, current, seat)
         end
         error("native_prop_carry_fixture_approach", 0)
     end
+    if seat == "hosting" and (mode == "approach-placed" or mode == "tip") and mesh(fixture_actor) then
+        local center = fixture_actor:K2_GetActorLocation()
+        if mode == "tip" then
+            local shape = fixture_actor.PropMesh
+            local mass = shape:GetMass()
+            shape:AddImpulseAtLocation({X = mass * 460, Y = 0, Z = 0},
+                {X = center.X, Y = center.Y, Z = center.Z + 40}, FName("None"))
+            shape:AddAngularImpulseInDegrees({X = 0, Y = 700, Z = 0}, FName("None"), true)
+            return "Applied a stock physics impulse above the placed barrel's center"
+        end
+        local guest = guest_save.exact_item_context(current, seat, fields[4])
+        if valid(guest) then
+            for _, offset in ipairs({{X = 145, Y = 0}, {X = -145, Y = 0}, {X = 0, Y = 145}, {X = 0, Y = -145}}) do
+                local at = {X = center.X + offset.X, Y = center.Y + offset.Y, Z = center.Z + 65}
+                if guest:K2_TeleportTo(at, guest:K2_GetActorRotation()) then
+                    guest:ForceNetUpdate()
+                    return "Guest staged near the original placed barrel"
+                end
+            end
+        end
+        error("native_prop_carry_fixture_approach", 0)
+    end
+    if mode == "sample" and #fields == 4 then
+        local actor = StaticFindObject(fields[4])
+        local shape = mesh(actor)
+        if shape and same(actor:GetWorld(), world) and actor.bReplicateMovement == true then
+            local position, rotation = actor:K2_GetActorLocation(), actor:K2_GetActorRotation()
+            return string.format("%.3f|%.3f|%.3f|%.3f|%.3f|%.3f",
+                position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw, rotation.Roll)
+        end
+        error("native_prop_carry_fixture_sample_unavailable", 0)
+    end
     if seat == "connected" and (mode == "grab" or mode == "pickup" or mode == "lamp-use") then
         local class = StaticFindObject(fields[4])
         local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")

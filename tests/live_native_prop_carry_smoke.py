@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tools.silverfish import native_lantern as lantern, native_prop_carry as carry
-from tools.silverfish.travel import DEAD_BRIDGE, OBSERVATORY
+from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY
 
 CRATE = f"{OBSERVATORY}.Observitory_P:PersistentLevel.LootCrate_Small_BP_C_1"
 
@@ -70,13 +70,50 @@ async def exercise(work, untouched, kind="crate"):
     def lamp(response):
         return response.get("game", {}).get(lantern.KEY, {}).get("lit")
 
+    async def verify_fuel_drum(initial):
+        actor_path = initial["actor"].split(" ", 1)[1]
+        await fixture(host, "approach-placed@guest")
+
+        async def sample(controller):
+            result = await fixture(controller, "sample@" + actor_path)
+            return [float(value) for value in result["sample"].split("|")]
+
+        def angle(first, second):
+            return abs((first - second + 180) % 360 - 180)
+
+        before = await sample(host)
+        async with asyncio.timeout(10):
+            while math.dist((await sample(guest))[:3], before[:3]) >= 8:
+                await asyncio.sleep(.2)
+        await fixture(host, "tip@" + actor_path)
+        authority = replica = None
+        try:
+            async with asyncio.timeout(14):
+                while True:
+                    authority, replica = await asyncio.gather(sample(host), sample(guest))
+                    tipped = max(angle(authority[index], before[index]) for index in (3, 5)) > 22
+                    matched = math.dist(authority[:3], replica[:3]) < 10 and all(
+                        angle(first, second) < 9 for first, second in zip(authority[3:], replica[3:], strict=True))
+                    if tipped and matched:
+                        return {"actor": initial["actor"], "before": before, "host": authority, "guest": replica,
+                                "original_files_verified": len(original)}
+                    await asyncio.sleep(.2)
+        except TimeoutError as error:
+            raise RuntimeError(f"Fuel drum did not match after tipping. Before {before}, host {authority}, guest {replica}") from error
+
     try:
         assert original
-        area = DEAD_BRIDGE if kind == "barrel" else OBSERVATORY
+        area = {"barrel": DEAD_BRIDGE, "fuel-drum": CROSSROADS}.get(kind, OBSERVATORY)
         await start("host", host, "host", *host, "--port", "0", "--headless", "--fixtures", "--native-events",
                     "--native-guest", "--native-zones", "--native-expanded-zones", "--start-zone", area)
+        barrel_class = {"barrel": "Prop_PlasticBarrel_C ", "fuel-drum": "Prop_FuelDrum_C "}.get(kind)
+
+        def barrels_of_class(state):
+            return [item for item in state.get("game", {}).get(carry.BARRELS, {}).values()
+                    if barrel_class and item["actor"].startswith(barrel_class)]
+
         initial_world = await wait(hrun, lambda state: state.get("state") == "hosting" and (
-            kind != "barrel" or state.get("game", {}).get(carry.BARRELS)))
+            not barrel_class or barrels_of_class(state)))
         invite = await command("invite", *host, "--name", "Crate carrier", "--character", "Crate carrier")
         guest_process = await start("guest", guest, "join", *guest, "--invite", invite["invite_file"], "--headless")
         await wait(grun, lambda state: state.get("state") == "connected")
@@ -86,10 +123,14 @@ async def exercise(work, untouched, kind="crate"):
         elif kind == "lantern":
             wanted = "select@" + lantern.ACTOR.split(" ", 1)[1]
         else:
-            barrels = initial_world["game"][carry.BARRELS]
-            selected = min(barrels.values(), key=lambda item: item["mass"])
+            barrels = barrels_of_class(initial_world)
+            selected = min(barrels, key=lambda item: item["mass"])
             wanted = "select@" + selected["actor"].split(" ", 1)[1]
         initial = (await fixture(host, wanted))[carry.FIXTURE]
+        if kind == "fuel-drum":
+            evidence = await verify_fuel_drum(initial)
+            (hrun / "fuel-drum-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+            return
         await fixture(host, "approach@guest")
         await asyncio.sleep(.65)
         if kind == "lantern":
@@ -139,6 +180,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", required=True, type=Path)
     parser.add_argument("--vanilla-saved", required=True, type=Path)
-    parser.add_argument("--kind", choices=("crate", "lantern", "barrel"), default="crate")
+    parser.add_argument("--kind", choices=("crate", "lantern", "barrel", "fuel-drum"), default="crate")
     options = parser.parse_args()
     asyncio.run(exercise(options.work.resolve(), options.vanilla_saved.resolve(), options.kind))

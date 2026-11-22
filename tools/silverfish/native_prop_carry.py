@@ -73,11 +73,14 @@ def parse(fields, phase, area):
             report.update(sample=_serial(fields[11]), grip=_numbers(fields[12:], (1e7,) * 3))
         return report
     if fields[0] == BARREL_ROW:
-        if (len(fields) != 4 or phase != "hosting"
-                or not re.fullmatch(r"Prop_PlasticBarrel_C /Game/[A-Za-z0-9_./]+:PersistentLevel\."
-                                    r"(?:Prop_PlasticBarrel_GEN_VARIABLE_Prop_PlasticBarrel_C_CAT_|Prop_PlasticBarrel_C_)[0-9]+",
-                                    fields[2])):
+        actor = re.fullmatch(r"(Prop_(?:PlasticBarrel|FuelDrum))_C /Game/[A-Za-z0-9_./]+:PersistentLevel\.([A-Za-z0-9_]+)",
+                             fields[2]) if len(fields) == 4 and phase == "hosting" else None
+        if not actor:
             raise ValueError("Invalid authored physics barrel")
+        stem, instance = actor.groups()
+        names = (stem, "Prop_FeulDrum") if stem == "Prop_FuelDrum" else (stem,)
+        if not any(re.fullmatch(rf"(?:{name}_GEN_VARIABLE_{name}_C_CAT_|{name}_C_)[0-9]{{1,4}}", instance) for name in names):
+            raise ValueError("Invalid authored physics barrel instance")
         mass, = _numbers(fields[3:], (10000,))
         if mass <= 0:
             raise ValueError("Invalid authored physics barrel mass")

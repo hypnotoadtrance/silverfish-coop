@@ -2775,13 +2775,15 @@ class Host:
                     result = {native_mushrooms.KEY: self.last_game.get(native_mushrooms.KEY, {})}
                 elif action == native_prop_carry.FIXTURE and self.fixtures:
                     mode, _, target = (request.get("target") or "").partition("@")
-                    if mode == "approach":
+                    if mode in {"approach", "approach-placed"}:
                         target = native_loot._scope(self, self.roles().get(target))
-                    if mode not in {"spawn", "approach", "select"} or not target:
+                    if mode not in {"spawn", "approach", "approach-placed", "select", "sample", "tip"} or not target:
                         raise party.RuleError("native_prop_carry_fixture_unavailable")
                     self.last_game = await bridge.command(action, mode, target, timeout=6)
                     self.last_seen = time.monotonic()
                     result = {native_prop_carry.FIXTURE: self.last_game.get(native_prop_carry.FIXTURE, {})}
+                    if mode == "sample":
+                        result["sample"] = self.last_game["ack"]["message"]
                 elif action in (native_mushrooms.APPROACH, native_mushrooms.HARVEST) and self.fixtures:
                     role, _, identity = (request.get("target") or "").partition("@")
                     pawn = native_loot._scope(self, self.roles().get(role))
@@ -5711,11 +5713,13 @@ class Client:
                     )
                 elif action == native_prop_carry.FIXTURE:
                     mode, _, target = (request.get("target") or "").partition("@")
-                    if mode not in {"grab", "pickup", "lamp-use", "turn", "throw", "drop"}:
+                    if mode not in {"grab", "pickup", "lamp-use", "turn", "throw", "drop", "sample"}:
                         raise party.RuleError("native_prop_carry_fixture_unavailable")
                     arguments = target.split("|") if target else []
                     self.last_game = await self.bridge.command(action, mode, *arguments, timeout=6)
                     result = {"input": mode}
+                    if mode == "sample":
+                        result["sample"] = self.last_game["ack"]["message"]
                 elif action == "native-client-remote-damage-fixture":
                     if not self.last_game.get("native_client_damage"):
                         raise ValueError("Connect and wait for the authenticated client damage guard")

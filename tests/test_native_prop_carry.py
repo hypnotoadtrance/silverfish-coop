@@ -24,3 +24,9 @@ class CorpseCarryPayloadTests(unittest.TestCase):
         self.edge[4] = "drop"
         with self.assertRaises(ValueError):
             carry.parse([*self.edge, "1", "pelvis"], "connected", self.area)
+
+    def test_authored_fuel_drums_accept_the_cooked_instance_name(self):
+        actor = f"Prop_FuelDrum_C {self.area}.CrossRoads_P:PersistentLevel.Prop_FeulDrum_C_33"
+        self.assertEqual(carry.parse([carry.BARREL_ROW, self.area, actor, "31"], "hosting", self.area)["actor"], actor)
+        with self.assertRaises(ValueError):
+            carry.parse([carry.BARREL_ROW, self.area, actor.replace("_33", "_2147482112"), "31"], "hosting", self.area)

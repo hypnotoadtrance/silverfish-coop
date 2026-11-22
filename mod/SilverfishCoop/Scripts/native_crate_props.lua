@@ -5,7 +5,10 @@ local spawner_path = "/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C
 local container_path = "/Game/Classes/Actors/Lootables/LootContainer_Master_BP.LootContainer_Master_BP_C"
 local prop_path = "/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C"
 local fuel_class_path = "/Game/Assets/StaticMeshes/Mesh_Props/Prop_Standing_FuelTank.Prop_Standing_FuelTank_C"
-local barrel_class_path = "/Game/Assets/StaticMeshes/Mesh_Props/Prop_PlasticBarrel.Prop_PlasticBarrel_C"
+local barrel_types = {
+    Prop_PlasticBarrel = {"Prop_PlasticBarrel"},
+    Prop_FuelDrum = {"Prop_FuelDrum", "Prop_FeulDrum"},
+}
 local fuel_maps = {
     ["/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"] = true,
     ["/Game/Classes/Maps/Maps_OverWorld/Quarry_01_P"] = true,
@@ -27,6 +30,14 @@ end
 local function root_mesh(actor)
     local mesh = actor.PropMesh
     if valid(mesh) and same(mesh, actor.RootComponent) and same(mesh:GetOwner(), actor) then return mesh end
+end
+
+local function authored_index(name, labels)
+    for _, label in ipairs(labels) do
+        local index = name:match(":PersistentLevel%." .. label .. "_C_(%d+)$")
+            or name:match(":PersistentLevel%." .. label .. "_GEN_VARIABLE_" .. label .. "_C_CAT_(%d+)$")
+        if index then return tonumber(index) end
+    end
 end
 
 local function publish_motion(actor)
@@ -87,27 +98,30 @@ local function placed_barrels(state, phase)
         return
     end
     if barrels and same(barrels.world, state.world) then return end
-    local class = StaticFindObject(barrel_class_path)
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-    if not valid(class) or not valid(api) then return end
-    local result = {}
-    api:GetAllActorsOfClass(state.world, class, result)
-    local matches = result.OutActors or result
+    if not valid(api) then return end
     local active = {}
-    if #matches <= 96 then
-        local bone = FName("None", EFindName.FNAME_Find)
-        for _, actor in ipairs(matches) do
-            if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
-            local mesh = valid(actor) and root_mesh(actor)
-            local name = mesh and actor:GetFullName()
-            local authored = name and (name:match(":PersistentLevel%.Prop_PlasticBarrel_C_(%d+)$")
-                or name:match(":PersistentLevel%.Prop_PlasticBarrel_GEN_VARIABLE_Prop_PlasticBarrel_C_CAT_(%d+)$"))
-            -- Runtime-spawned stock class copies use the high-name counter. Those follow their crate's enrollment.
-            if authored and tonumber(authored) < 10000 and same(actor:GetClass(), class)
-                and actor.bNetLoadOnClient == true and actor:HasAuthority() and not actor:IsActorBeingDestroyed()
-                and same(actor:GetWorld(), state.world) and same(actor:GetOuter(), state.world.PersistentLevel)
-                and mesh:IsSimulatingPhysics(bone) == true and publish_motion(actor) and carry.enroll(actor) then
-                active[name] = actor
+    local bone = FName("None", EFindName.FNAME_Find)
+    for stem, labels in pairs(barrel_types) do
+        local class = StaticFindObject("/Game/Assets/StaticMeshes/Mesh_Props/" .. stem .. "." .. stem .. "_C")
+        if valid(class) then
+            local result = {}
+            api:GetAllActorsOfClass(state.world, class, result)
+            local matches = result.OutActors or result
+            if #matches <= 96 then
+                for _, actor in ipairs(matches) do
+                    if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+                    local mesh = valid(actor) and root_mesh(actor)
+                    local name = mesh and actor:GetFullName()
+                    local authored = name and authored_index(name, labels)
+                    -- Runtime-spawned copies follow their crate's enrollment.
+                    if authored and authored < 10000 and same(actor:GetClass(), class)
+                        and actor.bNetLoadOnClient == true and actor:HasAuthority() and not actor:IsActorBeingDestroyed()
+                        and same(actor:GetWorld(), state.world) and same(actor:GetOuter(), state.world.PersistentLevel)
+                        and mesh:IsSimulatingPhysics(bone) == true and publish_motion(actor) and carry.enroll(actor) then
+                        active[name] = actor
+                    end
+                end
             end
         end
     end
