@@ -114,7 +114,7 @@ def _enemy_items(frame, rolls, area, zone):
         identity = uuid.uuid5(uuid.NAMESPACE_OID, f"enemy-loot:{guid}").hex
         transform = {"position": row["position"], "rotation": [0, 0, 0], "scale": [1, 1, 1]}
         yield Item(identity, row.get("class_path"), transform, ENEMY_CLAIM, f"{native_enemy_shells.PREFIX}{zone}:{guid}",
-                   _display_count(row.get("quantity")))
+                   _display_count(row.get("quantity")), ground_snap=not row.get("settled"))
 
 
 def player_drop_identity(drop_id):
@@ -145,7 +145,8 @@ def _stock_enemy_items(drops, area):
     for guid, row in drops.items():
         if valid_guid(guid) and isinstance(row, dict) and row.get("map") == area:
             yield Item(stock_enemy_identity(guid), row.get("class_path"), row.get("transform"),
-                       native_stock_enemy_drops.CLAIM, guid, _display_count(row.get("ammo")))
+                       native_stock_enemy_drops.CLAIM, guid, _display_count(row.get("ammo")),
+                       ground_snap=not row.get("settled"))
 
 
 def _display_count(value):

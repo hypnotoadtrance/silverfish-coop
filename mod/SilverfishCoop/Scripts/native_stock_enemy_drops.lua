@@ -1,7 +1,9 @@
 local drops = {}
 local guest_save = require("guest_save")
 local shell_view = require("native_enemy_shell_view")
+local world_loot = require("native_guest_drop_projection")
 local transport = require("native_transport")
+local motion = require("native_enemy_drop_motion")
 local world, latest, observed
 local proof, bank, claim, broker_defeated
 local black_market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
@@ -13,6 +15,15 @@ local broker_cue_class = "/Game/Classes/ScriptingActors/Generic_Interact_BP.Gene
 
 local function same(a, b)
     return a and b and a:IsValid() and b:IsValid() and a:GetAddress() == b:GetAddress()
+end
+
+local function live_actor(record)
+    local name = record[5]
+    local actor = record.actor or StaticFindObject(name:match("^%S+ (.+)$") or "")
+    if not actor or not actor:IsValid() or actor:IsActorBeingDestroyed()
+        or actor:GetFullName() ~= name or not same(actor:GetWorld(), world) then return end
+    record.actor = actor
+    return actor
 end
 
 local function market_scope(state, phase)
@@ -62,7 +73,7 @@ function drops.rows(state, phase, row)
         local sequence, roll, npc, killer, actor, class, live = SilverfishReadStockEnemyDrop(address, latest)
         if math.type(sequence) ~= "integer" or sequence <= latest then break end
         latest = sequence
-        observed[#observed + 1] = {sequence, roll, npc, killer, actor, class, live and 1 or 0}
+        observed[#observed + 1] = {sequence, roll, npc, killer, actor, class, live and 1 or 0, sample = {}}
         if live and npc == "NPC_Broker_C " .. broker_path
             and class == "/Game/Classes/Items/Key_Items/BrokersKey.BrokersKey_C" then
             broker_defeated = true
@@ -77,6 +88,12 @@ function drops.rows(state, phase, row)
         rows[#rows + 1] = row("native-stock-broker-cue-removed", black_market)
     end
     for _, record in ipairs(observed) do
+        if not record.finished then
+            local actor = record[7] == 1 and live_actor(record)
+            record[8] = not actor and "gone" or motion.settled(actor, record.sample) and "settled" or "moving"
+            record[9] = record.sample.origin_z or "-"
+            if not actor then record.finished = true end
+        end
         rows[#rows + 1] = row("native-stock-enemy-drop", state.map, table.unpack(record))
     end
     if proof then rows[#rows + 1] = row("native-stock-enemy-escrow", state.map, table.unpack(proof)) end
@@ -120,11 +137,12 @@ local function capture(fields, state, phase, fixture)
     for _, record in ipairs(observed) do
         if record[1] == sequence then match = record break end
     end
-    local name = match and match[5]
-    local actor = name and StaticFindObject(name:match("^%S+ (.+)$") or "")
-    if not actor or not actor:IsValid() or actor:GetFullName() ~= name or not same(actor:GetWorld(), world) then
-        error("stock_enemy_escrow_actor_unavailable", 0)
+    local actor = match and live_actor(match)
+    if not actor then error("stock_enemy_escrow_actor_unavailable", 0) end
+    if not fixture and not motion.settled(actor, match.sample) then
+        error("stock_enemy_escrow_drop_settling", 0)
     end
+    local name = match[5]
     local pose = not fixture and transform(actor)
     if not fixture and not pose then error("stock_enemy_escrow_transform_unavailable", 0) end
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
@@ -153,6 +171,7 @@ local function capture(fields, state, phase, fixture)
         error("mutation_unverified_stock_enemy_drop_retirement", 0)
     end
     actor:K2_DestroyActor()
+    match.finished = true
     bank = {sequence, name, match[6], guid, ammo, slot, table.unpack(pose)}
     return "exact stock NPC item banked and retired"
 end
@@ -163,7 +182,8 @@ local function transfer(fields, state, phase)
     local x, y, z, identity = tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8]), fields[9]
     local host, fresh = transport.scoped_host(state, phase)
     local stock = host and host.pawn.Save
-    if phase ~= "hosting" or #fields ~= 9 or not fresh or not stock or not stock:IsValid()
+    local ground = #fields == 10 and fields[10] == "legacy-ground"
+    if phase ~= "hosting" or (#fields ~= 9 and not ground) or not fresh or not stock or not stock:IsValid()
         or not valid_slot(slot) or type(guid) ~= "string" or #guid ~= 32 or not guid:match("^[0-9A-F]+$")
         or not finite(x, 1e7) or not finite(y, 1e7) or not finite(z, 1e7)
         or #identity ~= 32 or not identity:match("^[0-9a-f]+$")
@@ -179,9 +199,10 @@ local function transfer(fields, state, phase)
     end
     if not pawn or not save or not save:IsValid() or not same(pawn:GetWorld(), state.world)
         or not same(pawn.Save, save) or pawn.Dead ~= false then error("stock_enemy_loot_claimant_unavailable", 0) end
+    if ground then z = world_loot.floor_z(state, {x, y, z}) end
     local position = {X = x, Y = y, Z = z}
     if not shell_view.clear_line(pawn, position, true)
-        and not require("native_guest_drop_projection").authority_sight(state, phase, pawn, identity, position) then
+        and not world_loot.authority_sight(state, phase, pawn, identity, position) then
         error("stock_enemy_loot_out_of_reach_or_obstructed", 0)
     end
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")

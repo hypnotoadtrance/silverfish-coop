@@ -250,9 +250,20 @@ local function approach_clear_sight(state, pawn, actor, box, label, distances, f
         or not finite(limit) or limit <= 0 or limit > 1000 or square(initial_eye, origin) > 150^2 then
         error(label .. "_geometry_unavailable", 0)
     end
-    local floor_ignored, sight_ignored = {actor}, {pawn}
+    local floor_ignored, sight_ignored, other_positions = {actor}, {pawn}, {}
     for _, detail in ipairs(state.pawns) do
-        if valid(detail.pawn) then floor_ignored[#floor_ignored + 1] = detail.pawn end
+        if valid(detail.pawn) then
+            floor_ignored[#floor_ignored + 1] = detail.pawn
+            if label == "world_loot_fixture" and not same(pawn, detail.pawn) then
+                other_positions[#other_positions + 1] = vector(detail.pawn:K2_GetActorLocation())
+            end
+        end
+    end
+    local function beside_party(point)
+        for _, other in ipairs(other_positions) do
+            if square(point, other) < 75^2 then return true end
+        end
+        return false
     end
     if valid(pawn.EquipedItem) then sight_ignored[#sight_ignored + 1] = pawn.EquipedItem end
     local deck, radius
@@ -330,7 +341,7 @@ local function approach_clear_sight(state, pawn, actor, box, label, distances, f
                             local point = {X = x, Y = y, Z = floor.Z + half_height + (drill_catwalk and 4 or 2)}
                             local eye = {X = x + initial_eye.X - origin.X, Y = y + initial_eye.Y - origin.Y,
                                 Z = point.Z + initial_eye.Z - origin.Z}
-                            if square(point, center) <= 235^2 then
+                            if square(point, center) <= 235^2 and not beside_party(point) then
                                 candidates = candidates + 1
                                 local clear = clear_sight(eye)
                                 if clear and not clear_step(point) then

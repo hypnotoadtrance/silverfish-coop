@@ -32,6 +32,7 @@ package.loaded.guest_save = {
 }
 local fresh = true
 package.loaded.native_transport = {scoped_host = function() return {pawn = host}, fresh end}
+package.loaded.native_enemy_drop_motion = assert(loadfile("mod/SilverfishCoop/Scripts/native_enemy_drop_motion.lua"))()
 package.loaded.native_enemy_loot_registry = assert(loadfile("mod/SilverfishCoop/Scripts/native_enemy_loot_registry.lua"))()
 package.loaded.native_enemy_shell_view = assert(loadfile("mod/SilverfishCoop/Scripts/native_enemy_shell_view.lua"))()
 local npc_class_path = "/Game/Classes/NPCs/NPC_State_Infantry_CQC.NPC_State_Infantry_CQC_C"
@@ -61,6 +62,7 @@ ammo.Ammo, ammo.bHidden = 8, false
 ammo.GetWorld, ammo.GetClass = host.GetWorld, function() return shell_class end
 ammo.HasAuthority, ammo.IsActorBeingDestroyed = function() return not destroyed end, function() return destroyed end
 ammo.K2_GetActorLocation = function() return {X = 1, Y = 2, Z = 3} end
+ammo.K2_GetActorRotation = function() return {Pitch = 0, Yaw = 0, Roll = 0} end
 ammo.SetActorEnableCollision, ammo.GetActorEnableCollision = function(_, value) collision = value end, function() return collision end
 ammo.SetActorHiddenInGame = function(self, value) self.bHidden = value end
 ammo.K2_DestroyActor = function() destroyed = true end
@@ -68,6 +70,8 @@ local slot, guid = "SFCoop_" .. ("b"):rep(32), ("B"):rep(32)
 local save_class_path = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local save_class, pool, reopened = object(11, save_class_path), object(12, "pool"), object(13, "reopened")
 local api = object(14, "gameplay statics")
+local now = 1
+api.GetTimeSeconds = function() return now end
 api.DoesSaveGameExist = function(_, name) assert(name == slot); return false end
 api.CreateSaveGameObject = function(_, class) assert(class == save_class); return pool end
 api.SaveGameToSlot = function(_, target, name) assert(target == pool and name == slot); return true end
@@ -138,7 +142,11 @@ assert(not table.concat(enemy_loot.rows(state, "hosting", row), "\n"):find(curre
 enemy_loot.clear_fixture()
 assert(enemy_loot.departure_pending(state, "hosting"))
 fresh = false
-assert(enemy_loot.command({"request", "native-enemy-loot-bank", npc:GetFullName(), slot, ammo:GetFullName()}, state, "hosting"))
+local request = {"request", "native-enemy-loot-bank", npc:GetFullName(), slot, ammo:GetFullName()}
+local banked, reason = pcall(enemy_loot.command, request, state, "hosting")
+assert(not banked and reason == "native_enemy_loot_drop_settling" and not captured and not destroyed)
+now = 1.25
+assert(enemy_loot.command(request, state, "hosting"))
 assert(not ammo.bHidden and collision and not destroyed and enemy_loot.departure_pending(state, "hosting"))
 assert(not pcall(enemy_loot.command, {"request", "native-enemy-loot-retire", ammo:GetFullName(), slot, ("C"):rep(32)}, state, "hosting"))
 assert(not destroyed)

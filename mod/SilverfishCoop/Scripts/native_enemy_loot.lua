@@ -1,4 +1,5 @@
 local enemy_loot = {}
+local motion = require("native_enemy_drop_motion")
 local guest_save = require("guest_save")
 local transport = require("native_transport")
 local shell_view = require("native_enemy_shell_view")
@@ -261,6 +262,8 @@ local function stash(state, phase, fields)
         or type(ammo.Ammo) ~= "number" or ammo.Ammo ~= report[15] or ammo.Ammo < 3 or ammo.Ammo > 9 then
         error("native_enemy_loot_exact_drop_unavailable", 0)
     end
+    scoped.drop_motion = scoped.drop_motion or {}
+    if not motion.settled(ammo, scoped.drop_motion) then error("native_enemy_loot_drop_settling", 0) end
     local at, units = ammo:K2_GetActorLocation(), ammo.Ammo
     if not at or not finite(at.X) or not finite(at.Y) or not finite(at.Z) then error("native_enemy_loot_position_unavailable", 0) end
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
@@ -339,7 +342,8 @@ local function claim(state, phase, fields)
     if not cqc then host, guest = participants(state, phase) end
     local name, slot, guid = fields[3], fields[4], fields[5]
     local x, y, z = tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8])
-    local physical = fields[9] == "stock-world-focus"
+    local legacy_ground = fields[9] == "stock-world-focus-ground"
+    local physical = legacy_ground or fields[9] == "stock-world-focus"
     local focused = physical or fields[9] == "stock-focus"
     local guarded = cqc and #fields == 10 and (focused or fields[9] == "stock-exact")
     if (not guarded and (#fields ~= 8 or cqc)) or not is_slot(slot) or not is_guid(guid)
@@ -350,6 +354,9 @@ local function claim(state, phase, fields)
     local pawn = cqc and member(state, phase, host, name)
         or host:GetFullName() == name and host or valid(guest) and guest:GetFullName() == name and guest or nil
     if not pawn or pawn.Dead ~= false then error("native_enemy_loot_claimant_unavailable", 0) end
+    if legacy_ground then
+        z = require("native_guest_drop_projection").floor_z(state, {x, y, z})
+    end
     local at, reach = pawn:K2_GetActorLocation(), pawn.InteractionRange
     if not at or not finite(reach) or reach <= 0 or reach > 1000 or
         (at.X - x)^2 + (at.Y - y)^2 + (at.Z - z)^2 > math.min(reach, 250)^2 then
@@ -628,7 +635,17 @@ function enemy_loot.rows(state, phase, status_row)
     if phase ~= "hosting" or not worlds[state.map] then return rows end
     local function append(scoped)
         if not scoped or not scoped.proof or not same(state.world, scoped.world) then return end
-        rows[#rows + 1] = status_row("native-enemy-loot", state.map, scoped.name, table.unpack(scoped.proof, 1, 15))
+        local proof = scoped.proof
+        if proof[1] == "stock_loot_observed" and not scoped.capture
+            and type(proof[13]) == "string" and proof[13]:match("^%S+ ") then
+            local ammo = StaticFindObject(proof[13]:match("^%S+ (.+)$"))
+            if valid(ammo) and ammo:GetFullName() == proof[13] and same(ammo:GetWorld(), state.world)
+                and not ammo:IsActorBeingDestroyed() then
+                scoped.drop_motion = scoped.drop_motion or {}
+                motion.settled(ammo, scoped.drop_motion)
+            end
+        end
+        rows[#rows + 1] = status_row("native-enemy-loot", state.map, scoped.name, table.unpack(proof, 1, 15))
         if scoped.proof.n >= 23 then
             rows[#rows + 1] = status_row("native-enemy-bounty", state.map, scoped.name, table.unpack(scoped.proof, 16, 23))
         end

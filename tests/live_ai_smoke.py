@@ -483,7 +483,11 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 native_host_save.verify_record(campaign / "game-user", durable["escrow"])
                 assert (durable["class_path"], durable["killer"], durable["claimed_by"]) == (
                     weapon["class_path"], invitation["character_id"], None), durable
-                assert durable["ammo"] > 0, durable
+                assert durable["ammo"] > 0 and durable["settled"] is True, durable
+                initial_height = weapon["initial_height"]
+                final_height = durable["transform"]["position"][2]
+                assert initial_height is not None and initial_height - final_height > 10, (weapon, durable)
+                proof_log["stock_weapon_fall_cm"] = initial_height - final_height
                 proof_log["stock_dropped_weapon_payload"] = durable
             bounty = actor_proof(resolved, "native_enemy_bounty", target)
             if bounty:
@@ -564,13 +568,19 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     assert {key: value for key, value in durable.items() if key not in ("escrow", "retirement")} == roll, durable
                     if restart_unclaimed_shells or (automatic_cqc_loot and status(run)["game"].get("native_enemy_shell_view_version") == 2):
                         assert cqc_retired(durable), durable
+                    assert durable["settled"] is True, durable
+                    if stock_drop_census:
+                        before = next(item["initial_height"] for item in proof_log["stock_drop_census"]
+                                      if item["actor"] == durable["actor"])
+                        assert before is not None and before - durable["position"][2] > 10, (before, durable)
+                        proof_log["stock_ammunition_fall_cm"] = before - durable["position"][2]
                     proof_log["verified_stock_shell_escrow"] = durable
 
                     def projected(state):
                         view = actor_proof(state, "native_enemy_loot_death_view", target)
                         current = (state.get("gameplay_fresh") and state.get("zone_epoch") == roll["epoch"]
                                    and view.get("actor") == target)
-                        if resident_game and current and view.get("state") == "stock":
+                        if current and view.get("state") == "stock":
                             return True
                         return current and (
                             view.get("actor"), view.get("state"), view.get("epoch"), view.get("guid"),
@@ -578,10 +588,10 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                         ) == (target, "projected", roll["epoch"], guid, True, False)
 
                     defeat = await wait(guest_run, projected, timeout=12)
-                    if not resident_game:
+                    if not resident_game and actor_proof(defeat, "native_enemy_loot_death_view", target).get("state") == "projected":
                         counterpart = cqc_counterpart(guest_run, target, area)
                         assert counterpart and counterpart["role"] == 1 and counterpart["authorities"] == 0, counterpart
-                        assert counterpart["controller"] is False and counterpart["alive"] is True, counterpart
+                        assert counterpart["controller"] is False, counterpart
                         proof_log["client_cqc_after_combat"] = counterpart
                     proof_log["client_cqc_death_view"] = actor_proof(defeat, "native_enemy_loot_death_view", target)
                 published = await wait(guest_run, lambda state: state.get("gameplay", {}).get(

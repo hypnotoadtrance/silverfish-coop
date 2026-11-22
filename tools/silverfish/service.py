@@ -247,7 +247,7 @@ class Host:
         self.stack_drop_projection = native_guest_drop_projection.Projection()
         self.world_loot = native_world_loot.Projection()
         self.loose_pickups = native_loose_pickup.Visibility()
-        self.last_stock_enemy_drop_sequence = 0
+        self.processed_stock_enemy_drops = set()
         self.stock_drop_input = native_host_stack_drop.HostDropInput()
         self.pickup_audio, self.pickup_playback = native_pickup_audio.PickupAudio(), native_pickup_audio.Playback()
         self.voice_audio, self.voice_playback = native_voice.VoiceQueue(), native_voice.Playback()
@@ -1087,7 +1087,8 @@ class Host:
                     self.last_game, self.last_seen = departure, time.monotonic()
                     if attempt == pending_capacity or not native_enemy_loot.pending(self):
                         raise RuntimeError("The stock CQC departure hold did not identify its reserved roll")
-                    await native_enemy_loot.observe(self, bridge)
+                    if await native_enemy_loot.observe(self, bridge):
+                        return {"ok": False, "error": native_enemy_loot.PENDING}
             observed = await bridge.wait_for(
                 lambda game: game.get("state") == "hosting" and game.get("map") == destination,
                 timeout=22,

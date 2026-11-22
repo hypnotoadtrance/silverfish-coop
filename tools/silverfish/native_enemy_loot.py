@@ -274,14 +274,21 @@ async def _retire(host, bridge, roll):
 
 async def observe(host, bridge):
     if not pending(host) or host.stopping or host.native_checkpoint_unsafe:
-        return
+        return False
+    settling = False
     try:
         for target in BY_MAP[host.last_game["map"]].actors:
             if _cqc_receipt(host.last_game, target).get("reserved") is True:
-                await bank(host, bridge, target)
+                try:
+                    await bank(host, bridge, target)
+                except party.RuleError as error:
+                    if str(error) != "native_enemy_loot_drop_settling":
+                        raise
+                    settling = True
     except party.RuleError as error:
         host.native_checkpoint_unsafe = host.stopping = True
         raise RuntimeError(f"The reserved stock CQC roll could not be verified ({error})") from error
+    return settling
 
 
 async def bank(host, bridge, target: str | None) -> dict:
@@ -313,7 +320,13 @@ async def bank(host, bridge, target: str | None) -> dict:
     slot = native_host_save.new_slot()
     host.native_checkpoint_unsafe = True
     try:
-        snapshot = await bridge.command(BANK, target, slot, ammo, timeout=7)
+        try:
+            snapshot = await bridge.command(BANK, target, slot, ammo, timeout=7)
+        except RuntimeError as error:
+            if str(error) != "native_enemy_loot_drop_settling":
+                raise
+            host.native_checkpoint_unsafe = False
+            raise party.RuleError(str(error)) from error
         proof = snapshot.get("native_enemy_loot_escrow", {})
         at, guid = proof.get("position"), proof.get("guid")
         if (snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("state"), proof.get("pawn"),
@@ -324,6 +337,7 @@ async def bank(host, bridge, target: str | None) -> dict:
         frame = await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True)
         roll = {"map": area, "epoch": host.zone_epoch, "bandit": target, "actor": proof["actor"], "guid": guid,
                 "class_path": SHELLS, "quantity": proof["units"], "position": at, "killer": killer, "claimed_by": None,
+                "settled": True,
                 "escrow": frame}
         if cqc:
             roll["profile"] = profile.id
@@ -371,7 +385,12 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
         raise party.RuleError("native_enemy_loot_claimant_unavailable")
     location = next((row.get("location") for row in host.last_game.get("pawns", {}).values()
                      if row.get("name") == pawn), None)
-    if not location or any(axis is None for axis in location) or math.dist(location, roll["position"]) > party.INTERACT_RANGE:
+    world_focus = focus and host.last_game.get(native_world_loot.CAPABILITY, 0) >= 1
+    legacy_ground = world_focus and not roll.get("settled")
+    if not location or any(axis is None for axis in location):
+        raise party.RuleError("native_enemy_loot_out_of_reach")
+    reach = math.dist(location[:2], roll["position"][:2]) if legacy_ground else math.dist(location, roll["position"])
+    if reach > party.INTERACT_RANGE:
         raise party.RuleError("native_enemy_loot_out_of_reach")
     frame = roll["escrow"]
     await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)
@@ -380,7 +399,7 @@ async def claim(host, bridge, character: str, target: str | None, operation: str
         try:
             mode = "stock-exact"
             if focus:
-                mode = "stock-world-focus" if host.last_game.get(native_world_loot.CAPABILITY, 0) >= 1 else "stock-focus"
+                mode = "stock-world-focus-ground" if legacy_ground else "stock-world-focus" if world_focus else "stock-focus"
             check = (mode, roll["actor"]) if _ordinary(host, area) else ()
             snapshot = await bridge.command(CLAIM, pawn, frame["slot"], guid,
                                             *(str(axis) for axis in roll["position"]), *check, timeout=7)

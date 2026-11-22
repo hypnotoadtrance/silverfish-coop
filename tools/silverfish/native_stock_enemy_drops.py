@@ -33,11 +33,15 @@ _SERIAL = re.compile(r"[1-9][0-9]{0,15}")
 
 
 def parse(fields, state, area):
-    if (len(fields) != 9 or fields[:2] != [TAG, area] or state != "hosting" or not isinstance(area, str)
+    if (len(fields) not in (9, 11) or fields[:2] != [TAG, area] or state != "hosting" or not isinstance(area, str)
             or not _MAP.fullmatch(area) or not all(_SERIAL.fullmatch(value) and int(value) < 2**53 for value in fields[2:4])
             or fields[8] not in ("0", "1")):
         raise ValueError("Invalid stock enemy drop observation")
-    _, _, sequence, roll, source, killer, actor, class_path, live = fields
+    _, _, sequence, roll, source, killer, actor, class_path, live = fields[:9]
+    motion, first_height = fields[9:] or ("settled", "-")
+    height = None if first_height == "-" else float(first_height)
+    if motion not in ("gone", "moving", "settled") or (height is not None and not abs(height) <= 1e7):
+        raise ValueError("Invalid stock enemy drop motion")
     prefix = re.escape(f" {area}.{area.rsplit('/', 1)[1]}:PersistentLevel.")
     item_class = _CLASS.fullmatch(class_path) if len(class_path) <= 256 else None
     if (not item_class or any(len(name) > 512 for name in (source, killer, actor))
@@ -46,7 +50,8 @@ def parse(fields, state, area):
             or not re.fullmatch(re.escape(item_class[1]) + prefix + r"[A-Za-z0-9_]+", actor)):
         raise ValueError("Invalid stock enemy, killer, or item identity")
     return dict(sequence=int(sequence), roll=int(roll), map=area, source=source,
-                killer=None if killer == "-" else killer, actor=actor, class_path=class_path, live_at_capture=live == "1")
+                killer=None if killer == "-" else killer, actor=actor, class_path=class_path, live_at_capture=live == "1",
+                motion=motion, initial_height=height)
 
 
 def parse_escrow(fields, game):
@@ -143,7 +148,8 @@ def published(data, game):
     for guid, row in data.get(STATE, {}).items():
         if (row["map"] == area and row["claimed_by"] is None
                 and any(math.dist(point, row["transform"]["position"]) <= 2000 for point in points)):
-            visible[guid] = {key: row[key] for key in ("map", "class_path", "transform", "ammo")}
+            visible[guid] = {**{key: row[key] for key in ("map", "class_path", "transform", "ammo")},
+                             "settled": row.get("settled", False)}
     return visible
 
 
@@ -180,8 +186,11 @@ async def observe(host, bridge):
 
     if not _available(host):
         return
-    observed = sorted((row for row in host.last_game.get(KEY, {}).values()
-                       if row["sequence"] > host.last_stock_enemy_drop_sequence), key=lambda row: row["sequence"])
+    rows = host.last_game.get(KEY, {}).values()
+    processed = host.processed_stock_enemy_drops
+    processed.intersection_update(row["sequence"] for row in rows)
+    observed = sorted((row for row in rows if row["sequence"] not in processed and row["motion"] != "moving"),
+                      key=lambda row: row["sequence"])
     if not observed:
         return
     candidate = party.load_party(host.party)
@@ -190,10 +199,10 @@ async def observe(host, bridge):
     try:
         for drop in observed[:8]:
             seq, area, actor = drop["sequence"], drop["map"], drop["actor"]
-            if (not drop["live_at_capture"] or
+            if (not drop["live_at_capture"] or drop["motion"] == "gone" or
                     drop["class_path"] == native_enemy_loot.SHELLS
                     and native_enemy_loot.source_for(host.last_game, drop["source"]).get("ammo_actor") == actor):
-                host.last_stock_enemy_drop_sequence = seq
+                processed.add(seq)
                 continue
             slot = native_host_save.new_slot()
             host.native_checkpoint_unsafe = True
@@ -202,12 +211,14 @@ async def observe(host, bridge):
             except RuntimeError as error:
                 reason = str(error)
                 if reason not in {"stock_enemy_escrow_actor_unavailable", "stock_enemy_escrow_actor_unverified",
-                                  "stock_enemy_escrow_host_not_ready"}:
+                                  "stock_enemy_escrow_host_not_ready", "stock_enemy_escrow_drop_settling"}:
                     raise
                 host.native_checkpoint_unsafe = bool(committed)
                 if reason == "stock_enemy_escrow_host_not_ready":
                     break
-                host.last_stock_enemy_drop_sequence = seq
+                if reason == "stock_enemy_escrow_drop_settling":
+                    continue
+                processed.add(seq)
                 host.control.event("native_stock_enemy_loot_capture_refused", sequence=seq, actor=actor, reason=reason)
                 continue
             proof = snapshot.get(BANK_KEY, {})
@@ -220,9 +231,9 @@ async def observe(host, bridge):
                            if drop["killer"] and native_loot._scope(host, character) == drop["killer"]), None)
             record = {key: proof[key] for key in ("map", "guid", "class_path", "ammo", "transform")}
             records[guid] = dict(record, source=drop["source"].partition(" ")[2], actor=actor, killer=killer,
-                                 claimed_by=None, escrow=frame)
+                                 claimed_by=None, settled=drop["initial_height"] is not None, escrow=frame)
             host.last_game, host.last_seen = snapshot, time.monotonic()
-            host.last_stock_enemy_drop_sequence = seq
+            processed.add(seq)
             committed.append((drop, records[guid]))
         if committed:
             revision = await host.checkpoint_native(bridge, candidate)
@@ -265,7 +276,8 @@ async def claim(host, bridge, character, guid, operation):
         try:
             snapshot = await bridge.command(CLAIM, pawn, frame["slot"], guid,
                                             *(str(axis) for axis in roll["transform"]["position"]),
-                                            stock_enemy_identity(guid), timeout=7)
+                                            stock_enemy_identity(guid), *(() if roll.get("settled") else ("legacy-ground",)),
+                                            timeout=7)
         except RuntimeError as error:
             if str(error) in {"stock_enemy_loot_out_of_reach_or_obstructed", "stock_enemy_loot_claimant_unavailable",
                               "native_loot_claimant_backpack_full", "native_loot_cash_wallet_out_of_range"}:

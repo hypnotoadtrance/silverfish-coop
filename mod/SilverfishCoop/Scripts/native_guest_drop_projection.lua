@@ -48,7 +48,7 @@ local function local_pawn(state, phase)
     end
 end
 
-local function floor_z(state, source)
+function projection.floor_z(state, source)
     local library = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     if not valid(library) then return source[3] end
     local ignored = {}
@@ -196,7 +196,7 @@ local function item_frame(fields, state, phase)
             if not valid(StaticFindObject(item.class)) then LoadAsset(item.class) end
             local t = item.transform
             local visual_z = previous and previous.visual_z
-            if not visual_z then visual_z = item.snap and floor_z(state, t) or t[3] end
+            if not visual_z then visual_z = item.snap and projection.floor_z(state, t) or t[3] end
             local ok, reason = SilverfishSyncNativeWorldLootItem(pawn:GetAddress(), epoch, id,
                 t[1], t[2], visual_z, visual_z, item.class, t[4], t[5], t[6], t[7], t[8], t[9], item.stack_count, slot)
             world_items[id] = { map = area, epoch = epoch, pawn = pawn, world = state.world,
