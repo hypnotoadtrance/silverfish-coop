@@ -3,6 +3,7 @@ local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
 local pose_fixture = os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_POSE") == "1"
 local rifle_fixture = os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_RIFLE") == "1"
 local sprint_fixture = os.getenv("SILVERFISH_COOP_MOVEMENT_PROBE") == "1"
+local sprint_trait_fixture = os.getenv("SILVERFISH_COOP_MOVEMENT_TRAIT_PROBE") == "1"
 local guest_fixture = mailbox and mailbox:match("[/\\]clients[/\\]avatar%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
     and (pose_fixture or rifle_fixture or sprint_fixture or os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_EQUIPMENT") == "1")
 local host_fixture = mailbox and mailbox:match("[/\\]campaigns[/\\]avatar%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
@@ -224,6 +225,22 @@ local function movement_probe(operation, local_pawn, remote_pawn)
         if local_pawn:HasAuthority() then
             prepare_lane(local_pawn, 16060)
             prepare_lane(remote_pawn, 16240)
+        end
+        if sprint_trait_fixture then
+            local pawn = local_pawn:HasAuthority() and remote_pawn or local_pawn
+            local trait = FName("SpeedBoost", EFindName.FNAME_Find)
+            local key = "PermanentEffects_42_E298D351429CF6DCAE0911A4D1EEDB00"
+            local character = pawn.Save.Character
+            character[key] = {trait}
+            pawn.Save.Character = character
+            local passives = pawn.Save.Character[key]
+            assert(passives:GetArrayNum() == 1 and passives[1]:ToString() == "SpeedBoost",
+                "avatar_probe_movement_trait_readback_failed")
+            if not local_pawn:HasAuthority() then
+                local instance = pawn:GetWorld().OwningGameInstance
+                instance.PassiveEffects = {trait}
+            end
+            pawn:ApplyDynamicStats()
         end
     elseif operation == "walk" or operation == "run" then
         assert(local_pawn.CharacterMovement:IsMovingOnGround() and not local_pawn.bIsCrouched

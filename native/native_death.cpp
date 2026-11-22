@@ -58,6 +58,7 @@
 #include "guest_primary_input.hpp"
 #include "guest_consumable.hpp"
 #include "guest_regen.hpp"
+#include "guest_movement.hpp"
 #include "guest_sickness.hpp"
 #include "loot_crate_input.hpp"
 #include "enemy_loot.hpp"
@@ -1506,6 +1507,7 @@ namespace
             silverfish::native_guest_consumable::uninstall_hooks();
             silverfish::native_loot_crate_input::uninstall_hooks();
             silverfish::native_enemy_loot::uninstall_hooks();
+            silverfish::native_guest_movement::uninstall_hooks();
             silverfish::stock_enemy_drops::uninstall_hooks();
             silverfish::native_shop_view::uninstall_hooks();
             silverfish::native_nothing_return::uninstall_hooks();
@@ -1560,6 +1562,7 @@ namespace
             silverfish::native_guest_consumable::install_hooks();
             silverfish::native_loot_crate_input::install_hooks();
             silverfish::native_enemy_loot::install_hooks();
+            silverfish::native_guest_movement::install_hooks();
             silverfish::stock_enemy_drops::install_hooks();
             silverfish::native_shop_view::install_hooks();
             silverfish::native_nothing_return::install_hooks();

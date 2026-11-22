@@ -479,6 +479,15 @@ bool silverfish::native_guest_sickness::read_exact(RC::Unreal::UObject* pawn, RC
     return true;
 }
 
+bool silverfish::native_guest_sickness::read_fatigue(RC::Unreal::UObject* save, std::int32_t& value)
+{
+    const U::FName name{STR("Player_Fatigue"), U::FNAME_Find};
+    Flags flags;
+    if (name.IsNone() || !flags.bind(save)) return false;
+    value = flags.read(name).value;
+    return true;
+}
+
 void silverfish::native_guest_sickness::install_hooks()
 {
     if (!enabled() || callback != Hook::ERROR_ID) return;

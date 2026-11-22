@@ -117,7 +117,7 @@ async def verify_pose(host_run, guest_run):
             "airborne": airborne, "landed": landed, "aim_clip_wrist_positions": wrists}
 
 
-async def capture_movement(host_run, guest_run, command, host, guest):
+async def capture_movement(host_run, guest_run, command, host, guest, with_trait):
     fields = ("sprinting", "walk_cap", "base_walk", "base_sprint", "speed_modifier", "food",
               "speed", "x", "y", "z", "mesh_x", "mesh_y")
 
@@ -160,6 +160,9 @@ async def capture_movement(host_run, guest_run, command, host, guest):
     for pace, sprinting in (("walk", False), ("run", True)):
         phase = guest_movement[pace]
         settled = phase["samples"][-3:]
+        if with_trait:
+            assert all(1.09 < row["runner"]["speed_modifier"] < 1.11
+                       and 1.09 < row["observer"]["speed_modifier"] < 1.11 for row in settled), phase
         speeds = [median(row[peer]["speed"] for row in settled) for peer in ("runner", "observer")]
         assert all(row["runner"]["sprinting"] == row["observer"]["sprinting"] == sprinting
                    and abs(row["runner"]["walk_cap"] - row["observer"]["walk_cap"]) < 1 for row in settled), phase
@@ -169,6 +172,9 @@ async def capture_movement(host_run, guest_run, command, host, guest):
         assert ("Running_Unarmed" in clips) == sprinting, clips
     await wait(host_run, lambda state: guest_pose(state)
                and guest_pose(state).get("pose_clip") != "Running_Unarmed", timeout=4)
+    if with_trait:
+        assert all(abs(row["runner"]["speed_modifier"] - 1.0) < .01
+                   for phase in evidence["host"].values() for row in phase["samples"]), evidence["host"]
     assert (guest_movement["run"]["samples"][-1]["observer"]["walk_cap"]
             > guest_movement["walk"]["samples"][-1]["observer"]["walk_cap"])
     return evidence
@@ -176,7 +182,7 @@ async def capture_movement(host_run, guest_run, command, host, guest):
 
 async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: bool = False,
                   melee: bool = False, pose: bool = False, rifle: bool = False,
-                  consumable: bool = False, movement: bool = False) -> None:
+                  consumable: bool = False, movement: bool = False, movement_traits: bool = False) -> None:
     profile = "avatar-" + uuid.uuid4().hex[:8]
     host_dir = work / "campaigns" / profile
     guest_dir = work / "clients" / profile
@@ -191,6 +197,8 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
         env["SILVERFISH_COOP_RENDER_CAPTURE_EQUIPMENT"] = "1"
     if movement:
         env["SILVERFISH_COOP_MOVEMENT_PROBE"] = "1"
+    if movement_traits:
+        env["SILVERFISH_COOP_MOVEMENT_TRAIT_PROBE"] = "1"
     base = (sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work))
     before = saved_hashes(vanilla_saved)
     processes = []
@@ -242,7 +250,7 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             identity = invitation["character_id"]
         if movement:
             await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
-            evidence["stock_movement"] = await capture_movement(host_run, guest_run, command, host, guest)
+            evidence["stock_movement"] = await capture_movement(host_run, guest_run, command, host, guest, movement_traits)
         if consumable:
             await avatar_probe(host_run, "consume")
             async with asyncio.timeout(8):
@@ -473,9 +481,12 @@ if __name__ == "__main__":
     parser.add_argument("--rifle", action="store_true", help="verify a guest's stock break-action quick-slot selection")
     parser.add_argument("--consumable", action="store_true", help="verify stock host Bandage geometry and positional sound")
     parser.add_argument("--movement", action="store_true", help="sample stock walk and sprint on the runner and the observing peer")
+    parser.add_argument("--movement-traits", action="store_true", help="give only the guest a stock movement-speed effect")
     options = parser.parse_args()
     if options.melee and (not options.equipment or options.lifecycle):
         parser.error("--melee requires --equipment and runs independently of --lifecycle")
+    if options.movement_traits:
+        options.movement = True
     if options.pose and (options.equipment or options.lifecycle):
         parser.error("--pose verifies the rig independently of --equipment and --lifecycle")
     if options.rifle and (options.pose or options.equipment or options.lifecycle):
@@ -486,4 +497,4 @@ if __name__ == "__main__":
     ) else nullcontext():
         asyncio.run(capture(work, options.vanilla_saved.resolve(strict=True),
                             options.lifecycle, options.equipment, options.melee, options.pose,
-                            options.rifle, options.consumable, options.movement))
+                            options.rifle, options.consumable, options.movement, options.movement_traits))

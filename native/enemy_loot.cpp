@@ -1280,6 +1280,16 @@ namespace silverfish::native_enemy_loot
         return true;
     }
 
+    bool read_owned_passive_count(U::UObject* save, const U::FName& effect, int& total)
+    {
+        BountyCounts counts;
+        if (!U::IsInGameThreadRaw() || !live(save) || save->GetClassPrivate() != find<U::UClass>(save_path)
+            || !count_bounty(save, effect, counts))
+            return false;
+        total = counts.total();
+        return true;
+    }
+
     void install_hooks()
     {
         if ((!fixtures_enabled() && !ordinary_enabled()) || installed.load(std::memory_order_acquire)) return;
