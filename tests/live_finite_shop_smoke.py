@@ -30,7 +30,7 @@ SCIENTIST_ACTOR = f"Shop_BP_C {MAPS['scientist']}.Shop_Scientist_01:PersistentLe
 
 
 async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: bool, merchant: str, *,
-                 shop_pages=False, scientist_blank=False, stock_screen=False, one_unit=False) -> None:
+                 shop_pages=False, scientist_blank=False, stock_screen=False, one_unit=False, finite_stack=False) -> None:
     name = "finite-shop-" + uuid.uuid4().hex[:8]
     campaign = work / "campaigns" / name
     host_run = campaign / "run"
@@ -167,6 +167,7 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
         listing = (await act(guest_target, "native-finite-shop-list"))["native_finite_shop"]
         assert listing["wallet_before"] == listing["wallet_after"] == 100_000 and listing["offers"], listing
         assert listing["map"] == MAPS[merchant] and listing["actor"] == approach["actor"], listing
+        finite_setup = None
         if merchant == "scientist":
             assert listing["actor"] == SCIENTIST_ACTOR and sum(row["class_path"] == CAMERA for row in listing["offers"]) == 1, listing
             item_class = BLANK_CLASS if scientist_blank else CAMERA
@@ -177,6 +178,35 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
             assert listing["actor"] == GUNSMITH_ACTOR, listing
             offer, = [row for row in listing["offers"] if row["class_path"] == BALL_AMMO and row["source"] == "shelf"]
             assert (offer["quantity"], offer["value"]) == (200, 600) and offer["price"] > 0, offer
+        elif finite_stack:
+            shelf, = [row for row in listing["offers"] if row["class_path"] == BALL_AMMO and row["source"] == "shelf"]
+            assert shelf["stackable"] and shelf["quantity"] >= 5 and shelf["value"] == 3 * shelf["quantity"], shelf
+            seed_count = 5
+            seed_price = math.ceil(shelf["markup"] * (3 * seed_count))
+            seed = (await act(guest_target, "native-finite-shop-buy", "--target",
+                              f"{shelf['guid']}@{seed_price}/{seed_count}"))["native_finite_purchase"]
+            seeded_stack, = seed["offers"]
+            assert (seed["stock_source"], seed["requested_quantity"], seeded_stack["class_path"], seeded_stack["quantity"]) == (
+                "stock_shelf", seed_count, BALL_AMMO, seed_count), seed
+            assert shelf["guid"] != seeded_stack["guid"], seed
+            seed_inventory = (await act(guest_target, "native-inventory-list"))["native_inventory"]
+            held, = [row for row in seed_inventory["items"] if row["guid"] == seeded_stack["guid"]]
+            assert (seed_inventory["owner"], held["source"], held["class_path"], held["quantity"]) == (
+                invite["character_id"], "backpack", BALL_AMMO, seed_count), seed_inventory
+            offer_guid = seeded_stack["guid"]
+            sale_quote = (await act(guest_target, "native-finite-shop-sale-quote", "--target", offer_guid))["native_finite_sale_quote"]
+            quote, = sale_quote["offers"]
+            assert (quote["guid"], quote["quantity"], quote["price"]) == (offer_guid, seed_count, 3 * seed_count), sale_quote
+            sale = (await act(guest_target, "native-finite-shop-sell", "--target", f"{offer_guid}@{quote['price']}"))["native_finite_sale"]
+            assert sale["offers"] == [quote] and sale["wallet_after"] == sale_quote["wallet_before"] + quote["price"], sale
+            post_sale = (await act(guest_target, "native-inventory-list"))["native_inventory"]
+            assert all(row["guid"] != offer_guid for row in post_sale["items"]), post_sale
+            await act(host_target, "native-finite-shop-wallet-fixture", "--amount", "100000")
+            listing = (await act(guest_target, "native-finite-shop-list"))["native_finite_shop"]
+            offer, = [row for row in listing["offers"] if row["guid"] == offer_guid]
+            assert (offer["source"], offer["class_path"], offer["quantity"], offer["value"], offer["markup"]) == (
+                "buyback", BALL_AMMO, seed_count, 3 * seed_count, 1), offer
+            finite_setup = {"shelf_purchase": seed, "guest_backpack_before_sale": held, "sale": sale}
         else:
             offer = listing["offers"][0] if shop_view else next(
                 row for row in listing["offers"] if row["price"] > 0 and "/Weapons/" not in row["class_path"]
@@ -203,7 +233,8 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
             if stock_screen:
                 view = await stock_ready(100_000)
                 assert view["total"] == view["visible"] == listing["count"], view
-                if one_unit:
+                if one_unit or finite_stack:
+                    source = offer["source"]
                     unit_price = math.ceil(offer["markup"] * 3)
                     assert 0 < unit_price < price, offer
                     await act(host_target, "native-finite-shop-wallet-fixture", "--amount", str(unit_price))
@@ -212,11 +243,11 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
                     items = (await act(guest_target, "native-inventory-list"))["native_inventory"]["items"]
                     canary = save_hashes()
                     for gesture in ("open", "cancel"):
-                        popup = await act(guest_target, "native-shop-view-fixture", "--target", f"stock-{gesture}:shelf:{guid}")
+                        popup = await act(guest_target, "native-shop-view-fixture", "--target", f"stock-{gesture}:{source}:{guid}")
                         assert popup["native_shop_view"]["state"] == "ready", popup
                         assert (await act(guest_target, "native-finite-shop-list"))["native_finite_shop"] == before
                         assert (await act(guest_target, "native-inventory-list"))["native_inventory"]["items"] == items
-                    submit = await act(guest_target, "native-shop-view-fixture", "--target", f"stock-amount:shelf:{guid}:1")
+                    submit = await act(guest_target, "native-shop-view-fixture", "--target", f"stock-amount:{source}:{guid}:1")
                     assert (submit["native_shop_view"]["state"], submit["native_shop_view"]["price"]) == ("buying", unit_price), submit
                     await stock_ready(0)
                     reports = (await command("events", *guest_target, "--tail", "60"))["events"]
@@ -225,21 +256,42 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
                     acquired, = purchase["offers"]
                     assert (purchase["offer_guid"], purchase["requested_quantity"], purchase["stock_source"],
                             purchase["wallet_before"], purchase["wallet_after"], acquired["class_path"], acquired["quantity"],
-                            acquired["price"]) == (guid, 1, "stock_shelf", unit_price, 0, BALL_AMMO, 1, unit_price), purchase
+                            acquired["price"]) == (guid, 1, "limited_stock" if finite_stack else "stock_shelf",
+                                                   unit_price, 0, BALL_AMMO, 1, unit_price), purchase
                     assert acquired["guid"] != guid and purchase["merchant_cash_after"] == purchase["merchant_cash_before"] + unit_price
                     replay = await act(guest_target, "native-finite-shop-buy", "--target", purchase_target(guid, unit_price, purchase),
                                        "--operation-id", bought["operation_id"])
                     assert replay["native_finite_purchase"] == purchase, replay
                     after = (await act(guest_target, "native-finite-shop-list"))["native_finite_shop"]
-                    assert after["wallet_after"] == 0 and after["offers"] == before["offers"], after
+                    assert after["wallet_after"] == 0 and after["merchant_cash_after"] == purchase["merchant_cash_after"], after
+                    if finite_stack:
+                        remaining, = [row for row in after["offers"] if row["guid"] == guid]
+                        count = offer["quantity"] - 1
+                        assert purchase["remaining_quantity"] == count, purchase
+                        assert (remaining["source"], remaining["class_path"], remaining["quantity"], remaining["ammo"],
+                                remaining["value"], remaining["price"]) == (
+                                    source, BALL_AMMO, count, count, 3 * count,
+                                    math.ceil(remaining["markup"] * (3 * count))), remaining
+                        assert [row for row in after["offers"] if row["guid"] != guid] == [
+                            row for row in before["offers"] if row["guid"] != guid], after
+                    else:
+                        assert after["offers"] == before["offers"], after
                     inventory = (await act(guest_target, "native-inventory-list"))["native_inventory"]
                     deposited, = [item for item in inventory["items"] if item["guid"] == acquired["guid"]]
                     assert deposited["quantity"] == 1 and inventory["owner"] == invite["character_id"], inventory
-                    await wait(host_run, lambda state: state.get("gameplay", {}).get("shared_wallet") == 0)
-                    await wait(guest_run, lambda state: state.get("gameplay", {}).get("shared_wallet") == 0)
+                    for seat in (host_run, guest_run):
+                        await wait(seat, lambda state: state.get("gameplay", {}).get("shared_wallet") == 0
+                                   and state.get("game", {}).get("native_wallet") == 0)
                     assert save_hashes() == canary, "Buying one stock unit wrote a campaign save"
-                    proof = {"purchase": purchase, "inventory_row": deposited, "shelf_unchanged": True,
+                    proof = {"purchase": purchase, "inventory_row": deposited,
                              "open_and_cancel_wallet_unchanged": True, "retry_replayed": True}
+                    if finite_stack:
+                        await act(host_target, "checkpoint")
+                        assert save_hashes() != canary, "The explicit campaign save did not commit the finite purchase"
+                        proof.update(finite_offer_before=offer, finite_offer_remaining=remaining,
+                                     finite_setup=finite_setup, saved_on_explicit_checkpoint=True, shared_wallet_on_both_seats=0)
+                    else:
+                        proof["shelf_unchanged"] = True
                     return
                 await act(host_target, "native-finite-shop-wallet-fixture", "--amount", "0")
                 assert (await stock_ready(0))["sequence"] == opened["sequence"]
@@ -464,7 +516,9 @@ if __name__ == "__main__":
     options.add_argument("--vanilla-saved", type=Path)
     options.add_argument("--shop-view", "--shop-input", action="store_true")
     options.add_argument("--stock-screen", action="store_true", help="trade using the stock ShopScreen")
-    options.add_argument("--one-unit", action="store_true", help="verify stock Gunsmith quantity, cancellation, and retry")
+    quantities = options.add_mutually_exclusive_group()
+    quantities.add_argument("--one-unit", action="store_true", help="verify stock Gunsmith quantity, cancellation, and retry")
+    quantities.add_argument("--finite-stack", action="store_true", help="verify an Observatory buyback stack keeps its GUID after a one-unit purchase")
     options.add_argument("--shop-pages", action="store_true", help="verify authenticated Gunsmith overlay page navigation when stock spans two pages")
     options.add_argument("--scientist-blank", action="store_true", help="purchase the Scientist's exact guest Blank Data Tape shelf offer")
     options.add_argument("--sell", action="store_true")
@@ -482,6 +536,8 @@ if __name__ == "__main__":
         options.error("Overlay page navigation and the stock screen use separate fixture paths")
     if args.one_unit and (args.merchant != "gunsmith" or not args.stock_screen):
         options.error("--one-unit requires --merchant gunsmith --stock-screen")
+    if args.finite_stack and (args.merchant != "observatory" or not args.stock_screen or args.sell):
+        options.error("--finite-stack requires the Observatory stock screen without --sell")
     asyncio.run(verify(args.work.resolve(), args.vanilla_saved, args.shop_view or args.shop_pages or args.stock_screen,
                        args.sell, args.merchant, shop_pages=args.shop_pages, scientist_blank=args.scientist_blank,
-                       stock_screen=args.stock_screen, one_unit=args.one_unit))
+                       stock_screen=args.stock_screen, one_unit=args.one_unit, finite_stack=args.finite_stack))
