@@ -17,6 +17,7 @@ local fixture_actions = {open = true, running = true, prompt = true, cancel = tr
 local reasons = {quit_to_menu = true, save_and_quit = true}
 
 local offer_path, eligibility_path, input_path, request_path
+local steam_host_path, steam_request_path, steam_invite
 local fixture_command_path, fixture_reply_path, fixture_previous, fixture_pending
 local fixture_seen, fixture_count = {}, 0
 local bound, written_eligibility, requested, fixture_menu, fixture_confirmation, fixture_status, fixture_diagnostic
@@ -114,9 +115,17 @@ local function revoke()
     written_eligibility = nil
 end
 
+local function clear_invite()
+    if steam_invite then
+        steam_invite.controls.remove(steam_invite.button)
+        steam_invite = nil
+    end
+end
+
 function pause.clear()
     active_scene = nil
     revoke()
+    clear_invite()
     fixture_menu, fixture_confirmation, fixture_status, fixture_diagnostic = nil, nil, nil, nil
 end
 
@@ -138,6 +147,67 @@ local function qualified(scene)
         written_eligibility = record
     end
     return scene
+end
+
+local function owned_pause(value, scene)
+    return exact(value, pause_class) and same(value:GetOwningPlayer(), scene.controller)
+        and same(value:GetOuter(), scene.world.OwningGameInstance) and value:IsInViewport()
+end
+
+local steam_labels = {
+    ready = "Invite Steam Friend",
+    friends = "Steam friends can join",
+    opening = "Opening Steam…",
+    unavailable = "Steam invite unavailable",
+}
+
+local function can_invite(status)
+    return status == "ready" or status == "friends"
+end
+
+local function steam_status(scene)
+    local data = read(steam_host_path, 80)
+    if not data then return end
+    local generation, status = data:match("^1\t([0-9a-f]+)\t([a-z_]+)\n$")
+    if generation == scene.generation and steam_labels[status] then return status end
+end
+
+local function top_pause(scene)
+    local stack = scene.controller.MenuStack
+    local menu = stack and stack:GetArrayNum() == 1 and stack[1]
+    if owned_pause(menu, scene) and menu:IsVisible() then return menu end
+end
+
+local function sync_steam_invite(scene)
+    local menu = scene.role == "host" and not requested and top_pause(scene)
+    local status = menu and steam_status(scene)
+    if not status then clear_invite(); return end
+    if steam_invite and (not same(steam_invite.menu, menu) or steam_invite.generation ~= scene.generation) then
+        clear_invite()
+    end
+    if not steam_invite then
+        local anchor = menu.Button_SaveAndQuit
+        local parent = valid(anchor) and anchor:GetParent()
+        if not exact(parent, "/Script/UMG.VerticalBox") then return end
+        local controls = require("native_menu_controls")
+        local record = {controls = controls, menu = menu, generation = scene.generation}
+        steam_invite = record
+        local added, button = pcall(controls.create, scene, parent, steam_labels[status], function()
+            local latest = active_scene
+            if steam_invite ~= record or requested or lease("host") ~= record.generation
+                or not latest or latest.generation ~= record.generation
+                or not can_invite(steam_status(latest)) or not same(top_pause(latest), menu) then return end
+            publish(steam_request_path, "1\t" .. record.generation .. "\tinvite\n", false)
+        end)
+        if added then record.button = button end
+    end
+    if steam_invite.button and steam_invite.status ~= status then
+        local widget = steam_invite.button.widget
+        widget:UpdateText(FText(steam_labels[status]))
+        widget:SetToolTipText(FText(status == "friends" and "Friends can select Join Game from your Steam profile." or ""))
+        widget:SetIsEnabled(can_invite(status))
+        steam_invite.status = status
+    end
 end
 
 local function consume(scene)
@@ -197,18 +267,18 @@ function pause.sync(state, phase)
     local scene = context(state, phase)
     if offer_path then
         local managed = qualified(scene)
-        if managed then consume(managed) else pause.clear() end
+        if managed then
+            consume(managed)
+            sync_steam_invite(managed)
+        else
+            pause.clear()
+        end
     end
     active_scene = scene
     if offer_path then service_fixture(state, phase) end
 end
 
 local function reject(reason) error("native_coop_pause_fixture_" .. reason, 0) end
-
-local function owned_pause(value, scene)
-    return exact(value, pause_class) and same(value:GetOwningPlayer(), scene.controller)
-        and same(value:GetOuter(), scene.world.OwningGameInstance) and value:IsInViewport()
-end
 
 local function class_label(class)
     local label = valid(class) and class:GetFullName():match("([^./: ]+)$") or "-"
@@ -311,6 +381,8 @@ function pause.start(bridge)
     eligibility_path = bridge .. "/native-session-exit-eligibility.state"
     input_path = bridge .. "/native-session-exit-input.state"
     request_path = bridge .. "/native-coop-pause-request.tsv"
+    steam_host_path = bridge .. "/steam-coop-host.tsv"
+    steam_request_path = bridge .. "/steam-coop-invite-request.tsv"
     os.remove(eligibility_path)
     os.remove(input_path)
     if fixtures then

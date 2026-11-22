@@ -1,7 +1,7 @@
 """One typed launch request for a packaged embedded co-op game process."""
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import AsyncExitStack, contextmanager
 import ctypes
 from ctypes import wintypes
 from dataclasses import asdict, dataclass
@@ -419,7 +419,7 @@ def _reserve_campaign(work: Path, campaign_root: Path) -> Path:
 
 
 def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, default_port, *,
-                        automatic_campaigns=False, host_options=None, cloud_backups=None):
+                        automatic_campaigns=False, host_options=None, cloud_backups=None, steam=None):
     from . import service
     from .control import select_run
     from .title_host_campaigns import saved_campaign
@@ -449,16 +449,20 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
                 raise RuntimeError("A distinct private Unreal port was not available")
             engine = EmbeddedEngine(os.getpid(), mailbox, saved, private, session_directory=selected)
             await engine.observe_title()
-            session = service.host_game(
-                work, selected, bind, port, headless, resident_engine=engine,
-                direct_password=password, stock_creator=use_creator, resume_existing=resume_area is not None,
-                max_guests=service.MENU_HOST_GUEST_LIMIT, **host_options,
-                **({"start_preset": mode} if mode == "wanderer" and not use_creator else {}),
-            )
-            if cloud_backups is None:
-                await session
-            else:
-                await cloud_backups.mirror_host(selected, session)
+            async with AsyncExitStack() as scope:
+                if steam is not None:
+                    await scope.enter_async_context(steam.playing(role="host"))
+                session = service.host_game(
+                    work, selected, bind, port, headless, resident_engine=engine,
+                    direct_password=password, stock_creator=use_creator, resume_existing=resume_area is not None,
+                    max_guests=service.MENU_HOST_GUEST_LIMIT, **host_options,
+                    **({"start_preset": mode} if mode == "wanderer" and not use_creator else {}),
+                    **({"steam_session": steam} if steam is not None else {}),
+                )
+                if cloud_backups is None:
+                    await session
+                else:
+                    await cloud_backups.mirror_host(selected, session)
 
         def status():
             return runtime.read_json(selected / "run" / "status.json")
@@ -540,7 +544,7 @@ async def _resident_direct_join(work: Path, directory: Path, mailbox: Path, save
         await settings.close()
 
 
-def _resident_direct_join_plan(work, directory, mailbox, saved, headless, *, available=None):
+def _resident_direct_join_plan(work, directory, mailbox, saved, headless, *, available=None, steam=None):
     from . import direct_ip, service
     from .title_join_settings import TitleJoinSettings
     from .title_session import SessionPlan
@@ -561,7 +565,8 @@ def _resident_direct_join_plan(work, directory, mailbox, saved, headless, *, ava
         return runtime.read_json(directory / "run" / "status.json")
 
     settings = TitleJoinSettings(work, mailbox, direct_profile=directory, qualify_connection=qualify,
-                                 timeout=18, saved=saved)
+                                 timeout=18, saved=saved,
+                                 endpoint_fingerprint=steam.fingerprint_for if steam is not None else None)
 
     def resolve(claim):
         if claim.join_settings is None:
@@ -576,7 +581,11 @@ def _resident_direct_join_plan(work, directory, mailbox, saved, headless, *, ava
         async def start():
             engine = EmbeddedEngine(os.getpid(), mailbox, saved, None, session_directory=directory)
             await engine.observe_title()
-            await service.join_game(work, directory, connection, headless, character, resident_engine=engine)
+            async with AsyncExitStack() as scope:
+                if steam is not None:
+                    endpoint = connection.session()
+                    await scope.enter_async_context(steam.playing(endpoint["host"], endpoint["port"], role="guest"))
+                await service.join_game(work, directory, connection, headless, character, resident_engine=engine)
 
         return SessionPlan(start, status, lambda frame: frame.get("character_id") == character
                            and frame.get("gameplay_fresh") is True)
@@ -605,21 +614,25 @@ async def _resident_unified(work: Path, seat: Path, mailbox: Path, saved: Path, 
     host_options = service.unified_host_options(work)
     options = service.unified_title_options(work, host_options=host_options)
     required = service._embedded_features(work, headless, None, options, resident=True, unified=True)
-    if _current_startup(tuple(required)).environment != required:
+    startup = _current_startup(tuple(required))
+    if startup.environment != required:
         raise ValueError("The unified title lacks the standard native co-op capabilities")
 
     from .steam_cloud import CloudBackups
+    from .steam_session import installed_steam
 
     defaults = HostDefaults(name, settings["bind"], settings["port"])
-    cloud = CloudBackups(campaign.parent, saved.parent) if os.environ.get(INSTALLED_ENV) == "1" else None
-    host = _resident_host_plan(work, campaign, mailbox, saved, headless, defaults.bind, defaults.port,
-                               automatic_campaigns=True, host_options=host_options, cloud_backups=cloud)
-    join, join_settings = _resident_direct_join_plan(work, guest, mailbox, saved, headless, available=options)
-    try:
-        await _resident_title(mailbox, saved, seat, {"host": host, "join": join}, join_settings=join_settings,
-                              host_campaign=campaign, host_defaults=defaults, cloud_backups=cloud)
-    finally:
-        await join_settings.close()
+    installed = os.environ.get(INSTALLED_ENV) == "1"
+    cloud = CloudBackups(campaign.parent, saved.parent) if installed else None
+    async with installed_steam(work, mailbox, startup.argv, enabled=installed and not headless) as steam:
+        host = _resident_host_plan(work, campaign, mailbox, saved, headless, defaults.bind, defaults.port,
+                                   automatic_campaigns=True, host_options=host_options, cloud_backups=cloud, steam=steam)
+        join, join_settings = _resident_direct_join_plan(work, guest, mailbox, saved, headless, available=options, steam=steam)
+        try:
+            await _resident_title(mailbox, saved, seat, {"host": host, "join": join}, join_settings=join_settings,
+                                  host_campaign=campaign, host_defaults=defaults, cloud_backups=cloud)
+        finally:
+            await join_settings.close()
 
 
 async def _resident_title(mailbox, saved, directory, plans, *, join_settings=None, host_campaign=None,

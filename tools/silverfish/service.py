@@ -4161,7 +4161,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     guest_melee_canary: bool = False, host_dig_live_fixture: bool = False,
                     embedded_port: int | None = None, runtime_listener: bool = False,
                     resident_engine: EmbeddedEngine | None = None, direct_password: str | None = None,
-                    stock_creator: bool = False, resume_existing: bool = False) -> None:
+                    stock_creator: bool = False, resume_existing: bool = False, steam_session=None) -> None:
     if resume_existing and (resident_engine is None or stock_creator or start_preset):
         raise ValueError("Resume requires the resident campaign and its existing checkpoint")
     if resident_engine is not None:
@@ -4493,7 +4493,11 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                                               **({"enroll": enrollment} if enrollment is not None else {}))
             controller.port = transport.address[1]
             control.event("listening", address=bind, port=controller.port)
-            await controller.run(bridge, transport)
+            async with contextlib.AsyncExitStack() as scope:
+                if steam_session is not None:
+                    await scope.enter_async_context(steam_session.host_panel(
+                        bridge.directory, bind, controller.port, identity.certificate_pem, control))
+                await controller.run(bridge, transport)
         except (Exception, asyncio.CancelledError) as error:
             result = "stopped" if isinstance(error, asyncio.CancelledError) else "failed"
             control.event("host_stopping", outcome=result, error_type=type(error).__name__)

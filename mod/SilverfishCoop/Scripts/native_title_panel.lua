@@ -9,6 +9,7 @@ local actions = {
     ["host"] = {host = true}, ["join"] = {join = true}, ["host,join"] = {host = true, join = true},
 }
 local bridge_path, session_path, request_path, loop, current, session, report
+local steam_join_path, steam_cancel_path, steam_opened_path, last_steam_invite, steam_polled_at
 local dismissed, submitted
 local singleplayer_title
 local guest_creation
@@ -357,7 +358,18 @@ local function handle_host_form(action, context)
     return choose("host", context, values)
 end
 
-local function handle_join_form(action, state, phase, context)
+local function publish_steam_join_state(path, nonce, action)
+    if not nonce then return end
+    local temporary = path .. "." .. nonce .. ".tmp"
+    local file = io.open(temporary, "wb")
+    if not file then return end
+    local written = file:write("1\t", nonce, "\t", action, "\n")
+    local closed = file:close()
+    if written and closed and os.rename(temporary, path) then return true end
+    os.remove(temporary)
+end
+
+local function handle_join_form(action, state, phase, context, steam_invite)
     local offer, reason = active_offer("join", context)
     if not offer then return false, reason end
     local form = session.form
@@ -367,8 +379,8 @@ local function handle_join_form(action, state, phase, context)
         present(nil)
         local owner = session
         local draft = api.open(state, phase, context, bridge_path, offer.generation, request_id, direct_join,
-            function(key) if session == owner then dispatch(key) end end, offer.defaults)
-        session.form = {role = "join", api = api, draft = draft}
+            function(key) if session == owner then dispatch(key) end end, offer.defaults, steam_invite and steam_invite.port)
+        session.form = {role = "join", api = api, draft = draft, steam_nonce = steam_invite and steam_invite.nonce}
         report = {state = "ready", choices = offer.choices}
         return true
     end
@@ -400,11 +412,36 @@ local function handle_join_form(action, state, phase, context)
         return true
     end
     if failure == "title_join_form_back_to_title" then
+        publish_steam_join_state(steam_cancel_path, form.steam_nonce, "cancel")
         close_form(session)
         multiplayer(offer)
         return true
     end
     return accepted, failure
+end
+
+local function poll_steam_invite(context)
+    if not direct_join or session.form or submitted == session.offer.generation
+        or not actions[session.offer.choices].join then return end
+    local now = os.time()
+    if steam_polled_at == now then return end
+    steam_polled_at = now
+    local file = io.open(steam_join_path, "rb")
+    if not file then return end
+    local record = file:read(81)
+    file:close()
+    if not record or #record > 80 then return end
+    local nonce, port, stamp = record:match("^1\t([0-9a-f]+)\t([1-9][0-9]*)\t([0-9]+)\n$")
+    local expiry = stamp and #stamp <= 10 and tonumber(stamp)
+    if not nonce or #nonce ~= 32 or not nonce:find("[^0]") or nonce == last_steam_invite
+        or #port > 5 or tonumber(port) > 65535 or not expiry or expiry < now or expiry > now + 60 then return end
+    if handle_join_form("join", current.state, current.phase, context, {nonce = nonce, port = port}) then
+        last_steam_invite = nonce
+        controls.remove(session.solo_back)
+        session.solo_back = nil
+        singleplayer_title = nil
+        show_stock(session, false)
+    end
 end
 
 local function resume_guest_creation(context, offer, state, phase)
@@ -682,9 +719,15 @@ local function update_title()
         report = nil
         return
     end
+    poll_steam_invite(context)
     surface.sync(session.view)
     local form = session.form
     if form and form.role == "join" then
+        local now = os.time()
+        if form.steam_nonce and not form.steam_opened and form.steam_opened_at ~= now then
+            form.steam_opened_at = now
+            form.steam_opened = publish_steam_join_state(steam_opened_path, form.steam_nonce, "opened")
+        end
         form.api.sync(form.draft)
         if form.draft.pending and active_offer("join", context) then
             form.api.poll(form.draft, current.state, current.phase)
@@ -799,6 +842,9 @@ function panel.start(bridge)
     bridge_path = bridge
     session_path = bridge .. "/title-handoff-session.tsv"
     request_path = bridge .. "/title-handoff-request.tsv"
+    steam_join_path = bridge .. "/steam-coop-join.tsv"
+    steam_cancel_path = bridge .. "/steam-coop-join-cancel.tsv"
+    steam_opened_path = bridge .. "/steam-coop-join-opened.tsv"
     loop = LoopInGameThreadWithDelay(16, function()
         if not pcall(update_title) then unavailable() end
     end)

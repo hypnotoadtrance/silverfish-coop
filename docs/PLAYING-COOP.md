@@ -42,6 +42,16 @@ Choose **Multiplayer** and **Join by Direct IP**. Enter the host's numeric IP an
 
 The game asks you to confirm trust on a first connection or when a known host’s identity changes. Once accepted, the connection remains encrypted. The default resident co-op workspace is `%LOCALAPPDATA%\SilverfishCoop\Resident`. Each loaded host campaign has its own character list.
 
+### Steam relay trial
+
+1. Install the same Steam-enabled co-op ZIP on both PCs and launch the game through Steam on accounts that can run Silverfish concurrently.
+2. On the host, start or load a co-op campaign using the default IPv4 listening address. In the pause menu, select **Invite Steam Friend**. If Steam’s overlay is unavailable, the pause menu indicates that friends can use **Join Game** from their Steam friends list.
+3. On the guest, accept the invite at the title screen or in Steam before launching. Select **Connect**, use the host password if set, then select or create a campaign character.
+
+Steam relay carries the connection without a publicly reachable UDP port. The host remains the authority for the same campaign and character roster. The lobby ends when the host closes the campaign. Direct IP remains available through the title menu.
+
+The relay and title integration have been tested with simulated Steam peers. A live invite and relay session between separate Steam accounts is pending. If the invite button is absent, the host can check the `steam-coop-status.json` file in the current game bridge for the initialization state.
+
 ### Steam Cloud backups
 
 The installed mod mirrors each hosted campaign as a complete backup under `%LOCALAPPDATA%\SilverFish\Saved\SaveGames\SilverfishCoopCloud`. The backup includes the world, host and guest characters, and the campaign’s private host identity so returning guests can use their existing characters. Keep the backup files within the host’s Steam account. Steam Auto-Cloud uploads these files on exit and downloads them on launch when Steam Cloud is enabled for Project Silverfish. The mod reads downloaded backups when you open the Host campaign picker. The same Steam account and a compatible mod build are required on the other PC.

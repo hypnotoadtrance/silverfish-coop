@@ -3,6 +3,8 @@ local offer = prefix .. "/native-coop-pause-session.tsv"
 local eligible = prefix .. "/native-session-exit-eligibility.state"
 local input = prefix .. "/native-session-exit-input.state"
 local request = prefix .. "/native-coop-pause-request.tsv"
+local steam_host = prefix .. "/steam-coop-host.tsv"
+local steam_request = prefix .. "/steam-coop-invite-request.tsv"
 local first = string.rep("a", 32)
 local second = string.rep("b", 32)
 local third = string.rep("c", 32)
@@ -20,6 +22,7 @@ end
 local controller_class = object(50)
 local pawn_class = object(51)
 local pause_class = object(52)
+local vertical_class = object(54)
 local map = "/Game/Classes/Maps/PlaytestMap_01"
 local world = object(10)
 world.GetFullName = function() return "World " .. map .. ".PlaytestMap_01" end
@@ -39,6 +42,11 @@ local state = {listening = true, server = false, world = world, map = map, contr
 local menu = object(40, pause_class)
 menu.GetOwningPlayer = function() return controller end
 menu.GetOuter = function() return world.OwningGameInstance end
+menu.IsInViewport = function() return true end
+menu.IsVisible = function() return true end
+local pause_parent = object(55, vertical_class)
+menu.Button_SaveAndQuit = object(56)
+menu.Button_SaveAndQuit.GetParent = function() return pause_parent end
 local pause_hook
 local already_paused = false
 local statics = object(53)
@@ -54,6 +62,23 @@ local function fake_open(path, mode)
 end
 
 local embedded, fixture_enabled = true, false
+local invite_button
+local controls = {
+    create = function(scene, parent, label, callback)
+        assert(scene.role == "host" and parent == pause_parent and invite_button == nil)
+        local widget = {
+            text = label,
+            UpdateText = function(self, text) self.text = text end,
+            SetToolTipText = function(self, text) self.tooltip = text end,
+            SetIsEnabled = function(self, enabled) self.enabled = enabled end,
+        }
+        invite_button = {widget = widget, callback = callback}
+        return invite_button
+    end,
+    remove = function(button)
+        if button then assert(button == invite_button); invite_button = nil end
+    end,
+}
 local env = setmetatable({
     io = {open = fake_open},
     os = {
@@ -69,10 +94,13 @@ local env = setmetatable({
             return true
         end,
     },
+    require = function(name) assert(name == "native_menu_controls"); return controls end,
+    FText = function(text) return text end,
     StaticFindObject = function(path)
         if path:find("PlayerControler_FP", 1, true) then return controller_class end
         if path:find("Player_FP", 1, true) then return pawn_class end
         if path:find("Menu_Pause_Widget", 1, true) then return pause_class end
+        if path == "/Script/UMG.VerticalBox" then return vertical_class end
         if path == "/Script/Engine.Default__GameplayStatics" then return statics end
     end,
     RegisterHook = function(path, callback)
@@ -120,6 +148,40 @@ local driver = world.NetDriver
 world.NetDriver = object(42)
 assert(requests_pause(menu), "An expired world binding cannot change pause")
 world.NetDriver = driver
+
+controller.MenuStack = {menu, GetArrayNum = function(self) return #self end}
+fs[steam_host] = row(1, second, "ready") .. "\n"
+bridge.sync(state, "hosting")
+assert(not invite_button, "Ignore a Steam marker from a different host session")
+fs[steam_host] = row(1, first, "ready") .. "\n"
+bridge.sync(state, "hosting")
+assert(invite_button.widget.text == "Invite Steam Friend" and invite_button.widget.enabled)
+invite_button.callback()
+assert(fs[steam_request] == row(1, first, "invite") .. "\n")
+fs[steam_host] = row(1, first, "friends") .. "\n"
+fs[steam_request] = nil
+bridge.sync(state, "hosting")
+assert(invite_button.widget.enabled and invite_button.widget.text == "Steam friends can join"
+    and invite_button.widget.tooltip:find("Join Game", 1, true))
+invite_button.callback()
+assert(fs[steam_request] == row(1, first, "invite") .. "\n")
+fs[steam_host] = row(1, first, "opening") .. "\n"
+fs[steam_request] = nil
+bridge.sync(state, "hosting")
+assert(not invite_button.widget.enabled)
+invite_button.callback()
+assert(fs[steam_request] == nil)
+fs[steam_host] = row(1, first, "ready") .. "\n"
+local stale_click = invite_button.callback
+controller.MenuStack[2] = object(57)
+bridge.sync(state, "hosting")
+assert(invite_button == nil, "The button must leave the stock pause when another menu covers it")
+stale_click()
+assert(fs[steam_request] == nil)
+controller.MenuStack[2] = nil
+bridge.sync(state, "hosting")
+assert(invite_button and invite_button.widget.enabled)
+fs[steam_host] = nil
 
 capture(second, 1, "quit_to_menu")
 bridge.sync(state, "hosting")

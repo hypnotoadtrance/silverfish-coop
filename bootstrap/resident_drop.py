@@ -9,6 +9,7 @@ from subprocess import CalledProcessError
 from tempfile import TemporaryDirectory
 
 from tools.silverfish import runtime, service
+from tools.silverfish.steam_session import STEAM_DLL, STEAM_DLL_SHA256
 
 from . import install_stage, install_stock, release_bundle, release_setup as layout
 from .resident_install import _GAME_BUILD
@@ -26,7 +27,7 @@ _SCRIPT_SOURCE = "mod/SilverfishCoop/Scripts/"
 _RUNTIME_SOURCE = layout.RUNTIME + "/"
 _RUNTIME_MANIFEST = _RUNTIME_SOURCE + install_stage.MANIFEST
 
-_START = r"""Project Silverfish Co-op | Windows Direct IP trial {version}
+_START = r"""Project Silverfish Co-op | Windows co-op trial {version}
 
 {variant}
 
@@ -43,14 +44,24 @@ _START = r"""Project Silverfish Co-op | Windows Direct IP trial {version}
 
 Both players need the same co-op release and matching Steam game build.
 Co-op saves live under %LOCALAPPDATA%\SilverfishCoop\Resident by default.
+{steam}
 On the same network, use the host's LAN IP. Across networks the guest
-must be able to reach the host's chosen UDP port (7777 by default).
+using Direct IP must be able to reach the host's chosen UDP port
+(7777 by default).
 
 Each campaign has its own guest characters. The host's identity belongs to
 the co-op installation and stays the same when the host changes campaigns.
 The game asks guests to confirm that they trust a new host or a host whose
 identity has changed. The connection remains encrypted after confirmation.
 """
+_STEAM_TRIAL = (
+    "\nSteam relay trial: launch through Steam on both PCs. Host a campaign,\n"
+    "then use Invite Steam Friend in the in-game Pause menu. Your friend can\n"
+    "accept the invite in Steam or use Join Game from the Steam friends list\n"
+    "while the lobby is open. They choose or create a character in the game.\n"
+    "Hosts using the default IPv4 bind do not need to forward a port for Steam\n"
+    "relay. An optional host password still applies.\n"
+)
 _FULL_INSTALL = ("Use this ZIP for a first install or an update. It includes the pinned\n"
                  "UE4SS v4.0.0 loader and Project Silverfish signature. Updating with this\n"
                  "ZIP replaces bundled UE4SS files, including UE4SS-settings.ini.")
@@ -106,7 +117,7 @@ def _features(work: Path, stage: dict, payload: dict[Path, bytes], loader: bytes
 
 def assemble(output: Path, *, version: str, revision: str, shipping: Path, cpp_addon: Path,
              embedded_addon: Path, embedded_runtime: Path, ue4ss: Path, signatures: Path | None = None,
-             include_loader: bool = False, cpp_addon_sha256: str | None = None) -> dict:
+             include_loader: bool = False, cpp_addon_sha256: str | None = None, steam_api: Path | None = None) -> dict:
     """Package an exact committed Lua and embedded runtime pair for a qualified stock executable."""
     if not layout.VERSION.fullmatch(version) or version.endswith("."):
         raise ValueError("Supply a version made from letters, numbers, dots, underscores, or hyphens")
@@ -149,8 +160,13 @@ def assemble(output: Path, *, version: str, revision: str, shipping: Path, cpp_a
         _BINARIES / runtime.CPP_ADDON_DLL: gameplay,
         _EMBEDDED / "dlls" / "main.dll": embedded,
         _STAGE: _json(stage),
-        _README: _START.format(version=version, variant=_FULL_INSTALL if include_loader else _UPDATE).encode("ascii"),
+        _README: _START.format(version=version, variant=_FULL_INSTALL if include_loader else _UPDATE,
+                              steam=_STEAM_TRIAL if steam_api is not None else "").encode("ascii"),
     })
+    if steam_api is not None:
+        redistributable = install_stock._pinned(absolute(steam_api), STEAM_DLL_SHA256)
+        release_bundle._pe(redistributable, dll=True, name="Steamworks redistributable")
+        payload[STEAM_DLL] = redistributable
     for module in ("SilverfishCoop", runtime.CPP_MOD_NAME, install_stage.MOD):
         payload[_MODS / module / "enabled.txt"] = b""
     if include_loader:
@@ -192,6 +208,7 @@ def main() -> None:
     parser.add_argument("--signatures", type=Path)
     parser.add_argument("--include-loader", action="store_true", help="include the pinned UE4SS loader and game signature")
     parser.add_argument("--cpp-addon-sha256")
+    parser.add_argument("--steam-api", type=Path, help="include the pinned Windows x64 Valve Steamworks redistributable")
     try:
         result = assemble(**vars(parser.parse_args()))
     except (CalledProcessError, OSError, ValueError) as error:

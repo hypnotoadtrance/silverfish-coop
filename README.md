@@ -23,6 +23,8 @@ An unofficial UE4SS mod that adds Direct IP co-op to the Windows Steam version o
 
 **Join.** Choose **Join by Direct IP** and enter the host’s IP address, port, and password if enabled. Review the trust prompt on the first connection or after a host identity change. Choose a saved character for that campaign or create a new one. Character lists belong to each host campaign.
 
+**Steam relay trial.** In a build that includes Steam networking, launch through Steam on both PCs. After loading a campaign, the host opens the in-game pause menu and selects **Invite Steam Friend**. The guest accepts through Steam and uses the in-game character picker. The host’s optional password applies. [Steam trial details](docs/PLAYING-COOP.md#steam-relay-trial)
+
 For LAN play, use the host’s LAN address. For internet play, the guest needs a route to the host’s UDP port. This may require a host firewall exception and router port forwarding. Co-op saves default to `%LOCALAPPDATA%\SilverfishCoop\Resident`. The mod can back up host campaigns through Steam Cloud. Keep a local copy of important campaigns before changing builds. [Co-op backups](docs/PLAYING-COOP.md#steam-cloud-backups)
 
 ## Screenshots
@@ -50,7 +52,7 @@ Captured in development builds. The Direct IP form shows a test port.
 - **Campaign coverage.** Co-op is still in development. Some quests and dialogue triggers, faction updates, inventory actions, NPC behaviors, map exits, and scripted events lack complete multiplayer coverage.
 - **Visual and physical state.** Avatar appearance, equipment and combat animations, thrown items, harvested objects, and some props and anomalies may differ between players. Release notes distinguish fixes included in the ZIP from work on `main`.
 - **Responsiveness.** Some interactions wait for the host to commit a change. Players have reported delays and Crossroads stutter. Muted loopback timings cover local iteration. Foreground and internet play can behave differently.
-- **Networking.** Steam Invites, matchmaking, and an internet relay are outside the current build. Direct IP depends on the guest being able to reach the host.
+- **Networking.** The Steam invite and relay trial has offline integration coverage and awaits human testing on two Steam accounts. Direct IP depends on the guest being able to reach the host.
 - **Compatibility.** Each ZIP targets a qualified Windows Steam build and includes a pinned UE4SS version. A game update or another UE4SS mod can introduce conflicts. Very long installation paths can prevent a bundled Windows DLL from loading.
 
 When [reporting a problem](https://github.com/hypnotoadtrance/silverfish-coop/issues/new), include the release tag, map, steps to reproduce, what each player expected and saw, and whether the connection was LAN or internet. Keep passwords, private invitation files, and save data out of issue reports.

@@ -62,12 +62,12 @@ class ResidentDropTests(unittest.TestCase):
         path.write_bytes(contents)
         return path
 
-    def assemble(self, filename, *, include_loader=False):
+    def assemble(self, filename, *, include_loader=False, steam_api=None):
         return resident_drop.assemble(
             self.root / filename, version="fixture-1", revision="a" * 40, shipping=self.shipping,
             cpp_addon=self.gameplay, embedded_addon=self.root / "embedded.dll",
             embedded_runtime=self.root / "runtime", ue4ss=self.ue4ss,
-            signatures=self.signatures if include_loader else None, include_loader=include_loader,
+            signatures=self.signatures if include_loader else None, include_loader=include_loader, steam_api=steam_api,
         )
 
     def test_update_contains_only_mod_files_and_versioned_runtime(self):
@@ -120,6 +120,15 @@ class ResidentDropTests(unittest.TestCase):
                 (binary / "ue4ss/LICENSE").as_posix(),
                 (binary / "ue4ss" / install_stock.SIGNATURE).as_posix(),
             })
+
+    def test_steam_trial_bundles_only_the_qualified_redistributable_and_instructions(self):
+        redistributable = self.gameplay.read_bytes()
+        with patch.object(resident_drop, "STEAM_DLL_SHA256", sha256(redistributable).hexdigest()):
+            release = self.assemble("steam.zip", steam_api=self.gameplay)
+        with ZipFile(release["file"]) as archive:
+            self.assertEqual(archive.read(resident_drop.STEAM_DLL.as_posix()), redistributable)
+            self.assertIn(b"Invite Steam Friend", archive.read("SilverFish/Silverfish-Coop-README.txt"))
+            self.assertFalse(any(name.endswith("steam_appid.txt") for name in archive.namelist()))
 
     def test_overwrite_preserves_previous_runtime_and_local_configuration(self):
         installed = self.root / "previous install"

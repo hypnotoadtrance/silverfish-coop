@@ -1,6 +1,8 @@
 local descriptor, request = "bridge/title-handoff-session.tsv", "bridge/title-handoff-request.tsv"
 local join_request, join_response = "bridge/title-join-request.tsv", "bridge/title-join-response.tsv"
 local join_invite = "bridge/title-join-fixture.invite.json"
+local steam_join, steam_cancel = "bridge/steam-coop-join.tsv", "bridge/steam-coop-join-cancel.tsv"
+local steam_opened = "bridge/steam-coop-join-opened.tsv"
 local host_catalog = "bridge/title-host-campaigns.tsv"
 local files, flags, queued = {}, {}, {}
 local now, id, tick, display, solo_back, writes = 100, 0, nil, nil, nil, 0
@@ -145,14 +147,15 @@ env = setmetatable({
             if not files[path] then return end
             return {read = function(_, size) return files[path]:sub(1, size) end, close = function() return true end}
         end
-        assert(mode == "wb" and (path:sub(1, #request) == request or path:sub(1, #join_request) == join_request))
+        assert(mode == "wb" and (path:sub(1, #request) == request or path:sub(1, #join_request) == join_request
+            or path:sub(1, #steam_cancel) == steam_cancel or path:sub(1, #steam_opened) == steam_opened))
         return {write = function(_, ...) files[path] = table.concat({...}); writes = writes + 1; return true end,
             close = function() return true end}
     end},
     os = {time = function() return now end, getenv = function(name) return flags[name] end,
         remove = function(path) files[path] = nil end,
         rename = function(source, target)
-            assert(target == request or target == join_request)
+            assert(target == request or target == join_request or target == steam_cancel or target == steam_opened)
             if refuse_rename or files[target] then return false end
             files[target], files[source] = files[source], nil
             return true
@@ -383,3 +386,42 @@ assert(display.title == "Load Game" and display.note == "Tutorial Dock  /  2026-
 click("submit")
 assert(files[request] == ("5\t%s\t%s\thost\tSecond-Campaign\t127.0.0.1\t28181\t\tresume\n")
     :format(save_generation, operation_id()))
+
+files[request] = nil
+state.qualified = false
+sync()
+state.qualified = true
+flags.SILVERFISH_COOP_TITLE_DIRECT_JOIN = "1"
+panel = start_panel()
+local steam_generation, steam_nonce = generation("7"), generation("8")
+offer("host,join", 110, steam_generation, defaults)
+files[steam_join] = ("1\t%s\t0\t159\n"):format(steam_nonce)
+tick()
+assert(display.title == "Project Silverfish" and not files[steam_opened])
+now = 101
+files[steam_join] = ("1\t%s\t28951\t159\n"):format(steam_nonce)
+refuse_rename = true
+tick()
+assert(display.title == "Join through Steam" and display.buttons.connect and display.toggles.use_password
+    and display.fields.address == nil and display.fields.port == nil and not files[steam_opened])
+local steam_view = display
+refuse_rename = false
+now = 102
+tick()
+assert(display == steam_view and files[steam_opened] == "1\t" .. steam_nonce .. "\topened\n")
+files[steam_opened] = nil
+next_guid = 11
+click("connect")
+assert(files[join_request] == ("1\t%s\t%s\tdirect\t127.0.0.1\t28951\t\n")
+    :format(steam_generation, operation_id()))
+files[join_request] = nil
+files[join_response] = ("1\t%s\t%s\terror\tdirect_password_required\t0\n"):format(steam_generation, operation_id())
+tick()
+assert(display.title == "Join through Steam" and surface.checked(display, "use_password"))
+click("back")
+assert(display.title == "Multiplayer" and files[steam_cancel] == "1\t" .. steam_nonce .. "\tcancel\n")
+now = 103
+tick()
+assert(display.title == "Multiplayer" and not files[steam_opened], "Do not reopen the consumed Steam invite")
+click("join")
+assert(display.title == "Join co-op" and display.fields.port == defaults[3])

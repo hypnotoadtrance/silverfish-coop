@@ -191,7 +191,7 @@ class TitleJoinSettings:
 
     def __init__(self, work: Path, bridge: Path, *, catalog: Catalog | None = None, timeout: float = 25,
                  direct_profile: Path | None = None, qualify_connection: Callable[[dict], None] | None = None,
-                 saved: Path | None = None):
+                 saved: Path | None = None, endpoint_fingerprint: Callable[[str, int], str | None] | None = None):
         self._work, self._bridge = _exact_existing(work), _exact_existing(bridge)
         if bridge == work or not bridge.is_relative_to(work):
             raise ValueError("The title Join mailbox must be inside the private co-op workspace")
@@ -206,6 +206,7 @@ class TitleJoinSettings:
             raise ValueError("Expected a title Join catalog service")
         self._catalog, self._timeout = catalog, timeout
         self._direct_profile, self._qualify_connection = direct_profile, qualify_connection
+        self._endpoint_fingerprint = endpoint_fingerprint
         self.request_path, self.response_path = bridge / REQUEST_FILE, bridge / RESPONSE_FILE
         self._storage = bridge / "title-join-imports"
         self._generation = self._resolved = None
@@ -318,6 +319,11 @@ class TitleJoinSettings:
         from .service import PROTOCOL, staged_build, validate_invite
 
         address, port, password, fingerprint = _endpoint(payload)
+        steam_fingerprint = self._endpoint_fingerprint(address, port) if self._endpoint_fingerprint else None
+        if steam_fingerprint is not None:
+            if fingerprint is not None and fingerprint != steam_fingerprint:
+                raise _DraftError("direct_identity_verification_failed")
+            fingerprint = steam_fingerprint
         build = staged_build(self._work)
         async with asyncio.timeout(self._timeout):
             try:

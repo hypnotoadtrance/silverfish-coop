@@ -129,20 +129,21 @@ local function page_count(draft)
 end
 
 local function render_surface(draft, screen, hint, initial)
-    local title, rows = "Join co-op", {}
+    local title, rows = draft.steam_port and "Join through Steam" or "Join co-op", {}
     local note = hint
     local back = button("back", "Back")
     if endpoint_screens[screen] then
-        rows = {
-            field("address", "Host IP", "IPv4 or IPv6 address", 45, draft.address),
-            field("port", "UDP port", "", 5, draft.port),
-            {toggle = {key = "use_password", label = "Use password", target = "password", checked = draft.use_password}},
-            field("password", "Password", "", 512, nil, true),
-            {button("connect", "Connect"), back},
-        }
+        if not draft.steam_port then
+            rows[#rows + 1] = field("address", "Host IP", "IPv4 or IPv6 address", 45, draft.address)
+            rows[#rows + 1] = field("port", "UDP port", "", 5, draft.port)
+        end
+        rows[#rows + 1] = {toggle = {key = "use_password", label = "Use password", target = "password",
+            checked = draft.use_password}}
+        rows[#rows + 1] = field("password", "Password", "", 512, nil, true)
+        rows[#rows + 1] = {button("connect", "Connect"), back}
     elseif screen == "trust_host" then
         title = draft.host_trust.changed and "Host identity changed" or "Trust this host?"
-        local endpoint = draft.address .. " · UDP " .. draft.port
+        local endpoint = draft.steam_port and "Steam invitation" or draft.address .. " · UDP " .. draft.port
         note = endpoint .. "\nOnly continue if you expect this host. A fake server could collect your lobby password."
         rows = {{button("trust", "Trust and connect"), back}}
     elseif screen == "invite" then
@@ -206,10 +207,11 @@ local function render(draft, state, phase, next_screen, hint, initial)
     end
 end
 
-function form.open(state, phase, context, bridge, generation, new_id, direct, on_action, defaults)
+function form.open(state, phase, context, bridge, generation, new_id, direct, on_action, defaults, steam_port)
     local surface = on_action and require("native_title_surface")
     local draft = {context = context, generation = generation, new_id = new_id, direct = direct,
-        surface = surface, on_action = on_action, port = surface and direct and (defaults and defaults.port or "7777") or nil,
+        surface = surface, on_action = on_action, steam_port = steam_port, address = steam_port and "127.0.0.1",
+        port = steam_port or (surface and direct and (defaults and defaults.port or "7777") or nil),
         request = bridge .. "/title-join-request.tsv", response = bridge .. "/title-join-response.tsv",
         fixture = bridge .. "/title-join-fixture.invite.json"}
     local ok, failure = pcall(render, draft, state, phase, direct and "address" or "invite")
@@ -316,8 +318,8 @@ local function write_field(draft, key, value, state, phase)
 end
 
 local function connect(draft, state, phase)
-    local address = draft.surface.read(draft.view, "address")
-    local port = draft.surface.read(draft.view, "port")
+    local address = draft.steam_port and "127.0.0.1" or draft.surface.read(draft.view, "address")
+    local port = draft.steam_port or draft.surface.read(draft.view, "port")
     local password = draft.surface.read(draft.view, "password")
     draft.use_password = draft.surface.checked(draft.view, "use_password") == true
     draft.address, draft.port = address or draft.address, port or draft.port
