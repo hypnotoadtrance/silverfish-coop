@@ -21,6 +21,9 @@ add_library(SilverfishCoopNative SHARED
     stock_rest.cpp transport_items.cpp zone_exit.cpp)
 target_compile_features(SilverfishCoopNative PRIVATE cxx_std_23)
 target_link_libraries(SilverfishCoopNative PRIVATE UE4SS)
+if(MSVC)
+    target_link_options(SilverfishCoopNative PRIVATE "/PDBALTPATH:SilverfishCoopNative.pdb")
+endif()
 set_target_properties(SilverfishCoopNative PROPERTIES
     OUTPUT_NAME main
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/SilverfishCoopNative"

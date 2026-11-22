@@ -45,8 +45,8 @@ Captured in development builds. The Direct IP form shows a test port.
 | --- | --- |
 | Sessions | In-game Steam and Direct IP hosting, optional passwords, encrypted transport, and hot join. Direct IP recovery preserves the character after a short interruption. One host and up to four guests have connected in loopback tests. Most gameplay checks use two players. |
 | Saves and characters | Co-op campaigns store the host’s world and each player’s character, inventory, and stash. New players can use the stock character creator and rejoin the same campaign with an existing character. Singleplayer has its own save scope. |
-| Shared world | The host resolves supported loot pickups and drops, door state, party money, campaign flags, and travel. Covered zone exits enforce the host-only and party-distance rules. Verified traps and hazards use host-side damage. |
-| Campaign gameplay | Supported paths cover downing, revives, party wipes, stock backpack and stash actions, merchant transactions, and selected NPC conversations and quest objectives. Exact coverage varies by map and interaction. |
+| Shared world | The host resolves supported loot pickups and drops, door state, party money, campaign flags, and travel. Covered zone exits enforce the host-only and party-distance rules. Verified traps and hazards use host-side damage and each player's health is reported separately. |
+| Campaign gameplay | Supported paths cover downing, revives, party wipes, stock backpack and stash actions, merchant transactions, and selected NPC conversations and quest objectives. Observatory and Scientist counter stock, Sewer Thing barter, and one authored Observatory NPC have host-owned stock. Exact coverage varies by map and interaction. |
 | Test and automation controls | Local commands expose session and gameplay status, events, and supported actions as JSON. They support human playtest operators and AI-assisted testing. |
 
 [Verified native scenarios](docs/NATIVE-INTEGRATION.md) · [Current integration and known gaps](docs/IN-GAME-INTEGRATION.md) · [Machine-readable controls](docs/PLAYING-COOP.md#machine-readable-controls)
@@ -54,7 +54,7 @@ Captured in development builds. The Direct IP form shows a test port.
 ## Limitations and known issues
 
 - **Campaign coverage.** Co-op is still in development. Some quests and dialogue triggers, faction updates, inventory actions, NPC behaviors, map exits, and scripted events lack complete multiplayer coverage.
-- **Visual and physical state.** Stock guest equipment selection is shared. Weapon actions and item-use effects have narrower coverage. Guest-carried physics objects, dragged ragdolls, wild mushroom patches, and some enemy, anomaly, and weather effects can still differ between players. Release notes distinguish fixes included in the ZIP from work on `main`.
+- **Visual and physical state.** Muted tests have covered guest-carried physics props, red flares, boar ragdoll dragging, and selected enemies and anomalies. Coverage varies by actor, weapon, item, and map. Release notes list the checks for each ZIP.
 - **Responsiveness.** Some interactions wait for the host to commit a change. Players have reported delays and Crossroads stutter. Muted loopback timings cover local iteration. Foreground and internet play can behave differently.
 - **Networking.** A two-PC playtest confirmed Steam invite and join into a hosted campaign. The new lobby modes and browser have automated coverage. Steam reconnect, public discovery, and Steam’s Join Game still need a two-PC retest. Direct IP depends on the guest being able to reach the host.
 - **Compatibility.** Each ZIP targets a qualified Windows Steam build and includes a pinned UE4SS version. A game update or another UE4SS mod can introduce conflicts. Very long installation paths can prevent a bundled Windows DLL from loading.

@@ -18,10 +18,11 @@ $sfTag = "rc-$($sfRevision.Substring(0,7))"
   --version $sfTag --revision $sfRevision `
   --shipping "$sfGame\SilverFish\Binaries\Win64\SilverFish-Win64-Shipping.exe" `
   --ue4ss $sfUe4ssRelease --signatures $sfSignatures --include-loader `
-  --cpp-addon $sfGameplayDll --embedded-addon $sfEmbeddedDll --embedded-runtime $sfRuntime
+  --cpp-addon $sfGameplayDll --embedded-addon $sfEmbeddedDll --embedded-runtime $sfRuntime `
+  --steam-api $sfSteamApi
 ```
 
-`$sfPython` is the Python interpreter with the repository requirements installed. `$sfReleaseFolder` should already exist. The packager reports the ZIP’s SHA-256. Use the complete ZIP for both first installs and updates. The package contains the mod and bundled runtime and loader files. Players use their own Steam installation.
+`$sfPython` is the Python interpreter with the repository requirements installed. `$sfSteamApi` points to the matching redistributable `steam_api64.dll` from Steamworks. `$sfReleaseFolder` should already exist. The packager reports the ZIP’s SHA-256. Use the complete ZIP for both first installs and updates. The package contains the mod and bundled runtime and loader files. Players use their own Steam installation.
 
 ## Verify and publish
 
