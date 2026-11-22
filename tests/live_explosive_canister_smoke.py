@@ -21,8 +21,8 @@ from tools.silverfish.native_anomaly_effects import CANISTERS
 from tools.silverfish.travel import CISTERN, CROSSROADS
 
 
-async def verify(work, vanilla, tall):
-    name = f"explosive-canister-{uuid.uuid4().hex[:8]}"
+async def verify(work, vanilla, tall, standing=False):
+    name = f"{'standing-fuel-tank' if standing else 'explosive-canister'}-{uuid.uuid4().hex[:8]}"
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
     host.mkdir(parents=True)
@@ -30,12 +30,18 @@ async def verify(work, vanilla, tall):
     original = saved_hashes(vanilla)
     assert original
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
-    area, actor = (CISTERN, "Prop_PropaneTank_Tall_C_3") if tall else (CROSSROADS, "Prop_PropaneTank_Small_C_12")
+    if standing:
+        area, actor = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P", "Prop_Standing_FuelTank_C_1"
+    else:
+        area, actor = (CISTERN, "Prop_PropaneTank_Tall_C_3") if tall else (CROSSROADS, "Prop_PropaneTank_Small_C_12")
     target = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel.{actor}"
+    if standing:
+        target = "Prop_Standing_FuelTank_C " + target
     jobs, proof = [], {"target": target, "verified": False, "shots": 0}
 
     def canister(frame):
-        return frame.get("game", {}).get(CANISTERS, {}).get(target, {})
+        key = "native_standing_fuel_tanks" if standing else CANISTERS
+        return frame.get("game", {}).get(key, {}).get(target, {})
 
     async def launch(run, role, *args):
         env = dict(os.environ)
@@ -56,8 +62,11 @@ async def verify(work, vanilla, tall):
     try:
         await launch(host, "host", "host", "--campaign", name, "--port", "0", "--start-zone", area,
                      "--native-guest", "--native-events", "--native-expanded-zones", "--fixtures")
-        initial = await wait(host, lambda row: canister(row).get("phase") == 0)
+        initial = await wait(host, lambda row: (canister(row).get("movement") is True if standing
+                                                else canister(row).get("phase") == 0))
         proof["host_initial"] = canister(initial)
+        if standing:
+            await action(host, "native-standing-fuel-tank-tip-fixture", target=f"prepare@{target}")
         invite_cmd = await asyncio.create_subprocess_exec(*cli, "invite", "--campaign", name, "--name", "Canister observer",
                                                          "--character", "Scout", stdout=asyncio.subprocess.PIPE,
                                                          cwd=REPO, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -65,7 +74,24 @@ async def verify(work, vanilla, tall):
         assert invite_cmd.returncode == 0
         invite = json.loads(invite_text)
         await launch(guest, "guest", "join", "--profile", name, "--invite", invite["invite_file"])
-        peer = await wait(guest, lambda row: canister(row).get("phase") == 0)
+        peer = await wait(guest, lambda row: (canister(row).get("movement") is True if standing
+                                              else canister(row).get("phase") == 0))
+        if standing:
+            def angle_distance(first, second):
+                return max(abs((a - b + 180) % 360 - 180) for a, b in zip(first, second, strict=True))
+            origin = canister(initial)["rotation"]
+            assert angle_distance(origin, canister(peer)["rotation"]) < 2, (origin, canister(peer))
+            await action(host, "native-standing-fuel-tank-tip-fixture", target=f"tip@{target}")
+            def synced_rotation(row):
+                host_prop, guest_prop = canister(status(host)), canister(row)
+                if (host_prop and guest_prop and angle_distance(origin, host_prop["rotation"]) > 25
+                        and angle_distance(host_prop["rotation"], guest_prop["rotation"]) < 3):
+                    proof["tipped"] = {"host": host_prop, "guest": guest_prop}
+                    return True
+                return False
+            await wait(guest, synced_rotation, timeout=6)
+            proof["verified"] = True
+            return
         prior = peer["game"].get("native_canister_blocked", 0)
         await action(guest, "native-canister-guest-guard-fixture", target=target)
         guarded = await wait(guest, lambda row: row.get("game", {}).get("native_canister_blocked", 0) >= prior + 2)
@@ -145,6 +171,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
-    parser.add_argument("--tall", action="store_true")
+    kind = parser.add_mutually_exclusive_group()
+    kind.add_argument("--tall", action="store_true")
+    kind.add_argument("--standing", action="store_true", help="verify an authored standing fuel tank's rotation")
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(strict=True), args.vanilla_saved.resolve(strict=True), args.tall))
+    asyncio.run(verify(args.work.resolve(strict=True), args.vanilla_saved.resolve(strict=True), args.tall, args.standing))

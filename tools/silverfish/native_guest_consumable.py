@@ -19,6 +19,11 @@ CANNED_BEANS = "native-guest-canned-beans"
 CANNED_BEANS_CLASS = "/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"
 BROWN_MUSHROOM = "native-guest-brown-mushroom"
 BROWN_MUSHROOM_CLASS = "/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C"
+STARTER_BAG = "native-guest-starter-bag"
+STARTER_BAGS = {
+    "random": "/Game/Classes/Items/Random_GearBag_Starter.Random_GearBag_Starter_C",
+    "hyperrandom": "/Game/Classes/Items/HyperRandom_GearBag_Starter.HyperRandom_GearBag_Starter_C",
+}
 
 
 @dataclass(frozen=True)
@@ -35,7 +40,8 @@ MEALS = {
     CANNED_BEANS: Meal(CANNED_BEANS_CLASS, 14, 0, 14),
     BROWN_MUSHROOM: Meal(BROWN_MUSHROOM_CLASS, 3.5, 0, 1),
 }
-COMMANDS = {BANDAGE_CLASS: ACTION, **{profile.class_path: action for action, profile in MEALS.items()}}
+COMMANDS = {BANDAGE_CLASS: ACTION, **{profile.class_path: action for action, profile in MEALS.items()},
+            **dict.fromkeys(STARTER_BAGS.values(), STARTER_BAG)}
 RESULT = {action: action.replace("-", "_") for action in COMMANDS.values()}
 
 
@@ -68,12 +74,32 @@ def parse_meal(fields: list[str]) -> dict:
             "host_intox_before": shared_intox, "host_intox_after": shared_intox}
 
 
+def starter_awards(guid, awards) -> bool:
+    return (type(awards) is list and 1 <= len(awards) <= 16 and all(valid_guid(award) and award != guid for award in awards)
+            and len(set(awards)) == len(awards))
+
+
+def parse_starter_bag(fields: list[str]) -> dict:
+    if len(fields) != 7:
+        raise ValueError("Invalid stock starter bag report size")
+    tag, status, area, pawn, guid, kind, serialized = fields
+    if not 32 <= len(serialized) <= 527:
+        raise ValueError("Invalid stock starter bag awards size")
+    awards = serialized.split(",")
+    if (tag != STARTER_BAG or status != "used" or not valid_guid(guid) or kind not in STARTER_BAGS
+            or len(pawn) > 512 or not pawn.startswith("Player_FP_C " + area + ".") or not starter_awards(guid, awards)):
+        raise ValueError("Invalid stock starter bag proof")
+    return {"state": status, "map": area, "pawn": pawn, "guid": guid, "class_path": STARTER_BAGS[kind],
+            "quantity_before": 1, "quantity_after": 0, "awarded_guids": awards}
+
+
 async def use(host, bridge, character: str, guid: str, operation_id: str, *, action: str = ACTION) -> dict:
     if action not in RESULT:
         raise party.RuleError("native_guest_consumable_unavailable")
     key = RESULT[action]
     kind = key.removeprefix("native_guest_")
     meal = MEALS.get(action)
+    starter = action == STARTER_BAG
     if not valid_guid(guid):
         raise party.RuleError(f"invalid_{kind}_guid")
     if not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
@@ -94,6 +120,8 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
             return receipt["result"]
     if player["downed"] or host.party["wipe"] is not None or character in host.party["pending_spawns"]:
         raise party.RuleError(f"guest_{kind}_refused_downed_or_respawning")
+    if starter and host.last_game.get("native_paired_save_capture") is not True:
+        raise party.RuleError("guest_starter_bag_refused_checkpoint")
     area, pawn = host.last_game["map"], owner["pawn"]
     await host.checkpoint_native(bridge)
     host.native_checkpoint_unsafe = True
@@ -110,11 +138,18 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
             "quantity_before", "quantity_after", "health_before", "regen_after", "max_health"))
         if (snapshot.get("state") != "hosting" or snapshot.get("map") != area
                 or tuple(proof.get(key) for key in ("state", "map", "pawn", "guid")) != ("used", area, pawn, guid)
-                or type(before) is not int or type(after) is not int or after < 0 or before - after != 1
-                or any(type(value) not in (int, float) for value in (hp, regen, maximum, proof.get("regen_before")))
+                or type(before) is not int or type(after) is not int or after < 0 or before - after != 1):
+            raise RuntimeError("The native consumable did not verify the selected guest and one item debit")
+        if starter:
+            if (before != 1 or proof.get("class_path") not in STARTER_BAGS.values()
+                    or not starter_awards(guid, proof.get("awarded_guids"))):
+                raise RuntimeError("The native starter bag did not verify exact stock rewards")
+        elif (any(type(value) not in (int, float) for value in (hp, regen, maximum, proof.get("regen_before")))
                 or not 0 < hp <= maximum or not 25 <= regen <= maximum or not 0 <= proof["regen_before"] <= maximum
                 or proof.get("health_after") != hp or type(proof.get("hemophilia")) is not bool):
             raise RuntimeError("The native consumable did not verify its exact quantity and stock regeneration")
+        if action == ACTION and regen != min(max(proof["regen_before"] + (27 if proof["hemophilia"] else 45), 25), maximum):
+            raise RuntimeError("The native Bandage did not apply the guest's stock regeneration effect")
         if meal is not None and (proof.get("class_path") != meal.class_path
                                  or not {"food_before", "food_after", "intox_before", "intox_after"}.issubset(proof)):
             raise RuntimeError("The native food did not verify its detached food and intoxication effects")
@@ -126,7 +161,8 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
         recent = candidate["receipts"].setdefault(character, [])
         recent.append({"id": operation_id, "request": fingerprint, "result": result})
         del recent[:-party.RECENT_ACTIONS]
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+        capture = {"typed_inventory": True} if starter else {}
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}), **capture)
     except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
@@ -135,7 +171,9 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
     if meal is None or after == 0:
         host.native_pickup.forget_committed_row(character, guid)
     host.native_checkpoint_unsafe = False
-    details = {"food": proof["food_after"], "intoxication": proof["intox_after"]} if meal is not None else {}
+    details = {"awarded_guids": proof["awarded_guids"]} if starter else {"regen": regen}
+    if meal is not None:
+        details.update(food=proof["food_after"], intoxication=proof["intox_after"])
     host.control.event(f"{key}_committed", character_id=character, operation_id=operation_id,
-                       guid=guid, revision=revision, quantity=after, regen=regen, **details)
+                       guid=guid, revision=revision, quantity=after, **details)
     return result

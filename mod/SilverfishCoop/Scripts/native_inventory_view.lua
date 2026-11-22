@@ -23,6 +23,10 @@ local display_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleTe
 local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local text_path = "/Script/UMG.TextBlock"
 local bandage_path = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
+local starter_bags = {
+    ["/Game/Classes/Items/Random_GearBag_Starter.Random_GearBag_Starter_C"] = "Dufflebag",
+    ["/Game/Classes/Items/HyperRandom_GearBag_Starter.HyperRandom_GearBag_Starter_C"] = "Dufflebag",
+}
 local meals = require("native_guest_mre")
 local mre_enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
@@ -212,7 +216,7 @@ local function page(fields)
                     and cqc[fields[4]] ~= nil)))
             or (source == "backpack" and (body_armor.is_body_path(class) or body_armor.is_helmet_path(class)))
         local name = item:gsub("_", " ")
-        local consumable = class == bandage_path and "Bandage" or mre_enabled and meals.label(class)
+        local consumable = class == bandage_path and "Bandage" or starter_bags[class] or mre_enabled and meals.label(class)
         local usable = source == "backpack" and consumable ~= false and consumable ~= nil
         local splittable = options == "split" or options == "split,drop"
         if splittable and (source ~= "backpack" or not split_ammo[class] or quantity <= 1) then
@@ -529,7 +533,7 @@ local function stock_action_fixture(screen, current, save, epoch, item, use, spl
         manager:FinalSplitStack(split)
         manager:FinalSplitStack(split)
     else
-        if use and class ~= bandage_path and not (mre_enabled and meals.label(class)) then
+        if use and class ~= bandage_path and not starter_bags[class] and not (mre_enabled and meals.label(class)) then
             error("The stock guest item has no host-authoritative Use action", 0)
         end
         manager:OpenContextMenu(card)
@@ -835,15 +839,24 @@ function inventory_view.command(fields, state, phase)
         error(("The actor did not produce a selectable Nearby Items card. Floor match %s, object type %s"):
             format(guid or "-", tostring(object_type)), 0)
     end
-    if operation == "native-inventory-stock-use-click-fixture" and #fields == 3 and headless and stock_session and not stock_drop
+    if operation == "native-inventory-stock-use-click-fixture" and (#fields == 3 or #fields == 4 and fields[4] == "drag")
+        and headless and stock_session and not stock_drop
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
         local screen = stock_session.screen
         local cards, manager = screen.BackpackPanel.Cards, screen.ItemManager
         for index = 1, cards:GetArrayNum() do
             local card = widget_at(cards, index)
             if stock_card_guid(card) == fields[3] then
-                manager:OpenContextMenu(card)
-                manager:ActionUse()
+                if fields[4] == "drag" then
+                    manager.HoveredCard = card
+                    manager:InitiateItemTake()
+                    manager:FinalTakeItem()
+                    if manager.HoldingItem ~= true then break end
+                    manager:InsertItem(screen.PlayerCard, -1)
+                else
+                    manager:OpenContextMenu(card)
+                    manager:ActionUse()
+                end
                 sync_stock(current, state, phase, true)
                 if stock_drop and stock_drop.guid == fields[3] then return "verified stock use click" end
                 break

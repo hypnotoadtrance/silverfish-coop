@@ -284,6 +284,7 @@ def parser() -> argparse.ArgumentParser:
         "native-guest-stack-drop-probe", "native-guest-stack-drop", "native-guest-stack-reclaim", "native-host-stack-drop",
         "native-host-stack-reclaim",
         "native-host-stack-drop-menu-fixture", "native-host-stack-drop-menu-close-fixture",
+        "native-observatory-lantern-fixture", "native-standing-fuel-tank-tip-fixture",
         "native-guest-drop-projection-fixture",
         "native-world-loot-fixture",
         "native-world-loot-approach",

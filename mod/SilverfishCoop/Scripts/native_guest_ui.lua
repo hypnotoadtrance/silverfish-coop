@@ -116,8 +116,11 @@ local function capture(state, phase, pawn_name, path)
     end
     local pack_size, equipment_size = count(save.PlayerBackpack), count(save.PlayerEquipment)
     local selected = integer(save.PlayerEquipIndex, -1, math.max(equipment_size - 1, 0))
+    local cash = FName("Player_Cash")
+    local balance = canonical.Flags:Contains(cash) and canonical.Flags:Find(cash):get() or 0
     local rows = {table.concat({state.map, character}, "\t"),
-        table.concat({"inventory-layout", pack_size, equipment_size, selected}, "\t")}
+        table.concat({"inventory-layout", pack_size, equipment_size, selected}, "\t"),
+        table.concat({"cash", integer(balance, 0, max_int32)}, "\t")}
     local checked, character_row = pcall(function()
         local character = save.Character
         local name = character[creator.name_field]:ToString()
@@ -206,7 +209,7 @@ local function project(state, phase, character, path)
     local view = api:CreateSaveGameObject(class)
     if not exact(view, save_class) then error("The stock co-op view could not be allocated", 0) end
     local processed, items, note_count, quest_count = 0, 0, 0, 0
-    local completed, attachments, reputation = 0, 0, nil
+    local completed, attachments, reputation, balance = 0, 0, nil, nil
     local layout, item_positions = nil, {backpack = {}, equipment = {}}
     for line in raw:gmatch("([^\n]+)\n") do
         processed = processed + 1
@@ -225,6 +228,8 @@ local function project(state, phase, character, path)
             local name = decode(row[2]):ToString()
             creator.install(view, row[4], name)
             if row[3] ~= "-" then appearance.install(view.Character, row[3]) end
+        elseif row[1] == "cash" and #row == 2 and balance == nil then
+            balance = integer(row[2], 0, max_int32)
         elseif row[1] == "reputation" and not reputation and #row <= 65 and #row % 2 == 1 then
             reputation = {}
             for index = 2, #row, 2 do
@@ -302,6 +307,16 @@ local function project(state, phase, character, path)
     end
     old.JournalEntries = view.JournalEntries
     old.ActiveQuests = view.ActiveQuests
+    if balance ~= nil then
+        local cash, flags = FName("Player_Cash"), old.Flags
+        if not flags:Contains(cash) or flags:Find(cash):get() ~= balance then
+            if flags:Contains(cash) then flags:Remove(cash) end
+            flags:Add(cash, balance)
+        end
+        if not flags:Contains(cash) or flags:Find(cash):get() ~= balance then
+            error("The attached co-op wallet failed readback", 0)
+        end
+    end
     if reputation then
         local flags, previous = old.Flags, {}
         flags:ForEach(function(raw)

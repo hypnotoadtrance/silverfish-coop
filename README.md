@@ -50,9 +50,9 @@ Captured in development builds. The Direct IP form shows a test port.
 ## Limitations and known issues
 
 - **Campaign coverage.** Co-op is still in development. Some quests and dialogue triggers, faction updates, inventory actions, NPC behaviors, map exits, and scripted events lack complete multiplayer coverage.
-- **Visual and physical state.** Avatar appearance, equipment and combat animations, thrown items, harvested objects, and some props and anomalies may differ between players. Release notes distinguish fixes included in the ZIP from work on `main`.
+- **Visual and physical state.** Stock guest equipment selection is shared. Weapon actions and item-use effects have narrower coverage. Guest-carried physics objects, dragged ragdolls, wild mushroom patches, and some enemy, anomaly, and weather effects can still differ between players. Release notes distinguish fixes included in the ZIP from work on `main`.
 - **Responsiveness.** Some interactions wait for the host to commit a change. Players have reported delays and Crossroads stutter. Muted loopback timings cover local iteration. Foreground and internet play can behave differently.
-- **Networking.** The Steam invite and relay trial has offline integration coverage and awaits human testing on two Steam accounts. Direct IP depends on the guest being able to reach the host.
+- **Networking.** A two-PC playtest confirmed Steam invite and join into a hosted campaign. Steam reconnect and longer sessions still need live coverage. Direct IP depends on the guest being able to reach the host.
 - **Compatibility.** Each ZIP targets a qualified Windows Steam build and includes a pinned UE4SS version. A game update or another UE4SS mod can introduce conflicts. Very long installation paths can prevent a bundled Windows DLL from loading.
 
 When [reporting a problem](https://github.com/hypnotoadtrance/silverfish-coop/issues/new), include the release tag, map, steps to reproduce, what each player expected and saw, and whether the connection was LAN or internet. Keep passwords, private invitation files, and save data out of issue reports.

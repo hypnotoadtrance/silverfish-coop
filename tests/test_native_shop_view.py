@@ -1,13 +1,94 @@
+import asyncio
+import time
 import unittest
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish.native_finite_shop import BALL_AMMO, GUNSMITH, MERCHANTS
+from tools.silverfish import native_finite_shop, party
+from tools.silverfish.native_finite_shop import BALL_AMMO, GUNSMITH, MERCHANTS, matching_report
 from tools.silverfish.native_shop_view import ShopView
 
 
 class MerchantPageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_open_stock_screen_refreshes_when_stock_changes_without_wallet_change(self):
+        actor, pawn = MERCHANTS[GUNSMITH], "exact stock guest"
+        guid = "A" * 32
+        row = {"guid": guid, "quantity": 200, "price": 100, "class_path": BALL_AMMO}
+        game = {"stock": True, "state": "ready", "sequence": 1, "map": GUNSMITH,
+                "actor": actor, "pawn": pawn, "wallet": 500}
+        bridge = SimpleNamespace(command=AsyncMock(return_value={"native_shop_view": game}))
+        reading = asyncio.Event()
+
+        async def query(*_args):
+            await reading.wait()
+            return {"native_finite_shop": {"map": GUNSMITH, "actor": actor, "wallet_after": 500,
+                                           "count": 0, "offers": []}}
+
+        client = SimpleNamespace(bridge=bridge, gameplay={"shared_wallet": 500},
+                                 gameplay_action=AsyncMock(side_effect=query))
+        view = ShopView()
+        epoch = ("host", "visit")
+        view.stock_catalog = ((*epoch, 1, GUNSMITH, pawn, actor), 500, [row])
+        await view._sync_stock(client, epoch, game, 10.0)
+        self.assertFalse(view.stock_poll.done())
+        await view._sync_stock(client, epoch, game, 10.1)
+        bridge.command.assert_not_awaited()
+        reading.set()
+        await view.stock_poll
+        await view._sync_stock(client, epoch, game, 10.2)
+        client.gameplay_action.assert_awaited_once()
+        bridge.command.assert_awaited_once_with("native-shop-view-refresh-stock", "1", GUNSMITH, timeout=2)
+
+    def test_scientist_display_accepts_complete_authority_catalog_with_purchase_validation(self):
+        from tools.silverfish.native_finite_shop import SCIENTIST_SHOP
+
+        pawn = "exact stock guest"
+        other = {"guid": "D" * 32, "quantity": 3, "value": 9, "price": 12, "class_path": BALL_AMMO, "source": "shelf"}
+        report = {"map": SCIENTIST_SHOP, "pawn": pawn, "actor": MERCHANTS[SCIENTIST_SHOP], "state": "listed",
+                  "wallet_before": 500, "wallet_after": 500, "merchant_cash_before": 100, "merchant_cash_after": 100,
+                  "count": 1, "offers": [other]}
+        snapshot = {"state": "hosting", "map": SCIENTIST_SHOP, "native_finite_shop": report}
+        self.assertEqual(matching_report(snapshot, SCIENTIST_SHOP, pawn, "listed", guest=True), report)
+        report["state"] = "purchased"
+        with self.assertRaisesRegex(RuntimeError, "exact qualified stock offer"):
+            matching_report(snapshot, SCIENTIST_SHOP, pawn, "purchased", guest=True)
+
+    async def test_reusable_observatory_shelf_requires_fresh_exact_inventory_guid(self):
+        area = native_finite_shop.OBSERVATORY
+        guid, minted, pawn = "A" * 32, "B" * 32, "exact stock guest"
+        item = {"guid": guid, "source": "shelf", "class_path": BALL_AMMO, "price": 50, "quantity": 10, "value": 25}
+        game = {"state": "hosting", "map": area}
+        listing = {"map": area, "pawn": pawn, "actor": MERCHANTS[area], "state": "listed",
+                   "wallet_before": 100, "wallet_after": 100, "merchant_cash_before": 25, "merchant_cash_after": 25,
+                   "count": 1, "offers": [item]}
+        for received in (guid, minted):
+            with self.subTest(received=received):
+                chosen = dict(item, guid=received)
+                bought = dict(listing, state="purchased", wallet_after=50, merchant_cash_after=75, offers=[chosen])
+                host = SimpleNamespace(native_guest=True, native_zones=True, native_profile=object(),
+                                       stopping=False, transitioning=False, native_checkpoint_unsafe=False,
+                                       last_game=game, last_seen=time.monotonic(), control=Mock(), checkpoint_native=AsyncMock(),
+                                       native_recipients=lambda: {"guest": {"pawn": pawn, "connected": True}},
+                                       party=party.load_party(None))
+                host.party["players"]["guest"] = {"downed": False}
+                bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+                    dict(game, native_finite_shop=listing), dict(game, native_finite_shop=bought),
+                ]))
+                operation = native_finite_shop.perform(host, bridge, "guest", "native-finite-shop-buy",
+                                                       f"{guid}@50", "a" * 32)
+                if received == guid:
+                    with self.assertRaisesRegex(RuntimeError, "reusable shelf transfer"):
+                        await operation
+                    self.assertTrue(host.stopping)
+                    self.assertFalse(host.party["receipts"])
+                else:
+                    result = (await operation)["native_finite_purchase"]
+                    self.assertEqual((result["offer_guid"], result["stock_source"], result["offers"]),
+                                     (guid, "stock_shelf", [chosen]))
+                    self.assertFalse(host.native_checkpoint_unsafe)
+                    self.assertEqual(host.checkpoint_native.await_args.kwargs["require_guest_frames"], frozenset({"guest"}))
+
     async def test_fresh_adjacent_page_and_current_quote_required(self):
         actor = MERCHANTS[GUNSMITH]
         pawn, sequence = "exact stock guest", 14

@@ -8,6 +8,7 @@ local skeletal_type = "/Script/Engine.SkeletalMeshComponent"
 local scene_type = "/Script/Engine.SceneComponent"
 local statics_type = "/Script/Engine.Default__GameplayStatics"
 local math_library = "/Script/Engine.Default__KismetMathLibrary"
+local sound_attenuation = "/Game/Assets/Sounds/SoundClasses/SmallSound_Attenuation.SmallSound_Attenuation"
 local bat_mesh = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/MeleeWep_Models/SM_Wep_Bat_01.SM_Wep_Bat_01"
 -- The bat mesh starts at the knob and extends along local Z. Put the handle
 -- inside the hand socket and keep the orientation chosen by the stock rig.
@@ -35,7 +36,7 @@ end
 
 local function stock_asset(path)
     if type(path) ~= "string" or #path > 192 then return false end
-    local root, leaf, name = path:match("^/Game/(%a+)/[%w_/]+/([%w_]+)%.([%w_]+)$")
+    local root, leaf, name = path:match("^/Game/(%a+)/[%w_/%-]+/([%w_%-]+)%.([%w_%-]+)$")
     return (root == "Classes" or root == "Assets") and leaf == name
 end
 
@@ -167,6 +168,7 @@ function view.clear(entry)
     end
     if valid(entry.weapon_anchor) and valid(entry.pawn) then entry.weapon_anchor:K2_DestroyComponent(entry.pawn) end
     entry.weapon_parts, entry.weapon_model, entry.weapon_anchor, entry.weapon_rig = nil, nil, nil, nil
+    entry.weapon_stance = nil
     entry.weapon_slide = nil
 end
 
@@ -263,6 +265,18 @@ function view.apply(entry, model, firearm)
             view.clear(entry)
             error(failure, 0)
         end
+        if firearm ~= "-" then
+            local class = StaticFindObject(firearm)
+            if not valid(class) then
+                LoadAsset(firearm)
+                class = StaticFindObject(firearm)
+            end
+            local defaults = valid(class) and class:GetCDO()
+            local base = StaticFindObject(firearm_type)
+            if valid(defaults) and valid(base) and defaults:IsA(base) then
+                entry.weapon_stance = defaults.ItemType == 3 and "pistol" or "rifle"
+            end
+        end
     end
     entry.weapon_model = model
 end
@@ -340,6 +354,27 @@ local function mechanism_position(rig, slide, bone)
     if bone then return rig:GetSocketTransform(bone, 2).Translation end
 end
 
+local function reload_sounds(weapon, clip, length)
+    local class = StaticFindObject(weapon)
+    local defaults = valid(class) and class:GetCDO()
+    if not valid(defaults) or not (same(clip, defaults.Reload_Wet_Anim) or same(clip, defaults.Reload_Dry_Anim)) then
+        return {}
+    end
+    local notify_class = StaticFindObject("/Script/Engine.AnimNotify_PlaySound")
+    local notifies, sounds = clip.Notifies, {}
+    for index = 1, math.min(notifies:GetArrayNum(), 64) do
+        local event = notifies[index]
+        local notify, at = event.Notify, event.LinkValue
+        if same(valid(notify) and notify:GetClass() or nil, notify_class) and valid(notify.Sound)
+            and event.LinkMethod == 0 and type(at) == "number" and at >= 0 and at <= length then
+            sounds[#sounds + 1] = {at = at, sound = notify.Sound,
+                volume = notify.VolumeMultiplier, pitch = notify.PitchMultiplier}
+        end
+    end
+    table.sort(sounds, function(left, right) return left.at < right.at end)
+    return sounds
+end
+
 function view.cycle(entry, world, weapon, serial, path)
     local rig = entry.weapon_rig
     if entry.firearm_class ~= weapon or not valid(rig) then return false end
@@ -361,10 +396,11 @@ function view.cycle(entry, world, weapon, serial, path)
     rig:SetAnimation(clip)
     rig:Stop()
     rig:SetPosition(0, false)
+    local read, sounds = pcall(reload_sounds, weapon, clip, length)
     local prior = entry.last_cycle
     local cycle = {world = world:GetAddress(), start = clock:GetRealTimeSeconds(world), duration = length,
         clip = path, weapon = weapon, serial = serial, count = prior and prior.count + 1 or 1, peak = 0,
-        bone = bone, rest = rest}
+        bone = bone, rest = rest, sounds = read and sounds or {}, sound_index = 1}
     active_cycle[entry], entry.last_cycle = cycle, cycle
     return true
 end
@@ -391,6 +427,20 @@ function view.animate_cycle(get_world)
             end
             local elapsed = math.max(0, now - cycle.start)
             rig:SetPosition(math.min(elapsed, cycle.duration), false)
+            local sound = cycle.sounds[cycle.sound_index]
+            while sound and sound.at <= elapsed do
+                local attenuation = StaticFindObject(sound_attenuation)
+                if not valid(attenuation) then
+                    LoadAsset(sound_attenuation)
+                    attenuation = StaticFindObject(sound_attenuation)
+                end
+                if valid(attenuation) and valid(sound.sound) then
+                    clock:PlaySoundAtLocation(entry.pawn, sound.sound, rig:K2_GetComponentLocation(),
+                        {Pitch = 0, Yaw = 0, Roll = 0}, sound.volume, sound.pitch, 0, attenuation, nil, nil, nil)
+                end
+                cycle.sound_index = cycle.sound_index + 1
+                sound = cycle.sounds[cycle.sound_index]
+            end
             cycle.finished = elapsed >= cycle.duration
         end
     end

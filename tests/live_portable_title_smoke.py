@@ -436,10 +436,61 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str) -> dict:
             "duplicate": duplicate["error"]}
 
 
+async def verify_stock_use(host: Seat, guest: Seat, pawn: str, *, starter: bool) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    before = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+    host_before = (await submit(host_run, "native-inventory-list"))["native_inventory"]
+    classes = set(native_guest_consumable.STARTER_BAGS.values()) if starter else {native_guest_consumable.BANDAGE_CLASS}
+    item, = (row for row in before["items"] if row["source"] == "backpack" and row["class_path"] in classes)
+    assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+    await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+    gesture = "drag" if starter else "context"
+    target = item["guid"] + ("|drag" if starter else "")
+    selected = await submit(guest_run, "native-inventory-stock-use-click-fixture", target=target)
+    assert selected["ok"] and selected["stock_action"]["guid"] == item["guid"], selected
+    await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock"
+               and "native_inventory_stock_action" not in state.get("game", {}))
+    action = native_guest_consumable.COMMANDS[item["class_path"]]
+    key = native_guest_consumable.RESULT[action]
+    events = [json.loads(line) for line in (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    event, = (entry for entry in events if entry["event"] == "native_stock_inventory_action"
+              and entry.get(key, {}).get("guid") == item["guid"])
+    receipt = event[key]
+    assert (receipt["pawn"], receipt["quantity_before"], receipt["quantity_after"]) == (
+        pawn, item["quantity"], item["quantity"] - 1), receipt
+    after = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+    contents = {row["guid"]: row for row in after["items"]}
+    added = set(contents) - {row["guid"] for row in before["items"]}
+    if starter:
+        assert added and added == set(receipt["awarded_guids"]), (after, receipt)
+        assert all(contents[guid]["source"] == "backpack" for guid in added), after
+    else:
+        assert not added, after
+    assert contents.get(item["guid"], {}).get("quantity", 0) == receipt["quantity_after"], after
+    assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before
+    replay = await submit(guest_run, action, target=item["guid"], operation_id=event["operation_id"])
+    assert replay["ok"] and replay[key] == receipt, replay
+    assert (await submit(guest_run, "native-inventory-list"))["native_inventory"] == after
+    native_host_save.verify_checkpoint(host.profile, json.loads(
+        (host.campaign / "save" / "campaign.json").read_text(encoding="utf-8")))
+    assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+    await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
+    return {"gesture": gesture, "receipt": receipt}
+
+
 async def create_stock_drop_character(guest, join, name):
     await join("create-editor", name)
     await guest.bridge.wait_for(lambda frame: frame.get("native_guest_stock_creator", {}).get("state") == "creating")
     await creator_action(guest, "guestkit")
+    assert await creator_action(guest, "guestnext") == "page=3"
+    await creator_action(guest, "finish")
+    await offered(guest)
+
+
+async def create_stock_bag_character(guest, join, name):
+    await join("create-editor", name)
+    await guest.bridge.wait_for(lambda frame: frame.get("native_guest_stock_creator", {}).get("state") == "creating")
+    await creator_action(guest, "gueststyle")
     assert await creator_action(guest, "guestnext") == "page=3"
     await creator_action(guest, "finish")
     await offered(guest)
@@ -552,7 +603,8 @@ async def verify_cloud_restore(first, second, session, game, processes):
 async def verify(work: Path, first_game: Path, second_game: Path, original: Path,
                  second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False,
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
-                 container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False) -> None:
+                 container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
+                 stock_use: bool = False) -> None:
     roots = (work, first_game, second_game, original)
     if second_legacy_work is not None:
         roots += (second_legacy_work,)
@@ -622,6 +674,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         async def check_gameplay(host, guest, pawn):
             evidence = await verify_gameplay(host, guest, pawn, stock_drop=stock_drop, stock_split=stock_split,
                                              stock_equip=stock_equip, stock_nearby=stock_nearby, projected_nearby=projected_nearby)
+            if stock_use:
+                evidence["guest_stock_use"] = await verify_stock_use(host, guest, pawn, starter=guest is second)
             if memory_bridge:
                 host_status = await wait(host.campaign / "run", lambda state: state.get("local_bridge") == "memory")
                 guest_status = await wait(guest.client / "run", lambda state: state.get("local_bridge") == "memory")
@@ -632,9 +686,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             return evidence
         create = create_stock_split_character if stock_split or stock_equip else create_stock_drop_character if stock_drop else None
         proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
-                                                  create_character=create))
+                                                  create_character=create_stock_bag_character if stock_use else create))
         proof["sessions"].append(await start_pair(second, first, "First portable scout", on_join=check_gameplay,
-                                                  create_character=create))
+                                                  create_character=create_stock_drop_character if stock_use else create))
         assert proof["sessions"][0]["host_pid"] == proof["sessions"][1]["guest_pid"]
         assert proof["sessions"][0]["guest_pid"] == proof["sessions"][1]["host_pid"]
         assert len({leg["campaign_id"] for leg in proof["sessions"]}) == 2
@@ -675,6 +729,7 @@ if __name__ == "__main__":
     parser.add_argument("--second-game", type=Path, required=True, help="Separate replica with the same release ZIP applied")
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Sort, Drop, and Use actions")
+    parser.add_argument("--stock-use", action="store_true", help="open a starter bag by stock drag and use a Bandage by stock click")
     parser.add_argument("--stock-split", action="store_true", help="test the stock guest stack-split popup with a Veteran loadout")
     parser.add_argument("--stock-equip", action="store_true", help="test the stock guest Equip action with a Veteran loadout")
     parser.add_argument("--stock-nearby", action="store_true", help="pick up a loose actor from the guest's stock Nearby Items panel")
@@ -687,9 +742,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.projected_nearby and (args.stock_drop == args.stock_split or args.stock_nearby):
         parser.error("Use --projected-nearby with either --stock-drop or --stock-split and without --stock-nearby")
+    if args.stock_use and (args.stock_drop or args.stock_split or args.stock_equip):
+        parser.error("Use --stock-use without other stock backpack character fixtures")
     legacy = args.second_legacy_work.resolve(strict=True) if args.second_legacy_work else None
     asyncio.run(verify(args.work.resolve(strict=True), args.first_game.resolve(strict=True),
                        args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy,
                        stock_drop=args.stock_drop, stock_split=args.stock_split, stock_equip=args.stock_equip,
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
-                       container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge))
+                       container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
+                       stock_use=args.stock_use))

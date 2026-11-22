@@ -9,6 +9,7 @@ local classes = {
     burner = "/Game/Classes/Anomalies/BurnerTrap_BP.BurnerTrap_BP_C",
     vortex = "/Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C",
     electrode = "/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C",
+    ["wandering-teleport"] = "/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C",
 }
 local kinds = {}
 for kind, path in pairs(classes) do kinds["BlueprintGeneratedClass " .. path] = kind end

@@ -102,8 +102,6 @@ namespace
     constexpr auto item_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto camera_class = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C");
     constexpr auto blank_tape_class = STR("/Game/Classes/Items/DataTapes/DataTape_Blank.DataTape_Blank_C");
-    constexpr auto gunsmith_ammo_class = STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C");
-    constexpr auto smuggler_mre_class = STR("/Game/Classes/Items/Item_MRE.Item_MRE_C");
     constexpr auto item_struct = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto saved_shop_struct = STR("/Game/Classes/Libraries/Structs/ShopInventory_SaveStruct.ShopInventory_SaveStruct");
     constexpr auto payload_struct = STR("/Script/StructUtils.InstancedStruct");
@@ -833,41 +831,23 @@ namespace
         auto* finite = layout.finite;
         Unreal::FArrayProperty* shelf{};
         const auto* camera = context.camera_only ? find<Unreal::UClass>(camera_class) : nullptr;
-        const Unreal::UClass* blank_tape{};
-        const Unreal::UClass* reusable_supply{};
-        if (context.camera_only || (context.guards_neutral_purchase && !context.reception))
+        const auto* blank_tape = context.camera_only && !context.host ? find<Unreal::UClass>(blank_tape_class) : nullptr;
+        auto* limited = field<Unreal::FBoolProperty>(context.shop, STR("NoInfiniteStock"));
+        if (!limited) return response(lua, false, "shop_stock_mode_unavailable");
+        if (!limited->GetPropertyValueInContainer(context.shop))
         {
-            auto* limited = field<Unreal::FBoolProperty>(context.shop, STR("NoInfiniteStock"));
-            if (!limited || (context.camera_only && !camera))
-                return response(lua, false, context.camera_only ? "shop_camera_stock_unavailable" : "shop_gunsmith_stock_mode_unavailable");
-            if (!limited->GetPropertyValueInContainer(context.shop))
-            {
-                shelf = field<Unreal::FArrayProperty>(context.shop, STR("StockInventory"));
-                if (!layout.is_array(shelf))
-                    return response(lua, false, context.camera_only ? "shop_camera_shelf_unavailable" : "shop_gunsmith_shelf_unavailable");
-                if (context.camera_only)
-                {
-                    finite = nullptr;
-                    if (!context.host) blank_tape = find<Unreal::UClass>(blank_tape_class);
-                }
-                else
-                {
-                    reusable_supply = find<Unreal::UClass>(context.smuggler ? smuggler_mre_class : gunsmith_ammo_class);
-                    if (!reusable_supply) return response(lua, false, context.smuggler ?
-                        "shop_smuggler_mre_class_unavailable" : "shop_gunsmith_ammo_class_unavailable");
-                }
-            }
+            shelf = field<Unreal::FArrayProperty>(context.shop, STR("StockInventory"));
+            if (!layout.is_array(shelf)) return response(lua, false, "shop_stock_shelf_unavailable");
         }
         Unreal::FArrayProperty* source_property{};
         std::set<Guid> seen;
         std::string rows;
         Offer selected;
-        int index = -1, listed = 0, supply_shelf_count = 0, blank_tape_count = 0;
-        auto* buyback = context.camera_only ? nullptr : layout.buyback;
+        int index = -1, listed = 0;
+        auto* buyback = layout.buyback;
         for (auto* inventory : {shelf, finite, buyback})
         {
             if (!inventory) continue;
-            const bool supply_shelf = reusable_supply && inventory == shelf;
             Unreal::FScriptArrayHelper items(inventory, inventory->ContainerPtrToValuePtr<void>(context.shop));
             if (items.Num() < 0 || items.Num() > max_offers) return response(lua, false, "shop_offer_count_unavailable");
             for (int i = 0; i < items.Num(); ++i)
@@ -875,36 +855,20 @@ namespace
                 const auto* item = items.GetRawPtr(i);
                 const auto key = layout.identity(item);
                 if (key == Guid{} || !seen.insert(key).second) return response(lua, false, "shop_offer_guid_ambiguous");
-                const auto* klass = layout.item_type(item);
-                const bool tape_offer = blank_tape && klass == blank_tape && inventory == shelf;
-                if (context.camera_only && klass != camera && !tape_offer) continue;
-                if (tape_offer && ++blank_tape_count > 1)
-                    return response(lua, false, "shop_scientist_blank_tape_shelf_ambiguous");
-                if (supply_shelf)
-                {
-                    if (klass != reusable_supply) continue;
-                    ++supply_shelf_count;
-                }
                 if constexpr (Buying)
                     if (key != chosen) continue;
                 if (++listed > max_offers) return response(lua, false, "shop_offer_count_unavailable");
                 Offer row;
                 row.source = inventory == shelf ? "shelf" : inventory == buyback ? "buyback" : "limited";
                 if (const auto state = offer(context, layout, item, row); !state.empty()) return response(lua, false, state);
-                if (tape_offer && (row.stackable || row.quantity != 1 || row.value != 30 || row.price > 75 ||
-                                  layout.ammo->GetPropertyValueInContainer(item) != 0))
-                    return response(lua, false, "shop_scientist_exact_blank_tape_offer_unavailable");
-                if (context.camera_only && !tape_offer && (row.stackable || row.quantity != 1 || row.value != 125 || row.price > 313))
-                    return response(lua, false, "shop_exact_camera_offer_unavailable");
-                if (supply_shelf)
+                if constexpr (Buying)
                 {
-                    // Configure_Stock uses the authored MaxAmount on the
-                    // reusable shelf. Other stock rows remain out of scope.
-                    const int expected_quantity = context.smuggler ? 4 : 200;
-                    const int expected_value = context.smuggler ? 100 : 600;
-                    if (!row.stackable || row.quantity != expected_quantity || row.value != expected_value)
-                        return response(lua, false, context.smuggler ?
-                            "shop_smuggler_exact_mre_offer_unavailable" : "shop_gunsmith_exact_ammo_offer_unavailable");
+                    const bool tape_offer = blank_tape && row.klass == blank_tape && inventory == shelf;
+                    if (context.camera_only && !tape_offer && (!camera || row.klass != camera || inventory == buyback ||
+                            row.stackable || row.quantity != 1 || row.value != 125 || row.price > 313))
+                        return response(lua, false, "shop_scientist_purchase_profile_unavailable");
+                    if (tape_offer && (row.stackable || row.quantity != 1 || row.value != 30 || row.price > 75 || row.ammo != 0))
+                        return response(lua, false, "shop_scientist_exact_blank_tape_offer_unavailable");
                 }
                 rows += encode(row);
                 if constexpr (Buying)
@@ -915,8 +879,6 @@ namespace
                 }
             }
         }
-        if (reusable_supply && supply_shelf_count != 1) return response(lua, false, context.smuggler ?
-            "shop_smuggler_mre_shelf_ambiguous" : "shop_gunsmith_ammo_shelf_ambiguous");
         if constexpr (!Buying)
             return response(lua, true, "listed", rows, money, money, cash, cash);
         if (!source_property || index < 0) return response(lua, false, "shop_offer_no_longer_available");
@@ -961,9 +923,7 @@ namespace
             const auto minted = new_stock_guid(layout);
             if (minted == Guid{} || seen.contains(minted) || layout.owner_has(context.guest, minted) ||
                 layout.owner_has(context.stock, minted))
-                return response(lua, false, blank_tape && selected.klass == blank_tape ? "shop_scientist_blank_tape_guid_unavailable" :
-                    context.camera_only ? "shop_camera_guid_unavailable" :
-                    context.smuggler ? "shop_smuggler_mre_guid_unavailable" : "shop_gunsmith_ammo_guid_unavailable");
+                return response(lua, false, "shop_shelf_transfer_guid_unavailable");
             layout.replace_identity(transferred.get(), minted);
             selected.guid = minted;
             rows = encode(selected);

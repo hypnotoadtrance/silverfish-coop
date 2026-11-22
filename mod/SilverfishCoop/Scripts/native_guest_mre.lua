@@ -1,5 +1,6 @@
 local mre = {}
 local guest_save = require("guest_save")
+local use_presentation = require("native_weapon_fire_view")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_MRE") == "1"
@@ -123,6 +124,7 @@ function mre.command(fields, state, phase)
         food_before = food_before, food_after = food_after, regen_before = regen_before, regen_after = regen_after,
         health = health, maximum = maximum, intox_before = intox_before, intox_after = intox_after,
         host_intox = host_intox, trait = trait}
+    pcall(use_presentation.consumed, pawn, string.format("/Game/Classes/Items/%s.%s_C", meal.blueprint, meal.blueprint), false)
     return "exact stock guest food effects verified"
 end
 

@@ -6,6 +6,7 @@ for _, row in ipairs({
     { "light-pistol", "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C", true },
     { "light-pistol-suppressed", "/Game/Classes/Weapons/Wep_LightPistol_Suppressed.Wep_LightPistol_Suppressed_C", true },
     { "nagant-scoped", "/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C", false },
+    { "break-action-50", "/Game/Classes/Weapons/Wep_50BMP_BreakAction.Wep_50BMP_BreakAction_C", true, "/Game/Classes/Items/Ammo_50Cal_BP.Ammo_50Cal_BP_C" },
     { "army-pistol", "/Game/Classes/Weapons/Wep_ArmyPistol.Wep_ArmyPistol_C", true },
     { "pistol", "/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C", true },
     { "pistol-02", "/Game/Classes/Weapons/Wep_Pistol02.Wep_Pistol02_C", true },

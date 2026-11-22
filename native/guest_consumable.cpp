@@ -1,5 +1,6 @@
 #include "guest_consumable.hpp"
 #include "guest_regen.hpp"
+#include "loot_escrow.hpp"
 
 #include <algorithm>
 #include <array>
@@ -8,12 +9,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <format>
 #include <memory>
 #include <string>
 #include <string_view>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
+#include <Unreal/Core/Containers/FString.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/FStrProperty.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
@@ -45,6 +48,8 @@ namespace
     constexpr auto canned_peaches_path = STR("/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C");
     constexpr auto canned_beans_path = STR("/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C");
     constexpr auto brown_mushroom_path = STR("/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C");
+    constexpr auto starter_bag_path = STR("/Game/Classes/Items/Random_GearBag_Starter.Random_GearBag_Starter_C");
+    constexpr auto hyper_bag_path = STR("/Game/Classes/Items/HyperRandom_GearBag_Starter.HyperRandom_GearBag_Starter_C");
     constexpr auto gain_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:GainHealth");
     constexpr auto boost_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:GiveRegenBoost");
     constexpr auto intox_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Apply_PlayerIntox");
@@ -307,6 +312,24 @@ namespace
             return entries.Num() == 0;
         }
 
+        bool read_hemophilia(const void* row, const Unreal::FName& trait, bool& present) const
+        {
+            auto* item = Unreal::Cast<Unreal::UClass>(read_class(row));
+            if (!item) return true;
+            auto* defaults = item->GetClassDefaultObject().Get();
+            auto* passives = field<Unreal::FArrayProperty>(defaults, STR("PassiveEffects"));
+            auto* passive = passives ? Unreal::CastField<Unreal::FStrProperty>(passives->GetInner()) : nullptr;
+            if (!defaults || !item->IsChildOf(item_base) || !passive || passive->GetOffset_Internal() != 0) return false;
+            Unreal::FScriptArrayHelper entries(passives, passives->ContainerPtrToValuePtr<void>(defaults));
+            if (entries.Num() < 0 || entries.Num() > max_effects) return false;
+            for (int index = 0; index < entries.Num(); ++index)
+            {
+                const auto& text = *passive->ContainerPtrToValuePtr<Unreal::FString>(entries.GetRawPtr(index));
+                if (Unreal::FName{*text, Unreal::FNAME_Find} == trait) present = true;
+            }
+            return true;
+        }
+
         bool stock_consumable(const void* row, int units, const Consumable& profile) const
         {
             auto* type = find<Unreal::UClass>(profile.path);
@@ -368,7 +391,7 @@ namespace
             {
                 const auto* item = worn->ContainerPtrToValuePtr<void>(scope.guest);
                 if (row.identity(item) == requested) return "guest_bandage_refused_guid_conflict";
-                if (!row.has_no_gear_effect(item)) return "guest_bandage_refused_gear_passives";
+                if (&profile != &bandage && !row.has_no_gear_effect(item)) return "guest_bandage_refused_gear_passives";
             }
 
             Unreal::FScriptArrayHelper bag(backpack, bag_data(scope.guest));
@@ -382,12 +405,12 @@ namespace
             {
                 const auto* item = equipped.GetRawPtr(index);
                 if (row.identity(item) == requested) return "guest_bandage_refused_guid_conflict";
-                if (!row.has_no_gear_effect(item)) return "guest_bandage_refused_gear_passives";
+                if (&profile != &bandage && !row.has_no_gear_effect(item)) return "guest_bandage_refused_gear_passives";
             }
             for (int index = 0; index < bag.Num(); ++index)
             {
                 const auto* item = bag.GetRawPtr(index);
-                if (!row.has_no_gear_effect(item)) return "guest_bandage_refused_gear_passives";
+                if (&profile != &bandage && !row.has_no_gear_effect(item)) return "guest_bandage_refused_gear_passives";
                 if (row.identity(item) != requested) continue;
                 if (selected != -1) return "guest_bandage_refused_guid_conflict";
                 selected = index;
@@ -475,7 +498,7 @@ namespace
             };
         }
 
-        std::string_view bind(const Scope& scope)
+        std::string_view bind(const Scope& scope, const RowLayout* detached_bandage = nullptr)
         {
             health = field<Unreal::FDoubleProperty>(scope.guest, STR("PlayerHealth"));
             regen = field<Unreal::FDoubleProperty>(scope.guest, STR("PlayerRegen"));
@@ -484,12 +507,13 @@ namespace
             maximum = field<Unreal::FDoubleProperty>(scope.pawn, STR("MaxHealth"));
             gain = find<Unreal::UFunction>(gain_path);
             auto* amount = field<Unreal::FDoubleProperty>(gain, STR("Ammount"));
-            if (!health || !regen || !food || !stim || !maximum || !amount ||
-                gain->GetOuterPrivate() != scope.pawn->GetClassPrivate() || gain->GetNumParms() != 1 ||
-                gain->GetReturnProperty() || gain->GetParmsSize() != sizeof(double) ||
-                gain->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
-                amount->GetOffset_Internal() != 0 || !amount->HasAnyPropertyFlags(Unreal::CPF_Parm) ||
-                amount->HasAnyPropertyFlags(Unreal::CPF_OutParm | Unreal::CPF_ReturnParm))
+            const bool native_gain = amount &&
+                gain->GetOuterPrivate() == scope.pawn->GetClassPrivate() && gain->GetNumParms() == 1 &&
+                !gain->GetReturnProperty() && gain->GetParmsSize() == sizeof(double) &&
+                !gain->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) &&
+                amount->GetOffset_Internal() == 0 && amount->HasAnyPropertyFlags(Unreal::CPF_Parm) &&
+                !amount->HasAnyPropertyFlags(Unreal::CPF_OutParm | Unreal::CPF_ReturnParm);
+            if (!health || !regen || !food || !stim || !maximum || (!detached_bandage && !native_gain))
                 return "guest_bandage_refused_health_schema";
 
             before = read(scope.guest);
@@ -514,8 +538,30 @@ namespace
                 !temporary_trait(scope.guest, trait, hemophilia) || !contains_name(cache, scope.instance, trait, cached))
                 return "guest_bandage_refused_trait_schema";
 
-            // GainHealth reads the GameInstance's compiled cache. A detached guest's
-            // verified trait must agree since the cache is never switched or rewritten.
+            if (detached_bandage)
+            {
+                // The shared GameInstance cache describes the host. Evaluate the
+                // same trait against this character and its own inventory instead.
+                for (auto* name : {STR("PlayerArmor"), STR("PlayerHelmet")})
+                {
+                    auto* property = field<Unreal::FStructProperty>(scope.guest, name);
+                    if (!detached_bandage->matches_type(property) ||
+                        !detached_bandage->read_hemophilia(property->ContainerPtrToValuePtr<void>(scope.guest), trait, hemophilia))
+                        return "guest_bandage_refused_trait_schema";
+                }
+                for (auto* name : {STR("PlayerEquipment"), STR("PlayerBackpack")})
+                {
+                    auto* property = field<Unreal::FArrayProperty>(scope.guest, name);
+                    if (!detached_bandage->matches_array(property)) return "guest_bandage_refused_trait_schema";
+                    Unreal::FScriptArrayHelper rows(property, property->ContainerPtrToValuePtr<void>(scope.guest));
+                    if (rows.Num() < 0 || rows.Num() > max_inventory) return "guest_bandage_refused_trait_schema";
+                    for (int index = 0; index < rows.Num(); ++index)
+                        if (!detached_bandage->read_hemophilia(rows.GetRawPtr(index), trait, hemophilia))
+                            return "guest_bandage_refused_trait_schema";
+                }
+                return {};
+            }
+            // Food still invokes GainHealth, so its detached trait must match the shared cache.
             return cached == hemophilia ? "" : "guest_bandage_refused_shared_trait_mismatch";
         }
 
@@ -585,7 +631,7 @@ namespace
         Inventory inventory;
         if (const auto error = inventory.locate(scope, guid, bandage); !error.empty()) return refuse(error);
         Health health;
-        if (const auto error = health.bind(scope); !error.empty()) return refuse(error);
+        if (const auto error = health.bind(scope, &inventory.row); !error.empty()) return refuse(error);
 
         auto* bag = inventory.backpack;
         auto* source = inventory.bag_data(scope.guest);
@@ -626,12 +672,10 @@ namespace
                    bag->Identical(source, source_before.get());
         };
 
-        // The exact clean Bandage has no instant healing, temporary effects, food,
-        // stimulation or infection. Invoke only the qualified stock gameplay effect.
-        // The stock consumable wrapper can fall back to player zero and runs latent UI.
-        double amount = bandage.regen_gain;
-        scope.pawn->ProcessEvent(health.gain, &amount);
         const auto expected_vitals = health.expected(bandage.regen_gain);
+        // GainHealth would read the host's traits. The Bandage only changes the
+        // selected guest's stock regeneration buffer and the exact consumed row.
+        health.regen->SetPropertyValueInContainer(scope.guest, expected_vitals.regen);
         if (!stock_unchanged() || !preflight() || health.read(scope.guest) != expected_vitals ||
             !bag->Identical(source, source_before.get()))
             return refuse(rollback(false) ? "guest_bandage_refused_heal_rolled_back"
@@ -653,6 +697,146 @@ namespace
         lua.set_number(health.max_health);
         lua.set_bool(health.hemophilia);
         return 10;
+    }
+
+    int open_starter_bag(const Lua& lua)
+    {
+        constexpr int max_rewards = 16;
+        const auto refuse = [&](std::string_view reason) { return result(lua, false, reason); };
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 4 ||
+            !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3) || !lua.is_string(4))
+            return refuse("guest_starter_bag_refused_scope");
+        const auto pawn = lua.get_integer(), detached = lua.get_integer(), stock = lua.get_integer();
+        Guid source{};
+        Scope scope;
+        if (pawn <= 0 || detached <= 0 || stock <= 0 || !parse_guid(lua.get_string(), source) ||
+            !scope.bind(pawn, detached, stock) || !read_bool(scope.pawn, STR("Dead"), false) ||
+            !read_bool(scope.pawn, STR("HeadUnderWater"), false))
+            return refuse("guest_starter_bag_refused_owner");
+
+        RowLayout row;
+        auto* backpack = field<Unreal::FArrayProperty>(scope.guest, STR("PlayerBackpack"));
+        auto* equipment = field<Unreal::FArrayProperty>(scope.guest, STR("PlayerEquipment"));
+        auto* armor = field<Unreal::FStructProperty>(scope.guest, STR("PlayerArmor"));
+        auto* helmet = field<Unreal::FStructProperty>(scope.guest, STR("PlayerHelmet"));
+        auto* flags = field<Unreal::FMapProperty>(scope.stock, STR("Flags"));
+        auto* destroy = find<Unreal::UFunction>(STR("/Script/Engine.Actor:K2_DestroyActor"));
+        if (!row.bind() || !row.matches_array(backpack) || !row.matches_array(equipment) ||
+            !row.matches_type(armor) || !row.matches_type(helmet) || !flags || !destroy ||
+            destroy->GetNumParms() || destroy->GetParmsSize() || !destroy->HasAnyFunctionFlags(Unreal::FUNC_Native))
+            return refuse("guest_starter_bag_refused_schema");
+
+        auto* guest_rows = backpack->ContainerPtrToValuePtr<void>(scope.guest);
+        auto* stock_rows = backpack->ContainerPtrToValuePtr<void>(scope.stock);
+        Unreal::FScriptArrayHelper guest(backpack, guest_rows), host(backpack, stock_rows);
+        if (guest.Num() < 1 || guest.Num() > max_inventory || host.Num() > max_inventory ||
+            (host.Num() && guest.GetRawPtr() == host.GetRawPtr()))
+            return refuse("guest_starter_bag_refused_inventory");
+
+        const auto rows_contain = [&](Unreal::FScriptArrayHelper& rows, const Guid& guid) {
+            for (int index = 0; index < rows.Num(); ++index)
+                if (row.identity(rows.GetRawPtr(index)) == guid) return true;
+            return false;
+        };
+        const auto gear_contains = [&](Unreal::UObject* save, const Guid& guid) {
+            Unreal::FScriptArrayHelper slots(equipment, equipment->ContainerPtrToValuePtr<void>(save));
+            return slots.Num() > max_inventory || rows_contain(slots, guid) ||
+                row.identity(armor->ContainerPtrToValuePtr<void>(save)) == guid ||
+                row.identity(helmet->ContainerPtrToValuePtr<void>(save)) == guid;
+        };
+        int selected = -1;
+        Unreal::UClass* type{};
+        for (int index = 0; index < guest.Num(); ++index)
+        {
+            const auto* item = guest.GetRawPtr(index);
+            if (row.identity(item) != source) continue;
+            if (selected != -1) return refuse("guest_starter_bag_refused_duplicate");
+            selected = index;
+            type = Unreal::Cast<Unreal::UClass>(row.read_class(item));
+        }
+        const auto bag_path = type ? type->GetPathName() : RC::StringType{};
+        if (selected == -1 || (bag_path != starter_bag_path && bag_path != hyper_bag_path) ||
+            !type->IsChildOf(row.item_base) || rows_contain(host, source) || gear_contains(scope.guest, source) ||
+            gear_contains(scope.stock, source))
+            return refuse("guest_starter_bag_refused_exact_bag");
+
+        auto* contents = field<Unreal::FArrayProperty>(type, STR("Contents"));
+        auto* entry = contents ? Unreal::CastField<Unreal::FClassProperty>(contents->GetInner()) : nullptr;
+        auto* row_property = Unreal::CastField<Unreal::FStructProperty>(backpack->GetInner());
+        const auto before = copy_value(backpack, guest_rows);
+        const auto prepared = copy_value(backpack, guest_rows);
+        const auto host_before = copy_value(backpack, stock_rows);
+        const auto host_flags = copy_value(flags, flags->ContainerPtrToValuePtr<void>(scope.stock));
+        if (!entry || entry->GetMetaClass().Get() != row.item_base || !before || !prepared || !host_before || !host_flags)
+            return refuse("guest_starter_bag_refused_snapshot");
+        const auto unchanged = [&] {
+            return scope.current() && backpack->Identical(stock_rows, host_before.get()) &&
+                flags->Identical(flags->ContainerPtrToValuePtr<void>(scope.stock), host_flags.get());
+        };
+        const auto generation_failed = [&](bool retired) {
+            return retired && unchanged() && backpack->Identical(guest_rows, before.get())
+                ? refuse("guest_starter_bag_refused_stock_contents")
+                : refuse("mutation_unverified_guest_starter_bag_generation");
+        };
+
+        const auto position = static_cast<Unreal::AActor*>(scope.pawn)->K2_GetActorLocation();
+        const Unreal::FRotator rotation{};
+        const auto retire = [&](Unreal::UObject* actor) {
+            if (!live(actor)) return true;
+            const Unreal::FWeakObjectPtr pointer{actor};
+            actor->ProcessEvent(destroy, nullptr);
+            auto* remaining = pointer.Get();
+            return !live(remaining) || read_bool(remaining, STR("bActorIsBeingDestroyed"), true);
+        };
+        auto* bag = scope.world->SpawnActor(type, &position, &rotation);
+        if (!authority(bag, scope.world) || !exact(bag, type)) return generation_failed(retire(bag));
+        Unreal::FScriptArrayHelper stock_contents(contents, contents->ContainerPtrToValuePtr<void>(bag));
+        std::array<Unreal::UClass*, max_rewards> rewards{};
+        int reward_count = 0;
+        if (stock_contents.Num() < 1 || stock_contents.Num() > max_rewards) return generation_failed(retire(bag));
+        for (int index = 0; index < stock_contents.Num(); ++index)
+        {
+            auto* value = entry->GetObjectPropertyValue(stock_contents.GetRawPtr(index));
+            if (!value) continue;
+            auto* reward = Unreal::Cast<Unreal::UClass>(value);
+            if (!live(reward) || !reward->IsChildOf(row.item_base) || reward->GetPathName() == starter_bag_path ||
+                reward->GetPathName() == hyper_bag_path) return generation_failed(retire(bag));
+            rewards[reward_count++] = reward;
+        }
+        if (!retire(bag)) return generation_failed(false);
+        if (reward_count == 0 || guest.Num() - 1 + reward_count > max_inventory) return generation_failed(true);
+
+        Unreal::FScriptArrayHelper destination(backpack, prepared.get());
+        destination.RemoveValues(selected);
+        std::string awarded;
+        for (int index = 0; index < reward_count; ++index)
+        {
+            auto* actor = scope.world->SpawnActor(rewards[index], &position, &rotation);
+            const auto converted = Value(row_property->AllocateAndInitializeValue(), {row_property});
+            const bool valid_row = converted && exact(actor, rewards[index]) && authority(actor, scope.world) &&
+                silverfish::loot_escrow::convert_stock_item(scope.pawn, actor, converted.get());
+            if (!retire(actor)) return generation_failed(false);
+            if (!valid_row) return generation_failed(true);
+            const auto guid = row.identity(converted.get());
+            if (guid == Guid{} || guid == source || rows_contain(destination, guid) || rows_contain(host, guid) ||
+                gear_contains(scope.guest, guid) || gear_contains(scope.stock, guid)) return generation_failed(true);
+            const int inserted = destination.AddValue();
+            row_property->CopyCompleteValue(destination.GetRawPtr(inserted), converted.get());
+            if (!awarded.empty()) awarded.push_back(',');
+            awarded += std::format("{:08X}{:08X}{:08X}{:08X}", guid[0], guid[1], guid[2], guid[3]);
+        }
+        if (!unchanged() || !backpack->Identical(guest_rows, before.get())) return generation_failed(true);
+        backpack->CopyCompleteValue(guest_rows, prepared.get());
+        if (!unchanged() || !backpack->Identical(guest_rows, prepared.get()))
+        {
+            if (!unchanged()) return refuse("mutation_unverified_guest_starter_bag_commit");
+            backpack->CopyCompleteValue(guest_rows, before.get());
+            return generation_failed(true);
+        }
+        result(lua, true, "used");
+        lua.set_string(bag_path == starter_bag_path ? "random" : "hyperrandom");
+        lua.set_string(awarded);
+        return 4;
     }
 
     struct Intoxication
@@ -1003,7 +1187,11 @@ void silverfish::native_guest_consumable::uninstall_hooks()
 
 void silverfish::native_guest_consumable::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
-    if (enabled()) lua.register_function("SilverfishUseNativeGuestBandage", use);
+    if (enabled())
+    {
+        lua.register_function("SilverfishUseNativeGuestBandage", use);
+        lua.register_function("SilverfishOpenNativeGuestStarterBag", open_starter_bag);
+    }
     if (mre_enabled())
     {
         lua.register_function("SilverfishPrepareNativeGuestMre", prepare_food);

@@ -47,6 +47,27 @@ class GuestStackDropTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_once_with(menu_drop.FINISH, host.zone_epoch, "1", timeout=2)
         self.assertEqual(host.control.event.call_args.kwargs["refresh"], "refreshed")
 
+    async def test_host_split_drag_dispatches_only_the_staged_portion_once(self):
+        host, _ = self.make_host()
+        scope = {"map": OBSERVATORY, "pawn": PAWN, "epoch": host.zone_epoch}
+        host.smg_holds = None
+        host.control.generation = "split-drag-host"
+        fields = [menu_drop.INTENT_ROW, OBSERVATORY, PAWN, host.zone_epoch, "7", NEW_GUID, "4", "split_drag_to_floor"]
+        intent = menu_drop.parse(fields, "hosting", OBSERVATORY)
+        host.last_game.update(pawns={"local": {"name": PAWN}}, **{
+            menu_drop.CAPABILITY: 1, menu_drop.SCOPE: scope, menu_drop.INTENT: intent,
+        })
+        bridge = SimpleNamespace(command=AsyncMock(return_value={**host.last_game, "ack": {"message": "refreshed"}}))
+        receipt = {native_guest_drop.RESULT: {"state": "dropped", "guid": NEW_GUID, "quantity": 4}}
+        controller = menu_drop.HostDropInput()
+        with patch.object(native_guest_drop, "perform", AsyncMock(return_value=receipt)) as perform:
+            await controller.poll(host, bridge)
+            await controller.poll(host, bridge)
+            perform.assert_awaited_once()
+            self.assertEqual(perform.await_args.args[:5], (host, bridge, "host", native_guest_drop.DROP, f"{NEW_GUID}|4"))
+        bridge.command.assert_awaited_once_with(menu_drop.FINISH, host.zone_epoch, "7", timeout=2)
+        self.assertEqual(host.control.event.call_args.kwargs["entry"], "split_drag_to_floor")
+
     def test_bridge_accepts_one_exact_host_only_report(self):
         path = Path(self.enterContext(TemporaryDirectory()))
         bridge = Bridge(path, Mock())

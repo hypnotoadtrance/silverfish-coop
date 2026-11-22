@@ -39,9 +39,10 @@ from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
 from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore_carry, native_mindcore_view
-from . import native_stock_door
+from . import native_lantern, native_stock_door
 from . import native_player_avatar
 from . import native_pickup_audio
+from . import native_damage_feedback
 from . import native_voice
 from . import native_anomaly_effects
 from . import native_weapon_fire_view
@@ -91,7 +92,8 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS,
                         native_authored_pickup.ACTION, native_loose_pickup.CLAIM, native_enemy_loot.CLAIM, native_stock_enemy_drops.CLAIM,
-                        *native_guest_weapon.GUEST_ACTIONS, *native_guest_consumable.RESULT, native_guest_melee.SWING,
+                        *native_guest_weapon.GUEST_ACTIONS, native_guest_weapon.SELECT_EQUIPMENT,
+                        *native_guest_consumable.RESULT, native_guest_melee.SWING,
                         native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION)
 TRANSPORT_FIXTURES = ("stardust", "fruiting-stardust", "green", "blue", "red", "gold", "purple", "teleport-cube")
 CUBE_RESULTS = {"inspect": ("present", "absent"), "debit": ("removed", "absent"),
@@ -876,6 +878,8 @@ class Host:
                 and world_view.get("actor") == WORLD_VIEW_ACTORS.get(area)):
             view["host_world"]["native_world_view"] = world_view
         view["native_quests"] = self.party.get("native_quests", {})
+        if jammer_pose := native_flood_jammer.pose_frame(self.last_game, self.zone_epoch):
+            view[native_flood_jammer.POSE] = jammer_pose
         if rolls := native_loot.published(self.party.get(native_loot.STATE_KEY, {}), area, game=self.last_game):
             view[native_loot.STATE_KEY] = rolls
         if locks := self.last_game.get(native_loot.VEHICLE_LOCKS):
@@ -884,6 +888,8 @@ class Host:
             view[native_loot.STOCK_ALARMS] = alarms
         if boxes := self.last_game.get(native_loot.POWER_BOX_STATES):
             view[native_loot.POWER_BOX_STATES] = boxes
+        if lantern := native_lantern.frame(self.last_game, self.zone_epoch):
+            view[native_lantern.KEY] = lantern
         if doors := native_stock_door.frame(self.last_game, self.zone_epoch):
             view[native_stock_door.KEY] = doors
         if rolls := self.party.get(native_enemy_loot.STATE_KEY):
@@ -1761,6 +1767,8 @@ class Host:
             self.voice_audio.observed(self.last_game, self.zone_epoch)
             if voice_frame := self.voice_audio.frame(self.last_game, self.zone_epoch, pawn):
                 gameplay[native_voice.KEY] = voice_frame
+            if hurt_frame := native_damage_feedback.frame(self.last_game, self.zone_epoch, pawn):
+                gameplay[native_damage_feedback.KEY] = hurt_frame
             if cues := self.last_game.get(native_anomaly_effects.KEY):
                 gameplay[native_anomaly_effects.KEY] = {
                     "map": self.last_game["map"], "epoch": self.zone_epoch, "cues": cues,
@@ -1926,6 +1934,9 @@ class Host:
                 result = await self.native_pickup.claim(self, bridge, character, request["operation_id"], target)
             elif action == "native-shop-buy":
                 result = await self.native_pickup.buy(self, bridge, character, request["operation_id"], target)
+            elif action == native_guest_weapon.SELECT_EQUIPMENT:
+                async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
+                    result = await native_guest_weapon.select_equipment(self, bridge, character, target)
             elif action in native_guest_weapon.GUEST_ACTIONS:
                 result = await native_guest_weapon.perform(self, bridge, character, request["operation_id"], action, target)
             elif action == native_guest_melee.SWING:
@@ -3023,6 +3034,21 @@ class Host:
                         raise RuntimeError("The stock container pry did not report the expected latch state")
                     self.last_game, self.last_seen = snapshot, time.monotonic()
                     result = {native_loot.VEHICLE_LOCKS: {crate: locked}}
+                elif action == "native-standing-fuel-tank-tip-fixture" and self.fixtures:
+                    requested = request.get("target")
+                    mode, separator, target = requested.partition("@") if isinstance(requested, str) else ("", "", "")
+                    if not separator or mode not in ("prepare", "tip") or target not in self.last_game.get("native_standing_fuel_tanks", {}):
+                        raise party.RuleError("native_standing_fuel_tank_fixture_unavailable")
+                    self.last_game = await bridge.command(action, target, mode, timeout=4)
+                    self.last_seen = time.monotonic()
+                    result = {"native_standing_fuel_tanks": self.last_game["native_standing_fuel_tanks"]}
+                elif action == native_lantern.FIXTURE and self.fixtures:
+                    target = request.get("target")
+                    if target not in ("toggle", "impulse") or native_lantern.KEY not in self.last_game:
+                        raise party.RuleError("native_observatory_lantern_fixture_unavailable")
+                    self.last_game = await bridge.command(action, target, timeout=4)
+                    self.last_seen = time.monotonic()
+                    result = {native_lantern.KEY: self.last_game[native_lantern.KEY]}
                 elif action == native_stock_door.FIXTURE and self.fixtures:
                     actor = request.get("target")
                     if not isinstance(actor, str) or actor not in self.last_game.get(native_stock_door.KEY, {}):
@@ -4665,6 +4691,7 @@ class Client:
         self.loot_tracking = None
         self.pickup_playback = native_pickup_audio.Playback()
         self.voice_playback = native_voice.Playback()
+        self.hurt_playback = native_damage_feedback.Playback()
         self.anomaly_playback = native_anomaly_effects.Playback()
         self.weapon_shot_playback = native_weapon_fire_view.Playback()
         self.snapshot_request: asyncio.Task | None = None
@@ -4681,6 +4708,7 @@ class Client:
         self.empty_zone_retry = native_zone_rejoin.EmptyZoneRetry()
         self.game_visit: tuple[str, str, str] | None = None
         self.last_reload_intent = 0
+        self.last_equipment_selection = 0
         self.guest_primary_input = guest_primary_input
         self.guest_held_input = native_smg_hold.GuestInput(self) if invite.get("native_guest_held_fire") else None
         self.mindcore_carry = native_mindcore_carry.GuestInput(self) if invite.get("native_zones") else None
@@ -5230,8 +5258,8 @@ class Client:
             report = consumed[native_guest_consumable.RESULT[action]]
             if (report.get("state"), report.get("map"), report.get("guid")) != ("used", area, guid):
                 raise ValueError("The host did not verify use of the selected item")
-            if action in native_guest_consumable.MEALS and report.get("class_path") != item_class:
-                raise ValueError("The host did not verify the selected food class")
+            if action != native_guest_consumable.ACTION and report.get("class_path") != item_class:
+                raise ValueError("The host did not verify the selected item class")
             outcome = "used"
             self.control.event("native_guest_inventory_used", operation_id=operation, view_sequence=sequence, **consumed)
         except (KeyError, TypeError, ValueError, OSError, RuntimeError) as error:
@@ -5370,6 +5398,8 @@ class Client:
                         self.bridge, self.last_game, self.gameplay.get(native_player_avatar.KEY), self.zone_epoch)
                     self.last_game = await native_stock_door.project(
                         self.bridge, self.last_game, self.gameplay.get(native_stock_door.KEY), self.zone_epoch)
+                    self.last_game = await native_lantern.project(
+                        self.bridge, self.last_game, self.gameplay.get(native_lantern.KEY), self.zone_epoch)
                     self.last_game = await native_stock_enemy_drops.project_broker_cue(
                         self.bridge, self.last_game, self.gameplay.get(native_stock_enemy_drops.BROKER_CUE), self.zone_epoch)
                     await native_inventory_death.project_bags(self, self.bridge, self.invite["character_id"],
@@ -5522,10 +5552,12 @@ class Client:
                     if target:
                         result["stock_inventory_proof"] = self.last_game.get("ack", {}).get("message")
                 elif action == "native-inventory-stock-use-click-fixture":
-                    item = request.get("target")
-                    if not native_gold.valid_guid(item) or self.last_game.get("native_inventory_view", {}).get("state") != "stock":
+                    target = request.get("target")
+                    item, separator, gesture = (target if isinstance(target, str) else "").partition("|")
+                    if (not native_gold.valid_guid(item) or separator and gesture != "drag"
+                            or self.last_game.get("native_inventory_view", {}).get("state") != "stock"):
                         raise ValueError("Select an item on the mounted stock backpack")
-                    self.last_game = await self.bridge.command(action, item, timeout=5)
+                    self.last_game = await self.bridge.command(action, item, *((gesture,) if separator else ()), timeout=5)
                     result = {"stock_action": self.last_game.get(native_guest_drop_record.STOCK_ACTION_KEY, {})}
                 elif action == native_loose_pickup.STOCK_CARD_FIXTURE:
                     target, separator, guid = (request.get("target") or "").partition("@")
@@ -5761,6 +5793,9 @@ class Client:
                     self.next_retry = time.monotonic() + self.auto_delay
             active = (self.transport.connected and self.last_game.get("state") == "connected"
                       and not self.needs_travel and not self.server_transitioning)
+            if active and self.last_game.get("map") == self.expected_zone and time.monotonic() - self.gameplay_seen < 2:
+                self.last_game = await self.hurt_playback.sync(
+                    self.bridge, self.control, self.last_game, self.gameplay.get(native_damage_feedback.KEY), self.zone_epoch)
             shots = self.transport.take_weapon_shots()
             if active and shots and self.last_game.get("map") == self.expected_zone:
                 self.last_game = await self.weapon_shot_playback.sync(
@@ -5774,6 +5809,7 @@ class Client:
                 await pause_exit.poll(scope, self.leave_session)
                 if self.stopping:
                     break
+            await native_guest_weapon.service_equipment_selection(self, active)
             await self.service_reload_input(active)
             if self.mindcore_carry:
                 await self.mindcore_carry.poll(active)

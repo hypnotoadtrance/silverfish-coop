@@ -1,5 +1,6 @@
-"""Keep the guest merchant overlay tied to current, authenticated stock quotes."""
+"""Keep the guest merchant screen tied to current, authenticated stock quotes."""
 
+import asyncio
 import contextlib
 import math
 import re
@@ -13,6 +14,7 @@ from .native_gold import valid_guid
 
 PAGE_SIZE = 8
 MAX_OFFERS = 128
+STOCK_RECHECK_INTERVAL = 4
 WAITING = {"open": "pending", "page": "paging", "buy": "buying", "sell": "selling"}
 _CARD = re.compile(r"stock:(shelf|limited|buyback|backpack):([0-9A-F]{32})\Z")
 _ITEM = re.compile(r"/Game/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+_C\Z")
@@ -21,6 +23,7 @@ _REFRESH_AFTER_REFUSAL = {
     "insufficient_merchant_funds", "finite_shop_refused_shop_quote_changed",
     "finite_shop_refused_shop_funds_unavailable", "finite_shop_refused_shop_offer_no_longer_available",
     "finite_shop_refused_shop_sale_stock_item_requires_special_handling",
+    "native_scientist_purchase_profile_unavailable", "finite_shop_refused_shop_scientist_purchase_profile_unavailable",
 }
 
 
@@ -47,12 +50,49 @@ class ShopView:
         self.pending = None
         self.rendered = None
         self.refresh_after = 0.0
+        self.stock_catalog = None
+        self.stock_poll = None
+        self.stock_poll_after = 0.0
+
+    def _clear_stock_poll(self):
+        if self.stock_poll is not None:
+            self.stock_poll.cancel()
+            self.stock_poll = None
+        self.stock_catalog = None
+
+    async def _poll_stock(self, client, catalog):
+        scope = catalog[0]
+        with contextlib.suppress(KeyError, TypeError, ValueError, OSError, RuntimeError):
+            listing = await self._listing(client, scope, uuid.uuid4().hex)
+            return scope, listing["wallet_after"], listing["offers"]
+
+    async def _sync_stock(self, client, epoch, game, now):
+        catalog = self.stock_catalog
+        if (not catalog or not game.get("stock") or game.get("state") != "ready"
+                or catalog[0] != (*epoch, *(game.get(key) for key in ("sequence", "map", "pawn", "actor")))):
+            self._clear_stock_poll()
+            return
+        stale = False
+        if self.stock_poll and self.stock_poll.done():
+            result = self.stock_poll.result()
+            self.stock_poll = None
+            stale = result is not None and result[0] == catalog[0] and result != catalog
+        wallet = client.gameplay.get("shared_wallet")
+        if now >= self.refresh_after and (stale or type(wallet) is int and wallet != game.get("wallet")):
+            self.refresh_after = now + .75
+            with contextlib.suppress(OSError, RuntimeError, ValueError):
+                client.last_game = await client.bridge.command("native-shop-view-refresh-stock",
+                                                                str(game["sequence"]), game["map"], timeout=2)
+        elif self.stock_poll is None and now >= self.stock_poll_after:
+            self.stock_poll_after = now + STOCK_RECHECK_INTERVAL
+            self.stock_poll = asyncio.create_task(self._poll_stock(client, catalog))
 
     async def sync(self, client, active):
         events = client.bridge.native_shop_view_requests()
         epoch = client.host_session, client.zone_epoch
         if not active or client.stopping or not all(epoch):
             self.pending = self.rendered = None
+            self._clear_stock_poll()
             return
         now = time.monotonic()
         if events:
@@ -60,14 +100,7 @@ class ShopView:
         if self.pending and (self.pending[0] != epoch or now - self.pending[1] > 2):
             self.pending = None
         if not self.pending:
-            game = client.last_game.get("native_shop_view", {})
-            if game.get("stock") and game.get("state") == "ready" and now >= self.refresh_after:
-                wallet = client.gameplay.get("shared_wallet")
-                if type(wallet) is int and wallet != game.get("wallet"):
-                    self.refresh_after = now + .75
-                    with contextlib.suppress(OSError, RuntimeError, ValueError):
-                        client.last_game = await client.bridge.command("native-shop-view-refresh-stock",
-                                                                        str(game["sequence"]), game["map"], timeout=2)
+            await self._sync_stock(client, epoch, client.last_game.get("native_shop_view", {}), now)
             return
         event, sequence, kind, area, pawn, actor, guid, price = self.pending[2]
         scope = (*epoch, sequence, area, pawn, actor)
@@ -75,6 +108,7 @@ class ShopView:
             self.pending = None
             if self.rendered and self.rendered[0] == scope:
                 self.rendered = None
+            self._clear_stock_poll()
             return
         game = client.last_game
         view = game.get("native_shop_view", {})
@@ -130,8 +164,8 @@ class ShopView:
             raise ValueError("The stock merchant selection did not match the displayed quote")
         return offset
 
-    async def _render(self, client, scope, operation, event, wanted, *, paged, stock=False):
-        _, _, sequence, area, pawn, actor = scope
+    async def _listing(self, client, scope, operation):
+        _, _, _, area, _, actor = scope
         response = await client.gameplay_action("native-finite-shop-list", operation, None)
         listing = response["native_finite_shop"]
         total, wallet, offers = listing["count"], listing["wallet_after"], listing["offers"]
@@ -139,6 +173,12 @@ class ShopView:
                 or not 0 <= wallet <= MAX_PRICE or type(offers) is not list or len(offers) != total
                 or (listing.get("map"), listing.get("actor")) != (area, actor)):
             raise ValueError("The host returned an invalid native merchant catalog")
+        return listing
+
+    async def _render(self, client, scope, operation, event, wanted, *, paged, stock=False):
+        _, _, sequence, area, pawn, actor = scope
+        listing = await self._listing(client, scope, operation)
+        total, wallet, offers = listing["count"], listing["wallet_after"], listing["offers"]
         if stock:
             await self._render_stock(client, scope, operation, event, wallet, offers)
             return
@@ -202,7 +242,11 @@ class ShopView:
         if tuple(observed.get(key) for key in keys) != (sequence, area, pawn, actor, "ready", len(offers), True, wallet):
             raise RuntimeError("The stock shop screen could not verify the authenticated catalog")
         self.rendered = (scope, 0, quotes)
-        self.refresh_after = time.monotonic() + .75
+        self._clear_stock_poll()
+        now = time.monotonic()
+        self.refresh_after = now + .75
+        self.stock_poll_after = now + STOCK_RECHECK_INTERVAL
+        self.stock_catalog = (scope, wallet, offers)
         client.last_game = snapshot
         client.control.event("native_shop_view_rendered", operation_id=operation, sequence=sequence,
                              total=len(offers), offset=0, stock=True)

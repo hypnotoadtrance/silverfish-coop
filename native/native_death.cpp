@@ -23,6 +23,7 @@
 #include <Unreal/Hooks.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
+#include <Unreal/UFunctionStructs.hpp>
 #include <Unreal/World.hpp>
 
 #include "black_stone.hpp"
@@ -1177,6 +1178,34 @@ namespace
         return read_object(object_field(object, name), object);
     }
 
+    void filter_jump_camera_shake(Unreal::UnrealScriptFunctionCallableContext& call, void*)
+    {
+        if (!Unreal::IsInGameThreadRaw() || (bridge_generation.load(std::memory_order_acquire) & 1) == 0)
+            return;
+        auto& frame = call.TheStack;
+        auto* caller = frame.PreviousFrame();
+        auto* source = caller ? caller->Object() : nullptr;
+        if (!live_object(source) || !caller->Node() ||
+            caller->Node()->GetFullName() != STR("Function /Game/Classes/Player/Player_FP.Player_FP_C:Resolve_Jump") ||
+            caller->Node()->GetOuterPrivate() != source->GetClassPrivate() || !frame.Locals()) return;
+        auto* function = frame.Node();
+        auto* shake = function ? Unreal::CastField<Unreal::FClassProperty>(
+            function->GetPropertyByNameInChain(STR("Shake"))) : nullptr;
+        if (!shake || !shake->HasAnyPropertyFlags(Unreal::CPF_Parm)) return;
+        auto* argument = shake->ContainerPtrToValuePtr<void>(frame.Locals());
+        auto* type = shake->GetObjectPropertyValue(argument);
+        if (!live_object(type) || type->GetPathName() != STR("/Game/Classes/Player/CS_Jumping.CS_Jumping_C"))
+            return;
+        auto* world = static_cast<Unreal::AActor*>(source)->GetWorld();
+        if (!live_object(world) || !live_object(object_value(world, STR("NetDriver")))) return;
+        // Resolve_Jump asks controller zero to play this first-person camera effect.
+        // The receiving controller must possess the pawn that originated it.
+        const bool remote = object_value(call.Context, STR("Pawn")) != source;
+        if (remote) shake->SetObjectPropertyValue(argument, nullptr);
+        if (environment_equals("SILVERFISH_COOP_NATIVE_FIXTURES", "1"))
+            RC::Output::send<RC::LogLevel::Verbose>(STR("[SilverfishCoopNative] Jump camera shake remote={}\n"), remote);
+    }
+
     [[nodiscard]] bool live_client_actor(Unreal::UObject* object, Unreal::UObject* world,
                                         std::uint8_t expected_role = autonomous_role)
     {
@@ -1445,6 +1474,7 @@ namespace
 
         ~SilverfishNativeMod() override
         {
+            if (jump_shake) Unreal::UObjectGlobals::UnregisterHook(jump_shake, jump_shake_hook);
             silverfish::local_bridge::stop();
             silverfish::native_guest_item::shutdown();
             silverfish::native_zone::uninstall_hooks();
@@ -1540,6 +1570,14 @@ namespace
             if (!enabled)
             {
                 return;
+            }
+            if (scoped_events || client_damage)
+            {
+                jump_shake = Unreal::UObjectGlobals::StaticFindObject<Unreal::UFunction*>(
+                    nullptr, nullptr, STR("/Script/Engine.PlayerController:ClientStartCameraShake"));
+                if (jump_shake)
+                    jump_shake_hook = Unreal::UObjectGlobals::RegisterHook(
+                        jump_shake, filter_jump_camera_shake, {}, nullptr);
             }
 
             hooks[0] = Hook::RegisterProcessEventPreCallback(
@@ -1712,6 +1750,8 @@ namespace
         bool scoped_events{};
         bool client_damage{};
         std::array<Hook::GlobalCallbackId, 4> hooks{};
+        Unreal::UFunction* jump_shake{};
+        std::pair<int, int> jump_shake_hook{};
     };
 }
 

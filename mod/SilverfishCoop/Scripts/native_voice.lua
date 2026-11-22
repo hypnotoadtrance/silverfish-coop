@@ -15,6 +15,7 @@ local fields = {
 }
 local current, hooked, events, profiles = nil, false, {}, {}
 local world, counter, visit, seen, history = nil, 0, nil, {}, {}
+local feedback_pawn
 
 local function valid(object) return object and object:IsValid() end
 local function same(first, second)
@@ -32,6 +33,7 @@ end
 
 local function capture(context, sound)
     local pawn, cue = context:get(), sound:get()
+    if same(pawn, feedback_pawn) then return end
     if not current or not valid(pawn) or not valid(cue) or not same(pawn:GetWorld(), current.state.world) then return end
     local name = pawn:GetFullName()
     if current.phase == "connected" then
@@ -47,6 +49,13 @@ local function capture(context, sound)
             return
         end
     end
+end
+
+function audio.local_feedback(pawn, play)
+    feedback_pawn = pawn
+    local ok, issue = pcall(play)
+    feedback_pawn = nil
+    if not ok then error(issue, 0) end
 end
 
 function audio.sync(state, phase)

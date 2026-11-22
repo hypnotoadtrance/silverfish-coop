@@ -35,6 +35,7 @@ local native_mindcore = require("native_mindcore")
 local native_datasilo_lift = require("native_datasilo_lift")
 local native_datasilo_door = require("native_datasilo_door")
 local native_stock_door = require("native_stock_door")
+local native_lantern = require("native_lantern")
 local native_stock_enemy_drops = require("native_stock_enemy_drops")
 local native_cistern_lockpick = require("native_cistern_lockpick")
 local native_mindcore_carry = require("native_mindcore_carry")
@@ -57,6 +58,7 @@ local native_authored_arrival = require("native_authored_arrival")
 local native_green = require("native_green")
 local native_green_cube = require("native_cubes").new("green")
 local native_hazard = require("native_hazard")
+local native_damage_feedback = require("native_damage_feedback")
 local native_anomaly_fields = require("native_anomaly_fields")
 local native_host_save = require("native_host_save")
 local native_save_scope = require("native_save_scope")
@@ -1022,6 +1024,7 @@ local function run_command(fields, state, current_phase)
         or native_death.command(fields, state, current_phase)
         or native_kill_volume.command(fields, state, current_phase)
         or native_hazard.command(fields, state, current_phase)
+        or native_damage_feedback.command(fields, state, current_phase)
         or native_anomaly_fields.command(fields, state, current_phase)
         or native_inventory.command(fields, state, current_phase)
         or native_stash.command(fields, state, current_phase)
@@ -1073,6 +1076,8 @@ local function run_command(fields, state, current_phase)
         or native_datasilo_lift.command(fields, state, current_phase)
         or native_datasilo_door.command(fields, state, current_phase)
         or native_stock_door.command(fields, state, current_phase)
+        or native_lantern.command(fields, state, current_phase)
+        or native_crate_props.command(fields, state, current_phase)
         or native_player_avatar.command(fields, state, current_phase)
         or native_pickup_audio.command(fields, state, current_phase)
         or native_voice.command(fields, state, current_phase)
@@ -1279,6 +1284,9 @@ local function write_status(state, current_phase, failure, fields, pending)
         for _, row in ipairs(native_datasilo_lift.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_datasilo_door.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_stock_door.rows(state, current_phase, status_row, fields)) do rows[#rows + 1] = row end
+        local lantern = native_lantern.status(state, current_phase, status_row)
+        if lantern then rows[#rows + 1] = lantern end
+        for _, row in ipairs(native_crate_props.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_cistern_lockpick.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_fixture.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_replication.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1396,6 +1404,7 @@ local function write_status(state, current_phase, failure, fields, pending)
             rows[#rows + 1] = row
         end
         for _, row in ipairs(native_hazard.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_damage_feedback.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_anomaly_fields.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         local native_ok, native_rows = pcall(native_world.rows, state, current_phase, status_row)
         if native_ok then
@@ -1467,6 +1476,7 @@ local function tick(fields, pending)
     pcall(native_zone_loading.sync, state, current_phase)
     native_title_panel.sync(state, current_phase)
     pcall(native_voice.sync, state, current_phase)
+    pcall(native_damage_feedback.sync, state, current_phase)
     pcall(native_weapon_fire_view.sync, state, current_phase, native_player_avatar)
     pcall(native_time_shift.sync, state, current_phase)
     native_guest_armor.sync(state, current_phase)
@@ -1481,6 +1491,7 @@ local function tick(fields, pending)
     native_enemy_loot.sync(state, current_phase)
     pcall(native_corpse_view.sync, state, current_phase)
     pcall(native_crate_props.sync, state, current_phase)
+    native_lantern.sync(state, current_phase)
     native_broker_input.sync(state, current_phase)
     native_death.sync(state, current_phase)
     if native_kill_volume.sync(state, current_phase) then
@@ -1604,7 +1615,7 @@ native_mindcore_replication.start(function() return role == "client" and not lea
 require("native_flare").start(function() return not leaving and role or nil end)
 native_anomaly_fields.start(function() return not leaving and role or nil end)
 native_corpse_view.start(function() return not leaving and role or nil end)
-require("native_damage_feedback").start(function() return role == "host" and not leaving end)
+native_damage_feedback.start(function() return role == "host" and not leaving end)
 native_datasilo_lift.start(function() return role == "client" and not leaving end)
 native_datasilo_door.start(function() return role == "client" and not leaving end)
 native_mindcore_view.start(bridge, players.is_downed)

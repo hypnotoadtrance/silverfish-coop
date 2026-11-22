@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import time
 
 from . import native_loot, native_rewards, native_spratt, native_wire_quest, party
+from .authored_loot import valid_item_transform
 from .native_gold import valid_guid
 from .travel import BLACK_MARKET, BOROUGH, LAKE, RAIL_YARD
 
@@ -61,6 +62,7 @@ XP_FIXTURES = {spec.command("xp-fixture"): spec for spec in CONTRACTS.values() i
 QUEST_ID, JAMMER, TRIGGER = FLOOD.quest, FLOOD.jammer, FLOOD.trigger
 PREFLIGHT, APPROACH, AIM, START, TURN_IN = map(FLOOD.command, ("preflight", "approach", "aim", "start", "turn-in"))
 STEPS = {None, -10, -7, 1, 2}
+POSE = "native_jammer_pose"
 
 
 def _pawn(host, actor, spec):
@@ -290,6 +292,55 @@ async def observe(host, bridge):
     host.control.event(f"{spec.key}_objective_committed", revision=revision, **record)
 
 
+def _pose_matches_scope(pose, spec):
+    return (isinstance(pose, dict) and (pose.get("map"), pose.get("actor")) == (spec.objective_map, spec.jammer)
+            and valid_item_transform(pose.get("transform")))
+
+
+def parse_pose(fields, phase, area, spec):
+    if (len(fields) != 12 or not isinstance(spec, JammerProfile)
+            or phase not in ("hosting", "connected") or area != spec.objective_map):
+        raise ValueError("Invalid authored jammer pose scope")
+    _, target_map, actor, *axes = fields
+    values = list(map(float, axes))
+    pose = dict(map=target_map, actor=actor,
+                transform=dict(position=values[:3], rotation=values[3:6], scale=values[6:]))
+    if not _pose_matches_scope(pose, spec):
+        raise ValueError("Invalid authored jammer pose")
+    return pose
+
+
+def pose_frame(game, epoch):
+    spec = OBJECTIVES.get(game.get("map"))
+    pose = game.get(POSE)
+    if (spec and game.get("state") == "hosting" and _pose_matches_scope(pose, spec)
+            and isinstance(epoch, str) and party.REQUEST_ID.fullmatch(epoch)):
+        return {**pose, "epoch": epoch}
+
+
+def same_pose(first, second):
+    return (
+        all(abs(a - b) <= .1 for a, b in zip(first["position"], second["position"], strict=True))
+        and all(abs((a - b + 180) % 360 - 180) <= .1 for a, b in zip(first["rotation"], second["rotation"], strict=True))
+        and all(abs(a - b) <= .005 for a, b in zip(first["scale"], second["scale"], strict=True))
+    )
+
+
+async def _project_pose(client, game, spec):
+    desired, local = client.gameplay.get(POSE), game.get(POSE)
+    if (not _pose_matches_scope(desired, spec) or desired.get("epoch") != client.zone_epoch
+            or not _pose_matches_scope(local, spec) or same_pose(local["transform"], desired["transform"])):
+        return
+    transform = desired["transform"]
+    axes = (*transform["position"], *transform["rotation"], *transform["scale"])
+    snapshot = await client.bridge.command(spec.command("project"), "pose", *(str(axis) for axis in axes), timeout=3)
+    report = snapshot.get(POSE)
+    if ((snapshot.get("state"), snapshot.get("map")) != ("connected", spec.objective_map)
+            or not _pose_matches_scope(report, spec) or not same_pose(report["transform"], transform)):
+        raise RuntimeError("The guest did not verify the authored jammer's host pose")
+    client.last_game = snapshot
+
+
 async def project_client(client):
     game = client.last_game
     spec = OBJECTIVES.get(game.get("map"))
@@ -299,11 +350,14 @@ async def project_client(client):
     local = game.get(key, {})
     record = client.gameplay.get("native_quests", {}).get(spec.quest, {})
     objective = record.get("objective", {})
-    if ((local.get("map"), local.get("actor"), local.get("state")) != (spec.objective_map, spec.jammer, "present")
-            or record.get("step") not in (2, -7, -10)
-            or (objective.get("map"), objective.get("jammer"), objective.get("trigger")) != (spec.objective_map, spec.jammer, spec.trigger)
-            or objective.get("state") not in ("stock_objective_verified", "stock_force_complete_verified")):
+    if (local.get("map"), local.get("actor"), local.get("state")) != (spec.objective_map, spec.jammer, "present"):
         return
+    destroyed = (record.get("step") in (2, -7, -10)
+                 and (objective.get("map"), objective.get("jammer"), objective.get("trigger"))
+                 == (spec.objective_map, spec.jammer, spec.trigger)
+                 and objective.get("state") in ("stock_objective_verified", "stock_force_complete_verified"))
+    if not destroyed:
+        return await _project_pose(client, game, spec)
     snapshot = await client.bridge.command(spec.command("project"), "destroyed", timeout=3)
     proof = snapshot.get(key, {})
     if (snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("actor")) != (

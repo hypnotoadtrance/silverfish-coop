@@ -26,6 +26,8 @@ namespace silverfish::guest_weapon_profiles
         STR("/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_ShotGun_Pellet.Projectile_ShotGun_Pellet_C"), 5, 9};
     inline constexpr StockAmmo five_seven_ap{11, STR("5-7_AP"),
         STR("/Game/Classes/Items/Ammo_5-7_AP_BP.Ammo_5-7_AP_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_5-7_AP.Projectile_5-7_AP_C"), 7, 1};
+    inline constexpr StockAmmo fifty_cal_fmj{6, STR("50Cal_FMJ"),
+        STR("/Game/Classes/Items/Ammo_50Cal_BP.Ammo_50Cal_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_50Cal.Projectile_50Cal_C"), 8, 1};
 
     struct Profile
     {
@@ -46,6 +48,7 @@ namespace silverfish::guest_weapon_profiles
         Profile{"light-pistol", STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"), true, 0, 0, 0.0, false, nullptr, false},
         Profile{"light-pistol-suppressed", STR("/Game/Classes/Weapons/Wep_LightPistol_Suppressed.Wep_LightPistol_Suppressed_C"), true, 14, 1, 0.05, false, &nine_mm_ball, false},
         Profile{"nagant-scoped", STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C"), false, 0, 0, 0.0, false, nullptr, false},
+        Profile{"break-action-50", STR("/Game/Classes/Weapons/Wep_50BMP_BreakAction.Wep_50BMP_BreakAction_C"), true, 1, 1, 0.1, false, &fifty_cal_fmj, true},
         Profile{"army-pistol", STR("/Game/Classes/Weapons/Wep_ArmyPistol.Wep_ArmyPistol_C"), true, 12, 1, 0.08, true, &nine_mm_ball, true},
         Profile{"pistol", STR("/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C"), true, 12, 1, 0.08, true, &nine_mm_ball, true},
         Profile{"pistol-02", STR("/Game/Classes/Weapons/Wep_Pistol02.Wep_Pistol02_C"), true, 12, 1, 0.1, true, &nine_mm_ball, true},

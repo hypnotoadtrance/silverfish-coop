@@ -1,6 +1,7 @@
 #include "guest_item.hpp"
 #include "guest_melee.hpp"
 #include "guest_weapon_registry.hpp"
+#include "interaction_input.hpp"
 
 #include <algorithm>
 #include <array>
@@ -10,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <format>
 #include <map>
 #include <memory>
 #include <ranges>
@@ -766,6 +768,28 @@ namespace
         return result(lua, proof, proof ? "seeded" : "mutation_unverified_guest_weapon_seed");
     }
 
+    struct EquipCall
+    {
+        struct Parameters { std::int32_t index{}; bool prev{}; } parameters;
+        Unreal::UFunction* action = find<Unreal::UFunction>(equip_path);
+        Unreal::FIntProperty* index = input<Unreal::FIntProperty>(action, STR("Index"), offsetof(Parameters, index));
+        Unreal::FBoolProperty* prev = input<Unreal::FBoolProperty>(action, STR("Prev"), offsetof(Parameters, prev));
+
+        bool valid(Unreal::UObject* pawn) const
+        {
+            return index && prev && action->GetOuterPrivate() == pawn->GetClassPrivate() && action->GetNumParms() == 2 &&
+                !action->GetReturnProperty() && action->GetParmsSize() >= offsetof(Parameters, prev) + 1 &&
+                action->GetParmsSize() <= sizeof(Parameters);
+        }
+
+        void invoke(Unreal::UObject* pawn, int slot)
+        {
+            index->SetPropertyValueInContainer(&parameters, slot);
+            prev->SetPropertyValueInContainer(&parameters, false);
+            pawn->ProcessEvent(action, &parameters);
+        }
+    };
+
     int equip(const Lua& lua, const Context& context, const Inventory& inventory)
     {
         const bool camera = context.weapon == find<Unreal::UClass>(camera_path);
@@ -802,14 +826,8 @@ namespace
         }
         if (!ready_pawn(context)) return result(lua, false, "guest_weapon_pawn_ineligible");
 
-        struct Parameters { std::int32_t index{}; bool prev{}; } parameters;
-        auto* action = find<Unreal::UFunction>(equip_path);
-        auto* index = input<Unreal::FIntProperty>(action, STR("Index"), offsetof(Parameters, index));
-        auto* prev = input<Unreal::FBoolProperty>(action, STR("Prev"), offsetof(Parameters, prev));
-        if (!index || !prev || action->GetOuterPrivate() != context.pawn->GetClassPrivate() || action->GetNumParms() != 2 ||
-            action->GetReturnProperty() || action->GetParmsSize() < offsetof(Parameters, prev) + 1 ||
-            action->GetParmsSize() > sizeof(Parameters))
-            return result(lua, false, "stock_guest_weapon_equip_schema_unavailable");
+        EquipCall call;
+        if (!call.valid(context.pawn)) return result(lua, false, "stock_guest_weapon_equip_schema_unavailable");
         const auto loaded = inventory.ammo->GetPropertyValueInContainer(inventory.item);
         if (camera)
         {
@@ -861,9 +879,7 @@ namespace
             inventory.type->CopyCompleteValue(equipment.GetRawPtr(target), inventory.item);
             backpack.RemoveValues(inventory.backpack_index, 1);
         }
-        index->SetPropertyValueInContainer(&parameters, target);
-        prev->SetPropertyValueInContainer(&parameters, false);
-        context.pawn->ProcessEvent(action, &parameters);
+        call.invoke(context.pawn, target);
 
         Inventory after;
         auto* actor = ownership_current(context) && locate(context, after).empty() ? equipped(context, after) : nullptr;
@@ -1757,6 +1773,144 @@ namespace
         return false;
     }
 
+    constexpr int quick_slots = 8;
+
+    int select_stock_equipment(const Lua& lua)
+    {
+        const auto refuse = [&](std::string_view reason) { return result(lua, false, reason); };
+        Context context;
+        if (!resolve(lua, context, nullptr).empty() || !ready_pawn(context) ||
+            std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
+                return hold.fenced && hold.pawn.Get() == context.pawn;
+            })) return refuse("native_guest_selection_refused_owner");
+        Inventory inventory;
+        if (!locate(context, inventory).empty() || !inventory.item ||
+            inventory.equipment_index < 0 || inventory.equipment_index >= quick_slots)
+            return refuse("native_guest_selection_refused_slot");
+        auto* type = Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item));
+        auto* base = find<Unreal::UClass>(equipment_base_path);
+        auto* defaults = live(type) && base && type != base && type->IsChildOf(base) ? type->GetClassDefaultObject().Get() : nullptr;
+        if (!defaults || defaults->GetClassPrivate() != type ||
+            !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) || !boolean(defaults, STR("Stacks"), false))
+            return refuse("native_guest_selection_refused_equipment");
+        context.weapon = type;
+        const auto loaded = inventory.ammo->GetPropertyValueInContainer(inventory.item);
+        const auto verifies = [&](const Inventory& selected) {
+            auto* actor = equipped(context, selected);
+            auto* ammo = field<Unreal::FIntProperty>(actor, STR("Ammo"));
+            return ammo && ammo->GetPropertyValueInContainer(actor) == loaded &&
+                selected.ammo->GetPropertyValueInContainer(selected.item) == loaded;
+        };
+        if (verifies(inventory)) return proof(lua, true, "equipped", loaded, loaded);
+
+        EquipCall call;
+        if (!call.valid(context.pawn)) return refuse("native_guest_selection_refused_schema");
+        const auto previous = inventory.selected->GetPropertyValueInContainer(context.save);
+        const auto target = inventory.equipment_index;
+        if (auto* old = object(context.pawn, STR("EquipedItem")); live(old))
+        {
+            Unreal::FScriptArrayHelper equipment(
+                inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(context.save));
+            if (previous == target || previous < 0 || previous >= equipment.Num() || !authority(old) ||
+                object(old, STR("Owner")) != context.pawn || object(old, STR("Instigator")) != context.pawn ||
+                inventory.row_class(equipment.GetRawPtr(previous)) != old->GetClassPrivate())
+                return refuse("native_guest_selection_refused_previous");
+        }
+        call.invoke(context.pawn, target);
+        Inventory after;
+        if (!ownership_current(context) || !locate(context, after).empty() || after.equipment_index != target ||
+            !verifies(after)) return refuse("mutation_unverified_guest_equipment_selection");
+        return proof(lua, true, "equipped", loaded, loaded);
+    }
+
+    struct LocalSelection
+    {
+        Unreal::FWeakObjectPtr pawn, save, actor;
+        Guid guid{};
+        std::uint64_t sequence{};
+    };
+    LocalSelection local_selection;
+    std::array selection_hooks{Hook::ERROR_ID, Hook::ERROR_ID};
+    std::uint64_t selection_sequence{};
+
+    void record_selection(Unreal::UObject* pawn, Unreal::UFunction* function, void* parameters)
+    {
+        static const Unreal::FName name{STR("Equip_NextItem")};
+        if (!function || function->GetFName() != name || !pawn || !parameters || !Unreal::IsInGameThreadRaw() ||
+            silverfish::native_interaction_input::current_guest_pawn(reinterpret_cast<std::uintptr_t>(pawn)) != pawn ||
+            function != find<Unreal::UFunction>(equip_path) || selection_sequence >= (1ULL << 53) - 1) return;
+        EquipCall call;
+        if (!call.valid(pawn)) return;
+        const int index = call.index->GetPropertyValueInContainer(parameters);
+        if (index < 0 || index >= quick_slots) return;
+        Context context;
+        context.pawn = pawn;
+        context.save = object(pawn, STR("Save"));
+        context.world = static_cast<Unreal::AActor*>(pawn)->GetWorld();
+        context.instance = object(context.world, STR("OwningGameInstance"));
+        if (!live(context.save) || object(context.instance, STR("SaveSlot_Ref")) != context.save) return;
+        Inventory inventory;
+        if (!bind_inventory(context, inventory).empty() ||
+            inventory.selected->GetPropertyValueInContainer(context.save) != index) return;
+        Unreal::FScriptArrayHelper slots(
+            inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(context.save));
+        if (slots.Num() < quick_slots || slots.Num() > max_inventory) return;
+        auto* row = slots.GetRawPtr(index);
+        const auto guid = inventory.identity(row);
+        context.weapon = Unreal::Cast<Unreal::UClass>(inventory.row_class(row));
+        auto* actor = object(pawn, STR("EquipedItem"));
+        if (guid == Guid{} || !context.weapon || !authority(actor) || actor->GetClassPrivate() != context.weapon ||
+            static_cast<Unreal::AActor*>(actor)->GetWorld() != context.world ||
+            object(actor, STR("Owner")) != pawn || object(actor, STR("Instigator")) != pawn ||
+            object(actor, STR("User")) != pawn || !boolean(actor, STR("HeldByPlayer"), true)) return;
+        if (local_selection.pawn.Get() == pawn && local_selection.save.Get() == context.save &&
+            local_selection.actor.Get() == actor && local_selection.guid == guid) return;
+        local_selection = {pawn, context.save, actor, guid, ++selection_sequence};
+    }
+
+    void selection_event_post(HoldHook&, Unreal::UObject* pawn, Unreal::UFunction* function, void* parameters)
+    {
+        record_selection(pawn, function, parameters);
+    }
+
+    void selection_script_post(HoldHook&, Unreal::UObject* pawn, Unreal::FFrame& frame, void*)
+    {
+        record_selection(pawn, frame.Node(), frame.Locals());
+    }
+
+    int read_local_selection(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto address = lua.get_integer();
+        auto* pawn = address > 0 ? silverfish::native_interaction_input::current_guest_pawn(address) : nullptr;
+        auto* actor = local_selection.actor.Get();
+        if (!pawn || pawn != local_selection.pawn.Get() || object(pawn, STR("Save")) != local_selection.save.Get() ||
+            !actor || object(pawn, STR("EquipedItem")) != actor) return 0;
+        const auto& guid = local_selection.guid;
+        lua.set_integer(local_selection.sequence);
+        lua.set_string(std::format("{:08X}{:08X}{:08X}{:08X}", guid[0], guid[1], guid[2], guid[3]));
+        return 2;
+    }
+
+    void remove_selection_hooks()
+    {
+        for (auto& callback : selection_hooks)
+        {
+            if (callback != Hook::ERROR_ID) Hook::UnregisterCallback(callback);
+            callback = Hook::ERROR_ID;
+        }
+    }
+
+    void install_selection_hooks()
+    {
+        if (selection_hooks[0] != Hook::ERROR_ID) return;
+        selection_hooks[0] = Hook::RegisterProcessEventPostCallback(
+            selection_event_post, {false, false, STR("SilverfishCoopNative"), STR("Read stock guest quick slot selection")});
+        selection_hooks[1] = Hook::RegisterProcessLocalScriptFunctionPostCallback(
+            selection_script_post, {false, false, STR("SilverfishCoopNative"), STR("Read stock guest quick slot selection")});
+        if (selection_hooks[0] == Hook::ERROR_ID || selection_hooks[1] == Hook::ERROR_ID) remove_selection_hooks();
+    }
+
     int store_stock_equipment(const Lua& lua)
     {
         Context context;
@@ -1779,7 +1933,6 @@ namespace
         auto* bag = inventory.backpack->ContainerPtrToValuePtr<void>(context.save);
         auto* equipped = inventory.equipment->ContainerPtrToValuePtr<void>(context.save);
         Unreal::FScriptArrayHelper equipment(inventory.equipment, equipped);
-        constexpr int quick_slots = 8;
         if (equipment.Num() < quick_slots || equipment.Num() > max_inventory)
             return result(lua, false, "native_inventory_equip_refused_layout");
         const auto selected = inventory.selected->GetPropertyValueInContainer(context.save);
@@ -2141,6 +2294,11 @@ namespace
 
 void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
+    if (env("SILVERFISH_COOP_NATIVE_INTERACT_INPUT"))
+    {
+        lua.register_function("SilverfishReadLocalGuestEquipmentSelection", read_local_selection);
+        install_selection_hooks();
+    }
     if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE")) return;
     lua.register_function("SilverfishEquipNativeGuestWeapon", run<Operation::Equip>);
     lua.register_function("SilverfishInspectNativeGuestWeapon", run<Operation::Inspect>);
@@ -2149,6 +2307,7 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishSplitNativeGuestAmmoStack", split_ammo);
     lua.register_function("SilverfishSortNativeGuestBackpack", sort_backpack);
     lua.register_function("SilverfishStoreNativeGuestEquipment", store_stock_equipment);
+    lua.register_function("SilverfishSelectNativeGuestEquipment", select_stock_equipment);
     if (env("SILVERFISH_COOP_NATIVE_FIXTURES"))
     {
         if (env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") && env("SILVERFISH_COOP_HEADLESS"))
@@ -2177,4 +2336,5 @@ void silverfish::native_guest_item::shutdown()
         }
     }
     remove_hold_hooks();
+    remove_selection_hooks();
 }

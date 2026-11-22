@@ -325,7 +325,9 @@ local function interact(fields, state, phase)
     if not qualified or not valid(pawn) or pawn.Dead ~= false then error("stock_door_guest_unavailable", 0) end
     local knob = actor.Box_Knob
     require("native_loot_crate_input").stock_focus(pawn, knob, function()
-        if not same(pawn.ActorBeingLookedAt, actor) or actor.Locked ~= false then
+        -- Stock F uses the interaction trace. The separate visibility ray can
+        -- hit the wall behind a valid knob when the door is open.
+        if not same(actor.Box_Knob, knob) or actor.Locked ~= false then
             error("stock_door_guest_out_of_reach", 0)
         end
         actor:SendInteractionToActor(pawn, knob)

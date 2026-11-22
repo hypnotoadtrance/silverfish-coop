@@ -58,6 +58,7 @@ options.add_argument("--dream-chain", action="store_true", help="take two Stardu
 options.add_argument("--dream-stone", action="store_true", help="return from Black Ocean by collecting its stock stone")
 options.add_argument("--dream-nothing", action="store_true", help="continue from Black Ocean into Nothing and return as the host")
 options.add_argument("--dream-tarot", choices=("rook", "obelisk", "night", "black-stag"), help="stage a stock Tarot route")
+options.add_argument("--rook-motion", action="store_true", help="test the Rook's wandering anomaly through the stock return")
 options.add_argument("--fruiting-stardust", action="store_true", help="use the stock Fruiting Dream Dust stack")
 options.add_argument("--native-seed", action="store_true", help="verify the saved seed reaches the stock day cycle on restart")
 options.add_argument("--native-world-view", action="store_true", help="verify the guest renders the authenticated stock sun")
@@ -214,6 +215,8 @@ if (args.dream_tarot or args.fruiting_stardust) and not args.native_stardust:
     options.error("The Tarot and Fruiting Dream Dust fixtures require --native-stardust")
 if args.dream_early and args.dream_tarot not in (None, "rook"):
     options.error("The current stock power fixture supports Exchange and Rook")
+if args.rook_motion and (not args.native_stardust or args.dream_tarot != "rook" or not args.dream_early):
+    options.error("--rook-motion requires --native-stardust --dream-tarot rook --dream-early")
 if args.native_host_save and not args.native_stardust:
     options.error("--native-host-save uses the Stardust stock inventory fixture")
 if args.native_world_view and not args.authored_zone:
@@ -892,6 +895,39 @@ def campaign_party(status):
     return status.get("campaign", {}).get("world", {}).get("party", {})
 
 
+async def verify_rook_anomaly_motion():
+    def roaming(status):
+        rows = status.get("game", {}).get("native_placed_anomalies", {})
+        return {path: row for path, row in rows.items() if row["kind"] == "wandering-teleport"}
+
+    host_frame, guest_frame = await asyncio.gather(
+        wait(run, lambda status: len(roaming(status)) == 5, timeout=10),
+        wait(client_run, lambda status: len(roaming(status)) == 5, timeout=10),
+    )
+    initial_host, initial_guest = roaming(host_frame), roaming(guest_frame)
+    assert initial_host.keys() == initial_guest.keys()
+    assert all(not row["collision"] for row in initial_guest.values()), initial_guest
+
+    observed = {}
+
+    def tracks_authority(status):
+        host = roaming(json.loads((run / "status.json").read_text(encoding="utf-8")))
+        guest = roaming(status)
+        for path in initial_host.keys() & host.keys() & guest.keys():
+            native, replica = host[path], guest[path]
+            error = math.dist(native["location"], replica["location"])
+            host_motion = math.dist(native["location"], initial_host[path]["location"])
+            guest_motion = math.dist(replica["location"], initial_guest[path]["location"])
+            if replica["role"] == 1 and not replica["collision"] and min(host_motion, guest_motion) > 250 and error < 350:
+                observed.update(actor=path, host_motion=host_motion, guest_motion=guest_motion, separation=error,
+                                host=native["location"], guest=replica["location"])
+                return True
+        return False
+
+    await wait(client_run, tracks_authority, timeout=22)
+    note("rook_wandering_anomaly_tracks_host_motion", observed | {"placed_actors": len(initial_host)})
+
+
 async def stardust_visit(character_id, host_session):
     guid = uuid.uuid4().hex.upper()
     visit_map, visit_actor = dream_map, dream_actor
@@ -977,6 +1013,8 @@ async def stardust_visit(character_id, host_session):
     assert math.dist(pawns["local"]["location"], arrival["location"]) <= 250, pawns
     assert math.dist(pawns["local"]["location"], pawns["guest"]["location"]) <= 250, pawns
     await peer_in(dream_map)
+    if args.rook_motion:
+        await verify_rook_anomaly_motion()
     await dust("inspect", dream_map, pawns["local"]["name"], "present", starting_quantity - 1)
     effects = await wait_campaign_event("native_dream_effects_committed", guid)
     assert (effects["kind"] == dream_kind and effects["tarot"] == dream_flag
@@ -1006,7 +1044,7 @@ async def stardust_visit(character_id, host_session):
         })
         active, at_dream, original_deadline = next_trip, chained, next_trip["deadline"]
 
-    return_deadline = original_deadline
+    return_deadline, return_fade = original_deadline, dream_fade
     if args.dream_nothing:
         visit_map = "/Game/Classes/Maps/Dreams/Nothing_P"
         visit_actor = "KillVolume_BP_C_0"
@@ -1033,7 +1071,7 @@ async def stardust_visit(character_id, host_session):
                       "--exit-position", "near")
         await wait(run, lambda state: party_in_zone(state, visit_map)
                    and math.dist(state["game"]["pawns"]["local"]["location"], state["game"]["pawns"]["guest"]["location"]) <= 1500)
-        return_deadline, dream_fade = time.time(), 0
+        return_deadline, return_fade = time.time(), 0
         terminal_return = await command("action", "--campaign", campaign, "native-return-to-rest")
         assert terminal_return["ok"] and terminal_return["map"] == observatory, terminal_return
         note("terminal_stock_dream_has_no_timer_and_host_returns_regrouped_party", {
@@ -1082,7 +1120,7 @@ async def stardust_visit(character_id, host_session):
         if early:
             assert float(early["deadline"]) < original_deadline, early
             return_deadline, return_mode = early["deadline"], "stock_overlap"
-    assert time.time() >= return_deadline + dream_fade, returned
+    assert time.time() >= return_deadline + return_fade, returned
     if args.dream_early or args.dream_stone:
         assert time.time() < original_deadline, returned
     assert returned["zone_epoch"] != at_dream["zone_epoch"], returned
@@ -2198,6 +2236,13 @@ async def smoke():
             assert saved_character["state"]["health"] == native_health
         note("isolated_checkpoint", {"revision": saved["revision"],
                                      "character_location": saved_character["state"]["location"]})
+        if args.rook_motion:
+            await stop(client, "--profile", profile)
+            await stop(host, "--campaign", campaign)
+            if original:
+                assert snapshot_hashes(original) == baseline
+                note("singleplayer_hashes_match", {"files": len(baseline)})
+            return
         await stop(host, "--campaign", campaign)
         if args.native_seed or args.native_host_save or args.native_guest_save:
             shutdown_checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))

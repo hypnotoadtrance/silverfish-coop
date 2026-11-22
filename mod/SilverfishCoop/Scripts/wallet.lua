@@ -1,6 +1,7 @@
--- Project the durable co-op wallet into the staged host's stock UI state.
+-- Read the stock wallet for each co-op seat and support the staged host wallet fixture.
 local wallet = {}
 local zones = require("zone_maps")
+local save_scope = require("native_save_scope")
 
 local playtest_maps = {
     ["/Game/Classes/Maps/PlaytestMap_01"] = true,
@@ -77,6 +78,18 @@ function wallet.command(fields, state, phase)
 end
 
 function wallet.rows(state, phase, status_row)
+    if phase == "connected" and save_scope.selected() then
+        local ok, projected = pcall(function()
+            local save = save_scope.bind_guest(state, phase)
+            local cash = FName("Player_Cash")
+            if save and save.Flags:Contains(cash) then return save.Flags:Find(cash):get() end
+        end)
+        local amount = ok and math.tointeger(projected)
+        if amount and 0 <= amount and amount <= max_cash then
+            return { status_row("wallet", amount) }
+        end
+        return {}
+    end
     local pawn = host_pawn(state, phase)
     if not pawn then
         last_read_error = nil

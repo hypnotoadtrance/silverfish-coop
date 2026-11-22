@@ -20,7 +20,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
-from tools.silverfish.native_flood_jammer import BLACK_LAKE, FLOOD, LENNY, SPRATT
+from tools.silverfish.native_flood_jammer import BLACK_LAKE, FLOOD, LENNY, POSE, SPRATT, same_pose
 from tools.silverfish import native_lenny, native_spratt, native_spratt_fixture
 from tools.silverfish.guest_weapon_profiles import NINE_MM_BALL, TWELVE_GAUGE_BUCK
 from tools.silverfish.travel import CROSSROADS
@@ -30,7 +30,7 @@ def quest_record(campaign, quest):
     return campaign.get("world", {}).get("party", {}).get("native_quests", {}).get(quest, {})
 
 
-async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
+async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=False, spec=FLOOD):
     lake, lenny = spec == BLACK_LAKE, spec == LENNY
     spratt = spec == SPRATT
     assassination = lenny or spratt
@@ -259,7 +259,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         evidence["ordinary_guest_revivals"].append({"approach": approach, "interaction": recovered, "native": native})
 
     try:
-        start_map = BOROUGH if lenny else board_map
+        start_map = area if pose_only else BOROUGH if lenny else board_map
         authority = await launch(host, "host", "host", *host, "--port", "0", "--start-zone", start_map, *host_flags)
         await wait(run, lambda state: state.get("state") == "hosting" and state.get("game", {}).get("map") == start_map, timeout=75)
         if lenny:
@@ -269,6 +269,21 @@ async def exercise(work, vanilla_saved, *, client_projection=False, spec=FLOOD):
         character = invitation["character_id"]
         visitor = await launch(client, "guest", "join", *client, "--invite", invitation["invite_file"], *client_flags)
         current = await enrolled(start_map)
+        if pose_only:
+            def current_pose(state):
+                row = state.get("game", {}).get(POSE, {})
+                if row.get("actor") == spec.jammer and row.get("map") == area:
+                    return row
+
+            authority = current_pose(await wait(run, current_pose, timeout=20))
+
+            def synced(state):
+                row = current_pose(state)
+                return row and same_pose(row["transform"], authority["transform"])
+
+            peer = current_pose(await wait(client_run, synced, timeout=20))
+            evidence.update(host_jammer=authority, guest_jammer=peer, verified=True)
+            return
         port = current["endpoint"]["port"]
         if spratt:
             await action(host, spec.command("approach"), "--target", "host")
@@ -559,10 +574,14 @@ if __name__ == "__main__":
     parser.add_argument("--work", required=True, type=Path, help="prepared isolated stage workspace")
     parser.add_argument("--vanilla-saved", type=Path, help="original Saved directory to hash before and after")
     parser.add_argument("--client-projection", action="store_true", help="require the exact client-local jammer to disappear after the stock kill")
+    parser.add_argument("--pose-only", action="store_true", help="compare both authored jammer transforms before the bounty")
     profiles = parser.add_mutually_exclusive_group()
     profiles.add_argument("--black-lake", action="store_true", help="run the authored Black Market and Black Lake contract")
     profiles.add_argument("--lenny", action="store_true", help="run Lenny's House and its stock quest-gated NPC spawn")
     profiles.add_argument("--spratt", action="store_true", help="run Kill Spratt through its stock board, Cistern spawn, and redemption")
     arguments = parser.parse_args()
+    if arguments.pose_only and (arguments.lenny or arguments.spratt):
+        parser.error("The pose check requires an authored jammer")
     asyncio.run(exercise(arguments.work.resolve(), arguments.vanilla_saved, client_projection=arguments.client_projection,
+                         pose_only=arguments.pose_only,
                          spec=SPRATT if arguments.spratt else LENNY if arguments.lenny else BLACK_LAKE if arguments.black_lake else FLOOD))

@@ -1,5 +1,6 @@
 """Settle the exact authored finite merchant against the shared stock wallet."""
 
+import asyncio
 import math
 import time
 
@@ -72,7 +73,7 @@ def matching_report(snapshot: dict, area: str, pawn: str, expected_state: str, *
                 or source is not None and (source == "backpack") != from_backpack
                 or source == "buyback" and offer["price"] != offer["value"]):
             raise RuntimeError("The finite merchant returned an invalid stock offer")
-        if area == SCIENTIST_SHOP:
+        if area == SCIENTIST_SHOP and expected_state != "listed":
             item = (path, offer["quantity"], offer["value"])
             if guest and item == (BLANK_CLASS, 1, 30) and offer["price"] <= 75 and not blank_seen:
                 blank_seen = True
@@ -153,6 +154,10 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     offer = next((row for row in listing["offers"] if row["guid"] == guid), None)
     if not offer:
         raise party.RuleError("native_finite_shop_item_unavailable")
+    if area == SCIENTIST_SHOP and (offer["class_path"] not in ((CAMERA, BLANK_CLASS) if guest else (CAMERA,))
+                                  or offer.get("source") == "buyback"
+                                  or offer["class_path"] == BLANK_CLASS and offer.get("source") not in (None, "shelf")):
+        raise party.RuleError("native_scientist_purchase_profile_unavailable")
     if price != offer["price"]:
         raise party.RuleError("native_finite_shop_quote_changed")
     wallet = listing["wallet_before"]
@@ -176,13 +181,16 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         proof = matching_report(snapshot, area, pawn, "sold" if sale else "purchased", guest=guest)
         reported = proof["offers"]
         shelf_classes = {SCIENTIST_SHOP: (CAMERA, BLANK_CLASS), GUNSMITH: (BALL_AMMO,), SMUGGLER: (MRE_CLASS,)}
-        if (not sale and len(reported) == 1 and offer["class_path"] == reported[0]["class_path"]
-                and offer["class_path"] in shelf_classes.get(area, ())):
-            if (area == SCIENTIST_SHOP and offer["class_path"] == BLANK_CLASS
-                    and any(row["guid"] == reported[0]["guid"] for row in listing["offers"])):
-                raise RuntimeError("The Scientist Shop did not mint a fresh stock blank tape GUID")
+        reusable = offer.get("source") == "shelf"
+        legacy_special = offer["class_path"] in shelf_classes.get(area, ())
+        if not sale and len(reported) == 1 and (reusable or legacy_special):
+            stock_guids = {row["guid"] for row in listing["offers"]}
+            received_guid = reported[0]["guid"]
+            if (reusable and received_guid in stock_guids or
+                    not reusable and received_guid != guid and (offer.get("source") is not None or received_guid in stock_guids)):
+                raise RuntimeError("The merchant did not verify an exact reusable shelf transfer")
             proof["offer_guid"] = guid
-            proof["stock_source"] = "limited_stock" if reported[0]["guid"] == guid else "stock_shelf"
+            proof["stock_source"] = "limited_stock" if received_guid == guid else "stock_shelf"
             reported = [dict(reported[0], guid=guid)]
         if (reported != [offer] or proof["wallet_before"] != wallet or proof["wallet_after"] != wallet + wallet_change
                 or proof["merchant_cash_before"] != merchant_cash or proof["merchant_cash_after"] != merchant_cash - wallet_change):
@@ -198,7 +206,7 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         del receipts[:-party.RECENT_ACTIONS]
         required = frozenset({character}) if guest else frozenset()
         revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=required)
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
         raise

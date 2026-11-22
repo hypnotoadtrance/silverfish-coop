@@ -69,7 +69,7 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
                       if profile.magazine and profile.magazine.reload_first_stack}
         self.assertEqual(same_stack, {
             "army-pistol", "pistol", "pistol-02", "tac-pistol", "1911", "1911-fancy", "heavy-pistol",
-            "sg-71-a", "sg-71-b", "sg-71-a-suppressed", "model-1931", "fennec-57", "black-fox",
+            "sg-71-a", "sg-71-b", "sg-71-a-suppressed", "model-1931", "fennec-57", "black-fox", "break-action-50",
         })
 
 
@@ -85,6 +85,27 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
             party=player_party, native_pickup=Mock(), control=Mock(),
             checkpoint_native=AsyncMock(),
         )
+
+    async def test_quick_slot_selection_uses_the_enrolled_guest_without_a_checkpoint(self):
+        host = self.host()
+        host.native_zones, host.zone_epoch = True, "current"
+        guid = "1" * 32
+        proof = {"map": "zone", "action": "select", "pawn": "exact pawn", "guid": guid, "ok": True,
+                 "status": "equipped", "actor_ammo": 1, "stored_ammo": 1}
+        bridge = SimpleNamespace(command=AsyncMock(return_value={
+            "state": "hosting", "map": "zone", "native_guest_weapon": proof,
+        }))
+        with self.assertRaisesRegex(party.RuleError, "selection_expired"):
+            await native_guest_weapon.select_equipment(host, bridge, "character", f"previous@{guid}")
+        bridge.command.assert_not_awaited()
+
+        result = await native_guest_weapon.select_equipment(host, bridge, "character", f"current@{guid}")
+        self.assertEqual(result, {"native_guest_weapon": proof})
+        bridge.command.assert_awaited_once_with(native_guest_weapon.SELECT_EQUIPMENT, "exact pawn", guid, timeout=3)
+        self.assertFalse(host.native_checkpoint_unsafe)
+        self.assertFalse(host.stopping)
+        self.assertEqual(host.party["receipts"], {})
+        host.checkpoint_native.assert_not_awaited()
 
     async def test_stale_binding_denies_weapon_request_without_stopping_host(self):
         for action, target in (("fire", "1" * 32), ("equip", "1" * 32), ("reload", "equipped")):
@@ -200,7 +221,7 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         guid, operation = "1" * 32, "b" * 32
         proof = {"state": "used", "map": "zone", "pawn": "exact pawn", "guid": guid,
                  "quantity_before": 2, "quantity_after": 1, "health_before": 25, "health_after": 25,
-                 "regen_before": 25, "regen_after": 50, "max_health": 100, "hemophilia": False}
+                 "regen_before": 25, "regen_after": 52, "max_health": 100, "hemophilia": True}
         for missing in (False, True):
             with self.subTest(missing=missing):
                 host = self.host()
@@ -225,3 +246,47 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(before.args, (bridge,))
                 self.assertEqual(before.kwargs, {})
                 self.assertEqual(after.kwargs, {"require_guest_frames": frozenset({"character"})})
+
+    async def test_starter_bag_awards_only_after_typed_checkpoint_and_replays_once(self):
+        action = native_guest_consumable.STARTER_BAG
+        key = native_guest_consumable.RESULT[action]
+        guid, operation, award = "1" * 32, "b" * 32, "A" * 32
+        proof = {"state": "used", "map": "zone", "pawn": "exact pawn", "guid": guid,
+                 "quantity_before": 1, "quantity_after": 0, "awarded_guids": [award],
+                 "class_path": native_guest_consumable.STARTER_BAGS["random"]}
+        for verified in (True, False):
+            with self.subTest(verified=verified):
+                host = self.host()
+                host.last_game["native_paired_save_capture"] = True
+                bridge = SimpleNamespace(command=AsyncMock(return_value={
+                    "state": "hosting", "map": "zone",
+                    key: proof if verified else dict(proof, awarded_guids=[award, guid]),
+                }))
+                pending = native_guest_consumable.use(host, bridge, "character", guid, operation, action=action)
+                if not verified:
+                    with self.assertRaisesRegex(RuntimeError, "exact stock rewards"):
+                        await pending
+                    self.assertTrue(host.stopping)
+                    self.assertNotIn("character", host.party["receipts"])
+                    host.native_pickup.forget_committed_row.assert_not_called()
+                    host.checkpoint_native.assert_awaited_once_with(bridge)
+                    continue
+                result = await pending
+                self.assertEqual(result, {key: proof})
+                self.assertEqual(host.checkpoint_native.await_args.kwargs,
+                                 {"require_guest_frames": frozenset({"character"}), "typed_inventory": True})
+                self.assertEqual(await native_guest_consumable.use(host, bridge, "character", guid, operation,
+                                                                  action=action), result)
+                bridge.command.assert_awaited_once_with(action, "exact pawn", guid, timeout=6)
+
+    def test_starter_bag_bridge_receipt_rejects_repeated_and_wrong_award_identities(self):
+        area = "/Game/Map"
+        source, award = "1" * 32, "A" * 32
+        fields = [native_guest_consumable.STARTER_BAG, "used", area, "Player_FP_C /Game/Map.ExactPawn",
+                  source, "hyperrandom", award]
+        parsed = native_guest_consumable.parse_starter_bag(fields)
+        self.assertEqual(parsed["class_path"], native_guest_consumable.STARTER_BAGS["hyperrandom"])
+        self.assertEqual(parsed["awarded_guids"], [award])
+        for invalid in (source, award + "," + award, award + ",", ""):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                native_guest_consumable.parse_starter_bag(fields[:-1] + [invalid])

@@ -2,7 +2,7 @@
 
 The Windows mod should let players launch Project Silverfish through Steam and choose **Singleplayer** or **Multiplayer** on the stock title screen. Multiplayer provides native Host and Join menus. The host chooses a Direct IP UDP port and an optional password. The guest enters the host's IP address and port, supplies a password if required, and selects or creates a character in that host campaign. The menu shows connection, admission, world loading, reconnect, and save status.
 
-The [18 locked rules](DESIGN.md) apply to every milestone. Moving the controls into the game leaves the host responsible for the shared world, wallet, travel, rewards, and committed campaign. Direct IP is the first transport. Steam Invite remains deferred and will use the same campaign identities and admission rules.
+The [18 locked rules](DESIGN.md) apply to every milestone. Moving the controls into the game leaves the host responsible for the shared world, wallet, travel, rewards, and committed campaign. Direct IP and Steam Invite both use the same campaign identities and admission rules.
 
 ## TODO from the first player trial
 
@@ -120,6 +120,30 @@ Keep a local, versioned JSON interface alongside the menu. It should expose sess
 - Verify manual bolt handling, reload animations, and melee variants beyond the bat and Old Pipe. Extend coverage to fires spawned by fixed explosive props.
 - Replicate a thrown flare's lit world actor after it leaves the equipped hand. Check the throw and light on both peers through expiry.
 - Compare frame times and network traffic at the Observatory and Crossroads. Measure the client projection and host discovery work separately from packet arrival before changing update pacing.
+
+## Latest Steam playtest backlog
+
+The host sent a Steam invite and the guest accepted and entered the campaign. The remaining Steam checks cover reconnect, longer sessions, and whether the fixes below behave the same over Steam as in muted Direct IP tests.
+
+| Report | Progress | Completion check |
+| --- | --- | --- |
+| Avatar head shifts after jumping, tail floats, body pivots off center and clips into walls | Muted pair verified the centered body, stable head through a turn and jump, and both stock tail attachments | Observe both players against walls, on landing, and while turning in a two-PC session |
+| A teammate landing shakes the local camera | Muted pair verified that the stock jump camera cue is filtered when its recipient does not own the source pawn | Confirm each peer sees their own landing shake in play |
+| Pistol aim stays lowered, .50 cal rifle missing, insufficient held-item and use presentation | Muted tests verified raised pistol aim in both directions and host observation of the guest's selected break-action rifle. The rifle also fired a host-owned shot and reloaded through the stock guest input fixture | Verify idle, moving, crouched, and aimed presentation across the stock equipment families. Verify use, reload, melee, and other applicable animations and spatial sounds from each observer's view |
+| Guest cannot open the starter duffle or use a bandage | Added stock context-click and player-card drag routes for supported items. Packaged test pending | Both bag variants award the guest their own saved loot and the bandage consumes one exact item. Qualify remaining usable item families and their feedback |
+| Host cannot split a stack when dragging to Nearby Items | Muted pair verified a partial drop through the stock split popup and floor drag. The remainder stayed with the host and the guest claimed the drop once | Repeat with bandages in the packaged build and check that item totals stay equal |
+| Guest manual reload and missing Take Ammo | Stock guest reload fixture transferred one .50 cal round into the empty rifle. Take Ammo remains open | Exercise manual reload across supported guns, including partial magazines. Route unloading from the stock context menu to a host transaction that preserves the loaded ammo type |
+| Guest can open doors but cannot close them with Interact | Muted pair verified guest closing, both collision poses, and replay | Repeat via a normal approach from both sides of the open leaf |
+| Different trade inventories and balances | Muted pairs matched full host stock at Observatory and Scientist counters. The guest's native wallet matched the host balance before opening a shop and through a purchase and restart | Open the same trader on both PCs and confirm purchases, sales, restocks, and host quest payouts update both views. Extend the stock route to general NPC barter |
+| Host-carried lantern stays stationary and unlit, tipped explosive barrel stays upright | Muted pairs verified lantern light and extinguish, movement of the original lantern, and rotation of the standing fuel tank in Dead End | Verify ordinary carry and release, barrel physics, and late join in both directions |
+| Guest pickups and throws of physics props do not reach the host, dragged ragdolls remain in place | Open. Host-to-guest crate prop motion worked in the playtest | Use the holder's movement while held, settle released and thrown items with the host, and keep a stable identity for each prop and ragdoll |
+| Guest takes damage but does not hear hurt sounds or see the red screen effect | Muted pair verified guest-only red overlay and camera feedback, selected the guest's stock hurt voice, and verified the authoritative health debit | Verify the audible hurt and impact sounds and screen effect on the struck player in a two-PC session |
+| Guest-only enemies and guest kills absent from the host | Open outside qualified encounter and weapon paths | One host-owned enemy roster resolves spawn, hit, death, and loot. Both peers see the same actors and reject local-only combat outcomes |
+| Fire anomaly matches but a wandering teleport anomaly moves differently | Muted Rook test verified motion of the host's wandering teleporter and matching placed actors | Verify actual teleport effects and add host-owned spawning and state for the remaining anomaly families |
+| Host harvests wild mushrooms and the guest still sees them | Open. Wild patches spawn runtime children that the placed-item pickup route does not track | Both peers see the same patch generation, harvest removal, and later regrowth |
+| Host rain and dangerous-weather fog horn are absent on the guest | Open. Time of day matches. Rain intensity and storm siren use separate stock effects | Verify rainfall, transitions back to clear skies, and the right horn on both PCs while preserving host weather authority |
+| Simmi can be turned in locally and Black Lake quest acceptance stays in the guest Journal | Open. Host jammer destruction already advanced the party objective. The two stock activation paths need separate verification | Guest acceptance and turn-in update the host Journal, pay the shared balance once, and survive reconnect |
+| Randomized jammer position differs on each peer | Muted pairs verified matching position, rotation, and scale for the Black Lake and Flood Plains jammers | Check the matching positions and disappearance through a complete bounty flow and late join |
 
 The muted two-seat loopback reproduced the Crossroads hitch. In the first 12-second sample, 36 host frames and 38 guest frames exceeded 33 ms. After distributing container inspection across game ticks, the counts were 22 and 2, and median bridge work fell from 40 to 25 ms on the host and from 36 to 17 ms on the guest. These measurements used the headless renderer. Internet latency and foreground frame timing still need a playtest.
 

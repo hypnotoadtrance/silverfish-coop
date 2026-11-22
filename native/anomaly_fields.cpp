@@ -29,21 +29,24 @@ namespace
     constexpr auto field_class = STR("/Game/Classes/Actors/AnomalyField_BP.AnomalyField_BP_C");
     constexpr auto trap_overlap = STR("BndEvt__Starburst_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature");
     constexpr auto electrode_class = STR("/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C");
+    constexpr auto roaming_teleport_class = STR("/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C");
     constexpr auto physics_prop = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
     constexpr auto fixed_prop = STR("/Game/Assets/StaticMeshes/Destructable/Explosive_Prop_Master_BP.Explosive_Prop_Master_BP_C");
     constexpr std::array<std::wstring_view, 2> canister_classes{
         STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_PropaneTank_Small.Prop_PropaneTank_Small_C"),
         STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_PropaneTank_Tall.Prop_PropaneTank_Tall_C"),
     };
-    constexpr std::array<std::wstring_view, 4> replicated_classes{
+    constexpr std::array<std::wstring_view, 5> replicated_classes{
         STR("/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C"),
         STR("/Game/Classes/Anomalies/BurnerTrap_BP.BurnerTrap_BP_C"),
         STR("/Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C"),
         electrode_class,
+        roaming_teleport_class,
     };
     std::array<H::GlobalCallbackId, 5> hooks{H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID};
-    U::FName spawn_field, overlap, electrode, fixed_prop_name;
+    U::FName spawn_field, overlap, electrode, roaming_teleport, fixed_prop_name;
     std::array<U::FName, 6> electrode_events;
+    std::array<U::FName, 7> roaming_events;
     std::array<U::FName, 2> canister_names;
     std::array<U::FName, 14> canister_events;
     std::array<U::FName, 5> fixed_prop_events;
@@ -130,18 +133,20 @@ namespace
         const bool field = name == spawn_field;
         const bool trap = name == overlap ||
             std::find(electrode_events.begin(), electrode_events.end(), name) != electrode_events.end();
+        const bool roaming_event = std::ranges::find(roaming_events, name) != roaming_events.end();
         const bool prop_event = !field && std::find(canister_events.begin(), canister_events.end(), name) != canister_events.end();
         const bool fixed_event = !field && std::find(fixed_prop_events.begin(), fixed_prop_events.end(), name) != fixed_prop_events.end();
-        if ((!field && !trap && !prop_event && !fixed_event) || !U::IsInGameThreadRaw() ||
+        if ((!field && !trap && !roaming_event && !prop_event && !fixed_event) || !U::IsInGameThreadRaw() ||
             call.OriginalFunctionCallPrevented() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
         auto* type = actor->GetClassPrivate();
         if (!type) return;
         const auto class_name = type->GetFName();
         const bool canister = prop_event && (class_name == canister_names[0] || class_name == canister_names[1]);
+        const bool roaming = roaming_event && class_name == roaming_teleport && type->GetPathName() == roaming_teleport_class;
         auto* binding = function->GetOuterPrivate();
         const bool fixed = fixed_event && binding && binding->GetFName() == fixed_prop_name &&
             binding->GetPathName() == fixed_prop && type->IsChildOf(static_cast<U::UClass*>(binding));
-        if (!field && !trap && !canister && !fixed) return;
+        if (!field && !trap && !roaming && !canister && !fixed) return;
         if (canister)
         {
             if (!canister_class(type) || !binding || (binding != type && binding->GetPathName() != physics_prop)) return;
@@ -156,7 +161,7 @@ namespace
             // Keep arming, blast creation, and queued graph continuations on the host.
             if (type->GetPathName() != electrode_class) return;
         }
-        else if (!canister && !fixed && (function->GetNumParms() != 6 || !trap_class(type))) return;
+        else if (!canister && !fixed && !roaming && (function->GetNumParms() != 6 || !trap_class(type))) return;
         auto* world = static_cast<U::AActor*>(actor)->GetWorld();
         if (!guest_world(world)) return;
 
@@ -232,6 +237,7 @@ namespace silverfish::native_anomaly_fields
         spawn_field = U::FName{STR("SpawnField"), U::FNAME_Add};
         overlap = U::FName{trap_overlap, U::FNAME_Add};
         electrode = U::FName{STR("Electrode_BP_C"), U::FNAME_Add};
+        roaming_teleport = U::FName{STR("Wandering_Teleport_BP_C"), U::FNAME_Add};
         electrode_events = {
             U::FName{STR("BndEvt__Electrode_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature"), U::FNAME_Add},
             U::FName{STR("ReceiveBeginPlay"), U::FNAME_Add},
@@ -239,6 +245,15 @@ namespace silverfish::native_anomaly_fields
             U::FName{STR("Burst"), U::FNAME_Add},
             U::FName{STR("EMP"), U::FNAME_Add},
             U::FName{STR("Shock"), U::FNAME_Add},
+        };
+        roaming_events = {
+            U::FName{STR("ReceiveTick"), U::FNAME_Add},
+            U::FName{STR("Wander"), U::FNAME_Add},
+            U::FName{STR("ForceMove"), U::FNAME_Add},
+            U::FName{STR("Authenticate_Target"), U::FNAME_Add},
+            U::FName{STR("Teleport_Actor"), U::FNAME_Add},
+            U::FName{STR("ExecuteUbergraph_Wandering_Teleport_BP"), U::FNAME_Add},
+            U::FName{STR("BndEvt__Wandering_Teleport_BP_Capsule_K2Node_ComponentBoundEvent_1_ComponentBeginOverlapSignature__DelegateSignature"), U::FNAME_Add},
         };
         canister_names = {
             U::FName{STR("Prop_PropaneTank_Small_C"), U::FNAME_Add},

@@ -44,6 +44,7 @@ local function make_state(name, count)
     for index = 1, count do
         local path = map .. "." .. name .. ":PersistentLevel.BasicDoor_" .. index
         local door = object({Locked = false, LockBroken = false, Open = false, name = "BasicDoor_C " .. path})
+        function door:HasAuthority() return true end
         function door:GetWorld() return world end
         function door:GetOuter() return world.PersistentLevel end
         function door:IsA(class) return class == door_class end
@@ -75,6 +76,12 @@ local function row(...) return {...} end
 local function current_rows(doors, state, command)
     return doors.rows(state, "connected", row, command)
 end
+
+local guest = object({Dead = false})
+package.loaded.guest_save = {exact_item_context = function(_, phase, name)
+    assert(phase == "hosting" and name == "guest pawn")
+    return guest
+end}
 
 local doors = require("native_stock_door")
 doors.start()
@@ -109,3 +116,29 @@ local fresh = current_rows(doors, new)
 assert(#fresh == 2 and fresh[1][2] == new.map and fresh[2][2] == new.map, "travel must retire the old census")
 tick()
 assert(#current_rows(doors, new) == 2, "an old background pass must never publish into the new world")
+
+local authority = make_state("Observitory_P", 1)
+authority.server = false
+local opened = authority.world.doors[1]
+opened.Open = true
+guest.ActorBeingLookedAt = object()
+guest.InteractionTarget_Component = opened.Box_Knob
+guest.CanInteract = true
+package.loaded.native_loot_crate_input = {stock_focus = function(pawn, knob, dispatch, refusal)
+    assert(pawn == guest and knob == opened.Box_Knob)
+    if pawn.CanInteract ~= true or pawn.InteractionTarget_Component ~= knob then error(refusal, 0) end
+    return dispatch()
+end}
+function opened:SendInteractionToActor(pawn, knob)
+    assert(pawn == guest and knob == self.Box_Knob)
+    self.Open = not self.Open
+end
+
+local close = {"request", "native-stock-door-guest-interact", opened.name, "guest pawn"}
+assert(doors.command(close, authority, "hosting") and not opened.Open,
+    "the stock F trace can close the exact open door even when the visibility trace hits a wall")
+opened.Open = true
+guest.InteractionTarget_Component = object()
+local ok, reason = pcall(doors.command, close, authority, "hosting")
+assert(not ok and reason == "stock_door_guest_out_of_reach" and opened.Open,
+    "guest authority must still refuse an obstructed interaction knob")

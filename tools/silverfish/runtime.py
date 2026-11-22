@@ -29,9 +29,10 @@ from . import native_guest_drop_projection, native_guest_drop_record, native_gue
 from . import native_loot, native_world_loot
 from . import native_loose_pickup
 from . import native_stock_enemy_drops
-from . import native_stock_door
+from . import native_lantern, native_stock_door
 from . import native_player_avatar
 from . import native_weapon_fire_view
+from . import native_damage_feedback
 from . import native_voice
 from . import native_anomaly_effects
 from .native_guest_creator import valid_profile
@@ -42,7 +43,7 @@ from . import native_spratt_fixture
 from . import native_subway_valve
 from . import native_prototype_drill
 from . import native_kill_volume
-from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULT, parse_meal
+from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULT, STARTER_BAG, parse_meal, parse_starter_bag
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
 from .enemy_loot_profiles import BY_ACTOR as ENEMY_LOOT_ACTORS
@@ -74,7 +75,7 @@ STARTUP_MOVIES = frozenset(Path("SilverFish/Content/Movies") / name for name in 
 JAMMER_ROWS = {
     spec.command(verb): (spec, verb)
     for spec in native_flood_jammer.CONTRACTS.values()
-    for verb in ("", "reputation", "objective", "aim", "projection")
+    for verb in ("", "reputation", "objective", "aim", "projection", "pose")
 }
 WORLD_WEATHER_FIELDS = ("fog_density", "fog_falloff", "cloud_bottom_km", "cloud_height_km", "cloud_density_offset")
 MANIFEST = Path("Manifest_NonUFSFiles_Win64.txt")
@@ -1449,6 +1450,23 @@ class Bridge:
                     if role is None or data.get("map") != native_mindcore.MAP or native_datasilo_door.KEY in data:
                         raise ValueError("Invalid upper Data Silo door frame scope")
                     data[native_datasilo_door.KEY] = native_datasilo_door.parse(fields, role)
+                elif fields[0] == "native-standing-fuel-tank":
+                    area = data.get("map")
+                    name = native_stock_door.actor_map(fields[2]) if len(fields) == 8 else None
+                    if (name is None or area != name or fields[1] != area
+                            or not fields[2].startswith("Prop_Standing_FuelTank_C ")
+                            or data.get("state") not in ("hosting", "connected")
+                            or any(value not in ("0", "1") for value in fields[3:5])):
+                        raise ValueError("Invalid standing fuel tank report")
+                    rotation = list(map(float, fields[5:]))
+                    tanks = data.setdefault("native_standing_fuel_tanks", {})
+                    if any(not -360 <= angle <= 360 for angle in rotation) or fields[2] in tanks or len(tanks) >= 12:
+                        raise ValueError("Invalid standing fuel tank rotation")
+                    tanks[fields[2]] = dict(movement=fields[3] == "1", simulating=fields[4] == "1", rotation=rotation)
+                elif fields[0] == native_lantern.TAG:
+                    if native_lantern.KEY in data:
+                        raise ValueError("Duplicate Observatory lantern status")
+                    data[native_lantern.KEY] = native_lantern.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] == native_stock_door.TAG:
                     report = native_stock_door.parse(fields, data.get("state"), data.get("map"))
                     doors = data.setdefault(native_stock_door.KEY, {})
@@ -1620,6 +1638,11 @@ class Bridge:
                                                   distance=_finite(fields[5]), component=fields[6])
                     elif kind == "projection" and len(fields) == 5 and fields[3] in ("present", "hidden", "absent"):
                         data[f"{key}_projection"] = dict(zip(("map", "actor", "state", "audio"), fields[1:]))
+                    elif kind == "pose":
+                        if native_flood_jammer.POSE in data:
+                            raise ValueError("Duplicate authored jammer pose")
+                        data[native_flood_jammer.POSE] = native_flood_jammer.parse_pose(
+                            fields, data.get("state"), data.get("map"), spec)
                 elif fields[0] == "native-guest-clock" and len(fields) == 9 and fields[6] in ("armed", "projected"):
                     data["native_guest_clock"] = {
                         "map": fields[1], "pawn": fields[2], "epoch": fields[3], "sequence": int(fields[4]),
@@ -1645,6 +1668,10 @@ class Bridge:
                     data["native_guest_stock_creator"] = {"state": creator_state, "attempt": attempt,
                                                           "appearance": None if appearance == "-" else appearance,
                                                           "profile": None if profile == "-" else profile}
+                elif fields[0] == "native-guest-hurt" and len(fields) == 8 and data.get("state") == "hosting":
+                    cues = data.setdefault(native_damage_feedback.KEY, [])
+                    if len(cues) < native_damage_feedback.LIMIT and (cue := native_damage_feedback.parse(fields)):
+                        cues.append(cue)
                 elif fields[0] == "native-voice-speaker" and len(fields) == 4 and data.get("state") == "hosting":
                     name, personality, pitch = fields[1:]
                     pitch = _finite(pitch)
@@ -1857,6 +1884,10 @@ class Bridge:
                     }
                 elif fields[0] == "native-guest-reload-intent" and len(fields) == 4:
                     data["native_guest_reload_intent"] = {"map": fields[1], "pawn": fields[2], "sequence": int(fields[3])}
+                elif (fields[0] == "native-guest-equipment-selection" and len(fields) == 5 and valid_guid(fields[4])
+                      and (selection := _held_input_sequence(fields[3]))):
+                    data["native_guest_equipment_selection"] = {"map": fields[1], "pawn": fields[2],
+                                                                  "sequence": selection, "guid": fields[4]}
                 elif fields[0] == "native-guest-equipped-weapon" and len(fields) == 4 and fields[3] in PRIMARY_KINDS:
                     data.setdefault("native_guest_equipped_weapons", {})[fields[1]] = {"guid": fields[2], "kind": fields[3]}
                 elif fields[0] == "native-guest-primary-fixture" and len(fields) == 6:
@@ -1907,11 +1938,11 @@ class Bridge:
                                                    "regen_before": _finite(fields[7]), "regen_after": _finite(fields[8]),
                                                    "health_before": _finite(fields[9]), "health_after": _finite(fields[10]),
                                                    "max_health": _finite(fields[11]), "hemophilia": fields[12] == "1"}
-                elif fields[0] in MEALS:
-                    proof = parse_meal(fields)
+                elif fields[0] in MEALS or fields[0] == STARTER_BAG:
+                    proof = parse_starter_bag(fields) if fields[0] == STARTER_BAG else parse_meal(fields)
                     key = CONSUMABLE_RESULT[fields[0]]
                     if key in data or data.get("state") != "hosting" or data.get("map") != proof["map"]:
-                        raise ValueError("Invalid stock food report scope")
+                        raise ValueError("Invalid stock item use report scope")
                     data[key] = proof
                 elif fields[0] == "native-guest-mre-fixture" and len(fields) in (6, 10, 11):
                     area, pawn, food, intox, host_intox = fields[1:6]
@@ -2414,7 +2445,8 @@ class Bridge:
                     path, kind, x, y, z, collision, role = fields[1:]
                     # Map-loaded guest actors can have ROLE_None until they enter replication range.
                     if (area.startswith("/Game/Classes/Maps/") and path.startswith(f"{area}.{area.rsplit('/', 1)[-1]}:")
-                            and len(path) <= 512 and len(placed) < 1024 and kind in {"starburst", "burner", "vortex", "electrode"}
+                            and len(path) <= 512 and len(placed) < 1024
+                            and kind in {"starburst", "burner", "vortex", "electrode", "wandering-teleport"}
                             and collision in {"0", "1"} and role in {"0", "1", "3"}):
                         placed[path] = {"kind": kind, "location": [_finite(axis) for axis in (x, y, z)],
                                         "collision": collision == "1", "role": int(role)}
@@ -2503,7 +2535,8 @@ class Bridge:
                                      "particles_active": fields[5] == "1"})
                 elif fields[0] == "native-anomaly-position" and len(fields) == 6:
                     positions = data.setdefault("native_anomaly_positions", [])
-                    if len(positions) < 1024 and fields[1] in {"starburst", "burner", "vortex", "electrode"} and fields[5] in {"0", "1"}:
+                    if (len(positions) < 1024 and fields[1] in {"starburst", "burner", "vortex", "electrode", "wandering-teleport"}
+                            and fields[5] in {"0", "1"}):
                         positions.append({"kind": fields[1], "location": [_finite(value) for value in fields[2:5]],
                                           "collision": fields[5] == "1"})
                 elif fields[0] == "native-kill-volume":

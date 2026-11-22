@@ -82,6 +82,32 @@ class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.party["native_quests"][jammer.QUEST_ID]["step"], 1)
         host.checkpoint_native.assert_not_awaited()
 
+    async def test_live_pose_matches_the_current_exact_host_actor(self):
+        for spec in (jammer.FLOOD, jammer.BLACK_LAKE):
+            with self.subTest(spec=spec.key):
+                epoch = "e" * 32
+                original = {"position": [2, 3, 4], "rotation": [0, 90, 0], "scale": [1, 1, 1]}
+                desired = {**original, "position": [17, 20, 24], "rotation": [0, -90, 10]}
+                pose = dict(map=spec.objective_map, actor=spec.jammer, transform=desired)
+                local = dict(map=spec.objective_map, actor=spec.jammer, state="present", audio="-")
+                game = {"state": "connected", "map": spec.objective_map, f"{spec.key}_projection": local,
+                        jammer.POSE: {**pose, "transform": original}}
+                authority = {"state": "hosting", "map": spec.objective_map, jammer.POSE: pose}
+                frame = jammer.pose_frame(authority, epoch)
+                self.assertEqual(frame, {**pose, "epoch": epoch})
+                after = {**game, jammer.POSE: pose}
+                bridge = SimpleNamespace(command=AsyncMock(return_value=after))
+                client = SimpleNamespace(last_game=game, gameplay={jammer.POSE: {**frame, "epoch": "f" * 32}},
+                                         zone_epoch=epoch, bridge=bridge, control=Mock())
+                await jammer.project_client(client)
+                bridge.command.assert_not_awaited()
+                client.gameplay[jammer.POSE] = frame
+                await jammer.project_client(client)
+                await jammer.project_client(client)
+                self.assertEqual(client.last_game, after)
+                bridge.command.assert_awaited_once_with(spec.command("project"), "pose", "17", "20", "24",
+                                                       "0", "-90", "10", "1", "1", "1", timeout=3)
+
     async def test_guest_projection_requires_the_committed_exact_stock_objective(self):
         host = self.host(1)
         live = {"map": jammer.FLOOD_PLAINS, "actor": jammer.JAMMER, "state": "present", "audio": "-"}

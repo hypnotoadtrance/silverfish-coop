@@ -2,12 +2,14 @@
 
 import re
 import time
+import uuid
 
 from . import guest_weapon_profiles, native_guest_melee, party
 
 GUEST_ACTIONS = ("native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
                  "native-guest-weapon-reload")
 GUID = re.compile(r"[0-9A-F]{32}\Z")
+SELECT_EQUIPMENT = "native-guest-weapon-select"
 READBACK_STATES = {"backpack", "equipped", "stored_equipment"}
 CAMERA_READBACK_STATES = {"camera_backpack", "camera_stored_equipment", "camera_equipped"}
 CAMERA_PATH = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
@@ -26,6 +28,66 @@ PROJECTILES_PER_ROUND = {
     for firearm in guest_weapon_profiles.FIREARMS
     if firearm.magazine
 }
+
+
+async def select_equipment(host, bridge, character: str, target: str | None) -> dict:
+    area = host.last_game.get("map")
+    epoch, _, guid = target.partition("@") if isinstance(target, str) else ("", "", "")
+    if not GUID.fullmatch(guid) or epoch != host.zone_epoch:
+        raise party.RuleError("native_guest_selection_expired")
+    if (not host.native_guest or not host.native_zones or host.native_profile is None or host.stopping
+            or host.transitioning or host.native_checkpoint_unsafe or host.last_game.get("state") != "hosting"
+            or time.monotonic() - host.last_seen > 3 or host.party["wipe"]
+            or character in host.party["pending_spawns"]
+            or host.party["players"].get(character, {}).get("downed", True)):
+        raise party.RuleError("native_guest_selection_unavailable")
+    scope = host.native_recipients().get(character, {})
+    if not scope.get("connected") or not (pawn := scope.get("pawn")):
+        raise party.RuleError("native_guest_selection_unavailable")
+
+    host.native_checkpoint_unsafe = True
+    try:
+        snapshot = await bridge.command(SELECT_EQUIPMENT, pawn, guid, timeout=3)
+        proof = snapshot.get("native_guest_weapon", {})
+        if ((snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"),
+             proof.get("action"), proof.get("guid")) != ("hosting", area, area, pawn, "select", guid)):
+            raise RuntimeError("Guest equipment selection did not verify the enrolled player's stock slot")
+        if proof.get("ok") is not True:
+            refusal = proof.get("status", "")
+            if refusal.startswith("native_guest_selection_refused_"):
+                host.native_checkpoint_unsafe = False
+                raise party.RuleError(refusal)
+            raise RuntimeError(refusal or "mutation_unverified_guest_equipment_selection")
+        if (proof.get("status") != "equipped" or type(loaded := proof.get("stored_ammo")) is not int
+                or loaded < -1 or loaded != proof.get("actor_ammo")):
+            raise RuntimeError("Guest equipment selection did not preserve the stock item")
+        host.last_game, host.last_seen = snapshot, time.monotonic()
+        host.native_checkpoint_unsafe = False
+        return {"native_guest_weapon": proof}
+    finally:
+        if host.native_checkpoint_unsafe:
+            host.stopping = True
+
+
+async def service_equipment_selection(client, active: bool) -> None:
+    from . import native_gold
+
+    proof = client.last_game.get("native_guest_equipment_selection", {})
+    sequence, area, pawn, guid = (proof.get(key) for key in ("sequence", "map", "pawn", "guid"))
+    if (not active or client.stopping or not client.host_session or not client.zone_epoch
+            or type(sequence) is not int or not client.last_equipment_selection < sequence < 2**53
+            or area != client.last_game.get("map", "") or (area, pawn) !=
+               (client.expected_zone, client.last_game.get("pawns", {}).get("local", {}).get("name"))
+            or not native_gold.valid_guid(guid)):
+        return
+    client.last_equipment_selection = sequence
+    operation = uuid.uuid5(client.bridge.input_namespace, f"stock-equipment:{client.zone_epoch}:{sequence}").hex
+    try:
+        result = await client.gameplay_action(SELECT_EQUIPMENT, operation, f"{client.zone_epoch}@{guid}")
+    except (OSError, RuntimeError, ValueError) as error:
+        client.control.event("native_guest_equipment_selection_rejected", sequence=sequence, reason=str(error))
+    else:
+        client.control.event("native_guest_equipment_selected", sequence=sequence, **result)
 
 
 async def perform(host, bridge, character: str, operation_id: str, action: str, guid: str, *, seed_kind=None,

@@ -171,7 +171,10 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
             remaining, before = receipt.get("quantity_after"), receipt.get("quantity_before")
             if (tuple(receipt.get(field) for field in ("state", "map", "guid")) != ("used", area, guid)
                     or type(remaining) is not int or type(before) is not int or remaining < 0 or remaining != before - 1
-                    or meal is not None and receipt.get("class_path") != meal.class_path):
+                    or meal is not None and receipt.get("class_path") != meal.class_path
+                    or action == native_guest_consumable.STARTER_BAG
+                    and (before != 1 or receipt.get("class_path") not in native_guest_consumable.STARTER_BAGS.values()
+                         or not native_guest_consumable.starter_awards(guid, receipt.get("awarded_guids")))):
                 raise RuntimeError("The host did not verify consumption of the selected stock item")
             committed = (str(remaining),)
         else:

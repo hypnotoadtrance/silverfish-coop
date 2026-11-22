@@ -68,6 +68,7 @@ function guest_weapon.command(fields, state, phase)
         ["seed-ammo"] = SilverfishSeedNativeGuestAmmo,
         inspect = SilverfishInspectNativeGuestWeapon,
         equip = SilverfishEquipNativeGuestWeapon,
+        select = SilverfishSelectNativeGuestEquipment,
         fire = SilverfishFireNativeGuestWeapon,
         reload = SilverfishReloadNativeGuestWeapon,
     }
@@ -143,7 +144,7 @@ function guest_weapon.command(fields, state, phase)
     local before, after, actor_ammo, stored_ammo, projectiles, reserve_before, reserve_after
     if action == "fire" then projectiles = fifth end
     if action == "reload" then before, after, reserve_before, reserve_after = first, second, fifth, sixth end
-    if ok and action == "inspect" then
+    if ok and (action == "inspect" or action == "select") then
         actor_ammo, stored_ammo = first, second
     elseif ok and action ~= "seed-ammo" then
         if action == "fire" then before, after = first, second end
@@ -155,6 +156,7 @@ function guest_weapon.command(fields, state, phase)
             ok, status = false, "mutation_unverified_stock_readback"
         end
     end
+    if ok and action == "reload" then pcall(require("native_weapon_fire_view").reloaded, pawn, before) end
     observation = { map = state.map, action = action, pawn = name, guid = guid,
         ok = ok == true, status = status, before = before, after = after,
         actor_ammo = actor_ammo, stored_ammo = stored_ammo, projectiles = projectiles,
@@ -168,7 +170,19 @@ end
 
 function guest_weapon.rows(state, phase, status_row)
     local rows = {}
-    if not enabled or phase ~= "hosting" or not state.listening then return rows end
+    if not state.listening then return rows end
+    if phase == "connected" and state.server == true and type(SilverfishReadLocalGuestEquipmentSelection) == "function" then
+        local local_pawn = state.local_pawn
+        local pawn = local_pawn and local_pawn.pawn
+        if pawn and pawn:IsValid() then
+            local sequence, guid = SilverfishReadLocalGuestEquipmentSelection(pawn:GetAddress())
+            if sequence and guid then
+                rows[1] = status_row("native-guest-equipment-selection", state.map, local_pawn.name, sequence, guid)
+            end
+        end
+        return rows
+    end
+    if not enabled or phase ~= "hosting" then return rows end
     for _, detail in ipairs(state.guests) do
         local ok, guid, kind = pcall(function()
             local pawn, save = guest_save.exact_item_context(state, phase, detail.name)

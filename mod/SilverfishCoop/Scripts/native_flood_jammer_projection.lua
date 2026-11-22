@@ -22,7 +22,9 @@ end
 
 local function context(state, phase)
     local profile = profiles.by_map[state.map]
-    if not profile or not enabled or phase ~= "connected" or state.listening ~= true or state.server ~= true then return end
+    local hosting = phase == "hosting"
+    if not profile or not enabled or (not hosting and phase ~= "connected")
+        or state.listening ~= true or state.server ~= (not hosting) then return end
     local detail, controller, world = state.local_pawn, state.controller, state.world
     local pawn = detail and detail.pawn
     if not valid(world) or world:GetFullName() ~= "World " .. profile.objective_world
@@ -30,12 +32,13 @@ local function context(state, phase)
         or not exact(pawn, pawn_class) or not exact(controller, controller_class)
         or not same(detail.controller_object, controller) or not same(controller.Pawn, pawn)
         or not same(pawn.Controller, controller) or not same(pawn:GetWorld(), world) or not same(controller:GetWorld(), world)
-        or pawn:HasAuthority() or controller:HasAuthority() or not pawn:IsLocallyControlled()
+        or pawn:HasAuthority() ~= hosting or controller:HasAuthority() ~= hosting or not pawn:IsLocallyControlled()
         or not controller:IsLocalController() or pawn:IsActorBeingDestroyed() or controller:IsActorBeingDestroyed()
         or controller.Loading ~= false or detail.name ~= pawn:GetFullName() then return end
     local driver = world.NetDriver
     local connection = valid(driver) and driver.ServerConnection
-    if not valid(connection) or not same(driver.World, world) or not same(connection.Driver, driver) then return end
+    if not valid(driver) or not same(driver.World, world) or (hosting and valid(connection))
+        or (not hosting and (not valid(connection) or not same(connection.Driver, driver))) then return end
     return { profile = profile, world = world, pawn = pawn, controller = controller, connection = connection }
 end
 
@@ -57,7 +60,9 @@ local function live_actor(current)
         return nil, "absent"
     end
     if not same(actor:GetClass(), class) or actor:GetFullName() ~= profile.jammer_name or not same(actor:GetWorld(), current.world)
-        or actor:IsActorBeingDestroyed() then return nil, "actor_unqualified" end
+        or not same(actor:GetOuter(), current.world.PersistentLevel) or actor:IsActorBeingDestroyed() then
+        return nil, "actor_unqualified"
+    end
     local capsule = actor.Capsule
     if not exact(capsule, "/Script/Engine.CapsuleComponent") or not same(capsule:GetOwner(), actor)
         or not same(capsule, actor.RootComponent) then return nil, "root_unqualified" end
@@ -79,6 +84,42 @@ local function hidden(actor)
     return actor.bHidden == true and actor:GetActorEnableCollision() == false
 end
 
+local function valid_pose(values)
+    for index = 1, 9 do
+        local value = values[index]
+        if type(value) ~= "number" or value ~= value
+            or (index <= 3 and math.abs(value) > 1e7)
+            or (index > 3 and index <= 6 and math.abs(value) > 360)
+            or (index > 6 and (value == 0 or math.abs(value) > 100)) then return false end
+    end
+    return true
+end
+
+local function pose(actor)
+    local loc, rot, scale = actor:K2_GetActorLocation(), actor:K2_GetActorRotation(), actor:GetActorScale3D()
+    if not loc or not rot or not scale then return end
+    local values = {loc.X, loc.Y, loc.Z, rot.Pitch, rot.Yaw, rot.Roll, scale.X, scale.Y, scale.Z}
+    if valid_pose(values) then return values end
+end
+
+local function matches(before, after)
+    if not before or not after then return false end
+    for i = 1, 9 do
+        local delta = before[i] - after[i]
+        if i > 3 and i <= 6 then delta = (delta + 180) % 360 - 180 end
+        if math.abs(delta) > (i <= 6 and 0.1 or 0.005) then return false end
+    end
+    return true
+end
+
+local function apply_pose(actor, values)
+    if matches(pose(actor), values) then return true end
+    if actor:K2_SetActorLocationAndRotation({X = values[1], Y = values[2], Z = values[3]},
+        {Pitch = values[4], Yaw = values[5], Roll = values[6]}, false, {}, true) ~= true then return false end
+    actor:SetActorScale3D({X = values[7], Y = values[8], Z = values[9]})
+    return matches(pose(actor), values)
+end
+
 function jammer.clear()
     binding = nil
 end
@@ -87,10 +128,24 @@ function jammer.command(fields, state, phase)
     local tag = type(fields[2]) == "string" and fields[2]:match("^(native%-%l+%-jammer)%-project$")
     local profile = profiles.by_tag[tag]
     if not profile then return end
-    if #fields ~= 3 or fields[3] ~= "destroyed" then error("jammer_projection_exact_state_required", 0) end
     local current = context(state, phase)
-    if not current or current.profile ~= profile then error("jammer_projection_exact_client_required", 0) end
+    if phase ~= "connected" or not current or current.profile ~= profile then
+        error("jammer_projection_exact_client_required", 0)
+    end
     local actor, root = live_actor(current)
+    if fields[3] == "pose" and #fields == 12 then
+        local expected = {}
+        for index = 1, 9 do expected[index] = tonumber(fields[index + 3]) end
+        if not actor or hidden(actor) or not valid_pose(expected) then error("jammer_projection_exact_pose_required", 0) end
+        local original = pose(actor)
+        if not original then error("jammer_projection_local_pose_unavailable", 0) end
+        if not apply_pose(actor, expected) then
+            pcall(apply_pose, actor, original)
+            error("jammer_projection_pose_unverified", 0)
+        end
+        return "stock authored jammer pose verified"
+    end
+    if #fields ~= 3 or fields[3] ~= "destroyed" then error("jammer_projection_exact_state_required", 0) end
     if not actor then
         if root ~= "absent" then error("jammer_projection_" .. root, 0) end
         binding = nil
@@ -124,8 +179,18 @@ function jammer.rows(state, phase, status_row)
         jammer.clear()
         return {}
     end
-    if not same_context(current, binding) then jammer.clear() end
     local profile = current.profile
+    local function pose_row()
+        local values = actor and pose(actor)
+        if values then
+            return status_row(profile.tag .. "-pose", profile.objective_map, profile.jammer_name, table.unpack(values))
+        end
+    end
+    if phase == "hosting" then
+        if not actor or not actor:HasAuthority() or hidden(actor) then return {} end
+        return {pose_row()}
+    end
+    if not same_context(current, binding) then jammer.clear() end
     if not actor then
         if root ~= "absent" then return {} end
         return {status_row(profile.tag .. "-projection", profile.objective_map, profile.jammer_name, "absent", "none")}
@@ -139,7 +204,7 @@ function jammer.rows(state, phase, status_row)
             return {status_row(profile.tag .. "-projection", profile.objective_map, profile.jammer_name, "hidden", audio_state)}
         end
     end
-    return {status_row(profile.tag .. "-projection", profile.objective_map, profile.jammer_name, "present", "-")}
+    return {status_row(profile.tag .. "-projection", profile.objective_map, profile.jammer_name, "present", "-"), pose_row()}
 end
 
 return jammer

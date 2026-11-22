@@ -50,7 +50,7 @@ The game asks you to confirm trust on a first connection or when a known host’
 
 Steam relay carries the connection without a publicly reachable UDP port. The host remains the authority for the same campaign and character roster. The lobby ends when the host closes the campaign. Direct IP remains available through the title menu.
 
-The relay and title integration have been tested with simulated Steam peers. A live invite and relay session between separate Steam accounts is pending. If the invite button is absent, the host can check the `steam-coop-status.json` file in the current game bridge for the initialization state.
+The host sent an in-game Steam invite and the guest accepted it and joined the campaign in a two-PC playtest. Steam reconnect and longer sessions still need live coverage. If the invite button is absent, the host can check the `steam-coop-status.json` file in the current game bridge for the initialization state.
 
 ### Steam Cloud backups
 
@@ -143,7 +143,7 @@ Invitations from a current matched native stage also enable the guest's stock in
 
 In the supported stock wipe picker, Page Up and Page Down move the selection, Space toggles an entire row, and Home twice submits the selection. An empty selection is allowed. Backpack recovery uses the local action shown below.
 
-The current stage has qualified stock paths for selected rest points, exits, transport items, stock loot containers, finite merchants, Copper Stop at Borough, and specific Broker objectives. The quest catalog can show authored templates beyond the objectives supported for co-op turn-in. General inventory editing, item and weapon coverage, NPC dialogue and quest completion, enemy loot, and map compatibility remain experimental. Steam Invite and live validation across separate PCs remain pending in the current test record. Use `--fixtures` only in a dedicated playtest campaign to enable synthetic loot, damage, and actions. [Verified scenarios and open coverage](NATIVE-INTEGRATION.md)
+The current stage has qualified stock paths for selected rest points, exits, transport items, stock loot containers, finite merchants, Copper Stop at Borough, and specific Broker objectives. The quest catalog can show authored templates beyond the objectives supported for co-op turn-in. General inventory editing, item and weapon coverage, NPC dialogue and quest completion, enemy loot, and map compatibility remain experimental. Use `--fixtures` only in a dedicated playtest campaign to enable synthetic loot, damage, and actions. [Verified scenarios and open coverage](NATIVE-INTEGRATION.md)
 
 At a qualified stock container, press Interact to open it. Look at an item inside and press Interact to take it. The same item disappears for everyone when the host commits the pickup. Supported player drops appear on the ground and use the same Interact control. Nearby physical pickups appear in `game.native_world_loot_items`. When the host visits a container from an older co-op save, the mod restores its item positions from the container's stock spawn points and keeps the original roll.
 

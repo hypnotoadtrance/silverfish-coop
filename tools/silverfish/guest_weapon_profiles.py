@@ -28,7 +28,8 @@ TWELVE_GAUGE_BUCK = StockAmmo(
     "twelve_gauge_buck", 4, "12Gauge_Buck", "Ammo_ShotgunShells_BP", "Projectile_ShotGun_Pellet", 5, projectile_count=9,
 )
 FIVE_SEVEN_AP = StockAmmo("five_seven_ap", 11, "5-7_AP", "Ammo_5-7_AP_BP", "Projectile_5-7_AP", 7)
-STOCK_AMMO = (NINE_MM_BALL, FORTY_FIVE_BALL, TWELVE_GAUGE_BUCK, FIVE_SEVEN_AP)
+FIFTY_CAL_FMJ = StockAmmo("fifty_cal_fmj", 6, "50Cal_FMJ", "Ammo_50Cal_BP", "Projectile_50Cal", 8)
+STOCK_AMMO = (NINE_MM_BALL, FORTY_FIVE_BALL, TWELVE_GAUGE_BUCK, FIVE_SEVEN_AP, FIFTY_CAL_FMJ)
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,8 @@ FIREARMS = (
     Firearm("light-pistol", "Wep_LightPistol", True),
     Firearm("light-pistol-suppressed", "Wep_LightPistol_Suppressed", True, Magazine(14, 1, 0.05)),
     Firearm("nagant-scoped", "Wep_Nagant_Scoped"),
+    Firearm("break-action-50", "Wep_50BMP_BreakAction", True,
+            Magazine(1, 1, 0.1, ammo=FIFTY_CAL_FMJ, reload_first_stack=True)),
     Firearm("army-pistol", "Wep_ArmyPistol", True, Magazine(12, 1, 0.08, True, reload_first_stack=True)),
     Firearm("pistol", "Wep_Pistol", True, Magazine(12, 1, 0.08, True, reload_first_stack=True)),
     Firearm("pistol-02", "Wep_Pistol02", True, Magazine(12, 1, 0.1, True, reload_first_stack=True)),

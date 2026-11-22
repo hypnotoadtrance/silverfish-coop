@@ -45,7 +45,6 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
         raise ValueError(f"Original Saved folder does not exist: {vanilla_saved}")
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
     processes = []
-    reusable = merchant in ("scientist", "gunsmith")
     verify_balances = merchant == "gunsmith" or scientist_blank
     proof = None
 
@@ -126,11 +125,13 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
     async def check_shop_pages(opened, listing, offer):
         identity = {key: opened[key] for key in ("map", "actor", "pawn", "sequence")}
         wallet, total = listing["wallet_before"], listing["count"]
-        assert listing["offers"][0] == offer, listing
         current = await rendered_page(identity, listing, 0, 0, wallet)
         proof = {"status": "verified" if total > 8 else "one_page", "total": total, "initial": current, "navigation": []}
+        destination = listing["offers"].index(offer) // 8 * 8
         if total > 8:
-            for key, offset in (("page-down", 8), ("page-up", 0)):
+            steps = [("page-down", 8), ("page-up", 0)]
+            steps.extend(("page-down", offset) for offset in range(8, destination + 1, 8))
+            for key, offset in steps:
                 press = (await act(guest_target, "native-shop-view-fixture", "--target", key))["native_shop_view"]
                 assert press["state"] == "paging" and all(press.get(field) == value for field, value in identity.items()), press
                 current = await rendered_page(identity, listing, offset, current["page"]["render_event"], wallet)
@@ -163,17 +164,25 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
                 assert (offer["quantity"], offer["value"]) == (1, 30) and 0 < offer["price"] <= 75, offer
         elif merchant == "gunsmith":
             assert listing["actor"] == GUNSMITH_ACTOR, listing
-            offer, = [row for row in listing["offers"] if row["class_path"] == BALL_AMMO]
+            offer, = [row for row in listing["offers"] if row["class_path"] == BALL_AMMO and row["source"] == "shelf"]
             assert (offer["quantity"], offer["value"]) == (200, 600) and offer["price"] > 0, offer
         else:
             offer = listing["offers"][0] if shop_view else next(
-                row for row in listing["offers"] if row["price"] > 0 and "/Weapons/" not in row["class_path"])
+                row for row in listing["offers"] if row["price"] > 0 and "/Weapons/" not in row["class_path"]
+                and row["source"] == "limited")
+        reusable = offer["source"] == "shelf"
         if verify_balances:
             before_balances = await saved_balances(invite["character_id"])
             assert before_balances["host"]["cash"] == listing["wallet_before"], before_balances
         guid, price = offer["guid"], offer["price"]
         stale = await act(guest_target, "native-finite-shop-buy", "--target", f"{guid}@{price + 1}", expected=False)
         assert stale["error"] == "native_finite_shop_quote_changed", stale
+        if stock_screen:
+            # Inspect the guest's native SaveSlot_Ref before the shop could copy the balance itself.
+            projected_wallet = await wait(guest_run, lambda state: state.get("game", {}).get("native_wallet") == 100_000
+                                          and state.get("gameplay", {}).get("shared_wallet") == 100_000
+                                          and not state.get("game", {}).get("native_shop_view", {}).get("stock"))
+            assert projected_wallet["game"]["native_wallet"] == 100_000
         operation_id = uuid.uuid4().hex
         if shop_view:
             opened = (await act(guest_target, "native-shop-view-fixture", "--target", "open"))["native_shop_view"]
@@ -195,7 +204,7 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
                 visible = await wait(guest_run, lambda state: state.get("game", {}).get("native_shop_view", {}).get("state") == "ready")
                 view = visible["game"]["native_shop_view"]
             if not stock_screen:
-                offer_index = listing["offers"].index(offer)
+                offer_index = listing["offers"].index(offer) - (current_page["page"]["offset"] if shop_pages else 0)
                 assert offer_index < view["visible"], (offer, view)
                 for _ in range(offer_index):
                     view = (await act(guest_target, "native-shop-view-fixture", "--target", "down"))["native_shop_view"]
@@ -206,7 +215,8 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
                 submit = (await act(guest_target, "native-shop-view-fixture", "--target", "enter"))["native_shop_view"]
             assert submit["state"] == "buying", submit
             if shop_pages:
-                page_proof["after_purchase"] = await rendered_page(page_scope, listing, 0, current_page["page"]["render_event"], 100_000 - price)
+                page_proof["after_purchase"] = await rendered_page(page_scope, listing, current_page["page"]["offset"],
+                                                                  current_page["page"]["render_event"], 100_000 - price)
             elif stock_screen:
                 await stock_ready(100_000 - price)
             else:
@@ -218,7 +228,7 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
             purchase, operation_id = awarded["native_finite_purchase"], awarded["operation_id"]
             if shop_pages:
                 renders = [row for row in records if row["event"] == "native_shop_view_rendered" and row["sequence"] == opened["sequence"]]
-                offsets = [0, 8, 0, 0] if listing["count"] > 8 else [0, 0]
+                offsets = [0, *(row["page"]["offset"] for row in page_proof["navigation"]), current_page["page"]["offset"]]
                 assert [row["offset"] for row in renders] == offsets and all(row["total"] == listing["count"] for row in renders), renders
                 assert renders[-1]["operation_id"] == operation_id, renders
                 page_proof["authenticated_renders"] = renders
@@ -254,10 +264,9 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
         if scientist_blank:
             await act(host_target, "native-finite-shop-approach", "--target", "host")
             host_listing = (await act(host_target, "native-finite-shop-list"))["native_finite_shop"]
-            host_camera, = host_listing["offers"]
-            assert host_listing["actor"] == SCIENTIST_ACTOR and host_camera["class_path"] == CAMERA, host_listing
+            assert host_listing["actor"] == SCIENTIST_ACTOR and host_listing["offers"] == listing["offers"], host_listing
             denied_host = await act(host_target, "native-finite-shop-buy", "--target", f"{guid}@{price}", expected=False)
-            assert denied_host["error"] == "native_finite_shop_item_unavailable", denied_host
+            assert denied_host["error"] == "native_scientist_purchase_profile_unavailable", denied_host
         if sell:
             quote = (await act(guest_target, "native-finite-shop-sale-quote", "--target", guid))["native_finite_sale_quote"]
             quote_row, = quote["offers"]
@@ -305,17 +314,19 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
                 assert restarted_offer["guid"] != acquire_guid and after["merchant_cash_before"] == purchase["merchant_cash_after"], after
         elif merchant == "gunsmith":
             assert after["actor"] == GUNSMITH_ACTOR and after["map"] == GUNSMITH, after
-            restarted_offer, = [row for row in after["offers"] if row["class_path"] == BALL_AMMO]
+            restarted_offer, = [row for row in after["offers"] if row["class_path"] == BALL_AMMO and row["source"] == "shelf"]
             assert (restarted_offer["quantity"], restarted_offer["value"]) == (200, 600), restarted_offer
             assert restarted_offer["guid"] != acquire_guid, restarted_offer
             assert after["merchant_cash_before"] == purchase["merchant_cash_after"], after
-        elif not sell:
+        elif not sell and not reusable:
             assert guid not in {row["guid"] for row in after["offers"]}, after
         assert (await act(guest_target, *operation))["native_finite_purchase"] == purchase
         persisted = (await act(guest_target, "native-inventory-list"))["native_inventory"]
         assert [row for row in persisted["items"] if row["guid"] == acquire_guid] == ([] if sell else [acquired]), persisted
         proof = {"purchase": purchase, "inventory_row": acquired, "after_restart_offer_count": after["count"],
                  "stock_merchant_input": shop_view, "stock_shop_screen": stock_screen}
+        if stock_screen:
+            proof["guest_wallet_before_shop"] = projected_wallet["game"]["native_wallet"]
         if verify_balances:
             assert rebound["game"]["map"] == MAPS[merchant] and persisted["owner"] == invite["character_id"], (rebound, persisted)
             restored_balances = await saved_balances(invite["character_id"])
@@ -327,7 +338,7 @@ async def verify(work: Path, vanilla_saved: Path | None, shop_view: bool, sell: 
                            "native_balances_before": before_balances, "native_balances_after": paid_balances,
                            "native_balances_restored": restored_balances}
             if scientist_blank:
-                proof[lane]["host_camera_only"] = host_listing
+                proof[lane]["matching_host_catalog"] = host_listing
                 proof[lane]["host_blank_purchase_error"] = denied_host["error"]
             if shop_view:
                 proof[lane]["stock_interact"] = opened

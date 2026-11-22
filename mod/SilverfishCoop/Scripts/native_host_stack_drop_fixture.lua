@@ -11,11 +11,12 @@ local panel_path = "/Game/Classes/GUI/New/Components/InventoryPanel.InventoryPan
 local manager_path = "/Game/Classes/GUI/New/Components/ItemManager.ItemManager_C"
 local card_path = "/Game/Classes/GUI/New/Components/ItemCard.ItemCard_C"
 local context_path = "/Game/Classes/GUI/New/Components/ItemContextMenu.ItemContextMenu_C"
+local split_popup_path = "/Game/Classes/GUI/New/Components/SplitStackPopup.SplitStackPopup_C"
 local slot_path = "/Game/Classes/GUI/New/Components/ItemSlot.ItemSlot_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local item_count = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
-local entries = { ctrl_click = true, context_menu = true, drag_to_floor = true,
+local entries = { ctrl_click = true, context_menu = true, drag_to_floor = true, split_drag_to_floor = true,
     equipped_ctrl_click = true, equipped_context_menu = true, equipped_drag_to_floor = true }
 
 local function valid(object)
@@ -30,13 +31,15 @@ local function exact(object, path)
     return valid(object) and same(object:GetClass(), StaticFindObject(path))
 end
 
-local function named_row(item, guid)
+local function row_guid(item)
     local parts = item and item[item_guid]
     if not parts then return false end
     local a, b, c, d = math.tointeger(parts.A), math.tointeger(parts.B), math.tointeger(parts.C), math.tointeger(parts.D)
     return a and b and c and d and string.format("%08X%08X%08X%08X", a & 0xffffffff, b & 0xffffffff,
-        c & 0xffffffff, d & 0xffffffff) == guid
+        c & 0xffffffff, d & 0xffffffff)
 end
+
+local function named_row(item, guid) return row_guid(item) == guid end
 
 local function select_row(rows, guid, read_item)
     local count = rows and rows:GetArrayNum()
@@ -60,15 +63,17 @@ local function card_item(card)
     return exact(card, card_path) and card.Item or nil
 end
 
-local function stock_payload(item, quantity)
+local function stock_payload(item, quantity, partial)
     if not item then return end
     local class, ammo = item[item_class], math.tointeger(item[item_count])
     local path = valid(class) and class:GetFullName():match("^%S+ (/Game/%S+)$")
     if not drop_items.stock_actor_class(path) or not ammo then return end
     local defaults = class:GetCDO()
     if not valid(defaults) or not same(defaults:GetClass(), class) or defaults.Important ~= false then return end
-    if defaults.Stacks == true and ammo == quantity then return class, ammo end
-    if defaults.Stacks == false and quantity == 1 then
+    if defaults.Stacks == true and (partial and ammo > quantity or not partial and ammo == quantity) then
+        return class, ammo
+    end
+    if not partial and defaults.Stacks == false and quantity == 1 then
         local capacity = defaults.MagSize
         return class, ammo, type(capacity) == "number" and capacity > 0
     end
@@ -108,7 +113,8 @@ end
 local function stock_drop(instance, pawn, controller, guid, count, entry)
     local save = instance.SaveSlot_Ref
     local row, rows = select_row(save.PlayerBackpack, guid, row_item)
-    local class, ammo, pistol = stock_payload(row, count)
+    local partial = entry == "split_drag_to_floor"
+    local class, ammo, pistol = stock_payload(row, count, partial)
     if not class then error("host_stack_drop_menu_fixture_stock_stack_unavailable", 0) end
     local function matches(item)
         return item and same(item[item_class], class) and item[item_count] == ammo
@@ -117,6 +123,33 @@ local function stock_drop(instance, pawn, controller, guid, count, entry)
     local card = select_row(panel.Cards, guid, card_item)
     if not valid(card) or not same(card.ItemManager, manager) or not same(card.InventoryWidget, panel)
         or not matches(card.Item) then error("host_stack_drop_menu_fixture_card_unavailable", 0) end
+
+    if partial then
+        manager.HoveredCard = card
+        manager:BeginSplitStack()
+        local popup = manager.SplitStackPopup
+        if manager.IsSplittingStack ~= true or not exact(popup, split_popup_path)
+            or not popup:IsVisible() or not same(popup.ItemCard, card) then
+            error("host_stack_drop_menu_fixture_split_popup_unavailable", 0)
+        end
+        popup:SetCount(count)
+        manager:FinalSplitStack(count)
+        local held = manager.HeldItem
+        local portion = row_guid(held)
+        if manager.IsSplittingStack ~= false or manager.HoldingItem ~= true or not portion or portion == guid
+            or not same(held[item_class], class) or held[item_count] ~= count then
+            error("host_stack_drop_menu_fixture_split_cursor_unavailable", 0)
+        end
+        manager:InsertItem(manager.DropLocation, -1)
+        local remaining, row_count = select_row(save.PlayerBackpack, guid, row_item)
+        local staged = select_row(save.PlayerBackpack, portion, row_item)
+        if manager.HoldingItem ~= false or not same(instance.SaveSlot_Ref, save) or not same(pawn.Save, save)
+            or row_count ~= rows + 1 or not remaining or not staged or not same(remaining[item_class], class)
+            or not same(staged[item_class], class) or remaining[item_count] ~= ammo - count or staged[item_count] ~= count then
+            error("mutation_unverified_host_stack_drop_menu_fixture_split", 0)
+        end
+        return "stock split drop invoked for " .. portion
+    end
 
     local equipped = entry:match("^equipped_") ~= nil
     local origin = panel

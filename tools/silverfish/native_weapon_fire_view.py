@@ -13,6 +13,7 @@ _MAILBOX = "native-weapon-shots"
 _MAX_MAILBOX = 16384
 _MAX_AGE = .25
 _STOCK_CLASS = re.compile(r"/Game/Classes/Weapons/(?:[\w-]+/)*([\w-]+)\.\1_C", re.ASCII)
+_STOCK_CONSUMABLE = re.compile(r"/Game/Classes/Items/(?:[\w-]+/)*([\w-]+)\.\1_C", re.ASCII)
 _STOCK_CYCLE = re.compile(r"/Game/Classes/Weapons/Wep_Assets/Wep_Anim/([\w-]+)\.\1", re.ASCII)
 MELEE_CLIPS = {"slash": "Standing_Melee_Attack_Horizontal", "backhand": "Standing_Melee_Attack_Backhand",
                "overhead": "Standing_Melee_Attack_Downward"}
@@ -62,6 +63,12 @@ def valid_melee(cue):
             and type(cue[5]) in (int, float) and 0 <= cue[5] <= .75)
 
 
+def valid_use(cue):
+    return (type(cue) is list and len(cue) == 6 and type(cue[0]) is int and 0 < cue[0] < 10**15
+            and cue[1] == "consume" and type(cue[2]) is str and len(cue[2]) <= 160
+            and _STOCK_CONSUMABLE.fullmatch(cue[2]) and valid_position(cue[3:]))
+
+
 def _captured(data):
     lines = data.splitlines()
     if not data.endswith("\n") or not 1 < len(lines) <= LIMIT + 1:
@@ -83,6 +90,14 @@ def _captured(data):
             except ValueError:
                 continue
             if valid_melee(cue):
+                cues.append(cue)
+            continue
+        if len(fields) == 6 and fields[1] == "consume":
+            try:
+                cue = [int(fields[0]), "consume", fields[2], *map(float, fields[3:])]
+            except ValueError:
+                continue
+            if valid_use(cue):
                 cues.append(cue)
             continue
         if len(fields) not in (11, 19):
@@ -136,6 +151,8 @@ async def relay(host, bridge, transport):
                 payload = cue
             elif cue[1] == "melee":
                 payload = cue[:4] + [round(value, 3) for value in cue[4:]]
+            elif cue[1] == "consume":
+                payload = cue[:3] + [round(value, 2) for value in cue[3:]]
             else:
                 payload = cue[:2] + [round(axis, 2) for axis in cue[2:]]
             packet = json.dumps([area, epoch, payload], separators=(",", ":")).encode("ascii")
@@ -162,13 +179,13 @@ class Playback:
                 continue
             if type(decoded) is list and len(decoded) == 3 and decoded[:2] == scope:
                 cue = decoded[2]
-                if (valid_cycle(cue) or valid_melee(cue) or valid_shot(cue)) and cue[0] > self.last_played:
+                if (valid_cycle(cue) or valid_melee(cue) or valid_use(cue) or valid_shot(cue)) and cue[0] > self.last_played:
                     selected[cue[0]] = cue[1:]
         if not selected:
             return game
         arguments = []
         for serial, (path, *parameters) in sorted(selected.items()):
-            values = map(str, parameters) if path in ("melee", "cycle") else (f"{value:.2f}" for value in parameters)
+            values = map(str, parameters) if path in ("melee", "cycle", "consume") else (f"{value:.2f}" for value in parameters)
             arguments.append("|".join((str(serial), path, *values)))
         try:
             result = await bridge.command("native-weapon-play-shots", game["map"], epoch, *arguments, timeout=1.5)
@@ -177,6 +194,10 @@ class Playback:
             return game
         self.last_played = max(selected)
         for receipt in result.get("ack", {}).get("message", "").split(","):
+            use = re.fullmatch(r"([0-9]{1,15}):consume", receipt)
+            if use and (source := selected.get(int(use[1]))) and source[0] == "consume":
+                control.event("native_avatar_use_sound_played", serial=int(use[1]), item_class=source[1])
+                continue
             cycle = re.fullmatch(r"([0-9]{1,15}):cycle", receipt)
             if cycle and (source := selected.get(int(cycle[1]))) and source[0] == "cycle":
                 control.event("native_avatar_cycle_played", serial=int(cycle[1]), player_id=source[1],

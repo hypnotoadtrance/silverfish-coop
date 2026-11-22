@@ -39,32 +39,95 @@ def installed_probe(work):
         mod.rmdir()
 
 
-async def avatar_probe(run, operation):
+async def avatar_probe(run, operation, *, allow_pending=False):
     ticket = uuid.uuid4().hex
     mailbox, = (run / "game-bridge").iterdir()
     pending = mailbox / "avatar-probe-command.pending"
     response = mailbox / "avatar-probe-reply.tsv"
     pending.write_text(f"{ticket}\t{operation}\n", encoding="ascii", newline="")
-    pending.replace(mailbox / "avatar-probe-command.tsv")
+    async with asyncio.timeout(2):
+        while True:
+            try:
+                pending.replace(mailbox / "avatar-probe-command.tsv")
+                break
+            except PermissionError:
+                await asyncio.sleep(.025)
     async with asyncio.timeout(15):
         while True:
             try:
-                fields = response.read_text(encoding="utf-8").rstrip().split("\t", 1)
-                if fields[0] == ticket and len(fields) == 2:
+                fields = response.read_text(encoding="utf-8").rstrip().split("\t")
+                if fields[0] == ticket and len(fields) >= 2:
+                    if allow_pending and fields[1].endswith("avatar_probe_rig_pending"):
+                        return
                     assert fields[1] == "ok", fields[1]
-                    return
+                    return fields[2:]
             except (FileNotFoundError, PermissionError):
                 pass
-            await asyncio.sleep(.1)
+            await asyncio.sleep(.025 if operation == "rig" else .1)
 
 
-async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: bool = False, melee: bool = False) -> None:
+async def verify_pose(host_run, guest_run):
+    import math
+
+    fields = ("base_cm", "body_cm", "neck_error_cm", "head_offset_error_cm", "head_roll", "head_yaw",
+              "tail_x", "tail_z", "tail_yaw", "actor_yaw", "falling")
+
+    async def observe(run, predicate=lambda _: True, timeout=5):
+        async with asyncio.timeout(timeout):
+            while True:
+                values = await avatar_probe(run, "rig", allow_pending=True)
+                if values:
+                    row = dict(zip(fields, map(float, values), strict=True))
+                    if predicate(row):
+                        return row
+                await asyncio.sleep(.025)
+
+    def aligned(row, *, skeletal):
+        assert row["base_cm"] < .01 and row["body_cm"] < 3, row
+        assert row["neck_error_cm"] < .15 and row["head_offset_error_cm"] < .15 and abs(row["head_roll"]) < .1, row
+        expected_tail = (21.374724, -7.291765, -10) if skeletal else (0, 0, 0)
+        assert all(math.isclose(row[key], value, abs_tol=.02)
+                   for key, value in zip(("tail_x", "tail_z", "tail_yaw"), expected_tail, strict=True)), row
+
+    await avatar_probe(host_run, "style")
+    initial = await observe(guest_run, lambda row: row["tail_x"] > 0 and row["falling"] == 0, timeout=15)
+    stationary = await observe(host_run, lambda row: row["tail_x"] == 0 and row["falling"] == 0, timeout=15)
+    aligned(initial, skeletal=True)
+    aligned(stationary, skeletal=False)
+    await avatar_probe(host_run, "turn")
+    turned = await observe(guest_run, lambda row: abs((row["actor_yaw"] - initial["actor_yaw"] + 180) % 360 - 180) > 60
+                          and row["body_cm"] < 3)
+    aligned(turned, skeletal=True)
+    await avatar_probe(host_run, "jump")
+    airborne = await observe(guest_run, lambda row: row["falling"] == 1)
+    aligned(airborne, skeletal=True)
+    landed = await observe(guest_run, lambda row: row["falling"] == 0 and row["body_cm"] < 3)
+    aligned(landed, skeletal=True)
+    wrists = {}
+    for index, clip in enumerate(("HandGun_Idle", "HandGun_Idle_2", "HandGun_Idle_3", "Rifle_Aiming_Idle"), 1):
+        wrists[clip] = {}
+        for sample in (0, 1):
+            await avatar_probe(guest_run, f"clip{index}{sample}")
+            points = await avatar_probe(guest_run, "wrists")
+            wrists[clip][str(sample * .15)] = dict(zip(
+                ("weapon_socket", "right_hand", "left_hand"),
+                (list(map(float, point.split(","))) for point in points), strict=True))
+    return {"guest_sees_host": initial, "host_sees_guest": stationary, "turned": turned,
+            "airborne": airborne, "landed": landed, "aim_clip_wrist_positions": wrists}
+
+
+async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: bool = False,
+                  melee: bool = False, pose: bool = False, rifle: bool = False) -> None:
     profile = "avatar-" + uuid.uuid4().hex[:8]
     host_dir = work / "campaigns" / profile
     guest_dir = work / "clients" / profile
     host_run, guest_run = host_dir / "run", guest_dir / "run"
     host_run.mkdir(parents=True)
     env = dict(os.environ, SILVERFISH_COOP_RENDER_CAPTURE="guest")
+    if pose:
+        env["SILVERFISH_COOP_RENDER_CAPTURE_POSE"] = "1"
+    if rifle:
+        env["SILVERFISH_COOP_RENDER_CAPTURE_RIFLE"] = "1"
     if equipment:
         env["SILVERFISH_COOP_RENDER_CAPTURE_EQUIPMENT"] = "1"
     base = (sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work))
@@ -106,6 +169,8 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
         join = ("join", *guest, "--invite", invitation["invite_file"], "--headless", "--native-zones")
         if equipment:
             join += ("--native-guest-primary-input",)
+        if rifle:
+            join += ("--native-guest-reload-input",)
         guest_process = await start("guest.txt", guest, *join)
         evidence = {}
         for role, run in (("host", host_run), ("guest", guest_run)):
@@ -114,6 +179,43 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             assert all(row["state"] == "default_body" for row in evidence[role].values()), evidence
         if lifecycle:
             identity = invitation["character_id"]
+        if pose:
+            await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+            evidence["pose"] = await verify_pose(host_run, guest_run)
+        if rifle:
+            await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+            guid, = await avatar_probe(host_run, "seedrifle")
+            async with asyncio.timeout(15):
+                while not (local_profile := await avatar_probe(guest_run, "selectrifle", allow_pending=True)):
+                    await asyncio.sleep(.1)
+            mounted = await wait(host_run, lambda state: any(
+                {"BreakAction_BMG_Frame", "BreakAction_BMG_Swing"} <= {path.rsplit(".", 1)[-1]
+                    for path in row.get("weapon_meshes", ())}
+                for row in (projections(state) or {}).values()), timeout=12)
+            selected, = events(guest_run, "native_guest_equipment_selected")
+            receipt = selected["native_guest_weapon"]
+            assert tuple(receipt[key] for key in ("action", "status", "guid", "actor_ammo", "stored_ammo")) == (
+                "select", "equipped", guid, 1, 1), receipt
+            authority_profile = await avatar_probe(host_run, "heldrifle")
+            assert local_profile == authority_profile, (local_profile, authority_profile)
+            fields = ("magazine", "caliber", "fire_rate", "burst_length", "action_on_release", "single_reload", "projectile")
+            evidence["guest_rifle_selection"] = {"receipt": receipt, "observer": projections(mounted),
+                "stock_profile": dict(zip(fields, authority_profile, strict=True))}
+            await avatar_probe(guest_run, "riflerange")
+            shot = await command("action", *guest, "native-guest-weapon-fire", "--target", guid)
+            assert tuple(shot["native_guest_weapon"][key] for key in ("guid", "before", "after", "projectiles")) == (
+                guid, 1, 0, 1), shot
+            reserve_guid = uuid.uuid4().hex.upper()
+            await command("action", *host, "native-guest-weapon-seed-ammo", "--target", "guest", "--item-guid", reserve_guid)
+            await command("action", *guest, "native-guest-reload-input-fixture")
+            async with asyncio.timeout(12):
+                while not (reloads := events(guest_run, "native_guest_reload_input")):
+                    await asyncio.sleep(.1)
+            reloaded, = reloads
+            ammo = reloaded["native_guest_weapon"]
+            assert tuple(ammo[key] for key in ("guid", "before", "after", "reserve_before", "reserve_after")) == (
+                guid, 0, 1, 8, 7), reloaded
+            evidence["guest_rifle_combat"] = {"fire": shot["native_guest_weapon"], "reload": ammo}
         if equipment:
             await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
             await avatar_probe(host_run, "equip")
@@ -148,19 +250,18 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             }
             def aimed_pistol(state, *, on_host):
                 peer = equipped_projection(state, on_host=on_host)
-                if (peer and peer.get("pose_clip") == "HandGun_Idle" and peer.get("animation_mode") == 1
-                        and 100 <= (peer.get("weapon_socket_height") or 0) <= 107):
+                if (peer and peer.get("pose_clip") == "HandGun_Idle_3" and peer.get("animation_mode") == 1
+                        and 130 <= (peer.get("weapon_socket_height") or 0) <= 143):
                     return peer
 
-            lowered = evidence["held"]["guest"]
             await avatar_probe(host_run, "aim")
             aimed_host = await wait(guest_run, lambda state: aimed_pistol(state, on_host=False), timeout=10)
             evidence["aimed_pistol"] = aimed_pistol(aimed_host, on_host=False)
             await avatar_probe(host_run, "lower")
             await wait(guest_run, lambda state: (peer := equipped_projection(state, on_host=False))
-                       and peer.get("pose_clip") is None and peer.get("animation_mode") == lowered["animation_mode"], timeout=10)
+                       and peer.get("pose_clip") == "HandGun_Idle"
+                       and 97 <= (peer.get("weapon_socket_height") or 0) <= 110, timeout=10)
             evidence["aim_release_verified"] = True
-            guest_lowered = evidence["held"]["host"]
             await wait(guest_run, lambda state: state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
             await avatar_probe(guest_run, "aim")
             await wait(guest_run, lambda state: state.get("game", {}).get("native_avatar_local_aim") is True, timeout=8)
@@ -169,7 +270,8 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             await avatar_probe(guest_run, "lower")
             await wait(guest_run, lambda state: state.get("game", {}).get("native_avatar_local_aim") is False, timeout=8)
             await wait(host_run, lambda state: (peer := equipped_projection(state, on_host=True))
-                       and peer.get("pose_clip") is None and peer.get("animation_mode") == guest_lowered["animation_mode"], timeout=10)
+                       and peer.get("pose_clip") == "HandGun_Idle"
+                       and 97 <= (peer.get("weapon_socket_height") or 0) <= 110, timeout=10)
             evidence["guest_aim_release_verified"] = True
             await command("action", *guest, "drop-link")
             await wait(host_run, lambda state: any(lease["character_id"] == invitation["character_id"]
@@ -278,9 +380,16 @@ if __name__ == "__main__":
     parser.add_argument("--lifecycle", action="store_true", help="verify avatar removal upon leaving and restoration upon rejoin")
     parser.add_argument("--equipment", action="store_true", help="verify distinct saved faces and multipart held pistols on both peers")
     parser.add_argument("--melee", action="store_true", help="verify a visible stock bat swing after the equipment checks")
+    parser.add_argument("--pose", action="store_true", help="verify the centered rig and stock attachments through a turn and jump")
+    parser.add_argument("--rifle", action="store_true", help="verify a guest's stock break-action quick-slot selection")
     options = parser.parse_args()
     if options.melee and (not options.equipment or options.lifecycle):
         parser.error("--melee requires --equipment and runs independently of --lifecycle")
+    if options.pose and (options.equipment or options.lifecycle):
+        parser.error("--pose verifies the rig independently of --equipment and --lifecycle")
+    if options.rifle and (options.pose or options.equipment or options.lifecycle):
+        parser.error("--rifle verifies stock guest equipment selection independently")
     work = options.work.resolve(strict=True)
-    with installed_probe(work) if options.equipment else nullcontext():
-        asyncio.run(capture(work, options.vanilla_saved.resolve(strict=True), options.lifecycle, options.equipment, options.melee))
+    with installed_probe(work) if options.equipment or options.pose or options.rifle else nullcontext():
+        asyncio.run(capture(work, options.vanilla_saved.resolve(strict=True),
+                            options.lifecycle, options.equipment, options.melee, options.pose, options.rifle))

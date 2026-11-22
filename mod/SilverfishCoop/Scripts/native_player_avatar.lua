@@ -11,7 +11,8 @@ local animation_root = "/Game/Classes/NPCs/NPC_Assets/Animations/"
 local crouched_idle = "Crouching_Idle"
 local crouched_walk = "Crouched_Walking"
 local firearm_class = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
-local aimed = {pistol = {"HandGun_Idle", "HandGun_Walk"}, rifle = {"Rifle_Aiming_Idle", "Rifle_Walk"}}
+local aimed = {pistol = {"HandGun_Idle_3", "HandGun_Walk"}, rifle = {"Rifle_Aiming_Idle", "Rifle_Walk"}}
+local lowered = {pistol = "HandGun_Idle", rifle = "Rifle_Idle_1_"}
 local melee_clips = {slash = "Standing_Melee_Attack_Horizontal", backhand = "Standing_Melee_Attack_Backhand",
     overhead = "Standing_Melee_Attack_Downward"}
 local identity = {
@@ -131,6 +132,9 @@ end
 
 local function attach_component(entry, field, parent, socket_name, class)
     local socket = FName(socket_name or "None", EFindName.FNAME_Find)
+    if socket_name and not parent:DoesSocketExist(socket) then
+        error("Remote avatar stock socket was unavailable: " .. socket_name)
+    end
     local component = entry.pawn:AddComponentByClass(StaticFindObject(class), true, identity, true)
     if not valid(component) then error("Remote avatar component could not be created") end
     if class ~= scene_class then
@@ -153,18 +157,29 @@ local function visual_component(entry, field, parent, socket_name, skeletal)
 end
 
 local function position_head(entry)
-    -- The stock head meshes have an offset origin. Preserve the stock mesh offset
-    -- from HeadSocket to HelmetSocket so aim rotates the face around the neck.
-    local head_socket = FName("HeadSocket", EFindName.FNAME_Find)
+    -- The stock head meshes use HelmetSocket as their origin. Put the aim
+    -- pivot on the Head bone itself so an animated socket offset cannot move
+    -- the pivot away from the neck during a jump or a pose change.
+    local head_bone = FName("Head", EFindName.FNAME_Find)
     local helmet_socket = FName("HelmetSocket", EFindName.FNAME_Find)
-    if not entry.body:DoesSocketExist(head_socket) or not entry.body:DoesSocketExist(helmet_socket) then
-        error("Remote avatar head sockets were unavailable")
+    if entry.body:GetBoneIndex(head_bone) < 0 or not entry.body:DoesSocketExist(helmet_socket) then
+        error("Remote avatar head anchors were unavailable")
     end
     local math_library = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
-    local anchor = entry.body:GetSocketTransform(head_socket, 0)
-    local origin = entry.body:GetSocketLocation(helmet_socket)
-    local offset = math_library:InverseTransformLocation(anchor, origin)
-    entry.head:K2_SetRelativeLocation(offset, false, {}, true)
+    local origin = entry.body:GetSocketTransform(helmet_socket, 0)
+    local neck = entry.body:GetSocketLocation(head_bone)
+    local offset = math_library:InverseTransformLocation(origin, neck)
+    entry.head:K2_SetRelativeLocation({X = -offset.X, Y = -offset.Y, Z = -offset.Z}, false, {}, true)
+end
+
+local function offset_body(entry, x, y)
+    local pawn, body = entry.pawn, entry.body
+    local base, relative = pawn:GetBaseTranslationOffset(), body.RelativeLocation
+    local location = {X = relative.X + x - base.X, Y = relative.Y + y - base.Y, Z = relative.Z}
+    -- Preserve the current smoothing displacement and change its baseline so
+    -- CharacterMovement keeps rotating the visible body around the capsule.
+    pawn:CacheInitialMeshOffset({X = x, Y = y, Z = base.Z}, pawn:GetBaseRotationOffsetRotator())
+    body:K2_SetRelativeLocation(location, false, {}, true)
 end
 
 local function restore_locomotion(entry)
@@ -178,7 +193,7 @@ local function apply_locomotion(entry, aim)
     if swings[entry] then return end
     local crouched = entry.pawn.bIsCrouched == true
     local profile = aimed[aim]
-    if not crouched and not profile then
+    if entry.pawn.CharacterMovement:IsFalling() then
         restore_locomotion(entry)
         return
     end
@@ -191,8 +206,14 @@ local function apply_locomotion(entry, aim)
         else
             name = moving and crouched_walk or crouched_idle
         end
-    else
+    elseif profile then
         name = profile[moving and 2 or 1]
+    elseif not moving then
+        name = lowered[entry.weapon_stance]
+    end
+    if not name then
+        restore_locomotion(entry)
+        return
     end
     local mesh = entry.body.SkinnedAsset
     if not valid(mesh) then return end
@@ -227,6 +248,9 @@ local function remove(entry)
         restore_locomotion(entry)
         character_view.clear_body(entry)
         if entry.material_override then entry.body:SetMaterial(0, nil) end
+        if entry.mesh_offset and valid(entry.pawn) then
+            offset_body(entry, entry.mesh_offset.X, entry.mesh_offset.Y)
+        end
         entry.body:SetVisibility(entry.visible, false)
         entry.body:SetHiddenInGame(entry.hidden, false)
         entry.body:SetSkeletalMeshAsset(entry.original_asset)
@@ -317,16 +341,19 @@ function avatar.animate_cycle(get_world)
     weapon_view.animate_cycle(get_world)
 end
 
+local function angle_difference(a, b)
+    return math.abs((a - b + 180) % 360 - 180)
+end
+
 local function aim_head(entry)
     local rotation = entry.pawn:GetBaseAimRotation()
-    local pitch = (rotation.Pitch + 180) % 360 - 180
-    local yaw = (rotation.Yaw + 180) % 360 - 180
-    pitch = math.max(-45, math.min(45, pitch))
-    if entry.aim_pitch == pitch and entry.aim_yaw == yaw then return end
-    local facing = {Pitch = pitch, Yaw = yaw, Roll = 0}
-    entry.head_pivot:K2_SetWorldRotation(facing, false, {}, true)
+    local pitch = math.max(-45, math.min(45, (rotation.Pitch + 180) % 360 - 180))
     local shown = entry.head_pivot:K2_GetComponentRotation()
-    entry.aim_pitch, entry.aim_yaw = pitch, yaw
+    if angle_difference(shown.Pitch, pitch) > 0.01 or angle_difference(shown.Yaw, rotation.Yaw) > 0.01
+        or angle_difference(shown.Roll, 0) > 0.01 then
+        entry.head_pivot:K2_SetWorldRotation({Pitch = pitch, Yaw = rotation.Yaw, Roll = 0}, false, {}, true)
+        shown = entry.head_pivot:K2_GetComponentRotation()
+    end
     entry.aim_roll = shown.Roll
 end
 
@@ -355,8 +382,14 @@ local function create(entry)
     body:SetHiddenInGame(false, false)
     body:SetVisibility(true, false)
 
-    local pivot = attach_component(entry, "head_pivot", body, "HeadSocket", scene_class)
-    -- The first-person animation still drives the neck position.
+    -- CharacterMesh0 is authored behind the capsule for first-person play.
+    -- A visible third-person body needs the stock humanoid's centered base.
+    local base = entry.pawn:GetBaseTranslationOffset()
+    entry.mesh_offset = {X = base.X, Y = base.Y}
+    offset_body(entry, 0, 0)
+
+    local pivot = attach_component(entry, "head_pivot", body, "Head", scene_class)
+    -- Keep the animated bone position and use the remote player's aim rotation.
     pivot:SetAbsolute(false, true, false)
     local head = visual_component(entry, "head", pivot)
     position_head(entry)
@@ -458,6 +491,7 @@ function avatar.sync(state, phase)
                             if not cosmetics then error("Invalid remote character appearance") end
                             apply_outfit(entry, outfit, cosmetics)
                             character_view.apply(entry, cosmetics, appearance, asset, visual_component)
+                            weapon_view.apply(entry, outfit and outfit.weapon or "-", outfit and outfit.firearm or "-")
                             local aim = outfit and outfit.aim or "-"
                             if phase == "hosting" then
                                 aim = outfit and host_aims[entry.id] == outfit.gun and outfit.gun or "-"
@@ -465,7 +499,6 @@ function avatar.sync(state, phase)
                             apply_locomotion(entry, aim)
                             aim_head(entry)
                         end
-                        weapon_view.apply(entry, outfit and outfit.weapon or "-", outfit and outfit.firearm or "-")
                         if entry.weapon_parts and #entry.weapon_parts > 0 then
                             local socket = entry.body:GetSocketTransform(FName("Weapon_Socket01", EFindName.FNAME_Find), 2)
                             entry.weapon_socket_height = socket.Translation.Z

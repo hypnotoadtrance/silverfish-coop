@@ -18,7 +18,7 @@ BIND = "native-host-stack-drop-bind"
 FINISH = "native-host-stack-drop-finish"
 FIXTURE = "native-host-stack-drop-menu-fixture"
 CLOSE_FIXTURE = "native-host-stack-drop-menu-close-fixture"
-_ENTRIES = {"ctrl_click", "context_menu", "drag_to_floor",
+_ENTRIES = {"ctrl_click", "context_menu", "drag_to_floor", "split_drag_to_floor",
             "equipped_ctrl_click", "equipped_context_menu", "equipped_drag_to_floor"}
 
 
@@ -106,6 +106,11 @@ async def fixture(host, bridge, action: str, target: str) -> dict:
     host.last_game, host.last_seen = snapshot, time.monotonic()
     if action == FIXTURE:
         message = snapshot.get("ack", {}).get("message", "")
+        if fields[2] == "split_drag_to_floor":
+            portion = message.removeprefix("stock split drop invoked for ")
+            if not valid_guid(portion) or portion == fields[0]:
+                raise party.RuleError("host_stock_drop_fixture_readback_unavailable")
+            return {"native_host_stack_drop_fixture": True, "drop_guid": portion}
         pistol = re.fullmatch(r"stock pistol drop invoked with stored ammo (0|[1-9][0-9]{0,9})", message)
         if pistol and fields[1] == "1":
             return {"native_host_stack_drop_fixture": True, "stored_ammo": int(pistol[1])}

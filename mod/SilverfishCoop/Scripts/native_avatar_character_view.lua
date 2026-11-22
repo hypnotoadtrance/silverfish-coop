@@ -232,8 +232,13 @@ function view.apply(entry, cosmetics, model, asset, add_component)
             set_mesh(add_component(entry, "tail_static", entry.body, "TailSocket_01"), tail_static, false)
             tint(entry.tail_static, colors)
         elseif tail_skeletal then
-            set_mesh(add_component(entry, "tail_skeletal", entry.body, "TailSocket_01", true), tail_skeletal, true)
-            tint(entry.tail_skeletal, colors)
+            local component = add_component(entry, "tail_skeletal", entry.body, "TailSocket_01", true)
+            set_mesh(component, tail_skeletal, true)
+            -- PlayerCharacter_ViewModel's skeletal tail root is offset from the
+            -- socket. The stock static tail already has its origin at the socket.
+            component:K2_SetRelativeLocationAndRotation({X = 21.374724, Y = 0, Z = -7.291765},
+                {Pitch = 0, Yaw = -10, Roll = 0}, false, {}, true)
+            tint(component, colors)
         end
     end
     if valid(entry.plumage) then entry.plumage:SetVisibility(not entry.hide_plumage, false) end

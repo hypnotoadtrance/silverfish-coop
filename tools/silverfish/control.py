@@ -116,7 +116,8 @@ async def submit(run: Path, action: str, **arguments) -> dict:
     output = run / "responses" / name
     limit = {"native-quest-catalog": 1_048_576, "native-quest-list": 32768,
              "native-dialogue-open": 32768, "native-dialogue-choose": 32768,
-             "native-inventory-list": 16384, "native-wipe-items": 16384}.get(action, 8192)
+             "native-finite-shop-list": 131072, "native-inventory-list": 16384,
+             "native-wipe-items": 16384}.get(action, 8192)
     for _ in range(200):
         if output.is_file():
             return read_json(output, limit=limit)

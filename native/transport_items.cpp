@@ -149,6 +149,7 @@ namespace
         Unreal::FName action_use{STR("ActionUse")};
         Unreal::FName sort_items{STR("SortItems")};
         Unreal::FName final_split{STR("FinalSplitStack")};
+        Unreal::FName move_to_cursor{STR("MoveItemToCursor")};
         Unreal::FName position_split{STR("PositionSplitStackPopup")};
         Unreal::FName action_pickup{STR("ActionPickup")};
         Unreal::FName action_split{STR("ActionSplitStack")};
@@ -243,6 +244,13 @@ namespace
         bool stock_inventory{};
     };
 
+    struct HostSplitDrag
+    {
+        Unreal::FWeakObjectPtr manager, save;
+        Guid portion{};
+        int quantity{};
+    };
+
     struct HostDropRequest
     {
         Guid guid;
@@ -271,6 +279,13 @@ namespace
         std::array<Unreal::FWeakObjectPtr, 3> shop_backups;
     };
 
+    struct GuestUseCursor
+    {
+        Unreal::FWeakObjectPtr manager;
+        Guid taking{};
+        Guid held{};
+    };
+
     std::optional<Entries> entries;
     std::array<Hook::GlobalCallbackId, 3> hooks{};
     std::atomic<bool> hooks_ready{};
@@ -280,9 +295,11 @@ namespace
     thread_local std::optional<TransportRequest> transport_request;
     thread_local std::array<MatrixInput, 2> matrix_inputs;
     thread_local HostDropScope host_drop_scope;
+    thread_local HostSplitDrag host_split_drag;
     thread_local std::optional<HostDropRequest> host_drop_request;
     thread_local std::int64_t host_drop_sequence{};
     thread_local StashScreen stash_screen;
+    thread_local GuestUseCursor guest_use_cursor;
 
     [[nodiscard]] bool enabled()
     {
@@ -311,6 +328,7 @@ namespace
     void clear_host_drop()
     {
         host_drop_scope = {};
+        host_split_drag = {};
         host_drop_request.reset();
     }
 
@@ -1136,7 +1154,7 @@ namespace
 
     [[nodiscard]] bool exact_canonical_drop_row(Unreal::UObject* save, const ItemView& card,
                                                 const Guid& guid, std::int32_t saved_ammo, Unreal::UObject* item_class,
-                                                std::optional<int> equipped_index = {})
+                                                std::optional<int> equipped_index = {}, bool require_droppable = true)
     {
         auto* backpack = field<Unreal::FArrayProperty>(save, STR("PlayerBackpack"));
         auto* equipment = field<Unreal::FArrayProperty>(save, STR("PlayerEquipment"));
@@ -1149,7 +1167,7 @@ namespace
         if (!backpack || !equipment || !item_struct(backpack->GetInner(), card.structure) ||
             !item_struct(equipment->GetInner(), card.structure) || !item_struct(armor, card.structure) ||
             !item_struct(helmet, card.structure) || !fields.valid() || !count_field || !class_field || !never_drop ||
-            never_drop->GetPropertyValueInContainer(card.value))
+            (require_droppable && never_drop->GetPropertyValueInContainer(card.value)))
             return false;
 
         Unreal::FScriptArrayHelper pack(backpack, backpack->ContainerPtrToValuePtr<void>(save));
@@ -1165,7 +1183,8 @@ namespace
                 if (fields.read(row) != guid) continue;
                 if (found || equipped != equipped_index.has_value() || (equipped && index != *equipped_index) ||
                     object_value(class_field, row) != item_class ||
-                    count_field->GetPropertyValueInContainer(row) != saved_ammo || never_drop->GetPropertyValueInContainer(row))
+                    count_field->GetPropertyValueInContainer(row) != saved_ammo ||
+                    (require_droppable && never_drop->GetPropertyValueInContainer(row)))
                     return false;
                 found = row;
             }
@@ -1213,6 +1232,76 @@ namespace
                !object_value(field<Unreal::FClassProperty>(after.structure, item_class_name), after.value);
     }
 
+    void observe_host_split_cursor(Unreal::UObject* manager, Unreal::UFunction* function)
+    {
+        if (!qualified_drop_seat(true) || !exact_class(manager, manager_path) ||
+            function->GetOuterPrivate() != manager->GetClassPrivate() || function->GetNumParms() != 1 ||
+            function->GetReturnProperty() || function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
+        host_split_drag = {};
+        auto* screen = object_field(manager, STR("ParentScreen"));
+        auto* panel = object_field(screen, STR("BackpackPanel"));
+        auto* save = canonical_host_save();
+        auto* splitting = field<Unreal::FBoolProperty>(manager, STR("IsSplittingStack"));
+        auto* popup = object_field(manager, STR("SplitStackPopup"));
+        if (!exact_drop_screen(manager, screen, panel) || !host_drop_scope_matches(save) ||
+            !splitting || !splitting->GetPropertyValueInContainer(manager) ||
+            !exact_class(popup, split_popup_path) || !same_widget_player(popup)) return;
+        auto* card = object_field(popup, STR("ItemCard"));
+        if (!exact_class(card, card_path) || !same_widget_player(card) ||
+            object_field(card, STR("ItemManager")) != manager ||
+            !array_has_widget(panel, STR("Cards"), card, false)) return;
+
+        // FinalSplitStack puts the new row on the cursor after reducing the original card.
+        const auto source = card_item(card);
+        const auto held = inventory_item(manager, STR("HeldItem"));
+        const GuidFields fields(held.structure);
+        auto* item_class = field<Unreal::FClassProperty>(held.structure, item_class_name);
+        auto* units = field<Unreal::FIntProperty>(held.structure, item_ammo_name);
+        auto* count = field<Unreal::FIntProperty>(popup, STR("Count"));
+        auto* type = object_value(item_class, held.value);
+        auto stacks = silverfish::drop_item_class::stacks(Unreal::Cast<Unreal::UClass>(type));
+        if (source.panel != panel || source.structure != held.structure || !fields.valid() || !units ||
+            !count || !stacks.value_or(false) || object_value(item_class, source.value) != type) return;
+        const auto source_guid = fields.read(source.value);
+        const auto portion_guid = fields.read(held.value);
+        const auto remaining = units->GetPropertyValueInContainer(source.value);
+        const auto quantity = units->GetPropertyValueInContainer(held.value);
+        if (source_guid == Guid{} || portion_guid == Guid{} || source_guid == portion_guid || remaining <= 0 ||
+            quantity <= 0 || quantity > max_drop_ammo || count->GetPropertyValueInContainer(popup) != quantity ||
+            !exact_canonical_drop_row(save, source, source_guid, remaining, type)) return;
+        host_split_drag = {manager, save, portion_guid, quantity};
+    }
+
+    bool stage_host_split_drop(Unreal::UObject* save, const ItemView& held, const Guid& guid)
+    {
+        auto* backpack = field<Unreal::FArrayProperty>(save, STR("PlayerBackpack"));
+        auto* equipment = field<Unreal::FArrayProperty>(save, STR("PlayerEquipment"));
+        auto* armor = field<Unreal::FStructProperty>(save, STR("PlayerArmor"));
+        auto* helmet = field<Unreal::FStructProperty>(save, STR("PlayerHelmet"));
+        auto* row = backpack ? Unreal::CastField<Unreal::FStructProperty>(backpack->GetInner()) : nullptr;
+        const GuidFields fields(held.structure);
+        if (!item_struct(row, held.structure) || !equipment || !item_struct(equipment->GetInner(), held.structure) ||
+            !item_struct(armor, held.structure) || !item_struct(helmet, held.structure) || !fields.valid() ||
+            fields.read(armor->ContainerPtrToValuePtr<void>(save)) == guid ||
+            fields.read(helmet->ContainerPtrToValuePtr<void>(save)) == guid) return false;
+        Unreal::FScriptArrayHelper pack(backpack, backpack->ContainerPtrToValuePtr<void>(save));
+        Unreal::FScriptArrayHelper loadout(equipment, equipment->ContainerPtrToValuePtr<void>(save));
+        for (auto* items : {&pack, &loadout})
+        {
+            if (items->Num() < 0 || items->Num() >= inventory_limit) return false;
+            for (int index = 0; index < items->Num(); ++index)
+                if (fields.read(items->GetRawPtr(index)) == guid) return false;
+        }
+        // Using ReturnItem would pass through the stock AddItem auto-stack and
+        // lose the split GUID. Stage the exact typed row for the normal drop debit.
+        const auto index = pack.AddValue();
+        auto* staged = pack.GetRawPtr(index);
+        row->CopyCompleteValue(staged, held.value);
+        if (row->Identical(staged, held.value)) return true;
+        pack.RemoveValues(index, 1);
+        return false;
+    }
+
     void intercept_drag_drop(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
                              const void* parameters)
     {
@@ -1225,8 +1314,10 @@ namespace
         auto* origin = object_field(manager, STR("ActiveReturnLocation"));
         const auto equipped_index = drop_equipment_index(manager, origin);
         if (!exact_drop_screen(manager, screen, panel) ||
-            object_value(field<Unreal::FObjectProperty>(function, STR("InventoryWidget")), parameters) != floor ||
-            (origin != panel && !equipped_index)) return;
+            object_value(field<Unreal::FObjectProperty>(function, STR("InventoryWidget")), parameters) != floor) return;
+        const bool tracked_split = host_split_drag.manager.Get() == manager &&
+                                   host_split_drag.save.Get() == canonical_host_save();
+        if (!tracked_split && origin != panel && !equipped_index) return;
 
         const auto held = inventory_item(manager, STR("HeldItem"));
         auto* item_class = object_value(field<Unreal::FClassProperty>(held.structure, item_class_name), held.value);
@@ -1249,15 +1340,27 @@ namespace
             (host_drop_request && now < host_drop_request->expires) || host_drop_sequence >= max_drop_sequence ||
             !allow || !allow->GetPropertyValueInContainer(manager) || !dead || dead->GetPropertyValueInContainer(scope.pawn.Get()) ||
             !fields.valid() || !count_field || !never_drop || never_drop->GetPropertyValueInContainer(held.value) ||
-            !clear || !restore || restore->GetOuterPrivate() != manager->GetClassPrivate() ||
-            restore->GetNumParms() != 2 || restore->GetReturnProperty() || restore->GetParmsSize() > 96 ||
-            restore->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
-            !item_struct(item, held.structure) || item->GetOffset_Internal() != 0 || item->GetSize() != 0x50 ||
-            !success || success->GetOffset_Internal() != 0x50) return;
+            !clear) return;
 
         const Guid guid = fields.read(held.value);
         const auto saved_ammo = count_field->GetPropertyValueInContainer(held.value);
         if (guid == Guid{} || (*stacks && (saved_ammo < 1 || saved_ammo > max_drop_ammo))) return;
+        if (tracked_split && *stacks && guid == host_split_drag.portion && saved_ammo == host_split_drag.quantity)
+        {
+            auto* instance = scope.instance.Get();
+            auto* recalculate = stock_no_args(instance, Unreal::FName(STR("Calc_CarryWeight")));
+            if (!recalculate || !stage_host_split_drop(save, held, guid)) return;
+            manager->ProcessEvent(clear, nullptr);
+            instance->ProcessEvent(recalculate, nullptr);
+            host_drop_request = HostDropRequest{guid, saved_ammo, ++host_drop_sequence, false, now + request_lease,
+                                               manager, screen, panel, "split_drag_to_floor"};
+            return;
+        }
+        if ((origin != panel && !equipped_index) || !restore || restore->GetOuterPrivate() != manager->GetClassPrivate() ||
+            restore->GetNumParms() != 2 || restore->GetReturnProperty() || restore->GetParmsSize() > 96 ||
+            restore->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
+            !item_struct(item, held.structure) || item->GetOffset_Internal() != 0 || item->GetSize() != 0x50 ||
+            !success || success->GetOffset_Internal() != 0x50) return;
         if (equipped_index && !*stacks && pack_equipment_drop(manager, panel, origin, guid, item_class))
         {
             if (exact_canonical_drop_row(save, held, guid, saved_ammo, item_class))
@@ -1288,6 +1391,9 @@ namespace
         if (!item_class) return {};
         const auto path = item_class->GetPathName();
         if (path == STR("/Game/Classes/Items/Item_Bandage.Item_Bandage_C")) return "use-bandage";
+        if (path == STR("/Game/Classes/Items/Random_GearBag_Starter.Random_GearBag_Starter_C") ||
+            path == STR("/Game/Classes/Items/HyperRandom_GearBag_Starter.HyperRandom_GearBag_Starter_C"))
+            return "use-starter-bag";
         if (path == STR("/Game/Classes/Items/Item_MRE.Item_MRE_C")) return "use-mre";
         if (path == STR("/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C")) return "use-canned-peaches";
         if (path == STR("/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C")) return "use-canned-beans";
@@ -1329,7 +1435,7 @@ namespace
     void intercept_backpack_split(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
                                   const void* parameters)
     {
-        if (!qualified_drop_seat(false) || !exact_class(manager, manager_path) ||
+        if (!qualified_drop_seat(scope.host) || !exact_class(manager, manager_path) ||
             function->GetOuterPrivate() != manager->GetClassPrivate() || function->GetReturnProperty() ||
             function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
         auto* screen = object_field(manager, STR("ParentScreen"));
@@ -1347,6 +1453,7 @@ namespace
             return;
         }
 
+        if (scope.host) return;
         auto* amount = field<Unreal::FIntProperty>(function, STR("AmountToTake"));
         if (function->GetNumParms() != 1 || function->GetParmsSize() != sizeof(std::int32_t) || !amount ||
             amount->GetOffset_Internal() != 0 || !amount->HasAnyPropertyFlags(Unreal::CPF_Parm) ||
@@ -1459,7 +1566,7 @@ namespace
         const Guid guid = fields.read(candidate.value);
         const auto saved_ammo = count_field->GetPropertyValueInContainer(candidate.value);
         if (guid == Guid{} || (stack && (saved_ammo < 1 || saved_ammo > max_drop_ammo)) ||
-            !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class, equipped_index)) return;
+            !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class, equipped_index, !using_item)) return;
         if (equipped_index)
         {
             auto* hover = field<Unreal::FObjectProperty>(manager, STR("HoveredCard"));
@@ -1674,7 +1781,7 @@ namespace
         if (auto* clear = stock_no_args(manager, entries->clear_held)) manager->ProcessEvent(clear, nullptr);
     }
 
-    void start_stash_cursor(Unreal::UObject* manager, const StashCard& selected)
+    bool start_stock_cursor(Unreal::UObject* manager, const ItemView& selected)
     {
         auto* taking = field<Unreal::FBoolProperty>(manager, STR("IsTakingItem"));
         auto* holding = field<Unreal::FBoolProperty>(manager, STR("HoldingItem"));
@@ -1682,20 +1789,31 @@ namespace
         auto* move = manager->GetClassPrivate()->GetFunctionByNameInChain(Unreal::FName(STR("MoveItemToCursor")));
         auto* animate = field<Unreal::FBoolProperty>(move, STR("Anim"));
         if (!taking || !taking->GetPropertyValueInContainer(manager) || !holding ||
-            holding->GetPropertyValueInContainer(manager) || !item_struct(held, selected.item.structure) ||
+            holding->GetPropertyValueInContainer(manager) || !item_struct(held, selected.structure) ||
             !move || move->GetOuterPrivate() != manager->GetClassPrivate() || move->GetNumParms() != 1 ||
             move->GetReturnProperty() || move->GetParmsSize() != 1 || !animate || animate->GetOffset_Internal() != 0 ||
-            move->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
+            move->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return false;
 
         // Show the stock held-item widget while leaving both source arrays untouched.
-        held->CopyCompleteValue(held->ContainerPtrToValuePtr<void>(manager), selected.item.value);
+        held->CopyCompleteValue(held->ContainerPtrToValuePtr<void>(manager), selected.value);
         taking->SetPropertyValueInContainer(manager, false);
         std::byte parameters{};
         animate->SetPropertyValueInContainer(&parameters, false);
+        manager->ProcessEvent(move, &parameters);
+        if (holding->GetPropertyValueInContainer(manager)) return true;
+        clear_stash_cursor(manager);
+        return false;
+    }
+
+    void start_stash_cursor(Unreal::UObject* manager, const StashCard& selected)
+    {
         stash_screen.drag_source = selected.item.panel;
         stash_screen.drag_item = selected.guid;
-        manager->ProcessEvent(move, &parameters);
-        if (!holding->GetPropertyValueInContainer(manager)) clear_stash_cursor(manager);
+        if (!start_stock_cursor(manager, selected.item))
+        {
+            stash_screen.drag_source = Unreal::FWeakObjectPtr{};
+            stash_screen.drag_item = {};
+        }
     }
 
     void finish_stash_cursor(Unreal::UObject* manager, Unreal::UObject* target)
@@ -1815,6 +1933,100 @@ namespace
         return true;
     }
 
+    std::string_view exact_guest_cursor_item(Unreal::UObject* save, const ItemView& item, Guid& guid)
+    {
+        const GuidFields fields(item.structure);
+        auto* quantity = field<Unreal::FIntProperty>(item.structure, item_ammo_name);
+        auto* item_class = object_value(field<Unreal::FClassProperty>(item.structure, item_class_name), item.value);
+        const auto use = stock_backpack_use(item_class);
+        if (use.empty() || !fields.valid() || !quantity) return {};
+        guid = fields.read(item.value);
+        if (guid == Guid{} || !exact_canonical_drop_row(save, item, guid,
+                quantity->GetPropertyValueInContainer(item.value), item_class, {}, false)) return {};
+        return use;
+    }
+
+    bool intercept_guest_use_cursor(Iteration& iteration, Unreal::UObject* manager, Unreal::UFunction* function,
+                                    const void* parameters, const Unreal::FName& name, bool guarded)
+    {
+        const bool held_here = guest_use_cursor.held != Guid{} && guest_use_cursor.manager.Get() == manager;
+        const bool landing = name == entries->insert_item || name == entries->use_held || name == entries->confirm_use;
+        if (held_here && (name == entries->return_item || (landing && !guarded)) &&
+            exact_class(manager, manager_path) && function->GetOuterPrivate() == manager->GetClassPrivate())
+        {
+            iteration.PreventOriginalFunctionCall();
+            if (iteration.OriginalFunctionCallPrevented())
+            {
+                guest_use_cursor = {};
+                clear_stash_cursor(manager);
+            }
+            return true;
+        }
+        if (!guarded || function->GetReturnProperty() ||
+            function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return false;
+        const bool begin = name == entries->begin_take;
+        const bool finish = name == entries->finish_take;
+        const bool insert = name == entries->insert_item && held_here;
+        const bool use = (name == entries->use_held || name == entries->confirm_use) && held_here;
+        if (!(begin || finish || insert || use) || function->GetNumParms() != (insert ? 2 : 0)) return false;
+
+        auto* screen = object_field(manager, STR("ParentScreen"));
+        auto* panel = object_field(screen, STR("BackpackPanel"));
+        auto* save = canonical_host_save();
+        auto* pawn = scope.pawn.Get();
+        auto* dead = field<Unreal::FBoolProperty>(pawn, STR("Dead"));
+        auto* underwater = field<Unreal::FBoolProperty>(pawn, STR("HeadUnderWater"));
+        const auto now = Clock::now();
+        const auto ready = [&] {
+            return now < host_drop_scope.expires && host_drop_sequence < max_drop_sequence &&
+                   (!host_drop_request || now >= host_drop_request->expires) &&
+                   dead && !dead->GetPropertyValueInContainer(pawn) && underwater &&
+                   !underwater->GetPropertyValueInContainer(pawn);
+        };
+        if (begin || finish)
+        {
+            auto* card = object_field(manager, STR("HoveredCard"));
+            const auto item = card_item(card);
+            Guid guid{};
+            const bool selectable = !held_here && ready() && item.panel == panel && same_widget_player(card) &&
+                object_field(card, STR("ItemManager")) == manager && array_has_widget(panel, STR("Cards"), card, false) &&
+                !exact_guest_cursor_item(save, item, guid).empty();
+            if (begin && selectable)
+            {
+                guest_use_cursor = {manager, guid, {}};
+                return true; // The stock hold timer is UI-only until FinalTakeItem.
+            }
+            iteration.PreventOriginalFunctionCall();
+            if (finish && selectable && guest_use_cursor.manager.Get() == manager && guest_use_cursor.taking == guid)
+            {
+                guest_use_cursor.taking = {};
+                guest_use_cursor.held = guid;
+                if (!start_stock_cursor(manager, item)) guest_use_cursor = {};
+            }
+            else if (!held_here && guest_use_cursor.manager.Get() == manager)
+            {
+                guest_use_cursor = {};
+                if (auto* cancel = stock_no_args(manager, entries->cancel_take)) manager->ProcessEvent(cancel, nullptr);
+            }
+            return true;
+        }
+
+        iteration.PreventOriginalFunctionCall();
+        if (!iteration.OriginalFunctionCallPrevented()) return true;
+        const auto item = inventory_item(manager, STR("HeldItem"));
+        auto* target = insert ? object_value(field<Unreal::FObjectProperty>(function, STR("InventoryWidget")), parameters) : nullptr;
+        const bool matches_player = !insert || (target && target == object_field(screen, STR("PlayerCard")) &&
+                                                    same_widget_player(target));
+        Guid guid{};
+        const auto action = ready() && matches_player ? exact_guest_cursor_item(save, item, guid) : std::string_view{};
+        if (!action.empty() && guid == guest_use_cursor.held)
+            host_drop_request = HostDropRequest{guid, 1, ++host_drop_sequence, false, now + request_lease,
+                                                manager, screen, panel, action};
+        guest_use_cursor = {};
+        clear_stash_cursor(manager);
+        return true;
+    }
+
     void intercept(Iteration& iteration, Unreal::UObject* context, Unreal::UFunction* function, const void* parameters)
     {
         if (!context || !function || !entries || iteration.OriginalFunctionCallPrevented())
@@ -1830,6 +2042,9 @@ namespace
             auto* screen = object_field(context, STR("ParentScreen"));
             return exact_drop_screen(context, screen, object_field(screen, STR("BackpackPanel")));
         };
+        if ((name == entries->return_item || name == entries->begin_take || name == entries->finish_take ||
+             name == entries->insert_item || name == entries->use_held || name == entries->confirm_use) &&
+            intercept_guest_use_cursor(iteration, context, function, parameters, name, guarded_inventory())) return;
         const bool context_pickup = name == entries->action_pickup || name == entries->action_quick_move;
         if ((context_pickup || name == entries->quick_move) && guarded_inventory())
         {
@@ -1858,6 +2073,13 @@ namespace
             iteration.PreventOriginalFunctionCall();
             return;
         }
+        if (name == entries->move_to_cursor && scope.host)
+        {
+            observe_host_split_cursor(context, function);
+            return;
+        }
+        if (name == entries->clear_held && host_split_drag.manager.Get() == context)
+            host_split_drag = {};
         if (name == entries->insert_item)
         {
             intercept_drag_drop(iteration, context, function, parameters);
