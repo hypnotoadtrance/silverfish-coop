@@ -9,6 +9,12 @@ local prop_path = "/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master
 local item_path = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
 local core_path = "/Game/Classes/Actors/MindCore_BP.MindCore_BP_C"
 local grab_path = "/Game/Classes/Player/Player_FP.Player_FP_C:Grab_Release_Object"
+local release_component_path = "/Script/Engine.PhysicsHandleComponent:ReleaseComponent"
+local final_capture_age = .10
+local max_handoff_offset = 175
+local max_release_reach = 375
+local max_linear_velocity = 6000
+local max_angular_velocity = 7200
 local color = {R = 0, G = 0, B = 0, A = 0}
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local world, state, phase, hook, mailbox, sequence, next_read
@@ -21,7 +27,10 @@ local offering_fixture = headless and observers.enabled and os.getenv("SILVERFIS
 local function valid(value) return value and value ~= false and value:IsValid() end
 local function same(left, right) return valid(left) and valid(right) and left:GetAddress() == right:GetAddress() end
 local function finite(value, limit) return type(value) == "number" and value == value and math.abs(value) <= limit end
-local function point(value) return value and finite(value.X, 1e7) and finite(value.Y, 1e7) and finite(value.Z, 1e7) end
+local function vector(value, limit)
+    return value and finite(value.X, limit) and finite(value.Y, limit) and finite(value.Z, limit)
+end
+local function point(value) return vector(value, 1e7) end
 local function pose(value)
     return value and finite(value.Pitch, 360) and finite(value.Yaw, 360) and finite(value.Roll, 360)
 end
@@ -29,6 +38,7 @@ local function dist2(left, right)
     return (left.X - right.X)^2 + (left.Y - right.Y)^2 + (left.Z - right.Z)^2
 end
 local function copy_rot(value) return {Pitch = value.Pitch, Yaw = value.Yaw, Roll = value.Roll} end
+local function angle_delta(angle, goal) return (goal - angle + 180) % 360 - 180 end
 local function guid(value) return type(value) == "string" and #value == 32 and value:match("^[0-9a-f]+$") end
 
 local function actor_class(actor)
@@ -76,6 +86,37 @@ local function held(pawn, actor, grip, corpse)
             or not corpse and (item ~= nil or actor.BeingHeld == true and same(actor["Holding Actor"], pawn)))
 end
 
+local function rigid_root(entry, grip, bone)
+    local pawn, actor = entry.pawn, entry.actor
+    if entry.corpse or entry.loot_id or not valid(actor) or actor.bReplicateMovement ~= true
+        or not held(pawn, actor, grip) then return end
+    local root = mesh(actor)
+    if same(root, actor.RootComponent) and root:IsSimulatingPhysics(bone) then return root end
+end
+
+local function solved_pose(root, bone)
+    local location, rotation = root:K2_GetComponentLocation(), root:K2_GetComponentRotation()
+    local velocity = root:GetPhysicsLinearVelocity(bone)
+    local spin = root:GetPhysicsAngularVelocityInDegrees(bone)
+    if point(location) and pose(rotation) and vector(velocity, max_linear_velocity)
+        and vector(spin, max_angular_velocity) then
+        return {location = location, rotation = rotation, velocity = velocity, spin = spin}
+    end
+end
+
+local function capture_release(grip)
+    if phase ~= "connected" or not local_hold or not state.listening or state.server ~= true then return end
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    if not same(pawn, local_hold.pawn) or not same(grip, handle(pawn)) or not pawn:IsLocallyControlled()
+        or pawn:HasAuthority() or pawn.Dead ~= false or players.is_downed(pawn) then return end
+    local_hold.release = nil
+    local bone = FName("None", EFindName.FNAME_Find)
+    local root = rigid_root(local_hold, grip, bone)
+    if not root or local_hold.actor:HasAuthority() then return end
+    local final = solved_pose(root, bone)
+    if final then local_hold.release = {time = os.clock(), pose = final} end
+end
+
 local function bone_name(value)
     if not value then return end
     local name = value:ToString()
@@ -106,7 +147,7 @@ local function stock_target(pawn)
         {Pitch = 0, Yaw = rotation.Yaw, Roll = 0}
 end
 
-local function emit(pawn, kind, class, position, pitch, yaw, corpse, placement, loot_id)
+local function emit(pawn, kind, class, position, pitch, yaw, corpse, placement, loot_id, final)
     if not point(position) or not class or not pitch or not yaw then return end
     sequence = (sequence or 0) + 1
     edges[#edges + 1] = {sequence, pawn:GetFullName(), kind, class, position.X, position.Y, position.Z, pitch, yaw}
@@ -119,6 +160,11 @@ local function emit(pawn, kind, class, position, pitch, yaw, corpse, placement, 
     elseif loot_id then
         local edge = edges[#edges]
         edge[#edge + 1] = "loot:" .. loot_id
+    elseif final then
+        local edge = edges[#edges]
+        for _, value in ipairs({final.location.X, final.location.Y, final.location.Z, final.rotation.Pitch,
+            final.rotation.Yaw, final.rotation.Roll, final.velocity.X, final.velocity.Y, final.velocity.Z,
+            final.spin.X, final.spin.Y, final.spin.Z}) do edge[#edge + 1] = value end
     end
     if #edges > 6 then table.remove(edges, 1) end
     return sequence
@@ -142,12 +188,19 @@ local function observe(pawn, throwing, dropping)
     local actor, grip = pawn.HeldObject, handle(pawn)
     if local_hold and not held(pawn, local_hold.actor, grip, local_hold.corpse) then
         local pitch, yaw = camera_aim(pawn)
+        local capture = local_hold.release
+        local age = capture and os.clock() - capture.time
+        local final = (throwing or dropping) and age and age >= 0 and age <= final_capture_age and capture.pose
         emit(pawn, throwing and "throw" or "drop", local_hold.class,
-            pawn:K2_GetActorLocation(), pitch, yaw)
+            pawn:K2_GetActorLocation(), pitch, yaw, nil, nil, nil, final)
         if local_hold.loot_id then loot.stop_carry(pawn, local_hold.actor) end
         local_hold = nil
     end
-    if local_hold or not valid(actor) then return end
+    if local_hold then
+        local_hold.release = nil
+        return
+    end
+    if not valid(actor) then return end
     local loot_id = actor:HasAuthority() and loot.start_carry(pawn, actor) or nil
     if not loot_id and actor:HasAuthority() then return end
     local number, part = corpses.binding(actor, true)
@@ -311,6 +364,52 @@ local function stock(pawn, kind, actor, range, pitch, yaw, corpse)
         if corpse then pawn["Hit Bone Name"], pawn["WhereI'mLooking"] = previous_bone, previous_point end
     end)
     return invoked and restored
+end
+
+local function read_release_pose(fields)
+    local location = {X = tonumber(fields[9]), Y = tonumber(fields[10]), Z = tonumber(fields[11])}
+    local rotation = {Pitch = tonumber(fields[12]), Yaw = tonumber(fields[13]), Roll = tonumber(fields[14])}
+    local velocity = {X = tonumber(fields[15]), Y = tonumber(fields[16]), Z = tonumber(fields[17])}
+    local spin = {X = tonumber(fields[18]), Y = tonumber(fields[19]), Z = tonumber(fields[20])}
+    if point(location) and pose(rotation) and vector(velocity, max_linear_velocity)
+        and vector(spin, max_angular_velocity) then
+        return {location = location, rotation = rotation, velocity = velocity, spin = spin}
+    end
+end
+
+local function write_release_pose(root, bone, target)
+    root:K2_SetWorldLocationAndRotation(target.location, target.rotation, false, {}, true)
+    local location, rotation = root:K2_GetComponentLocation(), root:K2_GetComponentRotation()
+    if not point(location) or dist2(location, target.location) > 2^2 or not pose(rotation)
+        or math.abs(angle_delta(rotation.Pitch, target.rotation.Pitch)) > 2
+        or math.abs(angle_delta(rotation.Yaw, target.rotation.Yaw)) > 2
+        or math.abs(angle_delta(rotation.Roll, target.rotation.Roll)) > 2 then return false end
+
+    root:SetPhysicsLinearVelocity(target.velocity, false, bone)
+    root:SetPhysicsAngularVelocityInDegrees(target.spin, false, bone)
+    local velocity = root:GetPhysicsLinearVelocity(bone)
+    local spin = root:GetPhysicsAngularVelocityInDegrees(bone)
+    return vector(velocity, max_linear_velocity + 8) and dist2(velocity, target.velocity) <= 8^2
+        and vector(spin, max_angular_velocity + 10) and dist2(spin, target.spin) <= 10^2
+end
+
+local function apply_release_pose(entry, fields)
+    if os.clock() >= entry.deadline or not valid(entry.actor) or not entry.actor:HasAuthority() then return false end
+    local final = read_release_pose(fields)
+    local bone = FName("None", EFindName.FNAME_Find)
+    local root = final and rigid_root(entry, entry.grip, bone)
+    local prior = root and solved_pose(root, bone)
+    local origin = prior and entry.pawn:K2_GetActorLocation()
+    -- Reject a handoff far from either the host's live grip or its holder.
+    if not point(origin) or dist2(origin, final.location) > max_release_reach^2
+        or dist2(prior.location, final.location) > max_handoff_offset^2 then return false end
+    -- Seed the body before the same stock call releases the constraint and adds the drop/throw velocity.
+    local ok, applied = pcall(write_release_pose, root, bone, final)
+    if not ok or not applied then
+        pcall(write_release_pose, root, bone, prior)
+        return false
+    end
+    return true
 end
 
 local function remove(entry, kind, pitch, yaw)
@@ -547,6 +646,7 @@ function carry.command(fields, current, seat)
         error("native_prop_carry_guest_unavailable", 0)
     end
     local entry = holdings[lease]
+    local release_pose_applied = false
     if kind == "grab" and (#fields == 12 or #fields == 13 or #fields == 14) then
         local position = {X = tonumber(fields[10]), Y = tonumber(fields[11]), Z = tonumber(fields[12])}
         local number = #fields == 14 and math.tointeger(fields[13]) or nil
@@ -605,8 +705,12 @@ function carry.command(fields, current, seat)
         entry = {lease = lease, pawn = pawn, actor = actor, actor_name = actor:GetFullName(), grip = grip,
             serial = serial, deadline = os.clock() + 1.5, corpse = corpse, loot_id = loot_id}
         holdings[lease] = entry
-    elseif (kind == "drop" or kind == "throw") and #fields == 8 and entry and same(pawn, entry.pawn)
-        and serial > entry.serial then
+    elseif (kind == "drop" or kind == "throw") and (#fields == 8 or #fields == 20)
+        and entry and same(pawn, entry.pawn) and serial > entry.serial then
+        if #fields == 20 then
+            local ok, applied = pcall(apply_release_pose, entry, fields)
+            release_pose_applied = ok and applied
+        end
         if not remove(entry, kind, pitch, yaw) then error("native_prop_carry_stock_release_unverified", 0) end
     else
         error("native_prop_carry_wrong_holder", 0)
@@ -614,11 +718,12 @@ function carry.command(fields, current, seat)
     latest = {lease, serial, kind, name, entry.actor_name}
     if entry.corpse then latest[6], latest[7] = entry.corpse.number, entry.corpse.name end
     if entry.loot_id then latest[6] = "loot:" .. entry.loot_id end
+    if release_pose_applied then latest[6] = "release-pose" end
     return "stock physics prop action verified"
 end
 
 local function interpolate_rotation(angle, goal, alpha)
-    local difference = (goal - angle + 180) % 360 - 180
+    local difference = angle_delta(angle, goal)
     return (angle + difference * alpha + 180) % 360 - 180
 end
 
@@ -734,6 +839,11 @@ function carry.sync(current, seat, bridge)
     end
     state, phase, mailbox = current, seat, bridge and bridge .. "/native-prop-carry-poses"
     if not hook and type(RegisterHook) == "function" and valid(StaticFindObject(grab_path)) then
+        if valid(StaticFindObject(release_component_path)) then
+            -- The Blueprint hook runs after release. Both release branches call this native method
+            -- while HeldObject still identifies the grip and before applying stock velocity.
+            pcall(RegisterHook, release_component_path, function(context) pcall(capture_release, context:get()) end)
+        end
         RegisterHook(grab_path, function(context, throwing, dropping)
             pcall(observe, context:get(), throwing:get() == true, dropping:get() == true)
         end)

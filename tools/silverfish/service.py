@@ -1849,6 +1849,8 @@ class Host:
 
     def snapshot_for_guest(self, guest_id: str, role: str) -> dict:
         gameplay = self.public_gameplay()
+        if self.native_guest and self.prop_carry_bridge is not None:
+            gameplay[native_prop_carry.RELEASE_POSE] = True
         if (isinstance(self.relay, link.HostLink) and self.prop_carry_bridge is not None
                 and self.prop_carry_bridge.local_bridge is not None):
             gameplay[native_prop_carry.POSE_DATAGRAM] = True

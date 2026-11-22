@@ -23,7 +23,7 @@ from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY
 CRATE = f"{OBSERVATORY}.Observitory_P:PersistentLevel.LootCrate_Small_BP_C_1"
 
 
-async def exercise(work, untouched, kind="crate"):
+async def exercise(work, untouched, kind="crate", *, require_release_pose=False):
     token = f"{kind}-carry-{uuid.uuid4().hex[:8]}"
     host, guest = ("--campaign", token), ("--profile", token)
     hrun, grun = work / "campaigns" / token / "run", work / "clients" / token / "run"
@@ -187,13 +187,24 @@ async def exercise(work, untouched, kind="crate"):
             moved_again = await wait(hrun, lambda state: prop(state).get("actor") == initial["actor"] and
                                      math.dist(prop(state)["position"], prop(moved)["position"]) > 70)
             effect = dict(thrown=prop(thrown), landed=prop(moved_again), throw_receipt=proof(thrown))
+            if require_release_pose:
+                assert proof(thrown).get("release_pose_applied") is True, proof(thrown)
             if kind in ("placed-prop", "placed-item"):
                 path = placed_name.split(" ", 1)[1]
+                previous = None
+                settled = 0
                 async with asyncio.timeout(8):
                     while True:
                         authority, replica = await asyncio.gather(fixture(host, f"sample@{path}"), fixture(guest, f"sample@{path}"))
                         host_pose, guest_pose = ([float(value) for value in row["sample"].split("|")] for row in (authority, replica))
-                        if math.dist(host_pose[:3], guest_pose[:3]) <= 10:
+                        close = math.dist(host_pose[:3], guest_pose[:3]) <= 10
+                        if require_release_pose:
+                            still = previous is not None and all(math.dist(now[:3], then[:3]) <= 2 for now, then in
+                                                                 zip((host_pose, guest_pose), previous, strict=True))
+                            settled = settled + 1 if close and still else 0
+                            close = settled >= 2
+                            previous = host_pose, guest_pose
+                        if close:
                             effect.update(host_pose=host_pose, guest_pose=guest_pose)
                             break
                         await asyncio.sleep(.15)
@@ -229,5 +240,9 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", required=True, type=Path)
     parser.add_argument("--kind", choices=("crate", "lantern", "barrel", "fuel-drum", "fuel-drum-grab", "placed-prop", "placed-item"),
                         default="crate")
+    parser.add_argument("--require-release-pose", action="store_true", help="require the rigid-body handoff and settled agreement")
     options = parser.parse_args()
-    asyncio.run(exercise(options.work.resolve(), options.vanilla_saved.resolve(), options.kind))
+    if options.require_release_pose and options.kind != "placed-prop":
+        parser.error("--require-release-pose uses the placed rigid-prop fixture")
+    asyncio.run(exercise(options.work.resolve(), options.vanilla_saved.resolve(), options.kind,
+                         require_release_pose=options.require_release_pose))

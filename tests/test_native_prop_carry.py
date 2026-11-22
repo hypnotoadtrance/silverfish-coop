@@ -1,4 +1,5 @@
 import unittest
+import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -131,6 +132,64 @@ class CorpseCarryPayloadTests(unittest.TestCase):
         self.assertEqual(carry.parse(row, "hosting", area)["actor"], actor)
         request = [self.edge[0], area, *self.edge[2:5], item_class, *self.edge[6:], path]
         self.assertEqual(carry.parse(request, "connected", area)["placement"], path)
+
+
+class ReleaseHandoffTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reliable_release_keeps_its_solved_pose_when_transient_sample_is_missing(self):
+        epoch, lease, character = "a" * 32, "b" * 32, "c" * 32
+        area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+        actor = f"Prop_TypeWriter_C {area}.CrossRoads_P:PersistentLevel.Prop_TypeWriter_C_3"
+        pose = (820.1, -280, 300, 0, -20, 4, 120, -130, -20, 300, 0, -20)
+        raw_pose = list(map(str, pose))
+        local_edge = ["native-prop-carry-input", area, "4", "guest pawn", "throw",
+                      "/Game/Assets/Prop_TypeWriter.Prop_TypeWriter_C", "800", "-300", "250", "10", "-50"]
+        release = carry.parse([*local_edge, *raw_pose], "connected", area)
+        self.assertEqual(release["release_pose"], pose)
+        with self.assertRaisesRegex(ValueError, "coordinates"):
+            carry.parse([*local_edge, *raw_pose[:-1], "nan"], "connected", area)
+        receipt_row = [carry.ACTION, area, lease, "4", "throw", "guest pawn", actor]
+        proof = carry.parse([*receipt_row, "release-pose"], "hosting", area)
+        self.assertTrue(proof["release_pose_applied"])
+
+        service = SimpleNamespace(zone_epoch=epoch, last_game={"map": area}, control=Mock())
+        host = carry.Host(service)
+        host._reset()
+        holder = {"lease": lease, "pawn": "guest pawn", "sample": 0, "sequence": 2,
+                  "deadline": 50, "identity": {"placement": actor.split(" ", 1)[1]}}
+        host.holders[character] = holder
+
+        async def execute(*args, **kwargs):
+            self.assertTrue(holder["closing"])
+            self.assertEqual(args[:7], (carry.ACTION, lease, "guest pawn", "throw", "4", "10.0", "-50.0"))
+            self.assertEqual(tuple(map(float, args[7:])), pose)
+            return {carry.PROOF: proof}
+
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=execute), input_namespace=uuid.NAMESPACE_URL)
+        service.bridge = bridge
+        service.gameplay = {carry.RELEASE_POSE: True}
+
+        async def gameplay_action(action, operation, target):
+            self.assertEqual(action, carry.ACTION)
+            return await host.operate(bridge, character, target)
+
+        service.gameplay_action = gameplay_action
+        guest = carry.Guest(service)
+        guest.epoch, guest.lease, guest.grab = epoch, lease, 2
+        with patch.object(host, "_pawn", return_value="guest pawn"):
+            await guest._operate(release)
+        bridge.command.assert_awaited_once()
+        self.assertIsNone(guest.lease)
+        self.assertNotIn(character, host.holders)
+
+    async def test_guest_uses_the_stock_release_format_with_an_older_host(self):
+        epoch, lease = "a" * 32, "b" * 32
+        service = SimpleNamespace(bridge=SimpleNamespace(input_namespace=uuid.NAMESPACE_URL),
+                                  gameplay={}, gameplay_action=AsyncMock(return_value={carry.PROOF: {"sequence": 2}}))
+        guest = carry.Guest(service)
+        guest.epoch, guest.lease, guest.grab = epoch, lease, 1
+        await guest._operate({"edge": "drop", "sequence": 2, "pose": (0, 0, 0, 0, 0),
+                              "release_pose": (1,) * 12})
+        self.assertEqual(service.gameplay_action.await_args.args[2], f"{epoch}@{lease}@drop@2@0@0")
 
 
 class GuestPoseTransportTests(unittest.IsolatedAsyncioTestCase):

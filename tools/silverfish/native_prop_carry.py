@@ -13,6 +13,7 @@ from . import native_loot, party
 ACTION = "native-prop-carry"
 AIM = "native-prop-carry-aim"
 POSE_DATAGRAM = "native_prop_pose_datagram"
+RELEASE_POSE = "native_prop_release_pose"
 FIXTURE = "native-prop-carry-fixture"
 BARRELS = "native_authored_physics_barrels"
 BARREL_ROW = "native-authored-physics-barrel"
@@ -27,6 +28,7 @@ _BONE = re.compile(r"[A-Za-z0-9_ .-]{1,64}\Z")
 _EDGES = {"grab", "drop", "throw"}
 _ORDER_LIMIT = 2**53
 _POSE_LIMITS = (1e7, 1e7, 1e7, 360, 360, 360)
+_RELEASE_LIMITS = (*_POSE_LIMITS, 6000, 6000, 6000, 7200, 7200, 7200)
 _POSE_FRAME = Struct("!16s16sQiiihhh")
 
 
@@ -93,7 +95,8 @@ def parse(fields, phase, area):
     if fields[0] == ACTION:
         if len(fields) not in (7, 8, 9) or phase != "hosting" or not _token(fields[2]) or fields[4] not in _EDGES:
             raise ValueError("Invalid physics carry receipt")
-        identity = _identity(fields[7:], area)
+        releases_with_pose = len(fields) == 8 and fields[4] in ("drop", "throw") and fields[7] == "release-pose"
+        identity = {"release_pose_applied": True} if releases_with_pose else _identity(fields[7:], area)
         if "placement" in identity:
             raise ValueError("Unexpected placed item in physics carry receipt")
         return dict(lease=fields[2], sequence=_serial(fields[3]), edge=fields[4], pawn=fields[5], actor=fields[6],
@@ -132,11 +135,17 @@ def parse(fields, phase, area):
     if phase != "connected":
         raise ValueError("Physics carry input belongs to the guest")
     if fields[0] == "native-prop-carry-input":
-        if (len(fields) not in (11, 12, 13) or len(fields) > 11 and fields[4] != "grab"
-                or fields[4] not in _EDGES or not _class(fields[5])):
+        if len(fields) < 11 or fields[4] not in _EDGES or not _class(fields[5]):
+            raise ValueError("Invalid stock physics carry input")
+        extra = fields[11:]
+        if fields[4] == "grab" and len(extra) <= 2:
+            details = _identity(extra, area)
+        elif fields[4] != "grab" and len(extra) in (0, len(_RELEASE_LIMITS)):
+            details = {"release_pose": _numbers(extra, _RELEASE_LIMITS)} if extra else {}
+        else:
             raise ValueError("Invalid stock physics carry input")
         return dict(sequence=_serial(fields[2]), pawn=fields[3], edge=fields[4], class_path=fields[5],
-                    pose=_numbers(fields[6:11], (1e7, 1e7, 1e7, 89.9, 180)), **_identity(fields[11:], area))
+                    pose=_numbers(fields[6:11], (1e7, 1e7, 1e7, 89.9, 180)), **details)
     if len(fields) != 9:
         raise ValueError("Invalid stock physics grip")
     return dict(grab=_serial(fields[2]), pose=_numbers(fields[3:], (1e7, 1e7, 1e7, 360, 360, 360)))
@@ -167,7 +176,7 @@ class Host:
     async def operate(self, bridge, character, target):
         self._reset()
         fields = target.split("@") if isinstance(target, str) and len(target) <= 700 else []
-        if len(fields) not in (6, 10, 11, 12):
+        if len(fields) not in (6, 10, 11, 12, 6 + len(_RELEASE_LIMITS)):
             raise party.RuleError("native_prop_carry_invalid_action")
         epoch, lease, edge, raw_sequence, *payload = fields
         if epoch != self.epoch or not _token(lease) or edge not in _EDGES:
@@ -184,9 +193,13 @@ class Host:
             coordinates = _numbers(payload[3:6], (1e7, 1e7, 1e7))
             identity = _identity(payload[6:], self.service.last_game["map"])
             args = (payload[2], *(str(axis) for axis in coordinates), *payload[6:])
-        elif len(payload) == 2 and holder and (holder["lease"], holder["pawn"]) == (lease, pawn) and number > holder["sequence"]:
-            args = ()
+        elif (len(payload) in (2, 2 + len(_RELEASE_LIMITS)) and holder
+              and (holder["lease"], holder["pawn"]) == (lease, pawn) and number > holder["sequence"]):
             identity = holder["identity"]
+            sample = payload[2:]
+            args = ()
+            if sample and not ("corpse" in identity or "loot_id" in identity):
+                args = tuple(str(value) for value in _numbers(sample, _RELEASE_LIMITS))
             holder["closing"] = True
         else:
             raise party.RuleError("native_prop_carry_wrong_holder")
@@ -194,6 +207,7 @@ class Host:
         proof = snapshot.get(PROOF, {})
         if (tuple(proof.get(key) for key in ("lease", "sequence", "edge", "pawn")) != (lease, number, edge, pawn)
                 or any(proof.get(key) != identity.get(key) for key in ("corpse", "bone", "loot_id"))
+                or (proof.get("release_pose_applied") and (edge == "grab" or not args))
                 or ("placement" in identity and proof.get("actor", "").partition(" ")[2] != identity["placement"])):
             raise RuntimeError("The stock physics carry did not return the exact action")
         self.service.last_game, self.service.last_seen = snapshot, time.monotonic()
@@ -269,6 +283,8 @@ class Guest:
             suffix += (row["placement"],)
         elif edge == "grab" and "loot_id" in row:
             suffix += ("loot:" + row["loot_id"],)
+        elif edge != "grab" and service.gameplay.get(RELEASE_POSE) is True and "release_pose" in row:
+            suffix = tuple(str(value) for value in row["release_pose"])
         target = "@".join((self.epoch, lease, edge, str(number), str(pitch), str(yaw), *suffix))
         try:
             returned = await service.gameplay_action(ACTION, operation, target)
