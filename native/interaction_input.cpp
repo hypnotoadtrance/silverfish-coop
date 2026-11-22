@@ -240,6 +240,7 @@ namespace
     {
         std::uint64_t sequence{};
         Clock::time_point expires{};
+        Unreal::FWeakObjectPtr focus{};
     };
 
     struct ScopedInteraction
@@ -288,6 +289,7 @@ namespace
     Clock::time_point stash_lease{};
     bool dispatching_valve = false;
     bool event_source_matches{}, event_consumed{};
+    Unreal::FWeakObjectPtr event_focus;
     bool sewer_answering{};
 
     bool live_actor(Unreal::UObject* actor, Unreal::UObject* world, std::uint8_t role)
@@ -937,7 +939,17 @@ namespace
         return pawn && function && pawn == scope.pawn.Get() && function == scope.started.function.Get();
     }
 
-    void record(Iteration& iteration, Unreal::UObject* pawn, const void* parameters)
+    Unreal::FWeakObjectPtr pressed_focus(Unreal::UObject* pawn)
+    {
+        // The stock focus can change before the co-op input queue is drained.
+        if (scope.host) return {};
+        auto* can_interact = field<Unreal::FBoolProperty>(pawn, STR("CanInteract"));
+        if (!can_interact || !can_interact->GetPropertyValueInContainer(pawn)) return {};
+        auto* component = object_field(pawn, STR("InteractionTarget_Component"));
+        return live(component) ? Unreal::FWeakObjectPtr{component} : Unreal::FWeakObjectPtr{};
+    }
+
+    void record(Iteration& iteration, Unreal::UObject* pawn, const void* parameters, Unreal::FWeakObjectPtr focus)
     {
         const auto now = Clock::now();
         if (!parameters || iteration.OriginalFunctionCallPrevented() || now >= scope.expires ||
@@ -949,7 +961,7 @@ namespace
         if (!std::isfinite(elapsed) || elapsed < 0 || !std::isfinite(triggered) || triggered < 0) return;
         discard_expired(now);
         if (count == pending_limit) return;
-        receipts[(first + count) % pending_limit] = {++sequence, now + receipt_lifetime};
+        receipts[(first + count) % pending_limit] = {++sequence, now + receipt_lifetime, focus};
         ++count;
     }
 
@@ -966,6 +978,7 @@ namespace
             event_consumed = false;
             event_source_matches = parameters && scope.started.source->GetObjectPropertyValue(
                 scope.started.source->ContainerPtrToValuePtr<void>(parameters)) == scope.action.Get();
+            event_focus = event_source_matches ? pressed_focus(pawn) : Unreal::FWeakObjectPtr{};
             if (sewer_answering && event_source_matches && !iteration.OriginalFunctionCallPrevented() && queue_sewer_dialogue(pawn))
             {
                 iteration.PreventOriginalFunctionCall();
@@ -979,7 +992,8 @@ namespace
     {
         if (!available() || !exact_dispatch(pawn, function) || !event_depth) return;
         if (--event_depth != 0) return;
-        if (!event_consumed) record(iteration, pawn, parameters);
+        if (!event_consumed) record(iteration, pawn, parameters, event_focus);
+        event_focus = Unreal::FWeakObjectPtr{};
         event_source_matches = event_consumed = false;
     }
 
@@ -990,7 +1004,7 @@ namespace
         if (!available() || frame.Object() != pawn) return;
         if (exact_dispatch(pawn, frame.Node()))
         {
-            if (!event_depth) record(iteration, pawn, frame.Locals());
+            if (!event_depth) record(iteration, pawn, frame.Locals(), pressed_focus(pawn));
         }
         else route_interaction(iteration, pawn, frame.Node(), frame.Locals());
     }
@@ -1035,9 +1049,11 @@ namespace
         if (!count) return 0;
         lua.set_integer(static_cast<std::int64_t>(receipts[first].sequence));
         lua.set_integer(target);
+        auto* focus = receipts[first].focus.Get();
+        lua.set_string(live(focus) ? RC::to_string(focus->GetPathName()) : std::string{});
         first = (first + 1) % pending_limit;
         --count;
-        return 2;
+        return 3;
     }
 
     int lua_clear(const Lua&)
@@ -1585,6 +1601,7 @@ namespace silverfish::native_interaction_input
         mosby_station_input::clear_scope();
         mindcore_input::clear_scope();
         first = count = event_depth = 0;
+        event_focus = Unreal::FWeakObjectPtr{};
         event_source_matches = event_consumed = false;
     }
 }

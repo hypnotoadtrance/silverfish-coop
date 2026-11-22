@@ -98,11 +98,11 @@ local function sync_guest_sprints(state, slots, phase)
     end
 end
 
-local function write_interaction(pawn, pickup_source)
+local function write_interaction(pawn, pickup_source, pressed_component)
     if not input_file or not local_player or desired[local_player.name] or not same(pawn, local_player.pawn)
         or not pawn:IsLocallyControlled() then return end
-    local target = pickup_source or native_bag_projection.focused_target(pawn) or native_enemy_shell_view.focused_target(pawn)
-        or native_stock_door.focused_target(pawn)
+    local target = pickup_source or native_stock_door.focused_target(pawn, pressed_component)
+        or native_bag_projection.focused_target(pawn) or native_enemy_shell_view.focused_target(pawn)
     input_sequence = input_sequence + 1
     local record = "interact\t" .. tostring(input_sequence) .. (target and "\t" .. target or "") .. "\n"
     if type(SilverfishEnqueueLocalBridgeInput) == "function" and SilverfishEnqueueLocalBridgeInput(record) then
@@ -140,9 +140,9 @@ local function drain_native_interact()
     end
     local target
     for _ = 1, 8 do
-        local sequence, matched = SilverfishTakeNativeInteractPress(address)
+        local sequence, matched, pressed_component = SilverfishTakeNativeInteractPress(address)
         if matched ~= address or type(sequence) ~= "number" or sequence < 1 then break end
-        target = write_interaction(pawn)
+        target = write_interaction(pawn, nil, pressed_component)
     end
     return target
 end

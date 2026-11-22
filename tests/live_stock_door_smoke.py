@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from contextlib import contextmanager, nullcontext
 import json
 import math
 from pathlib import Path
@@ -26,8 +27,41 @@ WOOD_DOOR = f"Door_Wood_04_BP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Door_W
 METAL_DOOR = f"Door_Metal_03_BP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Door_Metal_03_Window_BP_C_16"
 
 
-async def exercise(work: Path, original: Path, actor: str, tool: str | None = None) -> None:
-    name = f"stock-door-{tool or 'host'}-{uuid.uuid4().hex[:8]}"
+@contextmanager
+def staged_sides_probe(work):
+    scripts = work / "stage/SilverFish/Binaries/Win64/ue4ss/Mods/SilverfishCoop/Scripts"
+    main, fixture = scripts / "main.lua", scripts / "stock_door_sides_probe.lua"
+    original = main.read_bytes()
+    with fixture.open("xb") as stream:
+        stream.write((Path(__file__).with_name("fixtures") / fixture.name).read_bytes())
+    try:
+        main.write_bytes(original + b'\nrequire("stock_door_sides_probe")\n')
+        yield
+    finally:
+        main.write_bytes(original)
+        fixture.unlink()
+
+
+async def side_probe(run, mode, role, side, reach):
+    mailbox = next((run / "game-bridge").iterdir())
+    reply = mailbox / "door-sides-reply"
+    reply.unlink(missing_ok=True)
+    (mailbox / "door-sides-probe").write_text(f"{mode}|{role}|{side}|{reach}|{uuid.uuid4().hex[:8]}\n",
+                                             encoding="ascii")
+    async with asyncio.timeout(6):
+        while True:
+            try:
+                ok, result = reply.read_text().split("|", 1)
+            except (OSError, ValueError):
+                await asyncio.sleep(.05)
+                continue
+            if ok != "ok":
+                raise RuntimeError(result)
+            return result
+
+
+async def exercise(work: Path, original: Path, actor: str, tool: str | None = None, two_sides: bool = False) -> None:
+    name = f"stock-door-{'two-sides' if two_sides else tool or 'host'}-{uuid.uuid4().hex[:8]}"
     host, guest = ("--campaign", name), ("--profile", name)
     hrun = work / "campaigns" / name / "run"
     grun = work / "clients" / name / "run"
@@ -71,6 +105,26 @@ async def exercise(work: Path, original: Path, actor: str, tool: str | None = No
     async def panel_blocks(controller, target):
         result = await command("action", *controller, doors.TRACE_FIXTURE, "--target", target)
         return result[doors.TRACE_RESULT]["panel"]
+
+    async def press_side(role, side):
+        target = hrun if role == "host" else grun
+        attempts = []
+        for reach in (95, 125, 155):
+            await side_probe(hrun, "stage", role, side, reach)
+            await asyncio.sleep(.55)
+            try:
+                input_status, signed_distance = (await side_probe(target, "press", role, side, reach)).split("|")
+                return {"stock": input_status, "leaf_distance": float(signed_distance), "role": role}
+            except RuntimeError as error:
+                if not any(marker in str(error) for marker in ("wrong leaf side", "fixture_focus_unavailable")):
+                    raise
+                attempts.append(str(error))
+        raise RuntimeError(f"The {role} could not reach the stock knob from side {side}: {attempts}")
+
+    async def guest_interactions():
+        actions = (await command("events", *guest, "--tail", "100", expected=None))["events"]
+        return [event for event in actions if event.get("event") == "local_interaction"
+                and event.get(doors.RESULT, {}).get("actor") == actor]
 
     async def approach_and_input(action):
         attempts = []
@@ -171,6 +225,49 @@ async def exercise(work: Path, original: Path, actor: str, tool: str | None = No
         await wait(grun, lambda state: doors.matches(door(state), door(unlocked)))
         assert not await panel_blocks(host, trace) and not await panel_blocks(guest, trace)
 
+        if two_sides:
+            async def aligned(opened):
+                def expected(frame):
+                    row = door(frame)
+                    if row.get("open") is not opened:
+                        return False
+                    angle = changed_angle(row, door(original_host))
+                    return angle > 80 if opened else angle < .05
+
+                authority = door(await wait(hrun, expected))
+                replica = door(await wait(grun, lambda frame: doors.matches(door(frame), authority)))
+                assert authority["collision"] == replica["collision"] in (3, 5)
+                assert math.dist(authority["knob_location"], replica["knob_location"]) < 2
+                passage = [await panel_blocks(host, trace), await panel_blocks(guest, trace)]
+                assert passage == [not opened, not opened], passage
+                return {"host": authority, "guest": replica, "closed_path_blocks": passage}
+
+            await press_side("host", 1)
+            await aligned(False)
+            cases = []
+            for opener, side in (("host", 1), ("guest", -1)):
+                opened_by = await press_side(opener, side)
+                open_state = await aligned(True)
+                opening_receipts = await guest_interactions()
+                closed_by = await press_side("guest", side)
+                closed_state = await aligned(False)
+                recent = await guest_interactions()
+                assert len(recent) == len(opening_receipts) + 1, recent
+                closing = recent[-1]
+                replay = await command("action", *guest, doors.ACTION, "--target", actor,
+                                       "--operation-id", closing["operation_id"])
+                assert replay[doors.RESULT] == closing[doors.RESULT] and replay[doors.RESULT]["open"] is False
+                await asyncio.sleep(.65)
+                assert await aligned(False) == closed_state
+                assert await guest_interactions() == recent
+                cases.append({"open_input": opened_by, "close_input": closed_by, "open": open_state,
+                              "closed": closed_state, "receipt": closing["operation_id"]})
+            assert cases[0]["close_input"]["leaf_distance"] * cases[1]["close_input"]["leaf_distance"] < 0
+            (hrun / "stock-door-two-sides-verification.json").write_text(json.dumps({
+                "door": actor, "cases": cases, "original_files_verified": len(originals),
+            }, indent=2), encoding="utf-8")
+            return
+
         _, input_started = await approach_and_input(doors.INPUT_FIXTURE)
 
         def is_closed(state):
@@ -234,6 +331,11 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--door", choices=("wood", "metal"), default="wood")
     parser.add_argument("--tool", choices=("blowtorch", "crowbar"))
+    parser.add_argument("--two-sides", action="store_true")
     args = parser.parse_args()
-    asyncio.run(exercise(args.work.resolve(), args.vanilla_saved.resolve(),
-                         WOOD_DOOR if args.door == "wood" else METAL_DOOR, args.tool))
+    if args.two_sides and (args.door != "wood" or args.tool):
+        parser.error("--two-sides uses the stock wooden door with no pry tool in the guest's inventory")
+    work = args.work.resolve()
+    with staged_sides_probe(work) if args.two_sides else nullcontext():
+        asyncio.run(exercise(work, args.vanilla_saved.resolve(),
+                             WOOD_DOOR if args.door == "wood" else METAL_DOOR, args.tool, args.two_sides))

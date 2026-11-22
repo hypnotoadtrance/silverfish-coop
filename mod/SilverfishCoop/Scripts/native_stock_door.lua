@@ -273,9 +273,15 @@ function doors.rows(state, phase, status_row, fields)
     return result
 end
 
-function doors.focused_target(pawn)
-    if not available() or not valid(pawn) or pawn:HasAuthority() or pawn.CanInteract ~= true then return end
-    local knob = pawn.InteractionTarget_Component
+function doors.focused_target(pawn, pressed_component)
+    if not available() or not valid(pawn) or pawn:HasAuthority() then return end
+    local knob
+    if pressed_component == nil then
+        if pawn.CanInteract ~= true then return end
+        knob = pawn.InteractionTarget_Component
+    elseif type(pressed_component) == "string" and #pressed_component > 0 and #pressed_component <= 512 then
+        knob = StaticFindObject(pressed_component)
+    end
     local actor = valid(knob) and knob:GetOwner()
     local world = pawn:GetWorld()
     local name = valid(world) and identity(actor, world)
