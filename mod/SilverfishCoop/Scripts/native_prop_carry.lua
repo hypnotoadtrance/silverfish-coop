@@ -164,7 +164,7 @@ local function observe(pawn, throwing, dropping)
     local position = corpse and part:GetSocketLocation(corpse.bone) or actor:K2_GetActorLocation()
     local placement
     if not corpse and actor:HasAnyFlags(EObjectFlags.RF_WasLoaded) and same(actor:GetOuter(), world.PersistentLevel) then
-        placement = actor:GetFullName():match("^%S+ (/Game/Classes/Maps/[%w_/]+%.[%w_]+:PersistentLevel%.[%w_]+)$")
+        placement = actor:GetFullName():match("^%S+ (/Game/Classes/Maps/[%w_/]+%.[%w_]+:PersistentLevel%.[%w_%-]+)$")
     end
     local birth = emit(pawn, "grab", class, position, pitch, yaw, corpse, placement, loot_id)
     if birth then local_hold = {actor = actor, pawn = pawn, class = class, serial = birth, corpse = corpse, loot_id = loot_id} end

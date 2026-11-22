@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 from contextlib import nullcontext
+from hashlib import sha256
 import json
 from pathlib import Path
 import shutil
@@ -283,6 +284,11 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
         native_host_save.verify_checkpoint(campaign / "game-user", saved)
         return saved
 
+    def save_hashes():
+        paths = list((campaign / "save").glob("campaign*.json"))
+        paths.extend((campaign / "game-user").rglob("*.sav"))
+        return {path.relative_to(campaign): sha256(path.read_bytes()).hexdigest() for path in paths}
+
     def canonical_flags(saved, map_name):
         return stock_flags(native_host_save.directory(campaign / "game-user"), saved["world"]["native_host_save"], map_name)
 
@@ -391,33 +397,19 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             tool_guid = uuid.uuid4().hex.upper()
             await command("action", *host, "native-guest-weapon-seed", "--target", "guest", "--item-guid", tool_guid,
                           "--kind", pry_tool)
-            page = (await command("action", *guest, "native-inventory-list"))["native_inventory"]
-            await command("action", *guest, "native-inventory-view-fixture")
-            await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "rendered")
-            key = ("action", *guest, "native-inventory-view-key-fixture", "--target")
-            for _ in range(next(index for index, item in enumerate(page["items"]) if item["guid"] == tool_guid)):
-                await command(*key, "down")
-            confirming = (await command(*key, "confirm"))["native_guest_inventory_equip_view"]
-            assert confirming["guid"] == tool_guid and confirming["state"] == "confirming", confirming
-            await command(*key, "confirm")
-            def equip_result():
-                return input_result(guest_run, confirming["sequence"], "native_guest_inventory_equipped",
-                                    "native_guest_inventory_equip_rejected", sequence_key="view_sequence")
-            await wait(guest_run, lambda _: equip_result() is not None)
-            equip_event = equip_result()
-            assert equip_event["event"] == "native_guest_inventory_equipped", equip_event
-            equipped = equip_event["native_guest_weapon"]
+            equipped = (await command("action", *guest, "native-guest-weapon-equip", "--target", tool_guid))["native_guest_weapon"]
             assert equipped["guid"] == tool_guid and equipped["kind"] == pry_tool, equipped
             assert equipped["actor_ammo"] == equipped["stored_ammo"] == tool_before, equipped
-            evidence[f"stock_{pry_tool}_inventory_equip"] = equip_event
-            await command(*key, "back")
-        if permanent:
+            evidence[f"stock_{pry_tool}_inventory_equip"] = equipped
+        if permanent or pry_tool or powered_scene:
             await command("action", *host, "checkpoint")
+        if permanent:
             initial = permanent_flags(saved_checkpoint())
             assert all(value is None for value in initial.values()), initial
             evidence["stock_persistent_flags_before"] = initial
 
         for position, crate in enumerate(targets):
+            disk_baseline = save_hashes() if pry_tool or powered_scene else None
             pried = False
             await command("action", *host, "native-loot-approach", "--target", crate)
             if family:
@@ -510,6 +502,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                         await command("action", *guest, loose.FIXTURE, "--target", target)
                         picked_up = await wait(run, lambda state: SAWMILL_KEY_ACTOR in state.get("gameplay", {}).get(loose.STATE, ()))
                         assert lock_status(picked_up, crate) is True
+                        await command("action", *host, "checkpoint")
                         key_record = saved_checkpoint()["world"]["party"][loose.STATE][SAWMILL_KEY_ACTOR]
                         assert key_record["owner"] == character
                         key_item = await typed_inventory_item(character, key_record["guid"])
@@ -696,6 +689,10 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                 selected["claimed_by"] = character
             replay = (await command("action", *host, "native-loot-open", "--target", crate))["native_loot_roll"]
             assert replay == roll, replay
+            if disk_baseline is not None:
+                assert disk_baseline and save_hashes() == disk_baseline, "Container interaction wrote a save"
+                evidence["no_save_on_interaction"] = True
+            await command("action", *host, "checkpoint")
             saved = saved_checkpoint()
             durable = saved["world"]["party"][native_loot.STATE_KEY][crate]
             assert native_loot.public_roll(durable) == roll, durable

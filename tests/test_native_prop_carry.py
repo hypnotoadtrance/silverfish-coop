@@ -38,3 +38,13 @@ class CorpseCarryPayloadTests(unittest.TestCase):
         self.assertEqual(carry.parse(fields, "connected", self.area)["placement"], path)
         with self.assertRaises(ValueError):
             carry.parse([*fields[:-1], path.replace("CrossRoads_P", "Observitory_P")], "connected", self.area)
+
+    def test_cooked_ammo_kits_keep_their_hyphenated_class_and_placement(self):
+        area = "/Game/Classes/Maps/Maps_Dungeons/FortLeto_01_P"
+        path = f"{area}.FortLeto_01_P:PersistentLevel.AmmoKit_5-56Inter_C_3"
+        actor = f"AmmoKit_5-56Inter_C {path}"
+        item_class = "/Game/Classes/Items/AmmoKit_5-56Inter.AmmoKit_5-56Inter_C"
+        row = [carry.PLACED_PROP_ROW, area, actor, item_class, "13.116963386536"]
+        self.assertEqual(carry.parse(row, "hosting", area)["actor"], actor)
+        request = [self.edge[0], area, *self.edge[2:5], item_class, *self.edge[6:], path]
+        self.assertEqual(carry.parse(request, "connected", area)["placement"], path)

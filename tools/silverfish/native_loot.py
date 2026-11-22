@@ -32,6 +32,7 @@ PLACEMENT = "native-loot-placement"
 STACK_MERGE_TAG = "native-loot-stack-merge"
 PLACEMENT_KEY = "native_loot_placement"
 FORCED_ROLL_STATUS = "opened_fixture_seeded"
+SPECIAL_MEMORY_CAPABILITY = "native_loot_special_memory"
 CASH_RANGES = {
     f"/Game/Classes/Items/Item_Money_{name}.Item_Money_{name}_C": limits
     for name, limits in (("CoupleBills", (6, 10)), ("SmallStack", (30, 50)),
@@ -44,8 +45,11 @@ def public_roll(roll: dict) -> dict:
 
 
 async def flush_pending_escrows(host, bridge, state):
-    rolls = state.get(STATE_KEY, {})
-    pending = {crate: roll["escrow"] for crate, roll in rolls.items()
+    from . import native_stock_enemy_drops
+
+    pending = {(ledger, identity): roll["escrow"]
+               for ledger in (STATE_KEY, native_stock_enemy_drops.STATE)
+               for identity, roll in state.get(ledger, {}).items()
                if (roll.get("escrow") or {}).get("pending") is True}
     if not pending:
         return state, {}
@@ -57,12 +61,16 @@ async def flush_pending_escrows(host, bridge, state):
         host.last_game, host.last_seen = snapshot, time.monotonic()
 
     def read_frames():
-        return {crate: native_host_save.record(host.native_profile, row["slot"], row["map"], flush=True)
-                for crate, row in pending.items()}
+        return {key: native_host_save.record(host.native_profile, row["slot"], row["map"], flush=True)
+                for key, row in pending.items()}
 
     records = await asyncio.to_thread(read_frames)
-    return {**state, STATE_KEY: {**rolls, **{crate: dict(rolls[crate], escrow=frame)
-                                           for crate, frame in records.items()}}}, records
+    updated = dict(state)
+    for ledger in {key[0] for key in records}:
+        updated[ledger] = dict(state[ledger])
+    for (ledger, identity), frame in records.items():
+        updated[ledger][identity] = dict(state[ledger][identity], escrow=frame)
+    return updated, records
 
 
 def pry_defers_unlock(crate: str) -> bool:
@@ -262,7 +270,7 @@ async def observe_powered_electronics(host, bridge) -> None:
             continue
         operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{host.control.generation}:{host.zone_epoch}:electronic:{crate}:{sequence}").hex
         try:
-            await perform(host, bridge, "host", "open", crate, operation, power_sequence=sequence)
+            await perform(host, bridge, "host", "open", crate, operation, power_sequence=sequence, defer_save=True)
         except party.RuleError as error:
             host.control.event("native_stock_crate_interaction_rejected", sequence=sequence,
                                operation_id=operation, crate=crate, entry="powered", reason=str(error))
@@ -364,6 +372,14 @@ async def use_vehicle_pry_tool(host, bridge, character, target, operation_id, ac
     if (game.get(VEHICLE_LOCKS, {}).get(crate) is not True or crate in host.party.get(STATE_KEY, {})
             or host.smg_holds is not None and host.smg_holds.strokes):
         raise party.RuleError(f"stock_{kind}_vehicle_not_locked")
+    defer_save = game.get(SPECIAL_MEMORY_CAPABILITY) is True
+    if defer_save:
+        from .native_inventory import retain_guest_save
+
+        if not await retain_guest_save(host, bridge, character, pawn):
+            raise party.RuleError("native_guest_save_retention_unavailable")
+        if host.zone_epoch != epoch or _scope(host, character) != pawn:
+            raise party.RuleError(f"stock_{kind}_scope_unavailable")
     before_sequence = game.get("native_loot_guest_pries", {}).get(crate, {}).get("sequence", 0)
     host.native_checkpoint_unsafe = True
     try:
@@ -389,7 +405,7 @@ async def use_vehicle_pry_tool(host, bridge, character, target, operation_id, ac
         host.last_game = snapshot if ready(snapshot) else await bridge.wait_for(ready, timeout=4)
         host.last_seen = time.monotonic()
         return await perform(host, bridge, character, "open", crate, operation_id, pried=True,
-                             tool_receipt=(fingerprint, result_key, proof))
+                             tool_receipt=(fingerprint, result_key, proof), defer_save=defer_save)
     finally:
         if host.native_checkpoint_unsafe:
             host.stopping = True
@@ -617,6 +633,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
         raise party.RuleError("native_loot_opener_unavailable")
 
     arguments = ()
+    memory_escrow = False
     if action == "claim":
         fingerprint = ["native-loot-claim", guid, crate]
         if receipt:
@@ -645,13 +662,15 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             arguments += ("defer-save",)
     elif action == "open":
         arguments = (native_host_save.new_slot(),)
+        capability = SPECIAL_MEMORY_CAPABILITY if pried or power_sequence is not None else "native_guest_save_retention"
+        memory_escrow = defer_save and not fixture_nonempty and host.last_game.get(capability) is True
         if fixture_nonempty:
             arguments += ("fixture-nonempty",)
         elif pried:
             arguments += ("stock-vehicle-pried",)
         elif power_sequence is not None:
             arguments += ("stock-electronic-powered", str(power_sequence))
-        elif defer_save and host.last_game.get("native_guest_save_retention"):
+        if memory_escrow:
             arguments += ("memory-escrow",)
     mutates = action in ("open", "seed", "claim")
     if mutates:
@@ -683,7 +702,11 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 receipts = candidate["receipts"].setdefault(character, [])
                 receipts.append({"id": operation_id, "request": unlock_request, "result": result})
                 del receipts[:-party.RECENT_ACTIONS]
-                revision = await host.checkpoint_native(bridge, candidate)
+                revision = None
+                if memory_escrow:
+                    host.pending_host_save = bool(host.pending_host_save)
+                else:
+                    revision = await host.checkpoint_native(bridge, candidate)
                 host.party = candidate
                 host.native_checkpoint_unsafe = False
                 host.control.event("native_loot_key_unlocked", revision=revision, operation_id=operation_id, **result[UNLOCK_RESULT])
@@ -700,7 +723,9 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 raise RuntimeError("The exact stock crate roll did not verify")
             if fixture_nonempty and (proof["status"] != FORCED_ROLL_STATUS or not items or proof["trait_calls"] != 3):
                 raise RuntimeError("The exact staged stock stream draw did not produce a retained item")
-            if proof.get("memory_escrow") is True:
+            if (proof.get("memory_escrow") is True) != memory_escrow:
+                raise RuntimeError("The stock crate roll did not verify its requested save mode")
+            if memory_escrow:
                 frame = {"slot": arguments[0], "map": area, "pending": True}
             else:
                 frame = await asyncio.to_thread(native_host_save.record, host.native_profile, arguments[0], area,
@@ -723,8 +748,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 receipts = candidate["receipts"].setdefault(character, [])
                 receipts.append({"id": operation_id, "request": request, "result": result})
                 del receipts[:-party.RECENT_ACTIONS]
-            deferred = defer_save and not (fixture_nonempty or pried or tool_receipt or power_sequence is not None)
-            if deferred:
+            if memory_escrow:
                 # The typed item escrow exists, but the world change belongs to the next stock checkpoint.
                 host.pending_host_save = bool(host.pending_host_save)
             elif tool_receipt:
@@ -733,7 +757,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
                 revision = await host.checkpoint_native(bridge, candidate)
             host.party = candidate
             host.native_checkpoint_unsafe = False
-            if deferred:
+            if memory_escrow:
                 host.control.event("native_loot_roll_accepted", **result["native_loot_roll"])
             else:
                 host.control.event("native_loot_roll_committed", revision=revision, **result["native_loot_roll"])

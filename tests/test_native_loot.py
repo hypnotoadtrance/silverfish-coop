@@ -561,6 +561,26 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         row, = host.party[native_loot.STATE_KEY][OTHER_CRATE]["items"]
         self.assertNotIn("claimed_by", row)
 
+    async def test_stock_enemy_claim_consumes_pending_escrow_without_saving(self):
+        enemy = native_stock_enemy_drops
+        host = self.host(CROSSROADS)
+        frame = {"slot": native_host_save.new_slot(), "map": CROSSROADS, "pending": True}
+        item = dict(ITEM, map=CROSSROADS, claimed_by=None, ammo=1, settled=True, escrow=frame,
+                    transform=dict(position=[1, 2, 3], rotation=[0, 0, 0], scale=[1, 1, 1]))
+        guid = item["guid"]
+        host.party[enemy.STATE] = {guid: item}
+        host.last_game.update({enemy.MEMORY_CAPABILITY: True, "native_world_loot_version": 1})
+        proof = dict(map=CROSSROADS, pawn=PAWN, slot=frame["slot"], guid=guid, status="claimed")
+        bridge = SimpleNamespace(command=AsyncMock(return_value=self.game(CROSSROADS, **{enemy.CLAIM_KEY: proof})))
+
+        with patch.object(native_host_save, "verify_record") as verify:
+            result = await enemy.claim(host, bridge, "host", guid, OPERATION)
+            verify.assert_not_called()
+        self.assertEqual(result[enemy.CLAIM_KEY]["claimed_by"], "host")
+        self.assertNotIn("escrow", host.party[enemy.STATE][guid])
+        self.assertIsNotNone(host.pending_host_save)
+        host.checkpoint_native.assert_not_awaited()
+
     async def test_stock_cash_credits_wallet_once_and_persists_the_exact_receipt(self):
         roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
         item = roll["items"][0]

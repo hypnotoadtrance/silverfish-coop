@@ -1746,6 +1746,8 @@ class Bridge:
                     data[native_stock_enemy_drops.BROKER_CUE] = True
                 elif fields[0] == native_stock_enemy_drops.PROOF_TAG:
                     data[native_stock_enemy_drops.PROOF_KEY] = native_stock_enemy_drops.parse_escrow(fields, data)
+                elif fields == ["native-stock-enemy-memory", "1"] and data.get("state") == "hosting":
+                    data[native_stock_enemy_drops.MEMORY_CAPABILITY] = True
                 elif fields[0] == native_stock_enemy_drops.BANKED:
                     data[native_stock_enemy_drops.BANK_KEY] = native_stock_enemy_drops.parse_bank(fields, data)
                 elif fields[0] == native_stock_enemy_drops.CLAIMED:
@@ -2376,6 +2378,8 @@ class Bridge:
                             row.update(zip(native_weather_view.RAIN_FIELDS, rain))
                             row["rain_verified"] = fields[31] == "1"
                     data["native_world_view"] = row
+                elif fields == ["native-loot-special-memory", "1"] and data.get("state") == "hosting":
+                    data[native_loot.SPECIAL_MEMORY_CAPABILITY] = True
                 elif fields[0] == "native-loot" and len(fields) in (14, 15, 16, 17):
                     count = int(fields[12])
                     if AUTHORED_CRATES.get(fields[3]) != fields[2] or not 0 <= count <= loot_capacity(fields[3]):

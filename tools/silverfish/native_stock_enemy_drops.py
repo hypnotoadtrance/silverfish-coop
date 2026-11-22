@@ -25,6 +25,7 @@ STATE = "native_stock_enemy_loot"
 BANK = "native-stock-enemy-loot-bank"
 BANKED = "native-stock-enemy-loot-banked"
 BANK_KEY = "native_stock_enemy_loot_banked"
+MEMORY_CAPABILITY = "native_stock_enemy_memory"
 CLAIM = "native-stock-enemy-loot-claim"
 CLAIMED = "native-stock-enemy-loot-claimed"
 CLAIM_KEY = "native_stock_enemy_loot_claim"
@@ -90,14 +91,15 @@ async def escrow_fixture(bridge, game, actor):
 
 
 def parse_bank(fields, game):
-    if len(fields) != 17 or not re.fullmatch(r"SFCoop_[0-9a-f]{32}", fields[7]):
+    if (len(fields) not in (17, 18) or not re.fullmatch(r"SFCoop_[0-9a-f]{32}", fields[7])
+            or len(fields) == 18 and fields[17] != "memory"):
         raise ValueError("Invalid banked stock enemy drop frame")
     report = parse_escrow(fields[:7], game)
-    axes = list(map(float, fields[8:]))
+    axes = list(map(float, fields[8:17]))
     transform = dict(position=axes[:3], rotation=axes[3:6], scale=axes[6:9])
     if not valid_item_transform(transform):
         raise ValueError("Invalid banked stock enemy drop transform")
-    return dict(report, slot=fields[7], transform=transform)
+    return dict(report, slot=fields[7], transform=transform, memory=len(fields) == 18)
 
 
 def parse_claim(fields, game):
@@ -332,6 +334,7 @@ async def observe(host, bridge):
     candidate = party.load_party(host.party)
     records = candidate.setdefault(STATE, {})
     committed = []
+    memory = host.last_game.get(MEMORY_CAPABILITY) is True
     try:
         for drop in observed[:8]:
             seq, area, actor = drop["sequence"], drop["map"], drop["actor"]
@@ -341,7 +344,8 @@ async def observe(host, bridge):
             slot = native_host_save.new_slot()
             host.native_checkpoint_unsafe = True
             try:
-                snapshot = await bridge.command(BANK, str(seq), slot, timeout=7)
+                options = ("memory-escrow",) if memory else ()
+                snapshot = await bridge.command(BANK, str(seq), slot, *options, timeout=7)
             except RuntimeError as error:
                 reason = str(error)
                 if reason not in {"stock_enemy_escrow_actor_unavailable", "stock_enemy_escrow_actor_unverified",
@@ -360,7 +364,10 @@ async def observe(host, bridge):
             if ((proof.get("map"), proof.get("sequence"), proof.get("actor"), proof.get("class_path"), proof.get("slot"))
                     != (area, seq, actor, drop["class_path"], slot) or not valid_guid(guid) or guid in records):
                 raise RuntimeError("The physical stock enemy item retirement did not verify")
-            frame = await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True)
+            if bool(proof.get("memory")) != memory:
+                raise RuntimeError("The stock enemy item did not verify its requested escrow mode")
+            frame = ({"slot": slot, "map": area, "pending": True} if memory else
+                     await asyncio.to_thread(native_host_save.record, host.native_profile, slot, area, flush=True))
             killer = next((character for character in host.roles().values()
                            if drop["killer"] and native_loot._scope(host, character) == drop["killer"]), None)
             record = {key: proof[key] for key in ("map", "guid", "class_path", "ammo", "transform")}
@@ -372,7 +379,11 @@ async def observe(host, bridge):
             processed.add(seq)
             committed.append((drop, records[guid]))
         if committed:
-            revision = await host.checkpoint_native(bridge, candidate)
+            revision = None
+            if memory:
+                host.pending_host_save = bool(host.pending_host_save)
+            else:
+                revision = await host.checkpoint_native(bridge, candidate)
             host.party = candidate
             host.native_checkpoint_unsafe = False
             for drop, record in committed:
@@ -408,7 +419,14 @@ async def claim(host, bridge, character, guid, operation):
         raise party.RuleError("stock_enemy_loot_claimant_unavailable")
 
     frame = roll["escrow"]
-    await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)
+    deferred = host.last_game.get(MEMORY_CAPABILITY) is True
+    if deferred and character != "host":
+        from .native_inventory import retain_guest_save
+
+        if not await retain_guest_save(host, bridge, character, pawn):
+            raise party.RuleError("native_guest_save_retention_unavailable")
+    if not frame.get("pending"):
+        await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -445,8 +463,13 @@ async def claim(host, bridge, character, guid, operation):
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
         host.last_game, host.last_seen = snapshot, time.monotonic()
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}),
-                                                typed_inventory=bool(merge))
+        revision = None
+        if deferred:
+            if character == "host":
+                host.pending_host_save = bool(host.pending_host_save or merge)
+        else:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}),
+                                                    typed_inventory=bool(merge))
         host.party = candidate
         host.native_checkpoint_unsafe = False
         host.control.event("native_stock_enemy_loot_claimed", revision=revision, operation_id=operation, **result[CLAIM_KEY])

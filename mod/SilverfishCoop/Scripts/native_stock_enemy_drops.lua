@@ -4,6 +4,7 @@ local shell_view = require("native_enemy_shell_view")
 local world_loot = require("native_guest_drop_projection")
 local transport = require("native_transport")
 local motion = require("native_enemy_drop_motion")
+local escrow = require("native_loot_actions")
 local world, latest, observed
 local proof, bank, claim, broker_defeated
 local black_market = "/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01"
@@ -130,6 +131,9 @@ function drops.rows(state, phase, row)
         end
         rows[#rows + 1] = row("native-stock-enemy-drop", state.map, table.unpack(record))
     end
+    if type(SilverfishReferenceNativeDetachedSave) == "function" then
+        rows[#rows + 1] = row("native-stock-enemy-memory", 1)
+    end
     if proof then rows[#rows + 1] = row("native-stock-enemy-escrow", state.map, table.unpack(proof)) end
     if bank then rows[#rows + 1] = row("native-stock-enemy-loot-banked", state.map, table.unpack(bank)) end
     if claim then rows[#rows + 1] = row("native-stock-enemy-loot-claimed", state.map, table.unpack(claim)) end
@@ -143,9 +147,10 @@ end
 local function capture(fields, state, phase, fixture)
     proof, bank = nil, nil
     local sequence, slot = math.tointeger(fields[3]), fields[4]
+    local pending = not fixture and #fields == 5 and fields[5] == "memory-escrow"
     local host, fresh = transport.scoped_host(state, phase)
     local pawn = host and host.pawn
-    if phase ~= "hosting" or #fields ~= 4 or not valid_slot(slot)
+    if phase ~= "hosting" or (#fields ~= 4 and not pending) or not valid_slot(slot)
         or not sequence or sequence < 1 or not same(world, state.world) or not pawn or not pawn:IsValid()
         or type(SilverfishCaptureStockEnemyDrop) ~= "function" or type(SilverfishVerifyNativeLootEscrow) ~= "function"
         or (fixture and (os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1"
@@ -167,22 +172,29 @@ local function capture(fields, state, phase, fixture)
     if not fixture and not pose then error("stock_enemy_escrow_transform_unavailable", 0) end
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     local save_class = StaticFindObject("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C")
-    if not api or not api:IsValid() or not save_class or not save_class:IsValid() or api:DoesSaveGameExist(slot, 0) then
+    if not api or not api:IsValid() or not save_class or not save_class:IsValid()
+        or not pending and api:DoesSaveGameExist(slot, 0) then
         error("stock_enemy_escrow_fixture_save_unavailable", 0)
     end
-    local scratch = api:CreateSaveGameObject(save_class)
+    local scratch = pending and escrow.create_pending_escrow(pawn.Save, api:GetGameInstance(pawn), state.world, slot)
+        or api:CreateSaveGameObject(save_class)
     if not scratch or not scratch:IsValid() then error("stock_enemy_escrow_fixture_save_unavailable", 0) end
     local ok, reason, guid, ammo = SilverfishCaptureStockEnemyDrop(pawn:GetAddress(), scratch:GetAddress(), actor:GetAddress(), sequence)
-    if not ok then error(tostring(reason), 0) end
-    if not api:SaveGameToSlot(scratch, slot, 0) then error("stock_enemy_escrow_fixture_save_failed", 0) end
-    local restored = api:LoadGameFromSlot(slot, 0)
-    local verified = restored and restored:IsValid() and SilverfishVerifyNativeLootEscrow(scratch:GetAddress(), restored:GetAddress())
-    if fixture or not verified then
-        local removed = api:DeleteGameInSlot(slot, 0)
-        if not verified or not removed or api:DoesSaveGameExist(slot, 0) or not actor:IsValid()
-            or actor:GetFullName() ~= name or actor.Ammo ~= ammo then error("stock_enemy_escrow_readback_failed", 0) end
-        proof = {sequence, name, match[6], guid, ammo}
-        return "stock NPC drop completed an exact escrow round trip"
+    if not ok then
+        if pending then escrow.release_escrow(slot) end
+        error(tostring(reason), 0)
+    end
+    if not pending then
+        if not api:SaveGameToSlot(scratch, slot, 0) then error("stock_enemy_escrow_fixture_save_failed", 0) end
+        local restored = api:LoadGameFromSlot(slot, 0)
+        local verified = restored and restored:IsValid() and SilverfishVerifyNativeLootEscrow(scratch:GetAddress(), restored:GetAddress())
+        if fixture or not verified then
+            local removed = api:DeleteGameInSlot(slot, 0)
+            if not verified or not removed or api:DoesSaveGameExist(slot, 0) or not actor:IsValid()
+                or actor:GetFullName() ~= name or actor.Ammo ~= ammo then error("stock_enemy_escrow_readback_failed", 0) end
+            proof = {sequence, name, match[6], guid, ammo}
+            return "stock NPC drop completed an exact escrow round trip"
+        end
     end
 
     actor:SetActorEnableCollision(false)
@@ -194,6 +206,7 @@ local function capture(fields, state, phase, fixture)
     match.finished = true
     clear_pose(match)
     bank = {sequence, name, match[6], guid, ammo, slot, table.unpack(pose)}
+    if pending then bank[#bank + 1] = "memory" end
     return "exact stock NPC item banked and retired"
 end
 
@@ -227,11 +240,13 @@ local function transfer(fields, state, phase)
         error("stock_enemy_loot_out_of_reach_or_obstructed", 0)
     end
     local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-    local pool = api and api:IsValid() and api:LoadGameFromSlot(slot, 0)
+    local pending = escrow.pending_escrow(state.world, slot)
+    local pool = pending or api and api:IsValid() and api:LoadGameFromSlot(slot, 0)
     if not pool or not pool:IsValid() then error("stock_enemy_loot_escrow_unavailable", 0) end
     local ok, status, amount, before, after, inventory_guid = SilverfishClaimNativeLootEscrow(pawn:GetAddress(), save:GetAddress(),
         stock:GetAddress(), pool:GetAddress(), guid)
     if not ok then error(tostring(status), 0) end
+    if pending then escrow.release_escrow(slot) end
     claim = {name, slot, guid, status, amount or 0, before or 0, after or 0}
     if status == "merged" then claim[8] = inventory_guid or "-" end
     return "exact stock NPC item transferred"

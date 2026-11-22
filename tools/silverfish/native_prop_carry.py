@@ -19,7 +19,8 @@ PLACED_PROP_ROW = "native-authored-physics-prop"
 INPUT = "native_prop_carry_input"
 TARGET = "native_prop_carry_target"
 PROOF = "native_prop_carry"
-_CLASS = re.compile(r"/Game/[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+_C\Z")
+_CLASS = re.compile(r"/Game/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+_C\Z")
+_PLACED_NAME = re.compile(r"[A-Za-z0-9_-]{1,100}\Z")
 _BONE = re.compile(r"[A-Za-z0-9_ .-]{1,64}\Z")
 _EDGES = {"grab", "drop", "throw"}
 _ORDER_LIMIT = 2**53
@@ -65,7 +66,7 @@ def _identity(fields, area):
     if path.startswith("loot:") and _token(path[5:]):
         return {"loot_id": path[5:]}
     prefix = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel."
-    if len(path) > 320 or not path.startswith(prefix) or not re.fullmatch(r"[A-Za-z0-9_]{1,100}", path[len(prefix):]):
+    if len(path) > 320 or not path.startswith(prefix) or not _PLACED_NAME.fullmatch(path[len(prefix):]):
         raise ValueError("Invalid placed physics carry target")
     return {"placement": path}
 
@@ -109,7 +110,7 @@ def parse(fields, phase, area):
         level = area.rsplit("/", 1)[-1]
         prefix = f"{name} {area}.{level}:PersistentLevel."
         mass, = _numbers(fields[4:], (10000,))
-        if not fields[2].startswith(prefix) or not re.fullmatch(r"[A-Za-z0-9_]{1,100}", fields[2][len(prefix):]) or mass <= 0:
+        if not fields[2].startswith(prefix) or not _PLACED_NAME.fullmatch(fields[2][len(prefix):]) or mass <= 0:
             raise ValueError("Invalid placed stock physics prop identity")
         return dict(actor=fields[2], class_path=fields[3], mass=mass)
     if phase != "connected":

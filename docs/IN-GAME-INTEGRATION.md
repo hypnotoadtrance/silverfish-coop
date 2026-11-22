@@ -162,7 +162,9 @@ Placed quest items and cash update the live inventory or shared wallet on pickup
 
 Merchant purchases and sales, NPC barter, Sewer Thing exchanges, and Borough or workbench trades update the live campaign. The Observatory purchase and sale left the campaign files unchanged. An explicit save preserved the merchant's buyback item and shared wallet through restart. A separate stock barter screen trial persisted an exact partial-stack trade only after an explicit save. [Merchant trial](../tests/live_finite_shop_smoke.py) · [Barter trial](../tests/live_npc_barter_smoke.py)
 
-Player and enemy drop storage, some special container actions, and some quest transitions and reward templates still have gameplay-time save calls. They need to share the explicit save boundaries before the campaign-wide save policy is complete.
+Keyed, powered, and pried containers use the same pending save path as ordinary crates. Fort Leto's key and unlock survived an explicit save and restart, and opening and looting the locker left save files unchanged. In a separate trial, a guest used a blowtorch and recovered the item's remaining fuel after saving and restarting. The powered locker also left the save files unchanged until the test requested a save. [Keyed locker trial](../tests/live_secure_locker_smoke.py) · [Powered and pried container trials](../tests/live_authored_crate_expansion_smoke.py)
+
+Physical stock enemy drops share the crate escrow and stay in memory until saved or claimed. Six Fort Leto drops were banked in memory and all six were present in the later explicit checkpoint. Firearm shell rewards that use the separate encounter adapter, player drops, and some quest transitions and reward templates still have gameplay-time save calls.
 
 The transport-item hook now requires an active co-op session before intercepting stock item use. Stardust and Fruiting Stardust use the game's own behavior in singleplayer.
 

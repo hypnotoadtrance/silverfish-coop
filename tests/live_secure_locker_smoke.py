@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from hashlib import sha256
 import json
 from pathlib import Path
 import subprocess
@@ -102,6 +103,12 @@ async def verify(work, original):
         native_host_save.verify_checkpoint(hrun.parent / "game-user", saved)
         return saved["world"]["party"]
 
+    def save_hashes():
+        root = hrun.parent
+        paths = list((root / "save").glob("campaign*.json"))
+        paths.extend((root / "game-user").rglob("*.sav"))
+        return {path.relative_to(root): sha256(path.read_bytes()).hexdigest() for path in paths}
+
     async def inventory(run):
         return (await action(run, "native-inventory-list"))["native_inventory"]["items"]
 
@@ -120,6 +127,9 @@ async def verify(work, original):
         invitation = await command("invite", *host, "--name", "Secure locker tester", "--character", "Secure locker tester")
         character = invitation["character_id"]
         await join(invitation, "guest", authority)
+        await action(hrun, "checkpoint")
+        locked_baseline = save_hashes()
+        assert locked_baseline
 
         await action(hrun, "native-loot-approach", target=crate)
         press = (await action(grun, "native-loot-crate-fixture", target=crate))["native_loot_crate_interaction"]
@@ -129,8 +139,8 @@ async def verify(work, original):
         await action(hrun, pickup.APPROACH, target="guest", pickup_source=source)
         key_press = await action(grun, pickup.STOCK_FIXTURE, pickup_source=source)
         assert key_press["native_authored_pickup_interaction"]["entry"] == "stock"
-        await wait(hrun, lambda frame: source in frame.get("gameplay", {}).get(pickup.STATE_KEY, {}))
-        key_record = checkpoint()[pickup.STATE_KEY][source]
+        picked_up = await wait(hrun, lambda frame: source in frame.get("gameplay", {}).get(pickup.STATE_KEY, {}))
+        key_record = picked_up["gameplay"][pickup.STATE_KEY][source]
         assert key_record["owner"] == character
         key_item, = [row for row in await inventory(grun) if row["guid"] == key_record["guid"]]
         assert all(row["class_path"] != key_item["class_path"] for row in await inventory(hrun))
@@ -144,11 +154,13 @@ async def verify(work, original):
         for run in (hrun, grun):
             await wait(run, lambda frame: ready(frame) and lock(frame) is False and roll(frame) is None)
         operation = unlocked["operation_id"]
-        assert checkpoint()[loot.KEY_UNLOCKS][crate] == {"id": operation, "opener": character}
         assert (await action(grun, "native-loot-open", target=crate, operation_id=operation))[loot.UNLOCK_RESULT] == expected
         different = next(target for target in candidates if target != crate)
         conflict = await submit(grun, "native-loot-open", target=different, operation_id=operation)
         assert conflict.get("error") == "operation_id_conflict", conflict
+        assert save_hashes() == locked_baseline, "Picking up the key or unlocking the locker wrote a save"
+        await action(hrun, "checkpoint")
+        assert checkpoint()[loot.KEY_UNLOCKS][crate] == {"id": operation, "opener": character}
 
         await stop_all()
         await start(hrun, "host-restart", "host", *host, "--port", str(port), *host_flags)
@@ -159,13 +171,13 @@ async def verify(work, original):
         assert renewed["character_id"] == character and resumed["endpoint"]["port"] == port
         assert key_item in await inventory(grun)
         assert (await action(grun, "native-loot-open", target=crate, operation_id=operation))[loot.UNLOCK_RESULT] == expected
+        unlocked_baseline = save_hashes()
 
         await action(hrun, "native-loot-approach", target=f"host@{crate}")
         await action(hrun, "native-loot-crate-fixture", target=crate)
         opened = roll(await wait(hrun, lambda frame: roll(frame)))
         await wait(grun, lambda frame: roll(frame) == opened)
         assert opened["opener"] == "host" and opened["items"], opened
-        assert crate not in checkpoint().get(loot.KEY_UNLOCKS, {})
         assert (await action(grun, "native-loot-open", target=crate, operation_id=operation))[loot.UNLOCK_RESULT] == expected
 
         selected = next(item for item in opened["items"] if item["class_path"] not in loot.CASH_RANGES)
@@ -181,9 +193,13 @@ async def verify(work, original):
         collected, = [row for row in await inventory(grun) if row["guid"] == guid]
         assert collected["class_path"] == selected["class_path"] and collected["source"] == "backpack"
         assert key_item in await inventory(grun)
+        assert save_hashes() == unlocked_baseline, "Opening the locker or taking loot wrote a save"
+        await action(hrun, "checkpoint")
+        saved = checkpoint()
+        assert crate not in saved.get(loot.KEY_UNLOCKS, {})
+        assert next(item for item in saved[loot.STATE_KEY][crate]["items"] if item["guid"] == guid)["claimed_by"] == character
         proof = {"unlock": expected, "restart_port": port, "roll": opened, "claimed": collected,
-                 "retained_key": key_item, "original_files_verified": len(originals)}
-        checkpoint()
+                 "retained_key": key_item, "no_save_on_interaction": True, "original_files_verified": len(originals)}
         (hrun / "secure-locker-verification.json").write_text(json.dumps(proof, indent=2), encoding="utf-8")
         print(json.dumps(proof), flush=True)
     finally:

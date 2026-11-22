@@ -727,8 +727,8 @@ class Host:
             self.pending_host_save = None
         if escrow_records:
             slots = []
-            for crate, frame in escrow_records.items():
-                checkpoint_party[native_loot.STATE_KEY][crate]["escrow"] = frame
+            for (ledger, identity), frame in escrow_records.items():
+                checkpoint_party[ledger][identity]["escrow"] = frame
                 slots.append(frame["slot"])
             for start in range(0, len(slots), 16):
                 try:
@@ -3126,7 +3126,7 @@ class Host:
                     elif operation != "claim" and target is None:
                         target = native_loot.default_crate(self.last_game.get("map"))
                     result = await native_loot.perform(self, bridge, character, operation, target,
-                                                       request.get("operation_id") or path.stem)
+                                                       request.get("operation_id") or path.stem, defer_save=True)
                 elif action == "native-loot-open-fixture" and self.fixtures:
                     role, crate = native_loot.fixture_selection(request.get("target"), self.last_game.get("map"))
                     character = self.roles().get(role)

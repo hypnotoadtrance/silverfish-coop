@@ -47,28 +47,38 @@ local function save_escrow(api, slot, pool, source)
     return restored
 end
 
+function actions.create_pending_escrow(stock, instance, world, slot)
+    local class = StaticFindObject(save)
+    local transient = StaticFindObject("/Engine/Transient")
+    if not valid_slot(slot) or pending_escrows[slot] or not valid_object(class)
+        or not valid_object(transient) or not valid_object(stock) or not valid_object(instance)
+        or not valid_object(world) or type(SilverfishReferenceNativeDetachedSave) ~= "function" then
+        error("native_loot_escrow_slot_unavailable", 0)
+    end
+    local pool = StaticConstructObject(class, transient, 0, EObjectFlags.RF_Transient | EObjectFlags.RF_MarkAsRootSet)
+    if not valid_object(pool) then error("native_loot_escrow_could_not_create_save", 0) end
+    local retained, reason = SilverfishReferenceNativeDetachedSave(stock:GetAddress(), pool:GetAddress(), true, true)
+    if not retained then error("native_loot_escrow_memory_" .. tostring(reason), 0) end
+    pending_escrows[slot] = {pool = pool, owner = instance, world = world:GetAddress()}
+    return pool
+end
+
+function actions.pending_escrow(world, slot)
+    local entry = pending_escrows[slot]
+    if entry and valid_object(world) and entry.world == world:GetAddress() and valid_object(entry.pool) then
+        return entry.pool
+    end
+end
+
 local function capture(scope, slot, outputs, items, pending)
     local api, class = StaticFindObject(statics), StaticFindObject(save)
     if not valid_object(api) or not valid_object(class) or pending_escrows[slot]
         or not pending and api:DoesSaveGameExist(slot, 0) then
         error("native_loot_escrow_slot_unavailable", 0)
     end
-    local pool
-    if pending then
-        local transient = StaticFindObject("/Engine/Transient")
-        if not valid_object(transient) then error("native_loot_transient_package_unavailable", 0) end
-        pool = StaticConstructObject(class, transient, 0, EObjectFlags.RF_Transient | EObjectFlags.RF_MarkAsRootSet)
-    else
-        pool = api:CreateSaveGameObject(class)
-    end
+    local pool = pending and actions.create_pending_escrow(scope.stock, scope.instance, scope.world, slot)
+        or api:CreateSaveGameObject(class)
     if not valid_object(pool) then error("native_loot_escrow_could_not_create_save", 0) end
-    if pending then
-        local retained, reason = SilverfishReferenceNativeDetachedSave(scope.stock:GetAddress(), pool:GetAddress(), true, true)
-        if not retained then
-            error("native_loot_escrow_memory_" .. tostring(reason), 0)
-        end
-        pending_escrows[slot] = {pool = pool, owner = scope.instance, world = scope.world:GetAddress()}
-    end
     local captured = table.pack(SilverfishCaptureNativeLootEscrow(
         scope.crate:GetAddress(), pool:GetAddress(), table.unpack(outputs)))
     if captured[1] ~= true or captured[3] ~= #items or captured.n ~= 3 + #outputs then
@@ -117,6 +127,8 @@ local function release_escrow(slot)
     end
     pending_escrows[slot] = nil
 end
+
+actions.release_escrow = release_escrow
 
 function actions.release_pending()
     for slot in pairs(pending_escrows) do release_escrow(slot) end
@@ -170,9 +182,10 @@ function actions.command(fields, state, phase)
     local fixture_nonempty = action == "open" and fields[6] == "fixture-nonempty"
     local pried = action == "open" and fields[6] == "stock-vehicle-pried"
     local powered = action == "open" and fields[6] == "stock-electronic-powered"
-    local pending = action == "open" and fields[6] == "memory-escrow"
-    local count = action == "open" and ((fixture_nonempty or pried or pending) and 6 or 5) or action == "claim" and 6 or 4
+    local pending = action == "open" and not fixture_nonempty and fields[#fields] == "memory-escrow"
+    local count = action == "open" and ((fixture_nonempty or pried) and 6 or 5) or action == "claim" and 6 or 4
     if powered then count = 7 end
+    if pending then count = count + 1 end
     local retain = action == "claim" and fields[#fields] == "defer-save"
     local positioned_claim = action == "claim" and #fields == (retain and 10 or 9)
     if positioned_claim then count = 9 end
@@ -329,6 +342,9 @@ function actions.rows(state, phase, status_row)
     local row = observation
     local records = {}
     if phase ~= "hosting" then return records end
+    if enabled and type(SilverfishReferenceNativeDetachedSave) == "function" then
+        records[#records + 1] = status_row("native-loot-special-memory", 1)
+    end
     if daily_update and daily_update.map == state.map then
         records[#records + 1] = status_row("native-loot-replenishment-fixture", daily_update.map,
             daily_update.crate, daily_update.days)

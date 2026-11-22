@@ -490,6 +490,15 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     loot = saved["world"]["party"].get(native_stock_enemy_drops.STATE, {})
                     return next((row for row in loot.values() if row["actor"] == weapon["actor"]), None)
 
+                def banked_drop(_):
+                    events = (run / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                    return next((row for line in events if line.endswith("}") and
+                                 (row := json.loads(line)).get("event") == "native_stock_enemy_loot_banked"
+                                 and row.get("actor") == weapon["actor"]), None)
+
+                banked = await wait(run, banked_drop, timeout=12)
+                assert banked["revision"] is None, banked
+                accepted("save the stock enemy drops", await combat_action(run, "checkpoint"))
                 durable = durable_drop(await wait(run, durable_drop, timeout=12))
                 native_host_save.verify_record(campaign / "game-user", durable["escrow"])
                 assert (durable["class_path"], durable["killer"], durable["claimed_by"]) == (
@@ -849,6 +858,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                                  await combat_action(guest_run, "native-inventory-list"))["native_inventory"]
             item, = [row for row in inventory["items"] if row["guid"] == guid]
             assert item["class_path"] == payload["class_path"], item
+            assert commit["revision"] is None, commit
+            accepted("save the collected stock weapon", await combat_action(run, "checkpoint"))
             campaign = run.parent
             saved = json.loads((campaign / "save" / "campaign.json").read_bytes())
             native_host_save.verify_checkpoint(campaign / "game-user", saved)
