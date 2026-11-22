@@ -96,19 +96,29 @@ local function equip(pawn, blueprint, rounds)
         "avatar_probe_stock_equip_unavailable")
 end
 
+local function unwrap(component)
+    if type(component) == "userdata" and type(component.type) == "function" and component:type() == "RemoteUnrealParam" then
+        return component:get()
+    end
+    return component
+end
+
+local function display_body(pawn)
+    local meshes = pawn:K2_GetComponentsByClass(asset("/Script/Engine.SkeletalMeshComponent"))
+    for index = 1, #meshes do
+        local body = unwrap(meshes[index])
+        if valid(body) and same(body:GetAttachParent(), pawn.Mesh) and valid(body.SkinnedAsset) then return body end
+    end
+    error("avatar_probe_rig_pending", 0)
+end
+
 local function rig(pawn)
-    local body = pawn.Mesh
+    local body = display_body(pawn)
     assert(valid(body) and valid(body.SkinnedAsset), "avatar_probe_rig_pending")
     local head_bone = FName("Head", EFindName.FNAME_Find)
     local helmet_socket = FName("HelmetSocket", EFindName.FNAME_Find)
     local pivot, tail, head
     local components = pawn:K2_GetComponentsByClass(asset("/Script/Engine.SceneComponent"))
-    local function unwrap(component)
-        if type(component) == "userdata" and type(component.type) == "function" and component:type() == "RemoteUnrealParam" then
-            return component:get()
-        end
-        return component
-    end
     for index = 1, #components do
         local component = unwrap(components[index])
         if valid(component) and same(component:GetAttachParent(), body) then
@@ -127,7 +137,7 @@ local function rig(pawn)
     local function distance(a, b)
         return math.sqrt((a.X - b.X)^2 + (a.Y - b.Y)^2 + (a.Z - b.Z)^2)
     end
-    local base, location = pawn:GetBaseTranslationOffset(), body.RelativeLocation
+    local base, location = pawn:GetBaseTranslationOffset(), pawn.Mesh.RelativeLocation
     local tail_at, tail_rot = tail.RelativeLocation, tail.RelativeRotation
     local neck = body:GetSocketLocation(head_bone)
     local helmet = body:GetSocketTransform(helmet_socket, 0)
@@ -220,14 +230,17 @@ local function movement_probe(operation, local_pawn, remote_pawn)
     if operation == "localmovement" then return movement_row(local_pawn) end
     if operation == "remotemovement" then return movement_row(remote_pawn) end
     if operation == "readpose" then
-        local body = remote_pawn.Mesh
-        local animation = body.AnimationData.AnimToPlay
+        local body = display_body(remote_pawn)
+        local instance = body:GetAnimInstance()
+        local animation = valid(instance) and instance.CurrentAsset
         local mesh = body.SkinnedAsset
         local socket = FName("Weapon_Socket01", EFindName.FNAME_Find)
         local hand = body:GetSocketTransform(socket, 2).Translation
         return table.concat({valid(animation) and animation:GetFullName() or "-", body:GetPosition(),
             tostring(body:IsPlaying()), body.VisibilityBasedAnimTickOption, valid(mesh) and mesh:GetFullName() or "-",
-            tostring(body:DoesSocketExist(socket)), hand.Z}, "\t")
+            socket:ToString(), tostring(body:DoesSocketExist(socket)), hand.Z,
+            body:GetBoneIndex(FName("RightHand", EFindName.FNAME_Find)), body:GetAnimationMode(), body.AnimationMode,
+            valid(instance) and instance:GetClass():GetFullName() or "-", body:GetFullName()}, "\t")
     end
     if operation == "preparemovement" then
         for _, pawn in ipairs({local_pawn, remote_pawn}) do
@@ -308,11 +321,11 @@ local function run(operation)
         if rig_operation then
             assert(remote_pawn, "avatar_probe_rig_pending")
             if operation == "rig" then return rig(remote_pawn) end
-            if operation == "wrists" then return sample_wrists(remote_pawn.Mesh) end
+            if operation == "wrists" then return sample_wrists(display_body(remote_pawn)) end
             local name = clips[tonumber(clip_index)]
             local path = "/Game/Classes/NPCs/NPC_Assets/Animations/" .. name .. "." .. name
             local animation = asset(path)
-            local body = remote_pawn.Mesh
+            local body = display_body(remote_pawn)
             assert(same(body.SkinnedAsset.Skeleton, animation.Skeleton), "avatar_probe_clip_rig_mismatch")
             body:PlayAnimation(animation, false)
             body:SetPlayRate(0)

@@ -180,7 +180,7 @@ local function position_head(entry)
 end
 
 local function offset_body(entry, x, y)
-    local pawn, body = entry.pawn, entry.body
+    local pawn, body = entry.pawn, entry.movement_mesh
     local base, relative = pawn:GetBaseTranslationOffset(), body.RelativeLocation
     local location = {X = relative.X + x - base.X, Y = relative.Y + y - base.Y, Z = relative.Z}
     -- Preserve the current smoothing displacement and change its baseline so
@@ -192,7 +192,11 @@ end
 local function restore_locomotion(entry)
     if entry.pose_animation and valid(entry.body) then
         entry.body:SetAnimationMode(entry.animation_mode, true)
-        entry.pose_animation, entry.pose_mesh = nil, nil
+        entry.pose_animation, entry.pose_mesh, entry.pose_asset = nil, nil, nil
+    end
+    if entry.pose_tick_option ~= nil and valid(entry.body) then
+        entry.body.VisibilityBasedAnimTickOption = entry.pose_tick_option
+        entry.pose_tick_option = nil
     end
 end
 
@@ -228,7 +232,10 @@ local function apply_locomotion(entry, aim, outfit)
     end
     local mesh = entry.body.SkinnedAsset
     if not valid(mesh) then return end
-    if entry.pose_animation == name and entry.pose_mesh == mesh:GetAddress() then return end
+    local instance = entry.body.AnimScriptInstance
+    local playing = valid(instance) and instance.CurrentAsset or nil
+    if entry.pose_animation == name and entry.pose_mesh == mesh:GetAddress() and valid(playing)
+        and playing:GetAddress() == entry.pose_asset then return end
     local animation = asset(animation_root .. name .. "." .. name)
     if not valid(animation) or not valid(animation.Skeleton) or not valid(mesh.Skeleton)
         or animation.Skeleton:GetAddress() ~= mesh.Skeleton:GetAddress() then
@@ -238,8 +245,17 @@ local function apply_locomotion(entry, aim, outfit)
 
     -- The stock first-person AnimBP reads the replicated crouch flag but its
     -- pose keeps the visible remote body upright. Use the stock full-body clip.
+    -- A single-node player's clock can advance while its socket bones retain
+    -- the previous pose. The projected held items and head use those bones.
+    if entry.pose_tick_option == nil then
+        entry.pose_tick_option = entry.body.VisibilityBasedAnimTickOption
+        entry.body.VisibilityBasedAnimTickOption = 0
+    end
+    if entry.body.AnimationMode == 1 and not valid(instance) then
+        entry.body:SetAnimationMode(1, true)
+    end
     entry.body:PlayAnimation(animation, true)
-    entry.pose_animation, entry.pose_mesh = name, mesh:GetAddress()
+    entry.pose_animation, entry.pose_mesh, entry.pose_asset = name, mesh:GetAddress(), animation:GetAddress()
 end
 
 local function stop_use(entry)
@@ -275,18 +291,12 @@ local function remove(entry)
     if valid(entry.head_pivot) and valid(entry.pawn) then
         entry.head_pivot:K2_DestroyComponent(entry.pawn)
     end
-    if entry.installed_body and valid(entry.body) then
-        restore_locomotion(entry)
-        character_view.clear_body(entry)
-        if entry.material_override then entry.body:SetMaterial(0, nil) end
-        if entry.mesh_offset and valid(entry.pawn) then
-            offset_body(entry, entry.mesh_offset.X, entry.mesh_offset.Y)
+    if entry.installed_body and valid(entry.pawn) then
+        if valid(entry.body) then
+            character_view.clear_body(entry)
+            entry.body:K2_DestroyComponent(entry.pawn)
         end
-        entry.body:SetVisibility(entry.visible, false)
-        entry.body:SetHiddenInGame(entry.hidden, false)
-        entry.body:SetSkeletalMeshAsset(entry.original_asset)
-        entry.body:SetCollisionEnabled(entry.collision)
-        entry.body:SetGenerateOverlapEvents(entry.overlap)
+        if entry.mesh_offset and valid(entry.movement_mesh) then offset_body(entry, entry.mesh_offset.X, entry.mesh_offset.Y) end
     end
 end
 
@@ -448,11 +458,10 @@ local function aim_head(entry)
 end
 
 local function create(entry)
-    local body = entry.pawn.Mesh
-    if not valid(body) then error("Player body component was unavailable") end
-    entry.body = body
-    entry.original_asset = body.SkinnedAsset
-    if valid(entry.original_asset) then
+    local movement_mesh = entry.pawn.Mesh
+    if not valid(movement_mesh) then error("Player body component was unavailable") end
+    if valid(movement_mesh.SkinnedAsset) then
+        entry.body = movement_mesh
         entry.status = "stock_body"
         return
     end
@@ -461,14 +470,18 @@ local function create(entry)
     if not valid(body_asset) or not valid(head_asset) or not valid(component_type) then
         error("Stock avatar assets were unavailable")
     end
-    entry.visible, entry.hidden = body.bVisible, body.bHiddenInGame
-    entry.animation_mode = body.AnimationMode
+    -- Keep the stock network smoothing transform. Its first-person component
+    -- can clear animation instances, so the display mesh owns its own pose.
+    entry.movement_mesh = movement_mesh
+    local body = visual_component(entry, "body", movement_mesh, nil, true)
+    entry.animation_mode = movement_mesh.AnimationMode
     entry.default_asset, entry.default_head = body_asset, head_asset
-    entry.collision, entry.overlap = body:GetCollisionEnabled(), body:GetGenerateOverlapEvents()
     entry.installed_body = true
-    body:SetCollisionEnabled(0)
-    body:SetGenerateOverlapEvents(false)
     body:SetSkeletalMeshAsset(body_asset)
+    local anim_class = movement_mesh.AnimClass
+    if valid(anim_class) then body:SetAnimClass(anim_class) end
+    body:SetAnimationMode(entry.animation_mode, true)
+    body.VisibilityBasedAnimTickOption = movement_mesh.VisibilityBasedAnimTickOption
     body:SetHiddenInGame(false, false)
     body:SetVisibility(true, false)
 
