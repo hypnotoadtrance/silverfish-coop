@@ -74,6 +74,7 @@ local native_stash_view = require("native_stash_view")
 local native_inventory_view = require("native_inventory_view")
 local native_corpse_view = require("native_corpse_view")
 local native_crate_props = require("native_crate_props")
+local native_prop_carry = require("native_prop_carry")
 local native_mushrooms = require("native_mushrooms")
 local native_guest_ui = require("native_guest_ui")
 local native_wipe_inventory = require("native_wipe_inventory")
@@ -1087,6 +1088,7 @@ local function run_command(fields, state, current_phase)
         or native_stock_door.command(fields, state, current_phase)
         or native_lantern.command(fields, state, current_phase)
         or native_crate_props.command(fields, state, current_phase)
+        or native_prop_carry.command(fields, state, current_phase)
         or native_mushrooms.command(fields, state, current_phase)
         or native_player_avatar.command(fields, state, current_phase)
         or native_pickup_audio.command(fields, state, current_phase)
@@ -1302,6 +1304,7 @@ local function write_status(state, current_phase, failure, fields, pending)
         local lantern = native_lantern.status(state, current_phase, status_row)
         if lantern then rows[#rows + 1] = lantern end
         for _, row in ipairs(native_crate_props.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
+        for _, row in ipairs(native_prop_carry.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mushrooms.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_cistern_lockpick.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_mindcore_fixture.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1506,6 +1509,7 @@ local function tick(fields, pending)
     native_host_dig_live.sync(state, current_phase)
     native_enemy_loot.sync(state, current_phase)
     pcall(native_corpse_view.sync, state, current_phase)
+    pcall(native_prop_carry.sync, state, current_phase, bridge)
     pcall(native_crate_props.sync, state, current_phase)
     native_lantern.sync(state, current_phase)
     native_broker_input.sync(state, current_phase)

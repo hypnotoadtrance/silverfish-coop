@@ -1,4 +1,5 @@
 local props = {}
+local carry = require("native_prop_carry")
 
 local spawner_path = "/Game/Classes/Actors/Lootables/Loot_Spawner.Loot_Spawner_C"
 local container_path = "/Game/Classes/Actors/Lootables/LootContainer_Master_BP.LootContainer_Master_BP_C"
@@ -37,11 +38,11 @@ end
 local function publish(spawner, actor)
     if not valid(world) or not valid(spawner) or not same(spawner:GetClass(), spawner_class)
         or not valid(actor) or not actor:IsA(prop_class) or not actor:HasAuthority()
-        or actor:IsActorBeingDestroyed() or actor.bReplicates ~= false or not same(actor:GetWorld(), world) then return end
+        or actor:IsActorBeingDestroyed() or not same(actor:GetWorld(), world) then return end
     local owner = spawner:GetOwner()
     if not valid(owner) or not owner:IsA(container_class) or not same(spawner.Container, owner)
         or not owner:HasAuthority() or not same(owner:GetWorld(), world) then return end
-    if root_mesh(actor) then publish_motion(actor) end
+    if root_mesh(actor) and publish_motion(actor) then carry.enroll(actor) end
 end
 
 local function placed_tanks(state, phase)

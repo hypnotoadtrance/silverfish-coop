@@ -254,6 +254,7 @@ def parser() -> argparse.ArgumentParser:
         "native-loose-pickup-claim", "native-loose-pickup-approach", "native-loose-pickup-fixture",
         "native-loose-pickup-expire-fixture",
         "native-mushroom-claim", "native-mushroom-approach-fixture", "native-mushroom-harvest-fixture", "native-mushroom-locate-fixture",
+        "native-prop-carry-fixture",
         "native-wire-quest-preflight", "native-wire-quest-approach", "native-wire-board-fixture",
         "native-wire-board-stock-fixture", "native-crossroads-jammer-preflight", "native-crossroads-jammer-approach",
         "native-crossroads-jammer-aim",

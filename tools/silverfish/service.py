@@ -48,6 +48,7 @@ from . import native_anomaly_effects
 from . import native_weapon_fire_view
 from . import native_loose_pickup
 from . import native_mushrooms
+from . import native_prop_carry
 from . import native_stock_enemy_drops
 from . import native_host_invitation, native_mindcore_fixture, native_session_exit
 from . import native_prototype_drill
@@ -95,6 +96,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         *native_finite_shop.ACTIONS,
                         native_authored_pickup.ACTION, native_loose_pickup.CLAIM, native_enemy_loot.CLAIM, native_stock_enemy_drops.CLAIM,
                         native_mushrooms.CLAIM,
+                        native_prop_carry.ACTION,
                         *native_guest_weapon.GUEST_ACTIONS, native_guest_weapon.SELECT_EQUIPMENT,
                         *native_guest_consumable.RESULT, native_guest_melee.SWING,
                         native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION)
@@ -253,6 +255,8 @@ class Host:
                                if native_guest and native_zones and native_backend == "cpp" else None)
         self.stack_drop_projection = native_guest_drop_projection.Projection()
         self.world_loot = native_world_loot.Projection()
+        self.prop_carry = native_prop_carry.Host(self)
+        self.prop_carry_bridge = None
         self.loose_pickups = native_loose_pickup.Visibility()
         self.processed_stock_enemy_drops = set()
         self.stock_drop_input = native_host_stack_drop.HostDropInput()
@@ -1852,6 +1856,11 @@ class Host:
             return self.enqueue_native_request(guest_id, request)
         if self.guest_leave_pending(guest_id):
             return {"ok": False, "error": "native_session_leave_pending"}
+        if action == native_prop_carry.AIM and self.prop_carry_bridge and set(request) == {"action", "operation_id", "target"}:
+            try:
+                return self.prop_carry.aim(self.prop_carry_bridge, character, request["target"])
+            except (OSError, ValueError, RuntimeError) as error:
+                return {"ok": False, "error": str(error)}
         if action == native_mindcore_carry.ACTION and self.mindcore_carry:
             try:
                 if set(request) != {"action", "operation_id", "target"} or not native_mindcore_carry.token(request.get("operation_id")):
@@ -2047,6 +2056,8 @@ class Host:
                 result = await native_loose_pickup.claim(self, bridge, character, target, request["operation_id"])
             elif action == native_mushrooms.CLAIM:
                 result = await native_mushrooms.claim(self, bridge, character, target, request["operation_id"])
+            elif action == native_prop_carry.ACTION:
+                result = await self.prop_carry.operate(bridge, character, target)
             elif action == native_authored_pickup.ACTION:
                 result = await native_authored_pickup.claim(self, bridge, character, target, request["operation_id"])
             elif action == native_stock_enemy_drops.CLAIM:
@@ -2710,6 +2721,15 @@ class Host:
                     self.last_game = await bridge.command(action, timeout=6)
                     self.last_seen = time.monotonic()
                     result = {native_mushrooms.KEY: self.last_game.get(native_mushrooms.KEY, {})}
+                elif action == native_prop_carry.FIXTURE and self.fixtures:
+                    mode, _, target = (request.get("target") or "").partition("@")
+                    if mode == "approach":
+                        target = native_loot._scope(self, self.roles().get(target))
+                    if mode not in {"spawn", "approach"} or not target:
+                        raise party.RuleError("native_prop_carry_fixture_unavailable")
+                    self.last_game = await bridge.command(action, mode, target, timeout=6)
+                    self.last_seen = time.monotonic()
+                    result = {native_prop_carry.FIXTURE: self.last_game.get(native_prop_carry.FIXTURE, {})}
                 elif action in (native_mushrooms.APPROACH, native_mushrooms.HARVEST) and self.fixtures:
                     role, _, identity = (request.get("target") or "").partition("@")
                     pawn = native_loot._scope(self, self.roles().get(role))
@@ -3768,6 +3788,7 @@ class Host:
         self.relay = transport
         if self.mindcore_carry:
             self.mindcore_carry.bridge = bridge
+        self.prop_carry_bridge = bridge
         engine = bridge.process if isinstance(bridge.process, EmbeddedEngine) else None
         invites = (native_host_invitation.HostInvitationMailbox(
             bridge.directory, self.control.run, self.invite, engine=engine)
@@ -4745,6 +4766,7 @@ class Client:
         self.guest_primary_input = guest_primary_input
         self.guest_held_input = native_smg_hold.GuestInput(self) if invite.get("native_guest_held_fire") else None
         self.mindcore_carry = native_mindcore_carry.GuestInput(self) if invite.get("native_zones") else None
+        self.prop_carry = native_prop_carry.Guest(self)
         self.last_primary_intent = 0
         self.last_inventory_use = 0
         self.last_inventory_split = 0
@@ -5620,6 +5642,12 @@ class Client:
                     result = await native_guest_drop.stock_menu_fixture(
                         self, request.get("target"), path.stem, native_guest_drop.STOCK_FIXTURES[action],
                     )
+                elif action == native_prop_carry.FIXTURE:
+                    mode, _, target = (request.get("target") or "").partition("@")
+                    if mode not in {"grab", "turn", "throw", "drop"}:
+                        raise party.RuleError("native_prop_carry_fixture_unavailable")
+                    self.last_game = await self.bridge.command(action, mode, *((target,) if target else ()), timeout=6)
+                    result = {"input": mode}
                 elif action == "native-client-remote-damage-fixture":
                     if not self.last_game.get("native_client_damage"):
                         raise ValueError("Connect and wait for the authenticated client damage guard")
@@ -5799,6 +5827,7 @@ class Client:
                 pause_exit.close()
             if self.mindcore_carry:
                 self.mindcore_carry.close()
+            self.prop_carry.close()
             if held:
                 held.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -5861,6 +5890,7 @@ class Client:
             await self.service_reload_input(active)
             if self.mindcore_carry:
                 await self.mindcore_carry.poll(active)
+            self.prop_carry.poll(active)
             await self.service_primary_input(active)
             await self.service_crate_interaction(active)
             interactions = self.bridge.interactions()

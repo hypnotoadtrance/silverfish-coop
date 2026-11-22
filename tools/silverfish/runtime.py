@@ -29,6 +29,7 @@ from . import native_guest_drop_projection, native_guest_drop_record, native_gue
 from . import native_loot, native_world_loot
 from . import native_loose_pickup
 from . import native_mushrooms
+from . import native_prop_carry
 from . import native_stock_enemy_drops
 from . import native_lantern, native_stock_door
 from . import native_player_avatar
@@ -2238,6 +2239,16 @@ class Bridge:
                     active[mushroom["id"]] = mushroom
                 elif fields[0] == native_mushrooms.CLAIM:
                     data[native_mushrooms.PROOF] = native_mushrooms.parse_claim(fields, data.get("state"), data.get("map"))
+                elif fields[0] in (native_prop_carry.ACTION, native_prop_carry.FIXTURE,
+                                   "native-prop-carry-input", "native-prop-carry-target"):
+                    prop = native_prop_carry.parse(fields, data.get("state"), data.get("map"))
+                    if fields[0] == "native-prop-carry-input":
+                        data.setdefault(native_prop_carry.INPUT, []).append(prop)
+                    elif fields[0] == native_prop_carry.FIXTURE:
+                        data[native_prop_carry.FIXTURE] = prop
+                    else:
+                        key = native_prop_carry.PROOF if fields[0] == native_prop_carry.ACTION else native_prop_carry.TARGET
+                        data[key] = prop
                 elif fields[0] == native_loose_pickup.ROW:
                     placed = native_loose_pickup.parse(fields, data.get("state"), data.get("map"))
                     data.setdefault(native_loose_pickup.KEY, {})[placed["actor"]] = placed
