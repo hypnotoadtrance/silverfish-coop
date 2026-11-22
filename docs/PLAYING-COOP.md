@@ -4,7 +4,7 @@ Use Direct IP on Windows. The resident trial opens co-op from the same game proc
 
 ## Install and open the Windows trial
 
-Close the game on both PCs. In Steam, choose **Manage → Browse local files** and extract the co-op ZIP into the folder containing `SilverFish.exe`. Use the same ZIP for a first install or an update. Merge its `SilverFish` folder and replace files if asked. The ZIP includes the pinned UE4SS loader and replaces its settings INI during an update. Start Project Silverfish through Steam and choose **Multiplayer**. [Resident trial setup](../bootstrap/README.md#installed-resident-title)
+Close the game on both PCs. Download the same `Silverfish-Coop-RC-*.zip` from the release’s **Assets**. In Steam, choose **Manage → Browse local files** and extract the co-op ZIP into the folder containing `SilverFish.exe`. Use the same ZIP for a first install or an update. Merge its `SilverFish` folder and replace files if asked. The ZIP includes the pinned UE4SS loader and replaces its settings INI during an update. Start Project Silverfish through Steam and choose **Multiplayer**. [GitHub Releases](https://github.com/hypnotoadtrance/silverfish-coop/releases) · [Resident trial setup](../bootstrap/README.md#installed-resident-title)
 
 Trial setup defaults to listening on all IPv4 interfaces on UDP port 7777. The host can select an interface address and port in **Host** settings. For LAN play, use the host PC's LAN address and allow inbound UDP on the chosen port. Across networks, use an address the guest can reach on that port. Use `127.0.0.1` when both players run on the same PC.
 
@@ -39,6 +39,8 @@ Open the stock **Journal** in the active co-op campaign with **J** or your confi
 ## Join from the co-op title
 
 Choose **Multiplayer** and **Join by Direct IP**. Enter the host's numeric IP and UDP port. Select **Use password** if the host gave you one, then choose **Connect**. Select a saved character or choose **Create Character**. Confirm the selected character to join.
+
+The game asks you to confirm trust on a first connection or when a known host’s identity changes. Once accepted, the connection remains encrypted. The default resident co-op workspace is `%LOCALAPPDATA%\SilverfishCoop\Resident`. Each loaded host campaign has its own character list.
 
 ## Host and join from the development CLI
 
