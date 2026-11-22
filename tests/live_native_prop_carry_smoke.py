@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tools.silverfish import native_lantern as lantern, native_prop_carry as carry
+from tools.silverfish import native_lantern as lantern, native_loose_pickup as loose, native_prop_carry as carry
+from tools.silverfish.control import submit
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY
 
 CRATE = f"{OBSERVATORY}.Observitory_P:PersistentLevel.LootCrate_Small_BP_C_1"
@@ -104,17 +105,27 @@ async def exercise(work, untouched, kind="crate"):
     try:
         assert original
         fuel_drum = kind in ("fuel-drum", "fuel-drum-grab")
-        area = CROSSROADS if fuel_drum else DEAD_BRIDGE if kind == "barrel" else OBSERVATORY
+        area = CROSSROADS if fuel_drum or kind in ("placed-prop", "placed-item") else DEAD_BRIDGE if kind == "barrel" else OBSERVATORY
         await start("host", host, "host", *host, "--port", "0", "--headless", "--fixtures", "--native-events",
                     "--native-guest", "--native-zones", "--native-expanded-zones", "--start-zone", area)
         barrel_class = "Prop_FuelDrum_C " if fuel_drum else "Prop_PlasticBarrel_C " if kind == "barrel" else None
+        placed_name = f"Prop_TypeWriter_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Prop_TypeWriter_C_3"
 
         def barrels_of_class(state):
             return [item for item in state.get("game", {}).get(carry.BARRELS, {}).values()
                     if barrel_class and item["actor"].startswith(barrel_class)]
 
-        initial_world = await wait(hrun, lambda state: state.get("state") == "hosting" and (
-            not barrel_class or barrels_of_class(state)))
+        def enrolled(state):
+            if kind == "placed-prop":
+                return placed_name in state.get("game", {}).get(carry.PLACED_PROPS, {})
+            if kind == "placed-item":
+                return any(item["class_path"].startswith("/Game/Classes/") for item in
+                           state.get("game", {}).get(carry.PLACED_PROPS, {}).values())
+            if fuel_drum:
+                return any(item["actor"].endswith(".Prop_FeulDrum_C_33") for item in barrels_of_class(state))
+            return not barrel_class or barrels_of_class(state)
+
+        initial_world = await wait(hrun, lambda state: state.get("state") == "hosting" and enrolled(state))
         invite = await command("invite", *host, "--name", "Crate carrier", "--character", "Crate carrier")
         guest_process = await start("guest", guest, "join", *guest, "--invite", invite["invite_file"], "--headless")
         await wait(grun, lambda state: state.get("state") == "connected")
@@ -123,9 +134,17 @@ async def exercise(work, untouched, kind="crate"):
             wanted = f"spawn@{CRATE}"
         elif kind == "lantern":
             wanted = "select@" + lantern.ACTOR.split(" ", 1)[1]
+        elif kind in ("placed-prop", "placed-item"):
+            if kind == "placed-item":
+                selected = min((item for item in initial_world["game"][carry.PLACED_PROPS].values()
+                                if item["class_path"].startswith("/Game/Classes/")),
+                               key=lambda item: (item["mass"], item["actor"]))
+                placed_name = selected["actor"]
+            wanted = "select@" + placed_name.split(" ", 1)[1]
         else:
             barrels = barrels_of_class(initial_world)
-            selected = min(barrels, key=lambda item: item["mass"])
+            selected = (next(item for item in barrels if item["actor"].endswith(".Prop_FeulDrum_C_33"))
+                        if fuel_drum else min(barrels, key=lambda item: item["mass"]))
             wanted = "select@" + selected["actor"].split(" ", 1)[1]
         initial = (await fixture(host, wanted))[carry.FIXTURE]
         if kind == "fuel-drum":
@@ -144,7 +163,9 @@ async def exercise(work, untouched, kind="crate"):
             await wait(grun, lambda state: lamp(state) is True)
         input_mode = "grab" if kind == "crate" or fuel_drum else "pickup"
         target = initial["class_path"]
-        if input_mode == "pickup" or fuel_drum:
+        if kind in ("placed-prop", "placed-item"):
+            target = f"{target}|{placed_name}"
+        elif input_mode == "pickup" or fuel_drum:
             occupants = 1 if kind == "lantern" else len(barrels)
             target = f"{target}|{occupants}|{initial['actor']}"
         await fixture(guest, f"{input_mode}@{target}")
@@ -162,11 +183,37 @@ async def exercise(work, untouched, kind="crate"):
             effect = dict(released_after_disconnect=prop(released), normal_interact_extinguished=True,
                           stock_fire_relit=True, remained_lit_after_disconnect=True)
         else:
-            await fixture(guest, "throw")
+            await fixture(guest, "throw@up" if kind in ("placed-prop", "placed-item") else "throw")
             thrown = await wait(hrun, lambda state: proof(state).get("edge") == "throw" and not prop(state).get("held", True))
             moved_again = await wait(hrun, lambda state: prop(state).get("actor") == initial["actor"] and
                                      math.dist(prop(state)["position"], prop(moved)["position"]) > 70)
             effect = dict(thrown=prop(thrown), landed=prop(moved_again), throw_receipt=proof(thrown))
+            if kind in ("placed-prop", "placed-item"):
+                path = placed_name.split(" ", 1)[1]
+                async with asyncio.timeout(8):
+                    while True:
+                        authority, replica = await asyncio.gather(fixture(host, f"sample@{path}"), fixture(guest, f"sample@{path}"))
+                        host_pose, guest_pose = ([float(value) for value in row["sample"].split("|")] for row in (authority, replica))
+                        if math.dist(host_pose[:3], guest_pose[:3]) <= 10:
+                            effect.update(host_pose=host_pose, guest_pose=guest_pose)
+                            break
+                        await asyncio.sleep(.15)
+            if kind == "placed-item":
+                target = "loose:" + path
+                for role in ("host", "guest"):
+                    await command("action", *host, loose.APPROACH, "--target", f"{role}@{target}")
+                await command("action", *guest, loose.FIXTURE, "--target", target)
+                for run in (hrun, grun):
+                    await wait(run, lambda state: state.get("game", {}).get(loose.KEY, {}).get(path, {}).get("state") == "claimed")
+                events = [json.loads(line) for line in (hrun / "events.jsonl").read_text().splitlines()]
+                applied, = [event for event in events if event.get("event") == "native_loose_pickup_claimed" and event.get("actor") == path]
+                assert applied["owner"] == invite["character_id"], applied
+                inventory = (await command("action", *guest, "native-inventory-list"))["native_inventory"]["items"]
+                item, = [row for row in inventory if row["guid"] == applied["guid"]]
+                assert item["class_path"] == initial["class_path"], item
+                repeated = await submit(hrun, loose.CLAIM, target=target)
+                assert not repeated["ok"] and repeated["error"] == "loose_pickup_already_claimed", repeated
+                effect.update(stock_pickup=applied, backpack=item, competing_claim=repeated["error"])
         (hrun / "prop-carry-verification.json").write_text(json.dumps(dict(
             initial=initial, grabbed=prop(grabbed), moved=prop(moved),
             grab_receipt=proof(grabbed), canary_files=len(original), **effect,
@@ -181,6 +228,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", required=True, type=Path)
     parser.add_argument("--vanilla-saved", required=True, type=Path)
-    parser.add_argument("--kind", choices=("crate", "lantern", "barrel", "fuel-drum", "fuel-drum-grab"), default="crate")
+    parser.add_argument("--kind", choices=("crate", "lantern", "barrel", "fuel-drum", "fuel-drum-grab", "placed-prop", "placed-item"),
+                        default="crate")
     options = parser.parse_args()
     asyncio.run(exercise(options.work.resolve(), options.vanilla_saved.resolve(), options.kind))

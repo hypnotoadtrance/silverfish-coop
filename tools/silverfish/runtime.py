@@ -2271,6 +2271,7 @@ class Bridge:
                     key = native_flare.PROOF if fields[0] == native_flare.ACTION else native_flare.INTENT
                     data[key] = native_flare.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] in (native_prop_carry.ACTION, native_prop_carry.FIXTURE, native_prop_carry.BARREL_ROW,
+                                   native_prop_carry.PLACED_PROP_ROW,
                                    "native-prop-carry-input", "native-prop-carry-target"):
                     prop = native_prop_carry.parse(fields, data.get("state"), data.get("map"))
                     if fields[0] == "native-prop-carry-input":
@@ -2279,6 +2280,8 @@ class Bridge:
                         data[native_prop_carry.FIXTURE] = prop
                     elif fields[0] == native_prop_carry.BARREL_ROW:
                         data.setdefault(native_prop_carry.BARRELS, {})[prop["actor"]] = prop
+                    elif fields[0] == native_prop_carry.PLACED_PROP_ROW:
+                        data.setdefault(native_prop_carry.PLACED_PROPS, {})[prop["actor"]] = prop
                     else:
                         key = native_prop_carry.PROOF if fields[0] == native_prop_carry.ACTION else native_prop_carry.TARGET
                         data[key] = prop

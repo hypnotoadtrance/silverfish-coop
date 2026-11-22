@@ -15,7 +15,8 @@ local fuel_maps = {
     ["/Game/Classes/Maps/Maps_Dungeons/Anex_01_P"] = true,
 }
 local world, spawner_class, container_class, prop_class, hooked
-local placed, barrels
+local placed, placed_props
+local core_class_path = "/Game/Classes/Actors/MindCore_BP.MindCore_BP_C"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 
@@ -92,40 +93,37 @@ local function placed_tanks(state, phase)
     placed = {world = state.world, phase = phase, actors = found}
 end
 
-local function placed_barrels(state, phase)
+local function enroll_placed_props(state, phase)
     if phase ~= "hosting" or not valid(state.world) or not state.listening or state.server ~= false then
-        barrels = nil
+        placed_props = nil
         return
     end
-    if barrels and same(barrels.world, state.world) then return end
-    local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-    if not valid(api) then return end
-    local active = {}
+    if not placed_props or not same(placed_props.world, state.world) then
+        local api = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        local base = StaticFindObject(prop_path)
+        if not valid(api) or not valid(base) then return end
+        local result = {}
+        api:GetAllActorsOfClass(state.world, base, result)
+        placed_props = {world = state.world, actors = {}, pending = result.OutActors or result, index = 1}
+    end
+    local scan = placed_props
+    if not scan.pending then return end
+    local core = StaticFindObject(core_class_path)
     local bone = FName("None", EFindName.FNAME_Find)
-    for stem, labels in pairs(barrel_types) do
-        local class = StaticFindObject("/Game/Assets/StaticMeshes/Mesh_Props/" .. stem .. "." .. stem .. "_C")
-        if valid(class) then
-            local result = {}
-            api:GetAllActorsOfClass(state.world, class, result)
-            local matches = result.OutActors or result
-            if #matches <= 96 then
-                for _, actor in ipairs(matches) do
-                    if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
-                    local mesh = valid(actor) and root_mesh(actor)
-                    local name = mesh and actor:GetFullName()
-                    local authored = name and authored_index(name, labels)
-                    -- Runtime-spawned copies follow their crate's enrollment.
-                    if authored and authored < 10000 and same(actor:GetClass(), class)
-                        and actor.bNetLoadOnClient == true and actor:HasAuthority() and not actor:IsActorBeingDestroyed()
-                        and same(actor:GetWorld(), state.world) and same(actor:GetOuter(), state.world.PersistentLevel)
-                        and mesh:IsSimulatingPhysics(bone) == true and publish_motion(actor) and carry.enroll(actor) then
-                        active[name] = actor
-                    end
-                end
-            end
+    local finish = math.min(#scan.pending, scan.index + 11)
+    for index = scan.index, finish do
+        local actor = scan.pending[index]
+        if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+        local mesh = valid(actor) and root_mesh(actor)
+        if mesh and (not valid(core) or not actor:IsA(core)) and actor:HasAnyFlags(EObjectFlags.RF_WasLoaded)
+            and actor.bNetLoadOnClient == true and actor:HasAuthority() and not actor:IsActorBeingDestroyed()
+            and same(actor:GetWorld(), state.world) and same(actor:GetOuter(), state.world.PersistentLevel)
+            and mesh:IsSimulatingPhysics(bone) == true and publish_motion(actor) and carry.enroll(actor) then
+            scan.actors[actor:GetFullName()] = actor
         end
     end
-    barrels = {world = state.world, actors = active}
+    scan.index = finish + 1
+    if scan.index > #scan.pending then scan.pending = nil end
 end
 
 function props.rows(state, phase, row)
@@ -144,10 +142,21 @@ function props.rows(state, phase, row)
             end
         end
     end
-    if fixtures and barrels and same(barrels.world, state.world) then
-        for name, actor in pairs(barrels.actors) do
+    if fixtures and placed_props and same(placed_props.world, state.world) then
+        for name, actor in pairs(placed_props.actors) do
             local mesh = valid(actor) and not actor:IsActorBeingDestroyed() and root_mesh(actor)
-            if mesh then result[#result + 1] = row("native-authored-physics-barrel", state.map, name, mesh:GetMass()) end
+            if mesh then
+                local class = actor:GetClass():GetFullName():match("^%S+ (.+)$")
+                local mass = mesh:GetMass()
+                if class and mass > 0 and mass <= 10000 then
+                    result[#result + 1] = row("native-authored-physics-prop", state.map, name, class, mass)
+                end
+                local stem = name:match("^(Prop_%w+)_C ")
+                local labels = barrel_types[stem]
+                if labels and authored_index(name, labels) and mass > 0 and mass <= 10000 then
+                    result[#result + 1] = row("native-authored-physics-barrel", state.map, name, mass)
+                end
+            end
         end
     end
     return result
@@ -182,7 +191,7 @@ end
 
 function props.sync(state, phase)
     placed_tanks(state, phase)
-    placed_barrels(state, phase)
+    enroll_placed_props(state, phase)
     world = phase == "hosting" and state.listening and not state.server and state.world or nil
     if hooked or not valid(world) or type(RegisterHook) ~= "function" then return end
     local spawn = spawner_path .. ":SpawnLoot"

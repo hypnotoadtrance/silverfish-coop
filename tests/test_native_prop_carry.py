@@ -30,3 +30,11 @@ class CorpseCarryPayloadTests(unittest.TestCase):
         self.assertEqual(carry.parse([carry.BARREL_ROW, self.area, actor, "31"], "hosting", self.area)["actor"], actor)
         with self.assertRaises(ValueError):
             carry.parse([carry.BARREL_ROW, self.area, actor.replace("_33", "_2147482112"), "31"], "hosting", self.area)
+
+    def test_placed_grabs_are_bound_to_an_actor_in_the_current_map(self):
+        path = f"{self.area}.CrossRoads_P:PersistentLevel.Item_CannedSoup_C_1"
+        fields = [*self.edge, path]
+        fields[5] = "/Game/Classes/Items/Item_CannedSoup.Item_CannedSoup_C"
+        self.assertEqual(carry.parse(fields, "connected", self.area)["placement"], path)
+        with self.assertRaises(ValueError):
+            carry.parse([*fields[:-1], path.replace("CrossRoads_P", "Observitory_P")], "connected", self.area)

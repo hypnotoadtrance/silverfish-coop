@@ -311,8 +311,23 @@ function pickup.update(state, phase)
         binding = {pawn = pawn, world = state.world, host = host, placements = placements}
         report, loose_check = nil, nil
     end
-    binding.loose_count = type(SilverfishDiscoverLoosePickups) == "function"
-        and SilverfishDiscoverLoosePickups(pawn:GetAddress(), host) or nil
+    if type(SilverfishDiscoverLoosePickups) == "function" then
+        local count, eligible = SilverfishDiscoverLoosePickups(pawn:GetAddress(), host)
+        binding.loose_count = count
+        if host and type(eligible) == "string" and eligible ~= "" then
+            binding.carry_sources, binding.carry_cursor = {}, 1
+            for path in eligible:gmatch("[^\n]+") do binding.carry_sources[#binding.carry_sources + 1] = path end
+        end
+        if binding.carry_sources then
+            local carry = require("native_prop_carry")
+            local limit = math.min(binding.carry_cursor + 7, #binding.carry_sources)
+            for index = binding.carry_cursor, limit do
+                carry.enroll_loose(StaticFindObject(binding.carry_sources[index]))
+            end
+            binding.carry_cursor = limit + 1
+            if limit == #binding.carry_sources then binding.carry_sources = nil end
+        end
+    end
     local active, unavailable, reason = {}, {}, nil
     for _, profile in ipairs(placements) do
         local allowed = profile ~= gold_bag or not host or gold_bag_step(pawn.Save) == 1
@@ -347,10 +362,15 @@ local function select_profile(requested)
     return profile
 end
 
-local function loose_profile(path, state)
+local function loose_profile(path, state, projecting_hidden)
     if not binding or not binding.loose_count or type(path) ~= "string" or #path > 384
         or type(SilverfishDescribeLoosePickup) ~= "function" then return end
-    local class, mode, claimed, cash = SilverfishDescribeLoosePickup(path)
+    local class, mode, claimed, cash
+    if projecting_hidden then
+        class, mode, claimed, cash = SilverfishDescribeLoosePickup(path, true)
+    else
+        class, mode, claimed, cash = SilverfishDescribeLoosePickup(path)
+    end
     local actor = class and StaticFindObject(path)
     local name = valid(actor) and actor:GetFullName():match("^(%S+) ")
     local leaf = path:match(":PersistentLevel%.([%w_]+)$")
@@ -657,7 +677,9 @@ function pickup.command(fields, state, phase)
         pickup.update(state, phase)
         local valid_args = #fields == 5 or (#fields == 6 and fields[6] == "stock-input")
         local profile = valid_args and loose_profile(fields[5], state)
-        if not profile or profile.claimed then error("loose_pickup_source_unavailable", 0) end
+        if not profile or profile.claimed or require("native_prop_carry").item_is_held(StaticFindObject(profile.path)) then
+            error("loose_pickup_source_unavailable", 0)
+        end
         return claim(fields, state, phase, profile)
     end
     if action == "native-loose-pickup-check" then
@@ -683,7 +705,7 @@ function pickup.command(fields, state, phase)
         local hidden = mode == "hide"
         local changed = false
         for index = 4, #fields do
-            local profile = loose_profile(fields[index], state)
+            local profile = loose_profile(fields[index], state, hidden)
             if profile and profile.claimed ~= hidden then
                 if not SilverfishProjectNativeAuthoredPickup(hidden, profile.source) then
                     error("loose_pickup_projection_unverified", 0)
