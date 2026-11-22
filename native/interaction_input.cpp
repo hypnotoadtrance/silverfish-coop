@@ -1,6 +1,7 @@
 #include "interaction_input.hpp"
 #include "mosby_station_input.hpp"
 #include "mindcore_input.hpp"
+#include "npc_barter.hpp"
 
 #include <array>
 #include <atomic>
@@ -68,11 +69,6 @@ namespace
     constexpr auto sewer_screen_class = STR("/Game/Classes/GUI/Menu_Trade_Widget.Menu_Trade_Widget_C");
     constexpr auto sewer_card_class = STR("/Game/Classes/GUI/SubWidgets/TradeOffer_Widget.TradeOffer_Widget_C");
 
-    constexpr auto observatory_world = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P");
-    constexpr auto stalker_npc = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.NPC_LoneStalker_C_0");
-    constexpr auto stalker_merchant = STR("/Game/Classes/Libraries/DataAssets/Merchants/StalkerTradesData.StalkerTradesData");
-    constexpr auto npc_barter_class = STR("/Game/Classes/Actors/Barter_BP.Barter_BP_C");
-    constexpr auto npc_barter_screen_class = STR("/Game/Classes/GUI/New/BarterScreen.BarterScreen_C");
     constexpr auto npc_barter_complete = STR("/Game/Classes/GUI/New/BarterScreen.BarterScreen_C:CompleteTrade");
     constexpr int sewer_confirm_entry = 3258;
     constexpr int sewer_offer_count = 26;
@@ -279,7 +275,7 @@ namespace
     Scope scope;
     ScopedInteraction wire_board, dialogue_input, valve_input, stash_input, lantern_input;
 
-    ScopedInteraction npc_barter, npc_barter_confirm;
+    ScopedInteraction npc_barter_input, npc_barter_confirm;
     Unreal::FWeakObjectPtr npc_barter_screen;
     std::array<Unreal::FWeakObjectPtr, 2> npc_barter_backups;
     std::uint64_t npc_barter_sequence{};
@@ -1154,24 +1150,14 @@ namespace
     }
 
 
-    Unreal::UObject* npc_barter_actor()
-    {
-        auto* world = scope.world.Get();
-        if (!live(world) || world->GetPathName() != observatory_world) return nullptr;
-        auto* npc = find<Unreal::UObject>(stalker_npc);
-        auto* trader = object_field(npc, STR("BarterRef"));
-        if (!live(npc) || !live(trader) || trader->GetClassPrivate() != find<Unreal::UClass>(npc_barter_class) ||
-            object_field(trader, STR("LinkedNPC")) != npc || static_cast<Unreal::AActor*>(trader)->GetWorld() != world ||
-            object_field(trader, STR("MerchantData")) != find<Unreal::UObject>(stalker_merchant) ||
-            !object_field(trader, STR("MerchantData"))) return nullptr;
-        return trader;
-    }
-
     bool stock_npc_barter_menu(Unreal::UObject* screen)
     {
-        auto* actor = npc_barter_actor();
-        return actor && live(screen) && screen->GetClassPrivate() == find<Unreal::UClass>(npc_barter_screen_class) &&
-            object_field(screen, STR("Trader")) == actor;
+        if (!live(screen) || screen->GetClassPrivate() != silverfish::npc_barter::type(silverfish::npc_barter::screen_class))
+            return false;
+        auto* trader = object_field(screen, STR("Trader"));
+        auto* npc = silverfish::npc_barter::linked_npc(trader, static_cast<Unreal::UWorld*>(scope.world.Get()));
+        auto* save = field<Unreal::FBoolProperty>(trader, STR("Save"));
+        return npc && save && (trader == npc_barter_input.actor.Get() || save->GetPropertyValueInContainer(trader));
     }
 
     void intercept_npc_barter(Iteration& call, Unreal::UObject* object, Unreal::UFunction* function)
@@ -1185,7 +1171,7 @@ namespace
         // GameInstance must never run the exchange against its inventory copy.
         call.PreventOriginalFunctionCall();
         const auto now = Clock::now();
-        if (call.OriginalFunctionCallPrevented() && object == npc_barter_screen.Get() && now < npc_barter.expires &&
+        if (call.OriginalFunctionCallPrevented() && object == npc_barter_screen.Get() && now < npc_barter_input.expires &&
             now < scope.expires && live_scope(scope) && standing(scope.pawn.Get()) && top_menu() == object &&
             !npc_barter_confirm.pending.sequence && npc_barter_sequence < max_sequence)
             npc_barter_confirm.pending = {++npc_barter_sequence, now + receipt_lifetime};
@@ -1194,7 +1180,7 @@ namespace
     int capture_npc_barter_menu(const Lua& lua)
     {
         if (!available() || lua.get_stack_size() != 1 || !lua.is_integer() || scope.host ||
-            !npc_barter.accepting || Clock::now() >= npc_barter.expires || !live_scope(scope) ||
+            !npc_barter_input.accepting || Clock::now() >= npc_barter_input.expires || !live_scope(scope) ||
             npc_barter_sequence == max_sequence) return 0;
         auto* screen = top_menu();
         if (address(screen) != lua.get_integer() || !stock_npc_barter_menu(screen)) return 0;
@@ -1205,21 +1191,23 @@ namespace
     int set_npc_barter(const Lua& lua)
     {
         const auto respond = [&](bool result) { lua.set_bool(result); return 1; };
-        if (!available() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_bool(2) || scope.host ||
-            Clock::now() >= scope.expires || !live_scope(scope)) return respond(false);
+        if (!available() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_bool(3) ||
+            scope.host || Clock::now() >= scope.expires || !live_scope(scope)) return respond(false);
         auto* pawn = scope.pawn.Get();
         if (address(pawn) != lua.get_integer()) return respond(false);
-        auto* actor = npc_barter_actor();
+        auto* screen = top_menu();
+        auto* actor = object_field(screen, STR("Trader"));
+        if (address(actor) != lua.get_integer() || !stock_npc_barter_menu(screen)) return respond(false);
         auto* box = object_field(actor, STR("Box"));
         if (!live(box) || box->GetOuterPrivate() != actor) return respond(false);
-        bind_interaction(npc_barter, actor, box, pawn, lua.get_bool(), Clock::now());
+        bind_interaction(npc_barter_input, actor, box, pawn, lua.get_bool(), Clock::now());
         if (npc_barter_confirm.pawn.Get() != pawn)
         {
             npc_barter_confirm = {};
             npc_barter_confirm.pawn = pawn;
         }
         npc_barter_confirm.accepting = true;
-        npc_barter_confirm.expires = npc_barter.expires;
+        npc_barter_confirm.expires = npc_barter_input.expires;
         return respond(true);
     }
 
@@ -1580,7 +1568,7 @@ namespace silverfish::native_interaction_input
         stash_input = {};
         lantern_input = {};
         clear_npc_barter_screen();
-        npc_barter = {};
+        npc_barter_input = {};
         npc_barter_confirm = {};
         stash_lease = {};
         mosby_station_input::clear_scope();

@@ -1401,7 +1401,7 @@ class Bridge:
                 elif fields[0] == "native-npc-barter-transfer":
                     npc_barter_transfers.append(fields)
                 elif fields[0] == "native-npc-barter-view":
-                    if native_npc_barter.VIEW in data or data.get("map") != native_npc_barter.OBSERVATORY:
+                    if native_npc_barter.VIEW in data or len(fields) != 9 or data.get("map") != fields[1]:
                         raise ValueError("Invalid NPC barter view")
                     data[native_npc_barter.VIEW] = native_npc_barter.parse_view(fields)
                 elif fields[0] == "native-dialogue-view" and len(fields) in (6, 7):
@@ -2962,7 +2962,8 @@ class Bridge:
                     if source in intents:
                         data["native_authored_pickup_interaction"] = intents[source]
                 if npc_barter_frame or npc_barter_items or npc_barter_transfers or npc_barter_preferences:
-                    if not npc_barter_frame or data.get("state") != "hosting" or data.get("map") != native_npc_barter.OBSERVATORY:
+                    if (not npc_barter_frame or len(npc_barter_frame) != 10 or data.get("state") != "hosting"
+                            or data.get("map") != npc_barter_frame[1]):
                         raise ValueError("Invalid host NPC barter frame")
                     data[native_npc_barter.STOCK] = native_npc_barter.parse(npc_barter_frame, npc_barter_items,
                                                                           npc_barter_transfers, npc_barter_preferences)

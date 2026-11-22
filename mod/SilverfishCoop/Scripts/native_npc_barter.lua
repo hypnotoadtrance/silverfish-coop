@@ -2,13 +2,9 @@ local barter = {}
 local guest_save = require("guest_save")
 local wire = require("native_wire_quest")
 
-local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
-local world = map .. ".Observitory_P"
-local npc_name = world .. ":PersistentLevel.NPC_LoneStalker_C_0"
-local npc_class = "/Game/Classes/NPCs/NPC_Stalker_Freelance.NPC_Stalker_Freelance_C"
+local npc_class = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local trader_class = "/Game/Classes/Actors/Barter_BP.Barter_BP_C"
-local merchant = "/Game/Classes/Libraries/DataAssets/Merchants/StalkerTradesData.StalkerTradesData"
-local trader_id = "025127D84BAC8B776150CCA7772B0300"
+local merchant_class = "/Game/Classes/Libraries/DataAssets/Merchants/MerchantData.MerchantData_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local item_weight = "Weight_12_11AB9ED547504E78A849A692A36DC938"
@@ -34,22 +30,40 @@ local function close_to(pawn, target)
         and (point.X - location.X)^2 + (point.Y - location.Y)^2 + (point.Z - location.Z)^2 <= max^2
 end
 
-local function merchant_actor(state)
-    if state.map ~= map or not valid(state.world) or state.world:GetFullName() ~= "World " .. world then return end
-    local npc = StaticFindObject(npc_name)
-    local actor = exact(npc, npc_class) and npc.BarterRef
-    if exact(actor, trader_class) and same(actor.LinkedNPC, npc) and same(actor.MerchantData, StaticFindObject(merchant))
-        and npc.Alive == true and npc:IsActorBeingDestroyed() == false and actor:IsActorBeingDestroyed() == false
-        and same(npc:GetWorld(), state.world) and same(actor:GetWorld(), state.world) and guid(actor.TraderID) == trader_id then
-        return npc, actor
-    end
+local function trader_identity(actor, state)
+    local npc = exact(actor, trader_class) and actor.LinkedNPC
+    local base = StaticFindObject(npc_class)
+    if not valid(npc) or not valid(base) or npc:IsA(base) ~= true or not same(npc.BarterRef, actor)
+        or valid(actor.LinkedShop) or not exact(actor.MerchantData, merchant_class)
+        or npc.Alive ~= true or npc:IsActorBeingDestroyed() or actor:IsActorBeingDestroyed()
+        or not same(npc:GetWorld(), state.world) or not same(actor:GetWorld(), state.world) then return end
+    local id = guid(actor.TraderID)
+    if id and id:find("[^0]") then return id, npc end
 end
 
-local function host_context(state, phase, name)
-    local npc, actor = merchant_actor(state)
-    if phase ~= "hosting" or state.server ~= false or state.listening ~= true or not actor
-        or npc:HasAuthority() ~= true or actor:HasAuthority() ~= true or type(name) ~= "string" then fail("scene") end
+local function find_trader(state, identifier)
+    local candidates = FindAllOf("Barter_BP_C") or {}
+    local match, npc
+    if #candidates > 512 then fail("merchant_bounds") end
+    for _, actor in ipairs(candidates) do
+        local id, owner = trader_identity(actor, state)
+        if id == identifier then
+            if match then fail("merchant_identity_ambiguous") end
+            match, npc = actor, owner
+        end
+    end
+    return match, npc
+end
+
+local function host_context(state, phase, name, identifier)
+    if phase ~= "hosting" or state.server ~= false or state.listening ~= true or not valid(state.world)
+        or type(name) ~= "string" or type(identifier) ~= "string" or #identifier ~= 32
+        or not identifier:match("^[0-9A-F]+$") or not identifier:find("[^0]") then fail("scene") end
     local pawn, save = guest_save.exact_item_context(state, phase, name)
+    local actor, npc = find_trader(state, identifier)
+    if not actor or actor.Save ~= true or npc:HasAuthority() ~= true or actor:HasAuthority() ~= true then
+        fail("merchant_unavailable")
+    end
     local instance = state.world.OwningGameInstance
     local stock = valid(instance) and instance.SaveSlot_Ref
     local host_stack = valid(state.controller) and state.controller.MenuStack
@@ -64,10 +78,16 @@ local function host_context(state, phase, name)
     if not valid(pawn) or pawn:GetFullName() ~= name or pawn.Dead ~= false or not valid(save) or not valid(stock)
         or same(save, stock) or not same(instance.SaveSlot_Ref, stock) or not same(actor["As Game Instance FP"], instance)
         or not close_to(pawn, npc) or not close_to(pawn, actor) then fail("guest_scope") end
-    local relation = {}
-    npc:IdentifyRelation(pawn, false, relation, relation)
-    local allowed = math.tointeger(relation.Relationship)
-    if not allowed or allowed < 0 or allowed > 2 then fail("faction") end
+    local library = StaticFindObject("/Script/GameplayTags.Default__BlueprintGameplayTagLibrary")
+    local ignore_tag = FName("NpcSkills.IgnoreStim", EFindName.FNAME_Find)
+    local ignores_reputation = valid(library) and ignore_tag:ToString() == "NpcSkills.IgnoreStim"
+        and library:HasTag(npc.NpcSkills, {TagName = ignore_tag}, true) == true
+    if not ignores_reputation then
+        local relation = {}
+        npc:IdentifyRelation(pawn, false, relation, relation)
+        local allowed = math.tointeger(relation.Relationship)
+        if not allowed or allowed < 0 or allowed > 2 then fail("faction") end
+    end
     return pawn, save, stock, instance, actor
 end
 
@@ -92,7 +112,7 @@ local function set_preferences(actor, catalog, seed)
     return #values == #catalog and actor.RngSeed == seed
 end
 
-local function catalog(pawn, instance, actor)
+local function catalog(state, pawn, instance, actor, identifier)
     local inventory = actor.Inventory
     local count = inventory and inventory:GetArrayNum()
     local wallet = wire.stock_flag(instance, "Player_Cash")
@@ -118,7 +138,7 @@ local function catalog(pawn, instance, actor)
     local taste, seed = preferences(actor)
     local minimum = actor.MinWeaponValue
     if type(minimum) ~= "number" or not (minimum >= 0 and minimum <= 1000000) then fail("minimum_weapon_value") end
-    return {map = map, trader = trader_id, pawn = pawn:GetFullName(), cash = wallet, accepts = actor.AcceptCash, items = items,
+    return {map = state.map, trader = identifier, pawn = pawn:GetFullName(), cash = wallet, accepts = actor.AcceptCash, items = items,
         preferences = taste, seed = seed, minimum = minimum}
 end
 
@@ -138,12 +158,17 @@ end
 
 local function local_context(state, phase)
     if not enabled or phase ~= "connected" or state.server ~= true then return end
-    local npc, actor = merchant_actor(state)
     local controller = state.controller
     local pawn = state.local_pawn and state.local_pawn.pawn
-    if not actor or not valid(controller) or not valid(pawn) or controller:IsLocalController() ~= true or pawn.Dead ~= false
-        or not same(controller.Pawn, pawn) or not close_to(pawn, npc) or not close_to(pawn, actor) then return end
-    return {actor = actor, pawn = pawn, controller = controller, name = pawn:GetFullName()}
+    if not valid(controller) or not valid(pawn) or controller:IsLocalController() ~= true or pawn.Dead ~= false
+        or not same(controller.Pawn, pawn) or not same(pawn:GetWorld(), state.world) then return end
+    local stack = controller.MenuStack
+    local opened = stack:GetArrayNum() == 1 and stack[1]
+    local actor = session and session.actor or exact(opened, barter_screen) and opened.Trader
+    local identifier, npc = trader_identity(actor, state)
+    if not identifier or not (session or actor.Save == true) or not close_to(pawn, npc) or not close_to(pawn, actor) then return end
+    return {actor = actor, pawn = pawn, controller = controller, name = pawn:GetFullName(),
+        identifier = identifier, map = state.map}
 end
 
 local function top(context, screen)
@@ -209,13 +234,13 @@ local function guest_command(action, fields, state, phase)
         return "exact NPC barter screen closed"
     end
     if not context or not same(context.pawn, session.pawn) or not same(context.actor, session.actor)
-        or #fields < 6 or #fields > 390 or session.expires < os.time() then fail("view_scope") end
-    local cash = math.tointeger(tonumber(fields[4]))
-    local seed, minimum = math.tointeger(tonumber(fields[5])), tonumber(fields[6])
+        or fields[4] ~= session.identifier or #fields < 7 or #fields > 391 or session.expires < os.time() then fail("view_scope") end
+    local cash = math.tointeger(tonumber(fields[5]))
+    local seed, minimum = math.tointeger(tonumber(fields[6])), tonumber(fields[7])
     if not cash or cash < 0 or cash > 2147483647 or not seed or seed < -2147483648 or seed > 2147483647
         or not minimum or not (minimum >= 0 and minimum <= 1000000) then fail("view_wallet_and_seed") end
     local entries, observed, taste = {}, {}, {}
-    for index = 7, #fields do
+    for index = 8, #fields do
         local encoded = fields[index]
         if encoded:sub(1, 2) == "p|" then
             local path, weight = encoded:match("^p|(/Game/Classes/[%w_./%-]+_C)|([^|]+)$")
@@ -307,7 +332,7 @@ function barter.sync(state, phase)
     local accepting = not session and current.controller.Loading == false and exact(opened, barter_screen)
         and same(opened.Trader, current.actor)
     local address = current.pawn:GetAddress()
-    if SilverfishSetNativeNpcBarter(address, accepting == true) ~= true then close_stock(); return end
+    if SilverfishSetNativeNpcBarter(address, current.actor:GetAddress(), accepting == true) ~= true then close_stock(); return end
     if accepting then
         local sequence = SilverfishCaptureNativeNpcBarterMenu(opened:GetAddress())
         if sequence then
@@ -337,18 +362,19 @@ function barter.command(fields, state, phase)
     if action ~= "native-npc-barter-open" and action ~= "native-npc-barter-exchange" then return end
     latest = nil
     local listing = action == "native-npc-barter-open"
-    if #fields ~= (listing and 3 or 6) then fail("arguments") end
-    local pawn, save, stock, instance, actor = host_context(state, phase, fields[3])
+    if #fields ~= (listing and 4 or 7) then fail("arguments") end
+    local identifier = fields[4]
+    local pawn, save, stock, instance, actor = host_context(state, phase, fields[3], identifier)
     if listing then
-        latest = catalog(pawn, instance, actor)
+        latest = catalog(state, pawn, instance, actor, identifier)
         return "exact native NPC barter stock read"
     end
-    local cash = math.tointeger(tonumber(fields[6]))
-    if not cash or tostring(cash) ~= fields[6] or type(SilverfishNativeStalkerBarter) ~= "function" then fail("exchange_arguments") end
-    local okay, detail, receipt, before, after = SilverfishNativeStalkerBarter(pawn:GetAddress(), save:GetAddress(),
-        stock:GetAddress(), fields[4], fields[5], cash)
+    local cash = math.tointeger(tonumber(fields[7]))
+    if not cash or tostring(cash) ~= fields[7] or type(SilverfishNativeNpcBarterExchange) ~= "function" then fail("exchange_arguments") end
+    local okay, detail, receipt, before, after = SilverfishNativeNpcBarterExchange(pawn:GetAddress(), save:GetAddress(),
+        stock:GetAddress(), actor:GetAddress(), identifier, fields[5], fields[6], cash)
     if okay ~= true then error(detail, 0) end
-    local verified, report = pcall(catalog, pawn, instance, actor)
+    local verified, report = pcall(catalog, state, pawn, instance, actor, identifier)
     if not verified or before - after ~= cash or after ~= report.cash or detail ~= "exchanged"
         or type(receipt) ~= "string" or #receipt == 0 or #receipt > 16000 then
         error("mutation_unverified_npc_barter_receipt", 0)
@@ -359,9 +385,9 @@ function barter.command(fields, state, phase)
 end
 
 function barter.rows(state, phase, row)
-    if session and phase == "connected" and state.map == map and state.local_pawn
+    if session and phase == "connected" and state.map == session.map and state.local_pawn
         and same(state.local_pawn.pawn, session.pawn) then
-        return {row("native-npc-barter-view", map, session.name, session.sequence, session.state, trader_id,
+        return {row("native-npc-barter-view", state.map, session.name, session.sequence, session.state, session.identifier,
             session.give or "-", session.receive or "-", session.cash or 0)}
     end
     if not latest or phase ~= "hosting" or state.map ~= latest.map then return {} end

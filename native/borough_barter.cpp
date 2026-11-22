@@ -5,6 +5,7 @@
 #include "loot_escrow.hpp"
 #include "shared_loot.hpp"
 #include "stock_wallet.hpp"
+#include "npc_barter.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1079,14 +1080,9 @@ namespace
         return result(false, layout.backpack->Identical(backpack, before.get()) && flags->Identical(flags_value, stock_flags.get())
             ? "borough_barter_refused_exchange_rolled_back" : "mutation_unverified_borough_barter_exchange");
     }
-    constexpr auto stalker_npc_path = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.NPC_LoneStalker_C_0");
-    constexpr auto stalker_npc_class = STR("/Game/Classes/NPCs/NPC_Stalker_Freelance.NPC_Stalker_Freelance_C");
-    constexpr auto stalker_trader_class = STR("/Game/Classes/Actors/Barter_BP.Barter_BP_C");
-    constexpr auto stalker_merchant_path = STR("/Game/Classes/Libraries/DataAssets/Merchants/StalkerTradesData.StalkerTradesData");
     constexpr auto barter_record_path = STR("/Game/Classes/Libraries/DataAssets/Barter/BarterSaveStruct.BarterSaveStruct");
-    constexpr Guid stalker_identity{0x025127D8, 0x4BAC8B77, 0x6150CCA7, 0x772B0300};
 
-    struct StalkerBarter
+    struct NpcBarter
     {
         silverfish::shared_loot::EscrowOwner owner;
         U::UObject* instance{};
@@ -1109,22 +1105,34 @@ namespace
         silverfish::stock_wallet::Wallet wallet;
         int money() const { return wallet.amount(instance); }
 
-        bool bind(Address pawn, Address save, Address stock)
+        Guid trader_id{};
+
+        bool bind(Address pawn, Address save, Address stock, Address trader, const Guid& expected)
         {
-            auto* world = find<U::UWorld>(observatory_path);
-            if (!world || pawn == 0 || save == 0 || stock == 0 || save == stock ||
-                !silverfish::shared_loot::qualify_escrow_owner_in_world(world, pawn, save, stock, owner)) return false;
+            if (!pawn || !save || !stock || save == stock || !trader || expected == Guid{}) return false;
+            auto* cls = silverfish::npc_barter::type(silverfish::npc_barter::trader_class);
+            if (!cls) return false;
+            U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
+                if (reinterpret_cast<Address>(candidate) != trader) return RC::LoopAction::Continue;
+                if (silverfish::npc_barter::live(candidate) && candidate->GetClassPrivate() == cls) actor = candidate;
+                return RC::LoopAction::Break;
+            });
+            if (!actor) return false;
+            auto* world = static_cast<U::AActor*>(actor)->GetWorld();
+            npc = silverfish::npc_barter::linked_npc(actor, world);
+            if (!npc || !silverfish::shared_loot::qualify_escrow_owner_in_world(world, pawn, save, stock, owner)) return false;
+            const auto active_authority = [](U::UObject* object) {
+                auto* role = field<U::FByteProperty>(object, STR("Role"));
+                return role && role->GetPropertyValueInContainer(object) == 3 &&
+                    bool_value(object, STR("bActorIsBeingDestroyed"), object, false);
+            };
             instance = object(world, STR("OwningGameInstance"));
-            npc = find<U::UObject>(stalker_npc_path);
-            actor = object(npc, STR("BarterRef"));
             data = object(actor, STR("MerchantData"));
-            if (!exact(npc, stalker_npc_class) || !authority(npc, world) || !exact(actor, stalker_trader_class) ||
-                !authority(actor, world) || !near(owner.pawn, actor) || !near(owner.pawn, npc) ||
-                !bool_value(npc, STR("Alive"), npc, true) || !bool_value(owner.pawn, STR("Dead"), owner.pawn, false) ||
-                object(actor, STR("LinkedNPC")) != npc || data != find<U::UObject>(stalker_merchant_path) || !data ||
-                !bool_value(actor, STR("Save"), actor, true) || object(actor, STR("As Game Instance FP")) != instance ||
-                object(instance, STR("SaveSlot_Ref")) != owner.stock || !wallet.bind(instance) ||
-                !layout.bind(owner.save)) return false;
+            if (!active_authority(npc) || !active_authority(actor) || !near(owner.pawn, actor) || !near(owner.pawn, npc) ||
+                !bool_value(owner.pawn, STR("Dead"), owner.pawn, false) || !bool_value(actor, STR("Save"), actor, true) ||
+                object(actor, STR("As Game Instance FP")) != instance || object(instance, STR("SaveSlot_Ref")) != owner.stock ||
+                !wallet.bind(instance) || !layout.bind(owner.save)) return false;
+            trader_id = expected;
             inventory = field<U::FArrayProperty>(actor, STR("Inventory"));
             saved = field<U::FArrayProperty>(owner.stock, STR("BarterInventories"));
             auto* record = find<U::UScriptStruct>(barter_record_path);
@@ -1143,7 +1151,7 @@ namespace
             if (!inventory || !layout.row_is(inventory->GetInner()) || !saved_inventory ||
                 !layout.row_is(saved_inventory->GetInner()) || !entry || !record || entry->GetStruct().Get() != record ||
                 !id || !saved_id || id->GetStruct().Get() != layout.guid->GetStruct().Get() ||
-                saved_id->GetStruct().Get() != id->GetStruct().Get() || identity(id, actor) != stalker_identity ||
+                saved_id->GetStruct().Get() != id->GetStruct().Get() || identity(id, actor) != trader_id ||
                 !day || !prior_day || !min_weapon || !prior_min_weapon || !layout.row_is(value_row) || !quoted ||
                 value_item->GetOuterPrivate() != actor->GetClassPrivate() || value_item->GetNumParms() != 2 ||
                 value_item->GetParmsSize() != 0x58 || !save_inventory ||
@@ -1180,7 +1188,7 @@ namespace
             for (int index = 0; index < rows.Num(); ++index)
             {
                 const auto* row = rows.GetRawPtr(index);
-                if (identity(saved_id, row) != stalker_identity) continue;
+                if (identity(saved_id, row) != trader_id) continue;
                 if (prior_day->GetPropertyValueInContainer(row) != day->GetPropertyValueInContainer(actor) ||
                     prior_min_weapon->GetPropertyValueInContainer(row) != min_weapon->GetPropertyValueInContainer(actor) ||
                     !saved_inventory->Identical(saved_inventory->ContainerPtrToValuePtr<void>(row),
@@ -1229,7 +1237,7 @@ namespace
         return stack->GetPropertyValueInContainer(defaults) ? layout.units->GetPropertyValueInContainer(row) : 1;
     }
 
-    bool keeps_weapon(const StalkerBarter& barter, U::FScriptArrayHelper& inventory)
+    bool keeps_weapon(const NpcBarter& barter, U::FScriptArrayHelper& inventory)
     {
         const auto minimum = barter.min_weapon->GetPropertyValueInContainer(barter.actor);
         if (!std::isfinite(minimum)) return false;
@@ -1248,7 +1256,7 @@ namespace
         return false;
     }
 
-    bool transfer_selection(const StalkerBarter& barter, U::FScriptArrayHelper& source, U::FScriptArrayHelper& destination,
+    bool transfer_selection(const NpcBarter& barter, U::FScriptArrayHelper& source, U::FScriptArrayHelper& destination,
                             const std::vector<BarterSelection>& selections, bool outbound, double& total, std::string& receipt)
     {
         const auto& inventory = barter.layout;
@@ -1289,7 +1297,7 @@ namespace
         return true;
     }
 
-    int stalker_barter(const Lua& lua)
+    int npc_barter_execute(const Lua& lua)
     {
         const auto reply = [&](bool okay, std::string_view status, const std::string& rows = {}, int before = 0, int after = 0) {
             lua.set_bool(okay);
@@ -1299,17 +1307,19 @@ namespace
             lua.set_integer(after);
             return 5;
         };
-        if (!enabled() || lua.get_stack_size() != 6 || !lua.is_integer(1) || !lua.is_integer(2) ||
-            !lua.is_integer(3) || !lua.is_string(4) || !lua.is_string(5) || !lua.is_integer(6))
+        if (!enabled() || lua.get_stack_size() != 8 || !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3) ||
+            !lua.is_integer(4) || !lua.is_string(5) || !lua.is_string(6) || !lua.is_string(7) || !lua.is_integer(8))
             return reply(false, "barter_refused_arguments");
         const auto pawn = lua.get_integer();
         const auto save = lua.get_integer();
         const auto stock = lua.get_integer();
+        const auto trader = lua.get_integer();
+        const auto identity = parse_guid(lua.get_string());
         const auto player_selection = lua.get_string();
         const auto trader_selection = lua.get_string();
         const auto cash = lua.get_integer();
-        StalkerBarter barter;
-        if (pawn <= 0 || save <= 0 || stock <= 0 || !barter.bind(pawn, save, stock))
+        NpcBarter barter;
+        if (pawn <= 0 || save <= 0 || stock <= 0 || trader <= 0 || !barter.bind(pawn, save, stock, trader, identity))
             return reply(false, "barter_refused_exact_owner_and_trader");
         const auto funds = barter.money();
         if (cash < 0 || cash > 1000 || cash > funds ||
@@ -1406,6 +1416,6 @@ namespace silverfish::borough_barter
         lua.register_function("SilverfishPreviewNativeCraftingBench", trade<true, true>);
         lua.register_function("SilverfishSeedNativeCraftingScrap", seed_crafting_scrap);
         lua.register_function("SilverfishNativeSewerTrade", sewer_trade);
-        lua.register_function("SilverfishNativeStalkerBarter", stalker_barter);
+        lua.register_function("SilverfishNativeNpcBarterExchange", npc_barter_execute);
     }
 }

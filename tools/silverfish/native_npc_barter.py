@@ -1,4 +1,4 @@
-"""Qualify the Observatory freelance trader's host-owned stock and exchanges."""
+"""Qualify a stock NPC trader and settle authenticated exchanges against the host save."""
 
 import asyncio
 import math
@@ -8,7 +8,6 @@ import uuid
 
 from . import party
 from .native_gold import valid_guid
-from .travel import OBSERVATORY
 
 
 OPEN = "native-npc-barter-open"
@@ -17,10 +16,18 @@ PROJECT = "native-npc-barter-project"
 CLOSE = "native-npc-barter-close"
 STOCK = "native_npc_barter"
 VIEW = "native_npc_barter_view"
-TRADER = "025127D84BAC8B776150CCA7772B0300"
 MAX_ITEMS = 128
 ITEM = re.compile(r"/Game/Classes/[A-Za-z0-9_./-]+_C")
-PAWN = re.compile(re.escape("Player_FP_C " + OBSERVATORY + ".Observitory_P:PersistentLevel.Player_FP_C_") + r"[0-9]+")
+MAP = re.compile(r"/Game/Classes/Maps(?:/[A-Za-z0-9_-]+)+")
+PAWN_SUFFIX = re.compile(r"[0-9]+")
+
+
+def pawn_in_map(pawn: str, area: str) -> bool:
+    if not isinstance(area, str) or not isinstance(pawn, str) or not MAP.fullmatch(area):
+        return False
+    level = area.rsplit("/", 1)[1]
+    prefix = f"Player_FP_C {area}.{level}:PersistentLevel.Player_FP_C_"
+    return pawn.startswith(prefix) and PAWN_SUFFIX.fullmatch(pawn[len(prefix):]) is not None
 
 
 def integer(raw: str, minimum: int, maximum: int) -> int:
@@ -35,7 +42,7 @@ def item_key(path: str, guid: str) -> bool:
 
 
 def parse(frame: list[str], items: list[list[str]], moved: list[list[str]], preferences: list[list[str]]) -> dict:
-    if len(frame) != 10 or frame[1:3] != [OBSERVATORY, TRADER] or not PAWN.fullmatch(frame[3]):
+    if len(frame) != 10 or not valid_guid(frame[2]) or not pawn_in_map(frame[3], frame[1]):
         raise ValueError("Invalid native NPC barter scope")
     seed = integer(frame[8], -(2**31), 2**31 - 1)
     minimum = float(frame[9])
@@ -92,7 +99,7 @@ def selection(encoded: str) -> dict[str, int]:
 
 
 def parse_view(fields: list[str]) -> dict:
-    if len(fields) != 9 or fields[1] != OBSERVATORY or fields[5] != TRADER or not PAWN.fullmatch(fields[2]):
+    if len(fields) != 9 or not valid_guid(fields[5]) or not pawn_in_map(fields[2], fields[1]):
         raise ValueError("Invalid native barter screen scope")
     mode = fields[4]
     if mode not in {"opening", "ready", "confirming", "closed"}:
@@ -107,27 +114,28 @@ def parse_view(fields: list[str]) -> dict:
             "state": mode, "trader": fields[5], "give": fields[6], "receive": fields[7], "cash": cash}
 
 
-def _scope(host, character: str) -> tuple[str, str]:
+def _scope(host, character: str) -> tuple[str, str, str]:
+    area = host.last_game.get("map")
     member = host.native_recipients().get(character)
     player = host.party["players"].get(character)
     if (not member or not member["connected"] or not player or player["downed"] or host.transitioning or host.stopping
             or host.native_checkpoint_unsafe or host.party.get("wipe") is not None or character in host.party["pending_spawns"]
-            or host.last_game.get("state") != "hosting" or host.last_game.get("map") != OBSERVATORY
-            or time.monotonic() - host.last_seen > 3 or not host.zone_epoch or not member.get("pawn")):
+            or host.last_game.get("state") != "hosting" or time.monotonic() - host.last_seen > 3
+            or not host.zone_epoch or not pawn_in_map(member.get("pawn"), area)):
         raise party.RuleError("native_npc_barter_unavailable")
-    return host.zone_epoch, member["pawn"]
+    return host.zone_epoch, area, member["pawn"]
 
 
-async def _report(host, bridge, command: str, pawn: str, *args: str) -> dict:
+async def _report(host, bridge, command: str, area: str, pawn: str, trader: str, *args: str) -> dict:
     try:
-        snapshot = await bridge.command(command, pawn, *args, timeout=7)
+        snapshot = await bridge.command(command, pawn, trader, *args, timeout=7)
     except RuntimeError as error:
         if str(error).startswith("barter_refused_"):
             raise party.RuleError(str(error)) from error
         raise
     report = snapshot.get(STOCK)
-    if (snapshot.get("state") != "hosting" or snapshot.get("map") != OBSERVATORY or not report
-            or report["trader"] != TRADER or report["pawn"] != pawn):
+    if (snapshot.get("state") != "hosting" or snapshot.get("map") != area or not report
+            or report["trader"] != trader or report["pawn"] != pawn):
         raise RuntimeError("The NPC did not verify its exact native barter stock")
     host.last_game, host.last_seen = snapshot, time.monotonic()
     return report
@@ -137,16 +145,18 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     scope = _scope(host, character)
     if not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
         raise party.RuleError("invalid_operation_id")
+    if not isinstance(target, str) or len(target) > 1150:
+        raise party.RuleError("native_npc_barter_invalid_trader")
+    parts = target.split("@")
+    if len(parts) != (2 if action == OPEN else 5) or parts[0] != scope[0] or not valid_guid(parts[1]):
+        raise party.RuleError("native_npc_barter_invalid_trader")
+    _, trader, *proposal = parts
     if action == OPEN:
-        if target != scope[0]:
-            raise party.RuleError("native_npc_barter_zone_changed")
-        return {STOCK: await _report(host, bridge, OPEN, scope[1])}
-    if not isinstance(target, str) or len(target) > 1100 or target.count("@") != 3:
-        raise party.RuleError("native_npc_barter_invalid_exchange")
-    epoch, payment, offered, wanted = target.split("@")
+        return {STOCK: await _report(host, bridge, OPEN, scope[1], scope[2], trader)}
+    payment, offered, wanted = proposal
     cash = integer(payment, 0, 1000)
     expected = {"give": selection(offered), "receive": selection(wanted)}
-    if epoch != scope[0] or not expected["receive"] or not expected["give"] and not cash:
+    if not expected["receive"] or not expected["give"] and not cash:
         raise party.RuleError("native_npc_barter_invalid_exchange")
     fingerprint = [EXCHANGE, target, None]
     for receipt in host.party["receipts"].get(character, []):
@@ -160,7 +170,7 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
     host.native_checkpoint_unsafe = True
     try:
         try:
-            result = await _report(host, bridge, EXCHANGE, scope[1], offered, wanted, payment)
+            result = await _report(host, bridge, EXCHANGE, scope[1], scope[2], trader, offered, wanted, payment)
         except party.RuleError:
             host.native_checkpoint_unsafe = False
             raise
@@ -198,17 +208,18 @@ class View:
         sequence = state.get("sequence", 0)
         action = {"opening": OPEN, "confirming": EXCHANGE}.get(state.get("state"))
         if (not active or not action or sequence <= self.latest or not client.host_session or not client.zone_epoch
-                or state.get("map") != OBSERVATORY or state.get("trader") != TRADER
+                or state.get("map") != client.last_game.get("map") or not valid_guid(state.get("trader"))
                 or state.get("pawn") != client.last_game.get("pawns", {}).get("local", {}).get("name")):
             return
         self.latest = sequence
         epoch = client.zone_epoch
-        target = epoch if action == OPEN else "@".join((epoch, str(state["cash"]), state["give"], state["receive"]))
-        operation = uuid.uuid5(client.bridge.input_namespace, f"{client.host_session}:{epoch}:{TRADER}:{sequence}").hex
+        trader = state["trader"]
+        target = f"{epoch}@{trader}" if action == OPEN else "@".join((epoch, trader, str(state["cash"]), state["give"], state["receive"]))
+        operation = uuid.uuid5(client.bridge.input_namespace, f"{client.host_session}:{epoch}:{trader}:{sequence}").hex
         try:
             reply = await client.gameplay_action(action, operation, target)
             catalog = reply[STOCK]
-            if catalog["trader"] != TRADER or catalog["map"] != OBSERVATORY or len(catalog["stock"]) > MAX_ITEMS:
+            if catalog["trader"] != trader or catalog["map"] != state["map"] or len(catalog["stock"]) > MAX_ITEMS:
                 raise ValueError("The host NPC returned invalid barter stock")
             items = ["|".join((row["guid"], row["class_path"], str(row["ammo"]), str(row["weight"]),
                                 str(row["value"]), str(int(row["never_drop"])))) for row in catalog["stock"]]
@@ -216,7 +227,7 @@ class View:
                 client.guest_ui.digest = "-"
                 await client.guest_ui.refresh(client)
             preferences = [f"p|{path}|{weight}" for path, weight in catalog["preferences"].items()]
-            client.last_game = await client.bridge.command(PROJECT, str(sequence), str(catalog["cash"]),
+            client.last_game = await client.bridge.command(PROJECT, str(sequence), trader, str(catalog["cash"]),
                                                            str(catalog["seed"]), str(catalog["minimum_weapon_value"]),
                                                            *items, *preferences, timeout=4)
         except (OSError, RuntimeError, ValueError, KeyError) as error:
