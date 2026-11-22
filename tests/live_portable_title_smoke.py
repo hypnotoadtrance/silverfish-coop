@@ -444,6 +444,13 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str) -> dict:
 
 async def verify_stock_use(host: Seat, guest: Seat, pawn: str, *, starter: bool) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
+    campaign_file = host.campaign / "save" / "campaign.json"
+
+    def save_hashes():
+        paths = [campaign_file, *host.profile.rglob("*.sav")]
+        return {path: sha256(path.read_bytes()).hexdigest() for path in paths}
+
+    before_saves = save_hashes()
     before = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
     host_before = (await submit(host_run, "native-inventory-list"))["native_inventory"]
     classes = ({native_guest_consumable.STARTER_BAGS["hyperrandom"]} if starter
@@ -496,8 +503,10 @@ async def verify_stock_use(host: Seat, guest: Seat, pawn: str, *, starter: bool)
     replay = await submit(guest_run, action, target=item["guid"], operation_id=event["operation_id"])
     assert replay["ok"] and replay[key] == receipt, replay
     assert (await submit(guest_run, "native-inventory-list"))["native_inventory"] == after
-    native_host_save.verify_checkpoint(host.profile, json.loads(
-        (host.campaign / "save" / "campaign.json").read_text(encoding="utf-8")))
+    assert save_hashes() == before_saves, "Using a stock item wrote a campaign save"
+    saved = await submit(host_run, "checkpoint")
+    assert saved["ok"], saved
+    native_host_save.verify_checkpoint(host.profile, json.loads(campaign_file.read_text(encoding="utf-8")))
     assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
     evidence = {"gesture": gesture, "receipt": receipt}

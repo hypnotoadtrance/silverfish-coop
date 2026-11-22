@@ -555,7 +555,7 @@ function guest_save.command(fields, state, phase)
     local command = fields[2]
     if command ~= "native-guest-bind" and command ~= "native-guest-bind-exact" and command ~= "native-guest-clear"
         and command ~= "native-guest-save-capture" and command ~= "native-guest-save-capture-retained"
-        and command ~= "native-guest-save-release-retained" then return end
+        and command ~= "native-guest-save-release-retained" and command ~= "native-guest-save-retain" then return end
     if not enabled then error("Native guest saves are disabled", 0) end
     if command == "native-guest-clear" then
         if #fields > 3 or (#fields == 3 and not stock_name(fields[3])) then
@@ -571,6 +571,14 @@ function guest_save.command(fields, state, phase)
     if command == "native-guest-save-capture-retained" then
         if #fields ~= 4 or not character_uuid(fields[3]) then error("Expected the retained guest and generation slot", 0) end
         return capture_retained(state, phase, fields[3], fields[4])
+    end
+    if command == "native-guest-save-retain" then
+        local binding = bindings[fields[3]]
+        if #fields ~= 4 or not binding or binding.character ~= fields[4]
+            or not guest_save.retain(state, phase, fields[3]) then
+            error("The exact guest inventory could not be retained", 0)
+        end
+        return "retained exact co-op guest inventory"
     end
     if command == "native-guest-save-release-retained" then
         if phase ~= "hosting" or #fields < 4 or #fields > 10 or #fields % 2 ~= 0 then

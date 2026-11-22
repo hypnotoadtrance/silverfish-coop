@@ -127,6 +127,8 @@ def parse_starter_bag(fields: list[str]) -> dict:
 
 
 async def use(host, bridge, character: str, guid: str, operation_id: str, *, action: str = ACTION) -> dict:
+    from .native_inventory import retain_guest_save
+
     if action not in RESULT:
         raise party.RuleError("native_guest_consumable_unavailable")
     key = RESULT[action]
@@ -156,7 +158,9 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
     if starter and host.last_game.get("native_paired_save_capture") is not True:
         raise party.RuleError("guest_starter_bag_refused_checkpoint")
     area, pawn = host.last_game["map"], owner["pawn"]
-    await host.checkpoint_native(bridge)
+    deferred = await retain_guest_save(host, bridge, character, pawn)
+    if not deferred:
+        await host.checkpoint_native(bridge)
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -195,7 +199,9 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
         recent.append({"id": operation_id, "request": fingerprint, "result": result})
         del recent[:-party.RECENT_ACTIONS]
         capture = {"typed_inventory": True} if starter else {}
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}), **capture)
+        revision = None
+        if not deferred:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}), **capture)
     except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
@@ -207,6 +213,6 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
     details = {"awarded_guids": proof["awarded_guids"]} if starter else {"regen": regen}
     if meal is not None:
         details.update(food=proof["food_after"], intoxication=proof["intox_after"])
-    host.control.event(f"{key}_committed", character_id=character, operation_id=operation_id,
+    host.control.event(f"{key}_{'accepted' if deferred else 'committed'}", character_id=character, operation_id=operation_id,
                        guid=guid, revision=revision, quantity=after, **details)
     return result

@@ -296,9 +296,9 @@ class Host:
             self.allowed_maps |= EXPANDED_MAPS
         self.next_zone_heartbeat = 0.0
         self.native_checkpoint_unsafe = False
-        # None means clean. A pending loot batch records whether it needs typed readback.
-        self.pending_native_loot_save: bool | None = None
-        self.pending_guest_loot_saves: dict[str, tuple[str, dict]] = {}
+        # None means clean. Pending host changes record whether they need typed readback.
+        self.pending_host_save: bool | None = None
+        self.pending_guest_saves: dict[str, tuple[str, dict]] = {}
         self.matrix_supported = matrix_supported
         self.world_flush_supported = world_flush_supported
         self.native_guest_health = None
@@ -612,15 +612,15 @@ class Host:
     def guest_lease_ids(self) -> dict[str, str]:
         return {self.guest["character_id"]: self.guest["lease_id"]} if self.guest else {}
 
-    def queue_guest_loot_save(self, character: str, pawn: str) -> None:
+    def queue_guest_save(self, character: str, pawn: str) -> None:
         for alias, details in self.last_game.get("pawns", {}).items():
             if details.get("name") == pawn:
-                self.pending_guest_loot_saves[character] = (pawn, _pawn(self.last_game, alias))
+                self.pending_guest_saves[character] = (pawn, _pawn(self.last_game, alias))
                 return
-        raise RuntimeError("The retained guest pickup did not report its character state")
+        raise RuntimeError("The retained guest did not report its character state")
 
-    async def capture_retained_guest_loot(self, bridge: Bridge, character: str, source: str) -> dict:
-        pawn, state = self.pending_guest_loot_saves[character]
+    async def capture_retained_guest_save(self, bridge: Bridge, character: str, source: str) -> dict:
+        pawn, state = self.pending_guest_saves[character]
         slot = native_host_save.new_slot()
         snapshot = await bridge.command("native-guest-save-capture-retained", character, slot, timeout=7)
         proof = snapshot.get("native_guest_save_retained_frames", {}).get(character, {})
@@ -652,10 +652,10 @@ class Host:
                 raise RuntimeError("The typed inventory requires a stock campaign checkpoint")
             return await self.commit_checkpoint(proposed_party, unleased_states=unleased_states,
                                                 require_guest_frames=require_guest_frames)
-        pending_loot = self.pending_native_loot_save is not None
-        if pending_loot:
-            typed_inventory = typed_inventory or self.pending_native_loot_save
-        pending_guests = frozenset(self.pending_guest_loot_saves)
+        pending_host = self.pending_host_save is not None
+        if pending_host:
+            typed_inventory = typed_inventory or self.pending_host_save
+        pending_guests = frozenset(self.pending_guest_saves)
         require_guest_frames |= pending_guests
         typed_inventory = typed_inventory or bool(pending_guests)
         source = self.last_game.get("map")
@@ -710,7 +710,7 @@ class Host:
             current_leases = {lease["character_id"] for lease in self.store.status()["leases"]}
             lease_ids = self.guest_lease_ids()
             for character in sorted(missing):
-                saved = await self.capture_retained_guest_loot(bridge, character, source)
+                saved = await self.capture_retained_guest_save(bridge, character, source)
                 guest_records[character] = saved["native_guest_save"]
                 if character in current_leases:
                     lease_id = lease_ids.get(character)
@@ -723,8 +723,8 @@ class Host:
                                                 native_record=record, guest_records=guest_records,
                                                 unleased_states=unleased_states, require_guest_frames=require_guest_frames,
                                                 retained_guest_changes=retained_changes)
-        if pending_loot:
-            self.pending_native_loot_save = None
+        if pending_host:
+            self.pending_host_save = None
         if escrow_records:
             slots = []
             for crate, frame in escrow_records.items():
@@ -738,8 +738,11 @@ class Host:
                     self.control.event("native_loot_escrow_release_failed", reason=str(error))
         if pending_guests:
             arguments = []
+            holds = getattr(self, "smg_holds", None)
             for character in sorted(pending_guests):
-                self.pending_guest_loot_saves.pop(character)
+                if holds is not None and (character in holds.strokes or holds.lock.locked()):
+                    continue
+                self.pending_guest_saves.pop(character)
                 frame = guest_records.get(character) or unleased_states[character]["native_guest_save"]
                 arguments.extend((character, frame["slot"]))
             for start in range(0, len(arguments), 8):
@@ -2602,11 +2605,11 @@ class Host:
             if snapshot.get("native_guest_save", {}).get("pawn") != pawn["name"]:
                 raise RuntimeError("The guest's independent native save could not be verified")
             character = self.guest["character_id"]
-            if character in self.pending_guest_loot_saves:
+            if character in self.pending_guest_saves:
                 if snapshot.get("native_guest_save_rebound", {}).get(character) != pawn["name"]:
                     raise RuntimeError("The game did not rebind the retained guest inventory")
                 self.last_game = snapshot
-                self.queue_guest_loot_save(character, pawn["name"])
+                self.queue_guest_save(character, pawn["name"])
             elif frame:
                 proof = snapshot.get("native_guest_save_frame", {})
                 if (proof.get("state") != "restored" or proof.get("slot") != frame["slot"]
@@ -3698,6 +3701,8 @@ class Host:
                         raise ValueError("Open an integrated co-op campaign to end it from the game")
                     result = await self.end_session(bridge, transport)
                 elif action == "checkpoint" or action == "stop":
+                    if self.smg_holds:
+                        await self.smg_holds.settle(bridge, stop_all=True)
                     result = {"revision": await self.checkpoint_native(bridge)}
                     self.control.event("checkpoint_saved", revision=result["revision"], command_id=path.stem)
                     if action == "stop":
@@ -4179,8 +4184,8 @@ class Host:
                             campaign=self.store.status(), gameplay=self.public_gameplay(),
                             zone_epoch=self.zone_epoch, awaiting_zone_guest=self.awaiting_zone_guest,
                             link_connected=linked,
-                            native_inventory_checkpoint_pending=(self.pending_native_loot_save is not None
-                                                                 or bool(self.pending_guest_loot_saves)),
+                            native_inventory_checkpoint_pending=(self.pending_host_save is not None
+                                                                 or bool(self.pending_guest_saves)),
                             transport=transport.statistics() if isinstance(transport, link.HostLink) else {},
                             local_bridge="memory" if bridge.local_bridge is not None else "file")
 

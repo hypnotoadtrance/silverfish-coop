@@ -705,6 +705,7 @@ class Bridge:
         self._status_snapshot: dict | None = None
         self.local_bridge = None
         self._local_status = None
+        self._file_command_lock = asyncio.Lock()
 
     async def wait_for_interaction(self, timeout: float, *, wake_if=None, guest=False) -> None:
         """Wake for local input, a new game frame, or pending network work."""
@@ -2485,6 +2486,8 @@ class Bridge:
                     sites[fields[2]] = dict(map=fields[1], actor=fields[3], location=location)
                 elif fields == ["native-stash-live-census", "1"] and data.get("state") == "hosting":
                     data[native_stash.LIVE_CENSUS] = True
+                elif fields == ["native-stash-live-move", "1"] and data.get("state") == "hosting":
+                    data[native_stash.LIVE_MOVE] = True
                 elif fields[0] == native_stash.CENSUS and len(fields) == 9 and data.get("state") == "hosting":
                     live = fields[3] == "-" and data.get(native_stash.LIVE_CENSUS) is True
                     if (fields[1] != data.get("map") or not (live or SLOT.fullmatch(fields[3])) or not valid_guid(fields[4])
@@ -2494,7 +2497,8 @@ class Bridge:
                     data["native_stash_census"] = dict(map=fields[1], pawn=fields[2], slot=fields[3], site=fields[4],
                         combined=fields[5] == "1", total=int(fields[6]), offset=int(fields[7]), count=int(fields[8]), items=[])
                 elif fields[0] == native_stash.MOVE and len(fields) == 10 and data.get("state") == "hosting":
-                    if (fields[1] != data.get("map") or not SLOT.fullmatch(fields[3]) or not valid_guid(fields[4])
+                    live = fields[3] == "-" and data.get(native_stash.LIVE_MOVE) is True
+                    if (fields[1] != data.get("map") or not (live or SLOT.fullmatch(fields[3])) or not valid_guid(fields[4])
                             or not valid_guid(fields[5]) or fields[6] not in {"deposit", "withdraw"}
                             or fields[7] not in {"0", "1"} or not fields[8].startswith("/Game/")
                             or not 1 <= int(fields[9]) < 2**31):
@@ -3066,8 +3070,9 @@ class Bridge:
             raise ValueError("Invalid game bridge command value")
         request = "\t".join(fields) + "\n"
         if self.local_bridge is None:
-            write_text(self.directory / "command.tsv", request)
-            status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout, interval=.025)
+            async with self._file_command_lock:
+                write_text(self.directory / "command.tsv", request)
+                status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout, interval=.025)
         else:
             status = self._parse_status(await self.local_bridge.command(request.encode("utf-8"), timeout))
             if not status or status.get("ack", {}).get("id") != fields[0]:

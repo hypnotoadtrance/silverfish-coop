@@ -152,6 +152,14 @@ The host sent a Steam invite and the guest accepted and entered the campaign. Th
 
 A muted two-instance Direct IP trial kept a guest's unsaved crate pickup through a brief outage and through expiration of the guest's original native pawn. The replacement pawn received the same item from the running host. The campaign and Unreal save file hashes stayed identical until an explicit checkpoint saved the item and its ownership together.
 
+Supported live guest weapon and inventory actions now keep the detached save in memory. This also covers ordinary melee, flares, mushroom harvesting, door prying, and consumable use. Two guests used stock reload and fired overlapping bursts in a muted trial. Releasing the triggers and losing one client's connection left the campaign files unchanged. An explicit save before stopping preserved each magazine through restart. [Held-fire trial](../tests/live_guest_held_fire_smoke.py)
+
+Stock inventory sorting and both direct and popup stack splitting also leave save files unchanged until a save. A muted two-player test restored the sorted and split inventory after restart. [Inventory trial](../tests/live_inventory_split_smoke.py)
+
+Private stash transfers use the live authoritative inventory and the game's stash screen. In a muted run, dragging a suppressed pistol into a Dead Bridge stash left the save files unchanged. Travel and an explicit save preserved it, and the guest withdrew it at Observatory after restart with all seven rounds. Loose level pickups also defer their campaign write. The Observatory test hid a claimed bolt for both players and recovered the guest's copy after an explicit save and restart. [Stash trial](../tests/live_stash_smoke.py) · [Loose-pickup trial](../tests/live_loose_pickup_smoke.py)
+
+Player and enemy drop storage, some special container actions, merchant transactions, and quest reward templates still have gameplay-time save calls. They need to share the explicit save boundaries before the campaign-wide save policy is complete.
+
 ### Steam hosting options
 
 - The in-game Host flow offers a transport choice. Direct IP uses the configured port and address. Steam Networking opens a Steam lobby when the campaign is ready.

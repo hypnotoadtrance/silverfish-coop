@@ -439,6 +439,7 @@ namespace
         return count;
     }
 
+    template <bool Live>
     int move_stash(const Lua& lua)
     {
         if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 6 ||
@@ -452,20 +453,23 @@ namespace
         const auto id = stash_identity(lua.get_string());
         const bool deposit = lua.get_bool();
         auto* save = authoritative_save(pawn, combined);
-        auto* snapshot = isolated_snapshot(frame);
-        if (!save || !snapshot || site == Guid{} || id == Guid{})
+        auto* snapshot = Live ? nullptr : isolated_snapshot(frame);
+        if (!save || (Live ? frame != 0 : !snapshot) || site == Guid{} || id == Guid{})
             return result(lua, false, "native_stash_move_exact_save_and_site_required");
         Inventory inventory;
         StashStorage storage;
         if (!inventory.bind(save) || !storage.bind(save, inventory))
             return result(lua, false, "native_stash_move_schema_unavailable");
-        const std::array<Unreal::FProperty*, 5> stores{
-            inventory.backpack, inventory.equipment, inventory.armor, inventory.helmet, storage.array};
-        for (auto* property : stores)
+        if constexpr (!Live)
         {
-            if (!property->Identical(property->ContainerPtrToValuePtr<void>(save),
-                                     property->ContainerPtrToValuePtr<void>(snapshot)))
-                return result(lua, false, "native_stash_move_stale_frame");
+            const std::array<Unreal::FProperty*, 5> stores{
+                inventory.backpack, inventory.equipment, inventory.armor, inventory.helmet, storage.array};
+            for (auto* property : stores)
+            {
+                if (!property->Identical(property->ContainerPtrToValuePtr<void>(save),
+                                         property->ContainerPtrToValuePtr<void>(snapshot)))
+                    return result(lua, false, "native_stash_move_stale_frame");
+            }
         }
         if (inventory.identity(inventory.armor->ContainerPtrToValuePtr<void>(save)) == id ||
             inventory.identity(inventory.helmet->ContainerPtrToValuePtr<void>(save)) == id)
@@ -571,7 +575,8 @@ namespace silverfish::inventory_census
         lua.register_function("SilverfishReadLiveNativeInventoryCensus", read_live_census);
         lua.register_function("SilverfishReadNativeStashCensus", read_stash);
         lua.register_function("SilverfishReadLiveNativeStashCensus", read_live_stash);
-        lua.register_function("SilverfishMoveNativeStashItem", move_stash);
+        lua.register_function("SilverfishMoveNativeStashItem", move_stash<false>);
+        lua.register_function("SilverfishMoveLiveNativeStashItem", move_stash<true>);
         lua.register_function("SilverfishVerifyNativeStashSave", verify_stash_save);
     }
 }

@@ -3,7 +3,7 @@
 import math
 import time
 
-from . import native_authored_pickup, party
+from . import native_authored_pickup, native_inventory, party
 from .enemy_loot_profiles import BY_ACTOR, BY_MAP
 from .native_gold import valid_guid
 from .travel import CROSSROADS, DEAD_BRIDGE
@@ -181,7 +181,9 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
         return {AIM_KEY: proof}
 
     key = SWING_KEY if ordinary else EQUIP_KEY if action == EQUIP else CANARY_KEY
-    await host.checkpoint_native(bridge)
+    deferred = ordinary and await native_inventory.retain_guest_save(host, bridge, character, pawn)
+    if not deferred:
+        await host.checkpoint_native(bridge)
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -234,7 +236,8 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation_id, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
-        await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
+        if not deferred:
+            await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
         host.party = candidate
         host.native_checkpoint_unsafe = False
         return result

@@ -373,11 +373,11 @@ class MultiHost(Host):
         scope = snapshot.get("native_guest_save_members", {}).get(binding.pawn, {})
         if scope.get("state") != "bound" or scope.get("pawn") != binding.pawn:
             raise RuntimeError("The game did not detach the exact authenticated guest save")
-        if member.character_id in self.pending_guest_loot_saves:
+        if member.character_id in self.pending_guest_saves:
             if snapshot.get("native_guest_save_rebound", {}).get(member.character_id) != binding.pawn:
                 raise RuntimeError("The game did not rebind the retained guest inventory")
             self.last_game = snapshot
-            self.queue_guest_loot_save(member.character_id, binding.pawn)
+            self.queue_guest_save(member.character_id, binding.pawn)
         elif frame:
             proof = snapshot.get("native_guest_save_member_frames", {}).get(binding.pawn, {})
             if (proof.get("state") != "restored" or proof.get("slot") != frame["slot"]

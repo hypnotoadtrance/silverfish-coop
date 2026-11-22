@@ -4,7 +4,7 @@ import asyncio
 import re
 import time
 
-from . import native_loot, native_pickup_audio, party
+from . import native_inventory, native_loot, native_pickup_audio, party
 from .native_gold import valid_guid
 from .native_guest_drop_record import valid_position
 
@@ -218,6 +218,7 @@ async def claim(host, bridge, character, requested, operation, *, local_input=Fa
     if not pawn or not player or player["downed"] or host.party["wipe"] or character in host.party["pending_spawns"]:
         raise party.RuleError("loose_pickup_claimant_unavailable")
     slot = native_host_save.new_slot()
+    retained = character == "host" or await native_inventory.retain_guest_save(host, bridge, character, pawn)
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -261,8 +262,13 @@ async def claim(host, bridge, character, requested, operation, *, local_input=Fa
         receipts.append({"id": operation, "request": fingerprint, "result": result})
         del receipts[:-party.RECENT_ACTIONS]
         host.last_game, host.last_seen = snapshot, time.monotonic()
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}),
-                                                typed_inventory=proof.get("memory", False))
+        deferred = retained and (proof.get("memory") or row["class_path"] in native_loot.CASH_RANGES)
+        revision = None
+        if not deferred:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}),
+                                                    typed_inventory=proof.get("memory", False))
+        elif character == "host":
+            host.pending_host_save = bool(host.pending_host_save or proof.get("memory"))
         host.party = candidate
         host.loose_pickups.replenished.discard(path)
         host.native_checkpoint_unsafe = False

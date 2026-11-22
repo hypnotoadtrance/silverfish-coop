@@ -69,8 +69,8 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.host = object.__new__(Host)
         self.host.native_profile = root / "game-user"
-        self.host.pending_native_loot_save = None
-        self.host.pending_guest_loot_saves = {}
+        self.host.pending_host_save = None
+        self.host.pending_guest_saves = {}
         self.host.party = {}
         native_host_save.directory(self.host.native_profile).mkdir(parents=True)
         self.host.allowed_maps = {CROSSROADS}
@@ -84,7 +84,7 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.bridge = SimpleNamespace(command=AsyncMock(side_effect=self.capture))
 
     async def capture(self, action, host_slot, dig_token, first, first_slot, second, second_slot, *, timeout):
-        typed = self.host.pending_native_loot_save or self.host.pending_guest_loot_saves
+        typed = self.host.pending_host_save or self.host.pending_guest_saves
         expected = "native-host-save-capture-typed" if typed else "native-host-save-capture"
         self.assertEqual(action, expected)
         self.assertIn(dig_token, ("-", "dig-token"))
@@ -118,7 +118,7 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.host.commit_checkpoint.assert_not_awaited()
 
     async def test_ordinary_party_update_cannot_save_a_half_persisted_pickup(self):
-        self.host.pending_native_loot_save = True
+        self.host.pending_host_save = True
         self.host.store.revision = 18
         self.host.store.checkpoint = Mock()
         candidate = {"queued": True}
@@ -127,10 +127,10 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.host.commit_checkpoint.side_effect = OSError("failed write")
         with self.assertRaisesRegex(OSError, "failed write"):
             await self.host.checkpoint_native(self.bridge, candidate)
-        self.assertTrue(self.host.pending_native_loot_save)
+        self.assertTrue(self.host.pending_host_save)
         self.host.commit_checkpoint.side_effect = None
         self.assertEqual(await self.host.checkpoint_native(self.bridge, candidate), 19)
-        self.assertIsNone(self.host.pending_native_loot_save)
+        self.assertIsNone(self.host.pending_host_save)
         self.assertIs(self.host.commit_checkpoint.await_args.args[0], candidate)
 
     async def test_missing_generation_never_publishes_campaign(self):
@@ -142,7 +142,7 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_save_captures_a_retained_inventory_after_its_lease_expires(self):
         guest = "departed-character"
         pawn = "departed-pawn"
-        self.host.pending_guest_loot_saves[guest] = (pawn, {"map": CROSSROADS, "location": [1, 2, 3], "health": 20})
+        self.host.pending_guest_saves[guest] = (pawn, {"map": CROSSROADS, "location": [1, 2, 3], "health": 20})
         self.host.store.status = Mock(return_value={"leases": []})
         self.host.guest_lease_ids = Mock(return_value={})
 
@@ -165,7 +165,7 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recorded["require_guest_frames"], {guest})
         state = recorded["unleased_states"][guest]
         self.assertEqual((state["health"], state["native_guest_save"]["character_id"]), (19, guest))
-        self.assertFalse(self.host.pending_guest_loot_saves)
+        self.assertFalse(self.host.pending_guest_saves)
 
     async def test_checkpoint_pruning_preserves_both_revisions_and_failure_is_deferred(self):
         profile = self.host.native_profile

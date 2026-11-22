@@ -96,11 +96,18 @@ end
 local function move(fields, state, phase)
     moved = nil
     local name, slot, site, item, direction, expected = table.unpack(fields, 3)
-    if #fields ~= 8 or type(SilverfishMoveNativeStashItem) ~= "function"
+    local live = slot == "-"
+    local transfer = live and SilverfishMoveLiveNativeStashItem or SilverfishMoveNativeStashItem
+    if #fields ~= 8 or type(transfer) ~= "function"
         or (direction ~= "deposit" and direction ~= "withdraw") or (expected ~= "0" and expected ~= "1") then
         error("native_stash_move_unavailable", 0)
     end
-    local pawn, combined, snapshot, host = census_context(state, phase, name, slot, site)
+    local pawn, combined, snapshot, host
+    if live then
+        pawn, combined, host = stash_context(state, phase, name, site)
+    else
+        pawn, combined, snapshot, host = census_context(state, phase, name, slot, site)
+    end
     if combined ~= (expected == "1") then error("native_stash_move_setting_changed", 0) end
     if same(pawn, host) then
         local controller = state.local_pawn and state.local_pawn.controller_object
@@ -108,7 +115,7 @@ local function move(fields, state, phase)
             error("native_stash_move_stock_menu_open", 0)
         end
     end
-    local ok, status, class, quantity = SilverfishMoveNativeStashItem(pawn:GetAddress(), snapshot:GetAddress(),
+    local ok, status, class, quantity = transfer(pawn:GetAddress(), live and 0 or snapshot:GetAddress(),
         combined, site, item, direction == "deposit")
     if ok ~= true then error(tostring(status), 0) end
     if status ~= "moved" or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$")
@@ -210,6 +217,9 @@ function stash.rows(state, phase, row)
     local rows = {row("native-stash-setting", state.map, combined and 1 or 0)}
     if type(SilverfishReadLiveNativeStashCensus) == "function" then
         rows[#rows + 1] = row("native-stash-live-census", 1)
+    end
+    if type(SilverfishMoveLiveNativeStashItem) == "function" then
+        rows[#rows + 1] = row("native-stash-live-move", 1)
     end
     for id, site in pairs(available) do
         if site and site.position and valid(site.actor) and not site.actor:IsActorBeingDestroyed() then

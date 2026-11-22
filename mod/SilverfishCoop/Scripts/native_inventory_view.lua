@@ -910,7 +910,7 @@ function inventory_view.command(fields, state, phase)
         end
     end
     if operation == "native-inventory-view-fixture" and #fields == 6 and fields[3] == "stock-split"
-        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" and #fields[4] == 32 and fields[4]:match("^[0-9a-f]+$")
+        and headless and #fields[4] == 32 and fields[4]:match("^[0-9a-f]+$")
         and #fields[5] == 32 and fields[5]:match("^[0-9A-F]+$") and fields[5]:find("[^0]") then
         local amount = integer(fields[6], 2147483647)
         if amount and amount > 0 then return fixture(current, state, phase, true, fields[4], fields[5], false, amount) end

@@ -132,7 +132,7 @@ async def verify(work, canary, colors, expiry, late_join):
                 async with asyncio.timeout(10):
                     while True:
                         rows = [json.loads(line) for line in (hrun / "events.jsonl").read_text().splitlines()]
-                        commit = next((row for row in rows if row["event"] == "native_guest_flare_committed"
+                        commit = next((row for row in rows if row["event"] == "native_guest_flare_accepted"
                                        and row["guid"] == guid), None)
                         if commit:
                             break
@@ -159,7 +159,8 @@ async def verify(work, canary, colors, expiry, late_join):
                             break
                         await asyncio.sleep(.1)
                 final_commit = next(row for row in (json.loads(line) for line in (hrun / "events.jsonl").read_text().splitlines())
-                                    if row["event"] == "native_guest_flare_committed" and row["after"] == 0 and row["guid"] == guid)
+                                    if row["event"] == "native_guest_flare_accepted" and row["after"] == 0 and row["guid"] == guid)
+                assert commit["revision"] is None and final_commit["revision"] is None
                 await asyncio.sleep(4.2)  # A replica's unmodified stock fuse is three seconds.
                 host_final, guest_final = await probe(hbox, "world"), await probe(gbox, "world")
                 host_lights, guest_lights = read_projectiles(host_final), read_projectiles(guest_final)
@@ -171,9 +172,9 @@ async def verify(work, canary, colors, expiry, late_join):
                 assert all(shot["role"] == 1 for shot in guest_lights)
                 assert sorted((shot["rgb"], shot["intensity"]) for shot in host_lights) == sorted(
                     (shot["rgb"], shot["intensity"]) for shot in guest_lights)
-                records[color] = {"stock_slot": slot, "receipt": proof, "save_revision": commit["revision"],
+                records[color] = {"stock_slot": slot, "receipt": proof, "throws_pending_save": True,
                     "host_projectile": host_shot, "guest_projectile": guest_shot, "last_unit": last,
-                    "last_unit_revision": final_commit["revision"], "host_lights": host_lights, "guest_lights": guest_lights}
+                    "host_lights": host_lights, "guest_lights": guest_lights}
                 evidence.write_text(json.dumps(records, indent=2), encoding="utf-8")
             if expiry:
                 max_fuse = max(shot["fuse"] for run in records.values() for shot in run["host_lights"])

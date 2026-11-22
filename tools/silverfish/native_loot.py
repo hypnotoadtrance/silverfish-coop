@@ -141,7 +141,7 @@ async def retire_replenished(host, bridge):
     for start in range(0, len(slots), 16):
         host.last_game = await bridge.command("native-loot-release-escrows", *slots[start:start + 16])
         host.last_seen = time.monotonic()
-    host.pending_native_loot_save = bool(host.pending_native_loot_save)
+    host.pending_host_save = bool(host.pending_host_save)
     host.party = candidate
     for crate, roll in expired.items():
         host.control.event("native_loot_roll_replenished", crate=crate, roll_id=roll["id"])
@@ -174,7 +174,7 @@ async def restore_legacy_placement(host, bridge) -> None:
             if "transform" not in row:
                 row["transform"] = available.pop(min(available))
         host.last_game, host.last_seen = snapshot, time.monotonic()
-        host.pending_native_loot_save = bool(host.pending_native_loot_save)
+        host.pending_host_save = bool(host.pending_host_save)
         host.party = candidate
         host.control.event("native_loot_legacy_placement_restored", crate=crate, map=area)
         return
@@ -726,7 +726,7 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             deferred = defer_save and not (fixture_nonempty or pried or tool_receipt or power_sequence is not None)
             if deferred:
                 # The typed item escrow exists, but the world change belongs to the next stock checkpoint.
-                host.pending_native_loot_save = bool(host.pending_native_loot_save)
+                host.pending_host_save = bool(host.pending_host_save)
             elif tool_receipt:
                 revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character}))
             else:
@@ -764,9 +764,9 @@ async def perform(host, bridge, character: str, action: str, target: str, operat
             deferred = defer_save and (character == "host" or proof.get("retained") is True)
             if deferred:
                 if character == "host":
-                    host.pending_native_loot_save = bool(host.pending_native_loot_save or merge)
+                    host.pending_host_save = bool(host.pending_host_save or merge)
                 else:
-                    host.queue_guest_loot_save(character, pawn)
+                    host.queue_guest_save(character, pawn)
             else:
                 revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}),
                                                         typed_inventory=bool(merge))
