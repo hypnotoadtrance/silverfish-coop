@@ -58,7 +58,7 @@ def census(mailbox):
         return {}
 
 
-async def proof(work, combat=False, squad="single", production=False, corpse=False):
+async def proof(work, combat=False, squad="single", production=False, corpse=False, corpse_drag=False):
     profile = "boar-proof-" + uuid.uuid4().hex[:8]
     host = work / "campaigns" / profile / "run"
     guest = work / "clients" / profile / "run"
@@ -212,23 +212,64 @@ async def proof(work, combat=False, squad="single", production=False, corpse=Fal
                 await asyncio.sleep(1)
                 assert await probe(guest_box, "death") == "1"
                 (host / "live-boar-stock-combat.json").write_text(json.dumps(witness, indent=2), encoding="utf-8")
-                if corpse:
-                    async def position(box, action):
-                        return [float(value) for value in (await probe(box, action)).split("|")]
+            if corpse or corpse_drag:
+                async def position(box, action):
+                    return [float(value) for value in (await probe(box, action)).split("|")]
 
-                    initial = await position(host_box, "corpseposition")
-                    initial_guest = await position(guest_box, "corpseposition")
-                    await position(host_box, "corpsemove")
-                    await asyncio.sleep(2)
-                    moved = await position(host_box, "corpseposition")
-                    moved_guest = await position(guest_box, "corpseposition|moved")
-                    assert math.dist(initial, moved) > 200 and math.dist(initial_guest, moved_guest) > 200, (
-                        initial, initial_guest, moved, moved_guest)
-                    assert math.dist(moved[:2], moved_guest[:2]) < 30, (moved, moved_guest)
-                    assert abs(moved[2] - moved_guest[2]) < 60, (moved, moved_guest)
-                    (host / "live-boar-corpse-movement.json").write_text(json.dumps(
-                        {"host_before": initial, "guest_before": initial_guest,
-                         "host_after": moved, "guest_after": moved_guest}, indent=2), encoding="utf-8")
+            if corpse:
+                initial = await position(host_box, "corpseposition")
+                initial_guest = await position(guest_box, "corpseposition")
+                await position(host_box, "corpsemove")
+                await asyncio.sleep(2)
+                moved = await position(host_box, "corpseposition")
+                moved_guest = await position(guest_box, "corpseposition|moved")
+                assert math.dist(initial, moved) > 200 and math.dist(initial_guest, moved_guest) > 200, (
+                    initial, initial_guest, moved, moved_guest)
+                assert math.dist(moved[:2], moved_guest[:2]) < 30, (moved, moved_guest)
+                assert abs(moved[2] - moved_guest[2]) < 60, (moved, moved_guest)
+                (host / "live-boar-corpse-movement.json").write_text(json.dumps(
+                    {"host_before": initial, "guest_before": initial_guest,
+                     "host_after": moved, "guest_after": moved_guest}, indent=2), encoding="utf-8")
+            if corpse_drag:
+                if not combat:
+                    assert await probe(host_box, "corpsekill|" + target.split(" ", 1)[1]) == "dead"
+                    await asyncio.sleep(1)
+                    assert await probe(guest_box, "death") == "1"
+                async def grip(box):
+                    return await probe(box, f"corpsegrip|{uuid.uuid4().hex[:8]}")
+
+                async def anchor(box):
+                    return await position(box, f"corpseposition|{uuid.uuid4().hex[:8]}")
+
+                identifier = await probe(host_box, "corpseid")
+                assert identifier.isdecimal() and identifier == await probe(guest_box, "corpseid")
+                initial, initial_guest = await anchor(host_box), await anchor(guest_box)
+                await probe(host_box, "corpseprepare")
+                await asyncio.sleep(.6)
+                bone = await probe(guest_box, "corpsegrab")
+                async with asyncio.timeout(5):
+                    while await grip(host_box) != "held":
+                        await asyncio.sleep(.08)
+                await probe(guest_box, "corpsepull")
+                async with asyncio.timeout(5):
+                    while True:
+                        moved = await anchor(host_box)
+                        moved_guest = await anchor(guest_box)
+                        if min(math.dist(initial, moved), math.dist(initial_guest, moved_guest)) > 50:
+                            break
+                        await asyncio.sleep(.08)
+                assert await probe(guest_box, "corpserelease") == "released"
+                async with asyncio.timeout(5):
+                    while await grip(host_box) != "released":
+                        await asyncio.sleep(.08)
+                await asyncio.sleep(.8)
+                settled, settled_guest = await anchor(host_box), await anchor(guest_box)
+                assert math.dist(settled, settled_guest) < 65, (settled, settled_guest)
+                assert await probe(guest_box, "death|after-drag") == "1"
+                (host / "live-boar-guest-corpse-drag.json").write_text(json.dumps(
+                    {"marker": int(identifier), "bone": bone, "host_before": initial, "guest_before": initial_guest,
+                     "host_moved": moved, "guest_moved": moved_guest, "host_released": settled,
+                     "guest_released": settled_guest}, indent=2), encoding="utf-8")
         finally:
             for process, run in reversed(processes):
                 if run.is_dir():
@@ -247,6 +288,7 @@ if __name__ == "__main__":
     parser.add_argument("--squad", choices=("single", "group", "husks"), default="single")
     parser.add_argument("--production-roster", action="store_true")
     parser.add_argument("--corpse", action="store_true")
+    parser.add_argument("--corpse-drag", action="store_true")
     options = parser.parse_args()
     if options.squad == "husks" and not options.production_roster:
         parser.error("The Husk trial exercises the production roster")
@@ -254,5 +296,7 @@ if __name__ == "__main__":
         parser.error("The stock pistol trial requires one boar")
     if options.corpse and not options.combat:
         parser.error("--corpse requires --combat")
+    if options.corpse_drag and options.squad != "single":
+        parser.error("--corpse-drag requires one boar")
     asyncio.run(proof(options.work.resolve(), combat=options.combat, squad=options.squad,
-                      production=options.production_roster, corpse=options.corpse))
+                      production=options.production_roster, corpse=options.corpse, corpse_drag=options.corpse_drag))

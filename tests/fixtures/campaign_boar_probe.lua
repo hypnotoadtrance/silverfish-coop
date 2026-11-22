@@ -149,6 +149,15 @@ local function execution(world, director, driver, pawn, host, operation, marker_
         assert(npc.Alive and npc.Health == initial and not npc.Mesh:IsAnySimulatingPhysics())
         assert(total.TotalDamage == 0 and lethal.IsLethal == false)
         return tostring(initial) .. "|" .. tostring(npc.Health) .. "|alive"
+    elseif operation == "corpsekill" then
+        assert(host and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1")
+        local actor = StaticFindObject(marker_path)
+        assert(valid(actor) and actor:IsA(StaticFindObject("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"))
+            and same(actor:GetWorld(), world) and actor:HasAuthority() and actor.bReplicates and actor.Alive)
+        actor.Health = 0
+        actor:ResolveDeath()
+        assert(actor.Alive == false and actor.Mesh:IsAnySimulatingPhysics())
+        return "dead"
     elseif operation == "death" then
         local deaths = 0
         for _, actor in ipairs(exact_npcs(world)) do
@@ -156,7 +165,7 @@ local function execution(world, director, driver, pawn, host, operation, marker_
                 and valid(actor.Mesh) and actor.Mesh:IsAnySimulatingPhysics() then deaths = deaths + 1 end
         end
         return tostring(deaths)
-    elseif operation == "corpseposition" or operation == "corpsemove" then
+    elseif operation:match("^corpse") then
         local corpse
         for _, actor in ipairs(exact_npcs(world)) do
             if not actor.Alive and actor:GetLocalRole() == (host and 3 or 1)
@@ -172,7 +181,58 @@ local function execution(world, director, driver, pawn, host, operation, marker_
             mesh:K2_AddWorldOffset({X = 0, Y = 360, Z = 10}, false, {}, true)
         end
         local pelvis = FName("pelvis", EFindName.FNAME_Find)
-        local point = mesh:DoesSocketExist(pelvis) and mesh:GetSocketLocation(pelvis) or mesh:K2_GetComponentLocation()
+        local point = require("native_corpse_view").position(corpse)
+        if operation == "corpseprepare" then
+            assert(host and #driver.ClientConnections == 1)
+            local guest = driver.ClientConnections[1].PlayerController.Pawn
+            guest:K2_SetActorLocation({X = point.X - 95, Y = point.Y, Z = point.Z + 75}, false, {}, true)
+            guest:ForceNetUpdate()
+            return "ready"
+        elseif operation == "corpseid" then
+            return tostring(require("native_corpse_view").binding(corpse, not host))
+        elseif operation == "corpsegrab" then
+            assert(not host and type(SilverfishProbeNativeInteractInput) == "function")
+            local eye = pawn.Camera:K2_GetComponentLocation()
+            for index = -1, math.min(mesh:GetNumBones() - 1, 80) do
+                local bone = index == -1 and pelvis or mesh:GetBoneName(index)
+                if mesh:IsSimulatingPhysics(bone) then
+                    local target = mesh:GetSocketLocation(bone)
+                    local x, y, z = target.X - eye.X, target.Y - eye.Y, target.Z - eye.Z
+                    local angle = {Pitch = math.deg(math.atan(z, math.sqrt(x*x + y*y))),
+                        Yaw = math.deg(math.atan(y, x)), Roll = 0}
+                    pawn.Controller:SetControlRotation(angle)
+                    pawn:K2_SetActorRotation({Pitch = 0, Yaw = angle.Yaw, Roll = 0}, true)
+                    pawn.Camera:K2_SetWorldRotation(angle, false, {}, true)
+                    pawn:LookTrace()
+                    if same(pawn.ActorBeingLookedAt, corpse) and mesh:IsSimulatingPhysics(pawn["Hit Bone Name"]) then break end
+                end
+            end
+            assert(same(pawn.ActorBeingLookedAt, corpse),
+                ("corpse look missing: reach %.0f visibility %s query %s focus %s"):format(pawn.InteractionRange,
+                    tostring(mesh:GetCollisionResponseToChannel(2)), tostring(mesh:GetCollisionEnabled()),
+                    valid(pawn.ActorBeingLookedAt) and pawn.ActorBeingLookedAt:GetFullName() or "none"))
+            local name = pawn["Hit Bone Name"]:ToString()
+            assert(name ~= "None" and mesh:IsSimulatingPhysics(pawn["Hit Bone Name"]), name)
+            local _, reason = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
+            assert(same(pawn.HeldObject, corpse) and same(pawn.PhysicsHandle:GetGrabbedComponent(), mesh), reason)
+            return name
+        elseif operation == "corpsegrip" then
+            local holder = host and driver.ClientConnections[1].PlayerController.Pawn or pawn
+            return same(holder.HeldObject, corpse) and same(holder.PhysicsHandle:GetGrabbedComponent(), mesh) and "held" or "released"
+        elseif operation == "corpsepull" then
+            assert(not host and same(pawn.HeldObject, corpse))
+            local angle = pawn.Controller:GetControlRotation()
+            angle.Yaw = (angle.Yaw + 75 + 180) % 360 - 180
+            pawn.Controller:SetControlRotation(angle)
+            pawn:K2_SetActorRotation({Pitch = 0, Yaw = angle.Yaw, Roll = 0}, true)
+            pawn.Camera:K2_SetWorldRotation(angle, false, {}, true)
+            return "pulled"
+        elseif operation == "corpserelease" then
+            assert(not host and same(pawn.HeldObject, corpse))
+            pawn:Grab_Release_Object(false, true, false)
+            assert(not valid(pawn.HeldObject) and not valid(pawn.PhysicsHandle:GetGrabbedComponent()))
+            return "released"
+        end
         return ("%.2f|%.2f|%.2f"):format(point.X, point.Y, point.Z)
     elseif operation == "position" then
         local actors = {}

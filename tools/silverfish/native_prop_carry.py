@@ -18,6 +18,7 @@ INPUT = "native_prop_carry_input"
 TARGET = "native_prop_carry_target"
 PROOF = "native_prop_carry"
 _CLASS = re.compile(r"/Game/[A-Za-z0-9_./-]+\.[A-Za-z0-9_]+_C\Z")
+_BONE = re.compile(r"[A-Za-z0-9_ .-]{1,64}\Z")
 _EDGES = {"grab", "drop", "throw"}
 _ORDER_LIMIT = 2**53
 
@@ -45,13 +46,24 @@ def _token(value):
     return isinstance(value, str) and party.REQUEST_ID.fullmatch(value)
 
 
+def _corpse(fields):
+    if not fields:
+        return {}
+    number, bone = fields
+    identifier = int(number)
+    if not 0 < identifier <= 65535 or bone == "None" or not _BONE.fullmatch(bone):
+        raise ValueError("Invalid corpse movement marker or skeletal body")
+    return dict(corpse=identifier, bone=bone)
+
+
 def parse(fields, phase, area):
     if len(fields) < 2 or fields[1] != area:
         raise ValueError("Physics carry changed maps")
     if fields[0] == ACTION:
-        if len(fields) != 7 or phase != "hosting" or not _token(fields[2]) or fields[4] not in _EDGES:
+        if len(fields) not in (7, 9) or phase != "hosting" or not _token(fields[2]) or fields[4] not in _EDGES:
             raise ValueError("Invalid physics carry receipt")
-        return dict(lease=fields[2], sequence=_serial(fields[3]), edge=fields[4], pawn=fields[5], actor=fields[6])
+        return dict(lease=fields[2], sequence=_serial(fields[3]), edge=fields[4], pawn=fields[5], actor=fields[6],
+                    **_corpse(fields[7:]))
     if fields[0] == FIXTURE:
         if len(fields) not in (11, 15) or phase != "hosting" or not _class(fields[2]) or fields[10] not in {"0", "1"}:
             raise ValueError("Invalid stock physics fixture")
@@ -73,10 +85,11 @@ def parse(fields, phase, area):
     if phase != "connected":
         raise ValueError("Physics carry input belongs to the guest")
     if fields[0] == "native-prop-carry-input":
-        if len(fields) != 11 or fields[4] not in _EDGES or not _class(fields[5]):
+        if (len(fields) not in (11, 13) or len(fields) == 13 and fields[4] != "grab"
+                or fields[4] not in _EDGES or not _class(fields[5])):
             raise ValueError("Invalid stock physics carry input")
         return dict(sequence=_serial(fields[2]), pawn=fields[3], edge=fields[4], class_path=fields[5],
-                    pose=_numbers(fields[6:], (1e7, 1e7, 1e7, 89.9, 180)))
+                    pose=_numbers(fields[6:11], (1e7, 1e7, 1e7, 89.9, 180)), **_corpse(fields[11:]))
     if len(fields) != 9:
         raise ValueError("Invalid stock physics grip")
     return dict(grab=_serial(fields[2]), pose=_numbers(fields[3:], (1e7, 1e7, 1e7, 360, 360, 360)))
@@ -106,8 +119,8 @@ class Host:
 
     async def operate(self, bridge, character, target):
         self._reset()
-        fields = target.split("@") if isinstance(target, str) and len(target) <= 400 else []
-        if len(fields) not in (6, 10):
+        fields = target.split("@") if isinstance(target, str) and len(target) <= 470 else []
+        if len(fields) not in (6, 10, 12):
             raise party.RuleError("native_prop_carry_invalid_action")
         epoch, lease, edge, raw_sequence, *payload = fields
         if epoch != self.epoch or not _token(lease) or edge not in _EDGES:
@@ -119,21 +132,25 @@ class Host:
         if not pawn:
             raise party.RuleError("native_prop_carry_guest_unavailable")
         if edge == "grab":
-            if len(payload) != 6 or not _class(payload[2]) or holder and time.monotonic() < holder["deadline"]:
+            if len(payload) not in (6, 8) or not _class(payload[2]) or holder and time.monotonic() < holder["deadline"]:
                 raise party.RuleError("native_prop_carry_guest_hands_busy")
-            coordinates = _numbers(payload[3:], (1e7, 1e7, 1e7))
-            args = (payload[2], *(str(axis) for axis in coordinates))
+            coordinates = _numbers(payload[3:6], (1e7, 1e7, 1e7))
+            corpse = _corpse(payload[6:])
+            args = (payload[2], *(str(axis) for axis in coordinates), *payload[6:])
         elif len(payload) == 2 and holder and (holder["lease"], holder["pawn"]) == (lease, pawn) and number > holder["sequence"]:
             args = ()
+            corpse = holder.get("corpse", {})
         else:
             raise party.RuleError("native_prop_carry_wrong_holder")
         snapshot = await bridge.command(ACTION, lease, pawn, edge, str(number), str(pitch), str(yaw), *args, timeout=4)
         proof = snapshot.get(PROOF, {})
-        if tuple(proof.get(key) for key in ("lease", "sequence", "edge", "pawn")) != (lease, number, edge, pawn):
+        if (tuple(proof.get(key) for key in ("lease", "sequence", "edge", "pawn")) != (lease, number, edge, pawn)
+                or any(proof.get(key) != corpse.get(key) for key in ("corpse", "bone"))):
             raise RuntimeError("The stock physics carry did not return the exact action")
         self.service.last_game, self.service.last_seen = snapshot, time.monotonic()
         if edge == "grab":
-            self.holders[character] = dict(lease=lease, pawn=pawn, sequence=number, sample=0, deadline=time.monotonic() + 1.4)
+            self.holders[character] = dict(lease=lease, pawn=pawn, sequence=number, sample=0,
+                                           deadline=time.monotonic() + 1.4, corpse=corpse)
         else:
             self.holders.pop(character, None)
             self.poses.pop(lease, None)
@@ -190,6 +207,8 @@ class Guest:
         lease = operation if edge == "grab" else self.lease
         x, y, z, pitch, yaw = row["pose"]
         suffix = (row["class_path"], str(x), str(y), str(z)) if edge == "grab" else ()
+        if edge == "grab" and "corpse" in row:
+            suffix += (str(row["corpse"]), row["bone"])
         target = "@".join((self.epoch, lease, edge, str(number), str(pitch), str(yaw), *suffix))
         try:
             returned = await service.gameplay_action(ACTION, operation, target)
@@ -200,6 +219,11 @@ class Guest:
         except (OSError, ValueError, RuntimeError) as error:
             self.lease = self.grab = None
             service.control.event("native_prop_carry_refused", edge=edge, reason=str(error))
+            if edge == "grab" and "corpse" in row:
+                try:
+                    await service.bridge.command("native-prop-carry-refuse", str(number), timeout=2)
+                except (OSError, ValueError, RuntimeError) as failure:
+                    service.control.event("native_prop_carry_local_release_failed", reason=str(failure))
 
     async def _pose(self, target):
         request = dict(action=AIM, operation_id=uuid.uuid4().hex, target=target)

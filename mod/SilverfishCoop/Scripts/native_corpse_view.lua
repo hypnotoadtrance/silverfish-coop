@@ -3,9 +3,10 @@ local corpses = {}
 local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local marker_path = "/Script/Engine.TargetPoint"
 local npc_class, marker_class, clock, death_hook
-local active_world, markers, mirrors, ended = nil, {}, {}, {}
-local next_sample = 0
+local active_world, markers, numbered, mirrors, ended, anchors = nil, {}, {}, {}, {}, {}
+local next_sample, corpse_number = 0, 0
 local sample_period = .1
+local byte_angle = 360 / 256
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -22,10 +23,54 @@ local function world_driver(actor, guest)
     return world
 end
 
-local function anchor(mesh)
-    local pelvis = FName("pelvis", EFindName.FNAME_Find)
-    if mesh:DoesSocketExist(pelvis) then return mesh:GetSocketLocation(pelvis) end
+function corpses.position(actor)
+    local mesh, address = actor.Mesh, actor:GetAddress()
+    local bone = anchors[address]
+    if bone == nil then
+        local pelvis = FName("pelvis", EFindName.FNAME_Find)
+        if mesh:GetBoneIndex(pelvis) >= 0 and mesh:IsSimulatingPhysics(pelvis) then
+            bone = pelvis
+        else
+            -- Wildlife rigs can lack a pelvis socket, and their detached
+            -- component origin can remain behind as the bodies move.
+            for index = 0, mesh:GetNumBones() - 1 do
+                local candidate = mesh:GetBoneName(index)
+                if mesh:IsSimulatingPhysics(candidate) then bone = candidate break end
+            end
+        end
+        anchors[address] = bone or false
+    end
+    if bone then return mesh:GetSocketLocation(bone) end
     return mesh:K2_GetComponentLocation()
+end
+
+local function marker_number(marker)
+    -- This invisible marker's rotation carries a world-local ID in two
+    -- movement-quantized axes. Its Owner remains the replicated corpse.
+    local rotation = marker:K2_GetActorRotation()
+    return (math.floor(rotation.Roll / byte_angle + .5) % 256) * 256
+        + math.floor(rotation.Yaw / byte_angle + .5) % 256
+end
+
+function corpses.binding(actor, guest)
+    if not valid(actor) or not valid(npc_class) or not actor:IsA(npc_class)
+        or not same(world_driver(actor, guest), active_world) or actor.Alive ~= false
+        or actor:IsActorBeingDestroyed() then return end
+    local address = actor:GetAddress()
+    local mirror = guest and mirrors[address]
+    local marker = guest and mirror and mirror.marker or not guest and markers[address]
+    local mesh = actor.Mesh
+    if not valid(marker) or not same(marker:GetOwner(), actor) or not same(active_world, marker:GetWorld())
+        or not valid(mesh) or not same(mesh:GetOwner(), actor) or not mesh:IsAnySimulatingPhysics() then return end
+    local number = marker_number(marker)
+    if number > 0 then return number, mesh end
+end
+
+function corpses.authoritative(number)
+    local marker = numbered[number]
+    local actor = valid(marker) and marker:GetOwner()
+    local identifier, mesh = corpses.binding(actor, false)
+    if identifier == number then return actor, mesh end
 end
 
 local function between(point, target)
@@ -43,7 +88,11 @@ local function publish(actor)
     -- when Unreal assigns a different local name to the replicated pawn.
     local mesh = actor.Mesh
     if not valid(mesh) then return end
-    local marker = world:SpawnActor(marker_class, anchor(mesh), {Pitch = 0, Yaw = 0, Roll = 0})
+    if corpse_number == 65535 then return end
+    corpse_number = corpse_number + 1
+    local marker = world:SpawnActor(marker_class, corpses.position(actor), {
+        Pitch = 0, Yaw = (corpse_number % 256) * byte_angle, Roll = (corpse_number // 256) * byte_angle,
+    })
     if not valid(marker) then return end
     marker:SetOwner(actor)
     marker.bAlwaysRelevant = false
@@ -52,7 +101,7 @@ local function publish(actor)
     marker:SetReplicates(true)
     marker:SetReplicateMovement(true)
     marker:ForceNetUpdate()
-    markers[address] = marker
+    markers[address], numbered[corpse_number] = marker, marker
 end
 
 local function apply(marker)
@@ -63,36 +112,39 @@ local function apply(marker)
         or not same(actor:GetWorld(), world) or actor:GetLocalRole() ~= 1 or actor:IsActorBeingDestroyed() then return end
     local mesh, capsule, movement = actor.Mesh, actor.CapsuleComponent, actor.CharacterMovement
     if not valid(mesh) or not valid(capsule) or not valid(movement) then return end
-    local key = marker:GetAddress()
-    if not mirrors[key] then mirrors[key] = {actor = marker} end
+    local key = actor:GetAddress()
+    if not mirrors[key] or not same(mirrors[key].marker, marker) then mirrors[key] = {marker = marker} end
     if actor.Alive == false and mesh:IsAnySimulatingPhysics() then return end
     movement:SetMovementMode(0, 0)
     capsule:SetCollisionEnabled(0)
     mesh:K2_DetachFromComponent(1, 1, 1, false)
     mesh:SetCollisionProfileName(FName("Ragdoll", EFindName.FNAME_Find), true)
+    mesh:SetCollisionEnabled(3)
     -- Local physics presents the fall. The host retains death, loot, AI and saves.
-    mesh:SetCollisionResponseToChannel(2, 0)
+    mesh:SetCollisionResponseToChannel(2, 2) -- Stock LookTrace must be able to select the dead skeletal body.
+    mesh:SetCollisionResponseToChannel(3, 2)
     mesh:SetSimulatePhysics(true)
     mesh:SetAnimationMode(2, true)
     actor.Alive = false
     actor.Agro = false
+    actor.Tags = {FName("Dead", EFindName.FNAME_Find)}
 end
 
-local function mirror_positions(world)
+local function mirror_positions(world, pawn)
     for address, mirror in pairs(mirrors) do
-        local marker = mirror.actor
+        local marker = mirror.marker
         local actor = valid(marker) and marker:GetOwner()
         if not valid(actor) or not same(marker:GetWorld(), world) or actor:IsActorBeingDestroyed() then
             mirrors[address] = nil
         elseif actor:GetLocalRole() == 1 and actor.Alive == false then
             local mesh = actor.Mesh
             if valid(mesh) and mesh:IsAnySimulatingPhysics() then
-                local target = marker:K2_GetActorLocation()
-                local _, changed = between(mirror.target or target, target)
-                if not mirror.target or changed > 3^2 then
-                    local offset, error_squared = between(anchor(mesh), target)
+                local grip = valid(pawn) and same(pawn.HeldObject, actor) and pawn.PhysicsHandle
+                -- The local stock grip already presents this carrier's movement.
+                if not valid(grip) or not same(grip:GetGrabbedComponent(), mesh) then
+                    local target = marker:K2_GetActorLocation()
+                    local offset, error_squared = between(corpses.position(actor), target)
                     if error_squared > 15^2 then mesh:K2_AddWorldOffset(offset, false, {}, true) end
-                    mirror.target = target
                 end
             end
         end
@@ -107,7 +159,7 @@ local function publish_positions(world)
         else
             local mesh = actor.Mesh
             if valid(mesh) and actor.Alive == false and mesh:IsAnySimulatingPhysics() then
-                local point = anchor(mesh)
+                local point = corpses.position(actor)
                 local _, distance_squared = between(marker:K2_GetActorLocation(), point)
                 if distance_squared > 3^2 then marker:K2_SetActorLocation(point, false, {}, true) end
             end
@@ -128,9 +180,10 @@ function corpses.start(role)
         local actor = context:get()
         if not valid(actor) then return end
         local address = actor:GetAddress()
-        mirrors[address] = nil
+        mirrors[address], anchors[address] = nil, nil
         local marker = markers[address]
         if valid(marker) and same(marker:GetOwner(), actor) then
+            numbered[marker_number(marker)] = nil
             ended[address], markers[address] = marker, nil
         end
     end)
@@ -141,7 +194,7 @@ function corpses.sync(state, phase)
     local hosting = phase == "hosting" and state.listening and not state.server
     local world = (hosting or phase == "connected" and state.server) and state.world or nil
     if not same(world, active_world) then
-        active_world, markers, ended, next_sample = world, {}, {}, 0
+        active_world, markers, numbered, ended, anchors, next_sample, corpse_number = world, {}, {}, {}, {}, 0, 0
         if hosting then mirrors = {} end
     end
     if not valid(world) then return end
@@ -160,7 +213,11 @@ function corpses.sync(state, phase)
         local now = clock:GetRealTimeSeconds(world)
         if now >= next_sample then
             next_sample = now + sample_period
-            if hosting then publish_positions(world) else mirror_positions(world) end
+            if hosting then
+                publish_positions(world)
+            else
+                mirror_positions(world, state.local_pawn and state.local_pawn.pawn)
+            end
         end
     end
 end

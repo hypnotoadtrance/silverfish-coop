@@ -1,4 +1,5 @@
 local carry = {}
+local corpses = require("native_corpse_view")
 local guest_save = require("guest_save")
 local players = require("players")
 
@@ -43,10 +44,17 @@ local function handle(pawn)
     if valid(found) and same(found:GetOwner(), pawn) then return found end
 end
 
-local function held(pawn, actor, grip)
-    local root = mesh(actor)
-    return valid(pawn) and root and valid(grip) and same(grip:GetGrabbedComponent(), root)
-        and same(pawn.HeldObject, actor) and actor.BeingHeld == true and same(actor["Holding Actor"], pawn)
+local function held(pawn, actor, grip, corpse)
+    local part = corpse and corpse.part or mesh(actor)
+    return valid(pawn) and valid(actor) and not actor:IsActorBeingDestroyed()
+        and valid(part) and valid(grip) and same(grip:GetGrabbedComponent(), part) and same(pawn.HeldObject, actor)
+        and (corpse and actor.Alive == false or not corpse and actor.BeingHeld == true and same(actor["Holding Actor"], pawn))
+end
+
+local function bone_name(value)
+    if not value then return end
+    local name = value:ToString()
+    if #name <= 64 and name ~= "None" and name:match("^[%w_ .%-]+$") then return name end
 end
 
 local function camera_aim(pawn)
@@ -73,30 +81,54 @@ local function stock_target(pawn)
         {Pitch = 0, Yaw = rotation.Yaw, Roll = 0}
 end
 
-local function emit(pawn, kind, class, position, pitch, yaw)
+local function emit(pawn, kind, class, position, pitch, yaw, corpse)
     if not point(position) or not class or not pitch or not yaw then return end
     sequence = (sequence or 0) + 1
     edges[#edges + 1] = {sequence, pawn:GetFullName(), kind, class, position.X, position.Y, position.Z, pitch, yaw}
+    if corpse then
+        local edge = edges[#edges]
+        edge[#edge + 1], edge[#edge + 2] = corpse.number, corpse.name
+    end
     if #edges > 6 then table.remove(edges, 1) end
     return sequence
 end
 
-local function observe(pawn, throwing)
+local function observe(pawn, throwing, dropping)
     local local_pawn = state and state.local_pawn and state.local_pawn.pawn
+    if phase == "hosting" and not throwing and not dropping and same(pawn, local_pawn) then
+        -- Stock props mark themselves as held; the dead NPC Blueprint does not.
+        -- Discard a competing local grip before the next physics step.
+        for _, entry in pairs(holdings) do
+            if entry.corpse and same(pawn.HeldObject, entry.actor) then
+                pawn:Grab_Release_Object(false, true, false)
+                return
+            end
+        end
+    end
     if phase ~= "connected" or not state.listening or state.server ~= true or not same(pawn, local_pawn)
         or not pawn:IsLocallyControlled() or pawn:HasAuthority() or pawn.Dead ~= false then return end
     local actor, grip = pawn.HeldObject, handle(pawn)
-    if local_hold and not held(pawn, local_hold.actor, grip) then
+    if local_hold and not held(pawn, local_hold.actor, grip, local_hold.corpse) then
         local pitch, yaw = camera_aim(pawn)
         emit(pawn, throwing and "throw" or "drop", local_hold.class,
             pawn:K2_GetActorLocation(), pitch, yaw)
         local_hold = nil
     end
-    if local_hold or not held(pawn, actor, grip) or actor.bReplicateMovement ~= true or actor:HasAuthority() then return end
+    if local_hold or not valid(actor) or actor:HasAuthority() then return end
+    local number, part = corpses.binding(actor, true)
+    local corpse
+    if number then
+        local bone = pawn["Hit Bone Name"]
+        local name = bone_name(bone)
+        if not name or part:GetBoneIndex(bone) < 0 or not part:IsSimulatingPhysics(bone) then return end
+        corpse = {number = number, part = part, name = name, bone = bone}
+    end
+    if not held(pawn, actor, grip, corpse) or not corpse and actor.bReplicateMovement ~= true then return end
     -- The stock call has bound the grip and the physics step has yet to move its root.
     local class, pitch, yaw = actor_class(actor), camera_aim(pawn)
-    local birth = emit(pawn, "grab", class, actor:K2_GetActorLocation(), pitch, yaw)
-    if birth then local_hold = {actor = actor, pawn = pawn, class = class, serial = birth} end
+    local position = corpse and part:GetSocketLocation(corpse.bone) or actor:K2_GetActorLocation()
+    local birth = emit(pawn, "grab", class, position, pitch, yaw, corpse)
+    if birth then local_hold = {actor = actor, pawn = pawn, class = class, serial = birth, corpse = corpse} end
 end
 
 function carry.enroll(actor)
@@ -105,55 +137,102 @@ function carry.enroll(actor)
     return true
 end
 
-local function trace(pawn, pitch, yaw)
+local function trace(pawn, pitch, yaw, number, expected_bone, claimed)
     local trace_api = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local camera = pawn.Camera
     local origin = valid(camera) and camera:K2_GetComponentLocation()
     local body, range = pawn:K2_GetActorLocation(), pawn.InteractionRange
     if not valid(trace_api) or not point(origin) or not point(body) or dist2(origin, body) > 150^2
-        or not finite(range, 1000) or range <= 0 then return end
+        or not finite(range, 1000) or range <= 0 then return nil, "origin" end
     local p, y = math.rad(pitch), math.rad(yaw)
-    local target = {X = origin.X + math.cos(p) * math.cos(y) * range,
-        Y = origin.Y + math.cos(p) * math.sin(y) * range, Z = origin.Z + math.sin(p) * range}
-    local hit = {}
-    if trace_api:LineTraceSingle(pawn, origin, target, 1, true, {pawn}, 0, hit, true, color, color, 0) ~= true then return end
-    hit = hit.OutHit or hit
-    local part = hit.Component and hit.Component:Get()
-    local actor = valid(part) and part:GetOwner()
-    if not valid(actor) or not same(actor, enrolled[actor:GetAddress()]) or not same(part, mesh(actor))
-        or not point(hit.ImpactPoint) then return end
-    return actor, math.sqrt(dist2(origin, hit.ImpactPoint))
+    local ray = {X = math.cos(p) * math.cos(y), Y = math.cos(p) * math.sin(y), Z = math.sin(p)}
+    local function along(distance)
+        return {X = origin.X + ray.X * distance, Y = origin.Y + ray.Y * distance, Z = origin.Z + ray.Z * distance}
+    end
+    local function impact(target)
+        local hit = {}
+        if trace_api:LineTraceSingle(pawn, origin, target, 1, true, {pawn}, 0, hit, true, color, color, 0) then
+            hit = hit.OutHit or hit
+            return hit.Component and hit.Component:Get(), hit.ImpactPoint
+        end
+    end
+    if not number then
+        local part, collision = impact(along(range))
+        local actor = valid(part) and part:GetOwner()
+        if valid(actor) and same(actor, enrolled[actor:GetAddress()]) and same(part, mesh(actor)) and point(collision) then
+            return actor, math.sqrt(dist2(origin, collision))
+        end
+        return
+    end
+    local actor, part = corpses.authoritative(number)
+    if not actor or not point(claimed) or not expected_bone
+        or #expected_bone > 64 or not expected_bone:match("^[%w_ .%-]+$") then
+        return nil, "marker or body name"
+    end
+    local bone = FName(expected_bone, EFindName.FNAME_Find)
+    local resolved, index = bone_name(bone), part:GetBoneIndex(bone)
+    if not resolved or resolved:lower() ~= expected_bone:lower() or index < 0 or not part:IsSimulatingPhysics(bone) then
+        return nil, ("bone %s (resolved %s, index %d, simulation %s)"):format(expected_bone, tostring(resolved),
+            index, tostring(part:IsSimulatingPhysics(bone)))
+    end
+    local location = part:GetSocketLocation(bone)
+    -- The replicas can settle in different poses. Check that the guest aimed
+    -- near their selected body, then check the same host body for reach and occlusion.
+    local projection = (claimed.X - origin.X) * ray.X + (claimed.Y - origin.Y) * ray.Y + (claimed.Z - origin.Z) * ray.Z
+    if not point(location) then return nil, "invalid body location" end
+    if projection <= 0 or projection > range or dist2(along(projection), claimed) > 55^2
+        or dist2(origin, location) >= range^2 then
+        return nil, ("skeletal aim %.1f / %.1f, ray offset %.1f, body separation %.1f, distance %.1f"):format(
+            projection, range, math.sqrt(dist2(along(projection), claimed)), math.sqrt(dist2(claimed, location)),
+            math.sqrt(dist2(origin, location)))
+    end
+    local surface, collision = impact(location)
+    if valid(surface) and not same(surface, part) and (not point(collision) or dist2(location, collision) > 9^2) then
+        return nil, "skeletal body occluded"
+    end
+    return actor, math.sqrt(dist2(origin, location)), {number = number, part = part, bone = bone, name = expected_bone,
+        location = location}
 end
 
-local function stock(pawn, kind, actor, range, pitch, yaw)
+local function stock(pawn, kind, actor, range, pitch, yaw, corpse)
     local camera = pawn.Camera
     if not valid(camera) or not pose(camera.RelativeRotation) then return false end
     local previous_angle = copy_rot(camera.RelativeRotation)
     local previous_actor, previous_distance = pawn.ActorBeingLookedAt, pawn.ActorLookedAt_Distance
+    local previous_bone, previous_point
+    if corpse then
+        previous_bone, previous_point = pawn["Hit Bone Name"], pawn["WhereI'mLooking"]
+        previous_point = {X = previous_point.X, Y = previous_point.Y, Z = previous_point.Z}
+    end
     local invoked = pcall(function()
         camera:K2_SetWorldRotation({Pitch = pitch, Yaw = yaw, Roll = 0}, false, {}, true)
         if kind == "grab" then pawn.ActorBeingLookedAt, pawn.ActorLookedAt_Distance = actor, range end
+        if corpse then pawn["Hit Bone Name"], pawn["WhereI'mLooking"] = corpse.bone, corpse.location end
         pawn:Grab_Release_Object(kind == "throw", kind == "drop", false)
     end)
     local restored = pcall(function()
         camera:K2_SetRelativeRotation(previous_angle, false, {}, true)
         pawn.ActorBeingLookedAt = valid(previous_actor) and previous_actor or nil
         pawn.ActorLookedAt_Distance = previous_distance
+        if corpse then pawn["Hit Bone Name"], pawn["WhereI'mLooking"] = previous_bone, previous_point end
     end)
     return invoked and restored
 end
 
 local function remove(entry, kind, pitch, yaw)
     local pawn, actor, grip = entry.pawn, entry.actor, entry.grip
-    if held(pawn, actor, grip) then stock(pawn, kind, actor, 0, pitch, yaw) end
-    if not valid(pawn) and mesh(actor) and actor:HasAuthority() and actor.BeingHeld == true
+    if held(pawn, actor, grip, entry.corpse) then stock(pawn, kind, actor, 0, pitch, yaw) end
+    if entry.corpse and not valid(pawn) and valid(grip) and same(grip:GetGrabbedComponent(), entry.corpse.part) then
+        grip:ReleaseComponent()
+    end
+    if not entry.corpse and not valid(pawn) and mesh(actor) and actor:HasAuthority() and actor.BeingHeld == true
         and not valid(actor["Holding Actor"]) then
         actor:PickUp_Object(false, nil)
         if actor.BeingHeld ~= false then return false end
     end
-    if valid(grip) and same(grip:GetGrabbedComponent(), mesh(actor)) then return false end
+    if valid(grip) and same(grip:GetGrabbedComponent(), entry.corpse and entry.corpse.part or mesh(actor)) then return false end
     if valid(pawn) and same(pawn.HeldObject, actor) then return false end
-    if valid(actor) and same(actor["Holding Actor"], pawn) then return false end
+    if not entry.corpse and valid(actor) and same(actor["Holding Actor"], pawn) then return false end
     holdings[entry.lease] = nil
     if valid(actor) then actor:ForceNetUpdate() end
     return true
@@ -296,6 +375,17 @@ end
 
 function carry.command(fields, current, seat)
     if fields[2] == "native-prop-carry-fixture" then return fixture(fields, current, seat) end
+    if fields[2] == "native-prop-carry-refuse" and enabled and seat == "connected" and current.server
+        and same(world, current.world) and #fields == 3 then
+        local pawn = current.local_pawn and current.local_pawn.pawn
+        if local_hold and local_hold.corpse and math.tointeger(fields[3]) == local_hold.serial
+            and same(pawn, local_hold.pawn) and pawn:IsLocallyControlled() and not pawn:HasAuthority() then
+            local refused = local_hold
+            local_hold = nil
+            if held(pawn, refused.actor, handle(pawn), refused.corpse) then pawn:Grab_Release_Object(false, true, false) end
+        end
+        return "stale corpse grip cleared"
+    end
     if fields[2] ~= "native-prop-carry" then return end
     local lease, name, kind, serial = fields[3], fields[4], fields[5], math.tointeger(fields[6])
     local pitch, yaw = tonumber(fields[7]), tonumber(fields[8])
@@ -308,20 +398,39 @@ function carry.command(fields, current, seat)
         error("native_prop_carry_guest_unavailable", 0)
     end
     local entry = holdings[lease]
-    if kind == "grab" and #fields == 12 then
+    if kind == "grab" and (#fields == 12 or #fields == 14) then
         local position = {X = tonumber(fields[10]), Y = tonumber(fields[11]), Z = tonumber(fields[12])}
-        local actor, distance = trace(pawn, pitch, yaw)
-        local grip = handle(pawn)
-        if entry or not actor or not point(position) or actor_class(actor) ~= fields[9]
-            or dist2(position, actor:K2_GetActorLocation()) > 35^2 or actor.BeingHeld ~= false
-            or not valid(grip) or valid(pawn.HeldObject) or valid(grip:GetGrabbedComponent()) then
+        local number = math.tointeger(fields[13])
+        if #fields == 14 and (not number or number < 1 or number > 65535) then
             error("native_prop_carry_stock_target_unavailable", 0)
         end
-        if not stock(pawn, kind, actor, distance, pitch, yaw) or not held(pawn, actor, grip) then
+        local actor, distance, corpse = trace(pawn, pitch, yaw, number, fields[14], position)
+        local grip = handle(pawn)
+        if entry or not actor or not point(position) or actor_class(actor) ~= fields[9]
+            or not valid(grip) or valid(pawn.HeldObject) or valid(grip:GetGrabbedComponent()) then
+            if fixtures and number then
+                error("native_prop_carry_stock_target_unavailable:" .. (not actor and tostring(distance) or "grip or class"), 0)
+            end
+            error("native_prop_carry_stock_target_unavailable", 0)
+        end
+        if corpse then
+            local host = current.local_pawn and current.local_pawn.pawn
+            if valid(host) and same(host.HeldObject, actor) then
+                if fixtures then error("native_prop_carry_stock_target_unavailable:host grip", 0) end
+                error("native_prop_carry_stock_target_unavailable", 0)
+            end
+            for _, holder in pairs(holdings) do
+                if same(holder.actor, actor) then error("native_prop_carry_wrong_holder", 0) end
+            end
+        elseif dist2(position, actor:K2_GetActorLocation()) > 35^2 or actor.BeingHeld ~= false then
+            error("native_prop_carry_stock_target_unavailable", 0)
+        end
+        if not stock(pawn, kind, actor, distance, pitch, yaw, corpse) or not held(pawn, actor, grip, corpse) then
             if same(pawn.HeldObject, actor) then stock(pawn, "drop", actor, 0, pitch, yaw) end
             error("native_prop_carry_stock_grab_unverified", 0)
         end
-        entry = {lease = lease, pawn = pawn, actor = actor, grip = grip, serial = serial, deadline = os.clock() + 1.5}
+        entry = {lease = lease, pawn = pawn, actor = actor, grip = grip, serial = serial, deadline = os.clock() + 1.5,
+            corpse = corpse}
         holdings[lease] = entry
     elseif (kind == "drop" or kind == "throw") and #fields == 8 and entry and same(pawn, entry.pawn)
         and serial > entry.serial then
@@ -330,6 +439,7 @@ function carry.command(fields, current, seat)
         error("native_prop_carry_wrong_holder", 0)
     end
     latest = {lease, serial, kind, name, entry.actor:GetFullName()}
+    if entry.corpse then latest[6], latest[7] = entry.corpse.number, entry.corpse.name end
     return "stock physics prop action verified"
 end
 
@@ -348,7 +458,7 @@ local function follow()
             local target = {X = tonumber(x), Y = tonumber(y), Z = tonumber(z)}
             local rotation = {Pitch = tonumber(pitch), Yaw = tonumber(yaw), Roll = tonumber(roll)}
             local origin = entry and valid(entry.pawn) and entry.pawn:K2_GetActorLocation()
-            if entry and number and number > (entry.sample or 0) and held(entry.pawn, entry.actor, entry.grip)
+            if entry and number and number > (entry.sample or 0) and held(entry.pawn, entry.actor, entry.grip, entry.corpse)
                 and point(origin) and point(target) and pose(rotation) and dist2(origin, target) <= 375^2 then
                 entry.sample, entry.deadline, entry.target, entry.rotation = number, now + 1.5, target, rotation
             end
@@ -357,7 +467,7 @@ local function follow()
     end
     for _, entry in pairs(holdings) do
         if now > entry.deadline or not valid(entry.pawn) or entry.pawn.Dead ~= false
-            or not held(entry.pawn, entry.actor, entry.grip) then
+            or not held(entry.pawn, entry.actor, entry.grip, entry.corpse) then
             remove(entry, "drop", 0, 0)
         elseif entry.target then
             entry.grip:SetTargetLocationAndRotation(entry.target, entry.rotation)
@@ -386,7 +496,7 @@ function carry.rows(current, seat, row)
     if seat ~= "connected" then return rows end
     for _, edge in ipairs(edges) do rows[#rows + 1] = row("native-prop-carry-input", current.map, table.unpack(edge)) end
     local grip = local_hold and handle(local_hold.pawn)
-    if not local_hold or not held(local_hold.pawn, local_hold.actor, grip) then return rows end
+    if not local_hold or not held(local_hold.pawn, local_hold.actor, grip, local_hold.corpse) then return rows end
     local position, rotation = stock_target(local_hold.pawn)
     if point(position) and pose(rotation) then
         rows[#rows + 1] = row("native-prop-carry-target", current.map, local_hold.serial, position.X, position.Y,
@@ -403,7 +513,9 @@ function carry.sync(current, seat, bridge)
     end
     state, phase, mailbox = current, seat, bridge and bridge .. "/native-prop-carry-poses"
     if not hook and type(RegisterHook) == "function" and valid(StaticFindObject(grab_path)) then
-        RegisterHook(grab_path, function(context, throwing) pcall(observe, context:get(), throwing:get() == true) end)
+        RegisterHook(grab_path, function(context, throwing, dropping)
+            pcall(observe, context:get(), throwing:get() == true, dropping:get() == true)
+        end)
         hook = true
     end
     if seat == "hosting" then follow() end
