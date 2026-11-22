@@ -84,8 +84,9 @@ namespace
     int publish(const Lua& lua)
     {
         if (lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_string(2)) return 0;
-        const auto ticket = lua.get_integer(1);
-        const auto frame = lua.get_string(2);
+        // UE4SS removes each argument as it is read.
+        const auto ticket = lua.get_integer();
+        const auto frame = lua.get_string();
         std::lock_guard lock(mutex);
         if (state != State::running || ticket != active_ticket) return 0;
         if (frame.empty() || frame.size() > reply_limit)
