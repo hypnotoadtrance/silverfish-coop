@@ -2031,7 +2031,7 @@ namespace
 
     void intercept(Iteration& iteration, Unreal::UObject* context, Unreal::UFunction* function, const void* parameters)
     {
-        if (!context || !function || !entries || iteration.OriginalFunctionCallPrevented())
+        if (!scope.address || !context || !function || !entries || iteration.OriginalFunctionCallPrevented())
         {
             return;
         }
@@ -2198,7 +2198,7 @@ namespace
             entry = primary ? "use_item_primary" : secondary ? "use_item_secondary" : teleport ? "teleport" :
                 matrix_script ? "matrix_stock_script" : "apply_item_effects";
         }
-        if (!artifact)
+        if (!artifact || !active_scope())
         {
             return;
         }

@@ -164,6 +164,8 @@ Merchant purchases and sales, NPC barter, Sewer Thing exchanges, and Borough or 
 
 Player and enemy drop storage, some special container actions, and some quest transitions and reward templates still have gameplay-time save calls. They need to share the explicit save boundaries before the campaign-wide save policy is complete.
 
+The transport-item hook now requires an active co-op session before intercepting stock item use. Stardust and Fruiting Stardust use the game's own behavior in singleplayer.
+
 ### Steam hosting options
 
 - The in-game Host flow offers a transport choice. Direct IP uses the configured port and address. Steam Networking opens a Steam lobby when the campaign is ready.
