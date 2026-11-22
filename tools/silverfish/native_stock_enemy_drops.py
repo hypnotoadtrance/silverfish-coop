@@ -1,6 +1,7 @@
 """Persist and transfer physical items from verified stock NPC loot rolls."""
 
 import asyncio
+import json
 import math
 import re
 import time
@@ -30,15 +31,18 @@ CLAIM_KEY = "native_stock_enemy_loot_claim"
 _MAP = re.compile(r"/Game/Classes/Maps(?:/[A-Za-z0-9_]+)+")
 _CLASS = re.compile(r"/Game/Classes/[A-Za-z0-9_/]+\.([A-Za-z0-9_]+_C)")
 _SERIAL = re.compile(r"[1-9][0-9]{0,15}")
+MOTION_INTERVAL = .08
+MOTION_TTL = .75
+MOTION_LIMIT = 32
 
 
 def parse(fields, state, area):
-    if (len(fields) not in (9, 11) or fields[:2] != [TAG, area] or state != "hosting" or not isinstance(area, str)
+    if (len(fields) not in (9, 11, 20) or fields[:2] != [TAG, area] or state != "hosting" or not isinstance(area, str)
             or not _MAP.fullmatch(area) or not all(_SERIAL.fullmatch(value) and int(value) < 2**53 for value in fields[2:4])
             or fields[8] not in ("0", "1")):
         raise ValueError("Invalid stock enemy drop observation")
     _, _, sequence, roll, source, killer, actor, class_path, live = fields[:9]
-    motion, first_height = fields[9:] or ("settled", "-")
+    motion, first_height = fields[9:11] or ("settled", "-")
     height = None if first_height == "-" else float(first_height)
     if motion not in ("gone", "moving", "settled") or (height is not None and not abs(height) <= 1e7):
         raise ValueError("Invalid stock enemy drop motion")
@@ -49,9 +53,16 @@ def parse(fields, state, area):
             or (killer != "-" and not re.fullmatch(r"Player_FP_C" + prefix + r"Player_FP_C_[0-9]+", killer))
             or not re.fullmatch(re.escape(item_class[1]) + prefix + r"[A-Za-z0-9_]+", actor)):
         raise ValueError("Invalid stock enemy, killer, or item identity")
-    return dict(sequence=int(sequence), roll=int(roll), map=area, source=source,
-                killer=None if killer == "-" else killer, actor=actor, class_path=class_path, live_at_capture=live == "1",
-                motion=motion, initial_height=height)
+    report = dict(sequence=int(sequence), roll=int(roll), map=area, source=source,
+                  killer=None if killer == "-" else killer, actor=actor, class_path=class_path, live_at_capture=live == "1",
+                  motion=motion, initial_height=height)
+    if len(fields) == 20:
+        axes = list(map(float, fields[11:]))
+        pose = dict(position=axes[:3], rotation=axes[3:6], scale=axes[6:])
+        if motion == "gone" or live != "1" or not valid_item_transform(pose):
+            raise ValueError("Invalid moving stock enemy drop transform")
+        report["transform"] = pose
+    return report
 
 
 def parse_escrow(fields, game):
@@ -123,11 +134,13 @@ def active_frames(data, members):
             raise ValueError("Invalid stock enemy loot identity")
         area, class_path, source = (row.get(key) for key in ("map", "class_path", "source"))
         actor = row.get("actor")
+        visual_id = row.get("visual_id")
         ammo, killer, claimant = (row.get(key) for key in ("ammo", "killer", "claimed_by"))
         if (not isinstance(area, str) or not _MAP.fullmatch(area)
                 or not isinstance(class_path, str) or len(class_path) > 256 or not _CLASS.fullmatch(class_path)
                 or not isinstance(source, str) or len(source) > 512
                 or not isinstance(actor, str) or len(actor) > 512
+                or (visual_id is not None and (not isinstance(visual_id, str) or not party.REQUEST_ID.fullmatch(visual_id)))
                 or not valid_item_transform(row.get("transform")) or type(ammo) is not int or not -2**31 <= ammo < 2**31
                 or any((value is not None and not isinstance(value, str)) or value not in owners
                        for value in (killer, claimant))):
@@ -156,7 +169,112 @@ def published(data, game):
                 and any(math.dist(point, row["transform"]["position"]) <= 2000 for point in points)):
             visible[guid] = {**{key: row[key] for key in ("map", "class_path", "transform", "ammo")},
                              "settled": row.get("settled", False)}
+            if identity := row.get("visual_id"):
+                visible[guid]["visual_id"] = identity
     return visible
+
+
+def motion_identity(zone, actor):
+    return uuid.uuid5(uuid.NAMESPACE_OID, f"stock-enemy-motion:{zone}:{actor}").hex
+
+
+def uses_shell_view(game, drop):
+    from . import native_enemy_loot
+
+    return (drop["class_path"] == native_enemy_loot.SHELLS
+            and native_enemy_loot.source_for(game, drop["source"]).get("ammo_actor") == drop["actor"])
+
+
+def moving_frame(game, zone, processed):
+    from .native_guest_drop_record import valid_position
+
+    if game.get("state") != "hosting" or not isinstance(zone, str) or not party.REQUEST_ID.fullmatch(zone):
+        return None
+    area = game.get("map")
+    points = [row["location"] for row in game.get("pawns", {}).values() if valid_position(row.get("location"))]
+    moving = {}
+    for drop in game.get(KEY, {}).values():
+        pose = drop.get("transform")
+        if (drop["map"] == area and drop["sequence"] not in processed and pose and not uses_shell_view(game, drop)
+                and any(math.dist(point, pose["position"]) <= 2000 for point in points)):
+            moving[motion_identity(zone, drop["actor"])] = {"class_path": drop["class_path"], "transform": pose}
+            if len(moving) == MOTION_LIMIT:
+                break
+    return {"map": area, "epoch": zone, "items": moving} if moving else None
+
+
+async def relay_motion(host, transport):
+    previous = {}
+    sequence = 0
+    while not host.stopping:
+        await asyncio.sleep(MOTION_INTERVAL)
+        if host.transitioning or time.monotonic() - host.last_seen > 1:
+            previous.clear()
+            continue
+        frame = moving_frame(host.last_game, host.zone_epoch, host.processed_stock_enemy_drops)
+        if not frame:
+            previous.clear()
+            continue
+        seats = {character for character, seat in host.native_recipients().items() if seat["connected"]}
+        if not seats:
+            previous.clear()
+            continue
+
+        def allowed(guest_id):
+            member = host.authenticated_guest(guest_id)
+            return bool(member and member[1] in seats)
+
+        now = time.monotonic()
+        items = frame["items"]
+        previous = {identity: state for identity, state in previous.items() if identity in items}
+        for identity, item in items.items():
+            transform = item["transform"]
+            pose = [*(round(value, 1) for field in ("position", "rotation") for value in transform[field]),
+                    *transform["scale"]]
+            prior, last = previous.get(identity, (None, 0.0))
+            if pose == prior and now - last < .3:
+                continue
+            sequence += 1
+            data = json.dumps([frame["map"], frame["epoch"], sequence, identity, item["class_path"], pose],
+                              separators=(",", ":")).encode("ascii")
+            transport.send_loot_motion(data, allowed)
+            previous[identity] = pose, now
+
+
+class MotionPlayback:
+    def __init__(self):
+        self.scope = None
+        self.items = {}
+
+    def frame(self, packets, area, epoch, *, active, now):
+        scope = (area, epoch) if active else None
+        if scope != self.scope:
+            self.scope = scope
+            self.items.clear()
+        if scope is None:
+            return None
+        self.items = {identity: state for identity, state in self.items.items() if now - state[0] < MOTION_TTL}
+        for received, packet in packets:
+            if now - received >= MOTION_TTL:
+                continue
+            try:
+                frame = json.loads(packet)
+            except (ValueError, UnicodeError, RecursionError):
+                continue
+            if not isinstance(frame, list) or len(frame) != 6 or tuple(frame[:2]) != scope:
+                continue
+            _, _, serial, identity, class_path, axes = frame
+            if (type(serial) is not int or not 0 < serial < 2**53 or not isinstance(identity, str)
+                    or not party.REQUEST_ID.fullmatch(identity) or not isinstance(class_path, str)
+                    or len(class_path) > 256 or not _CLASS.fullmatch(class_path) or not isinstance(axes, list) or len(axes) != 9):
+                continue
+            last = self.items.get(identity)
+            if (last and serial <= last[1]) or (not last and len(self.items) >= MOTION_LIMIT):
+                continue
+            pose = {"position": axes[:3], "rotation": axes[3:6], "scale": axes[6:]}
+            if valid_item_transform(pose):
+                self.items[identity] = received, serial, {"class_path": class_path, "transform": pose}
+        return {"map": area, "epoch": epoch, "items": {identity: state[2] for identity, state in self.items.items()}}
 
 
 def broker_cue_frame(game, epoch):
@@ -188,7 +306,7 @@ def _available(host):
 
 
 async def observe(host, bridge):
-    from . import native_enemy_loot, native_host_save, native_loot
+    from . import native_host_save, native_loot
 
     if not _available(host):
         return
@@ -205,9 +323,7 @@ async def observe(host, bridge):
     try:
         for drop in observed[:8]:
             seq, area, actor = drop["sequence"], drop["map"], drop["actor"]
-            if (not drop["live_at_capture"] or drop["motion"] == "gone" or
-                    drop["class_path"] == native_enemy_loot.SHELLS
-                    and native_enemy_loot.source_for(host.last_game, drop["source"]).get("ammo_actor") == actor):
+            if not drop["live_at_capture"] or drop["motion"] == "gone" or uses_shell_view(host.last_game, drop):
                 processed.add(seq)
                 continue
             slot = native_host_save.new_slot()
@@ -238,6 +354,8 @@ async def observe(host, bridge):
             record = {key: proof[key] for key in ("map", "guid", "class_path", "ammo", "transform")}
             records[guid] = dict(record, source=drop["source"].partition(" ")[2], actor=actor, killer=killer,
                                  claimed_by=None, settled=drop["initial_height"] is not None, escrow=frame)
+            if drop.get("transform"):
+                records[guid]["visual_id"] = motion_identity(host.zone_epoch, actor)
             host.last_game, host.last_seen = snapshot, time.monotonic()
             processed.add(seq)
             committed.append((drop, records[guid]))
@@ -282,7 +400,8 @@ async def claim(host, bridge, character, guid, operation):
         try:
             snapshot = await bridge.command(CLAIM, pawn, frame["slot"], guid,
                                             *(str(axis) for axis in roll["transform"]["position"]),
-                                            stock_enemy_identity(guid), *(() if roll.get("settled") else ("legacy-ground",)),
+                                            stock_enemy_identity(guid, roll.get("visual_id")),
+                                            *(() if roll.get("settled") else ("legacy-ground",)),
                                             timeout=7)
         except RuntimeError as error:
             if str(error) in {"stock_enemy_loot_out_of_reach_or_obstructed", "stock_enemy_loot_claimant_unavailable",

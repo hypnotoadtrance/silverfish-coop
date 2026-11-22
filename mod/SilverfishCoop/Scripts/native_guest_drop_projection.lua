@@ -146,7 +146,9 @@ function projection.rows(state, phase, row)
         else
             local active, epoch, observed, name, press = SilverfishReadNativeGuestDropProjection(item.slot)
             if active and epoch == item.epoch and observed == id then
-                rows[#rows + 1] = row("native-world-loot-item", item.map, epoch, id, pawn:GetFullName(), name, press, item.class)
+                local fields = {"native-world-loot-item", item.map, epoch, id, pawn:GetFullName(), name, press, item.class}
+                if item.moving then fields[#fields + 1] = "moving" end
+                rows[#rows + 1] = row(table.unpack(fields))
             end
         end
     end
@@ -165,25 +167,25 @@ local function item_frame(fields, state, phase)
         local values = {}
         for value in fields[index]:gmatch("[^|]+") do values[#values + 1] = value end
         local id, class = values[1], values[2]
-        local snap = #values == 13 and values[3] == "ground"
+        local snap, moving = #values == 13 and values[3] == "ground", #values == 13 and values[3] == "moving"
         local stack_count = math.tointeger(values[#values])
-        if (#values ~= 12 and not snap) or not identifier(id) or incoming[id] or #class > 256
+        if (#values ~= 12 and not snap and not moving) or not identifier(id) or incoming[id] or #class > 256
             or not stack_count or stack_count < 0 or stack_count > 2147483647
             or not class:match("^/Game/Classes/[%w_./%-]+_C$") then error("world_loot_item_identity_invalid", 0) end
         local transform = {}
-        for axis = snap and 4 or 3, #values - 1 do
+        for axis = (snap or moving) and 4 or 3, #values - 1 do
             local value = tonumber(values[axis])
             if not coordinate(value) then error("world_loot_item_transform_invalid", 0) end
             transform[#transform + 1] = value
         end
-        incoming[id] = { class = class, transform = transform, snap = snap, stack_count = stack_count }
+        incoming[id] = { class = class, transform = transform, snap = snap, moving = moving, stack_count = stack_count }
     end
     local changed = false
     for id, entry in pairs(world_items) do
         if not incoming[id] or entry.epoch ~= epoch or not same(entry.pawn, pawn) then
             if SilverfishClearNativeGuestDropProjection(entry.slot) then
                 world_items[id] = nil
-                changed = changed or not entry.error
+                changed = changed or not entry.error and not entry.moving
             end
         end
         if world_items[id] then occupied[entry.slot] = true end
@@ -207,12 +209,15 @@ local function item_frame(fields, state, phase)
                 visual_z = same_origin and previous.visual_z or projection.floor_z(state, t)
             end
             local ok, reason = SilverfishSyncNativeWorldLootItem(pawn:GetAddress(), epoch, id,
-                t[1], t[2], visual_z, visual_z, item.class, t[4], t[5], t[6], t[7], t[8], t[9], item.stack_count, slot)
+                t[1], t[2], visual_z, visual_z, item.class, t[4], t[5], t[6], t[7], t[8], t[9], item.stack_count,
+                not item.moving, slot)
             world_items[id] = { map = area, epoch = epoch, pawn = pawn, world = state.world,
                 class = item.class, slot = slot, visual_z = visual_z, x = t[1], y = t[2], z = t[3],
-                stack_count = item.stack_count,
+                stack_count = item.stack_count, moving = item.moving,
                 error = not ok and (reason or "stock_drop_projection_unavailable") or nil }
-            changed = changed or (ok and (not previous or previous.error ~= nil or previous.stack_count ~= item.stack_count))
+            local was_pickable = previous ~= nil and not previous.error and not previous.moving
+            local pickable = ok and not item.moving
+            changed = changed or was_pickable ~= pickable or (was_pickable and previous.stack_count ~= item.stack_count)
             if not ok then errors = errors + 1 end
         end
     end

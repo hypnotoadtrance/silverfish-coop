@@ -26,6 +26,38 @@ local function live_actor(record)
     return actor
 end
 
+local function finite(value, limit)
+    return type(value) == "number" and value == value and math.abs(value) <= limit
+end
+
+local function transform(actor)
+    local at, angle, scale = actor:K2_GetActorLocation(), actor:K2_GetActorRotation(), actor:GetActorScale3D()
+    if not at or not angle or not scale then return end
+    if not finite(at.X, 1e7) or not finite(at.Y, 1e7) or not finite(at.Z, 1e7)
+        or not finite(angle.Pitch, 360) or not finite(angle.Yaw, 360) or not finite(angle.Roll, 360)
+        or not finite(scale.X, 100) or not finite(scale.Y, 100) or not finite(scale.Z, 100)
+        or scale.X == 0 or scale.Y == 0 or scale.Z == 0 then return end
+    return {at.X, at.Y, at.Z, angle.Pitch, angle.Yaw, angle.Roll, scale.X, scale.Y, scale.Z}
+end
+
+local function clear_pose(record)
+    for index = 10, 18 do record[index] = nil end
+end
+
+local function sample_pose(record, actor, now)
+    if not actor or actor.bReplicates ~= false then
+        clear_pose(record)
+    elseif not record.next_pose or now >= record.next_pose then
+        record.next_pose = now + .08
+        local pose = transform(actor)
+        if pose then
+            for index, axis in ipairs(pose) do record[index + 9] = axis end
+        else
+            clear_pose(record)
+        end
+    end
+end
+
 local function market_scope(state, phase)
     return state.map == black_market and state.listening and (phase == "hosting" or phase == "connected")
         and state.server == (phase == "connected") and same(state.world, StaticFindObject(black_market .. ".Shop_BlackMarket_01"))
@@ -87,11 +119,13 @@ function drops.rows(state, phase, row)
     if broker_defeated and market_scope(state, phase) then
         rows[#rows + 1] = row("native-stock-broker-cue-removed", black_market)
     end
+    local now = os.clock()
     for _, record in ipairs(observed) do
         if not record.finished then
             local actor = record[7] == 1 and live_actor(record)
             record[8] = not actor and "gone" or motion.settled(actor, record.sample) and "settled" or "moving"
             record[9] = record.sample.origin_z or "-"
+            sample_pose(record, actor, now)
             if not actor then record.finished = true end
         end
         rows[#rows + 1] = row("native-stock-enemy-drop", state.map, table.unpack(record))
@@ -104,20 +138,6 @@ end
 
 local function valid_slot(slot)
     return type(slot) == "string" and #slot == 39 and slot:match("^SFCoop_[0-9a-f]+$")
-end
-
-local function finite(value, limit)
-    return type(value) == "number" and value == value and math.abs(value) <= limit
-end
-
-local function transform(actor)
-    local at, angle, scale = actor:K2_GetActorLocation(), actor:K2_GetActorRotation(), actor:GetActorScale3D()
-    if not at or not angle or not scale then return end
-    if not finite(at.X, 1e7) or not finite(at.Y, 1e7) or not finite(at.Z, 1e7)
-        or not finite(angle.Pitch, 360) or not finite(angle.Yaw, 360) or not finite(angle.Roll, 360)
-        or not finite(scale.X, 100) or not finite(scale.Y, 100) or not finite(scale.Z, 100)
-        or scale.X == 0 or scale.Y == 0 or scale.Z == 0 then return end
-    return {at.X, at.Y, at.Z, angle.Pitch, angle.Yaw, angle.Roll, scale.X, scale.Y, scale.Z}
 end
 
 local function capture(fields, state, phase, fixture)
@@ -172,6 +192,7 @@ local function capture(fields, state, phase, fixture)
     end
     actor:K2_DestroyActor()
     match.finished = true
+    clear_pose(match)
     bank = {sequence, name, match[6], guid, ammo, slot, table.unpack(pose)}
     return "exact stock NPC item banked and retired"
 end

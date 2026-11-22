@@ -3854,15 +3854,17 @@ class Host:
         heartbeat = asyncio.create_task(self.renew_native_scope(bridge)) if self.native_events else None
         weapon_shots = (asyncio.create_task(native_weapon_fire_view.relay(self, bridge, transport))
                         if self.native_guest else None)
+        loot_motion = (asyncio.create_task(native_stock_enemy_drops.relay_motion(self, transport))
+                       if self.native_events else None)
         if self.wipe_view_enabled:
             self.wipe_view = native_wipe_view.WipeView(bridge, self.control, "host")
         try:
             await self.run_session(bridge, transport, invites, pause_exit=pause_exit)
         finally:
-            for task in (heartbeat, weapon_shots):
+            for task in (heartbeat, weapon_shots, loot_motion):
                 if task:
                     task.cancel()
-            for task in (heartbeat, weapon_shots):
+            for task in (heartbeat, weapon_shots, loot_motion):
                 if task:
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
@@ -4806,6 +4808,7 @@ class Client:
         self.weather_sirens = native_weather_view.SirenPlayback()
         self.anomaly_playback = native_anomaly_effects.Playback()
         self.weapon_shot_playback = native_weapon_fire_view.Playback()
+        self.loot_motion_playback = native_stock_enemy_drops.MotionPlayback()
         self.snapshot_request: asyncio.Task | None = None
         self.next_snapshot = 0.0
         self.last_sprint_sent = None
@@ -6078,8 +6081,13 @@ class Client:
                 self.last_game = await self.enemy_shell_view.sync(
                     self.bridge, self.last_game, "connected", self.zone_epoch, frame, present=not world_items,
                 )
+            motion_packets = self.transport.take_loot_motion()
             if self.invite.get("native_loot_input") or world_items:
                 try:
+                    motion = self.loot_motion_playback.frame(
+                        motion_packets, self.last_game.get("map"), self.zone_epoch,
+                        active=active and world_items and self.transport.game_access, now=time.monotonic(),
+                    )
                     self.last_game = await self.world_loot.sync(
                         self.bridge, self.last_game, self.gameplay.get(native_loot.STATE_KEY, {}),
                         f"{self.host_session}:{self.stack_drop_projection.admission}", self.zone_epoch,
@@ -6088,6 +6096,7 @@ class Client:
                         enemy_frame=frame if world_items else None,
                         enemy_rolls=self.gameplay.get(native_enemy_loot.STATE_KEY),
                         stock_enemy_drops=self.gameplay.get(native_stock_enemy_drops.STATE),
+                        enemy_motion=motion,
                         player_drops=self.gameplay.get(native_guest_drop_record.STATE) if shared_pickups else None,
                         mushroom_frame=self.gameplay.get(native_mushrooms.KEY),
                     )
@@ -6103,7 +6112,8 @@ class Client:
                 await self.project_gameplay()
             self.publish_gameplay_status(active)
             await self.bridge.wait_for_interaction(
-                .25, wake_if=lambda: self.gameplay_snapshot_ready() or self.transport.weapon_shots_ready(), guest=True)
+                .25, wake_if=lambda: self.gameplay_snapshot_ready() or self.transport.weapon_shots_ready()
+                or self.transport.loot_motion_ready(), guest=True)
 
     def publish_gameplay_status(self, active: bool) -> None:
         fresh = active and time.monotonic() - self.gameplay_seen < 3

@@ -102,6 +102,7 @@ _FRAGMENT_HEADER = struct.Struct("!IHH")
 # Unreal fragments always declare a nonzero size. The reserved header carries
 # small, host-to-guest cosmetic events on the same authenticated connection.
 _WEAPON_SHOT_HEADER = _FRAGMENT_HEADER.pack(0, 0, 1)
+_LOOT_MOTION_HEADER = _FRAGMENT_HEADER.pack(0, 0, 2)
 _WEAPON_SHOT_MAX_AGE = .25
 _FRAGMENT_TTL = 1.0
 _MAX_ASSEMBLIES = 32
@@ -579,18 +580,19 @@ class _LinkProtocol(QuicConnectionProtocol):
         stats.relay_queue_max_frames = max(stats.relay_queue_max_frames, len(pending))
         self.transmit()
 
-    def forward_weapon_shot(self, data: bytes) -> None:
+    def _forward_presentation(self, header: bytes, data: bytes) -> None:
         if not self.authorized or not self.game_access or self.terminated or not 0 < len(data) <= _FRAGMENT_SIZE:
             return
         now = self._loop.time()
         self._expire_game_queue(now)
         pending = self._quic._datagrams_pending
         if len(pending) >= _MAX_QUEUED_FRAMES:
-            self._stats.weapon_cues_rejected_full_queue += 1
+            if header == _WEAPON_SHOT_HEADER:
+                self._stats.weapon_cues_rejected_full_queue += 1
             return
         if not pending:
             self._game_queue_started = now
-        self._quic.send_datagram_frame(_WEAPON_SHOT_HEADER + data)
+        self._quic.send_datagram_frame(header + data)
         self._stats.relay_queue_max_frames = max(self._stats.relay_queue_max_frames, len(pending))
         self.transmit()
 
@@ -1087,9 +1089,15 @@ class HostLink:
             protocol.forward_game_packet(data)
 
     def send_weapon_shot(self, data: bytes, allowed: Callable[[str], bool]) -> None:
+        self._send_presentation(_WEAPON_SHOT_HEADER, data, allowed)
+
+    def send_loot_motion(self, data: bytes, allowed: Callable[[str], bool]) -> None:
+        self._send_presentation(_LOOT_MOTION_HEADER, data, allowed)
+
+    def _send_presentation(self, header: bytes, data: bytes, allowed: Callable[[str], bool]) -> None:
         for guest_id, protocol in self._protocols.items():
             if self.connected(guest_id) and self._native_route_permitted(guest_id) and allowed(guest_id):
-                protocol.forward_weapon_shot(data)
+                protocol._forward_presentation(header, data)
 
     async def close(self) -> None:
         if self._closed:
@@ -1175,9 +1183,14 @@ class _ClientProtocol(_LinkProtocol):
             if action is not None and not action.response.done():
                 action.response.set_exception(LinkError("application request stream closed"))
         elif isinstance(event, events.DatagramFrameReceived):
-            if event.data.startswith(_WEAPON_SHOT_HEADER):
+            header = event.data[:_FRAGMENT_HEADER.size]
+            if header in (_WEAPON_SHOT_HEADER, _LOOT_MOTION_HEADER):
                 if self.authorized and self.game_access and not self.terminated:
-                    self.client._receive_weapon_shot(event.data[len(_WEAPON_SHOT_HEADER):], self._loop.time())
+                    payload = event.data[_FRAGMENT_HEADER.size:]
+                    if header == _WEAPON_SHOT_HEADER:
+                        self.client._receive_weapon_shot(payload, self._loop.time())
+                    else:
+                        self.client._receive_loot_motion(payload, self._loop.time())
                 return
             packet = self._game_payload(event)
             if packet is not None:
@@ -1337,6 +1350,7 @@ class ClientLink:
         self._keepalive: asyncio.Task[None] | None = None
         self._game_endpoint: Address | None = None
         self._weapon_shots: deque[tuple[float, bytes]] = deque(maxlen=36)
+        self._loot_motion: deque[tuple[float, bytes]] = deque(maxlen=32)
         self.game_local_datagrams = 0
         self.game_packets_sent = 0
         self.game_packets_received = 0
@@ -1512,8 +1526,21 @@ class ClientLink:
         self._weapon_shots.clear()
         return result
 
+    def _receive_loot_motion(self, data: bytes, now: float) -> None:
+        if 0 < len(data) <= _FRAGMENT_SIZE:
+            self._loot_motion.append((now, data))
+
+    def loot_motion_ready(self) -> bool:
+        return bool(self._loot_motion)
+
+    def take_loot_motion(self) -> list[tuple[float, bytes]]:
+        frames = list(self._loot_motion)
+        self._loot_motion.clear()
+        return frames
+
     async def _disconnect_locked(self) -> None:
         self._weapon_shots.clear()
+        self._loot_motion.clear()
         if self._keepalive is not None:
             self._keepalive.cancel()
             await asyncio.gather(self._keepalive, return_exceptions=True)

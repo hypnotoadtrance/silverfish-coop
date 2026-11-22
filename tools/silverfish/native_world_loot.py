@@ -53,9 +53,10 @@ def pawn_matches(area, pawn):
 
 
 def parse(fields, phase, area):
-    if len(fields) != 8 or phase not in {"hosting", "connected"}:
+    if (len(fields) not in {8, 9} or phase not in {"hosting", "connected"}
+            or (len(fields) == 9 and (phase != "connected" or fields[8] != "moving"))):
         raise ValueError("Unexpected stock world loot report")
-    _, world, epoch, identity, pawn, actor, press, item_class = fields
+    _, world, epoch, identity, pawn, actor, press, item_class = fields[:8]
     match = _CLASS.fullmatch(item_class)
     if (world != area or not pawn_matches(area, pawn) or not match or len(item_class) > 256
             or not party.REQUEST_ID.fullmatch(epoch) or not party.REQUEST_ID.fullmatch(identity)
@@ -65,8 +66,10 @@ def parse(fields, phase, area):
     prefix = f"{class_name} {area}.{area.rsplit('/', 1)[-1]}:PersistentLevel.{class_name}_"
     if not actor.startswith(prefix) or not re.fullmatch(r"[0-9]{1,10}", actor[len(prefix):]):
         raise ValueError("Invalid projected stock loot actor")
-    return dict(map=area, epoch=epoch, id=identity, pawn=pawn, actor=actor,
-                class_path=item_class, sequence=int(press))
+    report = dict(map=area, epoch=epoch, id=identity, pawn=pawn, actor=actor, class_path=item_class, sequence=int(press))
+    if len(fields) == 9:
+        report["moving"] = True
+    return report
 
 
 def parse_projection_error(fields, phase, area):
@@ -85,8 +88,8 @@ class Item:
     identity: str
     class_path: str
     transform: dict
-    claim_action: str
-    claim_target: str
+    claim_action: str | None
+    claim_target: str | None
     stack_count: int
     ground_snap: bool = False
 
@@ -142,8 +145,8 @@ def _player_items(drops, area):
                    native_guest_drop_record.PICKUP_ACTION, drop_id, row["quantity"], ground_snap=True)
 
 
-def stock_enemy_identity(guid):
-    return uuid.uuid5(uuid.NAMESPACE_OID, f"stock-enemy-loot:{guid}").hex
+def stock_enemy_identity(guid, visual_id=None):
+    return visual_id or uuid.uuid5(uuid.NAMESPACE_OID, f"stock-enemy-loot:{guid}").hex
 
 
 def _stock_enemy_items(drops, area):
@@ -151,9 +154,23 @@ def _stock_enemy_items(drops, area):
         return
     for guid, row in drops.items():
         if valid_guid(guid) and isinstance(row, dict) and row.get("map") == area:
-            yield Item(stock_enemy_identity(guid), row.get("class_path"), row.get("transform"),
+            identity = stock_enemy_identity(guid, row.get("visual_id"))
+            if not isinstance(identity, str) or not party.REQUEST_ID.fullmatch(identity):
+                continue
+            yield Item(identity, row.get("class_path"), row.get("transform"),
                        native_stock_enemy_drops.CLAIM, guid, _display_count(row.get("ammo")),
                        ground_snap=not row.get("settled"))
+
+
+def _moving_enemy_items(frame, area, zone):
+    if not isinstance(frame, dict) or (frame.get("map"), frame.get("epoch")) != (area, zone):
+        return
+    items = frame.get("items")
+    if not isinstance(items, dict) or len(items) > native_stock_enemy_drops.MOTION_LIMIT:
+        return
+    for identity, row in items.items():
+        if isinstance(identity, str) and party.REQUEST_ID.fullmatch(identity) and isinstance(row, dict):
+            yield Item(identity, row.get("class_path"), row.get("transform"), None, None, 0)
 
 
 def _display_count(value):
@@ -167,24 +184,24 @@ def _mushroom_items(frame, area, zone):
 
 
 def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drops=None, stock_enemy_drops=None,
-           mushroom_frame=None):
+           mushroom_frame=None, enemy_motion=None):
     area = game.get("map")
     pawn = game.get("pawns", {}).get("local", {})
     origin = pawn.get("location")
     if not pawn_matches(area, pawn.get("name")) or not valid_position(origin):
         return {}
-    visible = []
+    visible = {}
     for item in chain(_crate_items(rolls, area), _enemy_items(enemy_frame, enemy_rolls or {}, area, zone),
                       _player_items(player_drops or {}, area), _stock_enemy_items(stock_enemy_drops, area),
-                      _mushroom_items(mushroom_frame, area, zone)):
-        if (not isinstance(item.class_path, str) or len(item.class_path) > 256
+                      _mushroom_items(mushroom_frame, area, zone), _moving_enemy_items(enemy_motion, area, zone)):
+        if (item.identity in visible or not isinstance(item.class_path, str) or len(item.class_path) > 256
                 or not _CLASS.fullmatch(item.class_path) or not valid_item_transform(item.transform)):
             continue
         distance = math.dist(origin, item.transform["position"])
         if distance <= _VISIBILITY_RADIUS:
-            visible.append((distance, item))
-    visible.sort(key=lambda entry: (entry[0], entry[1].identity))
-    return {item.identity: item for _, item in visible[:_MAX_VISIBLE]}
+            visible[item.identity] = (distance, item)
+    ordered = sorted(visible.values(), key=lambda entry: (entry[0], entry[1].identity))
+    return {item.identity: item for _, item in ordered[:_MAX_VISIBLE]}
 
 
 class Projection:
@@ -199,7 +216,7 @@ class Projection:
         self.retired = set()
 
     async def sync(self, bridge, game, rolls, generation, zone, *, active, enemy_frame=None, enemy_rolls=None,
-                   player_drops=None, stock_enemy_drops=None, mushroom_frame=None):
+                   player_drops=None, stock_enemy_drops=None, mushroom_frame=None, enemy_motion=None):
         phase = game.get("state")
         if phase not in {"hosting", "connected"} or not isinstance(zone, str):
             self.previous = None
@@ -213,12 +230,15 @@ class Projection:
             self.presses.clear()
         self.items = nearby(game, rolls, zone, enemy_frame=enemy_frame, enemy_rolls=enemy_rolls,
                             player_drops=player_drops, stock_enemy_drops=stock_enemy_drops,
-                            mushroom_frame=mushroom_frame) if active else {}
+                            mushroom_frame=mushroom_frame, enemy_motion=enemy_motion) if active else {}
         for identity in self.retired:
             self.items.pop(identity, None)
-        args = tuple("|".join((identity, item.class_path, *(("ground",) if item.ground_snap else ()), *(str(axis)
-            for field in ("position", "rotation", "scale") for axis in item.transform[field]), str(item.stack_count)))
-            for identity, item in sorted(self.items.items()))
+        def encode(identity, item):
+            mode = ("moving",) if item.claim_action is None else ("ground",) if item.ground_snap else ()
+            pose = (str(axis) for field in ("position", "rotation", "scale") for axis in item.transform[field])
+            return "|".join((identity, item.class_path, *mode, *pose, str(item.stack_count)))
+
+        args = tuple(encode(identity, item) for identity, item in sorted(self.items.items()))
         seat = (phase, area, game.get("pawns", {}).get("local", {}).get("name"))
         signature = (epoch, seat, args)
         now = time.monotonic()
@@ -239,7 +259,7 @@ class Projection:
         item = self.items.get(identity)
         pawn = game.get("pawns", {}).get("local", {}).get("name")
         seat = (game.get("state"), game.get("map"), pawn)
-        if epoch != self.epoch or not item or not pawn or seat != self.seat:
+        if epoch != self.epoch or not item or item.claim_action is None or not pawn or seat != self.seat:
             raise party.RuleError("native_world_loot_intent_stale")
         if len(target) == 3:
             # The game thread sends the native receipt with the press. The next

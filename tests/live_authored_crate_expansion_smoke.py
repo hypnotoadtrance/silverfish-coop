@@ -451,13 +451,13 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
 
                         banked = broker_drop(await wait(run, broker_drop))
                         key_guid = banked["guid"]
-                        identity = native_world_loot.stock_enemy_identity(key_guid)
+                        identity = native_world_loot.stock_enemy_identity(key_guid, banked.get("visual_id"))
                         for directory in (run, guest_run):
                             await wait(directory, lambda state: state.get("game", {}).get(native_stock_enemy_drops.BROKER_CUE) is True
                                        and identity in state["game"].get(native_world_loot.KEY, {}))
                         frame = await wait(run, broker_drop)
                         loot = frame["campaign"]["world"]["party"][native_stock_enemy_drops.STATE]
-                        remaining = [native_world_loot.stock_enemy_identity(drop["guid"]) for drop in loot.values()
+                        remaining = [native_world_loot.stock_enemy_identity(drop["guid"], drop.get("visual_id")) for drop in loot.values()
                                      if drop["source"] == banked["source"] and drop["claimed_by"] is None]
                         remaining.remove(identity)
                         remaining.insert(0, identity)

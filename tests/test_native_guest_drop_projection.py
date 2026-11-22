@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 import time
 import unittest
@@ -5,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, native_world_loot, party
 from tools.silverfish import native_guest_drop_projection as projection
+from tools.silverfish import native_stock_enemy_drops
 
 
 MAP = record.OBSERVATORY
@@ -93,6 +95,35 @@ class DropProjectionTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     with self.assertRaisesRegex(party.RuleError, "native_world_loot_intent_stale"):
                         view.claim_target(current, intent)
+
+    async def test_enemy_drop_keeps_its_identity_when_it_lands_and_becomes_claimable(self):
+        client, view = self.client(), native_world_loot.Projection()
+        game, zone = client.last_game, client.zone_epoch
+        source = f"Ammo_Pistol_BP_C {WORLD}Ammo_Pistol_BP_C_8"
+        identity = native_stock_enemy_drops.motion_identity(zone, source)
+        pose = {"position": [10, 20, 140], "rotation": [10, 20, 30], "scale": [1, 1, 1]}
+        packet = [MAP, zone, 3, identity, record.ITEM, [10, 20, 140, 10, 20, 30, 1, 1, 1]]
+        earlier = [*packet]
+        earlier[2], earlier[5] = 2, [10, 20, 170, 10, 20, 30, 1, 1, 1]
+        playback = native_stock_enemy_drops.MotionPlayback()
+        moving = playback.frame([(10, json.dumps(row)) for row in (packet, earlier)], MAP, zone, active=True, now=10.1)
+        self.assertEqual(moving["items"][identity]["transform"], pose)
+        bridge = SimpleNamespace(command=AsyncMock(return_value=game))
+        await view.sync(bridge, game, {}, "first", zone, active=True, enemy_motion=moving)
+        target = view.epoch, identity, 2
+        self.assertEqual(bridge.command.await_args.args[3].split("|")[:4], [identity, record.ITEM, "moving", "10"])
+        with self.assertRaisesRegex(party.RuleError, "native_world_loot_intent_stale"):
+            view.claim_target(game, target)
+
+        guid = "D" * 32
+        landed = dict(pose, position=[10, 20, 40])
+        drops = {guid: {"map": MAP, "class_path": record.ITEM, "transform": landed, "ammo": 2,
+                        "settled": True, "visual_id": identity}}
+        await view.sync(bridge, game, {}, "first", zone, active=True, stock_enemy_drops=drops, enemy_motion=moving)
+        self.assertEqual(list(view.items), [identity])
+        self.assertEqual(bridge.command.await_args.args[3].split("|")[:5], [identity, record.ITEM, "10", "20", "40"])
+        self.assertEqual(view.claim_target(game, target), (native_stock_enemy_drops.CLAIM, guid))
+        self.assertEqual(playback.frame([], MAP, zone, active=True, now=11)["items"], {})
 
     async def test_guest_can_collect_nearest_stock_drop_from_another_guest(self):
         client, view = self.client(), projection.Projection()

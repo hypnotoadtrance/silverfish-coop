@@ -268,7 +268,7 @@ async def verify_observer_reward_pickup(host, guest, host_box, guest_box, probe,
     await wait(guest, lambda _: events(guest, "native_observer_absorb_played"), timeout=5)
     cue, = events(guest, "native_observer_absorb_played")
     assert cue["cue"] == cue_kind and cue["particles"], cue
-    identity = native_world_loot.stock_enemy_identity(guid)
+    identity = native_world_loot.stock_enemy_identity(guid, reward.get("visual_id"))
 
     def projected(view):
         return view.get("game", {}).get(native_world_loot.KEY, {}).get(identity, {})

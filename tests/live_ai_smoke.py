@@ -766,7 +766,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             from tools.silverfish import native_host_save, native_stock_enemy_drops, native_world_loot
 
             guid = payload["guid"]
-            identity = native_world_loot.stock_enemy_identity(guid)
+            identity = native_world_loot.stock_enemy_identity(guid, payload.get("visual_id"))
             area = payload["map"]
 
             def projection(state):
