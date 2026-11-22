@@ -84,7 +84,8 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_turret_photo.CAPTURE, native_turret_photo.BOARD_LIST, native_turret_photo.SHUTTER,
                         *native_computer_board.PREFLIGHTS, *native_flood_jammer.PREFLIGHTS, native_meet_broker.PREFLIGHT,
                         native_subway_valve.PREFLIGHT, native_subway_valve.ACTIVATE,
-                        "native-inventory-list", native_inventory.SPLIT, native_inventory.SORT, native_inventory.STORE_EQUIPMENT,
+                        "native-inventory-list", native_inventory.SPLIT, native_inventory.TAKE_AMMO, native_inventory.SORT,
+                        native_inventory.STORE_EQUIPMENT,
                         native_stash.LIST, native_stash.MOVE,
                         native_guest_ui.ACTION,
                         "native-loot-inspect", "native-loot-open", "native-loot-claim", *native_loot.PRY_TOOL_ACTIONS.values(),
@@ -1981,8 +1982,9 @@ class Host:
             elif action == native_stash.MOVE:
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                     result = await native_stash.move(self, bridge, character, target, request["operation_id"])
-            elif action == native_inventory.SPLIT:
-                result = await native_inventory.split_stack(self, bridge, character, target, request["operation_id"])
+            elif action in (native_inventory.SPLIT, native_inventory.TAKE_AMMO):
+                result = await native_inventory.split_stack(self, bridge, character, target, request["operation_id"],
+                                                            unload=action == native_inventory.TAKE_AMMO)
             elif action in native_guest_drop.ACTIONS:
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                     result = await native_guest_drop.perform(self, bridge, character, action, target, request["operation_id"])
@@ -5600,7 +5602,7 @@ class Client:
                 elif action == "native-inventory-stock-use-click-fixture":
                     target = request.get("target")
                     item, separator, gesture = (target if isinstance(target, str) else "").partition("|")
-                    if (not native_gold.valid_guid(item) or separator and gesture != "drag"
+                    if (not native_gold.valid_guid(item) or separator and gesture not in ("drag", "take-ammo")
                             or self.last_game.get("native_inventory_view", {}).get("state") != "stock"):
                         raise ValueError("Select an item on the mounted stock backpack")
                     self.last_game = await self.bridge.command(action, item, *((gesture,) if separator else ()), timeout=5)

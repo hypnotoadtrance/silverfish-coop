@@ -1,7 +1,7 @@
 local inventory = {}
 local guest_save = require("guest_save")
 local statics_path = "/Script/Engine.Default__GameplayStatics"
-local observation, split, sorted, stored
+local observation, split, unloaded, sorted, stored
 local stock_backpack = "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"
 local page_size = 16
 
@@ -32,6 +32,29 @@ local function split_stack(fields, state, phase)
     return "native guest ammo stack split verified"
 end
 
+local function take_ammo(fields, state, phase)
+    local name, source, created = fields[3], fields[4], fields[5]
+    local expected = math.tointeger(tonumber(fields[6]))
+    if #fields ~= 6 or phase ~= "hosting" or not state.listening or state.server ~= false
+        or not guid(source) or not guid(created) or source == created or not expected or expected < 1 or expected > 12
+        or type(SilverfishTakeNativeGuestWeaponAmmo) ~= "function" then
+        error("native_inventory_take_ammo_refused_scope", 0)
+    end
+    local exact, pawn, save = pcall(guest_save.exact_item_context, state, phase, name)
+    if not exact or not pawn or not save then error("native_inventory_take_ammo_refused_owner", 0) end
+    local ok, status, before, remaining, taken, ammo, weapon = SilverfishTakeNativeGuestWeaponAmmo(
+        pawn:GetAddress(), save:GetAddress(), source, created, expected, expected)
+    if ok ~= true then error(tostring(status), 0) end
+    if status ~= "unloaded" or before ~= expected or remaining ~= 0 or taken ~= expected
+        or type(ammo) ~= "string" or not ammo:match("^/Game/[%w_./%-]+$")
+        or type(weapon) ~= "string" or not weapon:match("^/Game/[%w_./%-]+$") then
+        error("mutation_unverified_native_inventory_take_ammo_receipt", 0)
+    end
+    unloaded = {map = state.map, pawn = name, source = source, created = created, class = ammo,
+        weapon = weapon, before = before, remaining = remaining, taken = taken}
+    return "native guest weapon unloading verified"
+end
+
 local function sort_backpack(fields, state, phase)
     sorted = nil
     if #fields ~= 3 or phase ~= "hosting" or not state.listening or state.server ~= false
@@ -54,6 +77,7 @@ end
 function inventory.command(fields, state, phase)
     if fields[2] == "native-inventory-sort" then return sort_backpack(fields, state, phase) end
     if fields[2] == "native-inventory-split" then return split_stack(fields, state, phase) end
+    if fields[2] == "native-inventory-take-ammo" then return take_ammo(fields, state, phase) end
     if fields[2] == "native-inventory-store-equipment" then
         stored = nil
         local name, item = fields[3], fields[4]
@@ -106,7 +130,7 @@ function inventory.command(fields, state, phase)
 end
 
 function inventory.reset()
-    observation, split, sorted, stored = nil, nil, nil, nil
+    observation, split, unloaded, sorted, stored = nil, nil, nil, nil, nil
 end
 
 function inventory.rows(state, phase, status_row)
@@ -118,6 +142,13 @@ function inventory.rows(state, phase, status_row)
     if split and split.map == state.map then
         rows[#rows + 1] = status_row("native-inventory-split", split.map, split.pawn, split.source, split.created,
             split.class, split.before, split.remaining, split.taken)
+    end
+    if type(SilverfishTakeNativeGuestWeaponAmmo) == "function" then
+        rows[#rows + 1] = status_row("native-inventory-take-ammo-capability", 1)
+    end
+    if unloaded and unloaded.map == state.map then
+        rows[#rows + 1] = status_row("native-inventory-take-ammo", unloaded.map, unloaded.pawn, unloaded.source,
+            unloaded.created, unloaded.class, unloaded.before, unloaded.remaining, unloaded.taken, unloaded.weapon)
     end
     if type(SilverfishSortNativeGuestBackpack) == "function" then
         rows[#rows + 1] = status_row("native-inventory-sort-capability", 1)

@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 import uuid
 
-from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record
+from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, native_inventory
 
 
 MAP = record.OBSERVATORY
@@ -96,3 +96,16 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
         for changes in ({"droppable": False}, {"important": True}, {"quantity": 2}, {"source": "armor"},
                         {"class_path": "/Game/Classes/Items/Item_PocketWatch.Different_C"}):
             self.assertFalse(drop.droppable({**row, **changes}, generic=True))
+
+    def test_take_ammo_requires_the_entire_expected_magazine(self):
+        game = {"state": "connected", "map": MAP, "pawns": {"local": {"name": PAWN}}}
+        envelope = [record.STOCK_ACTION_ROW, MAP, PAWN, "b" * 32, "5", "take-ammo", GUID]
+        for rounds in ("1", "12"):
+            intent = record.parse_stock_action([*envelope, rounds, rounds], game)
+            self.assertEqual((intent["mode"], intent["count"], intent["expected"]), ("unload", int(rounds), int(rounds)))
+            self.assertEqual(native_inventory.take_ammo_target(f"{GUID}|{rounds}"), (GUID, int(rounds), int(rounds)))
+        for amount, expected in (("0", "0"), ("1", "7"), ("13", "13"), ("2", "0")):
+            with self.assertRaises(ValueError):
+                record.parse_stock_action([*envelope, amount, expected], game)
+        for target in (f"{GUID}|0", f"{GUID}|13", f"{GUID}|1|2", f"{'0' * 32}|1"):
+            self.assertIsNone(native_inventory.take_ammo_target(target))

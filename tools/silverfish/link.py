@@ -77,6 +77,7 @@ _CHECKPOINT_ACTION_TIMEOUTS = {
     "native-guest-door-blowtorch": 20.0,
     "native-guest-door-crowbar": 20.0,
     "native-inventory-split": 20.0,
+    "native-inventory-take-ammo": 20.0,
     "native-inventory-sort": 20.0,
     "native-guest-stack-drop": 36.0,
     "native-stash-move": 36.0,

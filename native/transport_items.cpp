@@ -2,6 +2,7 @@
 #include "authored_pickup.hpp"
 #include "drop_item_class.hpp"
 #include "guest_drop_maps.hpp"
+#include "guest_item.hpp"
 #include "guest_weapon_registry.hpp"
 
 #include <algorithm>
@@ -1565,7 +1566,9 @@ namespace
         if (!fields.valid() || !count_field) return;
         const Guid guid = fields.read(candidate.value);
         const auto saved_ammo = count_field->GetPropertyValueInContainer(candidate.value);
+        const bool unload = action == "take-ammo";
         if (guid == Guid{} || (stack && (saved_ammo < 1 || saved_ammo > max_drop_ammo)) ||
+            (unload && !silverfish::native_guest_item::take_ammo_supported(item_class, saved_ammo)) ||
             !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class, equipped_index, !using_item)) return;
         if (equipped_index)
         {
@@ -1579,12 +1582,12 @@ namespace
             if (!pack_equipment_drop(manager, panel, candidate.panel, guid, item_class) ||
                 !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class)) return;
         }
-        const auto count = stack ? saved_ammo : 1;
+        const auto count = (stack || unload) ? saved_ammo : 1;
         const auto entry = !action.empty() ? action :
             equipped_index ? (from_menu ? "equipped_context_menu" : "equipped_ctrl_click") :
                              (from_menu ? "context_menu" : "ctrl_click");
         host_drop_request = HostDropRequest{guid, count, ++host_drop_sequence, false, now + request_lease, manager,
-                                            screen, panel, entry};
+                                            screen, panel, entry, unload ? saved_ammo : 0};
     }
 
     [[nodiscard]] bool request_current(const TransportRequest& request, Unreal::UObject* save)
@@ -2042,6 +2045,19 @@ namespace
             auto* screen = object_field(context, STR("ParentScreen"));
             return exact_drop_screen(context, screen, object_field(screen, STR("BackpackPanel")));
         };
+        if (name == entries->action_split && guarded_inventory())
+        {
+            auto* menu = object_field(context, STR("ItemContextMenu"));
+            const auto selected = card_item(object_field(menu, STR("Item Card")));
+            auto* item = object_value(field<Unreal::FClassProperty>(selected.structure, item_class_name), selected.value);
+            auto* ammo = field<Unreal::FIntProperty>(selected.structure, item_ammo_name);
+            if (selected.value && ammo && silverfish::native_guest_item::take_ammo_supported(
+                    item, ammo->GetPropertyValueInContainer(selected.value)))
+            {
+                intercept_backpack_action(iteration, context, function, true, "take-ammo");
+                return;
+            }
+        }
         if ((name == entries->return_item || name == entries->begin_take || name == entries->finish_take ||
              name == entries->insert_item || name == entries->use_held || name == entries->confirm_use) &&
             intercept_guest_use_cursor(iteration, context, function, parameters, name, guarded_inventory())) return;
@@ -2433,7 +2449,7 @@ namespace
         lua.set_string({guid.data(), guid.size()});
         lua.set_integer(request.count);
         lua.set_string(request.entry);
-        if (request.entry == "split")
+        if (request.entry == "split" || request.entry == "take-ammo")
         {
             lua.set_integer(request.expected);
             return 5;
@@ -2472,6 +2488,7 @@ namespace
             manager->ProcessEvent(cancel, nullptr);
         }
         if (completed.entry == "context_menu" || completed.entry == "equipped_context_menu" || completed.entry == "equip" ||
+            completed.entry == "take-ammo" ||
             completed.entry.starts_with("use-"))
         {
             const Unreal::FName close_name{STR("CloseContextMenu")};

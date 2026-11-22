@@ -118,7 +118,7 @@ async def stock_menu_fixture(client, target, operation: str, mode: str) -> dict:
 
 
 async def settle_stock_action(client, area, epoch, operation, mode, entry, guid, quantity, sequence, expected, split):
-    sorting, splitting = mode == "sort", mode == "split"
+    sorting, splitting, unloading = mode == "sort", mode == "split", mode == "unload"
     accepted = False
     finish = ("native-inventory-stock-drop-finish", epoch, sequence)
     try:
@@ -132,18 +132,21 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                     or type(count := receipt.get("count")) is not int or not 0 <= count <= 4096):
                 raise RuntimeError("The host did not verify sorting the guest's stock backpack")
             committed = ("sorted",)
-        elif splitting:
-            if entry != "split" or expected is None or (guid, quantity, int(expected)) != split:
+        elif splitting or unloading:
+            if entry != ("take-ammo" if unloading else "split") or expected is None or (guid, quantity, int(expected)) != split:
                 raise ValueError("The stock stack changed before the selected split")
-            key = native_inventory.SPLIT_KEY
-            target = f"{guid}|{quantity}|{expected}"
-            receipt = (await client.gameplay_action(native_inventory.SPLIT, operation, target)).get(key)
+            key = native_inventory.TAKE_AMMO_KEY if unloading else native_inventory.SPLIT_KEY
+            action = native_inventory.TAKE_AMMO if unloading else native_inventory.SPLIT
+            target = f"{guid}|{quantity}" if unloading else f"{guid}|{quantity}|{expected}"
+            receipt = (await client.gameplay_action(action, operation, target)).get(key)
             remaining = split[2] - quantity
             if (not isinstance(receipt, dict)
                     or tuple(receipt.get(field) for field in (
                         "state", "owner", "map", "source_guid", "quantity_before", "split", "remaining",
-                    )) != ("split", client.invite["character_id"], area, guid, split[2], quantity, remaining)
-                    or receipt.get("class_path") not in native_inventory.SPLIT_CLASSES
+                    )) != ("unloaded" if unloading else "split", client.invite["character_id"], area, guid, split[2], quantity, remaining)
+                    or (native_inventory.TAKE_AMMO_WEAPONS.get(receipt.get("weapon_class")) != receipt.get("class_path")
+                        or not receipt.get("class_path") if unloading
+                        else receipt.get("class_path") not in native_inventory.SPLIT_CLASSES)
                     or not valid_guid(created := receipt.get("new_guid")) or created == guid):
                 raise RuntimeError("The host did not verify both resulting stock stacks")
             committed = (str(remaining), created)
@@ -214,7 +217,7 @@ async def service_stock_view(client, active: bool) -> None:
     )
     operation = uuid.uuid5(client.bridge.input_namespace,
                            f"{client.host_session}:{epoch}:{view['pawn']}:stock-inventory:{sequence}").hex
-    split = (guid, count, expected) if mode == "split" else None
+    split = (guid, count, expected) if mode in ("split", "unload") else None
     try:
         result = await settle_stock_action(client, area, epoch, operation, mode, view["entry"],
                                            guid, count, str(sequence), str(expected), split)

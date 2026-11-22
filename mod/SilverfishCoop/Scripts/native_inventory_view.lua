@@ -40,6 +40,7 @@ local split_ammo = {
     ["/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C"] = true,
     ["/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"] = true,
 }
+local take_ammo_weapons = {[weapon_profiles.paths.pistol] = 12, [weapon_profiles.paths["break-action-50"]] = 1}
 local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
 local keys = {up = "PageUp", down = "PageDown", confirm = "Home", back = "End", drop = "Delete"}
 local input_keys, held = {}, {}
@@ -435,9 +436,9 @@ local function stock_card_guid(card)
     return stock_item_guid(exact(card, card_path) and card.Item)
 end
 
-local function stock_cards(screen, save, guid, remaining, ordered)
+local function stock_cards(screen, save, guid, remaining, ordered, raw_ammo)
     local expected, displayed = 0, 0
-    local saved_count, card_count = 0, 0
+    local saved_count, card_count
     local order = ordered and {} or nil
     for index = 1, save.PlayerBackpack:GetArrayNum() do
         local row = save.PlayerBackpack[index]
@@ -449,8 +450,8 @@ local function stock_cards(screen, save, guid, remaining, ordered)
             end
         end
         if guid and stock_item_guid(row) == guid then
-            if saved_count > 0 or not valid(row[item_class]) then return end
-            saved_count = math.max(1, row[item_ammo])
+            if saved_count ~= nil or not valid(row[item_class]) then return end
+            saved_count = raw_ammo and row[item_ammo] or math.max(1, row[item_ammo])
         end
     end
     local cards = screen.BackpackPanel.Cards
@@ -461,15 +462,35 @@ local function stock_cards(screen, save, guid, remaining, ordered)
             if order and stock_card_guid(card) ~= order[displayed] then return end
         end
         if guid and stock_card_guid(card) == guid then
-            if card_count > 0 or not valid(card.Item[item_class]) then return end
-            card_count = math.max(1, card.Item[item_ammo])
+            if card_count ~= nil or not valid(card.Item[item_class]) then return end
+            card_count = raw_ammo and card.Item[item_ammo] or math.max(1, card.Item[item_ammo])
         end
     end
     local item_matches = not guid or (saved_count == card_count and
-        (remaining == nil and saved_count > 0 or saved_count == remaining))
+        (remaining == nil and saved_count ~= nil or remaining ~= nil and
+            (saved_count == remaining or not raw_ammo and saved_count == nil and remaining == 0)))
     if displayed == expected and item_matches then
         return displayed, order and table.concat(order, "|") or nil
     end
+end
+
+local function enable_take_ammo(screen)
+    local manager, panel = screen.ItemManager, screen.BackpackPanel
+    local menu = manager.ItemContextMenu
+    if not exact(menu, context_menu_path) or not menu:IsVisible() then return end
+    local card = menu["Item Card"]
+    if not exact(card, card_path) or not same(card.InventoryWidget, panel) or not same(card.ItemManager, manager) then return end
+    local class = card.Item[item_class]
+    local path = valid(class) and class:GetFullName():match("^BlueprintGeneratedClass (.+)$")
+    local count, maximum = card.Item[item_ammo], take_ammo_weapons[path]
+    if not maximum or math.type(count) ~= "integer" or count < 1 or count > maximum then return end
+    local button = menu.Button_SplitStack
+    if not exact(button, "/Game/Classes/GUI/SubWidgets/Button_Default_Widget.Button_Default_Widget_C") then return end
+    if not button:IsVisible() then
+        button:UpdateText(FText("TAKE AMMO"))
+        button:SetVisibility(0)
+    end
+    return button
 end
 
 local function stock_sort_fixture(screen, current, save, epoch, pawn)
@@ -663,11 +684,13 @@ sync_stock = function(current, state, phase, allowed)
         return
     end
     if stock_drop or not exposed or not allowed then return end
+    enable_take_ammo(session.screen)
     local sequence, guid, quantity, entry, expected = SilverfishTakeNativeGuestDropRequest(pawn, session.epoch)
     if not sequence then return end
     stock_drop = {context = current, screen = session.screen, save = save, epoch = session.epoch, sequence = sequence,
         guid = entry == "sort" and "-" or guid, quantity = quantity, entry = entry, expected = expected,
-        sort = entry == "sort", split = entry == "split" and quantity or nil, equip = entry == "equip", live = true}
+        sort = entry == "sort", split = (entry == "split" or entry == "take-ammo") and quantity or nil,
+        unload = entry == "take-ammo", equip = entry == "equip", live = true}
 end
 
 local function finish_stock_drop(fields, current, state, phase)
@@ -714,7 +737,7 @@ local function finish_stock_drop(fields, current, state, phase)
             return ("verified stock equipment slot %d"):format(slot)
         end
         local displayed = finished and status == "refreshed" and stock_cards(pending.screen, save,
-            remaining and pending.guid or nil, remaining, sorted)
+            remaining and pending.guid or nil, remaining, sorted, pending.unload)
         if not displayed then error("The open stock backpack did not reflect the settled action", 0) end
         if split then
             local manager = pending.screen.ItemManager
@@ -722,7 +745,8 @@ local function finish_stock_drop(fields, current, state, phase)
                 or not stock_cards(pending.screen, save, created, pending.split) then
                 error("The stock backpack did not show both settled stacks", 0)
             end
-            return ("verified two stock stacks in an open backpack with %d cards"):format(displayed)
+            return (pending.unload and "verified stock empty weapon and recovered ammo with %d cards"
+                or "verified two stock stacks in an open backpack with %d cards"):format(displayed)
         end
         if sorted then
             if SilverfishTakeNativeGuestDropRequest(pawn, pending.epoch) ~= nil then
@@ -839,9 +863,11 @@ function inventory_view.command(fields, state, phase)
         error(("The actor did not produce a selectable Nearby Items card. Floor match %s, object type %s"):
             format(guid or "-", tostring(object_type)), 0)
     end
-    if operation == "native-inventory-stock-use-click-fixture" and (#fields == 3 or #fields == 4 and fields[4] == "drag")
+    if operation == "native-inventory-stock-use-click-fixture"
+        and (#fields == 3 or #fields == 4 and (fields[4] == "drag" or fields[4] == "take-ammo"))
         and headless and stock_session and not stock_drop
-        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        and (os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" or fields[4] == "take-ammo"
+            and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1") then
         local screen = stock_session.screen
         local cards, manager = screen.BackpackPanel.Cards, screen.ItemManager
         for index = 1, cards:GetArrayNum() do
@@ -853,6 +879,11 @@ function inventory_view.command(fields, state, phase)
                     manager:FinalTakeItem()
                     if manager.HoldingItem ~= true then break end
                     manager:InsertItem(screen.PlayerCard, -1)
+                elseif fields[4] == "take-ammo" then
+                    manager:OpenContextMenu(card)
+                    local button = enable_take_ammo(screen)
+                    if not valid(button) or not button:IsVisible() then error("The loaded stock weapon has no Take Ammo button", 0) end
+                    manager.ItemContextMenu:BndEvt__ItemContextMenu_Button_SplitStack_K2Node_ComponentBoundEvent_7_Pressed__DelegateSignature()
                 else
                     manager:OpenContextMenu(card)
                     manager:ActionUse()

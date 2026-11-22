@@ -2135,6 +2135,15 @@ class Bridge:
                         map=fields[1], pawn=fields[2], source_guid=fields[3], new_guid=fields[4], class_path=fields[5],
                         quantity_before=int(fields[6]), remaining=int(fields[7]), split=int(fields[8]),
                     )
+                elif fields == [native_inventory.TAKE_AMMO + "-capability", "1"]:
+                    data[native_inventory.TAKE_AMMO_CAPABILITY] = 1
+                elif (fields[0] == native_inventory.TAKE_AMMO and len(fields) == 10 and data.get("map") == fields[1]
+                      and valid_guid(fields[3]) and valid_guid(fields[4]) and fields[3] != fields[4]
+                      and native_inventory.TAKE_AMMO_WEAPONS.get(fields[9]) == fields[5]):
+                    data[native_inventory.TAKE_AMMO_KEY] = dict(
+                        map=fields[1], pawn=fields[2], source_guid=fields[3], new_guid=fields[4], class_path=fields[5],
+                        quantity_before=int(fields[6]), remaining=int(fields[7]), split=int(fields[8]), weapon_class=fields[9],
+                    )
                 elif fields[0] == native_guest_drop_record.STOCK_ACTION_ROW and len(fields) == 9:
                     data[native_guest_drop_record.STOCK_ACTION_KEY] = native_guest_drop_record.parse_stock_action(fields, data)
                 elif fields == ["native-inventory-split-view-capability", "1"]:

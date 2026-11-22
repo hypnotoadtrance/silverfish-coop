@@ -7,7 +7,7 @@ import time
 import uuid
 
 from . import native_host_save, party
-from .guest_weapon_profiles import FORTY_FIVE_BALL, NINE_MM_BALL, TWELVE_GAUGE_BUCK
+from .guest_weapon_profiles import FIREARMS, FORTY_FIVE_BALL, NINE_MM_BALL, TWELVE_GAUGE_BUCK
 from .native_gold import valid_guid
 
 
@@ -18,6 +18,12 @@ SPLIT = "native-inventory-split"
 SPLIT_KEY = "native_inventory_split"
 SPLIT_CAPABILITY = "native_inventory_split_capability"
 SPLIT_CLASSES = frozenset(ammo.item_path for ammo in (NINE_MM_BALL, FORTY_FIVE_BALL, TWELVE_GAUGE_BUCK))
+TAKE_AMMO = "native-inventory-take-ammo"
+TAKE_AMMO_KEY = "native_inventory_take_ammo"
+TAKE_AMMO_CAPABILITY = "native_inventory_take_ammo_capability"
+_TAKE_AMMO_TARGET = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]?)")
+TAKE_AMMO_WEAPONS = {weapon.path: weapon.magazine.ammo.item_path for weapon in FIREARMS
+                     if weapon.kind in ("pistol", "break-action-50")}
 _SPLIT_TARGET = re.compile(r"([0-9A-F]{32})\|([1-9][0-9]{0,9})\|([1-9][0-9]{0,9})")
 SPLIT_VIEW = "native_guest_inventory_split_view"
 SORT = "native-inventory-sort"
@@ -80,48 +86,62 @@ def splittable(row):
             and type(quantity) is int and 1 < quantity < 2**31)
 
 
-async def split_stack(host, bridge, character: str, target, operation: str) -> dict:
-    selection = split_target(target)
+def take_ammo_target(value):
+    match = _TAKE_AMMO_TARGET.fullmatch(value) if isinstance(value, str) else None
+    if match and valid_guid(match[1]) and 1 <= (rounds := int(match[2])) <= 12:
+        return match[1], rounds, rounds
+    return None
+
+
+async def split_stack(host, bridge, character: str, target, operation: str, *, unload=False) -> dict:
+    action, key, capability = ((TAKE_AMMO, TAKE_AMMO_KEY, TAKE_AMMO_CAPABILITY) if unload
+                               else (SPLIT, SPLIT_KEY, SPLIT_CAPABILITY))
+    prefix = key
+    selection = take_ammo_target(target) if unload else split_target(target)
     if not selection or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
-        raise party.RuleError("native_inventory_split_requires_guid_amount_and_expected_quantity")
+        raise party.RuleError(f"{prefix}_requires_guid_amount_and_expected_quantity")
     game = host.last_game
     if (not host.native_guest or not host.native_zones or not host.native_profile or host.stopping or host.transitioning
-            or host.native_checkpoint_unsafe or game.get("state") != "hosting" or game.get(SPLIT_CAPABILITY) != 1
+            or host.native_checkpoint_unsafe or game.get("state") != "hosting" or game.get(capability) != 1
             or time.monotonic() - host.last_seen > 3):
-        raise party.RuleError("native_inventory_split_unavailable")
+        raise party.RuleError(f"{prefix}_unavailable")
     owner = host.native_recipients().get(character)
     player = host.party["players"].get(character)
     if not owner or not owner["connected"] or not owner.get("pawn") or not player:
         raise party.RuleError("guest_not_active")
-    fingerprint = [SPLIT, target, None]
+    fingerprint = [action, target, None]
     for receipt in host.party["receipts"].get(character, []):
         if receipt["id"] == operation:
             if receipt["request"] != fingerprint:
                 raise party.RuleError("operation_id_conflict")
             return receipt["result"]
     if player["downed"] or host.party["wipe"] or character in host.party["pending_spawns"]:
-        raise party.RuleError("native_inventory_split_refused_downed_or_respawning")
+        raise party.RuleError(f"{prefix}_refused_downed_or_respawning")
     source, take, expected = selection
     area, pawn = game["map"], owner["pawn"]
     campaign = host.store.status()["campaign_id"]
-    created = uuid.uuid5(uuid.NAMESPACE_OID, f"{SPLIT}:{campaign}:{character}:{operation}").hex.upper()
+    created = uuid.uuid5(uuid.NAMESPACE_OID, f"{action}:{campaign}:{character}:{operation}").hex.upper()
+    amounts = (str(expected),) if unload else (str(take), str(expected))
     host.native_checkpoint_unsafe = True
     try:
         try:
-            snapshot = await bridge.command(SPLIT, pawn, source, created, str(take), str(expected), timeout=6)
+            snapshot = await bridge.command(action, pawn, source, created, *amounts, timeout=6)
         except RuntimeError as error:
-            if str(error).startswith("native_inventory_split_refused_"):
+            if str(error).startswith(f"{prefix}_refused_"):
                 host.native_checkpoint_unsafe = False
                 raise party.RuleError(str(error)) from error
             raise
-        proof = snapshot.get(SPLIT_KEY, {})
+        proof = snapshot.get(key, {})
+        ammo_class = proof.get("class_path")
+        qualified = (TAKE_AMMO_WEAPONS.get(proof.get("weapon_class")) == ammo_class and ammo_class is not None
+                     if unload else ammo_class in SPLIT_CLASSES)
         if ((snapshot.get("state"), snapshot.get("map")) != ("hosting", area)
                 or tuple(proof.get(key) for key in ("map", "pawn", "source_guid", "new_guid", "quantity_before",
                                                    "remaining", "split")) != (area, pawn, source, created, expected, expected - take, take)
-                or proof.get("class_path") not in SPLIT_CLASSES):
+                or not qualified):
             raise RuntimeError("The native inventory split did not verify both exact stock stacks")
         host.last_game, host.last_seen = snapshot, time.monotonic()
-        result = {SPLIT_KEY: {"state": "split", "owner": character, **proof}}
+        result = {key: {"state": "unloaded" if unload else "split", "owner": character, **proof}}
         candidate = party.load_party(host.party)
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": fingerprint, "result": result})
@@ -132,7 +152,8 @@ async def split_stack(host, bridge, character: str, target, operation: str) -> d
             host.stopping = True
         raise
     host.party, host.native_checkpoint_unsafe = candidate, False
-    host.control.event("native_guest_inventory_split_committed", operation_id=operation, revision=revision, **result[SPLIT_KEY])
+    event = "native_guest_inventory_take_ammo_committed" if unload else "native_guest_inventory_split_committed"
+    host.control.event(event, operation_id=operation, revision=revision, **result[key])
     return result
 
 

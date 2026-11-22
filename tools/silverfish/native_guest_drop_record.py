@@ -48,13 +48,16 @@ def parse_stock_action(fields, game):
             or not all(re.fullmatch(r"(?:0|[1-9][0-9]{0,9})", value) for value in (count, expected))):
         raise ValueError("Invalid stock backpack request scope")
     amount, before = int(count), int(expected)
-    mode = {"sort": "sort", "split": "split", "equip": "equip", "context_menu": "drop", "ctrl_click": "drop"}.get(entry)
+    mode = {"sort": "sort", "split": "split", "take-ammo": "unload", "equip": "equip",
+            "context_menu": "drop", "ctrl_click": "drop"}.get(entry)
     if mode is None and entry.startswith("use-") and f"native-guest-{entry[4:]}" in CONSUMABLE_RESULTS:
         mode = "use"
     if (mode is None or (guid != "-" and not valid_guid(guid)) or (guid == "-") != (mode == "sort")
             or (mode == "sort" and amount != 0) or (mode in ("use", "equip") and amount != 1)
             or (mode == "drop" and not 1 <= amount <= MAX_QUANTITY)
-            or (mode == "split" and not 0 < amount < before < 2**31) or (mode != "split" and before != 0)):
+            or (mode == "split" and not 0 < amount < before < 2**31)
+            or (mode == "unload" and not 1 <= amount == before <= 12)
+            or (mode not in ("split", "unload") and before != 0)):
         raise ValueError("Invalid stock backpack operation")
     return dict(area=area, pawn=pawn, epoch=epoch, sequence=int(sequence), entry=entry, guid=guid,
                 count=amount, expected=before, mode=mode)
