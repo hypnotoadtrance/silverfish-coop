@@ -708,6 +708,7 @@ class Bridge:
         self.local_bridge = None
         self._local_interaction_records = deque(maxlen=64)
         self._local_board_records = deque(maxlen=64)
+        self._local_crate_records = deque(maxlen=64)
         self.status_source = "file"
         self._local_status = None
         self._file_command_lock = asyncio.Lock()
@@ -759,11 +760,16 @@ class Bridge:
             for record in self.local_bridge.read_input():
                 if record.startswith(b"wire-board\t"):
                     self._local_board_records.append(record)
+                elif record.startswith(b"loot-crate-open\t"):
+                    self._local_crate_records.append(record)
                 else:
                     self._local_interaction_records.append(record)
         records = list(pending)
         pending.clear()
         return records
+
+    def native_crate_inputs(self) -> list[bytes]:
+        return self._take_local_inputs(self._local_crate_records)
 
     def interactions(self) -> list[tuple[str, str | None]]:
         """Consume complete local input records once, even if writing is in progress."""

@@ -208,6 +208,32 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(native_loot.interactions(game, 10), [(11, LEGACY_CRATE, "stock"), (13, OTHER_CRATE, "stock")])
         self.assertEqual(native_loot.interactions(game, 11), [(13, OTHER_CRATE, "stock")])
 
+    def test_fast_container_input_merges_with_status_without_losing_older_fallback(self):
+        def ring(sequence, crate=OTHER_CRATE, pawn=PAWN, area=CROSSROADS):
+            return f"loot-crate-open\t{area}\t{crate}\t{pawn}\t{sequence}\n".encode()
+
+        for role in ("hosting", "connected"):
+            with self.subTest(role=role):
+                inputs = native_loot.OpenIntents()
+                game = self.game(CROSSROADS, state=role)
+                mixed = [ring(11), ring(9), ring(11), ring(14, pawn="foreign"), ring(15, BRIDGE_CRATE)]
+                self.assertEqual(inputs.take(game, mixed),
+                                 [(9, OTHER_CRATE, "stock", "memory_input"), (11, OTHER_CRATE, "stock", "memory_input")])
+                proof = {"map": CROSSROADS, "crate": LEGACY_CRATE, "pawn": PAWN, "entry": "fixture", "sequence": 10}
+                duplicate = dict(proof, crate=OTHER_CRATE, entry="stock", sequence=11)
+                game["native_loot_crate_interactions"] = [duplicate, proof]
+                self.assertEqual(inputs.take(game, [ring(11)]), [(10, LEGACY_CRATE, "fixture", "status")])
+                self.assertEqual(inputs.take(game, mixed), [])
+
+    def test_status_wins_when_the_exact_container_input_arrives_on_both_paths(self):
+        game = self.game(DEAD_BRIDGE, native_loot_crate_interaction={
+            "map": DEAD_BRIDGE, "crate": BRIDGE_CRATE, "pawn": PAWN, "entry": "stock", "sequence": 12,
+        })
+        frame = f"loot-crate-open\t{DEAD_BRIDGE}\t{BRIDGE_CRATE}\t{PAWN}\t12\n".encode()
+        inputs = native_loot.OpenIntents()
+        self.assertEqual(inputs.take(game, [frame]), [(12, BRIDGE_CRATE, "stock", "status")])
+        self.assertEqual(inputs.take(game, [frame]), [])
+
     def test_publication_excludes_other_maps_and_invalid_saved_identity(self):
         roll = self.roll(CROSSROADS, OTHER_CRATE, "1" * 32)
         records = {

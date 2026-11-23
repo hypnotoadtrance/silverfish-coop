@@ -308,7 +308,7 @@ class Host:
         self.native_host_dig_live = host_dig_live
         self.native_host_dig_live_fixture = host_dig_live_fixture
         self.wipe_view = None
-        self.last_crate_intent = 0
+        self.crate_intents = native_loot.OpenIntents()
         if authored_zones and expanded_zones:
             self.allowed_maps |= EXPANDED_MAPS
         self.next_zone_heartbeat = 0.0
@@ -4146,18 +4146,20 @@ class Host:
                     self.last_game, self.last_seen = snapshot, time.monotonic()
             if self.native_loot_input:
                 area, epoch = self.last_game.get("map"), self.zone_epoch
-                for sequence, crate, entry in native_loot.interactions(self.last_game, self.last_crate_intent):
+                intents = self.crate_intents.take(self.last_game, bridge.native_crate_inputs())
+                for sequence, crate, entry, source in intents:
                     if (self.stopping or self.native_checkpoint_unsafe or self.transitioning
                             or (self.last_game.get("map"), self.zone_epoch) != (area, epoch)):
                         break
-                    self.last_crate_intent = sequence
                     operation = uuid.uuid5(uuid.NAMESPACE_OID, f"{self.control.generation}:{epoch}:host-crate:{sequence}:{crate}").hex
                     try:
                         await native_loot.perform(self, bridge, "host", "open", crate, operation, pried=entry == "pried",
                                                   defer_save=True)
-                        self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, crate=crate, entry=entry)
+                        self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation,
+                                           crate=crate, entry=entry, input_source=source)
                     except (OSError, ValueError, RuntimeError) as error:
-                        self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, crate=crate, reason=str(error))
+                        self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, crate=crate,
+                                           input_source=source, reason=str(error))
             await self.stock_drop_input.poll(self, bridge)
             for operation_id, target in bridge.interactions():
                 if self.stopping or self.native_checkpoint_unsafe:
@@ -4974,7 +4976,7 @@ class Client:
         self.guest_ui = native_guest_ui.GuestView()
         self.inventory_view_scope = None
         self.inventory_drop_scope = None
-        self.last_crate_intent = 0
+        self.crate_intents = native_loot.OpenIntents()
         self.last_broker_intent = 0
         self.wire_board = native_wire_board.WireBoardView(bridge, control) if invite.get("native_wire_board") else None
         self.dead_drop_projection = (None, 0.0)
@@ -5328,8 +5330,8 @@ class Client:
         if not self.invite.get("native_loot_input"):
             return
         session, epoch = self.host_session, self.zone_epoch
-        for sequence, crate, _ in native_loot.interactions(self.last_game, self.last_crate_intent):
-            self.last_crate_intent = sequence
+        intents = self.crate_intents.take(self.last_game, self.bridge.native_crate_inputs())
+        for sequence, crate, _, source in intents:
             if (not active or self.stopping or not session or not epoch
                     or (self.host_session, self.zone_epoch) != (session, epoch)):
                 continue
@@ -5337,9 +5339,11 @@ class Client:
                                    f"{session}:{epoch}:{self.invite['character_id']}:crate:{sequence}:{crate}").hex
             try:
                 result = await self.gameplay_action("native-loot-open", operation, crate)
-                self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation, crate=crate, **result)
+                self.control.event("native_stock_crate_interaction", sequence=sequence, operation_id=operation,
+                                   crate=crate, input_source=source, **result)
             except (ValueError, OSError, RuntimeError) as error:
-                self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, operation_id=operation, crate=crate, reason=str(error))
+                self.control.event("native_stock_crate_interaction_rejected", sequence=sequence, operation_id=operation,
+                                   crate=crate, input_source=source, reason=str(error))
 
     async def service_broker_input(self, active: bool) -> None:
         if not self.invite.get("native_broker_input"):

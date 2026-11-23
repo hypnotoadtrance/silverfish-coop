@@ -10,7 +10,8 @@ local legacy_fixture_profiles = 3
 local open_rotation = { Pitch = 0, Yaw = 0, Roll = -95 }
 local cabinet_rotations = {{Pitch = 0, Yaw = 95, Roll = 0}, {Pitch = 0, Yaw = -95, Roll = 0}}
 local bindings, fixture_sequences = {}, {}
-local active_world, sampler
+local active_world, sampler, receipt_frame
+local published = {}
 local blowtorch_path = "/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"
 local crowbar_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C"
 local tool_report
@@ -42,6 +43,7 @@ end
 function input.clear()
     bindings, fixture_sequences, active_world = {}, {}, nil
     sampler, tool_report = nil, nil
+    receipt_frame, published = nil, {}
     if enabled and type(SilverfishClearNativeLootCrateInput) == "function" then
         SilverfishClearNativeLootCrateInput()
     end
@@ -705,15 +707,7 @@ local function sample_slice()
 end
 
 local periodic_sampling = false
-function input.start()
-    if not enabled or type(SilverfishReadNativeLootCrateReceipts) ~= "function" then return end
-    LoopInGameThreadWithDelay(16, function()
-        if sampler and not pcall(sample_slice) then sampler = nil end
-    end)
-    periodic_sampling = true
-end
-
-local function append_receipts(rows, state, status_row)
+local function visit_receipts(state, accept)
     local detail = state.local_pawn
     if not detail or not valid(detail.pawn) then return end
     local receipts = table.pack(SilverfishReadNativeLootCrateReceipts(detail.pawn:GetAddress()))
@@ -721,21 +715,48 @@ local function append_receipts(rows, state, status_row)
         local index, sequence, pried, guest = table.unpack(receipts, offset, offset + 3)
         local binding = bindings[index]
         if binding and binding.profile.map == state.map and same(binding.pawn, detail.pawn) then
-            local profile = binding.profile
-            if pried and guest ~= 0 then
-                for _, candidate in ipairs(state.guests or {}) do
-                    if valid(candidate.pawn) and candidate.pawn:GetAddress() == guest then
-                        rows[#rows + 1] = status_row("native-loot-guest-pry", state.map, profile.name,
-                            candidate.name, sequence)
-                        break
-                    end
-                end
-            else
-                rows[#rows + 1] = status_row("native-loot-crate-interaction", state.map, profile.name, detail.name, sequence,
-                    pried and "pried" or sequence == fixture_sequences[index] and "fixture" or "stock")
-            end
+            accept(index, binding.profile, detail.name, sequence, pried, guest)
         end
     end
+end
+
+local function append_receipts(rows, state, status_row)
+    visit_receipts(state, function(index, profile, pawn, sequence, pried, guest)
+        if pried and guest ~= 0 then
+            for _, candidate in ipairs(state.guests or {}) do
+                if valid(candidate.pawn) and candidate.pawn:GetAddress() == guest then
+                    rows[#rows + 1] = status_row("native-loot-guest-pry", state.map, profile.name, candidate.name, sequence)
+                    break
+                end
+            end
+        else
+            rows[#rows + 1] = status_row("native-loot-crate-interaction", state.map, profile.name, pawn, sequence,
+                pried and "pried" or sequence == fixture_sequences[index] and "fixture" or "stock")
+        end
+    end)
+end
+
+local function publish_receipts(frame)
+    local state, status_row = frame.state, frame.row
+    local pawn = state.local_pawn.pawn
+    if not same(active_world, state.world) or not valid(pawn) or not same(pawn:GetWorld(), state.world) then return end
+    visit_receipts(state, function(index, profile, pawn, sequence, pried, guest)
+        if not pried and guest == 0 and sequence ~= fixture_sequences[index] and sequence ~= published[index] then
+            published[index] = sequence
+            -- Status remains the fallback if the in-process input ring is detached or full.
+            SilverfishEnqueueLocalBridgeInput(status_row("loot-crate-open", state.map, profile.name, pawn, sequence) .. "\n")
+        end
+    end)
+end
+
+function input.start()
+    if not enabled or type(SilverfishReadNativeLootCrateReceipts) ~= "function" then return end
+    local fast = type(SilverfishEnqueueLocalBridgeInput) == "function"
+    LoopInGameThreadWithDelay(16, function()
+        if fast and receipt_frame and not pcall(publish_receipts, receipt_frame) then receipt_frame = nil end
+        if sampler and not pcall(sample_slice) then sampler = nil end
+    end)
+    periodic_sampling = true
 end
 
 function input.rows(state, phase, status_row, fields)
@@ -743,6 +764,7 @@ function input.rows(state, phase, status_row, fields)
     local detail = state.local_pawn
     if not enabled or #profiles == 0 or not state.listening or not detail or not valid(detail.pawn)
         or phase ~= "hosting" and phase ~= "connected" then
+        receipt_frame = nil
         if active_world then input.clear() end
         return {}
     end
@@ -770,6 +792,8 @@ function input.rows(state, phase, status_row, fields)
         readings = sample(state, phase, status_row, profiles)
     end
     local rows = {}
+    if not receipt_frame then receipt_frame = {} end
+    receipt_frame.state, receipt_frame.row = state, status_row
     for _, profile in ipairs(profiles) do
         for _, row in ipairs(readings[profile.index] or {}) do rows[#rows + 1] = row end
     end

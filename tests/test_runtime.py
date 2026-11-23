@@ -92,6 +92,18 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
                 (uuid.uuid5(bridge.input_namespace, str(sequence)).hex, None) for sequence in (8, 9, 10)
             ])
 
+    async def test_crate_ring_input_does_not_consume_a_loose_interaction(self):
+        with TemporaryDirectory() as temporary:
+            bridge = runtime.Bridge(Path(temporary), None)
+            bridge.local_bridge = Mock()
+            bridge.local_bridge.input_ready.side_effect = [True, False, False]
+            crate = b"loot-crate-open\tmap\tcrate\tpawn\t7\n"
+            bridge.local_bridge.read_input.return_value = [b"interact\t8", crate]
+            self.assertEqual(bridge.native_crate_inputs(), [crate])
+            self.assertEqual(bridge.interactions(), [(uuid.uuid5(bridge.input_namespace, "8").hex, None)])
+            self.assertEqual(bridge.native_crate_inputs(), [])
+            self.assertEqual(list(bridge.directory.iterdir()), [])
+
     async def test_bad_embedded_receipt_does_not_fall_back_to_replay(self):
         with TemporaryDirectory() as temporary:
             bridge = runtime.Bridge(Path(temporary), None)

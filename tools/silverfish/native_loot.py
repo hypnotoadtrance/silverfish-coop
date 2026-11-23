@@ -109,6 +109,49 @@ def interactions(game: dict, last_sequence: int) -> list[tuple[int, str, str]]:
     return sorted(pending.values())
 
 
+class OpenIntents:
+    """Merge early stock F receipts with the compatible status stream."""
+
+    def __init__(self) -> None:
+        self.last_status = 0
+        self.early = set()
+
+    def take(self, game: dict, inputs: list[bytes]) -> list[tuple[int, str, str, str]]:
+        status = interactions(game, self.last_status)
+        pending = {sequence: (sequence, crate, entry, "status") for sequence, crate, entry in status}
+        area, pawn = game.get("map"), game.get("pawns", {}).get("local", {}).get("name")
+        if area and pawn and game.get("state") in ("hosting", "connected"):
+            for record in inputs:
+                try:
+                    fields = record.decode("ascii").rstrip("\n").split("\t")
+                except UnicodeError:
+                    continue
+                if len(fields) != 5:
+                    continue
+                tag, source, crate, owner, raw_sequence = fields
+                if (tag != "loot-crate-open" or source != area or owner != pawn or CRATES.get(crate) != area
+                        or not 0 < len(raw_sequence) <= 16 or not raw_sequence.isdigit()):
+                    continue
+                sequence = int(raw_sequence)
+                if self.last_status < sequence < 2**53:
+                    pending.setdefault(sequence, (sequence, crate, "stock", "memory_input"))
+
+        ready = []
+        for sequence, crate, entry, source in sorted(pending.values()):
+            if sequence in self.early:
+                continue
+            if source == "memory_input":
+                # If status stops advancing, let its existing fallback handle later inputs.
+                if len(self.early) >= 128:
+                    continue
+                self.early.add(sequence)
+            ready.append((sequence, crate, entry, source))
+        if status:
+            self.last_status = status[-1][0]
+            self.early = {sequence for sequence in self.early if sequence > self.last_status}
+        return ready
+
+
 def interaction(game: dict, last_sequence: int) -> tuple[int, str] | None:
     pending = interactions(game, last_sequence)
     if pending:
