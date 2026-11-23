@@ -2885,8 +2885,9 @@ std::string_view silverfish::native_guest_item::finish_local_unequip(Unreal::UOb
     context.instance = object(context.world, STR("OwningGameInstance"));
     if (!context.world || object(context.instance, STR("SaveSlot_Ref")) != save) return "unequip_guest_scope_changed";
     Inventory inventory;
-    if (!locate(context, inventory).empty() || !inventory.item || inventory.backpack_index < 0 ||
-        inventory.ammo->GetPropertyValueInContainer(inventory.item) != rounds) return "unequip_backpack_item_unavailable";
+    if (const auto error = locate(context, inventory); !error.empty()) return error;
+    if (!inventory.item || inventory.backpack_index < 0) return "unequip_backpack_item_unavailable";
+    if (inventory.ammo->GetPropertyValueInContainer(inventory.item) != rounds) return "unequip_backpack_ammunition_mismatch";
     if (slot >= quick_slots)
     {
         const bool head = slot == 8;
