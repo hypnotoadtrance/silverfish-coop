@@ -7,6 +7,8 @@ local async = "/Script/Engine.AsyncActionHandleSaveGame:"
 local find_files = "/Script/BlueprintFileUtils.BlueprintFileUtilsBPLibrary:FindFiles"
 local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local instance_class = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"
+local title_world = "World /Game/Classes/Maps/MainMenu_P.MainMenu_P"
+local max_ms = 922337203685477
 
 local function text(value)
     return type(value) == "userdata" and value:ToString() or value
@@ -58,6 +60,46 @@ function scope.prepare_guest(state)
             previous_autosave = instance.SaveAfterTransition}
     end
     install_guest(active.guest)
+end
+
+local function bounded_integer(value, low, high)
+    local integer = type(value) == "string" and #value <= 16 and value:match("^%-?%d+$") and math.tointeger(tonumber(value))
+    return integer and integer >= low and integer <= high and integer or nil
+end
+
+function scope.prepare_guest_world(state, phase, session, visit, map, seed_text, time_text)
+    local guest = active and active.guest
+    if guest then guest.world_start = nil end
+    if seed_text == nil and time_text == nil then return end
+    local seed = bounded_integer(seed_text, -2147483648, 2147483647)
+    local milliseconds = bounded_integer(time_text, 1, max_ms)
+    local world, controller = state.world, state.controller
+    if not seed or not milliseconds or not guest or phase ~= "ready" or state.listening or state.server
+        or not valid(world) or world:GetFullName() ~= title_world or not valid(controller)
+        or not same(controller:GetWorld(), world) or not same(world.OwningGameInstance, guest.instance)
+        or not same(guest.instance.SaveSlot_Ref, guest.save) or same(guest.save, guest.previous_save)
+        or text(guest.instance.CurrentSaveSlot) ~= guest.slot or guest.instance.SaveAfterTransition ~= false then
+        return
+    end
+    if type(SilverfishSetNativeGuestWorldStart) ~= "function" then return end
+    local result, observed_seed, observed_ms, previous_step =
+        SilverfishSetNativeGuestWorldStart(controller:GetAddress(), guest.save:GetAddress(), active.id, seed, milliseconds)
+    if type(result) == "string" and result:match("^mutation_unverified_") then error(result, 0) end
+    if result ~= "applied" then return end
+    if guest.previous_travel_step == nil and type(previous_step) == "number" then
+        guest.previous_travel_step = previous_step
+    end
+    if observed_seed ~= seed or observed_ms ~= milliseconds or type(previous_step) ~= "number"
+        or guest.instance.Travel_TimeStep ~= 0 then error("mutation_unverified_guest_world_receipt", 0) end
+    guest.world_start = {session = session, visit = visit, map = map, seed = observed_seed, milliseconds = observed_ms}
+end
+
+function scope.guest_world_start_row(state, phase, status_row)
+    local guest = active and active.guest
+    local start = guest and guest.world_start
+    if not start or not valid(state.world) or not same(state.world.OwningGameInstance, guest.instance)
+        or (phase ~= "joining" and (phase ~= "connected" or state.map ~= start.map)) then return end
+    return status_row("native-guest-world-start", start.session, start.visit, start.map, start.seed, start.milliseconds)
 end
 
 function scope.bind_guest(state, phase)
@@ -165,6 +207,9 @@ function scope.release(id)
         end
         if text(instance.CurrentSaveSlot) == guest.slot then instance.CurrentSaveSlot = guest.previous_slot end
         instance.SaveAfterTransition = guest.previous_autosave
+        if guest.previous_travel_step ~= nil and instance.Travel_TimeStep == 0 then
+            instance.Travel_TimeStep = guest.previous_travel_step
+        end
     end
     active = nil
 end

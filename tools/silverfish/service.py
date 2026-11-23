@@ -5051,6 +5051,38 @@ class Client:
         self.control.status(active=True, role="client", state="waiting_for_host", wait_reason=reason,
                             character_id=self.invite["character_id"])
 
+    async def guest_world_start(self, visit: tuple[str, str, str]) -> tuple[str, ...]:
+        """Use the existing authenticated destination snapshot for a real embedded guest load."""
+        session, epoch, area = visit
+        if (not getattr(self.bridge, "local_bridge", None) or not self.transport.game_access
+                or area in PLAYTEST_MAPS or area not in self.allowed_maps):
+            return ()
+        game = self.bridge.snapshot() or self.last_game
+        scope = self.invite["character_id"].replace("-", "")
+        if (game.get("state"), game.get("map"), game.get("save_scope")) != ("ready", MENU, scope):
+            return ()
+        try:
+            reply = await self.transport.request({"action": "snapshot"}, timeout=1)
+        except (OSError, RuntimeError, ValueError):
+            return ()
+        if (not self.transport.game_access or (self.host_session, self.zone_epoch, self.expected_zone) != visit
+                or not isinstance(reply, dict) or reply.get("ok") is not True
+                or reply.get("travel_in_progress") is not False or (reply.get("zone_epoch"), reply.get("zone")) != (epoch, area)):
+            return ()
+        gameplay = reply.get("gameplay")
+        world = gameplay.get("host_world") if isinstance(gameplay, dict) else None
+        scene = world.get("native_scene") if isinstance(world, dict) else None
+        if not isinstance(scene, dict) or scene.get("active_map") != area:
+            return ()
+        seed, seconds = scene.get("instance_seed"), scene.get("game_seconds")
+        if (type(seed) not in (float, int) or not -2147483648 <= seed <= 2147483647 or int(seed) != seed
+                or type(seconds) not in (float, int) or not 0 < seconds <= native_guest_clock.MAX_MILLISECONDS / 1000):
+            return ()
+        milliseconds = round(seconds * 1000)
+        if not 0 < milliseconds <= native_guest_clock.MAX_MILLISECONDS:
+            return ()
+        return str(int(seed)), str(milliseconds)
+
     async def open_game_link(self, *, timeout: float = 18, renew_endpoint: bool = False) -> None:
         if renew_endpoint:
             await self.transport.renew_game_endpoint()
@@ -5063,7 +5095,8 @@ class Client:
             if not native_mindcore_carry.token(self.host_session) or not native_mindcore_carry.token(self.zone_epoch):
                 raise RuntimeError("The native client requires an authenticated host and zone")
             visit = (self.host_session, self.zone_epoch, self.expected_zone)
-        self.last_game = await self.bridge.command("join", self.endpoint, *visit)
+        world_start = await self.guest_world_start(visit) if visit else ()
+        self.last_game = await self.bridge.command("join", self.endpoint, *visit, *world_start)
         await self.wait_game_link(timeout)
 
     async def wait_game_link(self, timeout: float) -> None:

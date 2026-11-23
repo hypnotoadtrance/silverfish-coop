@@ -38,7 +38,7 @@ from . import native_stock_enemy_drops
 from . import native_lantern, native_stock_door
 from . import native_player_avatar
 from . import native_weapon_fire_view
-from . import native_damage_feedback, native_weather_view
+from . import native_damage_feedback, native_guest_clock, native_weather_view
 from . import native_voice
 from . import native_anomaly_effects
 from .native_guest_creator import valid_profile
@@ -1204,6 +1204,21 @@ class Bridge:
                     if len(fields) != 2 or "save_scope" in data or not re.fullmatch(r"-|[a-f0-9]{32}", fields[1]):
                         raise ValueError("Invalid co-op save scope status")
                     data["save_scope"] = None if fields[1] == "-" else fields[1]
+                elif fields[0] == "native-guest-world-start":
+                    key = "native_guest_world_start"
+                    if (len(fields) != 6 or key in data or data.get("mode") != "client"
+                            or data.get("state") not in ("joining", "connected")
+                            or not all(re.fullmatch(r"[0-9a-f]{32}", value) and value != "0" * 32 for value in fields[1:3])
+                            or not re.fullmatch(r"/Game/Classes/Maps/[A-Za-z0-9_/]{1,236}", fields[3])
+                            or not re.fullmatch(r"-?[0-9]{1,10}", fields[4]) or not re.fullmatch(r"[0-9]{1,15}", fields[5])):
+                        raise ValueError("Invalid guest world start status")
+                    seed, milliseconds = int(fields[4]), int(fields[5])
+                    if (not -2147483648 <= seed <= 2147483647
+                            or not 0 < milliseconds <= native_guest_clock.MAX_MILLISECONDS
+                            or data["state"] == "connected" and data["map"] != fields[3]):
+                        raise ValueError("Unqualified guest world start status")
+                    data[key] = dict(zip(("session", "epoch", "map"), fields[1:4]),
+                                     seed=seed, milliseconds=milliseconds)
                 elif fields[0] == native_title_entry.TAG:
                     if native_title_entry.KEY in data:
                         raise ValueError("Repeated stock title report")

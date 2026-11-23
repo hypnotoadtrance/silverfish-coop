@@ -118,6 +118,45 @@ class EmptyZoneRetryTests(IsolatedAsyncioTestCase):
 
 
 class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
+    async def test_embedded_join_uses_only_a_matching_authenticated_destination_time(self):
+        session, visit, scope = "a" * 32, "b" * 32, "c" * 32
+        character = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        game = {"state": "ready", "map": MENU, "save_scope": scope}
+        bridge = SimpleNamespace(local_bridge=object(), snapshot=lambda: game,
+                                 command=AsyncMock(return_value={"state": "joining"}),
+                                 wait_for=AsyncMock(return_value={"state": "connected", "map": CITY}))
+        reply = {"ok": True, "travel_in_progress": False, "zone_epoch": visit, "zone": CITY,
+                 "gameplay": {"host_world": {"native_scene": {
+                     "active_map": CITY, "instance_seed": -123.0, "game_seconds": 113312.523,
+                 }}}}
+        transport = SimpleNamespace(address=("127.0.0.1", 31000), game_access=True,
+                                    reset_game_endpoint=Mock(), request=AsyncMock(return_value=reply))
+        client = Client(SimpleNamespace(event=Mock()), transport, {"character_id": character, "native_zones": True},
+                        bridge, allowed_maps=frozenset({CITY, BOROUGH}))
+        client.host_session, client.zone_epoch, client.expected_zone = session, visit, CITY
+        expected = ("join", "127.0.0.1:31000", session, visit, CITY)
+
+        await client.open_game_link()
+        bridge.command.assert_awaited_once_with(*expected, "-123", "113312523")
+        transport.request.assert_awaited_once_with({"action": "snapshot"}, timeout=1)
+
+        for mismatch in ({"zone_epoch": "d" * 32}, {"zone": BOROUGH}, {"travel_in_progress": True},
+                         {"gameplay": {"host_world": {"native_scene": {
+                             "active_map": BOROUGH, "instance_seed": -123, "game_seconds": 113312,
+                         }}}}):
+            with self.subTest(mismatch=mismatch):
+                bridge.command.reset_mock()
+                transport.request.return_value = {**reply, **mismatch}
+                await client.open_game_link()
+                bridge.command.assert_awaited_once_with(*expected)
+
+        bridge.command.reset_mock()
+        transport.request.reset_mock()
+        game["save_scope"] = "e" * 32
+        await client.open_game_link()
+        transport.request.assert_not_awaited()
+        bridge.command.assert_awaited_once_with(*expected)
+
     async def test_client_zone_change_recovers_zero_packet_attempt_at_fresh_local_port(self):
         game = {"map": BOROUGH, "state": "connected", "mode": "client", "server_connection": True,
                 "remote_clients": 0, "sequence": 1}

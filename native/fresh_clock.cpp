@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
+#include <string>
 #include <string_view>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
@@ -33,6 +36,8 @@ namespace
     constexpr auto timespan_type = STR("/Script/CoreUObject.Timespan");
     constexpr auto track_type = STR("/Game/Classes/Weather/StormTrack.StormTrack");
     constexpr auto working_slot_prefix = STR("SFCoopLive_");
+    constexpr auto guest_slot_prefix = STR("SFCoopGuest_");
+    constexpr std::int64_t ticks_per_millisecond = 10'000;
     constexpr std::int64_t game_ticks = 1'107'000'000'000LL;
     constexpr std::int64_t storm_ticks = 2'268'000'000'000LL;
 
@@ -116,7 +121,7 @@ namespace
     {
         U::FWeakObjectPtr controller, world, instance, save, local_player;
 
-        bool current() const
+        bool current_title() const
         {
             auto* c = controller.Get();
             auto* w = U::Cast<U::UWorld>(world.Get());
@@ -133,15 +138,22 @@ namespace
                 !exact(gi, instance_type) || exact(object(gi, STR("As Player FP")), pawn_type) ||
                 !exact(profile, save_type) || object(gi, STR("SaveSlot_Ref")) != profile ||
                 !profile->GetOuterPrivate() || profile->GetOuterPrivate()->GetPathName() != STR("/Engine/Transient") ||
-                !reserved_slot(gi) || !is_false(gi, STR("SaveAfterTransition")) || !is_false(gi, STR("Respawning")) ||
-                !stock_text(profile, STR("Level"), STR("Observitory_P")) ||
-                !stock_text(profile, STR("RespawnLevel"), STR("Observitory_P")) ||
-                !stock_text(profile, STR("Entrance"), STR("MainMenu"))) return false;
+                !is_false(gi, STR("SaveAfterTransition"))) return false;
             auto* locals = field<U::FArrayProperty>(gi, STR("LocalPlayers"));
             auto* entry = locals ? U::CastField<U::FObjectProperty>(locals->GetInner()) : nullptr;
             if (!entry) return false;
             U::FScriptArrayHelper seats(locals, locals->ContainerPtrToValuePtr<void>(gi));
             return seats.Num() == 1 && entry->GetObjectPropertyValue(seats.GetRawPtr()) == local;
+        }
+
+        bool current() const
+        {
+            auto* gi = instance.Get();
+            auto* profile = save.Get();
+            return current_title() && reserved_slot(gi) && is_false(gi, STR("Respawning")) &&
+                stock_text(profile, STR("Level"), STR("Observitory_P")) &&
+                stock_text(profile, STR("RespawnLevel"), STR("Observitory_P")) &&
+                stock_text(profile, STR("Entrance"), STR("MainMenu"));
         }
 
         bool bind(Address controller_address, Address save_address)
@@ -165,6 +177,30 @@ namespace
             return current();
         }
     };
+
+    Context guest_title(Address controller_address, Address save_address)
+    {
+        auto* world = find<U::UWorld>(title);
+        auto* instance = object(world, STR("OwningGameInstance"));
+        auto* locals = field<U::FArrayProperty>(instance, STR("LocalPlayers"));
+        auto* entry = locals ? U::CastField<U::FObjectProperty>(locals->GetInner()) : nullptr;
+        if (!entry) return {};
+        U::FScriptArrayHelper seats(locals, locals->ContainerPtrToValuePtr<void>(instance));
+        if (seats.Num() != 1) return {};
+        auto* local = entry->GetObjectPropertyValue(seats.GetRawPtr());
+        auto* controller = object(local, STR("PlayerController"));
+        auto* save = object(instance, STR("SaveSlot_Ref"));
+        if (reinterpret_cast<Address>(controller) != controller_address ||
+            reinterpret_cast<Address>(save) != save_address) return {};
+
+        Context scope;
+        scope.world = world;
+        scope.instance = instance;
+        scope.local_player = local;
+        scope.controller = controller;
+        scope.save = save;
+        return scope;
+    }
 
     struct TimespanArguments
     {
@@ -279,9 +315,75 @@ namespace
         lua.set_integer(applied_storm);
         return 5;
     }
+
+    int set_guest_world(const Lua& lua)
+    {
+        if (!enabled() || !opt_in("SILVERFISH_COOP_EMBEDDED_ENGINE") || !U::IsInGameThreadRaw() ||
+            lua.get_stack_size() != 5 || !lua.is_integer(1) || !lua.is_integer(2) ||
+            !lua.is_string(3) || !lua.is_integer(4) || !lua.is_integer(5))
+            return reply(lua, "refused_scope");
+        const auto controller = lua.get_integer();
+        const auto profile = lua.get_integer();
+        const auto id = lua.get_string();
+        const auto seed = lua.get_integer();
+        const auto milliseconds = lua.get_integer();
+        if (controller <= 0 || profile <= 0 || id.size() != 32 ||
+            !std::ranges::all_of(id, [](char ch) { return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'); }) ||
+            id.find_first_not_of('0') == std::string::npos ||
+            seed < (std::numeric_limits<std::int32_t>::min)() || seed > (std::numeric_limits<std::int32_t>::max)() ||
+            milliseconds <= 0 || milliseconds > (std::numeric_limits<std::int64_t>::max)() / ticks_per_millisecond)
+            return reply(lua, "refused_values");
+
+        const auto scope = guest_title(controller, profile);
+        auto* save = scope.save.Get();
+        auto* instance = scope.instance.Get();
+        const auto slot = RC::StringType(guest_slot_prefix) + RC::to_wstring(id);
+        if (!scope.current_title() || !stock_text(instance, STR("CurrentSaveSlot"), slot))
+            return reply(lua, "refused_private_guest_title");
+        auto* game = field<U::FStructProperty>(save, STR("GameTime"));
+        auto* seed_field = field<U::FIntProperty>(save, STR("InstanceSeed"));
+        auto* step = field<U::FDoubleProperty>(instance, STR("Travel_TimeStep"));
+        auto* type = find<U::UScriptStruct>(timespan_type);
+        if (!type || !game || !seed_field || !step || game->GetStruct().Get() != type ||
+            game->GetSize() != sizeof(std::int64_t))
+            return reply(lua, "refused_world_schema");
+
+        auto* address = game->ContainerPtrToValuePtr<void>(save);
+        const auto prior_time = ticks(address);
+        const auto prior_seed = seed_field->GetPropertyValueInContainer(save);
+        const auto prior_step = step->GetPropertyValueInContainer(instance);
+        if (!std::isfinite(prior_step)) return reply(lua, "refused_world_schema");
+        const std::int64_t requested_time = milliseconds * ticks_per_millisecond;
+        game->CopyCompleteValue(address, &requested_time);
+        seed_field->SetPropertyValueInContainer(save, static_cast<std::int32_t>(seed));
+        // The host's destination clock already includes the authored travel advance.
+        step->SetPropertyValueInContainer(instance, 0);
+
+        const auto applied_seed = seed_field->GetPropertyValueInContainer(save);
+        const auto applied_time = ticks(address);
+        if (applied_seed != seed || applied_time != requested_time || step->GetPropertyValueInContainer(instance) != 0 ||
+            !scope.current_title() || !stock_text(instance, STR("CurrentSaveSlot"), slot))
+        {
+            if (scope.save.Get() != save || scope.instance.Get() != instance)
+                return reply(lua, "mutation_unverified_guest_world_scope");
+            game->CopyCompleteValue(address, &prior_time);
+            seed_field->SetPropertyValueInContainer(save, prior_seed);
+            step->SetPropertyValueInContainer(instance, prior_step);
+            return reply(lua, ticks(address) == prior_time && seed_field->GetPropertyValueInContainer(save) == prior_seed &&
+                step->GetPropertyValueInContainer(instance) == prior_step
+                ? "rolled_back_guest_world_readback" : "mutation_unverified_guest_world_readback");
+        }
+        reply(lua, "applied");
+        lua.set_integer(applied_seed);
+        lua.set_integer(applied_time / ticks_per_millisecond);
+        lua.set_number(prior_step);
+        return 4;
+    }
 }
 
 void silverfish::native_fresh_clock::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (enabled()) lua.register_function("SilverfishSetNativeFreshClock", set_clock);
+    if (enabled() && opt_in("SILVERFISH_COOP_EMBEDDED_ENGINE"))
+        lua.register_function("SilverfishSetNativeGuestWorldStart", set_guest_world);
 }
