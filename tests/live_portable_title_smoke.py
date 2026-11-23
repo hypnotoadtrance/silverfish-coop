@@ -1282,7 +1282,17 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str) -> dict:
             slot = moved[native_inventory.STORE_KEY]["slot"]
 
             async def read_loadout(action="read"):
-                read = await guest.bridge.command("fixture-stock-take-ammo-loadout", str(slot), guid, action)
+                # The portable test bridge polls a file while gameplay uses the
+                # resident bridge. A gameplay acknowledgement can replace the
+                # readback before the test sees it. Retry reads only.
+                if action == "read":
+                    try:
+                        read = await guest.bridge.command("fixture-stock-take-ammo-loadout", str(slot), guid, action,
+                                                          timeout=1.5)
+                    except TimeoutError:
+                        return "waiting"
+                else:
+                    read = await guest.bridge.command("fixture-stock-take-ammo-loadout", str(slot), guid, action)
                 return read["ack"]["message"]
 
             async with asyncio.timeout(8):
