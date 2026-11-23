@@ -6250,7 +6250,7 @@ class Client:
                                 self.last_game = await self.world_loot.retire_claim(self.bridge, self.last_game, world_loot)
                             except (OSError, RuntimeError) as error:
                                 self.control.event("native_world_loot_retirement_deferred", reason=str(error))
-                            await self.guest_ui.refresh_stock_inventory(self)
+                            self.guest_ui.queue_stock_inventory(self)
                             continue
                         stack_drop = native_guest_drop_projection.target_parts(target)
                         if stack_drop:

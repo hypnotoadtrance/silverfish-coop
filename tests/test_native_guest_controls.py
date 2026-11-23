@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -248,6 +249,60 @@ class ResidentGuestUIBridgeTests(unittest.IsolatedAsyncioTestCase):
         guest_bridge.guest_ui_command.assert_awaited_once_with(owner, payload=self.body)
         guest_bridge.command.assert_not_awaited()
         self.assertIs(client.last_game, guest_receipt)
+
+
+class NativeGuestStockPickupViewTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.view = native_guest_ui.GuestView()
+        self.addAsyncCleanup(self.view.close)
+        self.view.receive = AsyncMock()
+        self.character = uuid.uuid4()
+        self.area, self.epoch, self.session = "/Game/Test", "e" * 32, "a" * 32
+        self.game = {"map": self.area, "state": "connected", "save_scope": self.character.hex,
+                     "native_inventory_view": {"state": "stock"}, "pawns": {"local": {"name": "pawn"}}}
+        self.client = SimpleNamespace(last_game=self.game, expected_zone=self.area, host_session=self.session,
+                                      zone_epoch=self.epoch, invite={"character_id": str(self.character)},
+                                      bridge=SimpleNamespace(command=AsyncMock(return_value=self.game)),
+                                      control=Mock())
+        self.release = asyncio.Event()
+        self.amount = 0
+
+        async def fetch(*_):
+            self.amount += 1
+            await self.release.wait()
+            return {"native_guest_ui": {"capture": self.amount}}
+
+        self.client.gameplay_action = AsyncMock(side_effect=fetch)
+
+    async def test_pickups_coalesce_without_waiting_for_stale_inventory_reply(self):
+        await self.view.sync(self.client, True)
+        await asyncio.sleep(0)
+        self.assertEqual(self.amount, 1)
+        self.view.queue_stock_inventory(self.client)
+        self.view.queue_stock_inventory(self.client)
+        await self.view.sync(self.client, True)
+        self.assertFalse(self.view.request.done())
+        self.view.receive.assert_not_awaited()
+
+        self.release.set()
+        await self.view.request
+        await self.view.sync(self.client, True)
+        await self.view.request
+        await self.view.sync(self.client, True)
+
+        self.assertEqual(self.amount, 2)
+        self.view.receive.assert_awaited_once_with(self.client, {"capture": 2}, self.area, self.epoch, str(self.character))
+        self.client.bridge.command.assert_awaited_once_with("native-inventory-stock-refresh", self.epoch, timeout=4)
+
+    async def test_refresh_does_not_rebuild_closed_or_replaced_stock_view(self):
+        self.view.queue_stock_inventory(self.client)
+        await self.view.sync(self.client, True)
+        self.game["pawns"]["local"]["name"] = "replacement"
+        self.release.set()
+        await self.view.request
+        await self.view.sync(self.client, True)
+        self.client.bridge.command.assert_not_awaited()
+        self.view.receive.assert_not_awaited()
 
 
 class NativeGuestHealthViewTests(unittest.IsolatedAsyncioTestCase):

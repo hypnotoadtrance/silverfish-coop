@@ -85,6 +85,8 @@ class GuestView:
     def __init__(self):
         self.next_poll = 0.0
         self.request = None
+        self.request_for_stock = None
+        self.pending_stock_refresh = None
         self.identity = None
         self.digest = "-"
         self.last_error = None
@@ -98,6 +100,25 @@ class GuestView:
             with contextlib.suppress(asyncio.CancelledError, OSError, ValueError, RuntimeError):
                 await self.request
             self.request = None
+        self.request_for_stock = None
+        self.pending_stock_refresh = None
+
+    @staticmethod
+    def stock_view(client):
+        game = client.last_game
+        pawn = game.get("pawns", {}).get("local", {}).get("name")
+        identity = (client.host_session, client.zone_epoch, game.get("map"), pawn)
+        if (game.get("state") == "connected" and game.get("native_inventory_view", {}).get("state") == "stock"
+                and all(identity) and identity[2] == client.expected_zone
+                and game.get("save_scope") == uuid.UUID(client.invite["character_id"]).hex):
+            return identity
+        return None
+
+    def queue_stock_inventory(self, client):
+        """Coalesce committed pickups without waiting for another host request."""
+        if scope := self.stock_view(client):
+            self.pending_stock_refresh = scope
+            self.next_poll = 0.0
 
     async def sync_health(self, client, active):
         game, frame = client.last_game, client.gameplay.get(HEALTH)
@@ -157,22 +178,37 @@ class GuestView:
             return
         area, epoch = game["map"], client.zone_epoch
         identity = (client.host_session, epoch, area)
+        current_stock = self.stock_view(client)
+        pending = self.pending_stock_refresh if self.pending_stock_refresh == current_stock else None
         if self.identity != identity:
             await self.close()
             self.identity, self.digest, self.next_poll = identity, "-", 0.0
+        self.pending_stock_refresh = pending
         if self.request is not None and self.request.done():
             request, self.request = self.request, None
+            requested_stock, self.request_for_stock = self.request_for_stock, None
             try:
-                await self.receive(client, request.result()["native_guest_ui"], area, epoch, character)
-                self.last_error = None
+                reply = request.result()
+                # A pickup arrived after this request started. Use one fresh view for all resulting changes.
+                if not pending and (requested_stock is None or requested_stock == current_stock):
+                    await self.receive(client, reply["native_guest_ui"], area, epoch, character)
+                    if requested_stock is not None and requested_stock == self.stock_view(client):
+                        client.last_game = await client.bridge.command("native-inventory-stock-refresh", epoch, timeout=4)
+                    self.last_error = None
             except (KeyError, TypeError, OSError, RuntimeError, ValueError, zlib.error) as error:
+                if requested_stock is not None and requested_stock == self.stock_view(client):
+                    self.pending_stock_refresh = requested_stock
                 description = str(error)
                 if description != self.last_error:
-                    client.control.event("native_guest_ui_unavailable", reason=description)
+                    event = ("native_stock_inventory_refresh_unavailable" if requested_stock is not None
+                             else "native_guest_ui_unavailable")
+                    client.control.event(event, reason=description)
                     self.last_error = description
         now = time.monotonic()
         if self.request is None and now >= self.next_poll:
             self.next_poll = now + 3
+            self.request_for_stock = self.pending_stock_refresh
+            self.pending_stock_refresh = None
             self.request = asyncio.create_task(client.gameplay_action(ACTION, uuid.uuid4().hex, self.digest))
 
     async def receive(self, client, result, area, epoch, character):
@@ -202,15 +238,6 @@ class GuestView:
         await self.receive(client, reply["native_guest_ui"], area, epoch, character)
         self.identity = (client.host_session, epoch, area)
         self.next_poll = time.monotonic() + 3
-
-    async def refresh_stock_inventory(self, client):
-        if client.last_game.get("native_inventory_view", {}).get("state") != "stock":
-            return
-        try:
-            await self.refresh(client)
-            client.last_game = await client.bridge.command("native-inventory-stock-refresh", client.zone_epoch, timeout=4)
-        except (KeyError, TypeError, OSError, RuntimeError, ValueError, zlib.error) as error:
-            client.control.event("native_stock_inventory_refresh_unavailable", reason=str(error))
 
     async def project(self, client, character, contents):
         bridge, game = client.bridge, getattr(client, "last_game", {})

@@ -172,7 +172,7 @@ async def refresh_claimed_stock_view(client):
         await project(client, client.bridge, client.gameplay.get(STATE))
     except (OSError, RuntimeError, ValueError) as error:
         client.control.event("native_loose_pickup_view_refresh_unavailable", reason=str(error))
-    await client.guest_ui.refresh_stock_inventory(client)
+    client.guest_ui.queue_stock_inventory(client)
 
 
 async def expire_fixture(host, bridge, target):
