@@ -14,6 +14,13 @@ KEY = "native_avatar_outfits"
 RECEIPT = "native_avatar_outfits_receipt"
 HOST_AIM_RECEIPT = "native_avatar_host_aim_receipt"
 LOCAL_AIM = "native_avatar_local_aim"
+LOCAL_LIGHTER = "native_avatar_local_lighter"
+GUEST_LIGHTER = "avatar_lighter"
+LIGHTER_MODES = ("closed", "open", "lit")
+_LIGHTER_MESHES = [
+    f"/Game/Assets/StaticMeshes/Mesh_Props/PropActor_Meshes/{name}.{name}"
+    for name in ("SM_Item_Lighter_Flip_01", "SM_Item_Lighter_Flip_Lid_01")
+]
 TAG = "native-avatar-outfit"
 _ARMOR = re.compile(r"/Game/Classes/Armor_Items/([A-Za-z0-9_]+)\.\1_C")
 _MESH = re.compile(r"/Game/(?:Assets|Classes)/[A-Za-z0-9_/-]+/([A-Za-z0-9_-]+)\.\1")
@@ -38,12 +45,21 @@ def valid_id(value):
     return isinstance(value, str) and _ID.fullmatch(value) and int(value) <= 2147483647
 
 
+def _lighter_shape(model):
+    if isinstance(model, str):
+        shape, separator, mode = model.rpartition("~")
+        if separator and mode in LIGHTER_MODES:
+            return shape, mode
+    return model, None
+
+
 def weapon_meshes(model):
     if model == "-":
         return []
     if not isinstance(model, str) or not 1 <= len(model) <= 4096:
         return None
-    parts = model.split("|")
+    shape, mode = _lighter_shape(model)
+    parts = shape.split("|")
     if len(parts) > 12:
         return None
     meshes = []
@@ -55,6 +71,8 @@ def weapon_meshes(model):
         kind, path, *pose = columns[:11]
         rig = kind in ("r", "h")
         socket = columns[11] if len(columns) == 12 else None
+        if mode and (kind != "s" or socket is not None):
+            return None
         if rig and has_rig or socket is not None and (rig or not re.fullmatch(r"[A-Za-z0-9_]{1,64}", socket)):
             return None
         has_rig = has_rig or rig
@@ -65,7 +83,7 @@ def weapon_meshes(model):
             return None
         if kind != "h":
             meshes.append(path)
-    if needs_rig and not has_rig:
+    if needs_rig and not has_rig or mode and meshes != _LIGHTER_MESHES:
         return None
     return meshes
 
@@ -143,6 +161,18 @@ def guest_aim(host, character, member, pressed):
         host.guest_avatar_aims.pop(pawn, None)
 
 
+def guest_lighter(host, character, member, mode):
+    pawn = member["pawn"]
+    if mode not in (*LIGHTER_MODES, "-"):
+        return
+    standing = host.party["players"].get(character, {}).get("downed") is False
+    if mode == "-" or not standing or host.party.get("wipe"):
+        host.guest_avatar_lighters.pop(pawn, None)
+    elif any(outfit["pawn"] == pawn and _lighter_shape(outfit["weapon"])[1]
+             for outfit in host.last_game.get(KEY, {}).values()):
+        host.guest_avatar_lighters[pawn] = host.zone_epoch, mode, time.monotonic() + 1.5
+
+
 def frame(host):
     game = host.last_game
     area, epoch = game.get("map"), host.zone_epoch
@@ -154,24 +184,37 @@ def frame(host):
     now = time.monotonic()
     host.guest_avatar_aims = {pawn: value for pawn, value in host.guest_avatar_aims.items()
                               if pawn in allowed and value[0] == epoch and value[1] > now}
-    outfits = {}
+    guest_lighters = getattr(host, "guest_avatar_lighters", {})
+    if guest_lighters:
+        host.guest_avatar_lighters = guest_lighters = {
+            pawn: value for pawn, value in guest_lighters.items()
+            if pawn in allowed and value[0] == epoch and value[2] > now
+        }
+    outfits, lighter_modes = {}, {}
     for player_id, outfit in game[KEY].items():
         pawn = outfit["pawn"]
         if pawn in allowed or pawn == lead:
             row = {key: outfit.get(key, "-") for key in _OUTFIT}
             row["sprinting"] = outfit.get("sprinting") is True
             row["moving"] = outfit.get("moving")
+            row["weapon"], lighter_mode = _lighter_shape(row["weapon"])
             if pawn in allowed:
                 standing = host.party["players"].get(allowed[pawn], {}).get("downed") is False
                 aiming = pawn in host.guest_avatar_aims and standing and not host.party.get("wipe")
                 row["aim"] = outfit.get("gun", "-") if aiming else "-"
+                if lighter_mode and (not standing or host.party.get("wipe")):
+                    lighter_mode = "closed"
+                elif lighter_mode and pawn in guest_lighters:
+                    lighter_mode = guest_lighters[pawn][1]
+            if lighter_mode:
+                lighter_modes[player_id] = lighter_mode
             outfits[player_id] = row
-    return {"map": area, "epoch": epoch, "outfits": outfits}
+    return {"map": area, "epoch": epoch, "outfits": outfits, "lighter_modes": lighter_modes}
 
 
 async def project_host(host, bridge):
     game = host.last_game
-    if not host.guest_avatar_aims and not game.get(HOST_AIM_RECEIPT):
+    if not host.guest_avatar_aims and not getattr(host, "guest_avatar_lighters", None) and not game.get(HOST_AIM_RECEIPT):
         return game
     incoming = frame(host)
     if incoming is None:
@@ -179,6 +222,8 @@ async def project_host(host, bridge):
     lead = game.get("pawns", {}).get("local", {}).get("name")
     aims = {player_id: row["aim"] for player_id, row in incoming["outfits"].items()
             if row["aim"] != "-" and game[KEY][player_id]["pawn"] != lead}
+    aims.update({player_id: mode for player_id, mode in incoming["lighter_modes"].items()
+                 if game[KEY][player_id]["pawn"] != lead})
     receipt = hashlib.sha256(json.dumps([incoming["map"], incoming["epoch"], aims], sort_keys=True).encode()).hexdigest()[:32]
     if game.get(HOST_AIM_RECEIPT) == receipt:
         return game
@@ -201,6 +246,15 @@ async def project(bridge, game, incoming, epoch):
             or row["firearm"] != "-" and (row["weapon"] == "-" or not stock_weapon_class(row["firearm"]))
             for key, row in outfits.items())):
         return game
+    modes = incoming.get("lighter_modes", {})
+    if not isinstance(modes, dict) or any(
+            player_id not in outfits or mode not in LIGHTER_MODES or outfits[player_id]["firearm"] != "-"
+            or weapon_meshes(outfits[player_id]["weapon"] + "~" + mode) is None
+            for player_id, mode in modes.items()):
+        return game
+    if modes:
+        outfits = {player_id: dict(row, weapon=row["weapon"] + "~" + modes[player_id]) if player_id in modes else row
+                   for player_id, row in outfits.items()}
     receipt = hashlib.sha256(json.dumps([area, epoch, outfits], sort_keys=True).encode()).hexdigest()[:32]
     if game.get(RECEIPT) == receipt:
         return game

@@ -39,7 +39,7 @@ local observations, client_outfits = {}, {}
 local observed_weapons = {}
 local client_world, client_map, client_receipt
 local host_world, host_aim_receipt, host_aims
-local holding_aim
+local holding_aim, lighter_mode
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local armor_root = "/Game/Classes/Armor_Items/"
 
@@ -135,9 +135,13 @@ end
 
 local function sync_local_aim(state, phase)
     local pawn = phase == "connected" and state.local_pawn and state.local_pawn.pawn or nil
-    holding_aim = nil
+    holding_aim, lighter_mode = nil, nil
     if not valid(pawn) or not pawn:IsLocallyControlled() then return end
     holding_aim = false
+    if not pawn.Dead then
+        local read, mode = pcall(weapon_view.local_lighter, pawn)
+        if read then lighter_mode = mode end
+    end
     if pawn.Dead or pawn.Sprinting or pawn.IsWeaponBlocked then return end
     -- The stock ADS state works for all local firearms, including ones that
     -- have no registered interception path for primary-fire input.
@@ -330,9 +334,11 @@ local function stop_use(entry)
         if valid(part) then part:SetHiddenInGame(false, false) end
     end
     entry.hidden_for_use = nil
+    weapon_view.hide_lighter(entry, false)
 end
 
 local function hide_held_item(entry)
+    weapon_view.hide_lighter(entry, true)
     for _, part in ipairs(entry.weapon_parts or {}) do
         if valid(part) and part.bHiddenInGame == false then
             entry.hidden_for_use[part:GetAddress()] = part
@@ -735,7 +741,9 @@ function avatar.sync(state, phase)
                             if not cosmetics then error("Invalid remote character appearance") end
                             apply_outfit(entry, outfit, cosmetics)
                             character_view.apply(entry, cosmetics, appearance, asset, visual_component)
-                            weapon_view.apply(entry, outfit and outfit.weapon or "-", outfit and outfit.firearm or "-")
+                            local equipment = outfit and outfit.weapon or "-"
+                            if phase == "hosting" then equipment = weapon_view.lighter_override(equipment, host_aims[entry.id]) end
+                            weapon_view.apply(entry, equipment, outfit and outfit.firearm or "-")
                             weapon_view.suppress_stock(entry)
                             if uses[entry] then hide_held_item(entry) end
                             local aim = outfit and outfit.aim or "-"
@@ -777,7 +785,8 @@ function avatar.command(fields, state, phase)
         local aims = {}
         for index = 5, #fields, 2 do
             local id, mode = math.tointeger(tonumber(fields[index])), fields[index + 1]
-            if not id or id < 0 or id > 2147483647 or aims[id] or not aimed[mode] then
+            if not id or id < 0 or id > 2147483647 or aims[id]
+                or not (aimed[mode] or mode == "closed" or mode == "open" or mode == "lit") then
                 error("Invalid hosted avatar aim")
             end
             aims[id] = mode
@@ -842,6 +851,7 @@ function avatar.rows(row)
     if client_receipt then rows[#rows + 1] = row("native-avatar-outfits-receipt", client_receipt) end
     if host_aim_receipt then rows[#rows + 1] = row("native-avatar-host-aim-receipt", host_aim_receipt) end
     if holding_aim ~= nil then rows[#rows + 1] = row("native-avatar-local-aim", holding_aim and 1 or 0) end
+    if lighter_mode then rows[#rows + 1] = row("native-avatar-local-lighter", lighter_mode) end
     return rows
 end
 

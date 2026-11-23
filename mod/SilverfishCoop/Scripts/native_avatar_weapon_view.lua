@@ -1,4 +1,7 @@
 local view = {}
+local lighter = require("native_avatar_lighter")
+view.lighter_override = lighter.override
+view.hide_lighter = lighter.hide
 
 local equipment_type = "/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C"
 local firearm_type = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
@@ -67,8 +70,9 @@ end
 function view.decode(model)
     if model == "-" then return {} end
     if type(model) ~= "string" or #model > 4096 or model == "" then return end
+    local shape, mode = lighter.split(model)
     local parts, has_rig, needs_rig = {}, false, false
-    for encoded in (model .. "|"):gmatch("([^|]*)|") do
+    for encoded in (shape .. "|"):gmatch("([^|]*)|") do
         local fields = {}
         for field in (encoded .. "@"):gmatch("([^@]*)@") do fields[#fields + 1] = field end
         local kind, socket = fields[1], fields[12]
@@ -89,7 +93,9 @@ function view.decode(model)
         parts[#parts + 1] = {kind = kind, path = fields[2], pose = pose, socket = socket}
     end
     if needs_rig and not has_rig then return end
-    return parts
+    if mode and (#parts ~= 2 or parts[1].kind ~= "s" or parts[2].kind ~= "s"
+        or parts[1].socket or parts[2].socket or parts[1].path ~= lighter.body_path or parts[2].path ~= lighter.lid_path) then return end
+    return parts, mode, shape
 end
 
 local function encode_pose(location, rotation, scale)
@@ -127,20 +133,43 @@ local function cycle_rig(equipment, root)
     return rig, table.concat({kind, path, pose}, "@")
 end
 
-function view.observe(pawn, save, cached)
+local function equipped(pawn, save)
     local equipment = pawn.EquipedItem
     if not valid(equipment) or not same(equipment.User, pawn) or not same(equipment:GetWorld(), pawn:GetWorld())
         or not equipment:HasAuthority() or equipment:IsActorBeingDestroyed() or not same(equipment:GetAttachParentActor(), pawn) then
-        return "-", nil
+        return
     end
     local selected, slots = math.tointeger(save.PlayerEquipIndex), save.PlayerEquipment
     local row = selected and slots and selected >= 0 and selected < slots:GetArrayNum() and slots[selected + 1]
-    if not row or not same(row[item_class], equipment:GetClass()) then return "-", nil end
-    if cached and same(equipment, cached.actor) then return cached.model, cached end
+    if row and same(row[item_class], equipment:GetClass()) then return equipment end
+end
+
+function view.local_lighter(pawn)
+    if not valid(pawn.Save) then return end
+    local equipment = equipped(pawn, pawn.Save)
+    if equipment and lighter.parts(equipment) then return lighter.state(equipment) end
+end
+
+function view.observe(pawn, save, cached)
+    local equipment = equipped(pawn, save)
+    if not equipment then return "-", nil end
+    if cached and same(equipment, cached.actor) then
+        local mode = cached.lighter and lighter.state(equipment)
+        return mode and cached.model .. "~" .. mode or cached.model, cached
+    end
     local class = StaticFindObject(equipment_type)
     local root, math_api = equipment.RootComponent, StaticFindObject(math_library)
     if not valid(class) or not equipment:IsA(class) or not valid(root) or not valid(math_api) then return "-", nil end
     local root_transform, parts = root:K2_GetComponentToWorld(), {}
+    local body, lid = lighter.parts(equipment)
+    if body then
+        local body_pose, lid_pose = root_pose(body, math_api, root_transform), root_pose(lid, math_api, root_transform)
+        local mode = lighter.state(equipment)
+        if body_pose and lid_pose and mode then
+            local model = "s@" .. lighter.body_path .. "@" .. body_pose .. "|s@" .. lighter.lid_path .. "@" .. lid_pose
+            return model .. "~" .. mode, {actor = equipment, model = model, lighter = true}
+        end
+    end
     local rig, rig_description = cycle_rig(equipment, root)
     if rig then parts[1] = rig_description end
     for _, kind in ipairs({"s", "k"}) do
@@ -232,6 +261,7 @@ function view.suppress_stock(entry)
 end
 
 function view.clear(entry)
+    lighter.clear(entry)
     restore_stock(entry)
     active_recoil[entry] = nil
     active_cycle[entry] = nil
@@ -240,6 +270,7 @@ function view.clear(entry)
     end
     if valid(entry.weapon_anchor) and valid(entry.pawn) then entry.weapon_anchor:K2_DestroyComponent(entry.pawn) end
     entry.weapon_parts, entry.weapon_model, entry.weapon_anchor, entry.weapon_rig = nil, nil, nil, nil
+    entry.weapon_shape = nil
     entry.weapon_stance = nil
     entry.weapon_slide = nil
 end
@@ -258,7 +289,7 @@ local function align_bat_grip(component, body, socket)
     end
 end
 
-local function attach(entry, parts)
+local function attach(entry, parts, lighter_mode)
     local socket = FName("Weapon_Socket01", EFindName.FNAME_Find)
     if not entry.body:DoesSocketExist(socket) then error("Stock weapon hand socket was unavailable") end
     local parent, none = entry.body, FName("None", EFindName.FNAME_Find)
@@ -273,6 +304,7 @@ local function attach(entry, parts)
         end
         parent = anchor
     end
+    local body, lid
     local function attach_part(part)
         local is_rig = rigs[part.kind]
         local profile = is_rig and kinds.k or kinds[part.kind]
@@ -302,6 +334,8 @@ local function attach(entry, parts)
             {Pitch = p[4], Yaw = p[5], Roll = p[6]}, false, {}, true)
         component:SetRelativeScale3D({X = p[7], Y = p[8], Z = p[9]})
         if part.kind == "s" then component:SetStaticMesh(asset) else component:SetSkeletalMeshAsset(asset) end
+        if lighter_mode and part.path == lighter.body_path then body = component end
+        if lighter_mode and part.path == lighter.lid_path then lid = component end
         if part.path == bat_mesh and part.kind == "s" then align_bat_grip(component, entry.body, socket) end
         local visible = part.kind ~= "h"
         component:SetHiddenInGame(not visible, false)
@@ -321,18 +355,24 @@ local function attach(entry, parts)
     for _, part in ipairs(parts) do
         if not rigs[part.kind] then attach_part(part) end
     end
+    if lighter_mode then lighter.mount(entry, body, lid) end
 end
 
 function view.apply(entry, model, firearm)
     firearm = firearm or "-"
     if entry.weapon_model == model and entry.firearm_class == firearm then return end
+    local parts, mode, shape = view.decode(model)
+    if not parts or mode and firearm ~= "-" then error("Invalid stock held weapon model") end
+    if mode and entry.lighter and entry.weapon_shape == shape and entry.firearm_class == firearm then
+        lighter.apply(entry, mode)
+        entry.weapon_model = model
+        return
+    end
     view.clear(entry)
-    local parts = view.decode(model)
-    if not parts then error("Invalid stock held weapon model") end
     entry.firearm_class = firearm
     entry.weapon_parts = {}
     if #parts > 0 then
-        local ok, failure = pcall(attach, entry, parts)
+        local ok, failure = pcall(attach, entry, parts, mode)
         if not ok then
             view.clear(entry)
             error(failure, 0)
@@ -350,7 +390,8 @@ function view.apply(entry, model, firearm)
             end
         end
     end
-    entry.weapon_model = model
+    if mode then lighter.apply(entry, mode) end
+    entry.weapon_model, entry.weapon_shape = model, shape
 end
 
 function view.recoil(entry, world, path, serial, values)
@@ -368,6 +409,7 @@ function view.recoil(entry, world, path, serial, values)
 end
 
 function view.animate_recoil(get_world)
+    lighter.animate(get_world)
     if not next(active_recoil) then return end
     local world, clock = get_world(), StaticFindObject(statics_type)
     if not valid(world) or not valid(clock) then return end
