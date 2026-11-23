@@ -1518,12 +1518,17 @@ namespace
         if ((!damage && name != death_name) || function != find<U::UFunction>(damage ? npc_damage_path : npc_death_path)
             || function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)
             || byte_field(receiver, STR("Role")) != 1 || !bool_field(receiver, STR("bReplicates"), true)) return false;
-        const auto family = npc_family(receiver);
-        if (!publishes(family) ||
-            (family == NpcFamily::NotDeer && byte_field(receiver, STR("Faction")) != not_deer_profile.faction)) return false;
-        const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld());
-        if (active.seat != Seat::Client || !roster_family(active, family) || !in_level(receiver, active.world) ||
+        const auto* base = find<U::UClass>(npc_base);
+        auto* type = receiver->GetClassPrivate();
+        if (!live(receiver) || !base || !type || !type->IsChildOf(base) ||
             (frame && frame->Object() != receiver)) return false;
+        auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
+        auto* driver = object(world, STR("NetDriver"));
+        // A stock simulated NPC only exists here because the host published it.
+        // The director profile limits spawn capture, not damage on existing replicas.
+        if (!in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
+            object(driver, STR("World")) != world || !server_connection(object(driver, STR("ServerConnection")), driver))
+            return false;
         call.PreventOriginalFunctionCall();
         if (!call.OriginalFunctionCallPrevented()) return false;
         if (!damage) return true;

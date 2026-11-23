@@ -22,7 +22,10 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_host_save
 from tools.silverfish.campaign import CampaignStore
-from ruin_npc_probe import RUIN, RUIN_LEVEL, capture, compare, installed_probe, read_director_trace, stock_refresh as probe_ruin_refresh
+from ruin_npc_probe import (
+    RUIN, RUIN_LEVEL, capture, compare, installed_probe, read_director_trace, request as ruin_probe,
+    stock_refresh as probe_ruin_refresh,
+)
 
 
 MAP = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
@@ -837,6 +840,12 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                 if fixture.get("guest_outcome") == "stock_ruin_guest_class_unloaded":
                     raise RuntimeError("The stock Worker was selected but its unloaded class left the stock spawn active")
                 if denials and fixture["host_mixed_cohort_verified"]:
+                    member = next(name for name in sorted(required) if name.startswith("NPC_Doe_C "))
+                    before, = await ruin_probe(host, f"health\t{member}")
+                    attack, = await ruin_probe(guest, f"damage\t{member}")
+                    after, = await ruin_probe(host, f"health\t{member}")
+                    assert before == after and attack == before.replace("host\t", "client\t", 1), (before, attack, after)
+                    fixture["guest_damage_and_death_veto"] = member
                     return
                 limitation = "No mixed stag/doe cohort and matching Worker veto both verified"
             elif denials:

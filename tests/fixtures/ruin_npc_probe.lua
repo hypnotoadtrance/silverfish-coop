@@ -236,18 +236,52 @@ local function stock_refresh()
         population, stock_cap, applied_cap, tostring(active_population), count_calls}, "\t")
 end
 
+local function damage_probe(operation, name)
+    local world, _, viewer = active_ruin()
+    local path = name and name:match("^NPC_[%w_]+ (.+)$")
+    local base = StaticFindObject("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C")
+    local npc = path and path:sub(1, #level_path) == level_path and StaticFindObject(path)
+    assert(valid(base) and valid(npc) and npc:IsA(base) and npc:GetFullName() == name
+        and same(npc:GetWorld(), world) and npc.bReplicates and npc.Alive and npc.Health > 0
+        and npc:GetLocalRole() == (viewer == "client" and 1 or 3), "exact live ambient NPC required")
+    local before = npc.Health
+    if operation == "damage" then
+        assert(viewer == "client" and os.getenv("SILVERFISH_COOP_RUIN_NPC_REFRESH_PROBE") == "1",
+            "damage requires the isolated guest replica")
+        local pawn = StaticFindObject("/Script/Engine.Default__GameplayStatics"):GetPlayerPawn(world, 0)
+        assert(valid(pawn) and same(pawn:GetWorld(), world) and pawn:IsLocallyControlled() and not pawn:HasAuthority(),
+            "exact guest pawn required")
+        local total, lethal = {}, {}
+        npc:DealDamage({Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5 = 200}, {}, pawn,
+            {X=0, Y=0, Z=0}, false, total, lethal)
+        assert(npc.Alive and npc.Health == before and total.TotalDamage == 0 and lethal.IsLethal == false,
+            ("guest damage ran on %s at %.2f HP, damage=%s, lethal=%s"):format(
+                name, npc.Health, tostring(total.TotalDamage), tostring(lethal.IsLethal)))
+        npc:ResolveDeath()
+        assert(npc.Alive and npc.Health == before and not npc.Mesh:IsAnySimulatingPhysics(),
+            "guest death ran on the authoritative replica")
+    end
+    return ("%s\t%s\t%.6f"):format(viewer, name, npc.Health)
+end
+
 LoopInGameThreadWithDelay(150, function()
     local file = io.open(bridge .. "/ruin-npc-command.tsv", "rb")
     if not file then return false end
-    local request = file:read(64) or ""
+    local request = file:read(560) or ""
     file:close()
-    local ticket, operation = request:match("^(%x+)\t([a-z]+)\n$")
+    local ticket, operation, actor = request:match("^(%x+)\t([a-z]+)\t([^\r\n]+)\n$")
+    if not ticket then ticket, operation = request:match("^(%x+)\t([a-z]+)\n$") end
     if not ticket then ticket, operation = request:match("^(%x+)\n$"), "census" end
-    if not ticket or #ticket ~= 32 or ticket == last or (operation ~= "refresh" and operation ~= "census") then
+    if not ticket or #ticket ~= 32 or ticket == last then
         return false
     end
     last = ticket
-    local ok, result = pcall(operation == "refresh" and stock_refresh or census)
+    local ok, result = pcall(function()
+        if operation == "census" then return census() end
+        if operation == "refresh" then return stock_refresh() end
+        assert(operation == "damage" or operation == "health", "unknown private NPC action")
+        return damage_probe(operation, actor)
+    end)
     local output = assert(io.open(bridge .. "/ruin-npc-reply.tsv", "wb"))
     output:write(ticket, ok and "\n" or "\nerror\t", result, "\nend\n")
     output:close()
