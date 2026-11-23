@@ -46,9 +46,9 @@ def select_routes(selectors):
 
 
 @contextmanager
-def staged_boundary_probe(work):
+def staged_probe(work, name):
     scripts = work / "stage/SilverFish/Binaries/Win64/ue4ss/Mods/SilverfishCoop/Scripts"
-    fixture = scripts / "fast_stock_exit_probe.lua"
+    fixture = scripts / f"{name}.lua"
     main = scripts / "main.lua"
     original = main.read_bytes()
     manifest = runtime.stage_manifest(work / "stage")
@@ -57,7 +57,7 @@ def staged_boundary_probe(work):
     with fixture.open("xb") as handle:
         handle.write((Path(__file__).with_name("fixtures") / fixture.name).read_bytes())
     try:
-        main.write_bytes(original + b'\nrequire("fast_stock_exit_probe")\n')
+        main.write_bytes(original + f'\nrequire("{name}")\n'.encode("ascii"))
         if isinstance(inventory := metadata.get("lua_files"), dict):
             inventory.update({path.name: sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
                               for path in (main, fixture)})
@@ -69,19 +69,19 @@ def staged_boundary_probe(work):
         fixture.unlink()
 
 
-async def boundary_probe(run, action, pawn):
+async def probe_command(run, name, action, argument):
     mailbox, = (run / "game-bridge").iterdir()
     ticket = uuid.uuid4().hex
-    runtime.write_text(mailbox / "fast-stock-exit-command.tsv", f"{ticket}\t{action}\t{pawn}")
+    runtime.write_text(mailbox / f"{name}-command.tsv", f"{ticket}\t{action}\t{argument}")
     async with asyncio.timeout(8):
         while True:
             try:
-                row = (mailbox / "fast-stock-exit-reply.tsv").read_text(encoding="utf-8").split("\t", 2)
+                row = (mailbox / f"{name}-reply.tsv").read_text(encoding="utf-8").split("\t", 2)
             except (FileNotFoundError, PermissionError):
                 row = []
             if len(row) == 3 and row[0] == ticket:
                 if row[1] != "ok":
-                    raise RuntimeError(f"Boundary {action} failed: {row[2]}")
+                    raise RuntimeError(f"{name} {action} failed: {row[2]}")
                 return row[2]
             await asyncio.sleep(.05)
 
@@ -229,12 +229,12 @@ async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=Fals
             if fast_boundary:
                 await act(position, target="host", exit_position="near", **options)
                 pawn = current["game"]["pawns"]["guest"]["name"]
-                placed = await boundary_probe(run, "place", pawn)
+                placed = await probe_command(run, "fast-stock-exit", "place", pawn)
                 assert 1470 <= float(placed) <= 1490, placed
                 leg["boundary"] = {"guest": pawn, "placed_cm": float(placed)}
                 wall_ready = await wait(run, lambda state: state["zone_epoch"] == current["zone_epoch"]
                                         and state.get("game", {}).get("native_zone_wall", {}).get("host_open"))
-                before, beyond, crossed, swept = (await boundary_probe(run, "cross", pawn)).split(",", 3)
+                before, beyond, crossed, swept = (await probe_command(run, "fast-stock-exit", "cross", pawn)).split(",", 3)
                 leg["boundary"].update(admitted_cm=float(before), before_overlap_cm=float(beyond),
                                        after_sweep_cm=float(crossed), stock_sweep=swept,
                                        source_sequence=wall_ready["game"]["sequence"])
@@ -355,7 +355,7 @@ if __name__ == "__main__":
             raise ValueError("--stock-insomnia requires --sleep-and-wipe at a neutral bed")
     except ValueError as error:
         parser.error(str(error))
-    with staged_boundary_probe(config.work.resolve()) if config.fast_boundary else nullcontext():
+    with staged_probe(config.work.resolve(), "fast_stock_exit_probe") if config.fast_boundary else nullcontext():
         asyncio.run(verify(config.work.resolve(), config.vanilla_saved.resolve(), selected,
                            config.verify_regroup_message, config.sleep_and_wipe, config.stock_insomnia,
                            config.verify_network_budget, config.verify_transition_presentation, config.fast_boundary))
