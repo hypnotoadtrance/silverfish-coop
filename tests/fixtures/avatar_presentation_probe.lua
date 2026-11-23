@@ -10,10 +10,14 @@ local guest_fixture = mailbox and mailbox:match("[/\\]clients[/\\]avatar%-%x+[/\
     and (pose_fixture or rifle_fixture or sprint_fixture or os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_EQUIPMENT") == "1")
 local host_fixture = mailbox and mailbox:match("[/\\]campaigns[/\\]avatar%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
-if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not (guest_fixture or host_fixture) then return end
+local portable_fixture = mailbox and mailbox:match("[/\\]portable%-title%-%x+[/\\]first[/\\]")
+    and mailbox:match("[/\\]run[/\\]game%-bridge[/\\]%x+$")
+    and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
+if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not (guest_fixture or host_fixture or portable_fixture) then return end
 
 local command, reply = mailbox .. "/avatar-probe-command.tsv", mailbox .. "/avatar-probe-reply.tsv"
-local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
+local map = portable_fixture and "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
+    or "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local mesh_root = "/Game/Classes/Player/PlayerAssets/HelmetMeshes/"
 local inventory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
@@ -349,6 +353,7 @@ local function movement_probe(operation, local_pawn, remote_pawn)
 end
 
 local function run(operation)
+    assert(not portable_fixture or operation == "consume", "avatar_probe_unknown_portable_operation")
     local movement_operation = sprint_fixture and movement_operations[operation]
         or aim_movement_fixture and aim_movement_operations[operation]
     if guest_fixture then
@@ -473,6 +478,14 @@ local function run(operation)
         actor:Use_Item_Primary(true, 0)
         assert(actor.BeingUsed == true and host.UsingItem == true and valid(actor.UseSound),
             "avatar_probe_stock_bandage_use_unverified")
+        if portable_fixture then
+            local state = valid(host.PlayerState) and host.PlayerState or host.Controller.PlayerState
+            local ok, id = pcall(function() return state:GetPlayerId() end)
+            if not ok or id == nil then id = state.PlayerId end
+            assert(type(id) == "number" and math.tointeger(id) and id >= 0 and same(actor:GetOwner(), host),
+                "avatar_probe_host_identity_unavailable")
+            return ("%d\t%s"):format(id, actor:GetClass():GetFullName())
+        end
     elseif operation == "equip" then
         style(host, "SM_Head_UV_02_EarRing", "SM_Plumage_007", { R = .2, G = .7, B = .35, A = 1 })
         style(guest, "SM_Head_UV_Fangs_01", "SM_Plumage_012", { R = .8, G = .25, B = .33, A = 1 })

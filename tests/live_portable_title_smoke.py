@@ -40,7 +40,7 @@ from live_same_process_listener_smoke import choose_ports
 from live_stock_creator_smoke import creator_action, installed_probe
 from live_stock_pause_exit_smoke import stock_pause
 from live_unified_title_smoke import Seat, offered, start_pair
-from portable_guest_world_start import GuestWorldStartProof, wait_resident_status
+from portable_guest_world_start import GuestWorldStartProof, resident_events, wait_resident_status
 from portable_world_view_receipt import patch_world_view_receipts, verify_world_view_receipt
 from tools.silverfish.title_session import STATUS_FILE as TITLE_STATUS_FILE
 
@@ -431,6 +431,65 @@ async def portable_probe_command(bridge, prefix, request, *, reply_end=None):
                     return fields[2]
             await asyncio.sleep(.05)
     raise RuntimeError(f"The {prefix} process exited before replying")
+
+
+def weapon_cue_files(host, guest):
+    return [str(path) for seat in (host, guest) for name in ("native-weapon-shots", "native-weapon-shots.tmp")
+            if os.path.lexists(path := seat.bridge.directory / name)]
+
+
+async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    host_frame, guest_frame = await asyncio.gather(
+        wait_resident_status(host_run, lambda frame: frame.get("local_bridge") == "memory"),
+        wait_resident_status(guest_run, lambda frame: frame.get("local_bridge") == "memory"
+                             and any(avatar["state"] == "stock_body" and avatar.get("player_id") is not None
+                                     for avatar in frame.get("game", {}).get("native_player_avatars", {}).values())),
+    )
+    assert host_frame["game"]["native_guest_save"]["pawn"] == pawn
+    item = native_guest_consumable.BANDAGE_CLASS
+    event_names = ("native_avatar_use_sound_played", "native_avatar_use_visual_played")
+    campaign = host.campaign / "save"
+
+    def save_state():
+        native = (path for seat in (host, guest) for path in (seat.profile / "Saved/SaveGames").rglob("*.sav"))
+        return {path: (fingerprint(path), path.stat().st_mtime_ns) for path in (*campaign.glob("campaign*.json"), *native)}
+
+    def use_events(events):
+        return [row for row in events if row["event"] in event_names and row["generation"] == guest_frame["generation"]
+                and row["item_class"] == item]
+
+    assert not weapon_cue_files(host, guest), "A weapon cue mailbox already exists"
+    assert not use_events(await resident_events(guest_run, guest_frame)), "The observer already has a Bandage cue"
+    before = save_state()
+    assert campaign / "campaign.json" in before
+    result = await portable_probe_command(host.bridge, "avatar-probe", "consume\n")
+    player_id, class_name = result.strip().split("\t")
+    player_id = int(player_id)
+    assert class_name == f"BlueprintGeneratedClass {item}", result
+
+    def heard_use(frame):
+        game = frame.get("game", {})
+        for remote, avatar in game.get("native_player_avatars", {}).items():
+            if avatar.get("player_id") == player_id:
+                use = game.get("native_avatar_use", {}).get(remote, {})
+                if use.get("item") == item and use.get("active") is False and use["hand_motion_cm"] > 20:
+                    return use
+        return None
+
+    observed = await wait_resident_status(guest_run, heard_use, timeout=12)
+    prop = heard_use(observed)
+    assert prop["mesh"].endswith(".SM_Prop_Bandage_02"), prop
+    cues = use_events(await resident_events(guest_run, observed))
+    assert {entry["event"] for entry in cues} == set(event_names) and len(cues) == 2, cues
+    assert {entry["serial"] for entry in cues} == {prop["serial"]}, (cues, prop)
+    visual, = [entry for entry in cues if entry["event"] == event_names[1]]
+    assert visual["player_id"] == player_id, visual
+    assert not weapon_cue_files(host, guest), "Stock use wrote a legacy weapon cue mailbox"
+    assert save_state() == before, "Stock use wrote a campaign save before the normal checkpoint"
+    return {"resident_weapon_cues": {"stock_player_id": player_id, "source": class_name, "observer_cues": cues,
+                                     "prop": prop, "local_bridge_both_peers": "memory",
+                                     "no_cue_mailbox": True, "saves_unchanged_before_checkpoint": True}}
 
 
 async def verify_stock_prop_grip(host: Seat, guest: Seat, pawn: str) -> dict:
@@ -1460,7 +1519,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
                  stock_use: bool = False, memory_status: bool = False, stock_prop_grip: bool = False,
-                 stock_host_prop_observer: bool = False,
+                 stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
@@ -1505,7 +1564,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     probes = ExitStack()
     seeded = None
 
-    single_scenario = (stock_prop_grip or stock_host_prop_observer or stock_crate_ring or guest_world_start
+    single_scenario = (stock_prop_grip or stock_host_prop_observer or resident_weapon_cues or stock_crate_ring or guest_world_start
                        or guest_ui_memory or compact_crate_status or compact_world_view or guest_shop_lease
                        or guest_stash_memory or nonmirrored_startup or resident_cabinet_archive is not None)
     try:
@@ -1521,6 +1580,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if guest_world_start_travel:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableRuinExitProbe",
                                                  fixture="portable_ruin_exit_probe.lua"))
+        if resident_weapon_cues:
+            probes.enter_context(installed_probe(first_game, mod="SilverfishPortableWeaponCueProbe",
+                                                 fixture="avatar_presentation_probe.lua"))
         if stock_prop_grip or stock_host_prop_observer:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableLanternProbe",
@@ -1636,6 +1698,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 return await verify_stock_host_prop_observer(host, guest, pawn, lantern_evidence)
 
             proof["sessions"].append(await start_pair(first, second, "Lantern observer", on_join=observe_host_lantern))
+        elif resident_weapon_cues:
+            proof["sessions"].append(await start_pair(first, second, "Bandage observer", on_join=verify_resident_weapon_cues,
+                                                      wait_status=wait_resident_status))
+            assert not weapon_cue_files(first, second), "A legacy weapon cue mailbox appeared before Save and Quit"
         elif compact_world_view:
             proof["sessions"].append(await start_pair(first, second, "Weather receipt scout", on_join=verify_world_view_receipt,
                                                       wait_status=wait_resident_status))
@@ -1712,6 +1778,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["nonmirrored_startup_failure"] = str(error) or type(error).__name__
         if stock_host_prop_observer:
             proof["stock_host_prop_observer_failure"] = str(error) or type(error).__name__
+        if resident_weapon_cues:
+            proof["resident_weapon_cue_failure"] = str(error) or type(error).__name__
         if compact_crate_status:
             proof["crate_status_failure"] = str(error)
         if compact_world_view:
@@ -1746,7 +1814,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         assert proof["original_saves_verified"], "The original player saves changed"
         assert proof.get("resident_source_preserved", True), "The source cabinet checkpoint changed"
         assert proof["portable_files_and_existing_activation_preserved"], "The portable marker or existing activation changed"
-        if guest_world_start or guest_shop_lease or guest_stash_memory or nonmirrored_startup:
+        if guest_world_start or guest_shop_lease or guest_stash_memory or nonmirrored_startup or resident_weapon_cues:
             assert all(process.poll() is not None for _, process in processes), "A portable test process is still running"
 
 
@@ -1766,6 +1834,8 @@ if __name__ == "__main__":
     parser.add_argument("--steam-cloud", action="store_true", help="test a copied cloud backup through Host Load Game")
     parser.add_argument("--memory-bridge", action="store_true", help="verify both embedded workers use the native bridge")
     parser.add_argument("--memory-status", action="store_true", help="verify both workers consume live frames through memory")
+    parser.add_argument("--resident-weapon-cues", action="store_true",
+                        help="verify one stock Bandage use through the installed in-process weapon cue queue")
     parser.add_argument("--guest-ui-memory", action="store_true",
                         help="verify the resident guest UI refresh on one stock Nearby Items container pickup")
     parser.add_argument("--stock-prop-grip", action="store_true", help="verify default guest carry filtering in one portable lantern session")
@@ -1854,6 +1924,13 @@ if __name__ == "__main__":
             args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory, args.compact_crate_status,
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
+    if args.resident_weapon_cues and any((
+            args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby, args.projected_nearby,
+            args.container_nearby, args.stock_use, args.steam_cloud, args.stock_prop_grip, args.stock_host_prop_observer,
+            args.stock_crate_ring, args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory,
+            args.compact_crate_status, args.compact_world_view, args.guest_shop_lease, args.guest_stash_memory,
+            args.guest_stash_large_memory, args.nonmirrored_startup, args.resident_cabinet_archive, args.second_legacy_work)):
+        parser.error("Use --resident-weapon-cues with two fresh private replicas and no other gameplay fixtures")
     if args.stock_crate_ring and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
                                      args.projected_nearby, args.container_nearby, args.stock_use, args.steam_cloud,
                                      args.second_legacy_work)):
@@ -1881,7 +1958,7 @@ if __name__ == "__main__":
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
                        stock_use=args.stock_use, memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
-                       stock_host_prop_observer=args.stock_host_prop_observer,
+                       stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
                        nonmirrored_startup=args.nonmirrored_startup,
