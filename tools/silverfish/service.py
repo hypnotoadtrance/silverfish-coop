@@ -5515,7 +5515,7 @@ class Client:
             if self.primary_scope != (event_area, event_pawn, event_guid, event_kind) or not eligible:
                 continue
             operation = uuid.uuid5(self.bridge.input_namespace, f"{self.host_session}:{self.zone_epoch}:{event_pawn}:primary:{sequence}").hex
-            if event_kind == native_guest_melee.KIND:
+            if event_kind in native_guest_melee.KINDS:
                 action, event = native_guest_melee.SWING, "native_guest_melee_input"
             elif event_kind == native_host_dig_live.GUEST_KIND:
                 action, event = native_host_dig_live.GUEST_ACTION, "native_guest_dig_input"

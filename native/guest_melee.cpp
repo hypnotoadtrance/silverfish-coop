@@ -289,20 +289,20 @@ namespace
                 blocking && penetrating && time && distance && depth;
         }
 
-        U::UObject* contact_component(const void* row) const
+        U::UObject* contact_component(const void* row, double range) const
         {
             if (!row || penetrating->GetPropertyValueInContainer(row)) return nullptr;
             const float reached = distance->GetPropertyValueInContainer(row);
             const float fraction = time->GetPropertyValueInContainer(row);
-            if (!std::isfinite(reached) || reached <= 1 || reached > sweep_range || !std::isfinite(fraction) ||
+            if (!std::isfinite(reached) || reached <= 1 || reached > range || !std::isfinite(fraction) ||
                 fraction <= 0 || fraction > 1 || depth->GetPropertyValueInContainer(row) != 0.0f) return nullptr;
             auto* value = component->GetPropertyValueInContainer(row).Get();
             return live(value) ? value : nullptr;
         }
 
-        U::UObject* owned_component(const void* row, U::UObject* enemy) const
+        U::UObject* owned_component(const void* row, U::UObject* enemy, double range) const
         {
-            auto* value = contact_component(row);
+            auto* value = contact_component(row, range);
             return value && value->GetOuterPrivate() == enemy ? value : nullptr;
         }
     };
@@ -321,7 +321,8 @@ namespace
     };
 
     std::optional<TraceProof> stock_trace(U::UObject* pipe, U::UObject* pawn, U::UObject* enemy,
-                                          std::string_view* refusal = nullptr, TraceDiagnostic* diagnostic = nullptr)
+                                          std::string_view* refusal = nullptr, TraceDiagnostic* diagnostic = nullptr,
+                                          double reach = sweep_range, float sweep_width = sweep_radius)
     {
         const auto reject = [&](std::string_view reason) -> std::optional<TraceProof> {
             if (refusal) *refusal = reason;
@@ -361,7 +362,7 @@ namespace
             return reject("trace_parameters_abi");
 
         TraceBuffer single;
-        const auto destination = ahead(*origin, *direction, sweep_range);
+        const auto destination = ahead(*origin, *direction, reach);
         line.inputs(single, pipe, pawn, *origin, destination, true);
         single.initialize(objects);
         single.initialize(line_hit);
@@ -376,20 +377,20 @@ namespace
             const auto* row = line_hit->ContainerPtrToValuePtr<void>(data);
             if (diagnostic) diagnostic->component = hit.component->GetPropertyValueInContainer(row).Get();
             const auto impact = read_vector(hit.impact, row, impact_vector_path);
-            if (!impact || !hit.blocking->GetPropertyValueInContainer(row) || !hit.contact_component(row))
+            if (!impact || !hit.blocking->GetPropertyValueInContainer(row) || !hit.contact_component(row, reach))
                 return reject("line_contact");
             // Stock clips the sphere's sweep at this surface. The sphere contacts below
             // still have to belong to the exact target, even when the ray hits a wall.
             contact = *impact;
         }
-        if (std::hypot(contact[0] - (*origin)[0], contact[1] - (*origin)[1], contact[2] - (*origin)[2]) <= sweep_radius)
+        if (std::hypot(contact[0] - (*origin)[0], contact[1] - (*origin)[1], contact[2] - (*origin)[2]) <= sweep_width)
             return reject("line_too_near");
 
         TraceBuffer area;
-        sphere.inputs(area, pipe, pawn, *origin, ahead(contact, *direction, -sweep_radius), false);
+        sphere.inputs(area, pipe, pawn, *origin, ahead(contact, *direction, -sweep_width), false);
         area.initialize(hits);
         data = area.values.data();
-        radius->SetPropertyValueInContainer(data, sweep_radius);
+        radius->SetPropertyValueInContainer(data, sweep_width);
         channel->SetPropertyValueInContainer(data, 6);
         sphere.library->ProcessEvent(sphere.fn, data);
         U::FScriptArrayHelper contacted(hits, hits->ContainerPtrToValuePtr<void>(data));
@@ -401,7 +402,7 @@ namespace
         {
             const auto* row = contacted.GetRawPtr(index);
             if (diagnostic) diagnostic->component = hit.component->GetPropertyValueInContainer(row).Get();
-            auto* component = hit.contact_component(row);
+            auto* component = hit.contact_component(row, reach);
             if (!component) return reject("sphere_contact");
             auto* owner = component->GetOuterPrivate();
             if (!live(owner) || (enemy && owner != enemy)) return reject("sphere_other_actor");
@@ -509,7 +510,7 @@ namespace
         }
     };
 
-    bool selected_pipe(U::UObject* save, const Guid& wanted, const Passives& passives)
+    bool selected_melee_item(U::UObject* save, U::UClass* weapon_class, const Guid& wanted, const Passives& passives)
     {
         auto* row = find<U::UScriptStruct>(row_path);
         auto* type = find<U::UScriptStruct>(STR("/Script/CoreUObject.Guid"));
@@ -534,7 +535,7 @@ namespace
             for (std::size_t index = 0; index < words.size(); ++index)
                 identity[index] = static_cast<std::uint32_t>(words[index]->GetPropertyValueInContainer(canary_guid));
             if (identity != wanted) return !selected;
-            return ++matches == 1 && selected && item == find<U::UClass>(pipe_path);
+            return ++matches == 1 && selected && item == weapon_class;
         };
         // Stock compiles the backpack, equipment, armor, and helmet. Checking every
         // typed row also refuses relevant effects from currently dormant items.
@@ -595,7 +596,8 @@ namespace
         std::int64_t serial{};
         std::string_view status{"inactive"};
         int presses{}, releases{}, contacts{}, qualified{};
-        double host_health{}, guest_health{};
+        double host_health{}, guest_health{}, range{sweep_range};
+        float radius{sweep_radius};
         bool pending{}, settled{}, passive_free{};
         SwingMode mode{SwingMode::surface_fixture};
         std::optional<FixtureContact> fixture;
@@ -774,7 +776,7 @@ namespace
         return current ? nullptr : value;
     }
 
-    bool stock_attack(const Swing& current, void* contact_args = nullptr)
+    bool stock_attack(Swing& current, void* contact_args = nullptr)
     {
         auto* weapon = current.pipe.Get();
         auto* motor = current.animation.Get();
@@ -784,14 +786,15 @@ namespace
         auto* parameter = field<U::FStructProperty>(current.contact.Get(), STR("Attack"));
         auto* charge = field<U::FFloatProperty>(weapon, STR("ChargeTime"));
         auto* type = find<U::UScriptStruct>(attack_path);
-        if (!combo_row || !attack || !type || !parameter || !charge ||
-            charge->GetPropertyValueInContainer(weapon) != 0.6f || attack->GetStruct().Get() != type ||
+        if (!combo_row || !attack || !type || !parameter || !charge || attack->GetStruct().Get() != type ||
             combo_row->GetStruct().Get() != type || parameter->GetStruct().Get() != type ||
             !parameter->HasAnyPropertyFlags(U::CPF_Parm) ||
             parameter->HasAnyPropertyFlags(U::CPF_OutParm | U::CPF_ReferenceParm) ||
             parameter->GetOffset_Internal() != 0) return false;
         U::FScriptArrayHelper rows(combo, combo->ContainerPtrToValuePtr<void>(weapon));
-        if (rows.Num() != 2) return false;
+        const bool ordinary = current.mode == SwingMode::ordinary;
+        if (rows.Num() < 1 || rows.Num() > 16 || (!ordinary && (rows.Num() != 2 ||
+            charge->GetPropertyValueInContainer(weapon) != 0.6f))) return false;
         auto* name = field<U::FObjectProperty>(type, animation_name);
         auto* range = field<U::FDoubleProperty>(type, range_name);
         auto* radius = field<U::FDoubleProperty>(type, radius_name);
@@ -801,13 +804,23 @@ namespace
         auto* blunt = field<U::FDoubleProperty>(damage_type, blunt_name);
         auto* first = rows.GetRawPtr(0);
         auto* sequence = name ? name->GetObjectPropertyValue(name->ContainerPtrToValuePtr<void>(first)) : nullptr;
-        return live(sequence) && sequence == find<U::UObject>(sequence_path) && range && radius && breach && damage &&
-            damage_type && damage->GetStruct().Get() == damage_type && blunt &&
-            range->GetPropertyValueInContainer(first) == sweep_range && radius->GetPropertyValueInContainer(first) == sweep_radius &&
-            !breach->GetPropertyValueInContainer(first) &&
-            blunt->GetPropertyValueInContainer(damage->ContainerPtrToValuePtr<void>(first)) == 30.0 &&
-            (!contact_args || (attack->Identical(attack->ContainerPtrToValuePtr<void>(motor), first) &&
-                              parameter->Identical(parameter->ContainerPtrToValuePtr<void>(contact_args), first)));
+        if (!live(sequence) || !range || !radius || !breach || !damage || !damage_type ||
+            damage->GetStruct().Get() != damage_type || !blunt) return false;
+        const double reach = range->GetPropertyValueInContainer(first);
+        const double width = radius->GetPropertyValueInContainer(first);
+        if (!(width > 0.0 && width < reach && reach <= 1000.0)) return false;
+        if (!ordinary && (sequence != find<U::UObject>(sequence_path) || reach != sweep_range || width != sweep_radius ||
+            breach->GetPropertyValueInContainer(first) ||
+            blunt->GetPropertyValueInContainer(damage->ContainerPtrToValuePtr<void>(first)) != 30.0)) return false;
+        if (!contact_args)
+        {
+            current.range = reach;
+            current.radius = static_cast<float>(width);
+            return true;
+        }
+        return reach == current.range && static_cast<float>(width) == current.radius &&
+            attack->Identical(attack->ContainerPtrToValuePtr<void>(motor), first) &&
+            parameter->Identical(parameter->ContainerPtrToValuePtr<void>(contact_args), first);
     }
 
     bool idle(const Swing& current)
@@ -830,8 +843,10 @@ namespace
     {
         Passives passives;
         std::vector<U::FName> cache;
-        return passives.canonical(current.game.Get(), cache) && cache == current.cache &&
-            passives.character(current.save.Get()) && selected_pipe(current.save.Get(), current.guid, passives);
+        auto* weapon = current.pipe.Get();
+        return weapon && passives.canonical(current.game.Get(), cache) && cache == current.cache &&
+            passives.character(current.save.Get()) &&
+            selected_melee_item(current.save.Get(), weapon->GetClassPrivate(), current.guid, passives);
     }
 
     void tick()
@@ -903,7 +918,7 @@ namespace
             return refuse("mutation_unverified_guest_melee_damage_scope");
         TraceDiagnostic diagnostic;
         auto trace = stock_trace(receiver, swing.pawn.Get(), ordinary ? nullptr : enemy, &swing.damage.contact_status,
-            swing.fixture ? &diagnostic : nullptr);
+            swing.fixture ? &diagnostic : nullptr, swing.range, swing.radius);
         if (ordinary && trace) enemy = trace->first->GetOuterPrivate();
         if (trace) swing.damage.contact_candidate = enemy;
         bool allowed = trace && (!ordinary || combat_target(enemy, world, true, &swing.damage.contact_status));
@@ -941,7 +956,7 @@ namespace
                     {
                         staged.saved_relative = *saved;
                         staged.restore_frame = &frame;
-                        trace = stock_trace(receiver, pawn, expected);
+                        trace = stock_trace(receiver, pawn, expected, nullptr, nullptr, swing.range, swing.radius);
                         allowed = trace && direction_dot(staged.direction, trace->direction) >= 0.9999 &&
                             displacement(staged.eye, trace->origin) <= 18 && eligible(expected);
                         if (allowed)
@@ -1056,9 +1071,9 @@ namespace
             !combat_target(receiver, static_cast<U::UWorld*>(swing.world.Get()), ordinary) ||
             fn != proof.deal.Get() || !args ||
             !hit.bound() || !hit_value || hit_value->GetStruct().Get() != hit.type ||
-            hit.owned_component(hit_value->ContainerPtrToValuePtr<void>(args), receiver) != proof.component.Get() ||
+            hit.owned_component(hit_value->ContainerPtrToValuePtr<void>(args), receiver, swing.range) != proof.component.Get() ||
             !damage || !damage_type || damage->GetStruct().Get() != damage_type || !blunt ||
-            blunt->GetPropertyValueInContainer(damage->ContainerPtrToValuePtr<void>(args)) != 30.0 ||
+            (!ordinary && blunt->GetPropertyValueInContainer(damage->ContainerPtrToValuePtr<void>(args)) != 30.0) ||
             read_object(parameter<U::FObjectProperty>(fn, STR("Instigator")), args) != swing.pawn.Get())
             return refuse("mutation_unverified_guest_melee_stock_damage_path");
         proof.before = enemy_health(receiver);
@@ -1235,10 +1250,11 @@ namespace
         auto* animator = find<U::UClass>(animator_path);
         auto* master = find<U::UClass>(master_path);
         auto* equipment = find<U::UClass>(equipment_path);
-        if (!live(pipe) || !old_pipe || pipe->GetClassPrivate() != old_pipe || !live(anim) ||
+        if (!live(pipe) || (ordinary ? !silverfish::native_guest_melee::ordinary_weapon(pipe) :
+             !old_pipe || pipe->GetClassPrivate() != old_pipe) || !live(anim) ||
             !animator || anim->GetClassPrivate() != animator)
             return proof(lua, false, "native_guest_melee_stock_receiver_unqualified");
-        if (!master || !equipment || old_pipe->GetSuperClass() != master || master->GetSuperClass() != equipment)
+        if (!master || !equipment || master->GetSuperClass() != equipment)
             return proof(lua, false, "native_guest_melee_stock_inheritance_unqualified");
         // The stock melee primary calls Equipment_Master_BP. InputIntercept is
         // declared on the separate firearm base and is absent from this chain.
@@ -1284,7 +1300,7 @@ namespace
             return proof(lua, false, "native_guest_melee_stock_health_unqualified");
         Passives passives;
         candidate.passive_free = passives.canonical(game, candidate.cache) && passives.character(save) &&
-            selected_pipe(save, candidate.guid, passives);
+            selected_melee_item(save, pipe->GetClassPrivate(), candidate.guid, passives);
         if (!candidate.passive_free) return proof(lua, false, "native_guest_melee_guid_or_passives_unqualified");
         if constexpr (damage)
         {
@@ -1313,7 +1329,8 @@ namespace
             auto* target = fixture_target(world, target_address);
             const auto hp = enemy_health(target);
             const auto origin = enemy_origin(target);
-            const auto lane = nonlethal_health(hp) ? stock_trace(pipe, pawn, target) : std::nullopt;
+            const auto lane = nonlethal_health(hp)
+                ? stock_trace(pipe, pawn, target, nullptr, nullptr, candidate.range, candidate.radius) : std::nullopt;
             auto* camera = object(pawn, STR("Camera"));
             const auto facing = lane ? component_vector(camera, STR("/Script/Engine.SceneComponent:K2_GetComponentRotation"),
                 rotator_path) : std::nullopt;
@@ -1425,10 +1442,23 @@ bool silverfish::native_guest_melee::ordinary_world(RC::Unreal::UWorld* world)
         world->GetPathName().starts_with(STR("/Game/Classes/Maps/"));
 }
 
+bool silverfish::native_guest_melee::ordinary_weapon(RC::Unreal::UObject* weapon)
+{
+    if (!live(weapon)) return false;
+    auto* master = find<U::UClass>(master_path);
+    auto* type = weapon->GetClassPrivate();
+    if (!master || !type || type == master || !type->IsChildOf(master)) return false;
+    const auto name = type->GetPathName();
+    return name.starts_with(STR("/Game/Classes/Weapons/MeleeWeapons/")) &&
+        name != STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C") &&
+        local_function(weapon, master, STR("Use_Item_Primary"), 2) &&
+        local_function(weapon, master, STR("Contact"), 1);
+}
+
 void silverfish::native_guest_melee::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (!enabled()) return;
-    lua.register_function("SilverfishStartNativeGuestOldPipeSwing", start<SwingMode::ordinary>);
+    lua.register_function("SilverfishStartNativeGuestMeleeSwing", start<SwingMode::ordinary>);
     if (env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_TITLE_FIXTURES"))
         lua.register_function("SilverfishReadNativeGuestMeleeContactStatus", [](const Lua& state) {
             auto cause = std::string{swing.damage.contact_status};

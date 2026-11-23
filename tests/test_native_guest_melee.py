@@ -140,11 +140,13 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
             fields[13:] = ["0", "0", "-1", "-1", "-1"]
         key, report = melee.parse(fields)
         snapshot = {"state": "hosting", "map": DEAD_BRIDGE, key: report,
-                    "native_guest_equipped_weapons": {"exact pawn": {"kind": melee.KIND, "guid": GUID}}}
+                    "native_guest_save_retention": True,
+                    "native_guest_equipped_weapons": {"exact pawn": {"kind": "melee", "guid": GUID}}}
         host = self.host()
         host.fixtures = False
         host.party.pop(pickup.STATE_KEY)
         host.last_game = snapshot
+        host.pending_guest_saves = {"guest": ("exact pawn",)}
         return host, snapshot
 
     async def test_ordinary_exact_equipment_hit_and_miss_replay_without_fixture(self):
@@ -156,7 +158,7 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await melee.perform(*args), {melee.SWING_KEY: snapshot[melee.SWING_KEY]})
                 self.assertEqual(await melee.perform(*args), {melee.SWING_KEY: snapshot[melee.SWING_KEY]})
                 bridge.command.assert_awaited_once_with(melee.SWING + "-start", "exact pawn", GUID, timeout=5)
-                self.assertEqual(host.checkpoint_native.await_args.kwargs, {"require_guest_frames": frozenset({"guest"})})
+                host.checkpoint_native.assert_not_awaited()
                 self.assertFalse(host.native_checkpoint_unsafe)
 
     async def test_ordinary_refuses_other_equipped_guid_and_open_smg_scope(self):
@@ -224,13 +226,13 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
                 melee.current_guid(rejected, epoch)
 
     async def test_client_primary_tap_routes_once_to_melee_action_with_scoped_guid(self):
-        scope = (DEAD_BRIDGE, "local pawn", GUID, melee.KIND)
+        scope = (DEAD_BRIDGE, "local pawn", GUID, "melee")
         pending = [(4, *scope), (4, *scope)]
         client = SimpleNamespace(guest_primary_input=True, viewer_role="guest", stopping=False, host_session="session",
                                  zone_epoch="epoch", gameplay_seen=time.monotonic(), invite={"character_id": "member"},
                                  gameplay={"players": {"guest": {"character_id": "member", "downed": False}},
                                            "native_equipped_weapon": {"map": DEAD_BRIDGE, "pawn": "host pawn", "guid": GUID,
-                                                                      "kind": melee.KIND}},
+                                                                      "kind": scope[-1]}},
                                  last_game={"map": DEAD_BRIDGE, "pawns": {"local": {"name": scope[1]}}},
                                  next_primary_renewal=time.monotonic() + 30, primary_scope=scope, last_primary_intent=0,
                                  bridge=Mock(input_namespace=uuid.uuid4(), native_primary_input_requests=Mock(return_value=pending)),

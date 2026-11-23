@@ -1,4 +1,4 @@
-"""Scope an authenticated guest's stock Old Pipe tap and diagnostic fixtures."""
+"""Scope an authenticated guest's stock melee attacks and diagnostic fixtures."""
 
 import math
 import re
@@ -17,6 +17,7 @@ SWING = "native-guest-melee-swing"
 AIM_FIXTURE = "native-guest-melee-aim-fixture"
 CONTACT_FIXTURE = "native-guest-melee-contact-fixture"
 KIND = "old-pipe"
+KINDS = (KIND, "melee")
 EQUIP_KEY = "native_guest_melee_equip"
 CANARY_KEY = "native_guest_melee_canary"
 SWING_KEY = "native_guest_melee_swing"
@@ -127,7 +128,7 @@ def verified_miss(proof: dict) -> bool:
 
 def is_equipped(equipment, area, guid):
     return (ordinary_map(area) and valid_guid(guid) and isinstance(equipment, dict)
-            and (equipment.get("kind"), equipment.get("guid")) == (KIND, guid))
+            and equipment.get("kind") in KINDS and equipment.get("guid") == guid)
 
 
 def request_target(guid: str, epoch: str) -> str:
@@ -201,6 +202,8 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
 
     key = SWING_KEY if ordinary else EQUIP_KEY if action == EQUIP else CANARY_KEY
     deferred = ordinary and await native_inventory.retain_guest_save(host, bridge, character, pawn)
+    if ordinary and not deferred:
+        raise party.RuleError("native_guest_melee_save_retention_unavailable")
     if not deferred:
         await host.checkpoint_native(bridge)
     host.native_checkpoint_unsafe = True
@@ -214,7 +217,7 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
             raise
         proof = exact(snapshot, key)
         if not proof:
-            raise RuntimeError("The Old Pipe receipt does not match the exact guest and GUID")
+            raise RuntimeError("The stock melee receipt does not match the exact guest and GUID")
         if action == EQUIP:
             if proof.get("ok") is not True:
                 status = proof.get("status", "")
@@ -227,7 +230,7 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
         else:
             serial = proof.get("serial")
             if type(serial) is not int or serial < 1:
-                raise RuntimeError("The stock Old Pipe animation did not report a bound serial")
+                raise RuntimeError("The stock melee animation did not report a bound serial")
             if proof.get("status") == "pending":
                 def terminal(frame):
                     current = exact(frame, key)

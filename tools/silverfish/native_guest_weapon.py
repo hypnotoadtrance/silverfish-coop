@@ -23,7 +23,7 @@ OLD_PIPE = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe
 OLD_PIPE_STATES = {"old_pipe_backpack", "old_pipe_stored_equipment", "old_pipe_equipped"}
 FIRE_CLASSES = {firearm.kind: firearm.path for firearm in guest_weapon_profiles.FIREARMS}
 CLASS_PATHS = {*FIRE_CLASSES.values(), CAMERA_PATH, OLD_PIPE, BLOWTORCH_PATH, CROWBAR_PATH, SPADE_PATH}
-PRIMARY_KINDS = frozenset((*FIRE_CLASSES, "camera", "blowtorch", "crowbar", "spade", native_guest_melee.KIND))
+PRIMARY_KINDS = frozenset((*FIRE_CLASSES, "camera", "blowtorch", "crowbar", "spade", *native_guest_melee.KINDS))
 SEED_KINDS = frozenset(firearm.kind for firearm in guest_weapon_profiles.FIREARMS if firearm.headless_seed) | {
     "blowtorch", "crowbar", "smg-standard-full", "stock-flare", "stock-flare-blue", "stock-flare-yellow",
     "stock-bolt",

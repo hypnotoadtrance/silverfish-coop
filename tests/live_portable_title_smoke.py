@@ -839,18 +839,19 @@ async def verify_stock_npc_rivalry(host: Seat, guest: Seat, _pawn: str) -> dict:
         assert await ask(host, "rivalry-cleanup") == "cleared"
 
 
-async def verify_resident_guest_melee(host: Seat, guest: Seat) -> dict:
+async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = False) -> dict:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-npc-override", action)
 
     guest_run = guest.client / "run"
-    guid = await command(host, "seed-pipe")
+    guid = await command(host, "seed-pipe\theavy" if heavy else "seed-pipe")
     assert re.fullmatch(r"[0-9A-F]{32}", guid), guid
     async with asyncio.timeout(8):
         while await command(guest, f"select-pipe\t{guid}") != "selected":
             await asyncio.sleep(.05)
     frame = await wait_resident_status(guest_run, lambda current: (
         current.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid), timeout=12)
+    assert frame["game"]["native_guest_primary_scope"]["kind"] == ("melee" if heavy else "old-pipe")
     center, name = (await command(host, "stage-melee")).split(";", 1)
     async with asyncio.timeout(6):
         while not (await command(guest, f"melee-state\t{center}")).startswith("true;false;"):
@@ -861,6 +862,7 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat) -> dict:
     before = await command(host, f"melee-state\t{center}")
     assert before == f"true;false;7.000;{name}", before
     tap = await submit(guest_run, "native-guest-primary-input-fixture")
+    assert tap["ok"], tap
     sequence = tap["native_guest_primary_fixture"]["sequence"]
     async with asyncio.timeout(8):
         while True:
@@ -883,6 +885,13 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat) -> dict:
                 break
             await asyncio.sleep(.05)
     return {"stock_input": tap, "host_damage": proof, "both_peers_dead_and_ragdolled": states}
+
+
+async def verify_stock_melee_family(host: Seat, guest: Seat, _pawn: str) -> dict:
+    before = campaign_save_hashes(host.campaign)
+    proof = await verify_resident_guest_melee(host, guest, heavy=True)
+    assert campaign_save_hashes(host.campaign) == before, "A regular melee attack wrote campaign saves"
+    return {"stock_melee_family": {"heavy_pipe": proof, "campaign_unchanged": True}}
 
 
 async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict) -> dict:
@@ -3037,7 +3046,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False,
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
-                 stock_weather_travel: bool = False,
+                 stock_weather_travel: bool = False, stock_melee_family: bool = False,
                  stock_npc_rivalry: bool = False,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
@@ -3100,6 +3109,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_stock_simmi_jammers(host, guest, pawn, portable_probe_command)),
         (stock_weather_travel, "stock_weather_travel",
          lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command)),
+        (stock_melee_family, "stock_melee_family", verify_stock_melee_family),
         (resident_weapon_cues, "resident_weapon_cues",
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override, rusty=rusty_pistol)),
         (stock_npc_rivalry, "stock_npc_rivalry", verify_stock_npc_rivalry),
@@ -3157,7 +3167,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                      fixture="portable_board_offer_probe.lua"))
         if stock_npc_override and resident_weapon_cues:
             proof["npc_combat_overlays"] = [probes.enter_context(host_npc_combat_overlay(game)) for game in games]
-        elif stock_host_corpse_carry or stock_npc_rivalry or stock_npc_override:
+        elif stock_host_corpse_carry or stock_npc_rivalry or stock_npc_override or stock_melee_family:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                      fixture="portable_npc_override_probe.lua"))
@@ -3508,6 +3518,8 @@ if __name__ == "__main__":
                         help="verify one compact resident stock weather receipt in a private muted portable pair")
     parser.add_argument("--stock-weather-travel", action="store_true",
                         help="verify stock weather, rain, and sirens after opening Crossroads in one muted portable pair")
+    parser.add_argument("--stock-melee-family", action="store_true",
+                        help="verify a guest's Heavy Pipe uses host-owned stock damage")
     parser.add_argument("--guest-world-start", action="store_true",
                         help="verify first stock guest map startup and short reconnect in one portable session")
     parser.add_argument("--nonmirrored-startup", action="store_true",
@@ -3582,7 +3594,8 @@ if __name__ == "__main__":
     resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "stock_board_offers", "resident_weapon_cues",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_take_ammo",
-                              "stock_host_corpse_carry", "stock_flashlights", "stock_simmi_jammers", "stock_weather_travel"}
+                              "stock_host_corpse_carry", "stock_flashlights", "stock_simmi_jammers", "stock_weather_travel",
+                              "stock_melee_family"}
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
     if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
@@ -3595,7 +3608,8 @@ if __name__ == "__main__":
         parser.error("Use --stock-shovel-loot with --stock-shovel")
     if any((args.stock_food, args.stock_campfire, args.stock_npc_override, args.stock_board_offers,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
-            args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel)) and (
+            args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
+            args.stock_melee_family)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
         parser.error("Run the resident gameplay checks without other gameplay fixtures")
@@ -3640,6 +3654,7 @@ if __name__ == "__main__":
                        stock_flashlights=args.stock_flashlights,
                        stock_simmi_jammers=args.stock_simmi_jammers,
                        stock_weather_travel=args.stock_weather_travel,
+                       stock_melee_family=args.stock_melee_family,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,

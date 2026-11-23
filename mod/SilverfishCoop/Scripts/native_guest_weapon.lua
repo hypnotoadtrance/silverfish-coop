@@ -21,6 +21,8 @@ local flare_fixture_paths = {
     ["stock-bolt"] = "/Game/Classes/Equipment/Eqp_Bolt.Eqp_Bolt_C",
 }
 local old_pipe_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
+local melee_folder = "/Game/Classes/Weapons/MeleeWeapons/"
+local melee_master = melee_folder .. "MeleeWep_Master_BP.MeleeWep_Master_BP_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local observation
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
@@ -65,16 +67,21 @@ local function equipped_guid(pawn, save, world, area)
     local guid = item_identity(row)
     if not guid then return end
     local class_name = held_class:GetFullName():match("^%S+ (%S+)$")
-    if world and (class_name == blowtorch_path or class_name == crowbar_path or (class_name == camera_path and area == camera_map)
-        or class_name == old_pipe_path or class_name == spade_path)
+    local melee_path = class_name and class_name:sub(1, #melee_folder) == melee_folder
+    if world and (class_name == blowtorch_path or (class_name == camera_path and area == camera_map)
+        or melee_path or class_name == spade_path)
         and held:HasAuthority() and not held:IsActorBeingDestroyed()
         and same(held:GetWorld(), world) and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
         and same(held.User, pawn) and held.HeldByPlayer == true and pawn.IsWeaponBlocked == false then
         if class_name == camera_path then return guid, "camera" end
         if class_name == blowtorch_path and math.type(held.Ammo) == "integer" and 0 <= held.Ammo and held.Ammo <= 3
             and held.Ammo == row[ammo_field] then return guid, "blowtorch" end
-        if (class_name == old_pipe_path or class_name == crowbar_path) and row[ammo_field] == -1 and held.Ammo == -1 then
-            return guid, class_name == crowbar_path and "crowbar" or "old-pipe"
+        if melee_path and row[ammo_field] == -1 and held.Ammo == -1 then
+            if class_name == old_pipe_path then return guid, "old-pipe" end
+            if class_name == crowbar_path then return guid, "crowbar" end
+            local base = StaticFindObject(melee_master)
+            if base and base:IsValid() and held:IsA(base) and not same(held_class, base)
+                and held.ComboAttacks:GetArrayNum() > 0 then return guid, "melee" end
         end
         if class_name == spade_path and row[ammo_field] == -1 and held.Ammo == -1 and same(held.Player_Ref, pawn) then
             return guid, "spade"

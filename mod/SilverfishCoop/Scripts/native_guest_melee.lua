@@ -30,7 +30,7 @@ local function qualified_host(state, phase, testing)
         and (not testing or cqc[state.map] ~= nil or state.map == crossroads)
         and (testing and fixtures and type(SilverfishStartNativeGuestMeleeCanary) == "function"
             and type(SilverfishEquipNativeGuestOldPipe) == "function"
-            or not testing and type(SilverfishStartNativeGuestOldPipeSwing) == "function")
+            or not testing and type(SilverfishStartNativeGuestMeleeSwing) == "function")
         and type(SilverfishReadNativeGuestMeleeCanary) == "function"
         and type(SilverfishAbortNativeGuestMeleeCanary) == "function"
 end
@@ -301,7 +301,7 @@ function melee.command(fields, state, phase, standing)
         local target = action == damage_start and npc_name or fixture_bound and staged_aim.target
         if fixture_bound then staged_aim = nil end
         local pose = target and damage_pose(state, pawn, target)
-        local invoke = ordinary and SilverfishStartNativeGuestOldPipeSwing
+        local invoke = ordinary and SilverfishStartNativeGuestMeleeSwing
             or damage and SilverfishStartNativeGuestMeleeDamageCanary or SilverfishStartNativeGuestMeleeCanary
         local called, result = pcall(function()
             if fixture_bound then return table.pack(invoke(pawn:GetAddress(), save:GetAddress(), guid, pose.target)) end

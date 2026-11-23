@@ -13,6 +13,9 @@ local shooters = {}
 local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
 local color = {R=0, G=0, B=0, A=0}
 local pipe_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
+local heavy_pipe_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_HeavyPipe.MeleeWep_HeavyPipe_C"
+local attack_range = "Range_7_1ABB464F45C04D4C4BDA07A41F83FF24"
+local attack_radius = "Radius_9_4CAB95D84DE379A3C49DFD9CE1A93643"
 local factory_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
@@ -158,12 +161,12 @@ local function guid_of(row)
     return ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
 end
 
-local function seed_pipe(world)
+local function seed_pipe(world, path)
     local guest = authoritative_guest(world)
-    local class = StaticFindObject(pipe_path)
-    if not valid(class) then LoadAsset(pipe_path); class = StaticFindObject(pipe_path) end
+    local class = StaticFindObject(path)
+    if not valid(class) then LoadAsset(path); class = StaticFindObject(path) end
     local factory = StaticFindObject(factory_path)
-    assert(valid(class) and valid(factory), "stock Old Pipe factory unavailable")
+    assert(valid(class) and valid(factory), "stock melee factory unavailable")
     local defaults, output = class:GetCDO(), {}
     factory:ItemActorToStruct(defaults, guest, output)
     local row = output.Item or output
@@ -176,7 +179,7 @@ local function seed_pipe(world)
             return guid_of(row)
         end
     end
-    error("stock Old Pipe needs an empty utility slot")
+    error("the melee fixture needs an empty utility slot")
 end
 
 local function select_equipment(pawn, matches)
@@ -219,13 +222,15 @@ local function melee_lane(guest, target, angle)
     end
     local line, sphere = {}, {}
     local pipe = guest.EquipedItem
+    local attack = pipe.ComboAttacks[1]
+    local range, radius = attack[attack_range], attack[attack_radius]
     local ignored = {guest}
-    local endpoint = step(eye, 230)
+    local endpoint = step(eye, range)
     if trace:LineTraceSingleForObjects(pipe, eye, endpoint, {0,4}, true, ignored, 0, line, true, color, color, 0) then
         endpoint = (line.OutHit or line).ImpactPoint
-        if (endpoint.X-eye.X)^2 + (endpoint.Y-eye.Y)^2 + (endpoint.Z-eye.Z)^2 <= 65^2 then return false, "near surface" end
+        if (endpoint.X-eye.X)^2 + (endpoint.Y-eye.Y)^2 + (endpoint.Z-eye.Z)^2 <= radius^2 then return false, "near surface" end
     end
-    local blocking = trace:SphereTraceMulti(pipe, eye, step(endpoint, -65), 65, 6, false, ignored, 0, sphere, true, color, color, 0)
+    local blocking = trace:SphereTraceMulti(pipe, eye, step(endpoint, -radius), radius, 6, false, ignored, 0, sphere, true, color, color, 0)
     local count = 0
     for _, raw in ipairs(sphere.OutHits or sphere) do
         local wrapped, value = pcall(function() return raw:get() end)
@@ -264,7 +269,7 @@ local function stage_melee(world)
     end
     local failures = {}
     for status in pairs(blockers) do failures[#failures+1] = status end
-    error("no clear stock Old Pipe contact lane: " .. table.concat(failures, ", "))
+    error("no clear stock melee contact lane: " .. table.concat(failures, ", "))
 end
 
 local shooter_paths = {
@@ -1066,9 +1071,10 @@ local function run(action, actor_path)
         rivalry = nil
         return "cleared"
     elseif action == "seed-pipe" then
-        assert(host, "only the host can grant the test Old Pipe")
+        assert(host, "only the host can grant the fixture item")
+        assert(actor_path == "" or actor_path == "heavy", "unknown melee fixture item")
         spawn_stock_npc(pawn, world, "state")
-        return seed_pipe(world)
+        return seed_pipe(world, actor_path == "heavy" and heavy_pipe_path or pipe_path)
     elseif action == "select-pipe" then
         assert(not host, "the guest must pick their test equipment")
         return select_equipment(pawn, function(row) return guid_of(row) == actor_path end)
