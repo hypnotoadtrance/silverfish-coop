@@ -305,6 +305,8 @@ namespace
         Unreal::FWeakObjectPtr manager;
         Guid taking{};
         Guid held{};
+        Unreal::FWeakObjectPtr source;
+        std::optional<int> source_slot;
     };
 
     std::optional<Entries> entries;
@@ -1272,6 +1274,20 @@ namespace
         return {};
     }
 
+    [[nodiscard]] std::optional<int> unequip_source_slot(Unreal::UObject* manager, Unreal::UObject* screen, Unreal::UObject* slot)
+    {
+        if (const auto quick = drop_equipment_index(manager, slot)) return quick;
+        return unequip_worn_slot(manager, screen, slot);
+    }
+
+    Unreal::UObject* selected_unequip_actor(Unreal::UObject* save, Unreal::UObject* item_class, int slot)
+    {
+        auto* selected = field<Unreal::FIntProperty>(save, STR("PlayerEquipIndex"));
+        if (slot >= 8 || !selected || selected->GetPropertyValueInContainer(save) != slot) return nullptr;
+        auto* actor = object_field(scope.pawn.Get(), STR("EquipedItem"));
+        return live(actor) && actor->GetClassPrivate() == item_class ? actor : nullptr;
+    }
+
     [[nodiscard]] bool pack_equipment_drop(Unreal::UObject* manager, Unreal::UObject* pack, Unreal::UObject* slot,
                                            const Guid& guid, Unreal::UObject* item_class)
     {
@@ -1590,8 +1606,8 @@ namespace
         if (!exact_class(card, card_path)) return;
         const auto candidate = card_item(card);
         const bool unequipping = action == "unequip";
-        auto equipped_index = drop_equipment_index(manager, candidate.panel);
-        if (unequipping && !equipped_index) equipped_index = unequip_worn_slot(manager, screen, candidate.panel);
+        const auto equipped_index = unequipping ? unequip_source_slot(manager, screen, candidate.panel)
+                                               : drop_equipment_index(manager, candidate.panel);
         auto* item_class = object_value(field<Unreal::FClassProperty>(candidate.structure, item_class_name), candidate.value);
         if ((candidate.panel != panel && !equipped_index) || !item_class) return;
         const auto stacks = action.empty() ? silverfish::drop_item_class::stacks(Unreal::Cast<Unreal::UClass>(item_class))
@@ -1636,16 +1652,7 @@ namespace
             !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class, equipped_index,
                                       !using_item && action != "equip" && !unequipping)) return;
         Unreal::UObject* prior_held{};
-        if (unequipping && *equipped_index < 8)
-        {
-            auto* selected = field<Unreal::FIntProperty>(save, STR("PlayerEquipIndex"));
-            if (!selected) return;
-            if (selected->GetPropertyValueInContainer(save) == *equipped_index)
-            {
-                auto* actor = object_field(scope.pawn.Get(), STR("EquipedItem"));
-                if (live(actor) && actor->GetClassPrivate() == item_class) prior_held = actor;
-            }
-        }
+        if (unequipping) prior_held = selected_unequip_actor(save, item_class, *equipped_index);
         else if (!unequipping && equipped_index)
         {
             auto* hover = field<Unreal::FObjectProperty>(manager, STR("HoveredCard"));
@@ -2230,7 +2237,8 @@ namespace
         return true;
     }
 
-    Unreal::UObject* exact_guest_cursor_item(Unreal::UObject* save, const ItemView& item, Guid& guid)
+    Unreal::UObject* exact_guest_cursor_item(Unreal::UObject* save, const ItemView& item, Guid& guid,
+                                            std::optional<int> source_slot = {})
     {
         const GuidFields fields(item.structure);
         auto* quantity = field<Unreal::FIntProperty>(item.structure, item_ammo_name);
@@ -2238,7 +2246,7 @@ namespace
         if (!live(item_class) || !fields.valid() || !quantity) return nullptr;
         guid = fields.read(item.value);
         if (guid == Guid{} || !exact_canonical_drop_row(save, item, guid,
-                quantity->GetPropertyValueInContainer(item.value), item_class, {}, false)) return {};
+                quantity->GetPropertyValueInContainer(item.value), item_class, source_slot, false)) return {};
         return item_class;
     }
 
@@ -2283,17 +2291,21 @@ namespace
         {
             auto* card = object_field(manager, STR("HoveredCard"));
             const auto item = card_item(card);
+            const auto source_slot = unequip_source_slot(manager, screen, item.panel);
             Guid guid{};
-            const bool selectable = !held_here && ready() && item.panel == panel && same_widget_player(card) &&
-                object_field(card, STR("ItemManager")) == manager && array_has_widget(panel, STR("Cards"), card, false) &&
-                exact_guest_cursor_item(save, item, guid);
+            const bool source_card = source_slot ? object_field(item.panel, STR("ItemCard")) == card
+                : item.panel == panel && array_has_widget(panel, STR("Cards"), card, false);
+            const bool selectable = !held_here && ready() && source_card && same_widget_player(card) &&
+                object_field(card, STR("ItemManager")) == manager &&
+                exact_guest_cursor_item(save, item, guid, source_slot);
             if (begin && selectable)
             {
-                guest_use_cursor = {manager, guid, {}};
+                guest_use_cursor = {manager, guid, {}, item.panel, source_slot};
                 return true; // The stock hold timer is UI-only until FinalTakeItem.
             }
             iteration.PreventOriginalFunctionCall();
-            if (finish && selectable && guest_use_cursor.manager.Get() == manager && guest_use_cursor.taking == guid)
+            if (finish && selectable && guest_use_cursor.manager.Get() == manager && guest_use_cursor.taking == guid &&
+                guest_use_cursor.source.Get() == item.panel && guest_use_cursor.source_slot == source_slot)
             {
                 guest_use_cursor.taking = {};
                 guest_use_cursor.held = guid;
@@ -2310,7 +2322,30 @@ namespace
         iteration.PreventOriginalFunctionCall();
         if (!iteration.OriginalFunctionCallPrevented()) return true;
         const auto item = inventory_item(manager, STR("HeldItem"));
-        auto* target = insert ? object_value(field<Unreal::FObjectProperty>(function, STR("InventoryWidget")), parameters) : nullptr;
+        auto* target_field = insert ? field<Unreal::FObjectProperty>(function, STR("InventoryWidget")) : nullptr;
+        auto* target = object_value(target_field, parameters);
+        if (const auto source_slot = guest_use_cursor.source_slot)
+        {
+            const auto parm = [](auto* property, int offset) {
+                return property && property->GetOffset_Internal() == offset &&
+                    property->HasAnyPropertyFlags(Unreal::CPF_Parm) &&
+                    !property->HasAnyPropertyFlags(Unreal::CPF_OutParm | Unreal::CPF_ReturnParm);
+            };
+            auto* index = insert ? field<Unreal::FIntProperty>(function, STR("Index")) : nullptr;
+            auto* holding = field<Unreal::FBoolProperty>(manager, STR("HoldingItem"));
+            Guid guid{};
+            auto* item_class = ready() && target == panel && parm(target_field, 0) && parm(index, 8) &&
+                holding && holding->GetPropertyValueInContainer(manager) &&
+                function->GetParmsSize() >= 12 && function->GetParmsSize() <= 16 &&
+                unequip_source_slot(manager, screen, guest_use_cursor.source.Get()) == source_slot
+                ? exact_guest_cursor_item(save, item, guid, source_slot) : nullptr;
+            if (item_class && guid == guest_use_cursor.held)
+                host_drop_request = HostDropRequest{guid, 1, ++host_drop_sequence, false, now + request_lease, manager,
+                    screen, panel, "unequip", *source_slot + 1, selected_unequip_actor(save, item_class, *source_slot)};
+            guest_use_cursor = {};
+            clear_stash_cursor(manager);
+            return true;
+        }
         const auto target_slot = drop_equipment_index(manager, target);
         const bool matches_player = !insert || (target && target == object_field(screen, STR("PlayerCard")) &&
                                                     same_widget_player(target));
@@ -2412,6 +2447,8 @@ namespace
         }
         if (name == entries->clear_held && host_split_drag.manager.Get() == context)
             host_split_drag = {};
+        if (name == entries->clear_held && guest_use_cursor.manager.Get() == context)
+            guest_use_cursor = {};
         if (name == entries->insert_item)
         {
             intercept_drag_drop(iteration, context, function, parameters);
