@@ -1002,14 +1002,18 @@ local function run_command(fields, state, current_phase)
         was_connected = false
         return "client travel requested"
     elseif command == "native-zone-loading-start" or command == "native-zone-loading-clear" then
-        if #fields ~= 3 or not supported_map(argument) or (role ~= "host" and role ~= "client") then
+        local source = fields[4]
+        if (#fields ~= 3 and #fields ~= 4) or not supported_map(argument) or (role ~= "host" and role ~= "client")
+            or (source and (role ~= "client" or source ~= state.map or not supported_map(source))) then
             error("Expected a qualified co-op transition presentation", 0)
         end
         if command == "native-zone-loading-clear" then
+            if source then error("Expected a destination for transition cleanup", 0) end
             native_zone_loading.clear(argument)
             return "zone transition presentation cleared"
         end
-        if (current_phase ~= "hosting" and current_phase ~= "connected") or state.map == argument then
+        local disconnected_source = source and current_phase == "disconnected"
+        if (current_phase ~= "hosting" and current_phase ~= "connected" and not disconnected_source) or state.map == argument then
             error("The co-op transition source is unavailable", 0)
         end
         if not native_zone_loading.begin(state, current_phase, argument) then

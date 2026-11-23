@@ -72,6 +72,7 @@ _MENU_NATIVE_SAVE_BYTES = 128 * 1024**2
 MENU_HOST_OPTIONS = {"native_events": True, "native_guest": True, "native_zones": True,
                      "native_zone_walls": True, "expanded_zones": True}
 POSITION_MAX_AGE = 3.0
+STOCK_ZONE_FADE_SECONDS = 1.0
 NATIVE_RUNTIME_RETIRING = "native_runtime_retiring"
 # The stock driver can retain a silent connection for 110 seconds.
 NATIVE_RUNTIME_RETIREMENT_WAIT = 130.0
@@ -138,14 +139,17 @@ def _zone_loading_cue(frame: dict, destination: str, seat: str) -> bool:
     return (proof.get("destination"), proof.get("seat"), proof.get("dispatched")) == (destination, seat, True)
 
 
-async def _start_zone_loading(bridge: Bridge, control: Control, destination: str, seat: str) -> None:
+async def _start_zone_loading(bridge: Bridge, control: Control, destination: str, seat: str,
+                              *, source: str | None = None) -> bool:
+    arguments = (destination, source) if source is not None else (destination,)
     try:
-        frame = await bridge.command("native-zone-loading-start", destination, timeout=2)
+        frame = await bridge.command("native-zone-loading-start", *arguments, timeout=2)
     except (OSError, RuntimeError, ValueError):
-        return
+        return False
+    covered = frame.get("native_zone_loading_cover") == destination and (source is None or frame.get("map") == source)
     control.event("zone_transition_presentation", destination=destination, seat=seat,
-                  cue=_zone_loading_cue(frame, destination, seat),
-                  covered=frame.get("native_zone_loading_cover") == destination)
+                  cue=_zone_loading_cue(frame, destination, seat), covered=covered)
+    return covered
 
 
 @dataclass(frozen=True)
@@ -351,6 +355,7 @@ class Host:
         self.zone_epoch = uuid.uuid4().hex
         self.transitioning = False
         self.loading_zone: str | None = None
+        self.zone_fade_from: str | None = None
         self.awaiting_zone_guest = None
         self.expired_characters: set[str] = set()
         self.native_restart_candidate: tuple[int, tuple[str, str], float] | None = None
@@ -1190,7 +1195,7 @@ class Host:
                 await _start_zone_loading(bridge, self.control, destination, "host")
                 # Paint the stock fade while the game routes remain open. The
                 # native departure command still checks the live party after it.
-                await asyncio.sleep(1)
+                await asyncio.sleep(STOCK_ZONE_FADE_SECONDS)
             authorization = ("blue", blue_plan["guid"]) if blue_plan else (gold_guid,) if gold_guid else ()
             if random_plan:
                 cube, itinerary = random_plan
@@ -1275,6 +1280,7 @@ class Host:
             if dream_plan:
                 await self.ensure_dream_stack(bridge, dream_plan)
             self.zone_epoch = uuid.uuid4().hex
+            self.zone_fade_from = current if stock_loading else None
             self.marker_ready = False
             candidate = native_gold.arrive(self.party, gold_guid, observed["map"]) if gold_guid else None
             if blue_plan:
@@ -1956,6 +1962,8 @@ class Host:
                  "zone": self.last_game["map"], "travel_in_progress": self.transitioning}
         if self.transitioning and (destination := getattr(self, "loading_zone", None)) and destination != reply["zone"]:
             reply["loading_zone"] = destination
+        if source := getattr(self, "zone_fade_from", None):
+            reply["zone_fade_from"] = source
         return reply
 
     async def project_guest_sprints(self, bridge):
@@ -4966,6 +4974,8 @@ class Client:
         self.host_session = None
         self.needs_travel = False
         self.loading_zone: str | None = None
+        self.zone_fade_from: str | None = None
+        self.source_fade: tuple[tuple[str, str, str], str, float] | None = None
         self.last_game = {}
         self.gameplay = {}
         self.zone_epoch = None
@@ -5057,6 +5067,7 @@ class Client:
             raise RuntimeError("Host did not return a valid session ID")
         if self.host_session and self.host_session != session:
             await self.clear_zone_loading()
+            self.zone_fade_from = None
             self.needs_travel = True
             self.gameplay = {}
             self.zone_epoch = None
@@ -5147,6 +5158,7 @@ class Client:
             raise
         self.needs_travel = False
         self.loading_zone = None
+        self.source_fade = None
         self.game_visit = (self.host_session, self.zone_epoch, self.expected_zone) if self.invite.get("native_zones") else None
         self.empty_zone_retry.clear()
 
@@ -5171,7 +5183,23 @@ class Client:
         previous = self.game_visit
         if (previous and self.needs_travel and self.host_session == previous[0] and self.zone_epoch != previous[1]
                 and self.expected_zone != previous[2] and self.expected_zone in self.allowed_maps):
-            await self.leave_for_rejoin(state, self.expected_zone)
+            destination = self.expected_zone
+            if (self.zone_fade_from == previous[2] == state.get("map") and state.get("mode") == "client"
+                    and state.get("state") in {"connected", "disconnected"}
+                    and all(map(native_mindcore_carry.token, (self.host_session, previous[1], self.zone_epoch)))
+                    and state.get("native_zone_loading_support") is True):
+                visit = self.host_session, self.zone_epoch, destination
+                fade_scope = previous, destination
+                if not self.source_fade or self.source_fade[:2] != fade_scope:
+                    await self.start_guest_zone_loading(previous, destination)
+                if self.source_fade and self.source_fade[:2] == fade_scope:
+                    remaining = self.source_fade[2] + STOCK_ZONE_FADE_SECONDS - time.monotonic()
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+                if self.stopping or self.check_host_end() or visit != (self.host_session, self.zone_epoch, self.expected_zone):
+                    return
+                state = self.bridge.snapshot() or state
+            await self.leave_for_rejoin(state, destination)
         else:
             await self.leave_for_rejoin(state)
         reservation, epoch = self.native_return_reservation, self.zone_epoch
@@ -5657,10 +5685,18 @@ class Client:
                 await pending
 
     async def clear_zone_loading(self) -> None:
+        self.source_fade = None
         if destination := getattr(self, "loading_zone", None):
             self.loading_zone = None
             with contextlib.suppress(OSError, RuntimeError, ValueError):
                 await self.bridge.command("native-zone-loading-clear", destination, timeout=2)
+
+    async def start_guest_zone_loading(self, source_visit: tuple[str, str, str], destination: str) -> None:
+        if self.loading_zone != destination:
+            await self.clear_zone_loading()
+        self.loading_zone = destination
+        if await _start_zone_loading(self.bridge, self.control, destination, "guest", source=source_visit[2]):
+            self.source_fade = source_visit, destination, time.monotonic()
 
     async def sync_zone_loading(self, destination: object) -> None:
         if (not self.host_session or not self.zone_epoch or self.needs_travel
@@ -5673,9 +5709,7 @@ class Client:
                 or not isinstance(destination, str) or destination not in self.allowed_maps
                 or destination == self.expected_zone or destination == self.loading_zone):
             return
-        await self.clear_zone_loading()
-        self.loading_zone = destination
-        await _start_zone_loading(self.bridge, self.control, destination, "guest")
+        await self.start_guest_zone_loading((self.host_session, self.zone_epoch, self.expected_zone), destination)
 
     def _schedule_gameplay_snapshot(self, *, edges_only: bool = False) -> None:
         if self.snapshot_request is not None or self.stopping:
@@ -5737,6 +5771,7 @@ class Client:
                         self.control.event("zone_rejoin_requested", zone_epoch=epoch)
                     self.zone_epoch = epoch
                     self.expected_zone = reply["zone"]
+                    self.zone_fade_from = reply.get("zone_fade_from")
                     await self.sync_zone_loading(reply.get("loading_zone"))
                     # Send the latest edges after handoff without waiting for
                     # another idle iteration or blocking the input loop.

@@ -181,6 +181,7 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
                 host.last_game["native_zone_loading_support"] = True
                 host.zone_epoch = "source"
                 host.public_gameplay = Mock(return_value={})
+                host.relay = host.prop_carry_bridge = None
                 transport = HostLink(("127.0.0.1", 17000), Mock(), None)
                 transport.restrict_game_routes({"old-guest"})
                 source = self.frame(route.source, 3, 1500, guarded=True)
@@ -191,6 +192,7 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
                 async def depart(*fields, **options):
                     if fields[0] == "native-zone-loading-start":
                         self.assertEqual(host.snapshot_for_guest("peer", "guest")["loading_zone"], route.destination)
+                        self.assertNotIn("zone_fade_from", host.snapshot_for_guest("peer", "guest"))
                         host.checkpoint_native.assert_awaited_once_with(bridge)
                         self.assertTrue(transport._native_route_permitted("old-guest"))
                         return {"native_zone_loading_cover": route.destination, "native_zone_loading_cue": {
@@ -238,6 +240,11 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
                 host.control.event.assert_any_call("zone_transition_presentation", destination=route.destination,
                                                    seat="host", cue=True, covered=True)
                 self.assertTrue(transport._native_route_permitted("old-guest"))
+                snapshot = host.snapshot_for_guest("peer", "guest")
+                if acknowledgement == "zone travel requested":
+                    self.assertEqual(snapshot["zone_fade_from"], route.source)
+                else:
+                    self.assertNotIn("zone_fade_from", snapshot)
                 self.assertFalse(transport._native_route_permitted("other-guest"))
                 self.assertFalse(host.transitioning)
                 self.assertFalse(host.stopping)

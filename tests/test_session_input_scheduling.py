@@ -185,6 +185,7 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         client.host_session, client.zone_epoch, client.expected_zone = "session", "current", source
         client.last_game = {"state": "connected", "map": source, "native_zone_loading_support": True}
         client.bridge.command = AsyncMock(return_value={
+            "map": source,
             "native_zone_loading_cover": destination,
             "native_zone_loading_cue": {"destination": destination, "seat": "guest", "dispatched": True},
         })
@@ -192,9 +193,9 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
             client.next_snapshot = 0
             await client.refresh_gameplay(project=False)
         self.assertEqual(client.bridge.command.await_args_list, [
-            call("native-zone-loading-start", destination, timeout=2),
+            call("native-zone-loading-start", destination, source, timeout=2),
             call("native-zone-loading-clear", destination, timeout=2),
-            call("native-zone-loading-start", destination, timeout=2),
+            call("native-zone-loading-start", destination, source, timeout=2),
         ])
         self.assertEqual(client.loading_zone, destination)
         self.assertTrue(client.needs_travel)
@@ -202,6 +203,64 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                          if event.args[0] == "zone_transition_presentation"]
         self.assertEqual(presentations, [call("zone_transition_presentation", destination=destination,
                                               seat="guest", cue=True, covered=True)] * 2)
+
+    async def test_changed_visit_holds_only_the_remaining_guest_source_fade(self):
+        source, destination = sorted(PLAYTEST_MAPS)
+        session, prior, next_visit = "a" * 32, "b" * 32, "c" * 32
+        source_visit = session, prior, source
+        source_frame = {"state": "disconnected", "mode": "client", "map": source, "native_zone_loading_support": True}
+        for scenario, started, expected_seconds in (
+            ("late", None, 1.0), ("early", 9.25, .25), ("elapsed", 8.0, None),
+            ("refused", None, None), ("unknown route", None, None), ("wrong world", None, None),
+            ("initial", None, None), ("same visit", None, None), ("new host", None, None),
+            ("cancelled", None, 1.0),
+        ):
+            with self.subTest(scenario=scenario):
+                reply = {"ok": True, "gameplay": {}, "zone_epoch": next_visit, "zone": destination,
+                         "zone_fade_from": source}
+                if scenario == "unknown route":
+                    del reply["zone_fade_from"]
+                if scenario == "same visit":
+                    reply.update(zone_epoch=prior, zone=source)
+                client = self.guest(AsyncMock(return_value=reply))
+                client.host_session = "d" * 32 if scenario == "new host" else session
+                client.zone_epoch, client.expected_zone = prior, source
+                client.game_visit = None if scenario == "initial" else source_visit
+                state = dict(source_frame, map=runtime.MENU) if scenario == "wrong world" else source_frame
+                client.bridge.snapshot.return_value = state
+                client.last_game = state
+                response = {"map": source, "native_zone_loading_cover": destination}
+                client.bridge.command = AsyncMock(return_value=response,
+                                                   side_effect=RuntimeError if scenario == "refused" else None)
+                if started is not None:
+                    client.source_fade = source_visit, destination, started
+                    client.loading_zone = destination
+                client.leave_for_rejoin, client.open_game_link = AsyncMock(), AsyncMock()
+                await client.refresh_gameplay(project=False)
+
+                async def wait_for_fade(_seconds):
+                    client.leave_for_rejoin.assert_not_awaited()
+                    if scenario == "cancelled":
+                        client.stopping = True
+
+                with (patch.object(service, "time", SimpleNamespace(monotonic=lambda: 10.0)),
+                      patch.object(asyncio, "sleep", new_callable=AsyncMock, side_effect=wait_for_fade) as delay):
+                    await client.reconcile_game()
+                if scenario in ("late", "refused", "cancelled"):
+                    client.bridge.command.assert_awaited_once_with("native-zone-loading-start", destination, source, timeout=2)
+                else:
+                    client.bridge.command.assert_not_awaited()
+                if expected_seconds is None:
+                    delay.assert_not_awaited()
+                else:
+                    delay.assert_awaited_once_with(expected_seconds)
+                if scenario == "cancelled":
+                    client.leave_for_rejoin.assert_not_awaited()
+                    client.open_game_link.assert_not_awaited()
+                else:
+                    expected_leave = (state,) if scenario in ("initial", "same visit", "new host") else (state, destination)
+                    client.leave_for_rejoin.assert_awaited_once_with(*expected_leave)
+                    client.open_game_link.assert_awaited_once()
 
     async def test_stock_door_receipt_projects_before_the_next_world_snapshot(self):
         door = native_stock_door
