@@ -110,6 +110,21 @@ def portable_script_overlay(game: Path, script_name: str, patch_script):
         assert provenance["original_bytes_restored"], "The private portable overlay failed to restore its release files"
 
 
+def host_npc_combat_overlay(game: Path):
+    fixture = (Path(__file__).with_name("fixtures") / "portable_npc_override_probe.lua").read_text(encoding="utf-8")
+    project_downed = """
+function(pawn, next_state)
+    local state = inspect()
+    assert(phase(state) == "hosting", "downed projection needs the active stock host")
+    assert(players.command({"fixture", "player-state-exact", pawn:GetFullName(), next_state}, state, "hosting")
+        == "player state projected")
+    players.sync(state, "hosting")
+end
+"""
+    return portable_main_overlay(game, lambda original: original + "\n;(function(project_downed)\n" + fixture
+                                 + "\nend)(" + project_downed + ")\n")
+
+
 def shop_lease_overlay(game: Path):
     def allow_isolated_approach(text):
         gate = 'local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"'
@@ -2344,9 +2359,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
                                                      fixture="portable_board_offer_probe.lua"))
         if stock_npc_override:
-            for game in games:
-                probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
-                                                     fixture="portable_npc_override_probe.lua"))
+            if resident_weapon_cues:
+                proof["npc_combat_overlays"] = [probes.enter_context(host_npc_combat_overlay(game)) for game in games]
+            else:
+                for game in games:
+                    probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
+                                                         fixture="portable_npc_override_probe.lua"))
         if stock_campfire:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableCampfireProbe",

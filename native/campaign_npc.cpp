@@ -1563,15 +1563,18 @@ namespace
         auto* item = property ? U::CastField<U::FObjectProperty>(property->GetInner()) : nullptr;
         if (!item || item->GetOffset_Internal() != 0) return false;
         U::FScriptArrayHelper targets(property, property->ContainerPtrToValuePtr<void>(receiver));
-        // Keep the stock order of viable targets, including enemies and allies of the turret.
-        // Blueprint FireRound will use the next entry and perform its own range and LOS checks.
-        for (int i = targets.Num() - 1; i >= 0; --i)
+        // Keep the stock order of viable targets. If the first target changed, skip
+        // this shot so the stock targeting loop can turn the barrel before firing again.
+        const auto count = targets.Num();
+        auto* previous_target = count ? item->GetObjectPropertyValue(targets.GetRawPtr(0)) : nullptr;
+        for (int i = count - 1; i >= 0; --i)
         {
             auto* target = item->GetObjectPropertyValue(targets.GetRawPtr(i));
             if (target && std::ranges::find(turret_inactive.pawns, reinterpret_cast<std::uintptr_t>(target)) !=
                           turret_inactive.pawns.end()) targets.RemoveValues(i, 1);
         }
-        if (targets.Num() != 0) return false;
+        if (targets.Num() > 0 && item->GetObjectPropertyValue(targets.GetRawPtr(0)) == previous_target)
+            return false;
         call.PreventOriginalFunctionCall();
         return call.OriginalFunctionCallPrevented();
     }

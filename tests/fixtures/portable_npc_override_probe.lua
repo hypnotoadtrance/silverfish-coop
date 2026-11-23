@@ -190,13 +190,21 @@ local function turret_fire(pawn, world, turret, host, with_downed_target)
                 and same(candidate:GetWorld(), world) and not candidate:IsActorBeingDestroyed() then other = candidate end
         end
         assert(valid(other), "expected a guest to put at the head of the threat list")
-        SilverfishSetTurretInactiveTargets(world:GetAddress(), other:GetAddress())
+        assert(type(project_downed) == "function", "the host probe needs the stock player-state projection")
+        project_downed(other, "downed")
     end
     turret.Targets = other and {other, pawn} or {pawn}
     assert(turret.Targets:GetArrayNum() == (other and 2 or 1), "stock target list could not be prepared")
     shot_turret, fired_count = turret, 0
-    local ok, issue = pcall(function() turret:FireRound() end)
-    if other then SilverfishSetTurretInactiveTargets() end
+    local ok, issue = pcall(function()
+        turret:FireRound()
+        if other then
+            assert(fired_count == 0 and turret.Targets:GetArrayNum() == 1 and same(turret.Targets[1], pawn),
+                "the turret must skip the shot when its first target is downed")
+            turret:FireRound()
+        end
+    end)
+    if other then project_downed(other, "standing") end
     assert(ok, issue)
     local remaining = turret.Targets:GetArrayNum()
     local selected = remaining == 1 and same(turret.Targets[1], pawn)

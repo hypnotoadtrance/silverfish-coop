@@ -17,6 +17,7 @@ local sound_at_location = "/Script/Engine.GameplayStatics:PlaySoundAtLocation"
 local trigger_click = "/Game/Assets/Sounds/CUEs/Weapon_Cues/Reload_Cues/TriggerClick_Cue.TriggerClick_Cue"
 local math_path = "/Script/Engine.Default__KismetMathLibrary"
 local stock_rest_inverse = {Pitch = 0, Yaw = 90, Roll = 0}
+local turret_concurrency = "/Game/Assets/Sounds/SoundClasses/Weapons_SoundConcurrency.Weapons_SoundConcurrency"
 local attenuation_path = "/Game/Assets/Sounds/SoundClasses/Weapon_Attenuation.Weapon_Attenuation"
 local local_attenuation = "/Game/Assets/Sounds/SoundClasses/SmallSound_Attenuation.SmallSound_Attenuation"
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
@@ -188,13 +189,15 @@ local function capture_turret(_, sound, attachment)
     if not current then return end
     local muzzle = attachment:get()
     local turret = valid(muzzle) and muzzle:GetOwner()
+    if not valid(turret) then return end
+    local path = turret:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
+    if not stock_turret(path) then return end
     local base = StaticFindObject(turret_base)
-    if not valid(turret) or not valid(base) or not turret:IsA(base) or not turret:HasAuthority()
+    if not valid(base) or not turret:IsA(base) or not turret:HasAuthority()
         or turret.Alive ~= true or not same(turret:GetWorld(), current.world)
         or not same(turret.Arrow_Muzzle, muzzle) or not same(turret.FireSound, sound:get()) then return end
-    local path = turret:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
     local volume = turret.Fire_Volume
-    if not stock_turret(path) or not bounded(volume, 0, 10) then return end
+    if not bounded(volume, 0, 10) then return end
     local position, rotation = muzzle:K2_GetComponentLocation(), muzzle:K2_GetComponentRotation()
     serial = serial + 1
     record({serial, path, position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw,
@@ -383,7 +386,8 @@ function view.flush(get_world)
 end
 
 local function play(pawn, path, point, rotation, scale, volume, pitch, distance)
-    local class, base = asset(path), asset(stock_turret(path) and turret_base or weapon_base)
+    local turret = stock_turret(path)
+    local class, base = asset(path), asset(turret and turret_base or weapon_base)
     local defaults = valid(class) and class:GetCDO()
     if not valid(defaults) or not valid(base) or not defaults:IsA(base) then return end
     local attenuation, sound = asset(attenuation_path), defaults.FireSound
@@ -396,8 +400,10 @@ local function play(pawn, path, point, rotation, scale, volume, pitch, distance)
         particles = valid(component) == true
     end
     if volume > 0 and valid(statics) and valid(sound) and valid(attenuation) then
+        local concurrency
+        if turret then concurrency = asset(turret_concurrency) else concurrency = defaults["Concurrency Settings"] end
         local component = statics:SpawnSoundAtLocation(pawn, sound, point, rotation, volume, 1, 0,
-            attenuation, defaults["Concurrency Settings"], true)
+            attenuation, concurrency, true)
         if valid(component) then
             component:SetFloatParameter(FName("Distance"), distance)
             component:SetFloatParameter(FName("PitchShift"), pitch)
