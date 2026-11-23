@@ -39,7 +39,7 @@ namespace
     std::string prop_poses;
     std::string local_avatar_pose;
     std::string remote_avatar_poses;
-    std::int64_t native_events_heartbeat{};
+    std::int64_t native_events_heartbeat{}, stock_board_heartbeat{};
 
     void clear()
     {
@@ -148,19 +148,38 @@ namespace
         return 1;
     }
 
-    int read_native_events_heartbeat(const Lua& lua)
+    int read_heartbeat(const Lua& lua, const std::int64_t& mailbox)
     {
         bool active{};
         std::int64_t stamp{};
         {
             std::lock_guard lock(mutex);
             active = attached;
-            stamp = native_events_heartbeat;
+            stamp = mailbox;
         }
         lua.set_bool(active);
         if (!active || !stamp) return 1;
         lua.set_integer(stamp);
         return 2;
+    }
+
+    int read_native_events_heartbeat(const Lua& lua)
+    {
+        return read_heartbeat(lua, native_events_heartbeat);
+    }
+
+    int read_stock_board_heartbeat(const Lua& lua)
+    {
+        return read_heartbeat(lua, stock_board_heartbeat);
+    }
+
+    int publish_heartbeat(std::int64_t stamp, std::int64_t& mailbox)
+    {
+        if (stamp <= 0) return 0;
+        std::lock_guard lock(mutex);
+        if (!attached) return 0;
+        mailbox = stamp;
+        return 1;
     }
 
     int take_presentation(const Lua& lua, std::string& mailbox)
@@ -219,7 +238,7 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
     prop_poses.clear();
     local_avatar_pose.clear();
     remote_avatar_poses.clear();
-    native_events_heartbeat = 0;
+    native_events_heartbeat = stock_board_heartbeat = 0;
     clear();
 }
 
@@ -269,11 +288,12 @@ extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeReadInputV1(char*
 
 extern "C" __declspec(dllexport) int SilverfishBridgePublishNativeEventsHeartbeatV1(std::int64_t stamp)
 {
-    if (stamp <= 0) return 0;
-    std::lock_guard lock(mutex);
-    if (!attached) return 0;
-    native_events_heartbeat = stamp;
-    return 1;
+    return publish_heartbeat(stamp, native_events_heartbeat);
+}
+
+extern "C" __declspec(dllexport) int SilverfishBridgePublishStockBoardHeartbeatV1(std::int64_t stamp)
+{
+    return publish_heartbeat(stamp, stock_board_heartbeat);
 }
 
 extern "C" __declspec(dllexport) int SilverfishBridgePublishPropPosesV1(const char* data, std::uint32_t size)
@@ -353,6 +373,7 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishPublishLocalAvatarPose", publish_avatar_pose);
         lua.register_function("SilverfishTakeRemoteAvatarPoses", take_avatar_poses);
         lua.register_function("SilverfishReadLocalNativeEventsHeartbeat", read_native_events_heartbeat);
+        lua.register_function("SilverfishReadLocalStockBoardHeartbeat", read_stock_board_heartbeat);
     }
 
     void stop()
@@ -366,7 +387,7 @@ namespace silverfish::local_bridge
         prop_poses.clear();
         local_avatar_pose.clear();
         remote_avatar_poses.clear();
-        native_events_heartbeat = 0;
+        native_events_heartbeat = stock_board_heartbeat = 0;
         clear();
     }
 }

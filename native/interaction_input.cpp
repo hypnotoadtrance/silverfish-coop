@@ -82,40 +82,12 @@ namespace
     constexpr std::uint64_t max_sequence = (std::uint64_t{1} << 53) - 1;
     constexpr std::size_t pending_limit = 8;
 
-    struct BoardProfile
-    {
-        const Unreal::TCHAR* world;
-        const Unreal::TCHAR* actor;
-        std::uint8_t turn_in_id;
-        bool displays_global_contracts;
-    };
-
-    constexpr std::array board_profiles{
-        BoardProfile{
-            STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough"),
-            STR("/Game/Classes/Maps/Maps_SafeZones/Borough.Borough:PersistentLevel.BountyBoard_BP_C_3"), 5, false,
-        },
-        BoardProfile{
-            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01"),
-            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.BountyBoard_BP_C_2"), 4, false,
-        },
-        BoardProfile{
-            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P"),
-            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ScavBar_P.Shop_ScavBar_P:PersistentLevel.BountyBoard_BP_C_2"), 10, true,
-        },
-        BoardProfile{
-            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01"),
-            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01:PersistentLevel.BountyBoard_BP_C_0"), 1, true,
-        },
-        BoardProfile{
-            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P.Shop_ShopKeep_P"),
-            STR("/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P.Shop_ShopKeep_P:PersistentLevel.BountyBoard_BP_C_1"), 2, false,
-        },
-        BoardProfile{
-            STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"),
-            STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.BountyBoard_BP_C_0"), 3, true,
-        },
-    };
+    constexpr auto wire_board_box = STR("/Script/Engine.BoxComponent");
+    constexpr auto wire_board_turn_in_enum = STR("/Game/Classes/Libraries/Enums_Lib/QuestTurnIns_Enum.QuestTurnIns_Enum");
+    constexpr auto prototype_drill_board = STR("/Game/Classes/Maps/Maps_SafeZones/Shop_Scientist_01.Shop_Scientist_01:PersistentLevel.BountyBoard_BP_C_2");
+    constexpr auto wire_board_turn_in_delegate = STR("/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C:TurnedInQuest__DelegateSignature");
+    constexpr auto black_market_jammer_board = STR("/Game/Classes/Maps/Maps_SafeZones/Shop_BlackMarket_01.Shop_BlackMarket_01:PersistentLevel.BountyBoard_BP_C_0");
+    constexpr auto observatory_jammer_board = STR("/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.BountyBoard_BP_C_0");
 
     struct DialogueProfile
     {
@@ -462,15 +434,6 @@ namespace
         return installed.load(std::memory_order_acquire) && Unreal::IsInGameThreadRaw();
     }
 
-    const BoardProfile* wire_board_profile(Unreal::UObject* world)
-    {
-        if (!live(world)) return nullptr;
-        const auto path = world->GetPathName();
-        for (const auto& profile : board_profiles)
-            if (path == profile.world) return &profile;
-        return nullptr;
-    }
-
     const DialogueProfile* dialogue_profile(Unreal::UObject* world)
     {
         if (!live(world)) return nullptr;
@@ -481,25 +444,40 @@ namespace
         return nullptr;
     }
 
-    std::string_view qualify_wire_board(Unreal::UObject* world, const BoardProfile& profile, Unreal::UObject* actor, Unreal::UObject* box)
+    bool placed_wire_board(Unreal::UObject* world, Unreal::UObject* actor, Unreal::UObject* box)
     {
         if (!live(actor) || actor->GetClassPrivate() != find<Unreal::UClass>(wire_board_class) ||
-            actor->GetPathName() != profile.actor) return "native_wire_board_actor";
+            !actor->HasAnyFlags(Unreal::RF_WasLoaded)) return false;
+        auto* placed = static_cast<Unreal::AActor*>(actor);
         auto* destroying = field<Unreal::FBoolProperty>(actor, STR("bActorIsBeingDestroyed"));
-        if (!destroying || destroying->GetPropertyValueInContainer(actor) ||
-            static_cast<Unreal::AActor*>(actor)->GetWorld() != world ||
-            (scope.host && !live_actor(actor, world, 3))) return "native_wire_board_actor_world";
-        if (!live(box) || box->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.BoxComponent")) ||
-            box->GetOuterPrivate() != actor || object_field(actor, STR("Box")) != box) return "native_wire_board_box";
+        return destroying && !destroying->GetPropertyValueInContainer(actor) &&
+            placed->GetWorld() == world &&
+            placed->GetLevel() == object_field(world, STR("PersistentLevel")) &&
+            (!scope.host || live_actor(actor, world, 3)) &&
+            object_field(actor, STR("As Game Instance FP")) == scope.instance.Get() &&
+            live(box) && box->GetClassPrivate() == find<Unreal::UClass>(wire_board_box) &&
+            box->GetOuterPrivate() == actor && object_field(actor, STR("Box")) == box;
+    }
+
+    bool stock_board_policy(Unreal::UObject* actor)
+    {
         auto* id = field<Unreal::FByteProperty>(actor, STR("TurnIn_ID"));
-        const auto equals = [&](const Unreal::TCHAR* name, bool expected) {
-            auto* value = field<Unreal::FBoolProperty>(actor, name);
-            return value && value->GetPropertyValueInContainer(actor) == expected;
-        };
-        return id && id->GetPropertyValueInContainer(actor) == profile.turn_in_id &&
-            equals(STR("BountyBoard_RedeemableHere"), true) && equals(STR("AcceptAllGlobalContracts"), true) &&
-            equals(STR("Display_GlobalContracts"), profile.displays_global_contracts) && equals(STR("ShowAllContracts"), false)
-                ? std::string_view{} : "native_wire_board_configuration";
+        auto* type = id ? id->GetEnum().Get() : nullptr;
+        auto* all = field<Unreal::FBoolProperty>(actor, STR("ShowAllContracts"));
+        if (!type || type != find<Unreal::UEnum>(wire_board_turn_in_enum) ||
+            !all || all->GetPropertyValueInContainer(actor) ||
+            !field<Unreal::FBoolProperty>(actor, STR("BountyBoard_RedeemableHere")) ||
+            !field<Unreal::FBoolProperty>(actor, STR("AcceptAllGlobalContracts")) ||
+            !field<Unreal::FBoolProperty>(actor, STR("Display_GlobalContracts"))) return false;
+        const auto value = type->GetNameByValue(id->GetPropertyValueInContainer(actor));
+        if (value.IsNone() || value.ToString().ends_with(STR("_MAX"))) return false;
+        auto* property = field<Unreal::FMulticastInlineDelegateProperty>(actor, STR("TurnedInQuest"));
+        auto* signature = find<Unreal::UFunction>(wire_board_turn_in_delegate);
+        if (!property || !signature || property->GetSignatureFunction().Get() != signature ||
+            property->GetSize() != sizeof(Unreal::FMulticastScriptDelegate)) return false;
+        const auto* callbacks = property->ContainerPtrToValuePtr<Unreal::FMulticastScriptDelegate>(actor);
+        // The existing Prototype Drill adapter handles the authored Scientist listener.
+        return callbacks->Num() == 0 || actor->GetPathName() == prototype_drill_board;
     }
 
     bool interaction_in_reach(Unreal::UObject* pawn, Unreal::UObject* actor, Unreal::UObject* component)
@@ -527,20 +505,20 @@ namespace
 
     void intercept_wire_board(Iteration& iteration, Unreal::UObject* actor, Unreal::UFunction* function, const void* parameters)
     {
-        if (!actor || !function || !parameters || actor != wire_board.actor.Get() ||
-            iteration.OriginalFunctionCallPrevented() || !live_scope(scope) ||
+        if (!actor || !function || !parameters || iteration.OriginalFunctionCallPrevented() ||
             Clock::now() >= wire_board.expires) return;
         static const Unreal::FName interaction{STR("SendInteractionToActor")};
         static const Unreal::FName script{STR("ExecuteUbergraph_BountyBoard_BP")};
         const auto name = function->GetFName();
         if (name != interaction && name != script) return;
+        auto* pawn = wire_board.pawn.Get();
+        if (!pawn || pawn != scope.pawn.Get() || !live_scope(scope) ||
+            function->GetOuterPrivate() != actor->GetClassPrivate() || function->GetReturnProperty() ||
+            function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
         auto* world = scope.world.Get();
-        auto* profile = wire_board_profile(world);
-        auto* box = wire_board.component.Get();
-        if (!profile || !qualify_wire_board(world, *profile, actor, box).empty() || function->GetOuterPrivate() != actor->GetClassPrivate() ||
-            function->GetReturnProperty() || function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
         if (name == script)
         {
+            if (actor != wire_board.actor.Get() || !placed_wire_board(world, actor, wire_board.component.Get())) return;
             auto* entry = input<Unreal::FIntProperty>(function, STR("EntryPoint"), 0);
             if (function == find<Unreal::UFunction>(wire_script_path) && entry && function->GetNumParms() == 1 &&
                 function->GetParmsSize() == sizeof(std::int32_t) && entry->GetPropertyValueInContainer(parameters) == wire_menu_entry)
@@ -553,14 +531,19 @@ namespace
             function->GetParmsSize() != 2 * sizeof(void*) || !player || !component ||
             player->GetPropertyClass().Get() != find<Unreal::UClass>(pawn_path) ||
             component->GetPropertyClass().Get() != find<Unreal::UClass>(STR("/Script/Engine.SceneComponent"))) return;
-        auto* pawn = player->GetObjectPropertyValue(player->ContainerPtrToValuePtr<void>(parameters));
-        auto* hit = component->GetObjectPropertyValue(component->ContainerPtrToValuePtr<void>(parameters));
+        auto* interactor = player->GetObjectPropertyValue(player->ContainerPtrToValuePtr<void>(parameters));
+        auto* box = component->GetObjectPropertyValue(component->ContainerPtrToValuePtr<void>(parameters));
+        if (interactor != pawn || object_field(pawn, STR("InteractionTarget_Component")) != box ||
+            !placed_wire_board(world, actor, box) || !silverfish::native_interaction_input::consume_current_press(pawn)) return;
         iteration.PreventOriginalFunctionCall();
-        if (!iteration.OriginalFunctionCallPrevented() || !pawn || pawn != wire_board.pawn.Get() || hit != box ||
-            object_field(pawn, STR("InteractionTarget_Component")) != box ||
-            !silverfish::native_interaction_input::consume_current_press(pawn) || !wire_board.accepting ||
-            wire_sequence == max_sequence || !interaction_in_reach(pawn, actor, box)) return;
-        wire_board.pending = {++wire_sequence, Clock::now() + receipt_lifetime};
+        const auto now = Clock::now();
+        if (!iteration.OriginalFunctionCallPrevented() || !wire_board.accepting ||
+            (wire_board.pending.sequence && now < wire_board.pending.expires) ||
+            wire_sequence == max_sequence || !standing(pawn) ||
+            !stock_board_policy(actor) || !interaction_in_reach(pawn, actor, box)) return;
+        wire_board.actor = actor;
+        wire_board.component = box;
+        wire_board.pending = {++wire_sequence, now + receipt_lifetime};
     }
 
     Unreal::UObject* top_menu()
@@ -576,14 +559,13 @@ namespace
     Unreal::UObject* stock_menu_board(Unreal::UObject* log)
     {
         auto* world = scope.world.Get();
-        auto* profile = wire_board_profile(world);
         auto* board = object_field(log, STR("BountyBoard_Ref"));
         auto* bounty = field<Unreal::FBoolProperty>(log, STR("BountyBoard"));
-        if (!profile || !live_scope(scope) || !live(log) ||
+        if (!live_scope(scope) || !live(log) ||
             log->GetClassPrivate() != find<Unreal::UClass>(quest_log) ||
             log != top_menu() || log->GetWorld() != world ||
             !bounty || !bounty->GetPropertyValueInContainer(log) ||
-            !qualify_wire_board(world, *profile, board, object_field(board, STR("Box"))).empty()) return nullptr;
+            !placed_wire_board(world, board, object_field(board, STR("Box")))) return nullptr;
         return board;
     }
 
@@ -615,22 +597,23 @@ namespace
             function->GetNumParms() != (redeem ? 1 : 0) || function->GetParmsSize() != (redeem ? 1 : 0) ||
             !live_scope(scope)) return;
         auto* world = scope.world.Get();
-        auto* profile = wire_board_profile(world);
         auto* log = object_field(widget, STR("QuestLog_MenuRef"));
         auto* board = stock_menu_board(log);
         const bool projected = board && log == stock_board_menu.menu.Get() && board == stock_board_menu.board.Get();
-        if (!board || !profile || widget->GetWorld() != world ||
-            (!projected && profile->turn_in_id != 1 && profile->turn_in_id != 3)) return;
+        if (!board || widget->GetWorld() != world) return;
+        const auto path = board->GetPathName();
+        iteration.PreventOriginalFunctionCall();
+        const auto now = Clock::now();
+        if (!iteration.OriginalFunctionCallPrevented() || !stock_board_policy(board) ||
+            (projected && !stock_board_menu.ready) ||
+            now >= scope.expires || !standing(scope.pawn.Get()) ||
+            (stock_board_action.receipt.sequence && now < stock_board_action.receipt.expires) || wire_sequence == max_sequence) return;
         auto* quest = field<Unreal::FNameProperty>(widget, redeem ? STR("Quest_IDTag") : STR("Quest_ID"));
         if (!quest) return;
         const auto key = quest->GetPropertyValueInContainer(widget);
         static const Unreal::FName lake{STR("Jmr_Lake")}, crossroads{STR("Jmr_CrossRoads")};
-        if (!projected && key != lake && (key != crossroads || profile->turn_in_id != 3)) return;
-        iteration.PreventOriginalFunctionCall();
-        const auto now = Clock::now();
-        if (!iteration.OriginalFunctionCallPrevented() || (projected && !stock_board_menu.ready) ||
-            now >= scope.expires || !standing(scope.pawn.Get()) ||
-            (stock_board_action.receipt.sequence && now < stock_board_action.receipt.expires) || wire_sequence == max_sequence) return;
+        if (!projected && ((path != black_market_jammer_board && path != observatory_jammer_board) ||
+            (key != lake && (key != crossroads || path != observatory_jammer_board)))) return;
 
         std::string id;
         if (projected)
@@ -1139,13 +1122,10 @@ namespace
         const auto now = Clock::now();
         if (!pawn || address(pawn) != requested || host != scope.host || now >= scope.expires || !live_scope(scope))
             return report(lua, false, "native_wire_board_local_input");
-        auto* world = scope.world.Get();
-        auto* profile = wire_board_profile(world);
-        if (!profile) return report(lua, false, "native_wire_board_world");
-        auto* actor = find<Unreal::AActor>(profile->actor);
-        auto* box = object_field(actor, STR("Box"));
-        if (const auto reason = qualify_wire_board(world, *profile, actor, box); !reason.empty()) return report(lua, false, reason);
-        bind_interaction(wire_board, actor, box, pawn, accepting, now);
+        if (pawn != wire_board.pawn.Get() || now >= wire_board.expires) wire_board = {};
+        wire_board.pawn = pawn;
+        wire_board.accepting = accepting;
+        wire_board.expires = now + lease;
         return report(lua, true, "ready");
     }
 
@@ -1170,7 +1150,30 @@ namespace
         return 1;
     }
 
-    int take_wire_board_press(const Lua& lua) { return take_interaction_press(lua, wire_board); }
+    int take_wire_board_press(const Lua& lua)
+    {
+        if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        auto* board = wire_board.actor.Get();
+        if (!placed_wire_board(scope.world.Get(), board, wire_board.component.Get()) || !stock_board_policy(board)) return 0;
+        const auto accepted = take_interaction_sequence(lua.get_integer(), wire_board);
+        if (!accepted) return 0;
+        lua.set_integer(static_cast<std::int64_t>(accepted));
+        lua.set_string(RC::to_string(board->GetPathName()));
+        return 2;
+    }
+
+    int qualify_stock_board_policy(const Lua& lua)
+    {
+        const auto result = [&](bool ok) { lua.set_bool(ok); return 1; };
+        if (!available() || !scope.host || !live_scope(scope) || Clock::now() >= scope.expires ||
+            lua.get_stack_size() != 2 || !lua.is_string(1) || !lua.is_integer(2)) return result(false);
+        const auto path = RC::to_wstring(lua.get_string());
+        const auto requested = lua.get_integer();
+        if (path.empty() || path.size() > 512) return result(false);
+        auto* board = find<Unreal::UObject>(path.c_str());
+        return result(address(board) == requested &&
+            placed_wire_board(scope.world.Get(), board, object_field(board, STR("Box"))) && stock_board_policy(board));
+    }
 
     int take_stock_board_action(const Lua& lua)
     {
@@ -1199,7 +1202,7 @@ namespace
         const auto start = lua.get_bool();
         auto* menu = top_menu();
         auto* board = stock_menu_board(menu);
-        if (!board || board != wire_board.actor.Get() || !standing(scope.pawn.Get()) ||
+        if (!board || board != wire_board.actor.Get() || !stock_board_policy(board) || !standing(scope.pawn.Get()) ||
             pawn != address(scope.pawn.Get()) || menu_address != address(menu)) return result(false);
 
         if (start)
@@ -1643,6 +1646,7 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishTakeNativeWireBoardPress", take_wire_board_press);
         lua.register_function("SilverfishTakeNativeStockBoardAction", take_stock_board_action);
         lua.register_function("SilverfishRenderNativeStockBoard", render_stock_board);
+        lua.register_function("SilverfishQualifyNativeStockBoardPolicy", qualify_stock_board_policy);
         lua.register_function("SilverfishClearNativeWireBoardScope", clear_wire_board);
         lua.register_function("SilverfishSetNativeDialogueInputScope", set_dialogue_scope);
 

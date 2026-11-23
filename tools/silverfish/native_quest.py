@@ -11,6 +11,12 @@ COMPLETED = -10
 REWARD_CASH = 200
 REWARD_XP = 1
 
+AUTHORED_BOARD_ACTIONS = frozenset({
+    native_subway_valve.QUEST, native_mosby_tape.MOSBY_QUEST, native_prototype_drill.QUEST_ID,
+    native_meet_broker.QUEST_ID, native_wire_quest.QUEST_ID, native_turret_photo.QUEST_ID,
+    *native_computer_board.CONTRACTS, *native_flood_jammer.CONTRACTS, *native_broker.QUESTS,
+})
+
 
 def _stock_step(snapshot: dict) -> int | None:
     quest = snapshot.get("native_quest", {})
@@ -47,7 +53,9 @@ async def action(host, bridge, actor: str, verb: str, target: str | None) -> dic
     if stock_verb and isinstance(target, str) and "|" in target:
         visit, board, target = native_board_contract.menu_selection(target)
         native_board_contract.require_visit(host, visit)
-        native_board_contract.scope(host, actor, board)
+        area, _, _ = native_board_contract.scope(host, actor, board)
+        if target in AUTHORED_BOARD_ACTIONS and board != native_computer_board.BOARDS.get(area):
+            raise party.RuleError("native_board_contract_requires_authored_board")
     if target == native_subway_valve.QUEST:
         if verb not in ("native-quest-start", "native-quest-turnin"):
             raise party.RuleError("stock_subway_valve_requires_authored_objective")

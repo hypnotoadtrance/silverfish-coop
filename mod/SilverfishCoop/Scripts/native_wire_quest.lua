@@ -125,22 +125,32 @@ local function controlled(detail, world, local_player)
         and same(pawn:GetWorld(), world) and same(controller:GetWorld(), world)
 end
 
+function meet.qualified_stock_board(world, instance, board)
+    if not exact(board, board_class) or not same(board:GetWorld(), world) or board:IsActorBeingDestroyed()
+        or not board:HasAnyFlags(EObjectFlags.RF_WasLoaded) or not same(board:GetOuter(), world.PersistentLevel)
+        or not same(board["As Game Instance FP"], instance) or not int32(board.TurnIn_ID)
+        or board.TurnIn_ID < 0 or board.TurnIn_ID > 11 or board.ShowAllContracts ~= false
+        or type(board.BountyBoard_RedeemableHere) ~= "boolean"
+        or type(board.AcceptAllGlobalContracts) ~= "boolean"
+        or type(board.Display_GlobalContracts) ~= "boolean" then return end
+    local box = board.Box
+    if not exact(box, "/Script/Engine.BoxComponent") or not same(box:GetOwner(), board) then return end
+    local collision = box:GetCollisionEnabled()
+    if collision == 1 or collision == 3 then return box end
+end
+
 local function live_board(world, instance, profile)
     local board = StaticFindObject(profile.board_path)
-    if not exact(board, board_class) or board:GetFullName() ~= profile.board_name
-        or not same(board:GetWorld(), world) or not board:HasAuthority() or board:IsActorBeingDestroyed()
-        or not same(board["As Game Instance FP"], instance)
+    local box = meet.qualified_stock_board(world, instance, board)
+    if not box or board:GetFullName() ~= profile.board_name or not board:HasAuthority()
         or (not profile.dynamic and (board.TurnIn_ID ~= profile.board_id or board.BountyBoard_RedeemableHere ~= true
-            or board.AcceptAllGlobalContracts ~= true or board.Display_GlobalContracts ~= (profile.global_contracts == true)
-            or board.ShowAllContracts ~= false)) then
+            or board.AcceptAllGlobalContracts ~= true or board.Display_GlobalContracts ~= (profile.global_contracts == true))) then
         refused("board_unqualified")
     end
-    local box = board.Box
-    if not exact(box, "/Script/Engine.BoxComponent") or not same(box:GetOwner(), board) then
-        refused("board_box_unqualified")
+    if profile.dynamic and (type(SilverfishQualifyNativeStockBoardPolicy) ~= "function"
+        or SilverfishQualifyNativeStockBoardPolicy(profile.board_path, board:GetAddress()) ~= true) then
+        refused("board_policy_unqualified")
     end
-    local collision = box:GetCollisionEnabled()
-    if collision ~= 1 and collision ~= 3 then refused("board_not_interactable") end
     return board, box
 end
 
@@ -409,7 +419,7 @@ function meet.live_stock_board_context(state, phase, name, full_board_name, ques
     local world = leaf and map .. "." .. leaf
     local prefix = world and "BountyBoard_BP_C " .. world .. ":PersistentLevel."
     local actor = prefix and type(full_board_name) == "string" and full_board_name:sub(#prefix + 1)
-    if not actor or full_board_name:sub(1, #prefix) ~= prefix or not actor:match("^BountyBoard_BP_C_[0-9]+$") then
+    if not actor or full_board_name:sub(1, #prefix) ~= prefix or not actor:match("^[A-Za-z0-9_]+$") then
         refused("board_unqualified")
     end
     return context_for(state, phase, name, false, {map = map, world_path = world,

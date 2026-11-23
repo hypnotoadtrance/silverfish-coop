@@ -5,6 +5,7 @@ import time
 
 from . import native_computer_board, native_inventory, native_loot, native_rewards, party
 from .native_gold import valid_guid
+from .travel import PLAYTEST_MAPS
 
 COMMAND = "native-board-contract"
 KEY = "native_board_contract"
@@ -13,11 +14,22 @@ CATALOG_KEY = "native_board_contract_catalog"
 REFUSAL = "stock_board_contract_"
 QUEST_ID = re.compile(r"[A-Za-z0-9_]{1,96}")
 VISIT_ID = re.compile(r"[0-9a-f]{32}")
+BOARD_PATH = re.compile(
+    r"BountyBoard_BP_C (?P<map>/Game/Classes/Maps/[A-Za-z0-9_/]+)\.(?P<level>[A-Za-z0-9_]+)"
+    r":PersistentLevel\.[A-Za-z0-9_]+"
+)
 COMPLETE = -10
 
 
 def quest_id(value):
     return isinstance(value, str) and QUEST_ID.fullmatch(value) is not None
+
+
+def board_map(name):
+    match = BOARD_PATH.fullmatch(name) if isinstance(name, str) and len(name) <= 512 else None
+    if match and match["map"].rsplit("/", 1)[-1] == match["level"] and match["map"] not in PLAYTEST_MAPS:
+        return match["map"]
+    return None
 
 
 def menu_selection(target):
@@ -26,8 +38,7 @@ def menu_selection(target):
     visit, separator, remainder = target.partition("|")
     board, second, quest = remainder.partition("|")
     if (not separator or not second or not VISIT_ID.fullmatch(visit)
-            or not board.startswith("BountyBoard_BP_C /Game/Classes/Maps/")
-            or len(board) > 512 or not board.isascii() or not board.isprintable() or not quest_id(quest)):
+            or not board_map(board) or not quest_id(quest)):
         raise party.RuleError("native_board_contract_selection_invalid")
     return visit, board, quest
 
@@ -92,8 +103,8 @@ def parse_catalog(fields):
 def scope(host, actor, selected_board):
     player = host.party["players"].get(actor)
     area = host.last_game.get("map")
-    board = native_computer_board.BOARDS.get(area)
-    if (not board or selected_board not in (None, board)
+    board = native_computer_board.BOARDS.get(area) if selected_board is None else selected_board
+    if (not area or area not in host.allowed_maps or board_map(board) != area
             or not host.native_profile or not host.native_zones or not host.native_guest
             or host.transitioning or host.stopping or host.native_checkpoint_unsafe or host.party["wipe"]
             or host.last_game.get("state") != "hosting" or time.monotonic() - host.last_seen > 3
@@ -147,11 +158,11 @@ def _receipt(actor, before, result):
     return record
 
 
-async def catalog(host, bridge, actor, selected_board=None, *, specialized=()):
+async def catalog(host, bridge, actor, selected_board=None, *, specialized=(), excluded=()):
     area, pawn, board = scope(host, actor, selected_board)
-    known = (",".join(sorted(specialized)),) if specialized else ()
+    policies = (",".join(sorted(specialized)) or "-", ",".join(sorted(excluded)) or "-")
     try:
-        snapshot = await bridge.command(CATALOG, pawn, board, *known, timeout=5)
+        snapshot = await bridge.command(CATALOG, pawn, board, *policies, timeout=5)
     except RuntimeError as error:
         if str(error).startswith(REFUSAL):
             raise party.RuleError(str(error)) from error

@@ -2180,8 +2180,10 @@ class Host:
             elif action == native_turret_photo.BOARD_LIST:
                 result = await native_turret_photo.offers(self, bridge, character, target)
             elif action == native_board_contract.CATALOG:
+                specialists = native_wire_board.catalog_specialists(self.last_game.get("map"), target)
                 result = await native_board_contract.catalog(
-                    self, bridge, character, target, specialized=native_wire_board.catalog_specialists(self.last_game["map"]))
+                    self, bridge, character, target, specialized=specialists,
+                    excluded=native_quest.AUTHORED_BOARD_ACTIONS - specialists)
             elif action == native_turret_photo.SHUTTER:
                 result = await native_turret_photo.shutter(self, bridge, character, target, request["operation_id"])
             elif action in native_computer_board.PREFLIGHTS and target is None:
@@ -3343,9 +3345,11 @@ class Host:
                 elif action == native_turret_photo.BOARD_LIST:
                     result = await native_turret_photo.offers(self, bridge, "host", request.get("target"))
                 elif action == native_board_contract.CATALOG:
+                    target = request.get("target")
+                    specialists = native_wire_board.catalog_specialists(self.last_game.get("map"), target)
                     result = await native_board_contract.catalog(
-                        self, bridge, actor, request.get("target"),
-                        specialized=native_wire_board.catalog_specialists(self.last_game["map"]))
+                        self, bridge, actor, target, specialized=specialists,
+                        excluded=native_quest.AUTHORED_BOARD_ACTIONS - specialists)
                 elif action == native_turret_photo.XP_FIXTURE and self.fixtures and request.get("target") is None:
                     result = await native_turret_photo.xp_fixture(self, bridge)
                 elif action in native_computer_board.PREFLIGHTS and request.get("target") is None:
@@ -3459,7 +3463,8 @@ class Host:
                     self.last_game = await bridge.command(native_wire_board.FIXTURE, *selection, timeout=4)
                     result = {"native_wire_board": self.last_game.get("native_wire_board", {})}
                 elif action == native_wire_board.STOCK_F_FIXTURE and self.wire_board_enabled and self.fixtures:
-                    self.last_game = await bridge.command(native_wire_board.STOCK_F_FIXTURE, timeout=4)
+                    selection = native_wire_board.stock_fixture_board(self.last_game.get("map"), request.get("target"))
+                    self.last_game = await bridge.command(native_wire_board.STOCK_F_FIXTURE, *selection, timeout=4)
                     result = {"native_wire_board_stock": self.last_game.get("native_wire_board_stock", {})}
                 elif action == native_wire_board.STOCK_FIXTURE and self.wire_board_enabled and self.fixtures:
                     selection = native_wire_board.stock_fixture_selection(
@@ -3951,9 +3956,9 @@ class Host:
                     elif not isinstance(bridge.process, EmbeddedEngine):
                         with contextlib.suppress(OSError):
                             write_text(bridge.directory / "native-events-heartbeat", stamp)
-                if self.wire_board_enabled and game.get("map") in native_wire_board.MAPS:
+                if self.wire_board_enabled and game.get("map") in self.allowed_maps - PLAYTEST_MAPS:
                     with contextlib.suppress(OSError):
-                        write_text(bridge.directory / native_wire_board.HEARTBEAT, stamp)
+                        native_wire_board.renew(bridge, game["map"], timestamp)
                 if self.native_host_dig_live and game.get("map") == CROSSROADS:
                     with contextlib.suppress(OSError):
                         write_text(bridge.directory / native_host_dig_live.HEARTBEAT, stamp)
@@ -4021,8 +4026,10 @@ class Host:
 
         async def wire_action(action, _operation, target):
             if action == native_board_contract.CATALOG:
+                specialists = native_wire_board.catalog_specialists(self.last_game.get("map"), target)
                 return await native_board_contract.catalog(
-                    self, bridge, "host", target, specialized=native_wire_board.catalog_specialists(self.last_game["map"]))
+                    self, bridge, "host", target, specialized=specialists,
+                    excluded=native_quest.AUTHORED_BOARD_ACTIONS - specialists)
             if action == native_wire_quest.PREFLIGHT:
                 return await native_wire_quest.preflight(self, bridge, "host")
             if action == native_mosby_tape.READINGS_PREFLIGHT:
@@ -5523,7 +5530,6 @@ class Client:
         features = (
             (self.invite.get("native_shop_view"), native_finite_shop.MERCHANTS, "native-shop-view-heartbeat"),
             (self.invite.get("native_broker_input"), (native_broker.BLACK_MARKET,), "native-broker-input-heartbeat"),
-            (self.wire_board is not None, native_wire_board.MAPS, native_wire_board.HEARTBEAT),
             (self.dialogue_view is not None, self.dialogue_view.maps if self.dialogue_view else (), native_dialogue.HEARTBEAT),
             (self.mosby_station is not None, native_mosby_station_view.ORDINARY_MAPS, native_mosby_station_view.HEARTBEAT),
         )
@@ -5536,7 +5542,11 @@ class Client:
             if (game and game.get("state") == "connected"
                     and self.transport.connected and self.host_session and not self.needs_travel
                     and not self.server_transitioning and now - seen < 1.5):
-                heartbeat = f"{int(time.time())}\n"
+                timestamp = int(time.time())
+                heartbeat = f"{timestamp}\n"
+                if self.wire_board is not None and game.get("map") in self.allowed_maps - PLAYTEST_MAPS:
+                    with contextlib.suppress(OSError):
+                        native_wire_board.renew(self.bridge, game["map"], timestamp)
                 for enabled, maps, heartbeat_file in features:
                     if enabled and game.get("map") in maps:
                         with contextlib.suppress(OSError):
@@ -5814,7 +5824,8 @@ class Client:
                     self.last_game = await self.bridge.command(native_wire_board.FIXTURE, *selection, timeout=4)
                     result = {"native_wire_board": self.last_game.get("native_wire_board", {})}
                 elif action == native_wire_board.STOCK_F_FIXTURE and self.wire_board:
-                    self.last_game = await self.bridge.command(native_wire_board.STOCK_F_FIXTURE, timeout=4)
+                    selection = native_wire_board.stock_fixture_board(self.last_game.get("map"), request.get("target"))
+                    self.last_game = await self.bridge.command(native_wire_board.STOCK_F_FIXTURE, *selection, timeout=4)
                     result = {"native_wire_board_stock": self.last_game.get("native_wire_board_stock", {})}
                 elif action == native_wire_board.STOCK_FIXTURE and self.wire_board:
                     selection = native_wire_board.stock_fixture_selection(

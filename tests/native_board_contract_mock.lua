@@ -138,11 +138,13 @@ end
 
 denied("not_offered", "start", "inspect", eye)
 fresh = true
-local function catalog(specialist)
-    mod.command({"1", "native-board-contract-catalog", "Guest", "Board", specialist}, state, "hosting")
+local function catalog(specialist, excluded)
+    mod.command({"1", "native-board-contract-catalog", "Guest", "Board", specialist, excluded}, state, "hosting")
     return proof()
 end
 assert(catalog()[7] == "Asn_EggHead,Clt_Eye_02" and catalog()[8] == "-")
+assert(catalog("-", kill)[7] == eye)
+assert(catalog(kill, kill)[7] == eye)
 action("start", "inspect", eye)
 assert(proof()[8] == "qualified" and proof()[9] == "-" and proof()[11] == 1)
 action("start", "apply", eye, "-")

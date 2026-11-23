@@ -1,10 +1,14 @@
+import tempfile
 import time
 import unittest
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish import native_board_contract, native_rewards, native_turret_photo as photo, native_wire_board as wire, party
+from tools.silverfish.authored_routes import MAPS as EXPANDED_MAPS
+
+from tools.silverfish import native_board_contract, native_rewards, native_turret_photo as photo, native_wire_board as wire, party, runtime
 
 
 class WireBoardTests(unittest.IsolatedAsyncioTestCase):
@@ -140,6 +144,71 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(action.await_args.args[0::2], ("native-quest-turnin", native_board_contract.menu_target(visit, board, quest)))
         self.assertEqual(bridge.command.await_args.args, ("native-wire-board-stock-result", "6", area, pawn, quest, "completed"))
         self.assertIsNone(view.stock_open)
+
+    async def test_discovers_real_stock_board_identity_beyond_specialist_placements(self):
+        gunsmith = "/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P"
+        gunsmith_board = f"BountyBoard_BP_C {gunsmith}.Shop_Gunsmith_P:PersistentLevel.BountyBoard_BP_C_0"
+        self.assertIn(gunsmith, EXPANDED_MAPS)
+        for area, board in ((wire.SHOPKEEP, wire.BOARDS[wire.SHOPKEEP].removesuffix("_1") + "_2"),
+                            (gunsmith, gunsmith_board)):
+            with self.subTest(area=area, board=board):
+                self.assertEqual(native_board_contract.board_map(board), area)
+                self.assertFalse(wire.catalog_specialists(area, board))
+                self.assertEqual(wire.stock_fixture_board(area, board), (board,))
+                pawn, visit, quest = "Player_FP_C ClientView", "56" * 16, "Clt_Eye_02"
+                command = AsyncMock()
+                requests = Mock()
+                bridge = SimpleNamespace(input_namespace=uuid.uuid4(), native_wire_board_requests=requests, command=command)
+                view = wire.WireBoardView(bridge, Mock())
+                action = AsyncMock(return_value={native_board_contract.CATALOG_KEY: {
+                    "map": area, "pawn": "Player_FP_C AuthorityGuest", "board": board, "offers": [quest], "turnins": [],
+                }})
+
+                def frame(state, sequence, opened, choice):
+                    return {"map": area, "pawns": {"local": {"name": pawn}}, "native_wire_board_stock": {
+                        "map": area, "pawn": pawn, "board": board, "quest": choice, "state": state,
+                        "sequence": sequence, "open": opened,
+                    }}
+
+                requests.return_value = [(1, 1, "stock-view", area, pawn, board, "-")]
+                command.return_value = frame("visible", 1, 1, "-")
+                await view.sync(frame("loading", 1, 1, "-"), visit, True, action)
+                self.assertEqual(action.await_args.args[0::2], (native_board_contract.CATALOG, board))
+                self.assertEqual(view.stock_open.identity, (visit, area, pawn, board, 1))
+
+                requests.return_value = [(2, 1, "stock-start", area, pawn, board, quest)]
+                action.return_value = {"quest_id": quest, "step": 1}
+                await view.sync(frame("starting", 2, 1, quest), visit, True, action)
+                self.assertEqual(action.await_args.args[0::2], (
+                    "native-quest-start", native_board_contract.menu_target(visit, board, quest),
+                ))
+
+    def test_renews_embedded_board_lease_without_a_file(self):
+        bridge = SimpleNamespace(local_bridge=Mock())
+        wire.renew(bridge, "/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P", 901)
+        bridge.local_bridge.publish_stock_board_heartbeat.assert_called_once_with(901)
+
+    def test_embedded_board_and_ordinary_input_are_delivered_once_to_their_own_consumers(self):
+        area, board = wire.SHOPKEEP, wire.BOARDS[wire.SHOPKEEP]
+        pawn = "Player_FP_C ClientView"
+        board_record = f"wire-board\t6\t6\tstock-view\t{area}\t{pawn}\t{board}\t-".encode()
+        for board_first in (False, True):
+            with self.subTest(board_first=board_first), tempfile.TemporaryDirectory() as directory:
+                bridge = runtime.Bridge(Path(directory), None)
+                bridge.local_bridge = Mock(input_ready=Mock(side_effect=[True, False, False, False]),
+                                           read_input=Mock(return_value=[b"interact\t4", board_record]))
+                identity = uuid.uuid5(bridge.input_namespace, "4").hex
+                wanted = [(6, 6, "stock-view", area, pawn, board, "-")]
+                if board_first:
+                    self.assertEqual(bridge.native_wire_board_requests(), wanted)
+                    self.assertEqual(bridge.interactions(), [(identity, None)])
+                else:
+                    self.assertEqual(bridge.interactions(), [(identity, None)])
+                    self.assertEqual(bridge.native_wire_board_requests(), wanted)
+                self.assertEqual(bridge.native_wire_board_requests(), [])
+                self.assertEqual(bridge.interactions(), [])
+                bridge.local_bridge.read_input.assert_called_once()
+                self.assertEqual(list(Path(directory).iterdir()), [])
 
     async def test_board_requires_current_rendered_offer_before_accepting(self):
         pawn = "Player_FP_C test-owner"

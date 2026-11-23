@@ -176,11 +176,18 @@ end
 
 local function catalog(fields, state, phase)
     local pawn, board_name = fields[3], fields[4]
-    local raw = fields[5]
-    if (#fields ~= 4 and #fields ~= 5) or type(board_name) ~= "string" or #board_name > 512
-        or (raw and (#raw > 2048 or not raw:match("^[A-Za-z0-9_,]+$"))) then refuse("arguments") end
-    local special = {}
-    if raw then for id in raw:gmatch("[A-Za-z0-9_]+") do special[id] = true end end
+    if #fields < 4 or #fields > 6 or type(board_name) ~= "string" or #board_name > 512 then refuse("arguments") end
+    local function policies(raw)
+        local ids = {}
+        if raw == nil or raw == "-" then return ids end
+        if #raw > 2048 then refuse("arguments") end
+        for id in (raw .. ","):gmatch("([^,]*),") do
+            if #id > 96 or not id:match("^[A-Za-z0-9_]+$") or ids[id] then refuse("arguments") end
+            ids[id] = true
+        end
+        return ids
+    end
+    local special, excluded = policies(fields[5]), policies(fields[6])
     local context = stock_context(state, phase, pawn, board_name)
     context.board:Configure_Stock()
     local offers, ready = {}, {}
@@ -189,7 +196,7 @@ local function catalog(fields, state, phase)
     local function descriptor(raw_key, raw_row, target, accepting)
         local key, row = raw_key:get(), raw_row:get()
         local id = name(key)
-        if type(id) ~= "string" or #id > 96 or not id:match("^[A-Za-z0-9_]+$") then return end
+        if type(id) ~= "string" or #id > 96 or not id:match("^[A-Za-z0-9_]+$") or excluded[id] then return end
         if special[id] then
             local live_step = row[keys.step]
             if int(live_step) and live_step > 0 and

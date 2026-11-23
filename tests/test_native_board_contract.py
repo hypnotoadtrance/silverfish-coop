@@ -38,6 +38,7 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
             party.add_player(saved, character)
         return SimpleNamespace(
             native_profile=True, native_zones=True, native_guest=True, stopping=False, transitioning=False,
+            allowed_maps={SHOPKEEP},
             native_checkpoint_unsafe=False, pending_host_save=False, party=saved,
             last_seen=time.monotonic(), last_game={"state": "hosting", "map": SHOPKEEP},
             checkpoint_native=AsyncMock(), checkpoint=Mock(), control=Mock(),
@@ -80,13 +81,14 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         host.zone_epoch = VISIT
         second = BOARD.removesuffix("_1") + "_2"
         bridge = SimpleNamespace(command=AsyncMock())
-        selection = board.menu_target(VISIT, BOARD, EYE)
+        selection = board.menu_target(VISIT, second, EYE)
 
-        # The other board occupies the same level and could offer the same contract.
-        # Its availability cannot replace the board chosen by the opening receipt.
-        with patch.dict(native_computer_board.BOARDS, {SHOPKEEP: second}):
-            with self.assertRaisesRegex(party.RuleError, "native_board_contract_unavailable"):
-                await native_quest.action(host, bridge, "guest", "native-quest-start", selection)
+        # An authored specialist can only use its own board, even when the other
+        # live board has an ordinary offer with the same map and visit.
+        specialist = native_computer_board.MOLASSES.quest_id
+        with self.assertRaisesRegex(party.RuleError, "native_board_contract_requires_authored_board"):
+            await native_quest.action(
+                host, bridge, "guest", "native-quest-start", board.menu_target(VISIT, second, specialist))
         bridge.command.assert_not_awaited()
 
         with self.assertRaisesRegex(party.RuleError, "native_board_contract_stale_visit"):
@@ -94,20 +96,21 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
                 host, bridge, "guest", "native-quest-start", board.menu_target("34" * 16, BOARD, EYE))
         bridge.command.assert_not_awaited()
 
-        bridge.command.return_value = result(EYE, "start", "inspect", None, 1, board_name=second)
+        bridge.command.return_value = result(EYE, "start", "inspect", None, 1, board_name=BOARD)
         with self.assertRaisesRegex(RuntimeError, "did not identify the current actor and board"):
             await native_quest.action(host, bridge, "guest", "native-quest-start", selection)
-        bridge.command.assert_awaited_once_with(board.COMMAND, "start", "inspect", PAWN, BOARD, EYE, timeout=5)
+        bridge.command.assert_awaited_once_with(board.COMMAND, "start", "inspect", PAWN, second, EYE, timeout=5)
         self.assertEqual(host.party.get("native_quests", {}), {})
         self.assertFalse(host.pending_host_save or host.native_checkpoint_unsafe)
 
         bridge.command.reset_mock()
         bridge.command.side_effect = (
-            result(EYE, "start", "inspect", None, 1), result(EYE, "start", "apply", None, 1),
+            result(EYE, "start", "inspect", None, 1, board_name=second),
+            result(EYE, "start", "apply", None, 1, board_name=second),
         )
         started = await native_quest.action(host, bridge, "guest", "native-quest-start", selection)
         self.assertEqual(started["step"], 1)
-        self.assertEqual([call.args[4] for call in bridge.command.await_args_list], [BOARD, BOARD])
+        self.assertEqual([call.args[4] for call in bridge.command.await_args_list], [second, second])
 
     async def test_current_board_visit_is_rechecked_after_awaiting_inspection(self):
         host = self.host()
@@ -242,12 +245,28 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await board.catalog(host, bridge, "guest", BOARD), {board.CATALOG_KEY: {
             "map": SHOPKEEP, "pawn": PAWN, "board": BOARD, "offers": [UNREGISTERED_KILL], "turnins": [EYE],
         }})
-        bridge.command.assert_awaited_once_with(board.CATALOG, PAWN, BOARD, timeout=5)
+        bridge.command.assert_awaited_once_with(board.CATALOG, PAWN, BOARD, "-", "-", timeout=5)
         host.checkpoint_native.assert_not_awaited()
         with self.assertRaisesRegex(ValueError, "both offered and ready"):
             board.parse_catalog((*fields[:-1], UNREGISTERED_KILL))
         with self.assertRaisesRegex(ValueError, "Invalid stock board catalog entries"):
             board.parse_catalog((*fields[:4], "2", *fields[5:]))
+
+    async def test_gunsmith_catalog_requires_an_allowed_map_and_reads_the_exact_board(self):
+        host = self.host()
+        area = "/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P"
+        actor = f"BountyBoard_BP_C {area}.Shop_Gunsmith_P:PersistentLevel.BountyBoard_BP_C_0"
+        host.last_game["map"] = area
+        proof = {"map": area, "pawn": PAWN, "board": actor, "offers": [UNREGISTERED_KILL], "turnins": []}
+        bridge = SimpleNamespace(command=AsyncMock(return_value={
+            "state": "hosting", "map": area, board.CATALOG_KEY: proof,
+        }))
+        with self.assertRaisesRegex(party.RuleError, "native_board_contract_unavailable"):
+            await board.catalog(host, bridge, "guest", actor)
+        bridge.command.assert_not_awaited()
+        host.allowed_maps.add(area)
+        self.assertEqual(await board.catalog(host, bridge, "guest", actor), {board.CATALOG_KEY: proof})
+        bridge.command.assert_awaited_once_with(board.CATALOG, PAWN, actor, "-", "-", timeout=5)
 
     def test_repeated_proof_rows_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

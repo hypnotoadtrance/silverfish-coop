@@ -1,7 +1,9 @@
 local board_view = {}
+local stock = require("native_wire_quest")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_DEATH") == "cpp"
+local embedded = os.getenv("SILVERFISH_COOP_EMBEDDED_ENGINE") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local input_fixtures = os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
@@ -53,7 +55,7 @@ local titles = {[molasses] = "Get Molasses", [keycard] = "Hall Pass", [wire] = "
 local board_class = "/Game/Classes/Actors/BountyBoard_BP.BountyBoard_BP_C"
 local pawn_class = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_class = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
-local box_class = "/Script/Engine.BoxComponent"
+local instance_class = "/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C"
 local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 local quest_log_path = "/Game/Classes/GUI/Menu_QuestLog_Widget.Menu_QuestLog_Widget_C"
 local quest_details_path = "/Game/Classes/GUI/SubWidgets/Quest_DetailsWindow_Widget.Quest_DetailsWindow_Widget_C"
@@ -191,7 +193,8 @@ local rendered_states = {
 
 local events, heartbeat, is_downed
 local binding, session, stock_session, stock_pending, stock_projection, widget, presented_text
-local selection, pending_move, navigation = 1, 0, false
+local input_armed = false
+local selection = 1
 local last_sequence = 0
 
 local function valid(value)
@@ -207,12 +210,14 @@ local function exact(value, path)
         and not value:GetFullName():find("Default__", 1, true)
 end
 
-local function current_context(state, phase)
+local function local_context(state, phase)
     local host = phase == "hosting" and state.server == false
     local client = phase == "connected" and state.server == true
-    local world, profile = state.world, profiles[state.map]
-    if not enabled or not events or not (host or client) or not profile or state.listening ~= true
-        or not valid(world) or world:GetFullName() ~= profile.world then return end
+    local world, area = state.world, state.map
+    local leaf = type(area) == "string" and area:match("^/Game/Classes/Maps/[%w_/]+/([%w_]+)$")
+    local world_path = leaf and area .. "." .. leaf
+    if not enabled or not events or not (host or client) or not world_path or state.listening ~= true
+        or not valid(world) or world:GetFullName() ~= "World " .. world_path then return end
     local driver = world.NetDriver
     if not valid(driver) or not same(driver.World, world) then return end
     local server = driver.ServerConnection
@@ -227,26 +232,60 @@ local function current_context(state, phase)
         or not same(detail.controller_object, controller) or not same(pawn.Controller, controller)
         or not same(controller.Pawn, pawn) or not same(pawn:GetWorld(), world) or not same(controller:GetWorld(), world) then return end
 
-    local board = StaticFindObject(profile.path)
-    if not exact(board, board_class) or board:GetFullName() ~= profile.name or not same(board:GetWorld(), world)
-        or board:IsActorBeingDestroyed() or board.TurnIn_ID ~= profile.id or board.BountyBoard_RedeemableHere ~= true
-        or board.AcceptAllGlobalContracts ~= true or board.Display_GlobalContracts ~= profile.display_global
-        or board.ShowAllContracts ~= false then return end
-    local box = board.Box
-    if not exact(box, box_class) or not same(box:GetOwner(), board) then return end
-    local collision = box:GetCollisionEnabled()
-    if collision ~= 1 and collision ~= 3 then return end
-    return { phase = phase, host = host, world = world, driver = driver, name = detail.name, pawn = pawn,
-        controller = controller, board = board, box = box, profile = profile }
+    return {phase = phase, host = host, world = world, driver = driver, name = detail.name, pawn = pawn,
+        controller = controller, area = area, world_path = world_path}
+end
+
+local function selected_context(seat, path, actor)
+    if not seat or type(path) ~= "string" or #path > 490 then return end
+    local prefix = seat.world_path .. ":PersistentLevel."
+    if path:sub(1, #prefix) ~= prefix or not path:sub(#prefix + 1):match("^[A-Za-z0-9_]+$") then return end
+    local board = actor or StaticFindObject(path)
+    local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    local instance = valid(statics) and statics:GetGameInstance(seat.pawn)
+    if not exact(instance, instance_class) then return end
+    local box = stock.qualified_stock_board(seat.world, instance, board)
+    local name = "BountyBoard_BP_C " .. path
+    if not box or board:GetFullName() ~= name or (seat.host and not board:HasAuthority()) then return end
+    local authored = profiles[seat.area]
+    local profile = authored and authored.path == path and board.TurnIn_ID == authored.id
+        and board.BountyBoard_RedeemableHere == true and board.AcceptAllGlobalContracts == true
+        and board.Display_GlobalContracts == authored.display_global and authored
+        or {map = seat.area, path = path, name = name, quests = {}}
+    local current = {}
+    for key, value in pairs(seat) do current[key] = value end
+    current.board, current.box, current.profile = board, box, profile
+    return current
+end
+
+local function same_seat(first, second)
+    return first and second and first.phase == second.phase and first.name == second.name
+        and same(first.world, second.world) and same(first.driver, second.driver) and same(first.pawn, second.pawn)
+        and same(first.controller, second.controller)
 end
 
 local function same_context(first, second)
-    return first and second and first.phase == second.phase and first.name == second.name
-        and same(first.world, second.world) and same(first.driver, second.driver) and same(first.pawn, second.pawn)
-        and same(first.controller, second.controller) and same(first.board, second.board) and same(first.box, second.box)
+    return same_seat(first, second) and same(first.board, second.board) and same(first.box, second.box)
+end
+
+local function bound_context(seat)
+    if same_seat(seat, binding) then return selected_context(seat, binding.profile.path, binding.board) end
+end
+
+local function fixture_context(seat, name)
+    if not seat or not headless or not (input_fixtures or not seat.host or host_fixtures) then return end
+    local profile = profiles[seat.area]
+    local path = type(name) == "string" and name:match("^BountyBoard_BP_C (.+)$") or nil
+    if name and not path then return end
+    return selected_context(seat, path or (profile and profile.path))
 end
 
 local function fresh(now)
+    if type(SilverfishReadLocalStockBoardHeartbeat) == "function" then
+        local attached, timestamp = SilverfishReadLocalStockBoardHeartbeat()
+        if attached then return timestamp ~= nil and timestamp <= now and now <= timestamp + 2 end
+    end
+    if embedded then return false end
     local file = io.open(heartbeat, "rb")
     if not file then return false end
     local raw = file:read(32)
@@ -281,11 +320,16 @@ local function hide()
     widget, presented_text = nil, nil
 end
 
-function board_view.clear()
+local function select_board(current)
     hide()
-    if binding and type(SilverfishClearNativeWireBoardScope) == "function" then SilverfishClearNativeWireBoardScope() end
-    binding, session, stock_session, stock_pending, stock_projection = nil, nil, nil, nil, nil
-    selection, pending_move = 1, 0
+    binding, session, stock_session, stock_pending, stock_projection = current, nil, nil, nil, nil
+    selection = 1
+end
+
+function board_view.clear()
+    select_board(nil)
+    if input_armed and type(SilverfishClearNativeWireBoardScope) == "function" then SilverfishClearNativeWireBoardScope() end
+    input_armed = false
 end
 
 local function show(current, text)
@@ -315,13 +359,6 @@ local function present(current, status)
     local quests = current.profile.quests
     local quest = quests[selection]
     local lines = {titles[quest]}
-    if navigation and #quests > 1 then
-        lines = {"Bounty Board"}
-        for index, item in ipairs(quests) do
-            lines[#lines + 1] = (index == selection and "> " or "   ") .. titles[item]
-        end
-        lines[#lines + 1] = "Up / Down to select"
-    end
     lines[#lines + 1] = ""
     lines[#lines + 1] = contract_prompt[quest][status] or prompt[status]
     local text = table.concat(lines, "\n")
@@ -333,15 +370,16 @@ end
 
 local function write_event(current, sequence, open_sequence, kind, quest)
     local profile = current.profile
-    local file = io.open(events, "ab")
-    local success = false
-    if file then
-        local written = file:write(table.concat({"wire-board", sequence, open_sequence, kind, profile.map, current.name,
-            profile.name, quest}, "\t"), "\n")
-        local closed = file:close()
-        success = not not (written and closed)
+    local record = table.concat({"wire-board", sequence, open_sequence, kind, profile.map, current.name,
+        profile.name, quest}, "\t") .. "\n"
+    if embedded then
+        return type(SilverfishEnqueueLocalBridgeInput) == "function" and SilverfishEnqueueLocalBridgeInput(record) == true
     end
-    return success
+    local file = io.open(events, "ab")
+    if not file then return false end
+    local written = file:write(record)
+    local closed = file:close()
+    return not not (written and closed)
 end
 
 local function emit(current, sequence, kind, now, fixture)
@@ -365,6 +403,7 @@ end
 
 local function supported_stock_action(current, quest)
     local map = current.profile.map
+    if current.profile ~= profiles[map] then return false end
     return quest == lake_jammer and (map == black_market or map == observatory)
         or quest == crossroads_jammer and map == observatory
 end
@@ -493,7 +532,6 @@ local function stock_fixture(current, fields, now)
     end
     if not menu then error("wire_board_stock_fixture_menu_missing", 0) end
     if verb == "start" then
-        local stock = require("native_wire_quest")
         local id = FName(quest, EFindName.FNAME_Find)
         local offer = stock.stock_row(current.board.Contracts, id)
         if not offer then error("wire_board_stock_fixture_offer_missing", 0) end
@@ -520,82 +558,83 @@ local function stock_fixture(current, fields, now)
     return "verified stock bounty button intercepted"
 end
 
-local function drain(current, allow, fixture, now)
-    local sequence = math.tointeger((SilverfishTakeNativeWireBoardPress(current.pawn:GetAddress())))
-    if not sequence or sequence <= last_sequence or sequence >= max_sequence then return false end
+local function take_press(seat)
+    local raw, path = SilverfishTakeNativeWireBoardPress(seat.pawn:GetAddress())
+    local sequence = math.tointeger(raw)
+    if not sequence or sequence <= last_sequence or sequence >= max_sequence then return end
     last_sequence = sequence
-    if not allow or (not fixture and not focused(current)) or session and session.pending then return false end
-    if not fixture and type(SilverfishRenderNativeStockBoard) == "function" then
-        return queue_stock_view(current, sequence, now, false)
-    end
+    return sequence, selected_context(seat, path)
+end
+
+local function drain_fixture(current, sequence, now)
     local kind = "view"
     if session and session.expires > now then
+        if session.pending then return false end
         if session.state == "offer" then kind = "start" end
         if session.state == "ready" then kind = "turnin" end
         if kind ~= "view" and (session.quest ~= current.profile.quests[selection]
-            or session.fixture ~= fixture or not present(current, session.state)) then return false end
+            or not session.fixture or not present(current, session.state)) then return false end
     end
-    return emit(current, sequence, kind, now, fixture)
+    return emit(current, sequence, kind, now, true)
 end
 
-local function arm(current, allow)
-    if type(SilverfishSetNativeWireBoardScope) ~= "function" or type(SilverfishTakeNativeWireBoardPress) ~= "function" then
-        return false, "native_wire_board_backend_unavailable"
-    end
-    return SilverfishSetNativeWireBoardScope(current.pawn:GetAddress(), current.host, allow)
+local function arm(seat, allow)
+    if type(SilverfishSetNativeWireBoardScope) ~= "function" or type(SilverfishTakeNativeWireBoardPress) ~= "function" then return end
+    input_armed = SilverfishSetNativeWireBoardScope(seat.pawn:GetAddress(), seat.host, allow) == true
+    return input_armed
 end
 
 function board_view.sync(state, phase)
-    local current = current_context(state, phase)
-    if not current then board_view.clear(); return end
+    local seat = local_context(state, phase)
+    if not seat then board_view.clear(); return end
     local now = os.time()
-    if not same_context(binding, current) then
+    local current = bound_context(seat)
+    if not fresh(now) then
+        if current and session and session.quest == readings and session.pending
+            and session.expires > now and can_use(current, now, true) then return end
         board_view.clear()
-        if not fresh(now) then return end
-        binding = current
-    end
-    local allow = can_use(current, now)
-    local armed, reason = arm(current, allow)
-    if armed ~= true then
-        board_view.clear()
-        binding = current
-        binding.status = type(reason) == "string" and reason:match("^native_wire_board_[a-z_]+$") or "scope_rejected"
         return
     end
-    local facing = focused(current)
+    if binding and not current then board_view.clear() end
     if stock_pending and stock_pending.expires <= now then stock_pending = nil end
-    if stock_projection and not same(current_stock_menu(current, now), stock_projection.menu) then
-        stock_projection = nil
-    end
-    local readings_pending = session and session.quest == readings and session.pending and can_use(current, now, true)
-    if session and (session.expires <= now or not allow and not readings_pending or (not facing and not session.fixture)) then session = nil end
-    if pending_move ~= 0 then
-        if allow and facing and (not session or not session.pending) then
-            local selected = ((selection - 1 + pending_move) % #current.profile.quests) + 1
-            if selection ~= selected then selection, session = selected, nil end
+    if stock_projection and not same(current_stock_menu(current, now), stock_projection.menu) then stock_projection = nil end
+
+    if input_armed then
+        local sequence, pressed = take_press(seat)
+        if pressed and not stock_pending and not stock_projection and can_use(pressed, now, true) and focused(pressed) then
+            if not same_context(current, pressed) then select_board(pressed) end
+            current = pressed
+            queue_stock_view(current, sequence, now, false)
         end
-        pending_move = 0
     end
-    drain(current, allow, false, now)
+    local stack = seat.controller.MenuStack
+    local allow = not stock_pending and not stock_projection and stack and stack:GetArrayNum() == 0
+        and seat.controller.Loading == false and seat.pawn.Dead == false and is_downed(seat.pawn) == false
+    if not arm(seat, allow == true) then board_view.clear(); return end
+    if not current and headless then
+        current = fixture_context(seat)
+        if current then select_board(current) end
+    end
+    if not current then return end
+    local usable = can_use(current, now, true)
+    if session and (session.expires <= now or not usable) then session = nil end
     drain_stock(current, now)
-    if session then
-        present(current, session.state)
-    elseif allow and facing and type(SilverfishRenderNativeStockBoard) ~= "function" then
-        present(current, "focused")
-    else
-        hide()
-    end
-    binding.status = allow and (facing and "focused" or "armed") or "waiting"
+    if session then present(current, session.state) else hide() end
+    binding.status = usable and (focused(current) and "focused" or "armed") or "waiting"
 end
 
 local function probe_press(current)
     local pawn, controller = current.pawn, current.controller
     local original, cursor = pawn.InteractionTarget_Component, controller.bShowMouseCursor
     pawn.InteractionTarget_Component = current.box
-    local invoked, ok, reason = pcall(SilverfishProbeNativeInteractInput, pawn:GetAddress(), true)
+    local armed = arm(current, true)
+    local invoked, ok, reason
+    if armed then invoked, ok, reason = pcall(SilverfishProbeNativeInteractInput, pawn:GetAddress(), true) end
     pawn.InteractionTarget_Component = valid(original) and original or nil
-    return invoked and ok == true and reason == "stock_started_consumed" and controller.MenuStack:GetArrayNum() == 0
-        and controller.bShowMouseCursor == cursor
+    if not armed or not invoked or ok ~= true or reason ~= "stock_started_consumed"
+        or controller.MenuStack:GetArrayNum() ~= 0 or controller.bShowMouseCursor ~= cursor then return end
+    local sequence, pressed = take_press(current)
+    if same_context(current, pressed) then return sequence end
 end
 
 function board_view.command(fields, state, phase)
@@ -603,7 +642,8 @@ function board_view.command(fields, state, phase)
     if action ~= "native-wire-board-render" and action ~= "native-wire-board-fixture"
         and action ~= "native-wire-board-stock-result" and action ~= "native-wire-board-stock-fixture"
         and action ~= "native-wire-board-stock-open" and action ~= "native-wire-board-stock-f-fixture" then return end
-    local current, now = current_context(state, phase), os.time()
+    local seat, now = local_context(state, phase), os.time()
+    local current = bound_context(seat)
     if action == "native-wire-board-stock-open" then
         local sequence = fields[3] and fields[3]:match("^%d+$") and math.tointeger(tonumber(fields[3]))
         if #fields ~= 7 or not same_context(current, binding) or not stock_pending or sequence ~= stock_pending.sequence
@@ -615,15 +655,15 @@ function board_view.command(fields, state, phase)
         return "verified the host options in the native bounty board menu"
     end
     if action == "native-wire-board-stock-f-fixture" then
-        if #fields ~= 2 or not headless or not (input_fixtures or current and current.host and host_fixtures)
-            or not same_context(current, binding) or not can_use(current, now) or not arm(current, true)
-            or type(SilverfishProbeNativeInteractInput) ~= "function" or not probe_press(current) then
+        local chosen = fixture_context(seat, fields[3])
+        if (#fields ~= 2 and #fields ~= 3) or not chosen or not (input_fixtures or chosen.host and host_fixtures)
+            or not can_use(chosen, now) or type(SilverfishProbeNativeInteractInput) ~= "function" then
             error("wire_board_stock_f_fixture_scope", 0)
         end
-        local sequence = math.tointeger((SilverfishTakeNativeWireBoardPress(current.pawn:GetAddress())))
-        if not sequence or sequence <= last_sequence or sequence >= max_sequence then error("wire_board_stock_f_fixture_receipt", 0) end
-        last_sequence = sequence
-        if not queue_stock_view(current, sequence, now, true) then error("wire_board_stock_f_fixture_unverified", 0) end
+        if not same_context(current, chosen) then select_board(chosen) end
+        local sequence = probe_press(chosen)
+        if not sequence then error("wire_board_stock_f_fixture_receipt", 0) end
+        if not queue_stock_view(chosen, sequence, now, true) then error("wire_board_stock_f_fixture_unverified", 0) end
         return "verified stock bounty board Interact press"
     end
     if action == "native-wire-board-stock-fixture" then
@@ -652,10 +692,11 @@ function board_view.command(fields, state, phase)
                 if quest == fields[3] then selected = index end
             end
         end
-        if not selected or not headless or (current.host and not host_fixtures) or not arm(current, true)
+        if not selected or not quests[selected] or not headless or (current.host and not host_fixtures)
             or type(SilverfishProbeNativeInteractInput) ~= "function" then error("wire_board_fixture_unavailable", 0) end
         if selected ~= selection then selection, session = selected, nil end
-        if not probe_press(current) or not drain(current, true, true, now) then
+        local sequence = probe_press(current)
+        if not sequence or not drain_fixture(current, sequence, now) then
             error("wire_board_stock_press_unverified", 0)
         end
         return quests[selected] == wire and "exact stock Copper Stop board press verified"
@@ -678,8 +719,11 @@ function board_view.rows(state, phase, status_row)
     if not binding or state.map ~= binding.profile.map or phase ~= binding.phase or not same(state.world, binding.world)
         or not state.local_pawn or not same(state.local_pawn.pawn, binding.pawn) then return {} end
     local profile = binding.profile
-    local rows = {status_row("native-wire-board", profile.map, binding.name, profile.name, profile.quests[selection],
-        session and session.state or binding.status, session and session.sequence or 0, session and session.open or 0)}
+    local rows = {}
+    if profile.quests[selection] then
+        rows[1] = status_row("native-wire-board", profile.map, binding.name, profile.name, profile.quests[selection],
+            session and session.state or binding.status or "waiting", session and session.sequence or 0, session and session.open or 0)
+    end
     if stock_session then
         rows[#rows + 1] = status_row("native-wire-board-stock", profile.map, binding.name, profile.name,
             stock_session.quest, stock_session.state, stock_session.sequence, stock_session.open)
@@ -697,11 +741,6 @@ function board_view.start(bridge, downed)
     if not enabled or type(bridge) ~= "string" or bridge == "" or type(downed) ~= "function" then return end
     events, heartbeat = bridge .. "/native-wire-board-events", bridge .. "/native-wire-board-heartbeat"
     is_downed = downed
-    if not headless and not navigation and type(RegisterKeyBind) == "function" and Key and Key.UP_ARROW and Key.DOWN_ARROW then
-        RegisterKeyBind(Key.UP_ARROW, function() if binding then pending_move = pending_move - 1 end end)
-        RegisterKeyBind(Key.DOWN_ARROW, function() if binding then pending_move = pending_move + 1 end end)
-        navigation = true
-    end
 end
 
 return board_view

@@ -7,6 +7,7 @@ import uuid
 from . import native_board_contract, native_computer_board, native_flood_jammer, native_mosby_tape, native_subway_valve, native_turret_photo, native_wire_quest, party
 from . import native_prototype_drill
 from .native_gold import valid_guid
+from .runtime import write_text
 from .travel import BLACK_MARKET, BOROUGH, OBSERVATORY, SCAV_BAR, SCIENTIST_SHOP, SHOPKEEP
 
 HEARTBEAT = "native-wire-board-heartbeat"
@@ -59,9 +60,26 @@ HIDDEN_OFFERS = {"stock_turret_photo_quest_not_offered", "stock_lake_jammer_ques
 STOCK_MENU = {LAKE_JAMMER.quest: LAKE_JAMMER, CROSSROADS_JAMMER.quest: CROSSROADS_JAMMER}
 
 
-def catalog_specialists(area):
+def catalog_specialists(area, board):
+    if board is not None and board != BOARDS.get(area):
+        return frozenset()
     # These contracts still use the existing authored action handlers.
     return QUESTS.get(area, frozenset()) - {native_mosby_tape.MOSBY_QUEST, native_prototype_drill.QUEST_ID}
+
+
+def renew(bridge, area, timestamp):
+    if bridge.local_bridge is not None:
+        bridge.local_bridge.publish_stock_board_heartbeat(timestamp)
+    elif area in MAPS:
+        write_text(bridge.directory / HEARTBEAT, f"{timestamp}\n")
+
+
+def stock_fixture_board(area, target):
+    if target is None:
+        return ()
+    if not area or native_board_contract.board_map(target) != area:
+        raise party.RuleError("Choose an exact stock board on the current map")
+    return (target,)
 
 
 def fixture_selection(area, target):
@@ -76,7 +94,7 @@ def stock_fixture_selection(area, target, projected=False):
     quest, separator, verb = target.partition("|") if isinstance(target, str) else ("", "", "")
     profile = STOCK_MENU.get(quest)
     supported = profile and profile.board_at(area) is not None
-    if projected and area in MAPS:
+    if projected:
         supported = native_board_contract.quest_id(quest)
     if separator != "|" or verb not in ("start", "turnin") or not supported:
         raise party.RuleError("Choose a supported stock board action on the current map")
@@ -108,7 +126,7 @@ class WireBoardView:
     async def sync(self, snapshot, epoch, active, action):
         events = self.bridge.native_wire_board_requests()
         now = time.monotonic()
-        if not active or not epoch or snapshot.get("map") not in MAPS:
+        if not active or not epoch:
             self.opened = self.stock_open = self.pending = None
             return snapshot
         if events:
@@ -122,8 +140,9 @@ class WireBoardView:
         stock_menu = kind.startswith("stock-")
         shown = snapshot.get("native_wire_board_stock" if stock_menu else "native_wire_board", {})
         expected_quest = (quest == "-" and opened == sequence if kind == "stock-view" else
-                          native_board_contract.quest_id(quest) if stock_menu else quest in QUESTS[area])
-        if (sequence <= self.latest or area != snapshot.get("map") or actor != pawn or board != BOARDS.get(area)
+                          native_board_contract.quest_id(quest) if stock_menu else quest in QUESTS.get(area, ()))
+        board_matches = native_board_contract.board_map(board) == area if stock_menu else board == BOARDS.get(area)
+        if (sequence <= self.latest or area != snapshot.get("map") or actor != pawn or not board_matches
                 or not expected_quest
                 or tuple(shown.get(name) for name in ("map", "pawn", "board", "quest", "state", "sequence", "open"))
                 != (area, actor, board, quest, WAITING[kind], sequence, opened)):
@@ -198,7 +217,7 @@ class WireBoardView:
         verb, state = ("native-quest-start", "accepted") if starting else ("native-quest-turnin", "completed")
         try:
             target = (native_board_contract.menu_target(epoch, board, quest)
-                      if projected and quest not in catalog_specialists(area) else quest)
+                      if projected and quest not in catalog_specialists(area, board) else quest)
             result = await action(verb, operation, target)
             step = result.get("step")
             valid_step = type(step) is int and (step > 0 if projected and starting else step == (1 if starting else -10))

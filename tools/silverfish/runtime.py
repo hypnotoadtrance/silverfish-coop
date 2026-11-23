@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import contextlib
 from contextvars import ContextVar
 import hashlib
@@ -705,6 +706,8 @@ class Bridge:
         self._status_text = ""
         self._status_snapshot: dict | None = None
         self.local_bridge = None
+        self._local_interaction_records = deque(maxlen=64)
+        self._local_board_records = deque(maxlen=64)
         self.status_source = "file"
         self._local_status = None
         self._file_command_lock = asyncio.Lock()
@@ -751,6 +754,17 @@ class Bridge:
                 return
             await asyncio.sleep(min(.025, remaining))
 
+    def _take_local_inputs(self, pending: deque[bytes]) -> list[bytes]:
+        if self.local_bridge is not None and self.local_bridge.input_ready():
+            for record in self.local_bridge.read_input():
+                if record.startswith(b"wire-board\t"):
+                    self._local_board_records.append(record)
+                else:
+                    self._local_interaction_records.append(record)
+        records = list(pending)
+        pending.clear()
+        return records
+
     def interactions(self) -> list[tuple[str, str | None]]:
         """Consume complete local input records once, even if writing is in progress."""
         try:
@@ -762,8 +776,7 @@ class Bridge:
         end = batch.rfind(b"\n") + 1
         self.input_offset += end if end else len(batch) if len(batch) == 4096 else 0
         records = batch[:end].splitlines()
-        if self.local_bridge is not None and self.local_bridge.input_ready():
-            records.extend(self.local_bridge.read_input())
+        records.extend(self._take_local_inputs(self._local_interaction_records))
         results = []
         for line in records:
             fields = line.split(b"\t")
@@ -948,16 +961,20 @@ class Bridge:
         return events
 
     def native_wire_board_requests(self) -> list[tuple[int, int, str, str, str, str, str]]:
-        try:
-            with (self.directory / "native-wire-board-events").open("rb") as stream:
-                stream.seek(self.wire_board_offset)
-                batch = stream.read(8192)
-        except OSError:
-            return []
-        end = batch.rfind(b"\n") + 1
-        self.wire_board_offset += end if end else len(batch) if len(batch) == 8192 else 0
+        if self.local_bridge is None:
+            try:
+                with (self.directory / "native-wire-board-events").open("rb") as stream:
+                    stream.seek(self.wire_board_offset)
+                    batch = stream.read(8192)
+            except OSError:
+                return []
+            end = batch.rfind(b"\n") + 1
+            self.wire_board_offset += end if end else len(batch) if len(batch) == 8192 else 0
+            records = batch[:end].splitlines()
+        else:
+            records = self._take_local_inputs(self._local_board_records)
         events = []
-        for line in batch[:end].splitlines():
+        for line in records:
             fields = line.decode("utf-8", errors="replace").split("\t")
             if (len(fields) == 8 and fields[0] == "wire-board"
                     and fields[3] in ("view", "start", "turnin", "stock-view", "stock-start", "stock-turnin")
