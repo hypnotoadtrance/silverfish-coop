@@ -2817,6 +2817,8 @@ namespace
         if (!Unreal::IsInGameThreadRaw() || (count != 3 && (host || count != 4 || !lua.is_integer(4))) ||
             !lua.is_integer(1) || !lua.is_string(2) || !lua.is_integer(3))
             return probe_result(lua, false, "scope_changed");
+        // LuaMadeSimple removes each argument as it reads it.
+        const auto rounds = count == 4 ? lua.get_integer(4) : 0;
         const auto sequence = lua.get_integer(3);
         const std::string epoch{lua.get_string(2)};
         const auto pawn = lua.get_integer(1);
@@ -2833,7 +2835,6 @@ namespace
         };
         if (count == 4)
         {
-            const auto rounds = lua.get_integer(4);
             if (completed.entry != "unequip" || rounds < -1 || rounds > INT32_MAX)
                 return finish(false, "unequip_projection_unavailable");
             const auto guid = format_guid(completed.guid);

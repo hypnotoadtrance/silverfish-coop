@@ -968,6 +968,8 @@ namespace
         if (!enabled() || !U::IsInGameThreadRaw() || (remove ? !removal_slot : (arguments != 3 && !named_seed)) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3))
             return report(lua, false, "native_guest_armor_exact_context_required");
+        const auto slot = remove ? lua.get_integer(4) : -1;
+        if (remove && slot != 8 && slot != 9) return report(lua, false, "native_guest_armor_worn_slot_unqualified");
         const auto pawn = lua.get_integer();
         const auto guest = lua.get_integer();
         Guid guid{};
@@ -976,8 +978,6 @@ namespace
             !scope.bind(static_cast<std::uintptr_t>(pawn), static_cast<std::uintptr_t>(guest)))
             return report(lua, false, "native_guest_armor_exact_owner_required");
         constexpr bool project = operation == Operation::Project || operation == Operation::ProjectHelmet;
-        const auto slot = remove ? lua.get_integer(4) : -1;
-        if (remove && slot != 8 && slot != 9) return report(lua, false, "native_guest_armor_worn_slot_unqualified");
         const bool head = operation == Operation::EquipHelmet || operation == Operation::ProjectHelmet || (remove && slot == 8);
         if constexpr (!project)
         {
