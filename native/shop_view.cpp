@@ -1,5 +1,6 @@
 #include "shop_view.hpp"
 #include "interaction_input.hpp"
+#include "finite_shop.hpp"
 
 #include <array>
 #include <atomic>
@@ -347,8 +348,9 @@ namespace
 
     void intercept(Iteration& iteration, Unreal::UObject* actor, Unreal::UFunction* action, const void* parameters)
     {
-        if (!Unreal::IsInGameThreadRaw() || !actor || actor != scope.shop.Get() || !action || action != scope.action || !parameters ||
-            iteration.OriginalFunctionCallPrevented() || !current()) return;
+        if (!Unreal::IsInGameThreadRaw() || !actor || !action || iteration.OriginalFunctionCallPrevented()) return;
+        silverfish::finite_shop::observe_stock_save(actor, action);
+        if (actor != scope.shop.Get() || action != scope.action || !parameters || !current()) return;
         auto* pawn = read(scope.player_arg, parameters);
         if (!pawn || (scope.host ? !remote_guest(pawn) : pawn != scope.pawn.Get())) return;
         iteration.PreventOriginalFunctionCall();
@@ -422,6 +424,11 @@ namespace silverfish::native_shop_view
             return;
         }
         installed.store(true, std::memory_order_release);
+    }
+
+    bool observes_stock_saves()
+    {
+        return installed.load(std::memory_order_acquire);
     }
 
     void uninstall_hooks()

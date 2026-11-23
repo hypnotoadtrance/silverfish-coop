@@ -21,6 +21,7 @@ import time
 import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
+from . import native_finite_shop
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from . import native_board_contract
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
@@ -2332,6 +2333,11 @@ class Bridge:
                 elif fields[0] == "native-bag-projection-interaction" and len(fields) == 6:
                     data["native_bag_projection_interaction"] = {"map": fields[1], "epoch": fields[2], "bag": fields[3],
                                                                  "sequence": int(fields[4]), "entry": fields[5]}
+                elif fields[0] == "native-finite-shop-stock-revision" and len(fields) == 4:
+                    key = native_finite_shop.STOCK_REVISION
+                    if key in data:
+                        raise ValueError("Duplicate stock merchant revision")
+                    data[key] = native_finite_shop.parse_stock_revision(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-finite-shop" and len(fields) == 10:
                     data["native_finite_shop"] = parse_finite_shop_summary(fields)
                 elif fields[0] == "native-finite-shop-item" and len(fields) in {6, 11, 12} and "native_finite_shop" in data:

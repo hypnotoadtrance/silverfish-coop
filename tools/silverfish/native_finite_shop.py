@@ -29,6 +29,19 @@ MERCHANTS = {
 }
 ACTIONS = ("native-finite-shop-list", "native-finite-shop-buy", "native-finite-shop-sale-quote", "native-finite-shop-sell")
 MAX_PRICE = (1 << 31) - 1
+STOCK_REVISION = "native_finite_shop_stock_revision"
+
+
+def valid_stock_revision(value) -> bool:
+    return type(value) is int and 0 < value < 2**53
+
+
+def parse_stock_revision(fields, phase, area) -> dict:
+    _, destination, actor, value = fields
+    if (phase != "hosting" or destination != area or MERCHANTS.get(area) != actor
+            or not value.isascii() or not value.isdecimal() or len(value) > 16 or not valid_stock_revision(int(value))):
+        raise ValueError("Invalid stock merchant revision")
+    return {"map": area, "actor": actor, "revision": int(value)}
 
 
 def parse_summary(fields: list[str]) -> dict:
@@ -160,6 +173,9 @@ async def perform(host, bridge, character: str, action: str, target: str | None,
         raise RuntimeError("The stock offer listing changed funds")
     host.last_game, host.last_seen = snapshot, time.monotonic()
     if listing_only:
+        revision = snapshot.get(STOCK_REVISION, {})
+        if (revision.get("map"), revision.get("actor")) == (area, listing["actor"]):
+            listing = dict(listing, stock_revision=revision["revision"])
         return {"native_finite_shop": listing}
     if quote_only:
         return {"native_finite_sale_quote": listing}

@@ -451,14 +451,13 @@ function view.command(fields, state, phase)
             or fields[4] ~= current.profile.map or not session.screen or session.state ~= "ready" then
             error("The stock shop refresh does not match the active screen", 0)
         end
-        local manager = session.screen.ItemManager
-        local menu = manager.ItemContextMenu
-        if stock.present(session, true) and manager.HoldingItem == false and manager.IsTakingItem == false
-            and (not valid(menu) or not menu:IsVisible()) then
-            SilverfishSetNativeShopScreen(session.screen:GetAddress(), false)
-            request("open", "pending", 0)
+        if not stock.idle(session) then return "stock shop refresh deferred" end
+        if not SilverfishSetNativeShopScreen(session.screen:GetAddress(), false) then
+            return "stock shop refresh deferred"
         end
-        return "stock shop refresh checked"
+        request("open", "pending", 0)
+        if session.state ~= "pending" then error("The stock shop refresh could not queue a request", 0) end
+        return "stock shop refresh queued"
     end
     local render_with_event = page_render or stock_render
     local tokened = render_with_event or (unavailable and #fields == 5)

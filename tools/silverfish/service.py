@@ -959,6 +959,9 @@ class Host:
         balance = self.last_game.get("native_wallet")
         if self.native_zones and type(balance) is int:
             view["shared_wallet"] = balance
+        merchant_revision = self.last_game.get(native_finite_shop.STOCK_REVISION)
+        if merchant_revision and merchant_revision["map"] == self.last_game.get("map") and not self.transitioning:
+            view[native_finite_shop.STOCK_REVISION] = {**merchant_revision, "epoch": self.zone_epoch}
         view["native_backpacks"] = native_inventory_death.visible_bags(self.party)
         if self.last_game.get(native_guest_drop_record.CAPABILITY) == 1:
             view[native_guest_drop_record.CAPABILITY] = 1
