@@ -735,6 +735,7 @@ async def verify_resident_npc_override(host: Seat, guest: Seat, _pawn: str) -> d
         return await portable_probe_command(seat.bridge, "portable-npc-override", request)
 
     checkpoint = campaign_save_hashes(host.campaign)
+    assert await command(guest, "census") == "empty", "A drone already existed on the guest before the test spawn"
     drone = await command(host, "spawn")
     async with asyncio.timeout(8):
         while (observed := await command(guest, "observe", drone)) == "absent":
@@ -742,17 +743,19 @@ async def verify_resident_npc_override(host: Seat, guest: Seat, _pawn: str) -> d
     before = float(await command(host, "observe", drone))
     assert float(observed) == before > 0, (before, observed)
     assert await command(guest, "guest-damage", drone) == "damage denied"
+    guest_drone = await command(guest, "census")
+    assert guest_drone.startswith("NPC_Drone_C /Game/"), guest_drone
     assert float(await command(host, "observe", drone)) == before
     total = float(await command(host, "host-damage", drone))
     assert total >= before
     async with asyncio.timeout(8):
-        while await command(guest, "observe", drone) != "absent":
+        while await command(guest, "death", drone) != "ragdoll" or await command(host, "death", drone) != "ragdoll":
             await asyncio.sleep(.1)
-    assert await command(host, "observe", drone) == "absent"
     assert campaign_save_hashes(host.campaign) == checkpoint, "Drone damage caused an early checkpoint"
-    return {"resident_npc_override": {"stock_drone": drone, "hit_points_before": before,
+    return {"resident_npc_override": {"host_stock_drone": drone, "guest_stock_drone": guest_drone,
+                                      "hit_points_before": before,
                                       "guest_local_damage_denied": True, "authority_damage": total,
-                                      "destroyed_on_both": True, "campaign_checkpoint_unchanged": True}}
+                                      "ragdoll_on_both": True, "campaign_checkpoint_unchanged": True}}
 
 
 async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:

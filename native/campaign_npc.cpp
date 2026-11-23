@@ -72,6 +72,12 @@ namespace
     constexpr auto perceive_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:Proscess_TargetPerception");
     constexpr auto melee_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:ResolveMelee");
     constexpr auto player_damage_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:DealDamage");
+    constexpr auto drone_base = STR("/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C");
+    constexpr auto drone_damage_path = STR("/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C:DealDamage");
+    constexpr auto drone_die_path = STR("/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C:Die");
+    constexpr auto turret_base = STR("/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C");
+    constexpr auto turret_damage_path = STR("/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C:DealDamage");
+    constexpr auto turret_die_path = STR("/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C:Die");
     constexpr auto npc_die_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:Die");
     constexpr auto npc_damage_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:DealDamage");
     constexpr auto npc_death_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:ResolveDeath");
@@ -1521,11 +1527,21 @@ namespace
             || !live(receiver) || byte_field(receiver, STR("Role")) != 1 ||
             !bool_field(receiver, STR("bReplicates"), true) || (frame && frame->Object() != receiver)) return false;
 
-        const auto* base = find<U::UClass>(npc_base);
         const auto* owner = U::Cast<U::UClass>(function->GetOuterPrivate());
         const auto* type = receiver->GetClassPrivate();
-        if (!base || !owner || !owner->IsChildOf(base) || !type || !type->IsChildOf(owner)) return false;
-        const auto* declaration = find<U::UFunction>(damage ? npc_damage_path : name == die_name ? npc_die_path : npc_death_path);
+        if (!owner || !type || !type->IsChildOf(owner)) return false;
+
+        const U::UFunction* declaration{};
+        if (const auto* base = find<U::UClass>(npc_base); base && owner->IsChildOf(base))
+            declaration = find<U::UFunction>(damage ? npc_damage_path : name == die_name ? npc_die_path : npc_death_path);
+        else if (name != death_name)
+        {
+            // The flying stock drone and turret families have separate Blueprint roots.
+            if (const auto* drone = find<U::UClass>(drone_base); drone && owner->IsChildOf(drone))
+                declaration = find<U::UFunction>(damage ? drone_damage_path : drone_die_path);
+            else if (const auto* turret = find<U::UClass>(turret_base); turret && owner->IsChildOf(turret))
+                declaration = find<U::UFunction>(damage ? turret_damage_path : turret_die_path);
+        }
         if (!declaration) return false;
         // Some stock NPCs override the damage or death graph. Follow its
         // reflected parent function so an unrelated Blueprint event stays unaffected.

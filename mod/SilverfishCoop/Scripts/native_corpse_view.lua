@@ -1,8 +1,9 @@
 local corpses = {}
 
 local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
+local drone_path = "/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C"
 local marker_path = "/Script/Engine.TargetPoint"
-local npc_class, marker_class, clock, death_hook
+local npc_class, marker_class, clock, death_hook, drone_death_hook
 local active_world, markers, numbered, mirrors, ended, anchors = nil, {}, {}, {}, {}, {}
 local pending = {}
 local next_sample, corpse_number = 0, 0
@@ -16,6 +17,15 @@ end
 
 local function same(first, second)
     return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function is_drone(actor)
+    local class = actor:GetClass()
+    return class:GetName() == "NPC_Drone_C" and class:GetFullName() == "BlueprintGeneratedClass " .. drone_path
+end
+
+local function supported_corpse(actor)
+    return valid(actor) and ((valid(npc_class) and actor:IsA(npc_class)) or is_drone(actor))
 end
 
 local function world_driver(actor, guest)
@@ -83,7 +93,7 @@ local function marker_number(marker)
 end
 
 function corpses.binding(actor, guest)
-    if not valid(actor) or not valid(npc_class) or not actor:IsA(npc_class)
+    if not supported_corpse(actor)
         or not same(world_driver(actor, guest), active_world) or actor.Alive ~= false
         or actor:IsActorBeingDestroyed() then return end
     local address = actor:GetAddress()
@@ -139,7 +149,7 @@ end
 local function apply(marker, world)
     if not valid(marker) or not same(marker:GetWorld(), world) then return true end
     local actor = marker:GetOwner()
-    if not valid(actor) or not actor:IsA(npc_class) or not same(actor:GetWorld(), world)
+    if not supported_corpse(actor) or not same(actor:GetWorld(), world)
         or actor:IsActorBeingDestroyed() then return true end
     -- The owner, simulated role and first movement update can arrive in separate frames.
     if marker:GetLocalRole() ~= 1 or actor:GetLocalRole() ~= 1 or not same(world_driver(marker, true), world)
@@ -160,7 +170,12 @@ local function apply(marker, world)
     mesh:SetSimulatePhysics(true)
     mesh:SetAnimationMode(2, true)
     actor.Alive = false
-    actor.Agro = false
+    if is_drone(actor) then
+        local engine_sound = actor.EngineSound
+        if valid(engine_sound) and same(engine_sound:GetOwner(), actor) then engine_sound:Stop() end
+    else
+        actor.Agro = false
+    end
     actor.Tags = {FName("Dead", EFindName.FNAME_Find)}
     return true
 end
@@ -219,6 +234,13 @@ function corpses.start(role)
             pending[marker:GetAddress()] = marker
         end
     end)
+    RegisterBeginPlayPostHook(function(context)
+        if drone_death_hook or role() ~= "host" then return end
+        local actor = context:get()
+        if not valid(actor) or not is_drone(actor) then return end
+        RegisterHook(drone_path .. ":Die", function(victim) pcall(publish, victim:get()) end)
+        drone_death_hook = true
+    end)
     RegisterEndPlayPreHook(function(context)
         if next(markers) == nil and next(mirrors) == nil and next(pending) == nil then return end
         local actor = context:get()
@@ -243,7 +265,6 @@ function corpses.sync(state, phase)
     end
     if not valid(world) then return end
     if not valid(npc_class) then npc_class = StaticFindObject(npc_path) end
-    if not valid(npc_class) then return end
     if hosting and not death_hook and valid(StaticFindObject(npc_path .. ":ResolveDeath")) then
         -- UE4SS invokes hooks on Blueprint functions after the original script.
         RegisterHook(npc_path .. ":ResolveDeath", function(context) pcall(publish, context:get()) end)

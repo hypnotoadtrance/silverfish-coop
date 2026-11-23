@@ -21,8 +21,18 @@ local function run(action, actor_path)
     assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn:GetWorld(), world), "local stock pawn unavailable")
     local host = pawn:HasAuthority()
     local class = StaticFindObject(class_path)
+    local drone
+    if not host or action == "census" or action == "spawn" then
+        for _, candidate in ipairs(FindAllOf("NPC_Drone_C") or {}) do
+            if valid(candidate) and not candidate:IsActorBeingDestroyed() and same(candidate:GetWorld(), world) then
+                assert(not drone, "unexpected stock drone already in the test world")
+                drone = candidate
+            end
+        end
+    end
+    if action == "census" then return drone and drone:GetFullName() or "empty" end
     if action == "spawn" then
-        assert(host and not valid(authority_drone), "only the isolated host may spawn one fixture drone")
+        assert(host and not drone and not valid(authority_drone), "only the isolated host may spawn one fixture drone")
         if not valid(class) then LoadAsset(class_path); class = StaticFindObject(class_path) end
         assert(valid(class), "stock drone class unavailable")
         local origin = pawn:K2_GetActorLocation()
@@ -43,20 +53,26 @@ local function run(action, actor_path)
 
     assert(actor_path and actor_path:match("^" .. map:gsub("%.", "%%.") .. ":PersistentLevel%.NPC_Drone_C_%d+$"),
         "expected the exact test drone's path")
-    local actor = StaticFindObject(actor_path)
+    -- Unreal may give a dynamically replicated actor a different name on the guest.
+    local actor = host and StaticFindObject(actor_path) or drone
     if not valid(actor) or actor:IsActorBeingDestroyed() then return "absent" end
     assert(same(actor:GetClass(), class) and same(actor:GetWorld(), world) and actor.bReplicates
         and actor:GetLocalRole() == (host and 3 or 1), "expected the enrolled stock drone")
     if host then assert(same(actor, authority_drone), "the target is outside the fixture") end
     local before = actor.Health
     if action == "observe" then return ("%.6f"):format(before) end
+    if action == "death" then
+        local mesh = actor.Mesh
+        assert(valid(mesh) and same(mesh:GetOwner(), actor), "stock drone mesh unavailable")
+        return actor.Alive == false and mesh:IsAnySimulatingPhysics() and "ragdoll" or "waiting"
+    end
 
     assert((action == "guest-damage" and not host) or (action == "host-damage" and host), "wrong damage test seat")
     assert(before > 0, "stock drone was already dead")
     local total, lethal = {}, {}
     actor:DealDamage({[damage_key]=1000}, {}, pawn, {X=0,Y=0,Z=0}, false, total, lethal)
     if not host then
-        assert(total.TotalDamage == 0 and lethal.IsLethal == false and actor.Health == before,
+        assert(total.TotalDamage == 0 and lethal.IsLethal == false and actor.Health == before and actor.Alive,
             ("stock drone override dealt damage locally: %s %s (%.2f to %.2f)"):format(
                 tostring(total.TotalDamage), tostring(lethal.IsLethal), before, actor.Health))
         return "damage denied"
