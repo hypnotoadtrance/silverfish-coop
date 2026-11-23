@@ -142,7 +142,8 @@ class MamaDialogueTests(unittest.IsolatedAsyncioTestCase):
             party={"players": {"guest": {"downed": False}}, "wipe": None, "pending_spawns": {}},
             native_recipients=lambda: {"guest": {"connected": True, "pawn": PAWN}}, control=SimpleNamespace(generation="boot", event=Mock()),
             zone_epoch="visit", native_zones=True, native_guest=True, native_profile=True, transitioning=False, stopping=False,
-            native_checkpoint_unsafe=False, last_game=game, last_seen=time.monotonic(), checkpoint_native=AsyncMock(return_value=5),
+            native_checkpoint_unsafe=False, last_game=game, last_seen=time.monotonic(), pending_host_save=None,
+            checkpoint_native=AsyncMock(),
         )
         meet, rev_orders, commands = 0, 0, []
         connection = "TestConnection@1"
@@ -171,9 +172,12 @@ class MamaDialogueTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(party.RuleError, "intro_questions_hidden"):
             await reply(dialogue.OPEN, dialogue.MAMA, "1")
         self.assertEqual(meet, 0)
+        self.assertIsNone(host.pending_host_save)
         rev_orders = 0
+        host.pending_host_save = True
         opened = await reply(dialogue.OPEN, dialogue.MAMA, "1")
         self.assertEqual((opened["row"], opened["effect"]), (dialogue.MAMA_FIRST, "opened-first"))
+        self.assertIs(host.pending_host_save, True)
         with self.assertRaisesRegex(party.RuleError, "choice_unavailable"):
             await reply(dialogue.CHOOSE, opened["token"] + "@5", "2")
         rev_orders = 1
@@ -189,3 +193,5 @@ class MamaDialogueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(commands.count(dialogue.MAMA_TRADE), 1)
         again = await reply(dialogue.OPEN, dialogue.MAMA, "6")
         self.assertEqual((again["row"], again["progress"]["meet"]), (dialogue.MAMA_ROOT, 1))
+        self.assertIs(host.pending_host_save, True)
+        host.checkpoint_native.assert_not_awaited()

@@ -31,7 +31,7 @@ class ShopKeepReceptionTests(unittest.IsolatedAsyncioTestCase):
                                                       "wipe": None, "pending_spawns": {}},
             control=SimpleNamespace(generation="boot", event=Mock()), zone_epoch="zone", native_zones=True,
             native_guest=True, native_profile=True, transitioning=False, stopping=False, native_checkpoint_unsafe=False,
-            last_game=game, last_seen=time.monotonic(), checkpoint_native=AsyncMock(side_effect=(20, 21, 22, 23)),
+            last_game=game, last_seen=time.monotonic(), pending_host_save=None, checkpoint_native=AsyncMock(),
         )
         meet, granted = 0, []
         connections = {value["pawn"]: f"NetConnection {name}@1" for name, value in members.items()}
@@ -58,10 +58,16 @@ class ShopKeepReceptionTests(unittest.IsolatedAsyncioTestCase):
 
         operation = uuid.uuid4().hex
         first = await send("first", dialogue.OPEN, dialogue.SHOPKEEP_PROFILE, operation)
-        self.assertEqual((first["row"], first["effect"], first["revision"]), (dialogue.SHOPKEEP_FIRST, "opened-first", 21))
+        self.assertEqual((first["row"], first["effect"], first["revision"]), (dialogue.SHOPKEEP_FIRST, "opened-first", None))
+        self.assertIs(host.pending_host_save, False)
+        self.assertFalse(host.native_checkpoint_unsafe)
         self.assertEqual(await send("first", dialogue.OPEN, dialogue.SHOPKEEP_PROFILE, operation), first)
+        self.assertEqual(sum(call.args[0] == dialogue.SHOPKEEP_OPEN for call in bridge.command.await_args_list), 1)
+        host.pending_host_save = None  # A normal checkpoint can clear the staged flag before the next visit.
         second = await send("second", dialogue.OPEN, dialogue.SHOPKEEP_PROFILE)
         self.assertEqual((second["row"], second["effect"], second["progress"]["meet"]), (dialogue.SHOPKEEP_ROOT, "opened-repeat", 1))
+        self.assertIsNone(second["revision"])
+        self.assertIsNone(host.pending_host_save)
         with self.assertRaisesRegex(ValueError, "choice_expired"):
             await send("second", dialogue.CHOOSE, first["token"] + "@1")
         with self.assertRaisesRegex(ValueError, "choice_unavailable"):
@@ -69,8 +75,33 @@ class ShopKeepReceptionTests(unittest.IsolatedAsyncioTestCase):
         accepted = await send("first", dialogue.CHOOSE, first["token"] + "@1")
         self.assertEqual((accepted["row"], accepted["effect"]), (dialogue.SHOPKEEP_ROOT, "cash-granted"))
         self.assertEqual(granted, [members["first"]["pawn"]])
-        self.assertEqual(host.checkpoint_native.await_count, 4)
+        host.checkpoint_native.assert_not_awaited()
         self.assertEqual(meet, 1)
+
+    async def test_unverified_stock_open_stops_without_marking_a_save(self):
+        game = {"state": "hosting", "map": dialogue.SHOPKEEP}
+        host = SimpleNamespace(
+            native_recipients=lambda: {"guest": {"connected": True, "pawn": PAWN}},
+            party={"players": {"guest": {"downed": False}}, "wipe": None, "pending_spawns": {}},
+            control=SimpleNamespace(generation="boot", event=Mock()), zone_epoch="zone", native_zones=True,
+            native_guest=True, native_profile=True, transitioning=False, stopping=False, native_checkpoint_unsafe=False,
+            last_game=game, last_seen=time.monotonic(), pending_host_save=None, checkpoint_native=AsyncMock(),
+        )
+        unverified = parse(1, "opened-first")
+        unverified["progress"]["cash"] += 1
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=(
+            {**game, "native_dialogue_stock": parse(0, "read")},
+            {**game, "native_dialogue_stock": unverified},
+        )))
+        sessions = dialogue.DialogueSessions(shopkeep=True)
+        with self.assertRaisesRegex(RuntimeError, "first-meet flag did not verify"):
+            await sessions.act(host, bridge, "guest", dialogue.OPEN, dialogue.SHOPKEEP_PROFILE, uuid.uuid4().hex)
+        self.assertTrue(host.native_checkpoint_unsafe)
+        self.assertTrue(host.stopping)
+        self.assertFalse(host.transitioning)
+        self.assertIsNone(host.pending_host_save)
+        host.checkpoint_native.assert_not_awaited()
+        host.control.event.assert_not_called()
 
     async def test_merchant_handoff_requires_native_response_and_verified_view(self):
         number, token = 6, "1" * 32

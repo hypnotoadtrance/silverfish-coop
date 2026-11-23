@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from hashlib import file_digest
 import json
 from pathlib import Path
 import subprocess
@@ -77,17 +78,38 @@ async def verify(work: Path, original: Path):
                    timeout=75)
         return state
 
+    def save_fingerprints():
+        paths = list((root / "save").glob("campaign*.json"))
+        for directory in (root, guest_run.parent):
+            paths.extend((directory / "game-user" / "Saved" / "SaveGames").rglob("*.sav"))
+        fingerprints = {}
+        for path in paths:
+            with path.open("rb") as stream:
+                fingerprints[str(path.relative_to(work))] = {
+                    "sha256": file_digest(stream, "sha256").hexdigest(),
+                    "mtime_ns": path.stat().st_mtime_ns,
+                }
+        return fingerprints
+
     async def reception(ordinal, entry, key):
         await action(host_run, dialogue.APPROACH, target="guest")
         preopen = await action(guest_run, "native-finite-shop-list", expected=False)
         assert preopen["error"] == "finite_shop_refused_shopkeep_stock_dialogue_required", preopen
         await wait(guest_run, lambda state: state.get("game", {}).get("native_dialogue_view", {}).get("state") == "armed")
+        before_open = save_fingerprints()
+        assert any(path.endswith(".sav") for path in before_open), before_open
+        assert any(path.endswith("campaign.json") for path in before_open), before_open
         pressed = (await action(guest_run, dialogue.FIXTURE, target="open"))["native_dialogue_view"]
         opened = await wait_event(guest_run, "native_dialogue_interaction",
                                   lambda event: event.get("generation") == key and event.get("sequence") == pressed["sequence"])
         assert (opened["profile"], opened["row"], opened["effect"]) == (
             dialogue.SHOPKEEP_PROFILE, entry, "opened-first" if entry == dialogue.SHOPKEEP_FIRST else "opened-repeat"
         ), opened
+        after_open = save_fingerprints()
+        evidence.setdefault("reception_save_canaries", {})[opened["effect"]] = {
+            "before": before_open, "after": after_open,
+        }
+        assert after_open == before_open, f"{opened['effect']} changed a campaign save"
         unrelated = await action(guest_run, dialogue.FIXTURE, target="4", expected=False)
         assert unrelated["ok"] is False, unrelated
         chosen = (await action(guest_run, dialogue.FIXTURE, target=ordinal))["native_dialogue_view"]
@@ -123,8 +145,21 @@ async def verify(work: Path, original: Path):
         evidence["stock_route"] = {"source": NORTHEAST_RAIL, "arrival": SHOPKEEP, "entry": "ShopKeep", "character": character}
         await action(host_run, "native-finite-shop-wallet-fixture", amount=100_000)
         generation = (await wait(guest_run, lambda state: bool(state.get("generation"))))["generation"]
+        save_file = root / "save" / "campaign.json"
+        checkpoint_before_open = json.loads(save_file.read_text(encoding="utf-8"))
+        frame_before_open = native_host_save.verify(root / "game-user", checkpoint_before_open["world"])
+        save_dir = native_host_save.directory(root / "game-user")
+        assert stock_flags(save_dir, frame_before_open, SHOPKEEP).get("Meet_ShopKeep", 0) == 0
         opened = await reception("1", dialogue.SHOPKEEP_FIRST, generation)
         evidence["stock_reception"] = opened
+        assert json.loads(save_file.read_text(encoding="utf-8"))["revision"] == checkpoint_before_open["revision"]
+        saved_revision = (await action(host_run, "checkpoint"))["revision"]
+        explicit = json.loads(save_file.read_text(encoding="utf-8"))
+        assert explicit["revision"] == saved_revision > checkpoint_before_open["revision"], explicit["revision"]
+        frame = native_host_save.verify(root / "game-user", explicit["world"])
+        assert stock_flags(save_dir, frame, SHOPKEEP).get("Meet_ShopKeep") == 1
+        evidence["explicit_save"] = {"prior_revision": checkpoint_before_open["revision"], "revision": saved_revision,
+                                     "stock_meet_flag": 1}
         listing = (await action(guest_run, "native-finite-shop-list"))["native_finite_shop"]
         assert (listing["map"], listing["actor"], listing["wallet_before"], listing["wallet_after"]) == (
             SHOPKEEP, dialogue.SHOPKEEP_COUNTER, 100_000, 100_000), listing
@@ -147,7 +182,7 @@ async def verify(work: Path, original: Path):
 
         await stop(host_run, authority)
         await stop(guest_run, guest)
-        checkpoint = json.loads((root / "save" / "campaign.json").read_text(encoding="utf-8"))
+        checkpoint = json.loads(save_file.read_text(encoding="utf-8"))
         host_frame = native_host_save.verify(root / "game-user", checkpoint["world"])
         guest_frame = native_host_save.guest_record(root / "game-user", checkpoint["characters"][character]["state"]["native_guest_save"],
                                                   character)

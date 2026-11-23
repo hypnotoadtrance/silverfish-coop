@@ -380,7 +380,6 @@ class DialogueSessions:
             raise party.RuleError("native_dialogue_mama_intro_questions_hidden")
         host.transitioning = True
         try:
-            await host.checkpoint_native(bridge)
             member = host.native_recipients().get(character, {})
             if (not member.get("connected") or member.get("pawn") != scope[3] or host.stopping
                     or (host.control.generation, host.zone_epoch, host.last_game.get("map")) != scope[:3]):
@@ -397,10 +396,11 @@ class DialogueSessions:
             if (observed["connection"] != scope[4]
                     or observed["progress"] != dict(before, meet=max(before["meet"], 1), effect=marker)):
                 raise RuntimeError("The stock first-meet flag did not verify")
-            revision = await host.checkpoint_native(bridge)
+            if first:
+                host.pending_host_save = bool(host.pending_host_save)
             host.native_checkpoint_unsafe = False
-            host.control.event("native_dialogue_committed", revision=revision, effect=marker, character=character)
-            return observed, first_row if first else profile.root, marker, revision
+            host.control.event("native_dialogue_accepted", effect=marker, character=character)
+            return observed, first_row if first else profile.root, marker
         except (OSError, RuntimeError, ValueError, KeyError, asyncio.CancelledError):
             if host.native_checkpoint_unsafe:
                 host.stopping = True
@@ -432,7 +432,7 @@ class DialogueSessions:
                 raise party.RuleError("native_dialogue_profile_unavailable")
             destination = profile.root
             if profile.id in MEET_PROFILES:
-                stock, destination, effect, revision = await self._open_meet(host, bridge, character, scope, stock, profile)
+                stock, destination, effect = await self._open_meet(host, bridge, character, scope, stock, profile)
                 now = time.monotonic()
             elif profile.id == MOSBY:
                 before = stock["progress"]
