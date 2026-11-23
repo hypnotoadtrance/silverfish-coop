@@ -256,6 +256,26 @@ def fixture_selection(target: str | None, area: str) -> tuple[str, str | None]:
         return "guest", target
     return target, default_crate(area)
 
+
+def _opening_arguments(game, crate, lid, angle):
+    scope = game.get("native_loot_crates", {}).get(crate, {})
+    if ((scope.get("map"), scope.get("crate")) != (game.get("map"), crate)
+            or scope.get("state") not in {"ready", "exhausted"}):
+        return None
+    if lid and not valid_lid_angle(lid, angle):
+        raise RuntimeError("The committed stock lid pose is invalid")
+    if scope.get("state") == "exhausted" and (not lid or _same_lid_angle(lid, scope, angle)):
+        return None
+    return (str(angle),) if lid else ()
+
+
+def _verify_opened(snapshot, area, crate, lid, angle):
+    proof = snapshot.get("native_loot_crates", {}).get(crate, {})
+    if (snapshot.get("map") != area or (proof.get("map"), proof.get("crate"), proof.get("state")) !=
+            (area, crate, "exhausted") or (lid and not _same_lid_angle(lid, proof, angle))):
+        raise RuntimeError("The exact stock crate did not reflect its committed roll")
+
+
 async def project_opened(bridge, game: dict, rolls: dict) -> dict:
     """Project saved open crates in this map without replaying stock rolls."""
     area = game.get("map")
@@ -263,23 +283,106 @@ async def project_opened(bridge, game: dict, rolls: dict) -> dict:
     for crate, roll in _rolls_in_area(rolls or {}, area).items():
         if crate in replenished:
             continue
-        scope = game.get("native_loot_crates", {}).get(crate, {})
-        if (scope.get("map"), scope.get("crate")) != (area, crate) or scope.get("state") not in {"ready", "exhausted"}:
-            continue
         lid = random_lid(crate)
         angle = roll.get(lid[0]) if lid else None
-        if lid and not valid_lid_angle(lid, angle):
-            raise RuntimeError("The committed stock lid pose is invalid")
-        if scope.get("state") == "exhausted" and (not lid or _same_lid_angle(lid, scope, angle)):
+        arguments = _opening_arguments(game, crate, lid, angle)
+        if arguments is None:
             continue
-        arguments = (str(angle),) if lid else ()
         snapshot = await bridge.command("native-loot-crate-project", "exhausted", crate, *arguments, timeout=4)
-        proof = snapshot.get("native_loot_crates", {}).get(crate, {})
-        if (snapshot.get("map") != area or (proof.get("map"), proof.get("crate"), proof.get("state")) !=
-                (area, crate, "exhausted") or (lid and not _same_lid_angle(lid, proof, angle))):
-            raise RuntimeError("The exact stock crate did not reflect its committed roll")
+        _verify_opened(snapshot, area, crate, lid, angle)
         game = snapshot
     return game
+
+
+class GuestCrateProjection:
+    """Restore accepted lid poses from fresh host rolls between guest input passes."""
+
+    attempts_per_turn = 2
+    turn_seconds = .150
+    retry_seconds = .750
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self.scope = None
+        self.last_attempt = None
+        self.prioritized_sequence = 0
+        self.deferred = {}
+
+    def _defer(self, client, crate, desired, error) -> None:
+        reason = str(error)[:200] or "stock lid readback timed out"
+        previous = self.deferred.get(crate)
+        self.deferred[crate] = (desired, time.monotonic() + self.retry_seconds, reason)
+        if previous is None or (previous[0], previous[2]) != (desired, reason):
+            client.control.event("native_loot_guest_lid_deferred", crate=crate, reason=reason)
+
+    async def sync(self, client) -> None:
+        game, now = client.last_game, time.monotonic()
+        area = game.get("map")
+        pawn = game.get("pawns", {}).get("local", {}).get("name")
+        scope = (client.host_session, client.zone_epoch, area, pawn)
+        if (client.stopping or client.needs_travel or client.server_transitioning or not client.transport.game_access
+                or game.get("state") != "connected" or area != client.expected_zone or not all(scope)):
+            self.reset()
+            return
+        if scope != self.scope:
+            self.reset()
+            self.scope = scope
+        if now - client.gameplay_seen >= 3:
+            return
+
+        rolls = _rolls_in_area(client.gameplay.get(STATE_KEY, {}), area)
+        for crate in self.deferred.keys() - rolls.keys():
+            del self.deferred[crate]
+        order = list(rolls)
+        if self.last_attempt in rolls:
+            start = order.index(self.last_attempt) + 1
+            order = order[start:] + order[:start]
+        # A fresh local press should see its confirmed lid before the restored backlog.
+        pressed = interaction(game, self.prioritized_sequence)
+        if pressed and pressed[1] in rolls:
+            self.prioritized_sequence, crate = pressed
+            order.remove(crate)
+            order.insert(0, crate)
+
+        deadline = now + self.turn_seconds
+        attempts = 0
+        for crate in order:
+            now = time.monotonic()
+            if attempts >= self.attempts_per_turn or now >= deadline or now - client.gameplay_seen >= 3:
+                break
+            lid = random_lid(crate)
+            roll = rolls[crate]
+            angle = roll.get(lid[0]) if lid else None
+            desired = (roll.get("id"), angle)
+            retry = self.deferred.get(crate)
+            if retry and retry[0] == desired and now < retry[1]:
+                continue
+            try:
+                arguments = _opening_arguments(game, crate, lid, angle)
+                if arguments is None:
+                    self.deferred.pop(crate, None)
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                attempts += 1
+                self.last_attempt = crate
+                # Include queue waiting as well as the native acknowledgement in the turn's budget.
+                async with asyncio.timeout(remaining):
+                    snapshot = await client.bridge.command(
+                        "native-loot-crate-project", "exhausted", crate, *arguments, timeout=remaining)
+                if (snapshot.get("state"), snapshot.get("map"), snapshot.get("pawns", {}).get("local", {}).get("name")) != (
+                        "connected", area, pawn):
+                    client.last_game = snapshot
+                    self.reset()
+                    return
+                _verify_opened(snapshot, area, crate, lid, angle)
+                client.last_game = game = snapshot
+                self.deferred.pop(crate, None)
+            except (OSError, RuntimeError) as error:
+                self._defer(client, crate, desired, error)
 
 
 async def _project_container_signal(bridge, game, published, frame, command, flag):

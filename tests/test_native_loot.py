@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import time
 import unittest
@@ -699,6 +700,139 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(final["native_loot_crates"][crate][lids[crate][0]] == lids[crate][1]
                             for crate in local_crates if crate in lids))
         self.assertEqual(final["native_loot_crates"][BRIDGE_CRATE]["state"], "ready")
+
+    def crate_guest(self, count):
+        crates = [crate for crate, area in native_loot.CRATES.items() if area == CROSSROADS][:count]
+        rolls, observed = {}, {}
+        for index, crate in enumerate(crates, start=1):
+            rolls[crate] = {"id": f"{index:032x}", "map": CROSSROADS, "crate": crate}
+            if lid := random_lid(crate):
+                rolls[crate][lid[0]] = (lid[1] + lid[2]) / 2
+            observed[crate] = {"map": CROSSROADS, "crate": crate, "state": "ready"}
+        client = SimpleNamespace(
+            stopping=False, needs_travel=False, server_transitioning=False, host_session="a" * 32,
+            zone_epoch="b" * 32, expected_zone=CROSSROADS, transport=SimpleNamespace(game_access=True),
+            last_game=self.game(CROSSROADS, state="connected", native_loot_crates=dict(observed)),
+            gameplay={native_loot.STATE_KEY: rolls}, gameplay_seen=time.monotonic(), control=Mock(),
+        )
+        return client, crates, observed
+
+    async def test_guest_lid_restoration_yields_between_bounded_passes_and_finishes(self):
+        client, crates, observed = self.crate_guest(5)
+        local_crate = crates[3]
+        expected = [local_crate, *crates[:3], crates[4]]
+        client.last_game["native_loot_crate_interactions"] = [
+            {"map": CROSSROADS, "crate": local_crate, "pawn": PAWN, "sequence": 7, "entry": "stock"},
+        ]
+        called, presses = [], []
+
+        async def project(action, status, crate, *pose, timeout):
+            self.assertEqual((action, status), ("native-loot-crate-project", "exhausted"))
+            self.assertGreater(timeout, 0)
+            called.append(crate)
+            if crate == local_crate:
+                presses.append("F")
+            observed[crate] = dict(observed[crate], state=status)
+            if lid := random_lid(crate):
+                observed[crate][lid[0]] = float(pose[0])
+            return dict(client.last_game, native_loot_crates=dict(observed))
+
+        client.bridge = SimpleNamespace(command=AsyncMock(side_effect=project))
+        view = native_loot.GuestCrateProjection()
+        await view.sync(client)
+        self.assertEqual(called, expected[:2])
+        self.assertEqual(presses.pop(0), "F")
+        await view.sync(client)
+        self.assertEqual(called, expected[:4])
+        await view.sync(client)
+        await view.sync(client)
+        self.assertEqual(called, expected)
+        self.assertTrue(all(row["state"] == "exhausted" for row in client.last_game["native_loot_crates"].values()))
+
+    async def test_slow_guest_lid_yields_and_a_ready_sibling_goes_first_next_turn(self):
+        client, crates, observed = self.crate_guest(3)
+        cancelled = asyncio.Event()
+
+        async def project(_action, status, crate, *pose, timeout):
+            if crate == crates[0]:
+                try:
+                    await asyncio.Future()
+                finally:
+                    cancelled.set()
+            if lid := random_lid(crate):
+                observed[crate][lid[0]] = float(pose[0])
+            observed[crate] = dict(observed[crate], state=status)
+            return dict(client.last_game, native_loot_crates=dict(observed))
+
+        client.bridge = SimpleNamespace(command=AsyncMock(side_effect=project))
+        view = native_loot.GuestCrateProjection()
+        view.turn_seconds = .025
+        await asyncio.wait_for(view.sync(client), timeout=1)
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual([request.args[2] for request in client.bridge.command.await_args_list], crates[:1])
+        view.turn_seconds = .150
+        await view.sync(client)
+        self.assertEqual([request.args[2] for request in client.bridge.command.await_args_list], crates)
+        client.control.event.assert_called_once_with(
+            "native_loot_guest_lid_deferred", crate=crates[0], reason="stock lid readback timed out")
+
+    async def test_guest_refusals_coalesce_and_missing_stock_is_tried_when_it_arrives(self):
+        client, (refused, sibling, arriving), observed = self.crate_guest(3)
+        observed.pop(arriving)
+        client.last_game["native_loot_crates"] = dict(observed)
+        attempts = []
+
+        async def project(_action, status, crate, *pose, timeout):
+            attempts.append(crate)
+            if crate == refused and attempts.count(crate) <= 2:
+                if attempts.count(crate) == 1:
+                    raise RuntimeError("stock binding unavailable")
+                return dict(client.last_game, native_loot_crates=dict(observed))
+            if lid := random_lid(crate):
+                observed[crate][lid[0]] = float(pose[0])
+            observed[crate] = dict(observed[crate], state=status)
+            return dict(client.last_game, native_loot_crates=dict(observed))
+
+        client.bridge = SimpleNamespace(command=AsyncMock(side_effect=project))
+        view = native_loot.GuestCrateProjection()
+        now = client.gameplay_seen
+        with patch.object(native_loot, "time", SimpleNamespace(monotonic=lambda: now)):
+            await view.sync(client)
+            self.assertEqual(attempts, [refused, sibling])
+            self.assertEqual(client.last_game["native_loot_crates"][sibling]["state"], "exhausted")
+            await view.sync(client)
+            self.assertEqual(attempts, [refused, sibling])
+            observed[arriving] = {"map": CROSSROADS, "crate": arriving, "state": "ready"}
+            client.last_game["native_loot_crates"] = dict(observed)
+            await view.sync(client)
+            self.assertEqual(attempts, [refused, sibling, arriving])
+            now += view.retry_seconds + .01
+            await view.sync(client)
+            self.assertEqual(client.last_game["native_loot_crates"][refused]["state"], "ready")
+            self.assertIn("did not reflect", client.control.event.call_args.kwargs["reason"])
+            now += view.retry_seconds + .01
+            await view.sync(client)
+            self.assertEqual(attempts, [refused, sibling, arriving, refused, refused])
+            self.assertEqual(client.last_game["native_loot_crates"][refused]["state"], "exhausted")
+
+    async def test_guest_lid_visit_reset_retries_and_rejects_readback_from_another_pawn(self):
+        client, (first, sibling), observed = self.crate_guest(2)
+        bridge = client.bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            RuntimeError("stock lid declined"), RuntimeError("stock lid declined"),
+            dict(client.last_game, pawns={"local": {"name": "different native pawn"}},
+                 native_loot_crates={first: dict(observed[first], state="exhausted")}),
+        ]))
+        view = native_loot.GuestCrateProjection()
+        await view.sync(client)
+        await view.sync(client)
+        self.assertEqual(bridge.command.await_count, 2)
+        self.assertEqual(client.control.event.call_count, 2)
+        client.zone_epoch = "c" * 32
+        await view.sync(client)
+        self.assertEqual([request.args[2] for request in bridge.command.await_args_list], [first, sibling, first])
+        self.assertEqual(client.last_game["pawns"]["local"]["name"], "different native pawn")
+        self.assertIsNone(view.scope)
+        self.assertEqual(view.deferred, {})
 
     async def test_vehicle_lock_projection_applies_host_state_to_the_exact_active_vehicle(self):
         car = full_name(CROSSROADS, "StaticMeshActor_488", "Loot_Car_01_BP_C")

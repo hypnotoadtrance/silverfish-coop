@@ -40,6 +40,28 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.zone_epoch, "new")
         self.assertIsNone(client.snapshot_request)
 
+    async def test_lid_restoration_keeps_its_turn_during_other_projection_backoff(self):
+        client = self.guest(AsyncMock())
+        client.invite["native_loot_input"] = True
+        client.last_game = {"state": "connected", "map": "CrossRoads"}
+        attempts = []
+
+        async def other_projection(*_args, **_kwargs):
+            attempts.append("other")
+            raise RuntimeError("other projection unavailable")
+
+        async def lids(_client):
+            attempts.append("lids")
+
+        with (patch.object(service, "project_players", side_effect=other_projection) as other,
+              patch.object(client.crate_lids, "sync", side_effect=lids) as restore):
+            await client.project_gameplay()
+            await client.project_gameplay()
+
+        self.assertEqual(attempts, ["other", "lids", "lids"])
+        self.assertEqual(other.await_count, 1)
+        self.assertEqual(restore.await_args_list, [call(client), call(client)])
+
     async def test_aim_edges_request_immediately_and_unchanged_aim_keeps_the_snapshot_cadence(self):
         zone = "CrossRoads"
         aim = native_player_avatar.LOCAL_AIM

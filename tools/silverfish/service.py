@@ -5006,6 +5006,7 @@ class Client:
         self.inventory_view_scope = None
         self.inventory_drop_scope = None
         self.crate_intents = native_loot.OpenIntents()
+        self.crate_lids = native_loot.GuestCrateProjection()
         self.last_broker_intent = 0
         self.wire_board = native_wire_board.WireBoardView(bridge, control) if invite.get("native_wire_board") else None
         self.dead_drop_projection = (None, 0.0)
@@ -5072,6 +5073,7 @@ class Client:
         self.next_snapshot = 0.0
         self.last_sprint_sent = self.last_aim_sent = None
         self.stack_drop_projection.rebind()
+        self.crate_lids.reset()
         self.control.event("client_link_authenticated", character_id=request["character_id"],
                            resumed=bool(result.get("resumed")))
         return result
@@ -5804,8 +5806,6 @@ class Client:
                             self.bridge, self.last_game, self.gameplay.get(native_loot.STOCK_ALARMS))
                         self.last_game = await native_loot.project_power_boxes(
                             self.bridge, self.last_game, self.gameplay.get(native_loot.POWER_BOX_STATES))
-                        self.last_game = await native_loot.project_opened(
-                            self.bridge, self.last_game, self.gameplay.get(native_loot.STATE_KEY, {}))
                 await self.project_world_view()
                 self.last_game = await self.weather_sirens.sync(
                     self.bridge, self.control, self.last_game,
@@ -5817,6 +5817,8 @@ class Client:
             except (OSError, RuntimeError) as error:
                 self.next_projection = time.monotonic() + 2
                 self.control.event("gameplay_projection_error", reason=str(error))
+        if self.invite.get("native_loot_input"):
+            await self.crate_lids.sync(self)
 
     async def project_world_view(self) -> None:
         area = self.last_game.get("map")
