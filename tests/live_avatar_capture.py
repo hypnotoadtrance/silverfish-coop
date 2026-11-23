@@ -122,26 +122,44 @@ async def observe_stock_offhand_flashlight(host_run, guest_run):
         return {"position": [x, y, z], "rotation": [pitch, yaw, roll], "scale": [sx, sy, sz]}
 
     def owner(values):
-        player, primary, primary_slot, primary_guid, torch_slot, torch_guid, offhand, *light = values
+        player, primary, primary_slot, primary_guid, torch_slot, torch_guid, offhand, item, *light = values
         result = {"player": int(player), "primary": primary, "primary_slot": int(primary_slot),
                   "primary_guid": primary_guid, "torch_slot": int(torch_slot), "torch_guid": torch_guid,
-                  "offhand": offhand == "true"}
+                  "offhand": offhand == "true", "item": None if item == "-" else item}
         if light:
-            item, replicates, camera, item_owner, *sample = light
-            result.update(item=item, replicates=replicates == "true", camera=camera, item_owner=item_owner,
+            replicates, camera, item_owner, *sample = light
+            result.update(replicates=replicates == "true", camera=camera, item_owner=item_owner,
                           box_camera_relative=transform(sample[:9]), stock_offhand_transform=transform(sample[9:18]),
-                          light=dict(flashlight_owner(sample[18:-14]), **torch_geometry(sample[-14:])))
+                          torch_pawn_relative=transform(sample[18:27]),
+                          light=dict(flashlight_owner(sample[27:-14]), **torch_geometry(sample[-14:])))
         return result
 
     async def phase(name, row):
         proof["phases"][name] = table = {"owner": row}
         record()
-        table["guest"] = observer = flashlight_observer(await avatar_probe(guest_run, f"observe{row['player']}"))
+        samples = await avatar_probe(guest_run, f"observe{row['player']}")
+        table["guest"] = observer = flashlight_observer(samples[:7])
+        bones = samples[7:]
+        table["guest_rig_pawn_relative"] = {}
+        if bones != ["-"]:
+            rig = table["guest_rig_pawn_relative"] = {
+                bones[i]: transform(bones[i + 1:i + 10]) for i in range(0, len(bones), 10)
+            }
+            if "LeftHand" in rig and "torch_pawn_relative" in row:
+                table["torch_left_hand_separation_cm"] = math.dist(
+                    rig["LeftHand"]["position"], row["torch_pawn_relative"]["position"],
+                )
         host_game, guest_game = status(host_run).get("game", {}), status(guest_run).get("game", {})
         table["host_flashlight_frame"] = host_game.get("native_flashlight")
         table["guest_flashlight_view"] = guest_game.get("native_flashlight_view")
         table["guest_primary_meshes"] = guest_game["native_player_avatars"][observer["remote"]]["weapon_meshes"]
         record()
+
+    async def stock_clears(operation):
+        async with asyncio.timeout(8):
+            while not (ready := await avatar_probe(host_run, operation, allow_pending=True)):
+                await asyncio.sleep(.1)
+        return ready
 
     seeded = owner(await avatar_probe(host_run, "seedoffhand"))
     try:
@@ -153,11 +171,17 @@ async def observe_stock_offhand_flashlight(host_run, guest_run):
         await asyncio.sleep(.4)
         later = owner(await avatar_probe(host_run, "readoffhand"))
         await phase("offhand_later", later)
-        cleared = owner(await avatar_probe(host_run, "offhandoff"))
+        clock = asyncio.get_running_loop().time
+        released_at = clock()
+        lowering = owner(await avatar_probe(host_run, "offhandoff"))
+        await phase("offhand_lowering", lowering)
+        cleared = owner(await stock_clears("waitoffhand"))
+        proof["offhand_clear_observed_ms"] = round((clock() - released_at) * 1000)
         await phase("offhand_cleared", cleared)
         assert not seeded["offhand"] and started["offhand"] and later["offhand"] and not cleared["offhand"], proof
+        assert not lowering["offhand"] and cleared["item"] is None, proof
         assert seeded["primary_slot"] != seeded["torch_slot"] and seeded["primary_guid"] != seeded["torch_guid"], proof
-        assert all(row[key] == seeded[key] for row in (started, later, cleared) for key in (
+        assert all(row[key] == seeded[key] for row in (started, later, lowering, cleared) for key in (
             "player", "primary", "primary_slot", "primary_guid", "torch_slot", "torch_guid",
         )), proof
         assert started["item"] == later["item"] and started["light"]["source"] == later["light"]["source"], proof
@@ -171,8 +195,11 @@ async def observe_stock_offhand_flashlight(host_run, guest_run):
                            "visible_pawn_spotlights", "displayed_flashlight_mesh_count")) for phase in proof["phases"].values()), proof
         proof["verified"] = True
     finally:
-        proof["stock_cleanup"] = await avatar_probe(host_run, "clearoffhand") == ["restored"]
-        record()
+        try:
+            await avatar_probe(host_run, "offhandoff")
+            proof["stock_cleanup"] = await stock_clears("clearoffhand") == ["restored"]
+        finally:
+            record()
         assert proof["stock_cleanup"], proof
     return proof
 

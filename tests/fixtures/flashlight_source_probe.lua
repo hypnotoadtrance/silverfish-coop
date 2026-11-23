@@ -167,10 +167,14 @@ local function offhand_operation(operation, pawn, world)
         pawn:CanOffhandFlashlight(eligible)
         assert(eligible.CanEquip == true or eligible[1] == true, "flashlight_probe_stock_offhand_ineligible")
         pawn:OffhandFlashlight(true)
-    elseif operation == "offhandoff" or operation == "clearoffhand" then
-        if save.PlayerOffhandingFlashlight then pawn:OffhandFlashlight(false) end
-        assert(save.PlayerOffhandingFlashlight == false and (not valid(pawn.OffhandEquipment)
-            or pawn.OffhandEquipment:IsActorBeingDestroyed()), "flashlight_probe_stock_offhand_clear_failed")
+    elseif operation == "offhandoff" or operation == "waitoffhand" or operation == "clearoffhand" then
+        if operation == "offhandoff" and save.PlayerOffhandingFlashlight then pawn:OffhandFlashlight(false) end
+        assert(save.PlayerOffhandingFlashlight == false, "flashlight_probe_stock_offhand_flag_clear_failed")
+        -- Stock ManipulateOffhand destroys the actor after it reaches the lowered position.
+        local item = pawn.OffhandEquipment
+        if operation ~= "offhandoff" and valid(item) and not item:IsActorBeingDestroyed() then
+            error("avatar_probe_rig_pending", 0)
+        end
         if operation == "clearoffhand" then
             for _, slot in ipairs(seeded_slots) do
                 world.OwningGameInstance:RemoveItemFromLoadout(save.PlayerEquipment[slot.index])
@@ -183,21 +187,50 @@ local function offhand_operation(operation, pawn, world)
         assert(operation == "seedoffhand" or operation == "readoffhand", "flashlight_probe_offhand_unknown_operation")
     end
     assert(same(pawn.EquipedItem, primary), "flashlight_probe_offhand_primary_changed_after_input")
+    local item = pawn.OffhandEquipment
+    local live_item = valid(item) and not item:IsActorBeingDestroyed()
     local row = table.concat({assert(player_id(pawn)), primary:GetFullName(), seeded_slots[2].index - 1, seeded_slots[2].guid,
-        seeded_slots[1].index - 1, seeded_slots[1].guid, tostring(save.PlayerOffhandingFlashlight)}, "\t")
+        seeded_slots[1].index - 1, seeded_slots[1].guid, tostring(save.PlayerOffhandingFlashlight),
+        live_item and item:GetFullName() or "-"}, "\t")
     if not save.PlayerOffhandingFlashlight then return row end
-    local item, camera = pawn.OffhandEquipment, pawn.Camera
-    assert(valid(item) and same(item:GetClass(), asset(equipment_path)) and same(item.User, pawn) and valid(camera)
+    local camera = pawn.Camera
+    assert(live_item and same(item:GetClass(), asset(equipment_path)) and same(item.User, pawn) and valid(camera)
         and valid(item.Box) and same(item.Box:GetAttachParent(), camera), "flashlight_probe_stock_offhand_mount_unavailable")
     local _, actor, spot = source_from(item, world)
     assert(actor.Powered == true and spot:IsVisible(), "flashlight_probe_stock_offhand_dark")
     local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
     local box = math_api:MakeRelativeTransform(item.Box:K2_GetComponentToWorld(), camera:K2_GetComponentToWorld())
+    local torch = math_api:MakeRelativeTransform(item.SM_Prop_Torch_01:K2_GetComponentToWorld(), pawn:GetTransform())
     local item_owner = item:GetOwner()
-    return table.concat({row, item:GetFullName(), tostring(item.bReplicates), camera:GetFullName(),
+    return table.concat({row, tostring(item.bReplicates), camera:GetFullName(),
         valid(item_owner) and item_owner:GetFullName() or "-",
-        transform_row(box, math_api), transform_row(pawn.OffhandTransform, math_api),
+        transform_row(box, math_api), transform_row(pawn.OffhandTransform, math_api), transform_row(torch, math_api),
         owner_row(pawn, actor, spot), torch_measurement(item, actor, spot)}, "\t")
+end
+
+local function offhand_rig(pawn)
+    local meshes = pawn:K2_GetComponentsByClass(asset("/Script/Engine.SkeletalMeshComponent"))
+    local display
+    for _, object in ipairs(meshes) do
+        local body = type(object.type) == "function" and object:type() == "RemoteUnrealParam" and object:get() or object
+        if valid(body) and same(body:GetOwner(), pawn) and same(body:GetAttachParent(), pawn.Mesh)
+            and valid(body.SkinnedAsset) and body.SkinnedAsset:GetFullName() ==
+                "SkeletalMesh /Game/Classes/NPCs/NPC_Assets/CharacterModels/Player_NoArmor.Player_NoArmor" then
+            if display then return "-" end
+            display = body
+        end
+    end
+    if not display then return "-" end
+    local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
+    local root, samples = pawn:GetTransform(), {}
+    for _, name in ipairs({"LeftHand", "RightHand", "LeftShoulder", "RightShoulder", "Weapon_Socket01"}) do
+        local bone = FName(name, EFindName.FNAME_Find)
+        if display:DoesSocketExist(bone) then
+            local relative = math_api:MakeRelativeTransform(display:GetSocketTransform(bone, 0), root)
+            samples[#samples + 1] = name .. "\t" .. transform_row(relative, math_api)
+        end
+    end
+    return #samples > 0 and table.concat(samples, "\t") or "-"
 end
 
 local function observe(world, local_pawn, id)
@@ -251,6 +284,7 @@ local function observe(world, local_pawn, id)
     end
     local census = string.format("%s\t%d\t%d\t%d\t%d\t%d\t%d", remote:GetFullName(), sources, powered, visible, components,
         held_sources, display_meshes)
+    if offhand then return census .. "\t" .. offhand_rig(remote) end
     local row = census
     if guest_source then
         assert(remote:HasAuthority() and valid(remote.Save) and not same(remote.Save, local_pawn.Save),
