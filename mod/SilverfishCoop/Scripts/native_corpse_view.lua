@@ -1,4 +1,5 @@
 local corpses = {}
+local npc_melee = require("native_npc_melee_view")
 
 local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local drone_path = "/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C"
@@ -179,6 +180,7 @@ end
 
 local function apply(marker, world)
     if not valid(marker) or not same(marker:GetWorld(), world) then return true end
+    if npc_melee.is_marker(marker:K2_GetActorRotation()) then return true end
     local actor = marker:GetOwner()
     if not valid(actor) or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return true end
     local body = supported_corpse(actor)

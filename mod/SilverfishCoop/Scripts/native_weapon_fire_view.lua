@@ -1,4 +1,5 @@
 local view = {}
+local npc_melee = require("native_npc_melee_view")
 
 local npc_base = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local turret_base = "/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C"
@@ -97,6 +98,11 @@ end
 local function record(row)
     pending[#pending + 1] = row
     if #pending > maximum then table.remove(pending, 1) end
+end
+
+local function record_npc_melee(now, id, path, rate, blend_in, blend_out)
+    serial = serial + 1
+    record({serial, "npc-melee", id, path, rate, blend_in, blend_out, expires = now + .25})
 end
 
 local function record_dry_fire(pawn, point)
@@ -298,6 +304,7 @@ local function clear_local_cues()
 end
 
 function view.sync(state, phase, avatar)
+    npc_melee.sync(state, phase, record_npc_melee)
     if phase ~= "hosting" or not valid(state.world) then
         clear_local_cues()
         current, pending, last_round = nil, {}, nil
@@ -427,6 +434,14 @@ function view.command(args, state, phase, avatar)
         local values = {}
         for field in (args[index] .. "|"):gmatch("([^|]*)|") do values[#values + 1] = field end
         local id, path = math.tointeger(tonumber(values[1])), values[2]
+        if #values == 7 and id and id > last_played and path == "npc-melee" then
+            local member = math.tointeger(tonumber(values[3]))
+            last_played = id
+            local ok, accepted = pcall(npc_melee.offer, state.world, member, values[4],
+                tonumber(values[5]), tonumber(values[6]), tonumber(values[7]))
+            if ok and accepted then receipts[#receipts + 1] = ("%d:npc_melee"):format(id) end
+            goto next_cue
+        end
         if #values == 5 and id and id > last_played and path == "dry" then
             local x, y, z = tonumber(values[3]), tonumber(values[4]), tonumber(values[5])
             if bounded(x, -1e7, 1e7) and bounded(y, -1e7, 1e7) and bounded(z, -1e7, 1e7) then

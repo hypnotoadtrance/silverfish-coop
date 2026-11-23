@@ -53,6 +53,25 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
                                                "3|dry|121.00|-59.00|2.05", timeout=1.5)
         control.event.assert_called_once_with("native_weapon_dry_fire_played", serial=3)
 
+    async def test_npc_swing_keeps_its_exact_owner_reference_and_clip_in_the_current_visit(self):
+        clip = "/Game/Classes/NPCs/NPC_Assets/Animations/Standing_Melee_Attack_Downward.Standing_Melee_Attack_Downward"
+        area, cues = _captured(f"{self.area}\n"
+                               f"2|npc-melee|17|{clip}|1.3|0.2|0.3\n"
+                               f"3|npc-melee|0|{clip}|1|0|0\n"
+                               f"4|npc-melee|17|{clip}|nan|0|0\n")
+        self.assertEqual(cues, [[2, "npc-melee", 17, clip, 1.3, .2, .3]])
+        bridge = SimpleNamespace(command=AsyncMock(return_value={"ack": {"message": "2:npc_melee"}}))
+        control = SimpleNamespace(event=Mock())
+        observer = Playback()
+        packet = json.dumps([area, self.epoch, cues[0]])
+        await observer.sync(bridge, control, {"map": area}, [packet], "2" * 32)
+        bridge.command.assert_not_called()
+        await observer.sync(bridge, control, {"map": area}, [packet, packet], self.epoch)
+        await observer.sync(bridge, control, {"map": area}, [packet], self.epoch)
+        bridge.command.assert_awaited_once_with("native-weapon-play-shots", area, self.epoch,
+                                               f"2|npc-melee|17|{clip}|1.3|0.2|0.3", timeout=1.5)
+        control.event.assert_called_once_with("native_npc_melee_received", serial=2, actor_id=17, clip=clip)
+
     async def test_resident_relay_reads_only_its_memory_queue_and_refuses_the_wrong_map(self):
         host = self.host()
         path = MagicMock(spec=Path)
