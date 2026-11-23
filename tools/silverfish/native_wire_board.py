@@ -123,7 +123,7 @@ class WireBoardView:
         self.stock_open = None
         self.pending = None
 
-    async def sync(self, snapshot, epoch, active, action):
+    async def sync(self, snapshot, epoch, active, action, *, visit=None):
         events = self.bridge.native_wire_board_requests()
         now = time.monotonic()
         if not active or not epoch:
@@ -153,7 +153,8 @@ class WireBoardView:
         if kind == "stock-view":
             return await self._open_stock_menu(snapshot, epoch, area, pawn, board, sequence, operation, action)
         if stock_menu:
-            return await self._stock_menu(snapshot, epoch, area, pawn, board, quest, kind, sequence, opened, operation, action)
+            return await self._stock_menu(snapshot, epoch, area, pawn, board, quest, kind, sequence, opened,
+                                          operation, action, visit=epoch if visit is None else visit)
         identity = (epoch, area, pawn, board, quest, opened)
         try:
             state = await self._perform(identity, kind, sequence, operation, action)
@@ -202,7 +203,8 @@ class WireBoardView:
             self.control.event("native_wire_board_stock_unavailable", operation_id=operation, board=board, reason=str(error))
             return snapshot
 
-    async def _stock_menu(self, snapshot, epoch, area, pawn, board, quest, kind, sequence, opened, operation, action):
+    async def _stock_menu(self, snapshot, epoch, area, pawn, board, quest, kind, sequence, opened,
+                          operation, action, *, visit):
         starting = kind == "stock-start"
         menu = self.stock_open
         projected = opened < sequence and menu and menu.identity == (epoch, area, pawn, board, opened)
@@ -216,7 +218,7 @@ class WireBoardView:
                 return snapshot
         verb, state = ("native-quest-start", "accepted") if starting else ("native-quest-turnin", "completed")
         try:
-            target = (native_board_contract.menu_target(epoch, board, quest)
+            target = (native_board_contract.menu_target(visit, board, quest)
                       if projected and quest not in catalog_specialists(area, board) else quest)
             result = await action(verb, operation, target)
             step = result.get("step")

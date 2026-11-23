@@ -6227,7 +6227,9 @@ class Client:
                 current = (active and not self.stopping and self.host_session and self.zone_epoch
                            and time.monotonic() - self.gameplay_seen < 2)
                 epoch = f"{self.host_session}:{self.zone_epoch}"
-                self.last_game = await self.wire_board.sync(self.last_game, epoch, current, self.gameplay_action)
+                self.last_game = await self.wire_board.sync(
+                    self.last_game, epoch, current, self.gameplay_action, visit=self.zone_epoch,
+                )
             if self.dialogue_view:
                 current = active and not self.stopping and self.host_session and self.zone_epoch and time.monotonic() - self.gameplay_seen < 2
                 epoch = f"{self.host_session}:{self.zone_epoch}"

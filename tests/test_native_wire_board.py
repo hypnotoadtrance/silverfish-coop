@@ -156,6 +156,8 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(wire.catalog_specialists(area, board))
                 self.assertEqual(wire.stock_fixture_board(area, board), (board,))
                 pawn, visit, quest = "Player_FP_C ClientView", "56" * 16, "Clt_Eye_02"
+                session = "23" * 16
+                view_key = f"{session}:{visit}"
                 command = AsyncMock()
                 requests = Mock()
                 bridge = SimpleNamespace(input_namespace=uuid.uuid4(), native_wire_board_requests=requests, command=command)
@@ -172,13 +174,17 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
 
                 requests.return_value = [(1, 1, "stock-view", area, pawn, board, "-")]
                 command.return_value = frame("visible", 1, 1, "-")
-                await view.sync(frame("loading", 1, 1, "-"), visit, True, action)
+                await view.sync(frame("loading", 1, 1, "-"), view_key, True, action, visit=visit)
                 self.assertEqual(action.await_args.args[0::2], (native_board_contract.CATALOG, board))
-                self.assertEqual(view.stock_open.identity, (visit, area, pawn, board, 1))
+                self.assertEqual(view.stock_open.identity, (view_key, area, pawn, board, 1))
 
                 requests.return_value = [(2, 1, "stock-start", area, pawn, board, quest)]
                 action.return_value = {"quest_id": quest, "step": 1}
-                await view.sync(frame("starting", 2, 1, quest), visit, True, action)
+                await view.sync(frame("starting", 2, 1, quest), f"{'34' * 16}:{visit}", True, action, visit=visit)
+                self.assertEqual(action.await_count, 1)
+
+                requests.return_value = [(3, 1, "stock-start", area, pawn, board, quest)]
+                await view.sync(frame("starting", 3, 1, quest), view_key, True, action, visit=visit)
                 self.assertEqual(action.await_args.args[0::2], (
                     "native-quest-start", native_board_contract.menu_target(visit, board, quest),
                 ))
