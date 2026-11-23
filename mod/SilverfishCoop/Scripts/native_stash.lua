@@ -95,15 +95,20 @@ end
 
 local function move(fields, state, phase)
     moved = nil
-    local name, slot, site, item, direction, expected, before = table.unpack(fields, 3)
+    local name, slot, site, item, direction, expected, extra, quantity, stack_size = table.unpack(fields, 3)
     local live = slot == "-"
     local reorder = direction == "reorder"
+    local split = direction == "split-deposit" or direction == "split-withdraw"
+    local deposit = direction == "deposit" or direction == "split-deposit"
     local transfer
     if reorder then transfer = SilverfishReorderLiveNativeStashItem
+    elseif split then transfer = SilverfishSplitLiveNativeStashItem
     else transfer = live and SilverfishMoveLiveNativeStashItem or SilverfishMoveNativeStashItem end
     if type(transfer) ~= "function" or (expected ~= "0" and expected ~= "1")
         or (reorder and (not live or #fields ~= 9))
-        or (not reorder and (#fields ~= 8 or (direction ~= "deposit" and direction ~= "withdraw"))) then
+        or (split and (not live or #fields ~= 11 or not math.tointeger(tonumber(quantity))
+            or not math.tointeger(tonumber(stack_size))))
+        or (not reorder and not split and (#fields ~= 8 or (not deposit and direction ~= "withdraw"))) then
         error("native_stash_move_unavailable", 0)
     end
     local pawn, combined, snapshot, host
@@ -114,23 +119,29 @@ local function move(fields, state, phase)
     end
     if combined ~= (expected == "1") then error("native_stash_move_setting_changed", 0) end
     if same(pawn, host) then
-        if reorder then error("native_stash_move_unavailable", 0) end
+        if reorder or split then error("native_stash_move_unavailable", 0) end
         local controller = state.local_pawn and state.local_pawn.controller_object
         if not valid(controller) or controller.MenuStack:GetArrayNum() ~= 0 then
             error("native_stash_move_stock_menu_open", 0)
         end
     end
-    local ok, status, class, quantity
-    if reorder then ok, status, class, quantity = transfer(pawn:GetAddress(), 0, combined, site, item, false, before)
-    else ok, status, class, quantity = transfer(pawn:GetAddress(), live and 0 or snapshot:GetAddress(),
-        combined, site, item, direction == "deposit") end
+    local ok, status, class, moved_quantity, remaining, created
+    if reorder then ok, status, class, moved_quantity = transfer(pawn:GetAddress(), 0, combined, site, item, false, extra)
+    elseif split then ok, status, class, moved_quantity, remaining, created =
+        transfer(pawn:GetAddress(), 0, combined, site, item, deposit, extra,
+            math.tointeger(tonumber(quantity)), math.tointeger(tonumber(stack_size)))
+    else ok, status, class, moved_quantity = transfer(pawn:GetAddress(), live and 0 or snapshot:GetAddress(),
+        combined, site, item, deposit) end
     if ok ~= true then error(tostring(status), 0) end
     if status ~= "moved" or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$")
-        or math.type(quantity) ~= "integer" or quantity < 1 then
+        or math.type(moved_quantity) ~= "integer" or moved_quantity < 1
+        or (split and (moved_quantity ~= tonumber(quantity) or remaining ~= tonumber(stack_size) - moved_quantity
+            or created ~= extra)) then
         error("mutation_unverified_native_stash_receipt", 0)
     end
     moved = {map = state.map, pawn = name, slot = slot, site = site, item = item,
-        direction = direction, combined = combined, class = class, quantity = quantity, before = before}
+        direction = direction, combined = combined, class = class, quantity = moved_quantity,
+        before = reorder and extra or nil, remaining = remaining, created = created}
     return "stock stash item moved"
 end
 
@@ -231,6 +242,9 @@ function stash.rows(state, phase, row)
     if type(SilverfishReorderLiveNativeStashItem) == "function" then
         rows[#rows + 1] = row("native-stash-live-reorder", 1)
     end
+    if type(SilverfishSplitLiveNativeStashItem) == "function" then
+        rows[#rows + 1] = row("native-stash-live-split", 1)
+    end
     for id, site in pairs(available) do
         if site and site.position and valid(site.actor) and not site.actor:IsActorBeingDestroyed() then
             local position = site.position
@@ -247,6 +261,7 @@ function stash.rows(state, phase, row)
     if moved and moved.map == state.map then
         local fields = {moved.map, moved.pawn, moved.slot, moved.site, moved.item,
             moved.direction, moved.combined and 1 or 0, moved.class, moved.quantity, moved.before}
+        if moved.created then fields[10], fields[11] = moved.remaining, moved.created end
         rows[#rows + 1] = row("native-stash-move", table.unpack(fields))
     end
     return rows

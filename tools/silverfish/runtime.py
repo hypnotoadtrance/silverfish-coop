@@ -2227,7 +2227,7 @@ class Bridge:
                     data["native_inventory_view"] = {"state": fields[1], "sequence": int(fields[2]),
                                                     "map": fields[3], "pawn": fields[4], "offset": int(fields[5]),
                                                     "total": int(fields[6]), "count": int(fields[7])}
-                elif fields[0] == "native-stash-view" and len(fields) in (9, 10):
+                elif fields[0] == "native-stash-view" and len(fields) in (9, 10, 11):
                     data[native_stash.VIEW] = native_stash.parse_view(fields, data.get("map"), data.get("state"))
                 elif fields == ["native-inventory-sort-capability", "1"]:
                     data["native_inventory_sort_capability"] = 1
@@ -2604,6 +2604,8 @@ class Bridge:
                     data[native_stash.LIVE_MOVE] = True
                 elif fields == ["native-stash-live-reorder", "1"] and data.get("state") == "hosting":
                     data[native_stash.LIVE_REORDER] = True
+                elif fields == ["native-stash-live-split", "1"] and data.get("state") == "hosting":
+                    data[native_stash.LIVE_SPLIT] = True
                 elif fields[0] == native_stash.CENSUS and len(fields) == 9 and data.get("state") == "hosting":
                     live = fields[3] == "-" and data.get(native_stash.LIVE_CENSUS) is True
                     if (fields[1] != data.get("map") or not (live or SLOT.fullmatch(fields[3])) or not valid_guid(fields[4])
@@ -2612,22 +2614,28 @@ class Bridge:
                         raise ValueError("Invalid stash census")
                     data["native_stash_census"] = dict(map=fields[1], pawn=fields[2], slot=fields[3], site=fields[4],
                         combined=fields[5] == "1", total=int(fields[6]), offset=int(fields[7]), count=int(fields[8]), items=[])
-                elif fields[0] == native_stash.MOVE and len(fields) in (10, 11) and data.get("state") == "hosting":
+                elif fields[0] == native_stash.MOVE and len(fields) in (10, 11, 12) and data.get("state") == "hosting":
                     live = fields[3] == "-" and data.get(native_stash.LIVE_MOVE) is True
                     reorder = fields[6] == "reorder"
+                    split = fields[6] in native_stash.SPLIT_DIRECTIONS
                     anchor = fields[10] if len(fields) == 11 else None
                     if (fields[1] != data.get("map") or not (live or SLOT.fullmatch(fields[3])) or not valid_guid(fields[4])
-                            or not valid_guid(fields[5]) or fields[6] not in {"deposit", "withdraw", "reorder"}
+                            or not valid_guid(fields[5]) or not (reorder or split or fields[6] in {"deposit", "withdraw"})
                             or fields[7] not in {"0", "1"} or not fields[8].startswith("/Game/")
-                            or not 1 <= int(fields[9]) < 2**31 or reorder != (anchor is not None)
+                            or not 1 <= int(fields[9]) < 2**31 or reorder != (anchor is not None) or split != (len(fields) == 12)
                             or reorder and (not live or data.get(native_stash.LIVE_REORDER) is not True
-                                            or not native_stash.valid_reorder_anchor(fields[5], anchor))):
+                                            or not native_stash.valid_reorder_anchor(fields[5], anchor))
+                            or split and (not live or data.get(native_stash.LIVE_SPLIT) is not True
+                                          or not 1 <= int(fields[10]) < 2**31 - int(fields[9])
+                                          or not valid_guid(fields[11]) or fields[11] == fields[5])):
                         raise ValueError("Invalid stash move receipt")
                     data[native_stash.MOVED] = dict(map=fields[1], pawn=fields[2], slot=fields[3], site=fields[4],
                         guid=fields[5], direction=fields[6], combined=fields[7] == "1", class_path=fields[8],
                         quantity=int(fields[9]))
                     if reorder:
                         data[native_stash.MOVED]["before"] = anchor
+                    if split:
+                        data[native_stash.MOVED].update(remaining=int(fields[10]), created_guid=fields[11])
                 elif fields[0] in {"native-inventory-census-item", "native-stash-census-item"} and len(fields) in (9, 10, 11, 14):
                     key = fields[0].removesuffix("-item").replace("-", "_")
                     if key not in data:

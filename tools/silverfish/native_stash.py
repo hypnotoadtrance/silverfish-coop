@@ -16,6 +16,7 @@ CENSUS = "native-stash-census"
 LIVE_CENSUS = "native_stash_live_census"
 LIVE_MOVE = "native_stash_live_move"
 LIVE_REORDER = "native_stash_live_reorder"
+LIVE_SPLIT = "native_stash_live_split"
 MOVE = "native-stash-move"
 MOVED = "native_stash_move"
 RESULT = "native_stash"
@@ -25,8 +26,11 @@ VIEW = "native_stash_view"
 VIEW_FIXTURES = {"native-stash-view-fixture", "native-stash-view-click-fixture"}
 _TARGET = re.compile(r"([0-9A-F]{32})(?:\|(0|[1-9][0-9]{0,3}))?\Z")
 _MOVE_TARGET = re.compile(r"([0-9A-F]{32})\|(deposit|withdraw|reorder)\|([0-9A-F]{32})(?:\|([0-9A-F]{32}|-))?\Z")
+_SPLIT_TARGET = re.compile(r"([0-9A-F]{32})\|(split-deposit|split-withdraw)\|([0-9A-F]{32})\|([1-9][0-9]{0,9})\|([1-9][0-9]{0,9})\Z")
+SPLIT_DIRECTIONS = {"split-deposit", "split-withdraw"}
 _VIEW_CARD = re.compile(r"(?:(?:drag|cancel|return|close)-)?(?:stash|backpack):([0-9A-F]{32})\Z")
 _VIEW_REORDER_CARD = re.compile(r"reorder-stash:([0-9A-F]{32}):(0|[1-9][0-9]{0,3})\Z")
+_VIEW_SPLIT_CARD = re.compile(r"split-(?:stash|backpack):([0-9A-F]{32}):([1-9][0-9]{0,8}):(cancel|move)\Z")
 _PATH = re.compile(r"([A-Za-z0-9_-]+_C) (/Game/Classes/Maps/[A-Za-z0-9_/-]+)\.([A-Za-z0-9_-]+):PersistentLevel\.([A-Za-z0-9_-]+)\Z")
 _ITEM_CLASS = re.compile(r"/Game/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+_C\Z")
 
@@ -45,11 +49,17 @@ def valid_view_fixture(action, target):
     match = _VIEW_CARD.fullmatch(target)
     if reorder := _VIEW_REORDER_CARD.fullmatch(target):
         return valid_guid(reorder[1]) and int(reorder[2]) < 4096
+    if split := _VIEW_SPLIT_CARD.fullmatch(target):
+        return valid_guid(split[1])
     return target == "close" or match is not None and valid_guid(match[1])
 
 
 def valid_reorder_anchor(item, before):
     return before == "-" or before != item and valid_guid(before)
+
+
+def valid_split_amount(amount, expected):
+    return type(amount) is int and type(expected) is int and 1 <= amount < expected < 2**31
 
 
 def _scope(host, character, site):
@@ -114,12 +124,14 @@ async def inspect(host, bridge, character, target):
 
 
 async def move(host, bridge, character, target, operation):
-    selected = _MOVE_TARGET.fullmatch(target) if isinstance(target, str) else None
+    selected = (_MOVE_TARGET.fullmatch(target) or _SPLIT_TARGET.fullmatch(target)) if isinstance(target, str) else None
     if not selected or not valid_guid(selected[1]) or not valid_guid(selected[3]):
         raise party.RuleError("native_stash_exact_site_and_item_required")
-    site, direction, item, before = selected.groups()
+    site, direction, item, argument, *stack = selected.groups()
+    before = None if stack else argument
+    amount, expected = (int(argument), int(stack[0])) if stack else (None, None)
     if (direction == "reorder" and (before is None or not valid_reorder_anchor(item, before))
-            or direction != "reorder" and before is not None):
+            or direction != "reorder" and before is not None or stack and not valid_split_amount(amount, expected)):
         raise party.RuleError("native_stash_exact_site_and_item_required")
     if not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
         raise party.RuleError("invalid_operation_id")
@@ -134,7 +146,8 @@ async def move(host, bridge, character, target, operation):
     scope = _scope(host, character, site)
     area, _, combined, pawn = scope
     live = host.last_game.get(LIVE_MOVE) is True
-    if before is not None and (not live or character == "host" or host.last_game.get(LIVE_REORDER) is not True):
+    capability = LIVE_SPLIT if stack else LIVE_REORDER if before is not None else None
+    if capability and (not live or character == "host" or host.last_game.get(capability) is not True):
         raise party.RuleError("native_stash_move_unavailable")
     if live and character != "host":
         if not await native_inventory.retain_guest_save(host, bridge, character, pawn):
@@ -142,10 +155,11 @@ async def move(host, bridge, character, target, operation):
         if _scope(host, character, site) != scope:
             raise party.RuleError("native_stash_scope_changed")
     slot = "-" if live else (await _frame(host, bridge, character, site, scope))["slot"]
+    created = uuid.uuid5(uuid.NAMESPACE_OID, f"{MOVE}:{character}:{item}:{operation}").hex.upper() if stack else None
     host.native_checkpoint_unsafe = True
     try:
         try:
-            extra = () if before is None else (before,)
+            extra = (created, str(amount), str(expected)) if stack else () if before is None else (before,)
             snapshot = await bridge.command(MOVE, pawn, slot, site, item, direction, str(int(combined)), *extra, timeout=6)
         except RuntimeError as error:
             if str(error).startswith(("native_stash_move_", "native_stash_exact_site_",
@@ -159,13 +173,17 @@ async def move(host, bridge, character, target, operation):
                 (area, pawn, slot, site, item, direction, combined)
                 or proof.get("before") != before or not proof.get("class_path")
                 or type(proof.get("quantity")) is not int or proof["quantity"] < 1
-                or before is not None and proof["quantity"] != 1):
+                or before is not None and proof["quantity"] != 1
+                or stack and (proof["quantity"], proof.get("remaining"), proof.get("created_guid")) !=
+                (amount, expected - amount, created)):
             raise RuntimeError("The authoritative stash transfer did not verify")
         host.last_game, host.last_seen = snapshot, time.monotonic()
         response = {MOVED: dict(owner=character, site=site, combined=combined, direction=direction, guid=item,
                                 class_path=proof["class_path"], quantity=proof["quantity"])}
         if before is not None:
             response[MOVED]["before"] = before
+        if stack:
+            response[MOVED].update(remaining=proof["remaining"], created_guid=proof["created_guid"])
         candidate = party.load_party(host.party)
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": request, "result": response})
@@ -185,7 +203,7 @@ async def move(host, bridge, character, target, operation):
 
 
 def parse_view(fields, area, phase):
-    _, state, sequence, view_area, pawn, site, mode, offset, item, *anchor = fields
+    _, state, sequence, view_area, pawn, site, mode, offset, item, *extra = fields
     sequence, offset = int(sequence), int(offset)
     if (phase != "connected" or view_area != area or not 1 <= sequence < 2**53 or offset != 0
             or not valid_guid(site) or (item != "-" and not valid_guid(item))
@@ -194,11 +212,16 @@ def parse_view(fields, area, phase):
         raise ValueError("Invalid stock stash view frame")
     result = dict(state=state, sequence=sequence, map=view_area, pawn=pawn, site=site,
                   mode=mode, offset=offset, item=None if item == "-" else item)
-    if anchor:
-        before, = anchor
+    if len(extra) == 1:
+        before, = extra
         if mode != "stash" or not result["item"] or not valid_reorder_anchor(item, before):
             raise ValueError("Invalid stash reorder request")
         result["before"] = before
+    elif extra:
+        amount, expected = map(int, extra)
+        if not result["item"] or not valid_split_amount(amount, expected):
+            raise ValueError("Invalid stash split request")
+        result.update(split_amount=amount, expected=expected)
     return result
 
 
@@ -254,14 +277,22 @@ async def service_view(client, active):
         if item := view["item"]:
             direction = "deposit" if view["mode"] == "backpack" else "withdraw"
             before = view.get("before")
+            amount = view.get("split_amount")
             if before is not None:
                 direction = "reorder"
+            elif amount is not None:
+                direction = f"split-{direction}"
             target = f"{view['site']}|{direction}|{item}"
             if before is not None:
                 target += f"|{before}"
+            elif amount is not None:
+                target += f"|{amount}|{view['expected']}"
             result = (await client.gameplay_action(MOVE, operation.hex, target))[MOVED]
             if ((result.get("owner"), result.get("site"), result.get("direction"), result.get("guid"),
-                 result.get("before")) != (client.invite["character_id"], view["site"], direction, item, before)):
+                 result.get("before")) != (client.invite["character_id"], view["site"], direction, item, before)
+                    or amount is not None and (result.get("quantity"), result.get("remaining")) !=
+                    (amount, view["expected"] - amount)
+                    or amount is not None and (not valid_guid(result.get("created_guid")) or result["created_guid"] == item)):
                 raise RuntimeError("The stock stash transfer did not verify")
             client.control.event("native_stash_view_item_moved", operation_id=operation.hex, **result)
         rows = await _stock_rows(client, view["site"], operation)

@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <initializer_list>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -269,6 +270,13 @@ namespace
         std::int32_t expected{};
     };
 
+    struct StashSplit
+    {
+        Guid source{};
+        int amount{};
+        int expected{};
+    };
+
     struct StashScreen
     {
         Unreal::FWeakObjectPtr screen, actor, manager, backpack, storage;
@@ -282,10 +290,12 @@ namespace
         Guid taking_item{};
         bool merchant{};
         int value{};
-        Guid shop_split{};
+        Guid popup_item{};
         int quantity{};
         std::array<Unreal::FWeakObjectPtr, 3> shop_backups;
         std::optional<Guid> reorder_before;
+        StashSplit dragged_split;
+        int split_expected{};
     };
 
     struct GuestUseCursor
@@ -1005,8 +1015,15 @@ namespace
         lua.set_integer(stash_screen.value);
         lua.set_integer(stash_screen.quantity);
         const auto before = std::exchange(stash_screen.reorder_before, std::nullopt);
+        const auto expected = std::exchange(stash_screen.split_expected, 0);
         stash_screen.item = {};
         stash_screen.quantity = 0;
+        if (expected)
+        {
+            lua.set_nil();
+            lua.set_integer(expected);
+            return 6;
+        }
         if (before)
         {
             if (*before == Guid{}) lua.set_string("-");
@@ -1867,14 +1884,14 @@ namespace
         if (auto* clear = stock_no_args(manager, entries->clear_held)) manager->ProcessEvent(clear, nullptr);
     }
 
-    bool start_stock_cursor(Unreal::UObject* manager, const ItemView& selected)
+    bool start_stock_cursor(Unreal::UObject* manager, const ItemView& selected, bool partial = false)
     {
         auto* taking = field<Unreal::FBoolProperty>(manager, STR("IsTakingItem"));
         auto* holding = field<Unreal::FBoolProperty>(manager, STR("HoldingItem"));
         auto* held = field<Unreal::FStructProperty>(manager, STR("HeldItem"));
         auto* move = manager->GetClassPrivate()->GetFunctionByNameInChain(Unreal::FName(STR("MoveItemToCursor")));
         auto* animate = field<Unreal::FBoolProperty>(move, STR("Anim"));
-        if (!taking || !taking->GetPropertyValueInContainer(manager) || !holding ||
+        if (!taking || taking->GetPropertyValueInContainer(manager) == partial || !holding ||
             holding->GetPropertyValueInContainer(manager) || !item_struct(held, selected.structure) ||
             !move || move->GetOuterPrivate() != manager->GetClassPrivate() || move->GetNumParms() != 1 ||
             move->GetReturnProperty() || move->GetParmsSize() != 1 || !animate || animate->GetOffset_Internal() != 0 ||
@@ -1912,10 +1929,76 @@ namespace
         if (!holding || !holding->GetPropertyValueInContainer(manager) ||
             !stash_panel(origin) || stash_screen.drag_item == Guid{} || !fields.valid() ||
             fields.read(held.value) != stash_screen.drag_item) return;
-        if (target != origin) queue_stash_move(stash_screen.drag_item, origin, held);
+        if (const auto split = stash_screen.dragged_split; split.source != Guid{})
+        {
+            auto* units = field<Unreal::FIntProperty>(held.structure, item_ammo_name);
+            if (target != origin && units && units->GetPropertyValueInContainer(held.value) == split.amount)
+            {
+                queue_stash_move(split.source, origin, held);
+                if (stash_screen.item != Guid{})
+                {
+                    stash_screen.split_expected = split.expected;
+                    stash_screen.quantity = split.amount;
+                }
+            }
+        }
+        else if (target != origin) queue_stash_move(stash_screen.drag_item, origin, held);
         else if (!stash_screen.merchant && target == stash_screen.storage.Get())
             queue_stash_reorder(held, target, function, parameters);
         clear_stash_cursor(manager);
+    }
+
+    std::optional<int> confirmed_split(Unreal::UObject* screen, Unreal::UObject* manager,
+                                       Unreal::UFunction* function, const void* parameters, Unreal::UObject* popup)
+    {
+        auto* splitting = field<Unreal::FBoolProperty>(manager, STR("IsSplittingStack"));
+        auto* parameter = field<Unreal::FIntProperty>(function, STR("AmountToTake"));
+        auto* count = field<Unreal::FIntProperty>(popup, STR("Count"));
+        auto* maximum = field<Unreal::FIntProperty>(popup, STR("Max"));
+        if (!parameters || !qualified_stash_action(screen, manager, function, 1) ||
+            function->GetParmsSize() != sizeof(std::int32_t) || !parameter || parameter->GetOffset_Internal() != 0 ||
+            !parameter->HasAnyPropertyFlags(Unreal::CPF_Parm) || parameter->HasAnyPropertyFlags(Unreal::CPF_OutParm) ||
+            !exact_class(popup, split_popup_path) || !same_widget_player(popup) ||
+            !splitting || !splitting->GetPropertyValueInContainer(manager) || !count || !maximum) return {};
+        const int take = parameter->GetPropertyValueInContainer(parameters);
+        return take > 0 && take == count->GetPropertyValueInContainer(popup) &&
+            take <= maximum->GetPropertyValueInContainer(popup) ? std::optional{take} : std::nullopt;
+    }
+
+    void finish_stash_split(Unreal::UObject* screen, Unreal::UObject* manager, Unreal::UFunction* function,
+                            const void* parameters)
+    {
+        auto* popup = object_field(manager, STR("SplitStackPopup"));
+        const auto selected = stash_card(object_field(popup, STR("ItemCard")), manager);
+        const auto take = confirmed_split(screen, manager, function, parameters, popup);
+        if (!selected || selected->guid != stash_screen.popup_item || !take || stash_screen.drag_item != Guid{}) return;
+        const auto& source = selected->item;
+        auto* klass = field<Unreal::FClassProperty>(source.structure, item_class_name);
+        auto* units = field<Unreal::FIntProperty>(source.structure, item_ammo_name);
+        auto* property = field<Unreal::FStructProperty>(manager, STR("HeldItem"));
+        auto* type = Unreal::Cast<Unreal::UClass>(object_value(klass, source.value));
+        if (!units || !item_struct(property, source.structure) ||
+            !silverfish::drop_item_class::stacks(type).value_or(false)) return;
+        const int expected = units->GetPropertyValueInContainer(source.value);
+        if (*take >= expected) return;
+
+        const auto deleter = [property](void* value) { property->DestroyAndFreeValue(value); };
+        std::unique_ptr<void, decltype(deleter)> portion(property->AllocateAndInitializeValue(), deleter);
+        std::unique_ptr<void, decltype(deleter)> remainder(property->AllocateAndInitializeValue(), deleter);
+        if (!portion || !remainder || !silverfish::native_guest_item::split_stock_stack(scope.pawn.Get(), property,
+                source.value, *take, portion.get(), remainder.get())) return;
+        const GuidFields fields(source.structure);
+        const auto guid = fields.read(portion.get());
+        if (guid == Guid{} || guid == selected->guid || fields.read(remainder.get()) != selected->guid ||
+            object_value(klass, portion.get()) != type || units->GetPropertyValueInContainer(portion.get()) != *take) return;
+        auto preview = source;
+        preview.value = portion.get();
+        if (start_stock_cursor(manager, preview, true))
+        {
+            stash_screen.drag_item = guid;
+            stash_screen.drag_source = source.panel;
+            stash_screen.dragged_split = {selected->guid, *take, expected};
+        }
     }
 
     void finish_shop_split(Unreal::UObject* screen, Unreal::UObject* manager, Unreal::UFunction* function,
@@ -1924,31 +2007,21 @@ namespace
         auto* popup = object_field(manager, STR("SplitStackPopup"));
         auto* card = object_field(popup, STR("ItemCard"));
         const auto selected = stash_card(card, manager);
-        auto* splitting = field<Unreal::FBoolProperty>(manager, STR("IsSplittingStack"));
-        auto* parameter = field<Unreal::FIntProperty>(function, STR("AmountToTake"));
-        auto* count = field<Unreal::FIntProperty>(popup, STR("Count"));
-        auto* maximum = field<Unreal::FIntProperty>(popup, STR("Max"));
+        const auto take = confirmed_split(screen, manager, function, parameters, popup);
         auto* markup = field<Unreal::FDoubleProperty>(card, STR("ShopMarkup"));
-        if (!parameters || !qualified_stash_action(screen, manager, function, 1) ||
-            function->GetParmsSize() != sizeof(std::int32_t) || !parameter || parameter->GetOffset_Internal() != 0 ||
-            !parameter->HasAnyPropertyFlags(Unreal::CPF_Parm) || parameter->HasAnyPropertyFlags(Unreal::CPF_OutParm) ||
-            !exact_class(popup, split_popup_path) || !same_widget_player(popup) || !selected ||
-            selected->item.panel != stash_screen.storage.Get() || selected->guid != stash_screen.shop_split ||
-            !splitting || !splitting->GetPropertyValueInContainer(manager) || !count || !maximum || !markup) return;
-        const int take = parameter->GetPropertyValueInContainer(parameters);
+        if (!take || !selected || selected->item.panel != stash_screen.storage.Get() ||
+            selected->guid != stash_screen.popup_item || !markup) return;
         const auto portion = inventory_item(popup, STR("Item"));
         auto* units = field<Unreal::FIntProperty>(portion.structure, item_ammo_name);
         auto* value = field<Unreal::FIntProperty>(portion.structure, item_value_name);
-        if (!portion.value || take < 1 || count->GetPropertyValueInContainer(popup) != take ||
-            take > maximum->GetPropertyValueInContainer(popup) || !units || !value ||
-            units->GetPropertyValueInContainer(portion.value) != take ||
+        if (!portion.value || !units || !value || units->GetPropertyValueInContainer(portion.value) != *take ||
             object_value(field<Unreal::FClassProperty>(portion.structure, item_class_name), portion.value) !=
                 object_value(field<Unreal::FClassProperty>(selected->item.structure, item_class_name), selected->item.value)) return;
         const double price = std::ceil(markup->GetPropertyValueInContainer(card) * value->GetPropertyValueInContainer(portion.value));
         if (!std::isfinite(price) || price < 0 || price > std::numeric_limits<std::int32_t>::max()) return;
         queue_stash_move(selected->guid, selected->item.panel, selected->item);
         stash_screen.value = static_cast<int>(price);
-        stash_screen.quantity = take;
+        stash_screen.quantity = *take;
     }
 
     bool intercept_stash(Iteration& call, Unreal::UObject* context, Unreal::UFunction* function, const Unreal::FName& name,
@@ -1986,6 +2059,7 @@ namespace
             stash_screen.drag_item = {};
             stash_screen.drag_source.Reset();
             stash_screen.taking_item = {};
+            stash_screen.dragged_split = {};
             return false;
         }
         if (name == entries->cancel_take)
@@ -1993,13 +2067,20 @@ namespace
             stash_screen.taking_item = {};
             return false;
         }
-        if (stash_screen.merchant && name == entries->cancel_split)
+        if (name == entries->cancel_split)
         {
-            stash_screen.shop_split = {};
+            stash_screen.popup_item = {};
             return false;
         }
-        if (stash_screen.merchant && name == entries->position_split) return false;
-        if (stash_screen.merchant && name == entries->action_split)
+        if (name == entries->position_split && stash_screen.popup_item != Guid{})
+        {
+            std::array<char, 2> flag{};
+            std::size_t size{};
+            if (!stash_screen.merchant && getenv_s(&size, flag.data(), flag.size(), "SILVERFISH_COOP_HEADLESS") == 0 &&
+                size == flag.size() && flag[0] == '1') call.PreventOriginalFunctionCall();
+            return call.OriginalFunctionCallPrevented();
+        }
+        if (name == entries->action_split)
         {
             auto* menu = object_field(manager, STR("ItemContextMenu"));
             auto* card = object_field(menu, STR("Item Card"));
@@ -2007,11 +2088,12 @@ namespace
             auto* splitting = field<Unreal::FBoolProperty>(manager, STR("IsSplittingStack"));
             if (qualified_stash_action(screen, manager, function, 0) && splitting &&
                 !splitting->GetPropertyValueInContainer(manager) &&
-                stash_screen.drag_item == Guid{} && selected && selected->item.panel == stash_screen.storage.Get() &&
+                stash_screen.drag_item == Guid{} && selected &&
+                (!stash_screen.merchant || selected->item.panel == stash_screen.storage.Get()) &&
                 exact_class(menu, context_menu_path) && same_widget_player(menu) &&
                 object_field(menu, STR("ItemManager")) == manager && shop_quantity_card(card, *selected))
             {
-                stash_screen.shop_split = selected->guid;
+                stash_screen.popup_item = selected->guid;
                 std::array<char, 2> flag{};
                 std::size_t size{};
                 if (getenv_s(&size, flag.data(), flag.size(), "SILVERFISH_COOP_HEADLESS") == 0 &&
@@ -2034,13 +2116,14 @@ namespace
             call.PreventOriginalFunctionCall();
             return true;
         }
-        if (stash_screen.merchant && name == entries->final_split)
+        if (name == entries->final_split)
         {
             call.PreventOriginalFunctionCall();
-            if (call.OriginalFunctionCallPrevented() && stash_screen.shop_split != Guid{})
+            if (call.OriginalFunctionCallPrevented() && stash_screen.popup_item != Guid{})
             {
-                finish_shop_split(screen, manager, function, parameters);
-                stash_screen.shop_split = {};
+                if (stash_screen.merchant) finish_shop_split(screen, manager, function, parameters);
+                else finish_stash_split(screen, manager, function, parameters);
+                stash_screen.popup_item = {};
                 if (auto* cancel = stock_no_args(manager, entries->cancel_split)) manager->ProcessEvent(cancel, nullptr);
             }
             return true;
@@ -2076,7 +2159,7 @@ namespace
             clear_stash_cursor(manager);
             return true;
         }
-        if ((!quick && !finish_take) || stash_screen.drag_item != Guid{} || stash_screen.shop_split != Guid{} ||
+        if ((!quick && !finish_take) || stash_screen.drag_item != Guid{} || stash_screen.popup_item != Guid{} ||
             !qualified_stash_action(screen, manager, function, 0)) return true;
 
         const bool from_menu = name == entries->action_quick_move || shop_buy;

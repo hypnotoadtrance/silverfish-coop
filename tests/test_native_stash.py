@@ -14,6 +14,69 @@ GUEST = "guest-character"
 
 
 class NativeStashTests(unittest.IsolatedAsyncioTestCase):
+    async def test_split_rejects_stale_or_merge_target_before_a_checkpoint(self):
+        state = party.new_party()
+        party.add_player(state, "host")
+        party.add_player(state, GUEST)
+        game = {"state": "hosting", "map": OBSERVATORY, native_stash.SETTING: False,
+                native_stash.SITES: {SITE: {"map": OBSERVATORY}}, native_stash.LIVE_MOVE: True,
+                native_stash.LIVE_SPLIT: True, "native_guest_save_retention": True}
+        host = SimpleNamespace(last_game=game, zone_epoch="zone", native_zones=True, native_profile=Mock(),
+                               stopping=False, transitioning=False, native_checkpoint_unsafe=False,
+                               party=state, smg_holds=None, native_recipients=lambda: {GUEST: {
+                                   "pawn": "guest-pawn", "connected": True}},
+                               pending_guest_saves={GUEST: ("guest-pawn", {})}, checkpoint_native=AsyncMock(), control=Mock())
+        item, operation = "D" * 32, uuid.uuid4().hex
+        bridge = SimpleNamespace(command=AsyncMock())
+        for invalid in (f"{SITE}|split-deposit|{item}|7|7", f"{SITE}|split-withdraw|{item}|1|2147483648"):
+            with self.assertRaisesRegex(party.RuleError, "exact_site_and_item"):
+                await native_stash.move(host, bridge, GUEST, invalid, operation)
+        bridge.command.assert_not_awaited()
+
+        target = f"{SITE}|split-deposit|{item}|3|7"
+        for status in ("native_stash_move_split_stale_amount", "native_stash_move_split_destination_stack"):
+            bridge.command.side_effect = RuntimeError(status)
+            with self.assertRaisesRegex(party.RuleError, status):
+                await native_stash.move(host, bridge, GUEST, target, operation)
+            self.assertEqual(host.party["receipts"], {})
+            self.assertFalse(host.native_checkpoint_unsafe)
+            self.assertFalse(host.stopping)
+
+        async def stock_split(action, pawn, slot, site, guid, direction, combined, created, amount, expected, *, timeout):
+            self.assertEqual((action, pawn, slot, site, guid, direction, combined, amount, expected),
+                             (native_stash.MOVE, "guest-pawn", "-", SITE, item, "split-deposit", "0", "3", "7"))
+            return {**game, native_stash.MOVED: dict(map=OBSERVATORY, pawn=pawn, slot=slot, site=site, guid=guid,
+                direction=direction, combined=False, class_path="/Game/Classes/Items/Test.Test_C", quantity=3,
+                remaining=4, created_guid=created)}
+
+        bridge.command.reset_mock()
+        bridge.command.side_effect = stock_split
+        response = await native_stash.move(host, bridge, GUEST, target, operation)
+        portion = response[native_stash.MOVED]
+        self.assertNotEqual(portion["created_guid"], item)
+        self.assertEqual((portion["owner"], portion["quantity"], portion["remaining"]), (GUEST, 3, 4))
+        self.assertEqual(await native_stash.move(host, bridge, GUEST, target, operation), response)
+        self.assertEqual(bridge.command.await_count, 1)
+        host.checkpoint_native.assert_not_awaited()
+
+    async def test_split_status_requires_both_verified_quantities_and_distinct_id(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        item, created = "D" * 32, "E" * 32
+        base = (f"schema\t1\nseq\t1\nsession\thost\thosting\t{OBSERVATORY}\t1\t0\n"
+                "native-stash-live-move\t1\nnative-stash-live-split\t1\n")
+        move = (f"native-stash-move\t{OBSERVATORY}\tguest-pawn\t-\t{SITE}\t{item}\tsplit-withdraw"
+                "\t0\t/Game/Classes/Items/Test.Test_C\t3")
+        result = bridge._parse_status(base + move + f"\t4\t{created}\n")[native_stash.MOVED]
+        self.assertEqual((result["quantity"], result["remaining"], result["created_guid"]), (3, 4, created))
+        for extra in (f"\t0\t{created}", f"\t4\t{item}", ""):
+            self.assertIsNone(bridge._parse_status(base + move + extra + "\n"))
+
+        fields = ["native-stash-view", "pending", "1", OBSERVATORY, "guest-pawn", SITE, "stash", "0", item]
+        view = native_stash.parse_view(fields + ["3", "7"], OBSERVATORY, "connected")
+        self.assertEqual((view["split_amount"], view["expected"]), (3, 7))
+        with self.assertRaisesRegex(ValueError, "stash split"):
+            native_stash.parse_view(fields + ["7", "7"], OBSERVATORY, "connected")
+
     async def test_reorder_requires_live_retention_and_returns_exact_anchor(self):
         state = party.new_party()
         party.add_player(state, "host")

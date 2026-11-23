@@ -84,9 +84,10 @@ function view.clear()
     if type(SilverfishClearNativeStashScreen) == "function" then SilverfishClearNativeStashScreen() end
 end
 
-local function queue(mode, item, before)
+local function queue(mode, item, before, amount, expected)
     sequence = sequence + 1
     current.sequence, current.mode, current.item, current.before = sequence, mode, item, before
+    current.amount, current.expected = expected and amount or nil, expected
     current.state, current.expires = "pending", os.time() + 45
 end
 
@@ -108,8 +109,8 @@ function view.sync(state, phase)
         view.clear()
     end
     if current and current.state == "rendered" and visible(binding.controller, current.screen, true) then
-        local guid, deposit, _, _, before = SilverfishTakeNativeStashMove(current.screen:GetAddress())
-        if guid then queue(deposit and "backpack" or "stash", guid, before) end
+        local guid, deposit, _, amount, before, expected = SilverfishTakeNativeStashMove(current.screen:GetAddress())
+        if guid then queue(deposit and "backpack" or "stash", guid, before, amount, expected) end
     end
     if not binding or type(SilverfishTakeNativeStashPress) ~= "function" then return end
     local press, path = SilverfishTakeNativeStashPress(binding.pawn:GetAddress())
@@ -245,6 +246,49 @@ local function fixture(binding, id)
     return "stock stash interaction verified"
 end
 
+local function split_fixture(screen, source, card, count, gesture)
+    local manager, expected, source_guid = screen.ItemManager, card.Item[item_ammo], identifier(card.Item[item_guid])
+    local stash_count, pack_count = screen.StashPanel.Cards:GetArrayNum(), screen.BackpackPanel.Cards:GetArrayNum()
+    if not count or not source_guid or math.type(expected) ~= "integer" or count >= expected then
+        error("native_stash_view_fixture_split_count", 0)
+    end
+    manager:OpenContextMenu(card)
+    manager:ActionSplitStack()
+    local popup = manager.SplitStackPopup
+    if manager.IsSplittingStack ~= true or not valid(popup) or not same(popup.ItemCard, card) then
+        error("native_stash_view_fixture_stock_split_popup", 0)
+    end
+    popup:SetCount(count)
+    manager:FinalSplitStack(count)
+    local held = manager.HeldItem
+    local portion = identifier(held[item_guid])
+    if manager.HoldingItem ~= true or not manager.HeldItemWidget:IsVisible() or not portion or portion == source_guid
+        or held[item_ammo] ~= count or card.Item[item_ammo] ~= expected
+        or SilverfishTakeNativeStashMove(screen:GetAddress()) then
+        error("native_stash_view_fixture_stock_split_cursor", 0)
+    end
+    if gesture == "cancel" then
+        manager:ReturnItem(held, {})
+    elseif gesture == "move" then
+        local destination = source == "stash" and screen.BackpackPanel or screen.StashPanel
+        if destination.IsInsertMode ~= true then error("native_stash_view_fixture_split_target", 0) end
+        manager:InsertItem(destination, -1)
+        manager:InsertItem(destination, -1)
+    else
+        error("native_stash_view_fixture_split_gesture", 0)
+    end
+    local guid, deposit, _, quantity, before, prior = SilverfishTakeNativeStashMove(screen:GetAddress())
+    if manager.HoldingItem ~= false or identifier(manager.HeldItem[item_guid]) or card.Item[item_ammo] ~= expected
+        or screen.StashPanel.Cards:GetArrayNum() ~= stash_count or screen.BackpackPanel.Cards:GetArrayNum() ~= pack_count
+        or (gesture == "cancel" and guid)
+        or (gesture == "move" and (guid ~= source_guid or deposit ~= (source == "backpack")
+            or quantity ~= count or before or prior ~= expected or SilverfishTakeNativeStashMove(screen:GetAddress()))) then
+        error("native_stash_view_fixture_stock_split_request", 0)
+    end
+    if guid then queue(source, guid, nil, quantity, prior) end
+    return "stock stash split cursor verified"
+end
+
 function view.command(fields, state, phase)
     local verb = fields[2]
     if verb == "native-stash-view-close" then view.clear(); return "private stash closed" end
@@ -259,8 +303,10 @@ function view.command(fields, state, phase)
         if not valid(screen) or current.state ~= "rendered" then error("native_stash_view_fixture_click_unavailable", 0) end
         if target == "close" then view.clear(); return "stock stash closed" end
         local to_move, stock_index = target:match("^reorder%-stash:([0-9A-F]+):(%d+)$")
+        local split_side, split_guid, split_count, split_gesture = target:match("^split%-(%a+):([0-9A-F]+):(%d+):(%a+)$")
         local action, source, wanted = target:match("^(%a+)%-(%a+):([0-9A-F]+)$")
         if to_move then action, source, wanted = "reorder", "stash", to_move
+        elseif split_side then source, wanted = split_side, split_guid
         elseif not action then source, wanted = target:match("^(%a+):([0-9A-F]+)$") end
         local panel = source == "backpack" and screen.BackpackPanel or source == "stash" and screen.StashPanel
         if not valid(panel) then error("native_stash_view_fixture_panel_unavailable", 0) end
@@ -268,6 +314,9 @@ function view.command(fields, state, phase)
         for index = 1, panel.Cards:GetArrayNum() do
             local card = entry(panel.Cards, index)
             if valid(card) and identifier(card.Item[item_guid]) == wanted then
+                if split_side then
+                    return split_fixture(screen, source, card, math.tointeger(tonumber(split_count)), split_gesture)
+                end
                 local stash_count, backpack_count = screen.StashPanel.Cards:GetArrayNum(), screen.BackpackPanel.Cards:GetArrayNum()
                 if action then
                     manager:StartHoverCard(card)
@@ -357,6 +406,7 @@ function view.rows(state, phase, row)
     if not current or phase ~= "connected" or current.binding.map ~= state.map then return {} end
     local fields = {current.state, current.sequence, current.binding.map, current.binding.name,
         current.id, current.mode, 0, current.item or "-", current.before}
+    if current.expected then fields[9], fields[10] = current.amount, current.expected end
     return {row("native-stash-view", table.unpack(fields))}
 end
 

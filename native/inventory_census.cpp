@@ -1,5 +1,6 @@
 #include "inventory_census.hpp"
 #include "drop_item_class.hpp"
+#include "guest_item.hpp"
 
 #include <algorithm>
 #include <array>
@@ -9,6 +10,8 @@
 #include <cstdlib>
 #include <format>
 #include <iterator>
+#include <limits>
+#include <memory>
 #include <set>
 #include <string>
 #include <string_view>
@@ -158,6 +161,17 @@ namespace
         }
 
         Guid identity(const void* item) const { return read_guid(guid->ContainerPtrToValuePtr<void>(item)); }
+
+        void write_guid(void* data, const Guid& identity) const
+        {
+            for (std::size_t index = 0; index < identity.size(); ++index)
+                guid_words[index]->SetPropertyValueInContainer(data, static_cast<std::int32_t>(identity[index]));
+        }
+
+        Unreal::UObject* klass(const void* data) const
+        {
+            return item_class->GetObjectPropertyValue(item_class->ContainerPtrToValuePtr<void>(data));
+        }
     };
 
     bool asset_path(std::string_view path)
@@ -328,7 +342,7 @@ namespace
         }
     };
 
-    Unreal::UObject* authoritative_save(Address address, bool combined);
+    Unreal::UObject* authoritative_save(Address address, bool combined, Unreal::UObject** context = nullptr);
 
     int stash_census(const Lua& lua, bool read_live)
     {
@@ -401,7 +415,7 @@ namespace
         return save;
     }
 
-    Unreal::UObject* authoritative_save(Address address, bool combined)
+    Unreal::UObject* authoritative_save(Address address, bool combined, Unreal::UObject** context)
     {
         auto* pawn = live_exact(address, find<Unreal::UClass>(pawn_path));
         auto* dead = field<Unreal::FBoolProperty>(pawn, STR("Dead"));
@@ -409,7 +423,13 @@ namespace
         Unreal::UObject* stock{};
         auto* save = live_pawn_save(pawn, stock);
         auto* setting = save ? field<Unreal::FBoolProperty>(stock, STR("CombineStashes")) : nullptr;
-        return setting && setting->GetPropertyValueInContainer(stock) == combined ? save : nullptr;
+        if (!setting || setting->GetPropertyValueInContainer(stock) != combined) return nullptr;
+        if (context)
+        {
+            if (save == stock) return nullptr; // A partial transfer belongs to the detached guest inventory.
+            *context = pawn;
+        }
+        return save;
     }
 
     int read_live_census(const Lua& lua)
@@ -439,13 +459,20 @@ namespace
         return count;
     }
 
-    template <bool Live, bool Reorder = false>
+    struct ItemDelete
+    {
+        Unreal::FStructProperty* property{};
+        void operator()(void* value) const { property->DestroyAndFreeValue(value); }
+    };
+
+    template <bool Live, bool Reorder = false, bool Split = false>
     int move_stash(const Lua& lua)
     {
-        static_assert(!Reorder || Live);
-        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != (Reorder ? 7 : 6) ||
+        static_assert((!Reorder && !Split) || (Live && !(Reorder && Split)));
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != (Split ? 9 : Reorder ? 7 : 6) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_bool(3) ||
-            !lua.is_string(4) || !lua.is_string(5) || !lua.is_bool(6) || (Reorder && !lua.is_string(7)))
+            !lua.is_string(4) || !lua.is_string(5) || !lua.is_bool(6) || ((Reorder || Split) && !lua.is_string(7)) ||
+            (Split && (!lua.is_integer(8) || !lua.is_integer(9))))
             return result(lua, false, "native_stash_move_unavailable");
         const auto pawn = static_cast<Address>(lua.get_integer());
         const auto frame = static_cast<Address>(lua.get_integer());
@@ -453,7 +480,21 @@ namespace
         const auto site = stash_identity(lua.get_string());
         const auto id = stash_identity(lua.get_string());
         const bool deposit = lua.get_bool();
-        auto* save = authoritative_save(pawn, combined);
+        Guid created{};
+        int take{}, expected{};
+        if constexpr (Split)
+        {
+            created = stash_identity(lua.get_string());
+            const auto quantity = lua.get_integer();
+            const auto source = lua.get_integer();
+            if (created == Guid{} || id == created || quantity < 1 || quantity >= source ||
+                source > std::numeric_limits<int>::max())
+                return result(lua, false, "native_stash_move_split_selection");
+            take = static_cast<int>(quantity);
+            expected = static_cast<int>(source);
+        }
+        Unreal::UObject* context{};
+        auto* save = authoritative_save(pawn, combined, Split ? &context : nullptr);
         auto* snapshot = Live ? nullptr : isolated_snapshot(frame);
         if (!save || (Live ? frame != 0 : !snapshot) || site == Guid{} || id == Guid{} || (Reorder && deposit))
             return result(lua, false, "native_stash_move_exact_save_and_site_required");
@@ -475,6 +516,10 @@ namespace
         if (inventory.identity(inventory.armor->ContainerPtrToValuePtr<void>(save)) == id ||
             inventory.identity(inventory.helmet->ContainerPtrToValuePtr<void>(save)) == id)
             return result(lua, false, "native_stash_move_equipped_item");
+        if constexpr (Split)
+            if (inventory.identity(inventory.armor->ContainerPtrToValuePtr<void>(save)) == created ||
+                inventory.identity(inventory.helmet->ContainerPtrToValuePtr<void>(save)) == created)
+                return result(lua, false, "native_stash_move_split_duplicate");
 
         Unreal::FScriptArrayHelper backpack(inventory.backpack, inventory.backpack->ContainerPtrToValuePtr<void>(save));
         Unreal::FScriptArrayHelper equipment(inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(save));
@@ -488,6 +533,9 @@ namespace
         const int pack_count = locate(inventory, backpack, id, pack_index);
         if (pack_count != (deposit ? 1 : 0) || locate(inventory, equipment, id, ignored) != 0)
             return result(lua, false, "native_stash_move_backpack_identity");
+        if constexpr (Split)
+            if (locate(inventory, backpack, created, ignored) != 0 || locate(inventory, equipment, created, ignored) != 0)
+                return result(lua, false, "native_stash_move_split_duplicate");
         for (int index = 0; index < stashes.Num(); ++index)
         {
             Unreal::FScriptArrayHelper rows(storage.contents,
@@ -495,6 +543,9 @@ namespace
             int found = -1;
             if (locate(inventory, rows, id, found) != (!deposit && index == selected ? 1 : 0))
                 return result(lua, false, "native_stash_move_stored_identity");
+            if constexpr (Split)
+                if (locate(inventory, rows, created, ignored) != 0)
+                    return result(lua, false, "native_stash_move_split_duplicate");
             if (index == selected) stash_index = found;
         }
         if ((!deposit && stash_index < 0) || (!Reorder && !deposit && backpack.Num() == max_array_rows))
@@ -508,13 +559,57 @@ namespace
             if (deposit && rows.Num() == max_array_rows) return result(lua, false, "native_stash_move_source_or_capacity");
             if (!deposit) source_row = rows.GetRawPtr(stash_index);
         }
-        auto* item_type = Unreal::Cast<Unreal::UClass>(inventory.item_class->GetObjectPropertyValue(
-            inventory.item_class->ContainerPtrToValuePtr<void>(source_row)));
+        auto* item_type = Unreal::Cast<Unreal::UClass>(inventory.klass(source_row));
         ItemClass item;
         if (!live(item_type) || !item_type->IsChildOf(inventory.base) || !item.read(item_type))
             return result(lua, false, "native_stash_move_item_unqualified");
         const auto quantity = item.stackable ? inventory.ammo->GetPropertyValueInContainer(source_row) : 1;
         if (quantity < 1) return result(lua, false, "native_stash_move_quantity_unqualified");
+
+        auto* property = Unreal::CastField<Unreal::FStructProperty>(inventory.backpack->GetInner());
+        std::unique_ptr<void, ItemDelete> portion{nullptr, {property}}, remainder{nullptr, {property}},
+            original_copy{nullptr, {property}};
+        if constexpr (Split)
+        {
+            if (!item.stackable || quantity != expected || !inventory.weight || !inventory.value)
+                return result(lua, false, "native_stash_move_split_stale_amount");
+            const auto contains_class = [&](Unreal::FScriptArrayHelper& rows) {
+                for (int index = 0; index < rows.Num(); ++index)
+                    if (inventory.klass(rows.GetRawPtr(index)) == item_type) return true;
+                return false;
+            };
+            if (!deposit && contains_class(backpack))
+                return result(lua, false, "native_stash_move_split_destination_stack");
+            if (deposit && selected >= 0)
+            {
+                Unreal::FScriptArrayHelper rows(storage.contents,
+                    storage.contents->ContainerPtrToValuePtr<void>(stashes.GetRawPtr(selected)));
+                if (contains_class(rows)) return result(lua, false, "native_stash_move_split_destination_stack");
+            }
+            portion.reset(property->AllocateAndInitializeValue());
+            remainder.reset(property->AllocateAndInitializeValue());
+            original_copy.reset(property->AllocateAndInitializeValue());
+            if (!portion || !remainder || !original_copy)
+                return result(lua, false, "native_stash_move_split_storage");
+            property->CopyCompleteValue(original_copy.get(), source_row);
+            if (!property->Identical(original_copy.get(), source_row) ||
+                !silverfish::native_guest_item::split_stock_stack(context, property, source_row, take,
+                    portion.get(), remainder.get()))
+                return result(lua, false, "native_stash_move_split_stock_unavailable");
+            const auto exact = [&](const void* row, int amount) {
+                const auto weight = inventory.weight->GetPropertyValueInContainer(row);
+                return inventory.klass(row) == item_type && inventory.ammo->GetPropertyValueInContainer(row) == amount &&
+                    std::isfinite(weight) && weight >= 0 && weight <= 100000 &&
+                    inventory.value->GetPropertyValueInContainer(row) >= 0 &&
+                    inventory.never_drop->GetPropertyValueInContainer(row) ==
+                        inventory.never_drop->GetPropertyValueInContainer(source_row);
+            };
+            const auto generated = inventory.identity(portion.get());
+            if (generated == Guid{} || generated == id || inventory.identity(remainder.get()) != id ||
+                !exact(portion.get(), take) || !exact(remainder.get(), expected - take))
+                return result(lua, false, "native_stash_move_split_stock_result");
+            inventory.write_guid(inventory.guid->ContainerPtrToValuePtr<void>(portion.get()), created);
+        }
 
         if constexpr (Reorder)
         {
@@ -549,12 +644,12 @@ namespace
             return 4;
         }
 
-        if (selected < 0)
+        const bool new_stash = selected < 0;
+        if (new_stash)
         {
             selected = stashes.AddValue();
             auto* encoded = storage.id->ContainerPtrToValuePtr<void>(stashes.GetRawPtr(selected));
-            for (std::size_t i = 0; i < site.size(); ++i)
-                inventory.guid_words[i]->SetPropertyValueInContainer(encoded, static_cast<std::int32_t>(site[i]));
+            inventory.write_guid(encoded, site);
         }
         Unreal::FScriptArrayHelper rows(storage.contents,
             storage.contents->ContainerPtrToValuePtr<void>(stashes.GetRawPtr(selected)));
@@ -563,7 +658,36 @@ namespace
         const int previous_source = source.Num(), previous_destination = destination.Num();
         const int source_index = deposit ? pack_index : stash_index;
         auto* copied = destination.GetRawPtr(destination.AddValue());
-        auto* property = inventory.backpack->GetInner();
+        if constexpr (Split)
+        {
+            auto* original = source.GetRawPtr(source_index);
+            const auto rollback_portion = [&] {
+                destination.RemoveValues(previous_destination, 1);
+                if (new_stash) stashes.RemoveValues(selected, 1);
+            };
+            property->CopyCompleteValue(copied, portion.get());
+            if (!property->Identical(copied, portion.get()))
+            {
+                rollback_portion();
+                return result(lua, false, "native_stash_move_split_portion_copy");
+            }
+            property->CopyCompleteValue(original, remainder.get());
+            if (source.Num() != previous_source || destination.Num() != previous_destination + 1 ||
+                !property->Identical(original, remainder.get()) || inventory.identity(copied) != created)
+            {
+                property->CopyCompleteValue(original, original_copy.get());
+                const bool restored = property->Identical(original, original_copy.get());
+                rollback_portion();
+                return result(lua, false, restored ? "native_stash_move_split_remainder_copy"
+                    : "mutation_unverified_native_stash_split_remainder");
+            }
+            result(lua, true, "moved");
+            lua.set_string(item.path);
+            lua.set_integer(inventory.ammo->GetPropertyValueInContainer(copied));
+            lua.set_integer(inventory.ammo->GetPropertyValueInContainer(original));
+            lua.set_string(std::format("{:08X}{:08X}{:08X}{:08X}", created[0], created[1], created[2], created[3]));
+            return 6;
+        }
         property->CopyCompleteValue(copied, source.GetRawPtr(source_index));
         if (!property->Identical(copied, source.GetRawPtr(source_index)))
             return result(lua, false, "mutation_unverified_native_stash_payload");
@@ -612,6 +736,7 @@ namespace silverfish::inventory_census
         lua.register_function("SilverfishMoveNativeStashItem", move_stash<false>);
         lua.register_function("SilverfishMoveLiveNativeStashItem", move_stash<true>);
         lua.register_function("SilverfishReorderLiveNativeStashItem", move_stash<true, true>);
+        lua.register_function("SilverfishSplitLiveNativeStashItem", move_stash<true, false, true>);
         lua.register_function("SilverfishVerifyNativeStashSave", verify_stash_save);
     }
 }
