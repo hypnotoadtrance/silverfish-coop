@@ -28,9 +28,9 @@ BOARD = native_wire_board.BOARDS[AREA]
 
 
 @contextlib.contextmanager
-def staged_probe(game):
+def staged_probe(game, module="eye_board_probe"):
     scripts = game / runtime.SHIPPING.parent / runtime.MOD_SCRIPTS
-    main, fixture = scripts / "main.lua", scripts / "eye_board_probe.lua"
+    main, fixture = scripts / "main.lua", scripts / f"{module}.lua"
     original = main.read_bytes()
     manifest = runtime.stage_manifest(game)
     original_manifest = manifest.read_bytes()
@@ -41,27 +41,28 @@ def staged_probe(game):
         anchor = b"native_wire_board.sync(state, current_phase)"
         if original.count(anchor) != 1:
             raise ValueError("The staged board tick is unavailable for this fixture")
-        main.write_bytes(original.replace(anchor, anchor + b'\n        require("eye_board_probe").sync(state, current_phase)'))
+        hook = f'\n        require("{module}").sync(state, current_phase)'.encode("ascii")
+        runtime.write_text(main, original.replace(anchor, anchor + hook).decode("utf-8"), newline="")
         staged = json.loads(original_manifest)
         if "lua_files" in staged:
             for path in (main, fixture):
                 staged["lua_files"][path.name] = sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
-            manifest.write_text(json.dumps(staged) + "\n", encoding="utf-8")
+            runtime.write_text(manifest, json.dumps(staged) + "\n", newline="")
         yield
     finally:
-        main.write_bytes(original)
-        manifest.write_bytes(original_manifest)
+        runtime.write_text(main, original.decode("utf-8"), newline="")
+        runtime.write_text(manifest, original_manifest.decode("utf-8"), newline="")
         fixture.unlink()
 
 
-async def probe(bridge, operation):
+async def probe(bridge, operation, *, prefix="eye-board", timeout=8):
     nonce = uuid.uuid4().hex
-    (bridge / "eye-board-probe").write_bytes(f"{operation}|{nonce}\n".encode("ascii"))
-    async with asyncio.timeout(8):
+    runtime.write_text(bridge / f"{prefix}-probe", f"{operation}|{nonce}\n", newline="")
+    async with asyncio.timeout(timeout):
         while True:
             await asyncio.sleep(.05)
             try:
-                transaction, state, response = (bridge / "eye-board-reply").read_text().split("|", 2)
+                transaction, state, response = (bridge / f"{prefix}-reply").read_text().split("|", 2)
             except (OSError, ValueError):
                 continue
             if transaction == nonce:
