@@ -271,6 +271,30 @@ local function aim_offhand(view, now)
     rendered.aim, rendered.pawn_rotation = aim, rotation
 end
 
+local function aim_handheld(rendered, now)
+    local pawn, light = rendered.pawn, rendered.light
+    if not rendered.visual_only or not valid(pawn) or pawn:IsActorBeingDestroyed() or not valid(light) then return end
+    local aim = pawn:GetBaseAimRotation()
+    local prior = rendered.beam_aim
+    if prior then
+        local blend = 1 - math.exp(-(now - rendered.beam_time) / .05)
+        rendered.beam_time = now
+        local pitch = (aim.Pitch - prior.Pitch + 180) % 360 - 180
+        local yaw = (aim.Yaw - prior.Yaw + 180) % 360 - 180
+        aim = {Pitch = prior.Pitch + pitch * blend, Yaw = prior.Yaw + yaw * blend, Roll = 0}
+        if math.abs(aim.Pitch - prior.Pitch) < .02 and math.abs(aim.Yaw - prior.Yaw) < .02 then return end
+    else
+        aim = {Pitch = aim.Pitch, Yaw = aim.Yaw, Roll = 0}
+    end
+    light:K2_SetWorldRotation(aim, false, {}, true)
+    rendered.beam_aim, rendered.beam_time = aim, now
+end
+
+local function animate_beam(view, now)
+    if view.offhand then aim_offhand(view, now)
+    else aim_handheld(view.rendered, now) end
+end
+
 local function project_offhand(view, pawn)
     local body = pawn and avatar.offhand_body(pawn)
     if not valid(body) then clear_render(view); return end
@@ -296,16 +320,18 @@ local function project_offhand(view, pawn)
 end
 
 function flashlight.animate(get_world)
+    if not (target and target.rendered) and not (peers and next(peers.views)) then return end
     local world
-    if target and target.offhand and target.rendered then
+    local now = os.clock()
+    if target and target.rendered then
         world = get_world()
-        if same(target.world, world) then aim_offhand(target, os.clock()) end
+        if same(target.world, world) then animate_beam(target, now) end
     end
     if peers then
         for _, view in pairs(peers.views) do
-            if view.offhand and view.rendered then
+            if view.rendered then
                 world = world or get_world()
-                if same(peers.world, world) then aim_offhand(view, os.clock()) end
+                if same(peers.world, world) then animate_beam(view, now) end
             end
         end
     end
@@ -330,6 +356,12 @@ local function project(state, listener, view)
         if valid(light) then
             rendered = {pawn = pawn, mount = mount, light = light,
                 instance = view.instance, visual_only = not stock_visible}
+            if rendered.visual_only then
+                -- The torch mesh follows the third-person hand pose. Its
+                -- lens stays attached while the beam follows native aim.
+                light:SetAbsolute(false, true, false)
+                aim_handheld(rendered, now)
+            end
             view.rendered = rendered
         end
     end

@@ -1563,6 +1563,143 @@ async def verify_stock_host_corpse_carry(host: Seat, guest: Seat, _pawn: str) ->
                                       "campaign_checkpoint_unchanged": True, **views}}
 
 
+async def verify_stock_flashlights(host: Seat, guest: Seat, _pawn: str) -> dict:
+    async def torch(seat, mode, action):
+        return (await portable_probe_command(seat.bridge, "avatar-probe", f"{mode}x{action}\n")).strip().split("\t")
+
+    async def view(observer, source, profile, power, after=None):
+        run = observer.campaign / "run" if observer is host else observer.client / "run"
+        def applies(state):
+            game = state.get("game", {})
+            projected = (game.get("native_guest_flashlight_view", {}).get(str(source), {})
+                         if observer is host else game.get("native_flashlight_view", {}))
+            if (projected.get("profile") == profile and projected.get("player") == source
+                    and projected.get("power") is power and projected.get("visible") is power
+                    and (after is None or math.dist(projected["aim"], after) > 4)):
+                return projected
+        return applies(await wait_resident_status(run, applies, timeout=8))
+
+    async def inspect(observer, mode, source, *, offhand=False, powered=True):
+        values = await torch(observer, mode, f"observe{source}")
+        assert sum(map(int, values[3:5])) == int(powered), values
+        if not powered:
+            assert values[-1] == "-", values
+            return {"spotlight": None}
+        _, hidden, affects, intensity, radius, inner, outer, units, inverse, falloff, cookie, fade, socket, *angles = values[7:]
+        assert hidden == "false" and affects == "true", values
+        assert tuple(map(float, (intensity, radius, inner, outer))) == (17, 5000, 15, 40), values
+        assert cookie.endswith("/M_LightCookie.M_LightCookie"), values
+        if offhand:
+            assert values[6] == "1" and socket == "LeftHand", values
+        return {"spotlight": values[7], "light_units": units, "inverse_squared": inverse,
+                "falloff": float(falloff), "cookie": cookie, "fade_distance": float(fade),
+                "direction": list(map(float, angles))}
+
+    async def switch_offhand(seat, mode):
+        assert (await torch(seat, mode, "coffhandstart"))[0] == "ongoing_start"
+        await asyncio.sleep(.42)
+        assert (await torch(seat, mode, "coffhandhold"))[0] == "ongoing_hold"
+        assert (await torch(seat, mode, "coffhandrelease"))[0] == "completed_release"
+
+    def angular_error(owner_angles, observer_angles):
+        a, b = [math.radians(float(axis)) for axis in owner_angles[:2]], [
+            math.radians(float(axis)) for axis in observer_angles[:2]]
+        dot = math.sin(a[0]) * math.sin(b[0]) + math.cos(a[0]) * math.cos(b[0]) * math.cos(a[1] - b[1])
+        return math.degrees(math.acos(max(-1, min(1, dot))))
+
+    async def turn_held(owner, observer, mode, player, previous_source, previous_beam):
+        await torch(owner, mode, "turnlight")
+        await asyncio.sleep(.45)
+        async with asyncio.timeout(4):
+            while True:
+                source = (await torch(owner, mode, "readlight"))[9:12]
+                beam = await inspect(observer, mode, player)
+                if (angular_error(previous_source, source) > 15 and
+                        angular_error(previous_beam["direction"], beam["direction"]) > 15):
+                    return {"owner": list(map(float, source)), "observer": beam,
+                            "error_degrees": angular_error(source, beam["direction"])}
+                await asyncio.sleep(.12)
+
+    checkpoint = campaign_save_hashes(host.campaign)
+    stock, offhand = "regularhost", "offhandhost"
+    seeded = await torch(host, offhand, "seedoffhand")
+    host_id = int(seeded[0])
+    assert seeded[6] == "false", seeded
+    assert await torch(host, offhand, "selectregular") == ["selected"]
+    await view(guest, host_id, None, False)
+    host_stock_light = await torch(host, stock, "lighton")
+    assert host_stock_light[4:6] == ["true", "true"]
+    host_held = await view(guest, host_id, None, True)
+    assert host_held["heard"] == host_held["switch"]
+    regular_beam = await inspect(guest, stock, host_id)
+    host_turn = await turn_held(host, guest, stock, host_id, host_stock_light[9:12], regular_beam)
+    assert (await torch(host, stock, "lightoff"))[4:6] == ["false", "false"]
+    await view(guest, host_id, None, False)
+    await inspect(guest, stock, host_id, powered=False)
+    assert await torch(host, offhand, "selectprimary") == ["selected"]
+    await wait_resident_status(guest.client / "run",
+                               lambda frame: not frame.get("game", {}).get("native_flashlight_view"), timeout=8)
+    await switch_offhand(host, offhand)
+    host_offhand = await view(guest, host_id, "offhand", True)
+    offhand_beam = await inspect(guest, offhand, host_id, offhand=True)
+    await torch(host, offhand, "turnoffhand")
+    turned = await view(guest, host_id, "offhand", True, after=host_offhand["aim"])
+    await asyncio.sleep(.32)
+    aimed_beam = await inspect(guest, offhand, host_id, offhand=True)
+    assert math.dist(offhand_beam["direction"], aimed_beam["direction"]) > 4
+    await switch_offhand(host, offhand)
+    await wait_resident_status(guest.client / "run",
+                               lambda frame: not frame.get("game", {}).get("native_flashlight_view"))
+    await inspect(guest, offhand, host_id, powered=False)
+    guest_mode, guest_stock = "offhandguest", "regularguest"
+    guard = await torch(host, guest_mode, "guestoffhandboundary")
+    _, gun, light = await torch(host, guest_mode, "guestoffhandseed")
+    async with asyncio.timeout(8):
+        while True:
+            try:
+                guest_setup = await torch(guest, guest_mode, f"selectoffhandgun{gun}{light}")
+                break
+            except AssertionError as error:
+                if str(error).strip() != "avatar_probe_rig_pending":
+                    raise
+                await asyncio.sleep(.2)
+    guest_id = int(guest_setup[0])
+    assert guest_id != host_id and guest_setup[6] == "false"
+    assert await torch(guest, guest_mode, "selectregular") == ["selected"]
+    await view(host, guest_id, None, False)
+    guest_stock_light = await torch(guest, guest_stock, "lighton")
+    assert guest_stock_light[4:6] == ["true", "true"]
+    guest_held = await view(host, guest_id, None, True)
+    assert guest_held["heard"] == guest_held["switch"]
+    host_beam = await inspect(host, guest_stock, guest_id)
+    guest_turn = await turn_held(guest, host, guest_stock, guest_id, guest_stock_light[9:12], host_beam)
+    assert (await torch(guest, guest_stock, "lightoff"))[4:6] == ["false", "false"]
+    await view(host, guest_id, None, False)
+    await inspect(host, guest_stock, guest_id, powered=False)
+    assert await torch(guest, guest_mode, "selectprimary") == ["selected"]
+    await switch_offhand(guest, guest_mode)
+    guest_offhand = await view(host, guest_id, "offhand", True)
+    host_offhand_beam = await inspect(host, guest_mode, guest_id, offhand=True)
+    await switch_offhand(guest, guest_mode)
+    await wait_resident_status(host.campaign / "run",
+                               lambda frame: not frame.get("game", {}).get("native_guest_flashlight_view"), timeout=8)
+    await inspect(host, guest_mode, guest_id, powered=False)
+    assert await torch(host, guest_mode, "guestoffhandboundary") == guard
+    assert campaign_save_hashes(host.campaign) == checkpoint, "Flashlight controls caused a premature save"
+    angle = {"host_initial": angular_error(host_stock_light[9:12], regular_beam["direction"]),
+             "guest_initial": angular_error(guest_stock_light[9:12], host_beam["direction"]),
+             "host_turned": host_turn["error_degrees"], "guest_turned": guest_turn["error_degrees"]}
+    assert all(value < 8 for value in angle.values()), (angle, host_turn, guest_turn)
+    return {"stock_flashlights": {"host_held": host_held, "guest_held_beam": regular_beam,
+                                  "host_offhand": host_offhand, "guest_offhand_beam": offhand_beam,
+                                  "turned_offhand": turned, "guest_aimed_beam": aimed_beam,
+                                  "guest_offhand": guest_offhand, "host_offhand_beam": host_offhand_beam,
+                                  "guest_held": guest_held,
+                                  "host_held_beam": host_beam, "held_aim_error_degrees": angle,
+                                  "host_held_turn": host_turn, "guest_held_turn": guest_turn,
+                                  "cleared_on_holster": True, "campaign_checkpoint_unchanged": True}}
+
+
 async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-campfire", action)
@@ -2897,7 +3034,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
                  stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False,
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
-                 stock_host_corpse_carry: bool = False,
+                 stock_host_corpse_carry: bool = False, stock_flashlights: bool = False,
                  stock_npc_rivalry: bool = False,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
@@ -2955,6 +3092,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_npc_override and not resident_weapon_cues, "stock_npc_override", verify_resident_npc_override),
         (stock_board_offers, "stock_board_offers", verify_resident_board_offers),
         (stock_host_corpse_carry, "stock_host_corpse_carry", verify_stock_host_corpse_carry),
+        (stock_flashlights, "stock_flashlights", verify_stock_flashlights),
         (resident_weapon_cues, "resident_weapon_cues",
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override, rusty=rusty_pistol)),
         (stock_npc_rivalry, "stock_npc_rivalry", verify_stock_npc_rivalry),
@@ -2970,6 +3108,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                        or guest_ui_memory or compact_crate_status or compact_world_view or guest_shop_lease
                        or guest_stash_memory or nonmirrored_startup or stock_unequip or resident_cabinet_archive is not None)
     try:
+        if stock_flashlights:
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableFlashlightProbe",
+                                                     fixture="flashlight_source_probe.lua"))
         if resident_cabinet_archive:
             proof.update(cabinet_provenance(resident_cabinet_archive, games, qualified, resident_cabinet_candidate_sha256),
                          test_only_timing_probes=True)
@@ -3293,6 +3435,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-campfire", action="store_true", help="verify stock campfire damage and feedback, combinable with food and weapon cues")
     parser.add_argument("--stock-board-offers", action="store_true",
                         help="compare the stock Observatory board on both seats and accept a complex contract")
+    parser.add_argument("--stock-flashlights", action="store_true",
+                        help="Observe stock handheld and offhand beams on the connected seat")
     parser.add_argument("--stock-host-corpse-carry", action="store_true",
                         help="Measure stock host ragdoll carry on the guest and verify physics returns on release")
     parser.add_argument("--stock-npc-override", action="store_true",
@@ -3416,7 +3560,7 @@ if __name__ == "__main__":
     resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "stock_board_offers", "resident_weapon_cues",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_take_ammo",
-                              "stock_host_corpse_carry"}
+                              "stock_host_corpse_carry", "stock_flashlights"}
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
     if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
@@ -3429,7 +3573,7 @@ if __name__ == "__main__":
         parser.error("Use --stock-shovel-loot with --stock-shovel")
     if any((args.stock_food, args.stock_campfire, args.stock_npc_override, args.stock_board_offers,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
-            args.stock_host_corpse_carry)) and (
+            args.stock_host_corpse_carry, args.stock_flashlights)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
         parser.error("Run the resident gameplay checks without other gameplay fixtures")
@@ -3471,6 +3615,7 @@ if __name__ == "__main__":
                        stock_npc_override=args.stock_npc_override, stock_board_offers=args.stock_board_offers,
                        stock_npc_rivalry=args.stock_npc_rivalry,
                        stock_host_corpse_carry=args.stock_host_corpse_carry,
+                       stock_flashlights=args.stock_flashlights,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
