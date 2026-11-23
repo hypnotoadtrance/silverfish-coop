@@ -119,10 +119,17 @@ local function run(action)
     end
     if action == "read" then
         assert(not failure, failure)
-        local guest_health = local_pawn:HasAuthority() and peer.Save.PlayerHealth or -1
-        return ("%.6f,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%s,%s"):format(local_pawn.Save.PlayerHealth, guest_health,
+        local authority = local_pawn:HasAuthority()
+        local guest_save = authority and peer.Save
+        return ("%.6f,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%s,%s,%.6f,%.6f"):format(
+            local_pawn.Save.PlayerHealth, guest_save and guest_save.PlayerHealth or -1,
             overlays, hit_sounds, muted_hits, local_fire, peer_fire, hurt_voices, remote_offset,
-            tostring(flame.Capsule:IsOverlappingActor(local_pawn)), tostring(flame.Capsule:IsOverlappingActor(peer)))
+            tostring(flame.Capsule:IsOverlappingActor(local_pawn)), tostring(flame.Capsule:IsOverlappingActor(peer)),
+            local_pawn.Save.PlayerRegen, guest_save and guest_save.PlayerRegen or -1)
+    end
+    if action == "regen-policy" then
+        assert(local_pawn:HasAuthority() and valid(peer.Save), "authority is required to read stock guest regeneration")
+        return ("%.8f,%.8f,%.8f,%.8f"):format(peer.Sickness, peer.RegenDmg_Coeff, peer.Min_RegenRatio, peer.MaxHealth)
     end
     error("unknown campfire probe action")
 end

@@ -732,17 +732,18 @@ async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
         return await portable_probe_command(seat.bridge, "portable-campfire", action)
 
     async def sample(seat):
-        own, remote, overlay, audio, muted, fire, peer_fire, voices, offset, inside, peer_inside = (
+        own, remote, overlay, audio, muted, fire, peer_fire, voices, offset, inside, peer_inside, own_regen, remote_regen = (
             await command(seat, "read")).split(",")
         return {"local_health": float(own), "remote_health": float(remote), "overlays": int(overlay), "burn_hits": int(audio),
                 "muted_remote_burn_hits": int(muted), "local_fire_pulses": int(fire), "remote_fire_pulses": int(peer_fire),
                 "hurt_voices": int(voices), "remote_hit_offset": float(offset),
-                "local_overlap": inside == "true", "remote_overlap": peer_inside == "true"}
+                "local_overlap": inside == "true", "remote_overlap": peer_inside == "true",
+                "local_regen": float(own_regen), "remote_regen": float(remote_regen)}
 
-    async def wait_for(seat, predicate):
+    async def wait_for(seat, predicate, timeout=7):
         result = None
         try:
-            async with asyncio.timeout(7):
+            async with asyncio.timeout(timeout):
                 while True:
                     result = await sample(seat)
                     if predicate(result):
@@ -757,6 +758,9 @@ async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
     assert all(result == "armed" for result in await asyncio.gather(*(command(seat, "arm") for seat in (host, guest))))
     baseline = await sample(host)
     assert not baseline["local_overlap"] and not baseline["remote_overlap"], baseline
+    sickness, coefficient, floor, maximum = map(float, (await command(host, "regen-policy")).split(","))
+    assert 0 <= sickness <= 100 and 0 < coefficient < 1 and 0 <= floor < 1 and maximum > 0
+    assert baseline["remote_regen"] == baseline["remote_health"] == maximum, baseline
 
     assert all(result == "moved" for result in await asyncio.gather(command(host, "enter-peer"), command(guest, "enter")))
     try:
@@ -772,6 +776,18 @@ async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
     received = [entry for entry in await resident_events(guest_run, guest_frame)
                 if entry["event"] == "native_guest_hurt_played" and entry["sound_mask"] & 4]
     assert received, guest_heard
+    damage = baseline["remote_health"] - remote_hit["remote_health"]
+    expected_ceiling = max(baseline["remote_regen"] - damage * (coefficient + (1 - coefficient) * sickness / 100),
+                           maximum * floor)
+    assert remote_hit["remote_health"] < expected_ceiling < maximum, (remote_hit, expected_ceiling)
+    assert abs(remote_hit["remote_regen"] - expected_ceiling) < .01, (remote_hit, expected_ceiling)
+    assert host_observed["local_regen"] == baseline["local_regen"], (baseline, host_observed)
+    guest_recovered = await wait_for(
+        guest, lambda hit: abs(hit["local_health"] - expected_ceiling) <= .2
+        and abs(hit["local_regen"] - expected_ceiling) < .01, timeout=25)
+    remote_recovered = await sample(host)
+    assert abs(remote_recovered["remote_health"] - expected_ceiling) <= .2, remote_recovered
+    assert abs(remote_recovered["remote_regen"] - expected_ceiling) < .01, remote_recovered
 
     await asyncio.sleep(1)
     assert all(result == "cleared" for result in await asyncio.gather(*(command(seat, "clear") for seat in (host, guest))))
@@ -783,12 +799,15 @@ async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
     finally:
         await command(host, "leave")
     assert local_hit["overlays"] > 0 and local_hit["burn_hits"] > 0, local_hit
-    assert local_hit["remote_health"] >= baseline["remote_health"], (baseline, local_hit)
+    assert local_hit["remote_health"] >= baseline["remote_health"] and local_hit["remote_regen"] == baseline["remote_regen"], (
+        baseline, local_hit)
     guest_observed = await sample(guest)
     assert guest_observed["overlays"] == guest_observed["burn_hits"] == 0, guest_observed
     assert campaign_save_hashes(host.campaign) == checkpoint, "Campfire damage triggered an early save"
     return {"resident_campfire": {"guest_authority_damage": remote_hit, "host_observer": host_observed,
                                   "guest_feedback": guest_heard, "guest_feedback_events": received,
+                                  "stock_guest_regeneration_ceiling": expected_ceiling,
+                                  "guest_recovered": guest_recovered, "authoritative_guest_recovered": remote_recovered,
                                   "host_feedback": local_hit, "guest_observer": guest_observed,
                                   "campaign_checkpoint_unchanged": True}}
 
