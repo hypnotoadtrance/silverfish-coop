@@ -98,7 +98,7 @@ async def start(host, bridge, actor: str) -> dict:
         host.native_checkpoint_unsafe = False
         host.control.event("native_wire_quest_started", revision=None, **record)
         return {"effect": "native_quest_changed", **record}
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, ValueError, KeyError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
         raise

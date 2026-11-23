@@ -1,3 +1,4 @@
+import asyncio
 import time
 import unittest
 from types import SimpleNamespace
@@ -66,6 +67,24 @@ class CopperStopAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         self.start_xp_change = 1
         with self.assertRaisesRegex(RuntimeError, "changed balances"):
             await self.accept("scout")
+        self.assertNotIn(wire.QUEST_ID, self.host.party.get("native_quests", {}))
+        self.assertIsNone(self.host.pending_host_save)
+        self.assertTrue(self.host.native_checkpoint_unsafe and self.host.stopping)
+        self.assertFalse(self.host.transitioning)
+        self.host.checkpoint_native.assert_not_awaited()
+
+    async def test_cancelled_stock_start_cannot_become_a_checkpoint(self):
+        async def cancelled_start(verb, pawn, *, timeout):
+            proof = await self.command(verb, pawn, timeout=timeout)
+            if verb == wire.START:
+                raise asyncio.CancelledError
+            return proof
+
+        self.bridge.command.side_effect = cancelled_start
+        with self.assertRaises(asyncio.CancelledError):
+            await self.accept("scout")
+
+        self.assertEqual(self.step, 1)
         self.assertNotIn(wire.QUEST_ID, self.host.party.get("native_quests", {}))
         self.assertIsNone(self.host.pending_host_save)
         self.assertTrue(self.host.native_checkpoint_unsafe and self.host.stopping)
