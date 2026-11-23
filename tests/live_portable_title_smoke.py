@@ -729,6 +729,32 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
                                     "stock_widget_tick_invoked_in_muted_fixture": True}}
 
 
+async def verify_resident_npc_override(host: Seat, guest: Seat, _pawn: str) -> dict:
+    async def command(seat, action, actor=None):
+        request = f"{action}\t{actor}" if actor is not None else action
+        return await portable_probe_command(seat.bridge, "portable-npc-override", request)
+
+    checkpoint = campaign_save_hashes(host.campaign)
+    drone = await command(host, "spawn")
+    async with asyncio.timeout(8):
+        while (observed := await command(guest, "observe", drone)) == "absent":
+            await asyncio.sleep(.1)
+    before = float(await command(host, "observe", drone))
+    assert float(observed) == before > 0, (before, observed)
+    assert await command(guest, "guest-damage", drone) == "damage denied"
+    assert float(await command(host, "observe", drone)) == before
+    total = float(await command(host, "host-damage", drone))
+    assert total >= before
+    async with asyncio.timeout(8):
+        while await command(guest, "observe", drone) != "absent":
+            await asyncio.sleep(.1)
+    assert await command(host, "observe", drone) == "absent"
+    assert campaign_save_hashes(host.campaign) == checkpoint, "Drone damage caused an early checkpoint"
+    return {"resident_npc_override": {"stock_drone": drone, "hit_points_before": before,
+                                      "guest_local_damage_denied": True, "authority_damage": total,
+                                      "destroyed_on_both": True, "campaign_checkpoint_unchanged": True}}
+
+
 async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-campfire", action)
@@ -2042,6 +2068,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
                  stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False,
+                 stock_npc_override: bool = False,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
@@ -2092,6 +2119,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     # vitals for its own test and therefore runs after the other checks.
     resident_checks = tuple((name, check) for enabled, name, check in (
         (stock_campfire, "stock_campfire", verify_resident_campfire),
+        (stock_npc_override, "stock_npc_override", verify_resident_npc_override),
         (resident_weapon_cues, "resident_weapon_cues", verify_resident_weapon_cues),
         (stock_food, "stock_food", verify_resident_guest_food),
     ) if enabled)
@@ -2116,6 +2144,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableGuestFoodProbe",
                                                      fixture="portable_guest_food_probe.lua"))
+        if stock_npc_override:
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
+                                                     fixture="portable_npc_override_probe.lua"))
         if stock_campfire:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableCampfireProbe",
@@ -2400,6 +2432,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-use", action="store_true", help="open a starter bag by stock drag and use a Bandage by stock click")
     parser.add_argument("--stock-food", action="store_true", help="verify the guest's Food stat after a meal, combinable with campfire and weapon cues")
     parser.add_argument("--stock-campfire", action="store_true", help="verify stock campfire damage and feedback, combinable with food and weapon cues")
+    parser.add_argument("--stock-npc-override", action="store_true",
+                        help="verify guest damage rejection and host death on a stock drone")
     parser.add_argument("--stock-split", action="store_true", help="test the stock guest stack-split popup with a Veteran loadout")
     parser.add_argument("--stock-equip", action="store_true", help="test the stock guest Equip action with a Veteran loadout")
     parser.add_argument("--stock-unequip", action="store_true",
@@ -2500,11 +2534,11 @@ if __name__ == "__main__":
             args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory, args.compact_crate_status,
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
-    resident_check_options = {"stock_food", "stock_campfire", "resident_weapon_cues"}
-    if (args.stock_food or args.stock_campfire) and (
+    resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "resident_weapon_cues"}
+    if (args.stock_food or args.stock_campfire or args.stock_npc_override) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
-        parser.error("Combine --stock-food, --stock-campfire, and --resident-weapon-cues without other gameplay fixtures")
+        parser.error("Combine --stock-food, --stock-campfire, --stock-npc-override, and --resident-weapon-cues without other gameplay fixtures")
     if args.resident_weapon_cues and any((
             args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby, args.projected_nearby,
             args.container_nearby, args.stock_use, args.steam_cloud, args.stock_prop_grip, args.stock_host_prop_observer,
@@ -2540,6 +2574,7 @@ if __name__ == "__main__":
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
                        stock_use=args.stock_use, stock_food=args.stock_food, stock_campfire=args.stock_campfire,
+                       stock_npc_override=args.stock_npc_override,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,

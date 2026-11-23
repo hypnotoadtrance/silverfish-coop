@@ -72,6 +72,7 @@ namespace
     constexpr auto perceive_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:Proscess_TargetPerception");
     constexpr auto melee_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:ResolveMelee");
     constexpr auto player_damage_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:DealDamage");
+    constexpr auto npc_die_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:Die");
     constexpr auto npc_damage_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:DealDamage");
     constexpr auto npc_death_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:ResolveDeath");
     constexpr auto projectile_base = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C");
@@ -1512,16 +1513,29 @@ namespace
                                U::FFrame* frame, void* parameters)
     {
         if (!production_roster || !receiver || !function || call.OriginalFunctionCallPrevented()) return false;
-        static const U::FName damage_name{STR("DealDamage")}, death_name{STR("ResolveDeath")};
+        static const U::FName damage_name{STR("DealDamage")}, death_name{STR("ResolveDeath")}, die_name{STR("Die")};
         const auto name = function->GetFName();
         const bool damage = name == damage_name;
-        if ((!damage && name != death_name) || function != find<U::UFunction>(damage ? npc_damage_path : npc_death_path)
+        if ((!damage && name != death_name && name != die_name)
             || function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)
-            || byte_field(receiver, STR("Role")) != 1 || !bool_field(receiver, STR("bReplicates"), true)) return false;
+            || !live(receiver) || byte_field(receiver, STR("Role")) != 1 ||
+            !bool_field(receiver, STR("bReplicates"), true) || (frame && frame->Object() != receiver)) return false;
+
         const auto* base = find<U::UClass>(npc_base);
-        auto* type = receiver->GetClassPrivate();
-        if (!live(receiver) || !base || !type || !type->IsChildOf(base) ||
-            (frame && frame->Object() != receiver)) return false;
+        const auto* owner = U::Cast<U::UClass>(function->GetOuterPrivate());
+        const auto* type = receiver->GetClassPrivate();
+        if (!base || !owner || !owner->IsChildOf(base) || !type || !type->IsChildOf(owner)) return false;
+        const auto* declaration = find<U::UFunction>(damage ? npc_damage_path : name == die_name ? npc_die_path : npc_death_path);
+        if (!declaration) return false;
+        // Some stock NPCs override the damage or death graph. Follow its
+        // reflected parent function so an unrelated Blueprint event stays unaffected.
+        const U::UStruct* inherited = function;
+        while (inherited && inherited != declaration) inherited = inherited->GetSuperStruct();
+        if (!inherited) return false;
+
+        auto* total = damage ? hit_field<U::FDoubleProperty>(function, STR("TotalDamage"), 0x178, true) : nullptr;
+        auto* lethal = damage ? hit_field<U::FBoolProperty>(function, STR("IsLethal"), 0x180, true) : nullptr;
+        if (damage && (!total || !lethal)) return false;
         auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
         auto* driver = object(world, STR("NetDriver"));
         // A stock simulated NPC only exists here because the host published it.
@@ -1532,10 +1546,6 @@ namespace
         call.PreventOriginalFunctionCall();
         if (!call.OriginalFunctionCallPrevented()) return false;
         if (!damage) return true;
-
-        auto* total = hit_field<U::FDoubleProperty>(function, STR("TotalDamage"), 0x178, true);
-        auto* lethal = hit_field<U::FBoolProperty>(function, STR("IsLethal"), 0x180, true);
-        if (!total || !lethal) return true;
         if (frame)
         {
             if (auto* output = hit_output(*frame, total);
