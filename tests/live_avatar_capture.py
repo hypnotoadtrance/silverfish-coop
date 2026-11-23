@@ -13,7 +13,7 @@ import subprocess
 import sys
 import uuid
 
-from live_ai_smoke import wait
+from live_ai_smoke import status, wait
 from live_guest_held_fire_smoke import events
 from live_multi_smoke import CROSSROADS, saved_hashes
 
@@ -69,6 +69,13 @@ async def avatar_probe(run, operation, *, allow_pending=False):
 
 
 async def observe_stock_flashlight(host_run, guest_run, *, verify_view=False):
+    proof_path = host_run / "live-flashlight-projection-probe.json"
+    diagnostic = {"verified": False, "phases": {}}
+
+    def record():
+        if verify_view:
+            proof_path.write_text(json.dumps(diagnostic, indent=2) + "\n", encoding="utf-8")
+
     async def owner(operation):
         values = await avatar_probe(host_run, operation)
         player, source, role, replicated, powered, visible, *data = values
@@ -79,18 +86,61 @@ async def observe_stock_flashlight(host_run, guest_run, *, verify_view=False):
                     inner=float(inner), outer=float(outer), light_cookie=cookie, power_calls=int(calls), click_calls=int(clicks))
 
     async def observer(player):
-        remote, sources, powered, spotlights, pawn_lights = await avatar_probe(guest_run, f"observe{player}")
+        remote, sources, powered, spotlights, pawn_lights, held_sources, display_meshes = await avatar_probe(guest_run, f"observe{player}")
         return dict(remote=remote, sources=int(sources), powered_sources=int(powered), visible_source_spotlights=int(spotlights),
-                    visible_pawn_spotlights=int(pawn_lights))
+                    visible_pawn_spotlights=int(pawn_lights), stock_held_source_count=int(held_sources),
+                    displayed_flashlight_mesh_count=int(display_meshes))
 
-    async def view_receipt(player, visible, *, click):
-        def matches(state):
-            view = state.get("game", {}).get("native_flashlight_view", {})
-            return (view.get("player") == player and view.get("visible") is visible and view.get("power") is visible
-                    and (view.get("heard") == view.get("switch") if click else view.get("heard") is None))
-
-        state = await wait(guest_run, matches, timeout=10)
-        return state["game"]["native_flashlight_view"]
+    async def view_receipt(phase, owner_state, *, click):
+        player, powered = owner_state["player"], owner_state["powered"]
+        proof = diagnostic["phases"].setdefault(phase, {"owner": owner_state, "samples": []})
+        mailbox, = (guest_run / "game-bridge").iterdir()
+        command_file = mailbox / "command.tsv"
+        record()
+        expected = ("host_capture", "guest_delivery", "guest_accept", "guest_beam", "guest_cue")
+        witnessed = {}
+        view = None
+        try:
+            async with asyncio.timeout(8):
+                while len(witnessed) != len(expected):
+                    host, guest = status(host_run), status(guest_run)
+                    host_game, guest_game = host.get("game", {}), guest.get("game", {})
+                    source = host_game.get("native_flashlight") or {}
+                    delivery = (guest.get("gameplay") or {}).get("native_flashlight") or {}
+                    view = guest_game.get("native_flashlight_view") or {}
+                    try:
+                        nonce, action, *_ = command_file.read_text(encoding="utf-8").strip().split("\t")
+                    except (OSError, ValueError):
+                        nonce, action = None, None
+                    ack = guest_game.get("ack", {})
+                    if action == "native-flashlight-view" and ack.get("id") == nonce:
+                        proof["local_ack"] = ack
+                    sample = {"host_sequence": host_game.get("sequence"), "guest_sequence": guest_game.get("sequence"),
+                              "source": source, "delivery": delivery, "view": view}
+                    if sample not in proof["samples"]:
+                        proof["samples"] = (proof["samples"] + [sample])[-6:]
+                    if source.get("player") == player and source.get("power") is powered:
+                        witnessed.setdefault("host_capture", sample["host_sequence"])
+                        identity = (player, source["instance"], source["switch"], powered)
+                        key = ("player", "instance", "switch", "power")
+                        if (tuple(delivery.get(field) for field in key) == identity
+                                and delivery.get("epoch") == guest.get("zone_epoch")):
+                            witnessed.setdefault("guest_delivery", sample["guest_sequence"])
+                        if (tuple(view.get(field) for field in key) == identity
+                                and view.get("epoch") == guest.get("zone_epoch")):
+                            witnessed.setdefault("guest_accept", sample["guest_sequence"])
+                            if view.get("visible") is powered:
+                                witnessed.setdefault("guest_beam", sample["guest_sequence"])
+                            if view.get("heard") == (view["switch"] if click else None):
+                                witnessed.setdefault("guest_cue", sample["guest_sequence"])
+                    if len(witnessed) != len(expected):
+                        await asyncio.sleep(.1)
+        except TimeoutError:
+            pass
+        proof["witnessed"] = witnessed
+        proof["missing"] = [name for name in expected if name not in witnessed]
+        record()
+        return view
 
     seeded = await owner("seedlight")
     try:
@@ -103,14 +153,25 @@ async def observe_stock_flashlight(host_run, guest_run, *, verify_view=False):
 
         mounted = await wait(guest_run, shows_flashlight)
         baseline = await owner("lightoff") if seeded["powered"] else seeded
-        off_view = await view_receipt(seeded["player"], False, click=False) if verify_view else None
+        off_view = await view_receipt("off", baseline, click=False) if verify_view else None
         before = await observer(seeded["player"])
+        if verify_view:
+            diagnostic["phases"]["off"]["observer_census"] = before
+            record()
         lit = await owner("lighton")
-        on_view = await view_receipt(seeded["player"], True, click=True) if verify_view else None
+        on_view = await view_receipt("on", lit, click=True) if verify_view else None
         seen_lit = await observer(seeded["player"])
+        if verify_view:
+            diagnostic["phases"]["on"]["observer_census"] = seen_lit
+            record()
         unlit = await owner("lightoff")
-        reset_view = await view_receipt(seeded["player"], False, click=True) if verify_view else None
+        reset_view = await view_receipt("off_again", unlit, click=True) if verify_view else None
         seen_unlit = await observer(seeded["player"])
+        if verify_view:
+            diagnostic["phases"]["off_again"]["observer_census"] = seen_unlit
+            record()
+            missing = {phase: proof["missing"] for phase, proof in diagnostic["phases"].items() if proof["missing"]}
+            assert not missing, f"Incomplete flashlight observer receipts {missing}. Evidence saved to {proof_path}"
         assert seeded["source"] == lit["source"] == unlit["source"], (seeded, lit, unlit)
         assert not baseline["visible"] and lit["powered"] and lit["visible"] and not (unlit["powered"] or unlit["visible"])
         assert lit["intensity"] > 0 and lit["radius"] > 0 and 0 <= lit["inner"] <= lit["outer"] <= 90, lit
@@ -127,9 +188,14 @@ async def observe_stock_flashlight(host_run, guest_run, *, verify_view=False):
             assert all(row["powered_sources"] == 0 for row in (before, seen_lit, seen_unlit)), evidence
             evidence["observer_view"] = {"off": off_view, "on": on_view, "off_again": reset_view}
     finally:
-        assert await avatar_probe(host_run, "clearlight") == ["restored"]
+        restored = await avatar_probe(host_run, "clearlight") == ["restored"]
+        diagnostic["owner_restored"] = restored
+        record()
+        assert restored
     if verify_view:
         await wait(guest_run, lambda state: "native_flashlight_view" not in state.get("game", {}), timeout=8)
+        diagnostic["verified"] = True
+        record()
     return evidence
 
 

@@ -5,6 +5,7 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_FL
 
 local map = "World /Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local equipment_path = "/Game/Classes/Equipment/Eqp_Flashlight.Eqp_Flashlight_C"
+local mesh_name = "StaticMesh /Game/Assets/StaticMeshes/Mesh_Props/PropActor_Meshes/SM_Prop_Flashlight_01.SM_Prop_Flashlight_01"
 local source_path = "/Game/Classes/Equipment/Equipment_Assets/FlashLight_Source_BP.FlashLight_Source_BP_C"
 local click_path = "SoundCue /Game/Assets/Sounds/CUEs/Mechanical_Cues/Switch_Reset_Cue.Switch_Reset_Cue"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
@@ -77,7 +78,7 @@ local function observe(world, local_pawn, id)
         end
     end
     assert(remote, "flashlight_probe_remote_not_ready")
-    local sources, powered, visible, components = 0, 0, 0, 0
+    local sources, powered, visible, components, held_sources, display_meshes = 0, 0, 0, 0, 0, 0
     for _, actor in ipairs(FindAllOf("FlashLight_Source_BP_C") or {}) do
         if valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed() then
             local parent = actor:GetParentActor()
@@ -86,6 +87,9 @@ local function observe(world, local_pawn, id)
                 or valid(parent) and same(parent:GetOwner(), remote)
                 or valid(attachment) and same(attachment:GetOwner(), remote) then
                 sources = sources + 1
+                if valid(parent) and parent:GetClass():GetFullName() == "BlueprintGeneratedClass " .. equipment_path then
+                    held_sources = held_sources + 1
+                end
                 if actor.Powered then powered = powered + 1 end
                 if valid(actor.SpotLight) and actor.SpotLight:IsVisible() then visible = visible + 1 end
             end
@@ -96,7 +100,16 @@ local function observe(world, local_pawn, id)
             and parameter:get() or parameter
         if valid(spot) and same(spot:GetOwner(), remote) and spot:IsVisible() then components = components + 1 end
     end
-    return string.format("%s\t%d\t%d\t%d\t%d", remote:GetFullName(), sources, powered, visible, components)
+    for _, parameter in ipairs(remote:K2_GetComponentsByClass(asset("/Script/Engine.StaticMeshComponent"))) do
+        local component = type(parameter.type) == "function" and parameter:type() == "RemoteUnrealParam"
+            and parameter:get() or parameter
+        local mesh = valid(component) and component.StaticMesh
+        if valid(mesh) and mesh:GetFullName() == mesh_name and same(component:GetOwner(), remote) then
+            display_meshes = display_meshes + 1
+        end
+    end
+    return string.format("%s\t%d\t%d\t%d\t%d\t%d\t%d", remote:GetFullName(), sources, powered, visible, components,
+        held_sources, display_meshes)
 end
 
 local function run(operation)
