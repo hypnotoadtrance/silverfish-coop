@@ -138,7 +138,7 @@ async def verify(work, vanilla, tall, standing=False, fuel_drum=False):
                 if canister(status(host)).get("phase") == 2:
                     break
         finished = await wait(host, lambda row: canister(row).get("phase") == 2, timeout=15)
-        assert finished["game"].get(capture_key) == 1
+        assert finished["game"].get(capture_key) == 1, (capture_key, finished["game"].get(capture_key))
         assert finished["game"]["pawns"]["guest"]["health"] == guest_health and not finished["gameplay"]["wipe"]
         proof["host_explosions"] = 1
         await wait(guest, lambda row: canister(row).get("phase") == 2 and events(guest, cue_event))

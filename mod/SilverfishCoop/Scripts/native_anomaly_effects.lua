@@ -125,11 +125,8 @@ local function observe_canister(actor, registered_source)
     local sound = actor.SFX
     local cue = valid(sound) and canister_sounds[sound:GetFullName():match("^%S+ (.+)$")]
     if not cue then return end
-    if cue == "fueldrum" then
-        -- The drum leaves this stock array empty. Anomalies also use the default grenade assets.
-        local ignored = actor["Actors to Ignore"]
-        if ignored and ignored:GetArrayNum() > 0 then return end
-    end
+    -- Stock drums set their impulse explicitly. Other blasts also use the default grenade assets.
+    if cue == "fueldrum" and actor.ImpulseStrength ~= 800 then return end
     local attenuation = actor["Attenuation Settings"]
     local point = actor:K2_GetActorLocation()
     if valid(attenuation) and attenuation:GetFullName() == "SoundAttenuation " .. assets[cue][3]
