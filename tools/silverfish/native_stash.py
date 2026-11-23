@@ -23,6 +23,10 @@ RESULT = "native_stash"
 SETTING = "native_stash_setting"
 SITES = "native_stash_sites"
 VIEW = "native_stash_view"
+MEMORY_VIEW = "native_stash_view_memory"
+RENDER_MEMORY = "native-stash-view-render-memory"
+MEMORY_VIEW_ACK = "private stash view updated in memory"
+MEMORY_VIEW_MAX_BYTES = 20_000  # Leaves room for the scoped header in the 32 KiB local bridge ticket.
 VIEW_FIXTURES = {"native-stash-view-fixture", "native-stash-view-click-fixture"}
 _TARGET = re.compile(r"([0-9A-F]{32})(?:\|(0|[1-9][0-9]{0,3}))?\Z")
 _MOVE_TARGET = re.compile(r"([0-9A-F]{32})\|(deposit|withdraw|reorder)\|([0-9A-F]{32})(?:\|([0-9A-F]{32}|-))?\Z")
@@ -271,8 +275,7 @@ async def service_view(client, active):
     scope = client.host_session, client.zone_epoch
     operation = uuid.uuid5(client.bridge.input_namespace, f"{scope}:stash:{view['sequence']}")
     arguments = str(view["sequence"]), view["map"], view["site"]
-    nonce = uuid.uuid4().hex
-    payload = client.bridge.directory / f"native-stash-screen-{nonce}.tsv"
+    path = None
     try:
         if item := view["item"]:
             direction = "deposit" if view["mode"] == "backpack" else "withdraw"
@@ -299,8 +302,18 @@ async def service_view(client, active):
         await client.guest_ui.refresh(client)
         if scope != (client.host_session, client.zone_epoch):
             raise RuntimeError("The stock stash request left its native world")
-        runtime.write_text(payload, "".join(rows), newline="")
-        snapshot = await client.bridge.command("native-stash-view-render", *arguments, nonce, str(len(rows)), timeout=5)
+        contents = "".join(rows)
+        if (client.last_game.get(MEMORY_VIEW) is True and client.bridge.local_bridge is not None
+                and len(contents) <= MEMORY_VIEW_MAX_BYTES):
+            snapshot = await client.bridge.command(RENDER_MEMORY, *arguments, str(len(rows)),
+                                                   stash_payload=contents.encode("ascii"), timeout=5)
+            if snapshot.get("ack", {}).get("message") != MEMORY_VIEW_ACK:
+                raise RuntimeError("The resident stash renderer did not acknowledge the in-process page")
+        else:
+            nonce = uuid.uuid4().hex
+            path = client.bridge.directory / f"native-stash-screen-{nonce}.tsv"
+            runtime.write_text(path, contents, newline="")
+            snapshot = await client.bridge.command("native-stash-view-render", *arguments, nonce, str(len(rows)), timeout=5)
         if snapshot.get(VIEW) != {**view, "state": "rendered"}:
             raise RuntimeError("The in-game stash screen did not render the verified page")
         client.last_game = snapshot
@@ -309,5 +322,6 @@ async def service_view(client, active):
         with suppress(OSError, RuntimeError, ValueError):
             client.last_game = await client.bridge.command("native-stash-view-unavailable", *arguments, timeout=3)
     finally:
-        with suppress(FileNotFoundError, PermissionError):
-            payload.unlink()
+        if path is not None:
+            with suppress(FileNotFoundError, PermissionError):
+                path.unlink()

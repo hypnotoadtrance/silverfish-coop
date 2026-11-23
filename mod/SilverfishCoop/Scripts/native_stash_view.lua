@@ -1,6 +1,8 @@
 local view = {}
 local save_scope = require("native_save_scope")
 
+view.memory_render = "native-stash-view-render-memory"
+local memory_limit = 20000
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local fixtures = headless and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
 local stash_path = "/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C"
@@ -139,14 +141,27 @@ local function item_row(line, seen)
     return row, guid
 end
 
-local function render(fields, state, phase)
-    local nonce, expected = fields[6], math.tointeger(tonumber(fields[7]))
-    if #fields ~= 7 or not nonce or #nonce ~= 32 or not nonce:match("^[0-9a-f]+$")
-        or not expected or expected < 0 or expected > 4096 then error("native_stash_view_invalid_page", 0) end
-    local file = io.open(mailbox .. "/native-stash-screen-" .. nonce .. ".tsv", "rb")
-    if not file then error("native_stash_view_missing_page", 0) end
-    local raw = file:read(2500001) or ""
-    file:close()
+local function render(fields, state, phase, payload)
+    local resident = fields[2] == view.memory_render
+    local expected = math.tointeger(tonumber(fields[resident and 6 or 7]))
+    if not expected or expected < 0 or expected > 4096 then error("native_stash_view_invalid_page", 0) end
+    local raw
+    if resident then
+        if #fields ~= 6 or type(payload) ~= "string" or #payload > memory_limit or payload:sub(1, 1) == "\n"
+            or payload:find("[^\t\n -~]") or payload:find("\n\n", 1, true) then
+            error("native_stash_view_invalid_page", 0)
+        end
+        raw = payload
+    else
+        local nonce = fields[6]
+        if #fields ~= 7 or not nonce or #nonce ~= 32 or not nonce:match("^[0-9a-f]+$") then
+            error("native_stash_view_invalid_page", 0)
+        end
+        local file = io.open(mailbox .. "/native-stash-screen-" .. nonce .. ".tsv", "rb")
+        if not file then error("native_stash_view_missing_page", 0) end
+        raw = file:read(2500001) or ""
+        file:close()
+    end
     if #raw > 2500000 or (#raw > 0 and raw:sub(-1) ~= "\n") then error("native_stash_view_invalid_page", 0) end
     local api, save_class = StaticFindObject(statics_path), StaticFindObject(save_path)
     local save = save_scope.bind_guest(state, phase)
@@ -289,7 +304,7 @@ local function split_fixture(screen, source, card, count, gesture)
     return "stock stash split cursor verified"
 end
 
-function view.command(fields, state, phase)
+function view.command(fields, state, phase, payload)
     local verb = fields[2]
     if verb == "native-stash-view-close" then view.clear(); return "private stash closed" end
     if verb == "native-stash-view-fixture" and fixtures and #fields == 3 then
@@ -386,20 +401,21 @@ function view.command(fields, state, phase)
         end
         error("native_stash_view_fixture_card_unavailable", 0)
     end
-    if verb ~= "native-stash-view-render" and verb ~= "native-stash-view-unavailable" then return end
+    if verb ~= "native-stash-view-render" and verb ~= view.memory_render and verb ~= "native-stash-view-unavailable" then return end
+    if verb == view.memory_render and type(payload) ~= "string" then error("native_stash_view_invalid_page", 0) end
     local binding = report(state, phase)
     if not binding or not current or not same(binding.pawn, current.binding.pawn) or current.state ~= "pending"
         or tostring(current.sequence) ~= fields[3] or binding.map ~= fields[4] or current.id ~= fields[5]
         or site_id(current.actor, binding) ~= current.id or not near(binding.pawn, current.actor) then
         error("native_stash_view_request_expired", 0)
     end
-    if verb == "native-stash-view-render" then
-        local ok, failure = pcall(render, fields, state, phase)
+    if verb == "native-stash-view-render" or verb == view.memory_render then
+        local ok, failure = pcall(render, fields, state, phase, payload)
         if not ok then view.clear(); error(failure, 0) end
     else
         view.clear()
     end
-    return "private stash view updated"
+    return verb == view.memory_render and "private stash view updated in memory" or "private stash view updated"
 end
 
 function view.rows(state, phase, row)

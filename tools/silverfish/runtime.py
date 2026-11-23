@@ -2227,6 +2227,8 @@ class Bridge:
                     data["native_inventory_view"] = {"state": fields[1], "sequence": int(fields[2]),
                                                     "map": fields[3], "pawn": fields[4], "offset": int(fields[5]),
                                                     "total": int(fields[6]), "count": int(fields[7])}
+                elif fields == ["native-stash-view-memory", "1"] and data.get("state") == "connected":
+                    data[native_stash.MEMORY_VIEW] = True
                 elif fields[0] == "native-stash-view" and len(fields) in (9, 10, 11):
                     data[native_stash.VIEW] = native_stash.parse_view(fields, data.get("map"), data.get("state"))
                 elif fields == ["native-inventory-sort-capability", "1"]:
@@ -3258,17 +3260,27 @@ class Bridge:
         self._local_world_view = sequence, pawn, proof
         return {**game, "native_world_view": proof}
 
-    async def command(self, action: str, *arguments: str, timeout: float = 8, update_status: bool = True) -> dict:
+    async def command(self, action: str, *arguments: str, timeout: float = 8, update_status: bool = True,
+                      stash_payload: bytes | None = None) -> dict:
         fields = (uuid.uuid4().hex, action, *arguments)
         if any(len(value) > 1024 or "\t" in value or "\r" in value or "\n" in value for value in fields):
             raise ValueError("Invalid game bridge command value")
+        if action == native_stash.RENDER_MEMORY:
+            if (self.local_bridge is None or not isinstance(stash_payload, bytes)
+                    or len(stash_payload) > native_stash.MEMORY_VIEW_MAX_BYTES
+                    or stash_payload and (not stash_payload.endswith(b"\n") or not _GUEST_UI_BYTES.fullmatch(stash_payload))):
+                raise ValueError("Invalid resident stash view payload")
+        elif stash_payload is not None:
+            raise ValueError("A stash payload requires the resident stash view command")
         request = "\t".join(fields) + "\n"
         if self.local_bridge is None:
             async with self._file_command_lock:
                 write_text(self.directory / "command.tsv", request)
                 status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout, interval=.025)
         else:
-            raw = await self.local_bridge.command(request.encode("utf-8"), timeout)
+            raw = await self.local_bridge.command(request.encode("utf-8") + (stash_payload or b""), timeout)
+            if action == native_stash.RENDER_MEMORY and _GUEST_UI_REPLY in raw:
+                raise RuntimeError("The resident stash renderer returned an unexpected body")
             if action == native_weather_view.LOCAL_APPLY and raw.startswith("native-world-view-reply\t"):
                 return self._local_world_view_reply(raw, fields)
             status = self._parse_status(raw)

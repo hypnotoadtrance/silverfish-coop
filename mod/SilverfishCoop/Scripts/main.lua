@@ -1197,11 +1197,12 @@ local function read_command(periodic)
         file:close()
     end
     if not content or #content > 32768 then return end
-    local line, guest_view
-    if ticket and native_guest_ui.is_memory_command(content:match("^[^\t\r\n]+\t([^\t\r\n]+)\t")) then
+    local line, body
+    local action = ticket and content:match("^[^\t\r\n]+\t([^\t\r\n]+)\t")
+    if ticket and (native_guest_ui.is_memory_command(action) or action == native_stash_view.memory_render) then
         local boundary = content:find("\n", 1, true)
         if boundary then
-            line, guest_view = content:sub(1, boundary - 1), content:sub(boundary + 1)
+            line, body = content:sub(1, boundary - 1), content:sub(boundary + 1)
         end
     end
     line = line or content:gsub("[\r\n]+$", "")
@@ -1215,7 +1216,7 @@ local function read_command(periodic)
         return
     end
     if ticket then
-        pending_local = {ticket = ticket, fields = fields, dispatched = false, guest_view = guest_view}
+        pending_local = {ticket = ticket, fields = fields, dispatched = false, body = body}
     end
     return fields, pending_local
 end
@@ -1271,6 +1272,9 @@ local function write_status(state, current_phase, failure, fields, pending, crat
     }
     if current_phase == "hosting" or current_phase == "connected" then
         rows[#rows + 1] = status_row("native-guest-ui-memory", 1)
+    end
+    if current_phase == "connected" then
+        rows[#rows + 1] = status_row("native-stash-view-memory", 1)
     end
     if current_phase == "connected" and world_view_enabled and compact_crates then
         rows[#rows + 1] = status_row("native-world-view-apply-local", 1)
@@ -1702,8 +1706,11 @@ local function tick(fields, pending, periodic)
         local accepted, message
         if pending and native_guest_ui.is_memory_command(fields[2]) then
             accepted, message, pending.guest_view_reply = pcall(native_guest_ui.memory_command,
-                fields, state, current_phase, pending.guest_view)
-            pending.guest_view = nil
+                fields, state, current_phase, pending.body)
+            pending.body = nil
+        elseif pending and fields[2] == native_stash_view.memory_render then
+            accepted, message = pcall(native_stash_view.command, fields, state, current_phase, pending.body)
+            pending.body = nil
         else
             accepted, message = pcall(run_command, fields, state, current_phase)
         end
