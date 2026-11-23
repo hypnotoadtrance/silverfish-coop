@@ -1,6 +1,7 @@
 local flashlight = {}
 
 local equipment_class = "/Game/Classes/Equipment/Eqp_Flashlight.Eqp_Flashlight_C"
+local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local source_class = "/Game/Classes/Equipment/Equipment_Assets/FlashLight_Source_BP.FlashLight_Source_BP_C"
 local mesh_path = "/Game/Assets/StaticMeshes/Mesh_Props/PropActor_Meshes/SM_Prop_Flashlight_01.SM_Prop_Flashlight_01"
 local light_class = "/Script/Engine.SpotLightComponent"
@@ -46,6 +47,15 @@ local function held(actor, pawn, world)
         and same(actor:GetOwner(), pawn) and same(actor:GetAttachParentActor(), pawn)
 end
 
+local function selected_stock(pawn, equipment)
+    local save = pawn.Save
+    if not valid(save) then return false end
+    local index = math.tointeger(save.PlayerEquipIndex)
+    local slots = save.PlayerEquipment
+    return index and slots and index >= 0 and index < slots:GetArrayNum()
+        and same(slots[index + 1][item_class], equipment:GetClass())
+end
+
 local function stock_beam(equipment, world)
     local child = equipment.FlashLight_Source_BP
     local source = valid(child) and child.ChildActor
@@ -74,8 +84,9 @@ end
 local function capture(state, pawn, previous, guest)
     local equipment = pawn.EquipedItem
     local instance = state.world.OwningGameInstance
-    if not pawn:HasAuthority() or not held(equipment, pawn, state.world) or not equipment:HasAuthority()
-        or not same(equipment.User, pawn) or not valid(instance) or not same(pawn.Save, instance.SaveSlot_Ref) then
+    if pawn:HasAuthority() ~= (not guest) or not held(equipment, pawn, state.world) or not equipment:HasAuthority()
+        or not same(equipment.User, pawn) or not valid(instance) or not same(pawn.Save, instance.SaveSlot_Ref)
+        or guest and not selected_stock(pawn, equipment) then
         return
     end
     local spot, source = stock_beam(equipment, state.world)
@@ -323,7 +334,8 @@ function flashlight.peer_rows(state, phase, row)
             local pawn = details.pawn
             if valid(pawn) and pawn:HasAuthority() and not pawn:IsLocallyControlled() and same(pawn:GetWorld(), state.world)
                 and not pawn:IsActorBeingDestroyed() and held(pawn.EquipedItem, pawn, state.world)
-                and same(pawn.EquipedItem.User, pawn) and pawn.EquipedItem:HasAuthority() then
+                and same(pawn.EquipedItem.User, pawn) and pawn.EquipedItem:HasAuthority()
+                and selected_stock(pawn, pawn.EquipedItem) then
                 local id = avatar.player_id(details)
                 if id ~= nil then rows[#rows + 1] = row("native-guest-flashlight-authority", id, details.name) end
             end
