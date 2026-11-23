@@ -26,6 +26,7 @@ _PORTABLE = "resident-portable.json"
 _SCRIPT_SOURCE = "mod/SilverfishCoop/Scripts/"
 _RUNTIME_SOURCE = layout.RUNTIME + "/"
 _RUNTIME_MANIFEST = _RUNTIME_SOURCE + install_stage.MANIFEST
+_REQUIRED_GAMEPLAY_BINDINGS = ("SilverfishSetNativeGuestWorldStart", "SilverfishSetNativePropCarryMovement")
 
 _START = r"""Project Silverfish Co-op | Windows co-op trial {version}
 
@@ -140,6 +141,9 @@ def assemble(output: Path, *, version: str, revision: str, shipping: Path, cpp_a
     runtime_folder = _EMBEDDED / f"runtime-{manifest_sha[:16]}"
     gameplay = release_bundle._read(absolute(cpp_addon), layout.FILE_LIMIT)
     release_bundle._pe(gameplay, dll=True, name="gameplay add-on")
+    missing = [name for name in _REQUIRED_GAMEPLAY_BINDINGS if name.encode("ascii") + b"\0" not in gameplay]
+    if missing:
+        raise ValueError("Gameplay add-on is missing resident bindings: " + ", ".join(missing))
     gameplay_sha = sha256(gameplay).hexdigest()
     if cpp_addon_sha256 is not None and cpp_addon_sha256 != gameplay_sha:
         raise ValueError("Gameplay add-on differs from the supplied build checksum")

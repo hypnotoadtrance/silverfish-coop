@@ -27,6 +27,7 @@ class ResidentDropTests(unittest.TestCase):
         gameplay[64:70] = b"PE\0\0\x64\x86"
         gameplay[87] = 0x20
         gameplay[88:90] = b"\x0b\x02"
+        gameplay.extend(b"SilverfishSetNativeGuestWorldStart\0SilverfishSetNativePropCarryMovement\0")
         self.gameplay = self.write(self.root / "native.dll", gameplay)
 
         self.ue4ss = self.root / "UE4SS"
@@ -120,6 +121,15 @@ class ResidentDropTests(unittest.TestCase):
                 (binary / "ue4ss/LICENSE").as_posix(),
                 (binary / "ue4ss" / install_stock.SIGNATURE).as_posix(),
             })
+
+    def test_rejects_gameplay_addon_missing_a_resident_binding(self):
+        image = self.gameplay.read_bytes()
+        for name in ("SilverfishSetNativeGuestWorldStart", "SilverfishSetNativePropCarryMovement"):
+            with self.subTest(binding=name):
+                self.gameplay.write_bytes(image.replace(name.encode("ascii"), b""))
+                with self.assertRaisesRegex(ValueError, name):
+                    self.assemble("stale.zip")
+                self.assertFalse((self.root / "stale.zip").exists())
 
     def test_steam_trial_bundles_only_the_qualified_redistributable_and_instructions(self):
         redistributable = self.gameplay.read_bytes()
