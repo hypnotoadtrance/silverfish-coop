@@ -732,10 +732,13 @@ local function finish_stock_drop(fields, current, state, phase)
         end
         if pending.live and finished and status == "screen_closed" then return "verified stock inventory settlement" end
         if unequipped then
+            if not finished or status ~= "refreshed" then
+                error("Stock unequip could not refresh: " .. tostring(status), 0)
+            end
             local widget = widget_at(pending.screen.ItemManager.EquipSlots, source + 1)
             local item = source < 8 and save.PlayerEquipment[source + 1] or source == 8 and save.PlayerHelmet or save.PlayerArmor
             local index = source < 8 and source or source - 8
-            if not finished or status ~= "refreshed" or not valid(widget) or widget.ItemIndex ~= index
+            if not valid(widget) or widget.ItemIndex ~= index
                 or widget.InventoryIndex ~= (source < 8 and 0 or 1)
                 or valid(item[item_class]) or stock_card_guid(widget.ItemCard) == pending.guid
                 or not stock_cards(pending.screen, save, pending.guid, rounds, false, true) then

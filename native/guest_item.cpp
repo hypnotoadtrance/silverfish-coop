@@ -2870,23 +2870,23 @@ bool silverfish::native_guest_item::take_ammo_supported(Unreal::UObject* item_cl
     return unload_profile(item_class, rounds) != nullptr;
 }
 
-bool silverfish::native_guest_item::finish_local_unequip(Unreal::UObject* pawn, Unreal::UObject* save,
-                                                       Unreal::UObject* prior_actor, int slot,
-                                                       std::string_view identity, int rounds)
+std::string_view silverfish::native_guest_item::finish_local_unequip(Unreal::UObject* pawn, Unreal::UObject* save,
+                                                                    Unreal::UObject* prior_actor, int slot,
+                                                                    std::string_view identity, int rounds)
 {
     if (!Unreal::IsInGameThreadRaw() || slot < 0 || slot > 9 ||
         silverfish::native_interaction_input::current_guest_pawn(reinterpret_cast<std::uintptr_t>(pawn)) != pawn ||
-        !live(pawn) || !live(save) || object(pawn, STR("Save")) != save) return false;
+        !live(pawn) || !live(save) || object(pawn, STR("Save")) != save) return "unequip_guest_scope_changed";
     Context context;
-    if (!parse_guid(identity, context.guid)) return false;
+    if (!parse_guid(identity, context.guid)) return "unequip_item_identity_unavailable";
     context.pawn = pawn;
     context.save = save;
     context.world = static_cast<Unreal::AActor*>(pawn)->GetWorld();
     context.instance = object(context.world, STR("OwningGameInstance"));
-    if (!context.world || object(context.instance, STR("SaveSlot_Ref")) != save) return false;
+    if (!context.world || object(context.instance, STR("SaveSlot_Ref")) != save) return "unequip_guest_scope_changed";
     Inventory inventory;
     if (!locate(context, inventory).empty() || !inventory.item || inventory.backpack_index < 0 ||
-        inventory.ammo->GetPropertyValueInContainer(inventory.item) != rounds) return false;
+        inventory.ammo->GetPropertyValueInContainer(inventory.item) != rounds) return "unequip_backpack_item_unavailable";
     if (slot >= quick_slots)
     {
         const bool head = slot == 8;
@@ -2901,35 +2901,35 @@ bool silverfish::native_guest_item::finish_local_unequip(Unreal::UObject* pawn, 
             !defaults || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
             update->GetOuterPrivate() != context.instance->GetClassPrivate() ||
             update->GetNumParms() != 0 || update->GetParmsSize() != 0 || update->GetReturnProperty() ||
-            update->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return false;
+            update->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return "unequip_worn_item_update_unavailable";
         // These stock functions target player zero in this guest process and
         // read only its verified private SaveSlot_Ref.
         context.instance->ProcessEvent(update, nullptr);
         return derived->Identical(derived->ContainerPtrToValuePtr<void>(pawn),
-                                  derived->ContainerPtrToValuePtr<void>(defaults));
+                                  derived->ContainerPtrToValuePtr<void>(defaults)) ? "" : "unequip_worn_stats_mismatch";
     }
     Unreal::FScriptArrayHelper slots(inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(save));
     if (slot >= slots.Num() || inventory.row_class(slots.GetRawPtr(slot)) ||
-        inventory.identity(slots.GetRawPtr(slot)) != Guid{}) return false;
+        inventory.identity(slots.GetRawPtr(slot)) != Guid{}) return "unequip_equipment_slot_not_empty";
 
     // A later stock input may already have holstered/replaced the actor while the host settled.
-    if (!prior_actor || object(pawn, STR("EquipedItem")) != prior_actor) return true;
+    if (!prior_actor || object(pawn, STR("EquipedItem")) != prior_actor) return {};
     context.weapon = Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item));
     auto* held_property = field<Unreal::FObjectProperty>(pawn, STR("EquipedItem"));
-    if (!held_property || !held_for_unequip(context, prior_actor)) return false;
+    if (!held_property || !held_for_unequip(context, prior_actor)) return "unequip_held_actor_unqualified";
     const auto next = inventory.selected->GetPropertyValueInContainer(save);
     EquipCall equip;
     auto* base = find<Unreal::UClass>(equipment_base_path);
     auto* fallback = next >= 0 && next < slots.Num() && next != slot
         ? Unreal::Cast<Unreal::UClass>(inventory.row_class(slots.GetRawPtr(next))) : nullptr;
-    if (fallback && (!base || !fallback->IsChildOf(base) || !equip.valid(pawn))) return false;
+    if (fallback && (!base || !fallback->IsChildOf(base) || !equip.valid(pawn))) return "unequip_fallback_unqualified";
     const Unreal::FWeakObjectPtr old{prior_actor};
     static_cast<Unreal::AActor*>(prior_actor)->K2_DestroyActor();
-    if (live(old.Get()) && boolean(old.Get(), STR("bActorIsBeingDestroyed"), false)) return false;
+    if (live(old.Get()) && boolean(old.Get(), STR("bActorIsBeingDestroyed"), false)) return "unequip_held_actor_still_live";
     if (object(pawn, STR("EquipedItem")) == prior_actor)
         held_property->SetObjectPropertyValue(held_property->ContainerPtrToValuePtr<void>(pawn), nullptr);
     if (fallback && !live(object(pawn, STR("EquipedItem")))) equip.invoke(pawn, next);
-    return object(pawn, STR("EquipedItem")) != prior_actor;
+    return object(pawn, STR("EquipedItem")) != prior_actor ? "" : "unequip_held_reference_still_active";
 }
 
 bool silverfish::native_guest_item::split_stock_stack(Unreal::UObject* context, Unreal::FStructProperty* row_type,

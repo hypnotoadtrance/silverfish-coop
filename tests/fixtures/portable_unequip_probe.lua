@@ -231,7 +231,12 @@ local function run(action, argument)
         local column = action == "guest-press-inactive" and 3 or 1
         unequip(pawn, specs[column].index, seed.ids[column], 2)
         assert(settled(pawn, seed) == before, "the stock guest press mutated inventory before authority settled")
-        return before
+        if action == "guest-press-inactive" then return before end
+        local pistol = seed.pistol
+        return before .. ";" .. table.concat({
+            tostring(pistol:HasAuthority()), tostring(same(pistol.Instigator, pawn)),
+            tostring(pistol.HeldByPlayer), tostring(pistol:IsActorBeingDestroyed()),
+        }, ",")
     elseif action == "guest-read" then
         assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
         return settled(pawn, seed)

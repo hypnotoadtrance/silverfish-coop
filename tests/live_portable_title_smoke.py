@@ -569,6 +569,9 @@ async def verify_stock_unequip(first, second, evidence):
                     assert len(matches) <= 1, matches
                     if matches:
                         return matches[0]
+                    rejected = [row for row in entries if row.get("event") == "native_stock_inventory_rejected"]
+                    if event == "native_stock_inventory_action" and rejected:
+                        raise RuntimeError(rejected[-1]["reason"])
                     await asyncio.sleep(.15)
 
         async def leaves_stock_open():
@@ -614,9 +617,20 @@ async def verify_stock_unequip(first, second, evidence):
 
         changed = unequip_seat(await portable_probe_command(host.bridge, probe, f"remote-ammo\t{pawn}"))
         assert changed == dict(host_inactive, ammo=3), changed
-        locally_pressed = unequip_seat(await portable_probe_command(guest.bridge, probe, "guest-press-selected"))
+        stock_press = await portable_probe_command(guest.bridge, probe, "guest-press-selected")
+        before_press, held_actor = stock_press.rsplit(";", 1)
+        locally_pressed = unequip_seat(before_press)
         assert locally_pressed == dict(guest_inactive, ammo=2), locally_pressed
-        selected = await witness("native_stock_inventory_action", "native_inventory_unequip", ids[0])
+        evidence["guest_selected_press"] = {"state": locally_pressed, "stock_actor": dict(zip(
+            ("authority", "instigated_by_pawn", "held_by_player", "being_destroyed"), held_actor.split(","), strict=True))}
+        try:
+            selected = await witness("native_stock_inventory_action", "native_inventory_unequip", ids[0])
+        except (RuntimeError, TimeoutError):
+            evidence["guest_selected_after_timeout"] = {
+                "guest": unequip_seat(await portable_probe_command(guest.bridge, probe, "guest-read")),
+                "host": unequip_seat(await portable_probe_command(host.bridge, probe, f"remote-read\t{pawn}")),
+            }
+            raise
         assert (selected["native_inventory_unequip"]["slot"], selected["native_inventory_unequip"]["ammo"],
                 selected["stock_inventory_proof"]) == (1, 3, "verified stock unequip from slot 1"), selected
         guest_after = unequip_seat(await portable_probe_command(guest.bridge, probe, "guest-read"))

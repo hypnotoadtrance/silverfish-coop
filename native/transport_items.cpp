@@ -2837,9 +2837,9 @@ namespace
             if (completed.entry != "unequip" || rounds < -1 || rounds > INT32_MAX)
                 return finish(false, "unequip_projection_unavailable");
             const auto guid = format_guid(completed.guid);
-            if (!silverfish::native_guest_item::finish_local_unequip(scope.pawn.Get(), canonical_host_save(),
-                    completed.prior_held.Get(), completed.expected - 1, {guid.data(), guid.size()}, static_cast<int>(rounds)))
-                return finish(false, "unequip_projection_unavailable");
+            if (const auto failure = silverfish::native_guest_item::finish_local_unequip(scope.pawn.Get(), canonical_host_save(),
+                    completed.prior_held.Get(), completed.expected - 1, {guid.data(), guid.size()}, static_cast<int>(rounds));
+                !failure.empty()) return finish(false, failure);
         }
         auto* manager = completed.manager.Get();
         auto* panel = completed.panel.Get();
