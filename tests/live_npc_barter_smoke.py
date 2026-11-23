@@ -50,7 +50,7 @@ def events(run, name):
             if (record := json.loads(line)).get("event") == name]
 
 
-async def verify(work, canary, offer):
+async def verify(work, canary, offer, *, rapid_reopen=False):
     profile = "npc-barter-flow-" + uuid.uuid4().hex[:8]
     campaign, client = work / "campaigns" / profile, work / "clients" / profile
     host, guest = campaign / "run", client / "run"
@@ -68,9 +68,12 @@ async def verify(work, canary, offer):
                                                         cwd=ROOT, env=environment, creationflags=subprocess.CREATE_NO_WINDOW)
         jobs.append((run, child))
 
-    def tail(run):
+    def trace(run):
         return [line for file in (run / "game-bridge").glob("*/npc-barter-flow.tsv")
-                for line in file.read_text(encoding="utf-8").splitlines()][-6:]
+                for line in file.read_text(encoding="utf-8").splitlines()]
+
+    def tail(run):
+        return trace(run)[-6:]
 
     with staged_probe(work):
         try:
@@ -109,6 +112,39 @@ async def verify(work, canary, offer):
                 assert not events(host, "native_npc_barter_committed")
                 proof = {"initial_items": original_count, "initial_cash": 1200, "provisional_screen_hidden": True,
                          "stock_refresh": refreshed, "sequence": sequence}
+                if rapid_reopen:
+                    def observed(run, label):
+                        rows = [line.split("\t") for line in trace(run)]
+                        errors = [fields for fields in rows if fields[0] == "error"]
+                        assert not errors, (label, errors, tail(run))
+                        matches = [fields[1:] for fields in rows if fields[0] == label]
+                        assert len(matches) <= 1, matches
+                        return next(iter(matches), None)
+
+                    count, cash, host_offer = observed(host, "restocked")
+                    mailbox, = (guest / "game-bridge").iterdir()
+                    (mailbox / "npc-barter-flow-reopen").touch()
+
+                    def new_ready(state):
+                        visible = observed(guest, "rapid-ready")
+                        panel = state.get("game", {}).get(native_npc_barter.VIEW, {})
+                        return (visible and panel.get("state") == "ready" and panel.get("sequence", 0) > sequence
+                                and panel.get("trader") == refreshed["trader"])
+
+                    await wait(guest, new_ready, timeout=14)
+                    old_sequence, trader, opacity, enabled, widget = observed(guest, "rapid-reopen")
+                    new_sequence, projected_trader, new_cash, new_count, cards = observed(guest, "rapid-ready")
+                    assert int(old_sequence) == sequence < int(new_sequence) and "BarterScreen_C " in widget
+                    assert trader == projected_trader == refreshed["trader"]
+                    assert (float(opacity), enabled) == (0.0, "false")
+                    cards = cards.split(",")
+                    assert int(new_cash) == int(cash) == 1375
+                    assert int(new_count) == int(count) == len(set(cards)) == original_count + 1
+                    assert cards.count(host_offer) == 1
+                    proof["rapid_reopen"] = {"old_sequence": sequence, "new_sequence": int(new_sequence),
+                                             "trader": trader, "provisional_opacity": float(opacity),
+                                             "provisional_enabled": False, "visible_wallet": int(new_cash),
+                                             "visible_cards": cards, "host_restocked_offer": host_offer}
                 (host / "npc-barter-refresh.json").write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
                 print(host / "npc-barter-refresh.json", flush=True)
                 return
@@ -195,5 +231,9 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--offer", choices=("cash", "high-value", "donation", "refresh", "skinflint", "partial", "simultaneous"),
                         default="cash")
+    parser.add_argument("--rapid-reopen", action="store_true", help="after the refresh check, close and reopen stock barter in one game tick")
     options = parser.parse_args()
-    asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve(strict=True), options.offer))
+    if options.rapid_reopen and options.offer != "refresh":
+        parser.error("--rapid-reopen requires --offer refresh")
+    asyncio.run(verify(options.work.resolve(), options.vanilla_saved.resolve(strict=True), options.offer,
+                       rapid_reopen=options.rapid_reopen))

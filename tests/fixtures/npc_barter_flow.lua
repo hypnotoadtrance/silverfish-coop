@@ -21,8 +21,14 @@ local simultaneous = mode == "simultaneous"
 local payment = partial and bandage or donation and jewelry or high_value and peaches or nil
 local money = high_value and 20000 or 1200
 local next_attempt, armed, committed, pending_confirmation, refreshed = 0, false, false, false, false
+local reopen_requested, reopened, reopened_visible
 
 local function valid(value) return value and value:IsValid() end
+
+local function guid(item)
+    local id = item[item_guid]
+    return ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
+end
 
 local function proof(...)
     local values = {...}
@@ -191,6 +197,38 @@ local function confirm(state, screen, actor, payment_row)
     end
 end
 
+local function rapid_reopen(state, phase, actor, pawn, screen, view)
+    local controller, old_address = state.controller, screen:GetAddress()
+    assert(screen.Trader:GetAddress() == actor:GetAddress() and screen:GetRenderOpacity() == 1
+        and screen:GetIsEnabled() and actor.Save == false, "the ready stock trader was not active before rapid reopen")
+    controller:CloseMenu({})
+    assert(controller.MenuStack:GetArrayNum() == 0, "stock CloseMenu did not remove the first barter screen")
+    actor:SendInteractionToActor(pawn, actor.Box)
+    local fresh = controller.MenuStack[1]
+    local retained = barter.rows(state, phase, function(...) return {...} end)[1]
+    assert(controller.MenuStack:GetArrayNum() == 1 and valid(fresh) and fresh:GetFullName():find("BarterScreen_C ", 1, true)
+        and fresh.Trader:GetAddress() == actor:GetAddress() and fresh:GetAddress() ~= old_address
+        and retained and retained[4] == view[4] and retained[5] == "ready",
+        "stock Interact did not create a distinct screen while the original barter session was retained")
+    reopened = {sequence = view[4], trader = view[6], provisional = fresh:GetAddress()}
+    local opacity, enabled = fresh:GetRenderOpacity(), fresh:GetIsEnabled()
+    proof("rapid-reopen", view[4], view[6], opacity, enabled, fresh:GetFullName())
+    assert(opacity == 0 and enabled == false, "rapid reopen exposed the provisional stock barter screen")
+end
+
+local function observe_reopened(actor, pawn, screen, view)
+    local cards = screen.TraderInventoryPanel.Cards
+    if not cards or cards:GetArrayNum() ~= actor.Inventory:GetArrayNum() or actor.Save ~= false then return end
+    assert(view[4] > reopened.sequence and view[6] == reopened.trader and screen:GetAddress() ~= reopened.provisional
+        and screen.Trader:GetAddress() == actor:GetAddress() and screen:GetRenderOpacity() == 1 and screen:GetIsEnabled(),
+        "rapid reopen did not activate a new visible stock barter projection")
+    local funds = pawn.Save.Flags:Find(FName("Player_Cash")):get()
+    local ids = {}
+    for i = 1, cards:GetArrayNum() do ids[i] = guid(cards[i].Item) end
+    proof("rapid-ready", view[4], view[6], funds, #ids, table.concat(ids, ","))
+    reopened_visible = true
+end
+
 function probe.sample(state, phase)
     if state.map ~= zone or os.time() < next_attempt then return end
     next_attempt = os.time() + 1
@@ -207,7 +245,8 @@ function probe.sample(state, phase)
             state.world.OwningGameInstance:Give_PlayerCash(175, false)
             seed(actor, actor.Inventory, jewelry, 8)
             refreshed = true
-            proof("restocked", actor.Inventory:GetArrayNum(), 1375)
+            local count = actor.Inventory:GetArrayNum()
+            proof("restocked", count, 1375, guid(actor.Inventory[count]))
         elseif phase == "hosting" and payment then
             local guest = state.guests[1]
             local pawn = guest and saves.exact_item_context(state, phase, guest.name)
@@ -250,6 +289,16 @@ function probe.sample(state, phase)
                     local flag = FName("Player_Cash")
                     if pawn.Save.Flags:Contains(flag) then
                         proof("visible", actor.Inventory:GetArrayNum(), pawn.Save.Flags:Find(flag):get(), menus[1]:GetRenderOpacity())
+                    end
+                    if reopened and not reopened_visible and view[4] > reopened.sequence then
+                        observe_reopened(actor, pawn, menus[1], view)
+                    elseif not reopen_requested then
+                        local signal = io.open(box .. "/npc-barter-flow-reopen", "r")
+                        if signal then
+                            signal:close()
+                            reopen_requested = true
+                            rapid_reopen(state, phase, actor, pawn, menus[1], view)
+                        end
                     end
                 else
                     confirm(state, menus[1], actor, payment_row)
