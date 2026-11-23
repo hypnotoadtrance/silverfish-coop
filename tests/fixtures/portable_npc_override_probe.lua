@@ -432,6 +432,75 @@ local attack_probe
 local attack_probe_hooked = false
 local dock_attacker = "NPC_Survivor_Worker_C_0"
 local montage_probe, montage_probe_hooked
+local live_worker = "NPC_Survivor_Worker_C_2"
+local live_probe, live_probe_hooked
+
+local function dock_fight_position(pawn, actor, ignored, distance, shot_lane)
+    local center = actor:K2_GetActorLocation()
+    local half_height = pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()
+    for offset = 0, 11 do
+        local angle = offset * math.pi / 6
+        local x, y = center.X + math.cos(angle) * distance, center.Y + math.sin(angle) * distance
+        local hit = {}
+        if trace:LineTraceSingle(pawn, {X=x, Y=y, Z=center.Z+100}, {X=x, Y=y, Z=center.Z-175},
+            0, false, ignored, 0, hit, true, color, color, 0) then
+            hit = hit.OutHit or hit
+            local surface = hit.Component and hit.Component:Get()
+            if valid(surface) and surface:GetCollisionObjectType() == 0 and hit.ImpactNormal.Z >= .75 then
+                local point = {X=x, Y=y, Z=hit.ImpactPoint.Z + half_height + 3}
+                local eye = {X=x, Y=y, Z=point.Z + half_height * .65}
+                local obstructed = trace:LineTraceSingle(pawn, eye, center, 0, true, ignored, 0, {},
+                    true, color, color, 0)
+                if (not shot_lane or not obstructed) and pawn:K2_TeleportTo(point, heading(eye, center)) then
+                    return pawn:K2_GetActorLocation()
+                end
+            end
+        end
+    end
+end
+
+local function stage_live_worker(pawn, world)
+    local actor = dock_worker(world, live_worker)
+    assert(valid(actor) and actor.Alive and not valid(actor.CombatTarget) and actor.Health > 1
+        and actor:HasAuthority() and valid(actor.Controller), "expected an untouched warehouse worker with its stock brain")
+    local guest = authoritative_guest(world)
+    local original = actor:K2_GetActorLocation()
+    local ignored = {pawn, guest, actor}
+    assert(dock_fight_position(pawn, actor, ignored, 1800, false), "no host position away from the warehouse fight")
+    local guest_point = assert(dock_fight_position(guest, actor, ignored, 350, true), "no clear guest shot in the warehouse")
+    live_probe = {actor = actor, guest = guest, host = pawn, enemy_health = actor.Health,
+        guest_health = guest.Save.PlayerHealth, guest_attacks = 0, host_attacks = 0}
+    if not live_probe_hooked then
+        RegisterHook("/Game/Classes/Player/Player_FP.Player_FP_C:DealDamage", function(context, _, _, instigator)
+            if not live_probe or not same(instigator:get(), live_probe.actor) then return end
+            local victim = context:get()
+            if same(victim, live_probe.guest) then live_probe.guest_attacks = live_probe.guest_attacks + 1 end
+            if same(victim, live_probe.host) then live_probe.host_attacks = live_probe.host_attacks + 1 end
+        end)
+        live_probe_hooked = true
+    end
+    return ("%.7f,%.7f,%.7f;%.7f,%.7f,%.7f"):format(original.X, original.Y, original.Z,
+        guest_point.X, guest_point.Y, guest_point.Z)
+end
+
+local function sample_live_worker()
+    local probe = assert(live_probe, "the warehouse fight has not started")
+    local actor, guest = probe.actor, probe.guest
+    assert(valid(actor) and valid(guest), "the warehouse participant disappeared")
+    local target = actor.CombatTarget
+    local chosen = same(target, guest) and "guest" or same(target, probe.host) and "host"
+        or valid(target) and target:GetFullName() or "-"
+    return ("%s;%s;%.3f;%.3f;%s;%d;%d;%.3f;%.3f"):format(
+        tostring(actor.Alive), tostring(same(actor.LastDamagedMe, guest)), probe.enemy_health, actor.Health,
+        chosen, probe.guest_attacks, probe.host_attacks, probe.guest_health, guest.Save.PlayerHealth)
+end
+
+local function live_worker_position(world)
+    local actor = dock_worker(world, live_worker)
+    if not valid(actor) or not actor.Alive then return "absent" end
+    local point = actor:K2_GetActorLocation()
+    return ("%.7f,%.7f,%.7f"):format(point.X, point.Y, point.Z)
+end
 
 local function dock_swing(world, host, action)
     local actor = dock_worker(world, dock_attacker)
@@ -557,6 +626,10 @@ local function run(action, actor_path)
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     local at_dock = action:match("^dock%-") ~= nil
+    if action == "dock-natural-stop" and (not valid(world) or world:GetFullName() ~= "World " .. dock) then
+        live_probe = nil
+        return "stopped"
+    end
     assert(valid(world) and world:GetFullName() == "World " .. (at_dock and dock or map) and valid(world.NetDriver),
         "the test requires the expected world in an isolated co-op pair")
     local pawn = statics:GetPlayerPawn(world, 0)
@@ -567,6 +640,30 @@ local function run(action, actor_path)
         return select_equipment(pawn, function(row)
             return row[item_class]:GetFName():ToString() == "Wep_RustyPistol_C"
         end)
+    elseif action == "dock-natural-stage" then
+        assert(host, "the test stages the stock host NPC")
+        return stage_live_worker(pawn, world)
+    elseif action == "dock-natural-position" then
+        return live_worker_position(world)
+    elseif action == "dock-natural-seat" then
+        local point = pawn:K2_GetActorLocation()
+        return ("%.7f,%.7f,%.7f"):format(point.X, point.Y, point.Z)
+    elseif action == "dock-natural-sample" then
+        assert(host, "the host owns the fight")
+        return sample_live_worker()
+    elseif action == "dock-natural-stop" then
+        assert(host, "only the host can stop the test NPC")
+        local actor = live_probe and live_probe.actor
+        if valid(actor) and actor.Alive then
+            if valid(actor.Controller) then
+                actor.Controller:StopMovement()
+                actor.Controller:SetActorTickEnabled(false)
+            end
+            actor.CharacterMovement:DisableMovement()
+            actor:SetActorTickEnabled(false)
+        end
+        live_probe = nil
+        return "stopped"
     elseif action == "dock-aim" then
         local shooter = host and authoritative_guest(world) or pawn
         local angle = heading(shooter.Camera:K2_GetComponentLocation(), position(actor_path))

@@ -344,6 +344,10 @@ RC `cb28747` shares the host's downed-player list with stock NPC and turret comb
 
 RC `b61783a` relays the NPC's stock melee animation through the existing in-memory cue channel. A replicated owner reference links the cue to the correct NPC. The guest plays the clip in the stock animation slot while the host resolves combat. The muted Tutorial Dock trial observed one `Melee_Swipe_Right_01` montage playing at 1.10× on both seats and also verified a separate guest-only hit, downed retargeting, and a matching corpse. Natural targeting and foreground swing and sound presentation still need a two-PC check. [Tutorial Dock swing test](../tests/live_portable_title_smoke.py)
 
+A second muted pair used the stock warehouse worker `NPC_Survivor_Worker_C_2` with its original health, position, and AI. The test placed the players in the warehouse. One Rusty Pistol round fired by the guest reduced the worker from 120 to 91.712 HP. The worker selected that guest and landed one measured hit. Guest health fell from 212.004 to 184.517, with zero hit callbacks for the host. The guest received stock melee cues during the encounter. Foreground animation and sound, passive detection, and combat involving allied NPCs need further coverage. [Tutorial Dock retaliation test](../tests/live_portable_title_smoke.py)
+
+An extended headless fight reproduced a loss of the guest's weapon scope after the guest took damage. The shooting fixture rejected a later trigger request before sending it to the host. A sustained two-PC fight remains open.
+
 ### Steam hosting options
 
 - The in-game Host flow offers a transport choice. Direct IP uses the configured port and address. Steam Networking opens a Steam lobby when the campaign is ready.

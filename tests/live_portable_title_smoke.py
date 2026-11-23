@@ -765,7 +765,63 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat) -> dict:
     return {"stock_input": tap, "host_damage": proof, "both_peers_dead_and_ragdolled": states}
 
 
-async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str) -> dict:
+async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict) -> dict:
+    async def command(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-npc-override", action)
+
+    guest_run = guest.client / "run"
+
+    center, seat_point = (await command(host, "dock-natural-stage")).split(";")
+    try:
+        baseline = await command(host, "dock-natural-sample")
+        assert baseline.split(";")[4] == "-", baseline
+        origin = tuple(map(float, center.split(",")))
+        seat_origin = tuple(map(float, seat_point.split(",")))
+        async with asyncio.timeout(6):
+            while True:
+                guest_point = await command(guest, "dock-natural-position")
+                local_point = await command(guest, "dock-natural-seat")
+                if (guest_point != "absent" and math.dist(origin, tuple(map(float, guest_point.split(",")))) < 350
+                        and math.dist(seat_origin, tuple(map(float, local_point.split(",")))) < 100):
+                    break
+                await asyncio.sleep(.05)
+        assert await command(guest, f"dock-aim\t{guest_point}") == "ready"
+        await asyncio.sleep(.15)
+        target = await command(host, "dock-natural-position")
+        assert await command(host, f"dock-aim\t{target}") == "ready"
+        began = time.time()
+        tap = await submit(guest_run, "native-guest-primary-input-fixture")
+        assert tap["ok"], tap
+        sequence = tap["native_guest_primary_fixture"]["sequence"]
+        async with asyncio.timeout(8):
+            while True:
+                shot = next((row for row in await resident_events(guest_run, frame)
+                             if row.get("sequence") == sequence and row["time_unix"] >= began
+                             and row["event"] in ("native_guest_primary_input", "native_guest_primary_input_rejected")), None)
+                if shot:
+                    break
+                await asyncio.sleep(.05)
+        assert shot["event"] == "native_guest_primary_input", shot
+        info = shot["native_guest_weapon"]
+        assert (info["before"], info["after"], info["projectiles"]) == (7, 6, 1), info
+        current = baseline
+        try:
+            async with asyncio.timeout(15):
+                while True:
+                    current = await command(host, "dock-natural-sample")
+                    alive, hit, initial, health, target, guest_hits, host_hits, guest_before, guest_after = current.split(";")
+                    if (alive, hit, target, host_hits) == ("true", "true", "guest", "0") and int(guest_hits) > 0:
+                        assert float(health) < float(initial) and float(guest_after) < float(guest_before), current
+                        break
+                    await asyncio.sleep(.08)
+        except (TimeoutError, RuntimeError) as error:
+            raise AssertionError(f"Stock NPC did not retaliate against its guest attacker: {baseline} to {current}") from error
+        return {"baseline": baseline, "shot": info, "stock_target_and_hit": current}
+    finally:
+        assert await command(host, "dock-natural-stop") == "stopped"
+
+
+async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, retaliation: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
     for seat in (host, guest):
@@ -791,6 +847,8 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str) -> dic
     frame = await wait_resident_status(guest_run, lambda frame: at_dock(frame)
                                       and frame.get("game", {}).get("native_guest_primary_scope", {}).get("kind") == "rusty-pistol",
                                       timeout=12)
+    if retaliation:
+        return {"tutorial_dock_retaliation": await verify_tutorial_dock_retaliation(host, guest, frame)}
     seen = await asyncio.gather(*(command(seat, "dock-worker") for seat in (host, guest)))
     assert all(row.startswith("true;false;0;") for row in seen), seen
     target = await command(host, "dock-stage")
@@ -2446,7 +2504,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
-                 rusty_pistol: bool = False, tutorial_dock_combat: bool = False,
+                 rusty_pistol: bool = False, tutorial_dock_combat: bool = False, tutorial_dock_retaliation: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
@@ -2500,7 +2558,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (resident_weapon_cues, "resident_weapon_cues",
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override, rusty=rusty_pistol)),
         (stock_food, "stock_food", verify_resident_guest_food),
-        (tutorial_dock_combat, "tutorial_dock_combat", verify_tutorial_dock_combat),
+        (tutorial_dock_combat, "tutorial_dock_retaliation" if tutorial_dock_retaliation else "tutorial_dock_combat",
+         lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, retaliation=tutorial_dock_retaliation)),
     ) if enabled)
     single_scenario = (bool(resident_checks) or stock_prop_grip or stock_host_prop_observer
                        or stock_crate_ring or guest_world_start
@@ -2841,6 +2900,8 @@ if __name__ == "__main__":
                         help="exercise the stock Rusty Pistol during the resident weapon checks")
     parser.add_argument("--tutorial-dock-combat", action="store_true",
                         help="follow the stock exit to Tutorial Dock and dispatch a shot at a placed worker")
+    parser.add_argument("--tutorial-dock-retaliation", action="store_true",
+                        help="observe the stock AI's response to a nonlethal guest shot at a placed worker")
     parser.add_argument("--guest-ui-memory", action="store_true",
                         help="verify the resident guest UI refresh on one stock Nearby Items container pickup")
     parser.add_argument("--stock-prop-grip", action="store_true", help="verify default guest carry filtering in one portable lantern session")
@@ -2930,11 +2991,13 @@ if __name__ == "__main__":
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "stock_board_offers", "resident_weapon_cues",
-                              "rusty_pistol", "tutorial_dock_combat"}
+                              "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation"}
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
     if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
         parser.error("Use --tutorial-dock-combat with --rusty-pistol and --stock-npc-override")
+    if args.tutorial_dock_retaliation and not args.tutorial_dock_combat:
+        parser.error("Use --tutorial-dock-retaliation with --tutorial-dock-combat")
     if (args.stock_food or args.stock_campfire or args.stock_npc_override or args.stock_board_offers) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
@@ -2978,6 +3041,7 @@ if __name__ == "__main__":
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
+                       tutorial_dock_retaliation=args.tutorial_dock_retaliation,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
                        nonmirrored_startup=args.nonmirrored_startup,
