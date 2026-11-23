@@ -41,6 +41,7 @@ from live_stock_creator_smoke import creator_action, installed_probe
 from live_stock_pause_exit_smoke import stock_pause
 from live_unified_title_smoke import Seat, offered, start_pair
 from portable_guest_world_start import GuestWorldStartProof, resident_events, wait_resident_status
+from portable_stock_shovel import verify_stock_shovel
 from portable_world_view_receipt import patch_world_view_receipts, verify_world_view_receipt
 from tools.silverfish.title_session import STATUS_FILE as TITLE_STATUS_FILE
 
@@ -176,6 +177,18 @@ def bandage_revisit_overlay(game: Path):
         return script.replace(marker, observer + marker, 1)
 
     return portable_script_overlay(game, "native_authored_pickup.lua", add_bandage_observation)
+
+
+def stock_shovel_overlay(game: Path):
+    fixture = (Path(__file__).with_name("fixtures") / "portable_stock_shovel_probe.lua").read_text(encoding="utf-8")
+
+    def add_shovel_fixture(script):
+        marker = "function dig.command(fields, state, phase)\n"
+        if script.count(marker) != 1:
+            raise ValueError("The replica lacks the stock dig command")
+        return script.replace(marker, marker + fixture, 1)
+
+    return portable_script_overlay(game, "native_host_dig_live.lua", add_shovel_fixture)
 
 
 def stash_memory_overlays(probes: ExitStack, game: Path, *, large: bool = False) -> dict:
@@ -2721,7 +2734,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
                  rusty_pistol: bool = False, tutorial_dock_combat: bool = False, tutorial_dock_retaliation: bool = False,
-                 stock_bandage_revisit: bool = False,
+                 stock_bandage_revisit: bool = False, stock_shovel: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
@@ -2777,6 +2790,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_npc_rivalry, "stock_npc_rivalry", verify_stock_npc_rivalry),
         (stock_food, "stock_food", verify_resident_guest_food),
         (stock_bandage_revisit, "stock_bandage_revisit", verify_tutorial_bandage_revisit),
+        (stock_shovel, "stock_shovel", verify_stock_shovel),
         (tutorial_dock_combat, "tutorial_dock_retaliation" if tutorial_dock_retaliation else "tutorial_dock_combat",
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, retaliation=tutorial_dock_retaliation)),
     ) if enabled)
@@ -2805,6 +2819,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_nearby_overlays"] = [probes.enter_context(stock_nearby_overlay(game)) for game in games]
         if stock_bandage_revisit:
             proof["bandage_revisit_overlays"] = [probes.enter_context(bandage_revisit_overlay(game)) for game in games]
+        if stock_shovel:
+            proof["stock_shovel_overlays"] = [probes.enter_context(stock_shovel_overlay(game)) for game in games]
         if stock_board_offers:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
@@ -2816,7 +2832,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 for game in games:
                     probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                          fixture="portable_npc_override_probe.lua"))
-        if tutorial_dock_combat or stock_bandage_revisit:
+        if tutorial_dock_combat or stock_bandage_revisit or stock_shovel:
             proof["dock_zone_overlays"] = [probes.enter_context(tutorial_dock_zone_overlay(game)) for game in games]
         if stock_campfire:
             for game in games:
@@ -2957,7 +2973,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         elif resident_checks:
             results = proof["resident_check_results"] = {}
             campaign_started = time.perf_counter()
-            exit_actions = ("prompt", "confirm") if tutorial_dock_combat or stock_bandage_revisit else ("save_and_quit",)
+            exit_actions = ("prompt", "confirm") if tutorial_dock_combat or stock_bandage_revisit or stock_shovel else ("save_and_quit",)
 
             async def run_resident_checks(host, guest, pawn):
                 proof["join_seconds"] = round(time.perf_counter() - campaign_started, 3)
@@ -3127,6 +3143,8 @@ if __name__ == "__main__":
                         help="observe the stock AI's response to a nonlethal guest shot at a placed worker")
     parser.add_argument("--stock-bandage-revisit", action="store_true",
                         help="collect the Tutorial Dock bandage and verify both views after revisiting the map")
+    parser.add_argument("--stock-shovel", action="store_true",
+                        help="collect a stock shovel as the guest and verify its dig on both peers")
     parser.add_argument("--stock-npc-rivalry", action="store_true",
                         help="observe stock perception, attacks, and death between two NPC factions")
     parser.add_argument("--guest-ui-memory", action="store_true",
@@ -3219,15 +3237,17 @@ if __name__ == "__main__":
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "stock_board_offers", "resident_weapon_cues",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "stock_npc_rivalry",
-                              "stock_bandage_revisit"}
+                              "stock_bandage_revisit", "stock_shovel"}
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
     if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
         parser.error("Use --tutorial-dock-combat with --rusty-pistol and --stock-npc-override")
     if args.tutorial_dock_retaliation and not args.tutorial_dock_combat:
         parser.error("Use --tutorial-dock-retaliation with --tutorial-dock-combat")
+    if args.stock_shovel and (args.stock_bandage_revisit or args.tutorial_dock_combat):
+        parser.error("Use separate sessions for the Crossroads shovel and Tutorial Dock checks")
     if any((args.stock_food, args.stock_campfire, args.stock_npc_override, args.stock_board_offers,
-            args.stock_npc_rivalry, args.stock_bandage_revisit)) and (
+            args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
         parser.error("Run the resident gameplay checks without other gameplay fixtures")
@@ -3272,6 +3292,7 @@ if __name__ == "__main__":
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
                        tutorial_dock_retaliation=args.tutorial_dock_retaliation, stock_bandage_revisit=args.stock_bandage_revisit,
+                       stock_shovel=args.stock_shovel,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
                        nonmirrored_startup=args.nonmirrored_startup,

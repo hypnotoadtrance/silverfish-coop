@@ -2023,7 +2023,9 @@ namespace
 
     bool authored_path(std::basic_string_view<U::TCHAR> path)
     {
-        if (path == STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.MeleeWep_Spade_C_3"))
+        if (path == STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.MeleeWep_Spade_C_3") &&
+            (env("SILVERFISH_COOP_NATIVE_FIXTURES") || env("SILVERFISH_COOP_NATIVE_HOST_DIG_LIVE_FIXTURES")) &&
+            env("SILVERFISH_COOP_HEADLESS"))
             return true;
         return std::ranges::any_of(profiles, [path](const Profile& profile) {
             if (profile.source == "crossroads-old-pipe" && !(env("SILVERFISH_COOP_NATIVE_GUEST_MELEE_CANARY") &&

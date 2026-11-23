@@ -2050,6 +2050,10 @@ class Bridge:
                 elif fields[0] == "native-guest-primary-fixture" and len(fields) == 6:
                     data["native_guest_primary_fixture"] = {"map": fields[1], "pawn": fields[2], "guid": fields[3],
                                                             "sequence": int(fields[4]), "stock_wrappers": int(fields[5])}
+                elif (fields[0] == "native-guest-spade-intent" and len(fields) == 5 and valid_guid(fields[3])
+                      and fields[1] == data.get("map") and data.get("state") == "connected" and len(fields[2]) <= 512
+                      and (sequence := _held_input_sequence(fields[4]))):
+                    data[native_host_dig_live.GUEST_INTENT] = (sequence, fields[1], fields[2], fields[3], "spade")
                 elif fields[0] == "native-guest-primary-scope" and len(fields) == 6:
                     data["native_guest_primary_scope"] = dict(zip(("map", "pawn", "guid", "kind", "mode"), fields[1:]))
                 elif (fields[0] == "native-guest-held-fire" and len(fields) == 7 and valid_guid(fields[3])

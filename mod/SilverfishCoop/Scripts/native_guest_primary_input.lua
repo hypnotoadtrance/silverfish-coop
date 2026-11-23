@@ -13,7 +13,7 @@ local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 local camera_quest = "Photo_DB_Turrets"
-local event_path, held_event_path, is_downed, binding, fixture_proof, held_fixture_proof
+local event_path, held_event_path, is_downed, binding, fixture_proof, held_fixture_proof, shovel_intent
 local held_edges = {press = true, release = true, cancel = true}
 local held_proofs = {["mapped-key"] = true, ["edge-window"] = true, ["headless-fixture"] = true}
 
@@ -97,7 +97,7 @@ function primary.reset()
     if binding and type(SilverfishClearNativeGuestPrimaryScope) == "function" then
         SilverfishClearNativeGuestPrimaryScope()
     end
-    binding, fixture_proof, held_fixture_proof = nil, nil, nil
+    binding, fixture_proof, held_fixture_proof, shovel_intent = nil, nil, nil, nil
 end
 
 local function drain_taps(current, address)
@@ -127,6 +127,8 @@ local function drain_taps(current, address)
             end
             if not name or actor.Locked ~= true or (kind == "crowbar" and current.pawn.CanInteract ~= true)
                 or not emit(event_path, {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind, name}) then break end
+        elseif kind == "spade" then
+            shovel_intent = {sequence = sequence, expires = os.clock() + 1.5}
         elseif not emit(event_path, {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind}) then break end
         emitted = emitted + 1
     end
@@ -238,7 +240,8 @@ function primary.command(fields, state, phase)
     local old_pipe = kind == "old-pipe"
     if #fields ~= (camera and 7 or 6) or fields[3] ~= current.map or fields[4] ~= current.name or not valid_guid(guid)
         or (camera and (current.map ~= camera_map or quest ~= camera_quest))
-        or (not camera and not old_pipe and kind ~= "blowtorch" and kind ~= "crowbar" and not weapon_profiles.paths[kind])
+        or (not camera and not old_pipe and kind ~= "blowtorch" and kind ~= "crowbar" and kind ~= "spade"
+            and not weapon_profiles.paths[kind])
         or (held_enabled and kind == "smg-standard" and (type(SilverfishTakeNativeGuestHeldFireIntent) ~= "function"
             or type(SilverfishReadNativeGuestHeldFire) ~= "function"))
         or type(SilverfishSetNativeGuestPrimaryScope) ~= "function"
@@ -272,6 +275,9 @@ function primary.rows(state, phase, status_row)
     if not same_context(current, binding) then return {} end
     local rows = { status_row("native-guest-primary-scope", current.map, current.name, binding.guid,
         binding.kind, binding.mode) }
+    if binding.kind == "spade" and shovel_intent and os.clock() < shovel_intent.expires and can_use(current) then
+        rows[#rows + 1] = status_row("native-guest-spade-intent", current.map, current.name, binding.guid, shovel_intent.sequence)
+    end
     if fixture_proof and same_context(current, fixture_proof.context) and fixture_proof.guid == binding.guid then
         rows[#rows + 1] = status_row("native-guest-primary-fixture", current.map, current.name, fixture_proof.guid,
             fixture_proof.sequence, fixture_proof.wrappers)

@@ -17,11 +17,13 @@ BLOWTORCH_PATH = "/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"
 BLOWTORCH_STATES = {"blowtorch_backpack", "blowtorch_stored_equipment", "blowtorch_equipped"}
 CROWBAR_PATH = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C"
 CROWBAR_STATES = {"crowbar_backpack", "crowbar_stored_equipment", "crowbar_equipped"}
+SPADE_PATH = "/Game/Classes/Equipment/MeleeWep_Spade.MeleeWep_Spade_C"
+SPADE_STATES = {"spade_backpack", "spade_stored_equipment", "spade_equipped"}
 OLD_PIPE = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
 OLD_PIPE_STATES = {"old_pipe_backpack", "old_pipe_stored_equipment", "old_pipe_equipped"}
 FIRE_CLASSES = {firearm.kind: firearm.path for firearm in guest_weapon_profiles.FIREARMS}
-CLASS_PATHS = {*FIRE_CLASSES.values(), CAMERA_PATH, OLD_PIPE, BLOWTORCH_PATH, CROWBAR_PATH}
-PRIMARY_KINDS = frozenset((*FIRE_CLASSES, "camera", "blowtorch", "crowbar", native_guest_melee.KIND))
+CLASS_PATHS = {*FIRE_CLASSES.values(), CAMERA_PATH, OLD_PIPE, BLOWTORCH_PATH, CROWBAR_PATH, SPADE_PATH}
+PRIMARY_KINDS = frozenset((*FIRE_CLASSES, "camera", "blowtorch", "crowbar", "spade", native_guest_melee.KIND))
 SEED_KINDS = frozenset(firearm.kind for firearm in guest_weapon_profiles.FIREARMS if firearm.headless_seed) | {
     "blowtorch", "crowbar", "smg-standard-full", "stock-flare", "stock-flare-blue", "stock-flare-yellow",
     "stock-bolt",
@@ -180,6 +182,7 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
         old_pipe = proof.get("status") in OLD_PIPE_STATES
         blowtorch = proof.get("status") in BLOWTORCH_STATES
         crowbar = proof.get("status") in CROWBAR_STATES
+        spade = proof.get("status") in SPADE_STATES
         if camera:
             status = proof["status"]
             if ((operation != "inspect" and (operation != "equip" or status != "camera_equipped"))
@@ -202,6 +205,10 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
                     or operation == "equip" and proof["status"] != "crowbar_equipped"
                     or operation == "seed" and seed_kind != "crowbar" or actor != -1 or stored != -1):
                 raise RuntimeError("Native guest stock crowbar did not verify")
+        elif spade:
+            if ((operation != "inspect" and (operation != "equip" or proof["status"] != "spade_equipped"))
+                    or actor != -1 or stored != -1):
+                raise RuntimeError("Native guest stock shovel equipment did not verify")
         elif operation == "seed-ammo":
             if proof.get("status") not in ("seeded", "present"):
                 raise RuntimeError("The stock guest reserve fixture did not verify the exact ammo GUID")
@@ -233,6 +240,8 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
             result["native_guest_weapon"] = dict(proof, kind="blowtorch", class_path=BLOWTORCH_PATH)
         if crowbar:
             result["native_guest_weapon"] = dict(proof, kind="crowbar", class_path=CROWBAR_PATH)
+        if spade:
+            result["native_guest_weapon"] = dict(proof, kind="spade", class_path=SPADE_PATH)
         if bandit_fixture is not None:
             aim = snapshot.get("native_bandit_aim", {})
             if (aim.get("map"), aim.get("bandit"), aim.get("pawn")) != (source, bandit_fixture, pawn):
