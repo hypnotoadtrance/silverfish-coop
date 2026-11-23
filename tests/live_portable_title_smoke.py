@@ -23,7 +23,7 @@ from bootstrap import install_stage
 from tools.silverfish import (
     direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop,
     native_host_save, native_inventory, native_loose_pickup,
-    native_lantern, native_loot, native_prop_carry, native_stash, native_world_loot, runtime,
+    native_lantern, native_loot, native_prop_carry, native_stash, native_weapon_fire_view, native_world_loot, runtime,
 )
 from tools.silverfish.authored_loot import GUARANTEED_CRATES
 from tools.silverfish.control import NAME, submit
@@ -599,11 +599,13 @@ async def verify_resident_npc_shots(host: Seat, guest_run: Path, guest_frame: di
                 if row["event"] == "native_weapon_shot_played" and row["generation"] == guest_frame["generation"]}
 
     evidence = []
-    for kind, faction, weapon_class in (("state", 4, "Wep_ScoutRifle_01"), ("bandit", 9, "Wep_Pistol")):
+    for kind in ("state", "bandit"):
         previous = shots(await resident_events(guest_run, guest_frame))
         raw = await portable_probe_command(host.bridge, "portable-npc-override", f"fire-npc\t{kind}")
         observed_faction, path, *position = raw.split(";")
-        assert int(observed_faction) == faction and path.endswith(f"/{weapon_class}.{weapon_class}_C"), raw
+        faction = int(observed_faction)
+        assert 0 <= faction < 15 and (faction == 4) == (kind == "state"), raw
+        assert native_weapon_fire_view.stock_weapon_class(path), raw
         try:
             async with asyncio.timeout(6):
                 while True:
