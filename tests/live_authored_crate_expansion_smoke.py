@@ -41,6 +41,9 @@ SCENES = {
     "trench": ("/Game/Classes/Maps/Maps_OverWorld/Trench_01_P", ("LootCrate_Small_BP_C_1", "LootCrate_Small_BP_C_3")),
 }
 DEFAULT_SCENES = tuple(SCENES)
+GUEST_LIDS_SCENE = "crossroads-guest-lids"
+# The existing Crossroads override smoke verified all three stock approaches. Leave the original small crate for the guest.
+SCENES[GUEST_LIDS_SCENE] = (CROSSROADS, (*SCENES["crossroads-overrides"][1], "LootCrate_Small_BP_C_3"))
 GUARANTEED_SCENES = {
     "guaranteed-observatory": (OBSERVATORY, ("LootCrate_Small_BP_C_1",)),
     # Match the lower stock shelves on opposite sides of the sorting aisle.
@@ -179,6 +182,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     if natural_lab_roll and (name != CABINET_SCENE or baseline or force_stock_roll):
         raise ValueError("The seeded Lab roll needs its fresh Wanderer route")
     area, actors = SCENES[name]
+    guest_lids = name == GUEST_LIDS_SCENE
     cabinet = name == CABINET_SCENE
     desk = name == DESK_SCENE
     family = FAMILY_SCENES[name][1] if name in FAMILY_SCENES else None
@@ -205,7 +209,7 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
     base = (sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work))
     host, guest = ("--campaign", key), ("--profile", key)
     originals = saved_hashes(original_save) if original_save else None
-    if (force_stock_roll or permanent) and not originals:
+    if (force_stock_roll or permanent or guest_lids) and not originals:
         raise ValueError("The single-player save directory must contain files to verify")
     evidence = {"map": area, "stock_interactions": []}
     if force_stock_roll:
@@ -358,6 +362,68 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
             assert next_offset is None or offset < next_offset <= 4096, page
             offset = next_offset
 
+    async def record_open(controller, directory, pawn, crate):
+        pressed = (await command("action", *controller, "native-loot-crate-fixture", "--target", crate))[
+            "native_loot_crate_interaction"]
+        assert (pressed["map"], pressed["crate"], pressed["entry"], pressed["pawn"]) == (
+            area, crate, "fixture", pawn), pressed
+        await wait(directory, lambda _: stock_input_result(directory, crate, pressed["sequence"]) is not None)
+        result = stock_input_result(directory, crate, pressed["sequence"])
+        assert result["event"] == "native_stock_crate_interaction", result
+        return pressed, result
+
+    def exact_open_lid(frame, crate, phase):
+        row = frame["game"].get("native_loot_crate_diagnostics", {}).get(crate, {})
+        return (status_of(frame, crate) == "exhausted"
+                and (row.get("map"), row.get("crate"), row.get("phase"), row.get("scope"), row.get("door"),
+                     row.get("looted")) == (area, crate, phase, "active", "live", True)
+                and type(row.get("roll")) in (int, float) and abs(row["roll"] + 95) < .05
+                and row.get("box") in ("live", "retired", "missing")
+                and (row["box"] != "live" or row.get("collision") == 0))
+
+    async def preopen_host_lids(opening):
+        opened = evidence["host_opened_before_guest"] = {}
+        pawn = opening["game"]["pawns"]["local"]["name"]
+        for crate in targets[:-1]:
+            await command("action", *host, "native-loot-approach", "--target", f"host@{crate}")
+            pressed, routed = await record_open(host, run, pawn, crate)
+            frame = await wait(run, lambda state: public_roll(state, crate) and exact_open_lid(state, crate, "hosting"))
+            roll = public_roll(frame, crate)
+            assert not frame.get("link_connected") and not frame["game"].get("remote_clients"), frame["game"]
+            assert (roll["crate"], roll["map"], roll["opener"], roll["id"]) == (crate, area, "host", routed["operation_id"]), roll
+            opened[crate] = {"press": pressed, "routed": routed, "roll": roll}
+        assert len({row["roll"]["id"] for row in opened.values()}) == len(targets) - 1
+        return opened
+
+    async def verify_guest_lids(character, opened):
+        authority = await route_pair(area, character)
+        target = targets[-1]
+        ready = await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("gameplay_fresh")
+                           and state.get("character_id") == character and state.get("host_session") == authority["generation"]
+                           and state.get("zone_epoch") == authority["zone_epoch"] and status_of(state, target) == "ready")
+        assert public_roll(authority, target) is None and public_roll(ready, target) is None
+        pawn = ready["game"]["pawns"]["local"]["name"]
+        await command("action", *host, "native-loot-approach", "--target", f"guest@{target}")
+        pressed, routed = await record_open(guest, guest_run, pawn, target)
+        host_frame = await wait(run, lambda state: public_roll(state, target) and exact_open_lid(state, target, "hosting"))
+        roll = public_roll(host_frame, target)
+        assert (roll["crate"], roll["map"], roll["opener"], roll["id"]) == (target, area, character, routed["operation_id"]), roll
+        assert routed["native_loot_roll"] == roll
+        expected = {crate: row["roll"] for crate, row in opened.items()} | {target: roll}
+        guest_frame = await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("gameplay_fresh")
+                                 and state.get("character_id") == character
+                                 and state.get("host_session") == authority["generation"]
+                                 and state.get("zone_epoch") == authority["zone_epoch"]
+                                 and all(public_roll(state, crate) == committed and exact_open_lid(state, crate, "connected")
+                                         for crate, committed in expected.items()))
+        assert guest_frame["game"]["pawns"]["local"]["name"] == pawn
+        assert all(public_roll(host_frame, crate) == expected[crate] for crate in opened)
+        evidence["guest_opened_stock_crate"] = {"press": pressed, "routed": routed, "roll": roll}
+        evidence["guest_lids_pending_at_first_ready"] = [crate for crate in opened if status_of(ready, crate) != "exhausted"]
+        evidence["guest_lids_verified"] = {crate: guest_frame["game"]["native_loot_crate_diagnostics"][crate] for crate in targets}
+        evidence["party_scope"] = {"character": character, "host_session": authority["generation"],
+                                   "epoch": authority["zone_epoch"], "guest_pawn": pawn}
+
     try:
         seed = clone_baseline(work, baseline, campaign, area, targets) if baseline else None
         if baseline:
@@ -378,12 +444,16 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
         if baseline:
             live_seed = opening["game"]["native_scene"]["instance_seed"]
             assert live_seed == seed, (seed, live_seed)
+        opened = await preopen_host_lids(opening) if guest_lids else None
         invitation = await command("invite", *host, "--name", f"{name} crate runner", "--character", "Crate runner")
         character = invitation["character_id"]
-        join_zones = ("--native-zones",) if natural_lab_roll else ()
+        join_zones = ("--native-zones",) if natural_lab_roll or guest_lids else ()
         if pry_tool:
             join_zones += ("--native-guest-primary-input", "--native-guest-inventory-view")
         await start("guest", guest, "join", *guest, "--headless", *join_zones, "--invite", invitation["invite_file"])
+        if guest_lids:
+            await verify_guest_lids(character, opened)
+            return
         if natural_lab_roll:
             await reach_lab(character)
         ready = await wait(guest_run, lambda state: state.get("state") == "connected" and state.get("gameplay_fresh")
@@ -780,13 +850,26 @@ async def exercise(work: Path, name: str, original_save: Path | None, baseline: 
                     if process.returncode is None:
                         process.terminate()
                         await asyncio.wait_for(process.wait(), timeout=10)
+        if guest_lids and "guest_opened_stock_crate" in evidence:
+            receipt = evidence["guest_opened_stock_crate"]["routed"]
+            events = (json.loads(line) for line in (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines())
+            routes = [row for row in events if row.get("event") in (
+                "native_stock_crate_interaction", "native_stock_crate_interaction_rejected") and row.get("crate") == targets[-1]]
+            evidence["guest_target_route_events"] = routes
+            evidence["workers_closed"] = [process.returncode for process, _ in processes]
+            if routes != [receipt] or evidence["workers_closed"] != [0, 0]:
+                evidence["failure"] = "The guest stock press did not route exactly once with clean worker shutdown"
         if originals is not None:
             hashes_match = saved_hashes(original_save) == originals
             evidence["original_files_verified"] = len(originals) if hashes_match else 0
+        if guest_lids:
+            evidence["verified"] = "guest_lids_verified" in evidence and "failure" not in evidence and hashes_match
         run.mkdir(parents=True, exist_ok=True)
         (run / "live-authored-crate-expansion-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
         if originals is not None:
             assert hashes_match, "The original single-player saves changed"
+        if guest_lids and "guest_lids_verified" in evidence:
+            assert evidence["verified"], evidence.get("failure")
 
 
 async def main(arguments):
@@ -823,6 +906,9 @@ if __name__ == "__main__":
         parser.error("--baseline requires exactly one --area")
     if arguments.natural_lab_roll and (arguments.area != [CABINET_SCENE] or arguments.baseline or arguments.force_stock_roll):
         parser.error("--natural-lab-roll requires --area lab-small-cabinet and a fresh campaign")
+    if GUEST_LIDS_SCENE in (arguments.area or ()) and (
+            arguments.area != [GUEST_LIDS_SCENE] or not arguments.vanilla_saved or arguments.require_cash):
+        parser.error("--area crossroads-guest-lids requires one muted pair and --vanilla-saved")
     if arguments.carry_loot and arguments.area != ["guaranteed-observatory"]:
         parser.error("--carry-loot requires --area guaranteed-observatory")
     asyncio.run(main(arguments))
