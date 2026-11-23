@@ -346,7 +346,7 @@ RC `b61783a` relays the NPC's stock melee animation through the existing in-memo
 
 A second muted pair used the stock warehouse worker `NPC_Survivor_Worker_C_2` with its original health, position, and AI. The test placed the players in the warehouse. One Rusty Pistol round fired by the guest reduced the worker from 120 to 91.712 HP. The worker selected that guest and landed one measured hit. Guest health fell from 212.004 to 184.517, with zero hit callbacks for the host. The guest received stock melee cues during the encounter. Foreground animation and sound, passive detection, and combat involving allied NPCs need further coverage. [Tutorial Dock retaliation test](../tests/live_portable_title_smoke.py)
 
-An extended headless fight reproduced a loss of the guest's weapon scope after the guest took damage. The shooting fixture rejected a later trigger request before sending it to the host. A sustained two-PC fight remains open.
+An extended headless fight recorded guest shots after taking damage and later rejected an attempt before sending it to the host. The stock muzzle obstruction trace can temporarily block the weapon. RC `bf42782` preserves the authenticated equipment binding across this block and drops pending taps during it. A headless fixture held the stock weapon block across a service renewal. The blocked trigger sent no shot, and the guest then fired one round from the same seven-round magazine with the same item ID. The worker retaliated against the guest. The same installed candidate also showed matching ragdolls after a staged State rifle shot killed a Bandit. Sustained two-PC fights remain open. [Guest weapon recovery test](../tests/live_portable_title_smoke.py)
 
 ### Steam hosting options
 

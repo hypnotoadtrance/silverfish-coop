@@ -434,6 +434,7 @@ local dock_attacker = "NPC_Survivor_Worker_C_0"
 local montage_probe, montage_probe_hooked
 local live_worker = "NPC_Survivor_Worker_C_2"
 local live_probe, live_probe_hooked
+local weapon_block_pawn, weapon_block_hooked
 
 local function dock_fight_position(pawn, actor, ignored, distance, shot_lane)
     local center = actor:K2_GetActorLocation()
@@ -643,7 +644,15 @@ local function run(action, actor_path)
     elseif action == "dock-block-weapon" or action == "dock-unblock-weapon" then
         assert(not host and pawn.Dead == false and valid(pawn.EquipedItem), "the guest needs a live equipped pawn")
         local blocked = action == "dock-block-weapon"
-        pawn.IsWeaponBlocked = blocked
+        if blocked and not weapon_block_hooked then
+            RegisterHook("/Game/Classes/Player/Player_FP.Player_FP_C:LookTrace", function(context)
+                local candidate = context:get()
+                if same(candidate, weapon_block_pawn) then candidate.IsWeaponBlocked = true end
+            end)
+            weapon_block_hooked = true
+        end
+        weapon_block_pawn = blocked and pawn or nil
+        pawn:LookTrace()
         return tostring(pawn.IsWeaponBlocked)
     elseif action == "dock-natural-stage" then
         assert(host, "the test stages the stock host NPC")
