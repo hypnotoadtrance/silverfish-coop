@@ -128,3 +128,25 @@ class FlashlightViewTests(unittest.IsolatedAsyncioTestCase):
                                                *(f"{float(x):.5f}" for x in self.axes), timeout=2)
         self.assertIs(await flashlight.project(bridge, applied, incoming, self.epoch), applied)
         self.assertIs(await flashlight.project(bridge, applied, dict(incoming, profile="other"), self.epoch), applied)
+
+    async def test_offhand_direction_refreshes_once_without_changing_stock_switch(self):
+        game = {"state": "connected", "map": self.area}
+        source = flashlight.parse_source([flashlight.SOURCE_TAG, "257", "9", "0", "1o", *self.axes], "hosting")
+        initial = dict(source, map=self.area, epoch=self.epoch)
+        def rendered(direction):
+            values = [flashlight.VIEW_TAG, self.epoch, "257", "9", "0", "1o", "1", "-", *direction]
+            return dict(game, **{flashlight.VIEW: flashlight.parse_view(values, "connected")})
+
+        changed = dict(initial, pose=[1, 2, 3, 12.5, 179.5, -10.1, .5, .6, .7])
+        first, next_aim = rendered(self.axes[3:6]), rendered(["12.5", "179.5", "-10.1"])
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[first, next_aim, game]))
+        self.assertIs(await flashlight.project(bridge, game, initial, self.epoch), first)
+        self.assertIs(await flashlight.project(bridge, first, initial, self.epoch), first)
+        self.assertIs(await flashlight.project(bridge, first, changed, self.epoch), next_aim)
+        bridge.command.assert_awaited_with(flashlight.VIEW_TAG, self.area, self.epoch, "257", "9", "0", "1o",
+                                           *(f"{value:.5f}" for value in changed["pose"]), timeout=2)
+        self.assertIs(await flashlight.project(bridge, next_aim, None, self.epoch), game)
+        with self.assertRaises(ValueError):
+            flashlight.parse_guest_source([flashlight.GUEST_SOURCE_TAG, "Player_FP_C Guest", "9", "0", "1o"], "connected")
+        with self.assertRaises(ValueError):
+            flashlight.parse_view([flashlight.GUEST_VIEW_TAG, self.epoch, "257", "9", "0", "1o", "1", "-"], "hosting")

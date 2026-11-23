@@ -20,6 +20,7 @@ GUEST_BEAMS = "native_guest_flashlights"
 GUEST_SUPPORT = "native_guest_flashlight_support"
 MAX_GUEST_SOURCES = 16
 HEAVY = "heavy"
+OFFHAND = "offhand"
 _LEASE = 1.5
 _BOUNDS = ((-250, 250),) * 3 + ((-180, 180),) * 3 + ((0, 1),) * 3
 
@@ -39,21 +40,23 @@ def _identifier(epoch):
     return isinstance(epoch, str) and REQUEST_ID.fullmatch(epoch) is not None
 
 
-def _power_profile(token):
+def _power_profile(token, *, offhand=False):
     if token in ("0", "1"):
         return token == "1", None
     if token in ("0h", "1h"):
         return token == "1h", HEAVY
+    if offhand and token in ("0o", "1o"):
+        return token == "1o", OFFHAND
     raise ValueError("Invalid stock flashlight power/profile")
 
 
 def _power_token(power, profile):
-    return str(int(power)) + ("h" if profile == HEAVY else "")
+    return str(int(power)) + {HEAVY: "h", OFFHAND: "o"}.get(profile, "")
 
 
 def parse_source(fields, phase):
     _, player, instance, switch, token, *axes = fields
-    power, profile = _power_profile(token)
+    power, profile = _power_profile(token, offhand=True)
     identity = tuple(map(int, (player, instance, switch)))
     values = list(map(float, axes))
     if phase != "hosting" or not _identity(*identity) or not _values(values):
@@ -65,8 +68,8 @@ def parse_source(fields, phase):
 
 
 def parse_view(fields, phase):
-    _, epoch, player, instance, switch, token, visible, heard = fields
-    power, profile = _power_profile(token)
+    tag, epoch, player, instance, switch, token, visible, heard, *direction = fields
+    power, profile = _power_profile(token, offhand=tag == VIEW_TAG)
     identity = tuple(map(int, (player, instance, switch)))
     heard = None if heard == "-" else int(heard)
     permitted = ("connected", "hosting") if fields[0] == GUEST_VIEW_TAG else ("connected",)
@@ -77,6 +80,13 @@ def parse_view(fields, phase):
                   power=power, visible=visible == "1", heard=heard)
     if profile:
         result["profile"] = profile
+    if profile == OFFHAND:
+        aim = list(map(float, direction))
+        if len(aim) != 3 or any(not -180 <= axis <= 180 for axis in aim):
+            raise ValueError("Invalid offhand flashlight direction receipt")
+        result["aim"] = aim
+    elif direction:
+        raise ValueError("Unexpected handheld flashlight direction receipt")
     return result
 
 
@@ -229,17 +239,22 @@ async def project(bridge, game, incoming, epoch):
         return result
     if (not isinstance(incoming, dict) or (incoming.get("map"), incoming.get("epoch")) != (area, epoch)
             or not _identifier(epoch) or not _identity(incoming.get("player"), incoming.get("instance"), incoming.get("switch"))
-            or type(incoming.get("power")) is not bool or incoming.get("profile") not in (None, HEAVY)
+            or type(incoming.get("power")) is not bool or incoming.get("profile") not in (None, HEAVY, OFFHAND)
             or not _values(incoming.get("pose"))):
         return game
     fields = ("epoch", "player", "instance", "switch", "power", "profile")
-    expected = tuple(incoming.get(field) for field in fields)
-    if applied and tuple(applied.get(field) for field in fields) == expected:
+    aim = incoming["pose"][3:6] if incoming.get("profile") == OFFHAND else None
+    expected = tuple(incoming.get(field) for field in fields) + (aim,)
+
+    def accepted(state):
+        return tuple(state.get(field) for field in fields) + (state.get("aim"),) == expected
+
+    if applied and accepted(applied):
         return game
     result = await bridge.command(VIEW_TAG, area, epoch, str(incoming["player"]), str(incoming["instance"]),
                                   str(incoming["switch"]), _power_token(incoming["power"], incoming.get("profile")),
                                   *(f"{value:.5f}" for value in incoming["pose"]), timeout=2)
     local = result.get(VIEW, {})
-    if tuple(local.get(field) for field in fields) != expected:
+    if not accepted(local):
         raise RuntimeError("The guest did not accept the stock flashlight view")
     return result

@@ -1810,6 +1810,7 @@ LoopInGameThreadWithDelay(25, function()
     if role == "host" and not leaving then pcall(native_weapon_fire_view.flush, current_world) end
     if native_avatar_lean_bridge.enabled then pcall(native_avatar_lean_bridge.update, current_world, role, leaving) end
     if not leaving then pcall(native_player_avatar.animate_head, current_world) end
+    if not leaving then pcall(native_flashlight.animate, current_world) end
     if not leaving then pcall(native_player_avatar.animate_melee, current_world) end
     if not leaving then pcall(native_player_avatar.animate_recoil, current_world) end
     if not leaving then pcall(native_player_avatar.animate_cycle, current_world) end

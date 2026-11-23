@@ -9,6 +9,7 @@ local click_range = 4000 -- Switch_Reset_Cue's stock attenuation maximum in cent
 local maths = "/Script/Engine.Default__KismetMathLibrary"
 local statics = "/Script/Engine.Default__GameplayStatics"
 local avatar = require("native_player_avatar")
+local offhand_view = require("native_avatar_offhand")
 local players = require("players")
 local owner, guest_owner, target, peers, serial = nil, nil, nil, nil, 0
 local equipment_path = "/Game/Classes/Equipment/"
@@ -57,12 +58,13 @@ local function held(actor, pawn, world)
 end
 
 local function power_token(view)
-    return (view.power and "1" or "0") .. (view.profile == heavy and "h" or "")
+    return (view.power and "1" or "0") .. (view.offhand and "o" or view.profile == heavy and "h" or "")
 end
 
 local function power_profile(token)
     if token == "0" or token == "1" then return regular, token == "1" end
     if token == "0h" or token == "1h" then return heavy, token == "1h" end
+    if token == "0o" or token == "1o" then return regular, token == "1o", true end
 end
 
 local function selected_stock(pawn, equipment)
@@ -72,6 +74,21 @@ local function selected_stock(pawn, equipment)
     local slots = save.PlayerEquipment
     return index and slots and index >= 0 and index < slots:GetArrayNum()
         and same(slots[index + 1][item_class], equipment:GetClass())
+end
+
+local function stock_offhand(pawn, world)
+    local pistol = pawn.EquipedItem
+    local camera, item = pawn.Camera, pawn.OffhandEquipment
+    if pawn.Save.PlayerOffhandingFlashlight ~= true or not exact(pistol, "/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C")
+        or not pistol:HasAuthority() or not same(pistol.User, pawn) or not selected_stock(pawn, pistol)
+        or not exact(item, regular.class) or item:IsActorBeingDestroyed() or item.bReplicates ~= false
+        or not same(item.User, pawn) or not same(item:GetWorld(), world) or not valid(camera)
+        or not same(camera:GetOwner(), pawn) or not valid(item.Box) or not same(item.Box:GetAttachParent(), camera) then return end
+    local slots = pawn.Save.PlayerEquipment
+    local class = item:GetClass()
+    for index = 1, math.min(slots:GetArrayNum(), 8) do
+        if same(slots[index][item_class], class) then return item end
+    end
 end
 
 local function stock_beam(equipment, world, profile)
@@ -102,19 +119,22 @@ end
 local function capture(state, pawn, previous, guest)
     local equipment = pawn.EquipedItem
     local instance = state.world.OwningGameInstance
+    if pawn:HasAuthority() ~= (not guest) or not valid(instance) or not same(pawn.Save, instance.SaveSlot_Ref) then return end
     local profile = held(equipment, pawn, state.world)
-    if pawn:HasAuthority() ~= (not guest) or not profile or not equipment:HasAuthority()
-        or not same(equipment.User, pawn) or not valid(instance) or not same(pawn.Save, instance.SaveSlot_Ref)
-        or guest and not selected_stock(pawn, equipment) then
-        return
+    local offhand = false
+    if not profile and not guest then
+        local item = stock_offhand(pawn, state.world)
+        if item then equipment, profile, offhand = item, regular, true end
     end
+    if not profile or not equipment:HasAuthority() or not same(equipment.User, pawn)
+        or guest and not selected_stock(pawn, equipment) then return end
     local spot, source = stock_beam(equipment, state.world, profile)
     local model = equipment.SM_Prop_Torch_01
     if not spot or not source:HasAuthority() or type(source.Powered) ~= "boolean" or source.Powered ~= spot:IsVisible()
         or not valid(model) or not same(model:GetOwner(), equipment) or not valid(model.StaticMesh)
         or model.StaticMesh:GetFullName() ~= "StaticMesh " .. profile.mesh then return end
-    if previous and same(previous.source, source) and same(previous.pawn, pawn)
-        and previous.power == source.Powered then return previous end
+    local prior = previous and same(previous.source, source) and same(previous.pawn, pawn) and previous.offhand == offhand and previous
+    if prior and not offhand and prior.power == source.Powered then return prior end
 
     local id = avatar.player_id(state.local_pawn)
     local math_api = StaticFindObject(maths)
@@ -123,15 +143,21 @@ local function capture(state, pawn, previous, guest)
     local p, r, c = relative.Translation, math_api:Quat_Rotator(relative.Rotation), source.Color
     local values = numbers({p.X, p.Y, p.Z, r.Pitch, r.Yaw, r.Roll, c.R, c.G, c.B}, 0)
     if not values then return end
-    if guest or profile == heavy then
+    if guest or profile == heavy or offhand then
         for index, expected in ipairs(profile.pose) do
             if math.abs(expected - values[index]) > .05 then return end
         end
     end
-    local prior = previous and same(previous.source, source) and same(previous.pawn, pawn) and previous
+    if offhand then
+        local to_pawn = math_api:MakeRelativeTransform(spot:K2_GetComponentToWorld(), pawn:GetTransform())
+        local aim = math_api:Quat_Rotator(to_pawn.Rotation)
+        values[4], values[5], values[6] = math.floor(aim.Pitch * 10 + .5) / 10,
+            math.floor(aim.Yaw * 10 + .5) / 10, math.floor(aim.Roll * 10 + .5) / 10
+        if not numbers(values, 0) then return end
+    end
     if not prior then serial = serial + 1 end
-    return {world = state.world, pawn = pawn, id = id, source = source, instance = serial, profile = profile,
-        switch = prior and prior.switch + 1 or 0, power = source.Powered, values = values}
+    return {world = state.world, pawn = pawn, id = id, source = source, instance = serial, profile = profile, offhand = offhand,
+        switch = prior and (prior.switch + (prior.power == source.Powered and 0 or 1)) or 0, power = source.Powered, values = values}
 end
 
 local function clear_render(view)
@@ -139,6 +165,9 @@ local function clear_render(view)
     if rendered and valid(rendered.light) then
         if rendered.visual_only and valid(rendered.pawn) then rendered.light:K2_DestroyComponent(rendered.pawn)
         elseif valid(rendered.source) and rendered.source.Powered == false then rendered.light:SetVisibility(false, false) end
+    end
+    if rendered and rendered.offhand and valid(rendered.mount) and valid(rendered.pawn) then
+        rendered.mount:K2_DestroyComponent(rendered.pawn)
     end
     if view then view.rendered = nil end
 end
@@ -209,8 +238,55 @@ local function click(listener, mount)
     return true
 end
 
+local function aim_offhand(view, now)
+    local rendered = view.rendered
+    if not rendered or not valid(rendered.light) or not valid(rendered.pawn) then return end
+    local api = rendered.math_api
+    if not valid(api) then return end
+    local alpha = math.min((now - view.aim_at) / .22, 1)
+    local aim = alpha < 1 and api:RLerp(view.aim_from, view.aim, alpha, true) or view.aim
+    view.aim_current = aim
+    local rotation = rendered.pawn:K2_GetActorRotation()
+    local prior = rendered.pawn_rotation
+    if rendered.aim == aim and prior and prior.Pitch == rotation.Pitch and prior.Yaw == rotation.Yaw
+        and prior.Roll == rotation.Roll then return end
+    rendered.light:K2_SetWorldRotation(api:ComposeRotators(aim, rotation), false, {}, true)
+    rendered.aim, rendered.pawn_rotation = aim, rotation
+end
+
+local function project_offhand(view, pawn)
+    local body = pawn and avatar.offhand_body(pawn)
+    if not valid(body) then clear_render(view); return end
+    local rendered = view.rendered
+    if rendered and (not same(rendered.pawn, pawn) or not same(rendered.body, body)
+        or not valid(rendered.mount) or not valid(rendered.light)) then clear_render(view); rendered = nil end
+    local now = os.clock()
+    if not rendered and now >= view.next_retry then
+        view.next_retry = now + .5
+        local mount = offhand_view.create(pawn, body)
+        if not valid(mount) then return end
+        local light = local_beam(pawn, mount, regular, regular.pose)
+        if not valid(light) then mount:K2_DestroyComponent(pawn); return end
+        light:SetAbsolute(false, true, false)
+        rendered = {offhand = true, visual_only = true, body = body, pawn = pawn, mount = mount, light = light,
+            math_api = StaticFindObject(maths)}
+        view.rendered = rendered
+    end
+    if rendered then
+        aim_offhand(view, now)
+        if rendered.light:IsVisible() ~= view.power then rendered.light:SetVisibility(view.power, false) end
+    end
+end
+
+function flashlight.animate(get_world)
+    if target and target.offhand and target.rendered and same(target.world, get_world()) then
+        aim_offhand(target, os.clock())
+    end
+end
+
 local function project(state, listener, view)
     local pawn = remote(state, view.id)
+    if view.offhand then project_offhand(view, pawn); return end
     local mount = pawn and avatar.equipment_mesh(pawn, view.profile.mesh)
     if not valid(pawn) or not valid(mount) then clear_render(view); return end
     local rendered = view.rendered
@@ -288,9 +364,9 @@ function flashlight.command(fields, state, phase)
             local id = math.tointeger(tonumber(fields[index]))
             local instance = math.tointeger(tonumber(fields[index + 1]))
             local switch = math.tointeger(tonumber(fields[index + 2]))
-            local profile, power = power_profile(fields[index + 3])
+            local profile, power, offhand = power_profile(fields[index + 3])
             if not finite(id, 0, 2147483647) or not finite(instance, 1, 2147483647)
-                or not finite(switch, 0, 2147483647) or not profile or views[id] or id == local_id then
+                or not finite(switch, 0, 2147483647) or not profile or offhand or views[id] or id == local_id then
                 error("invalid guest flashlight view", 0)
             end
             local prior = previous[id]
@@ -315,21 +391,28 @@ function flashlight.command(fields, state, phase)
     end
     if #fields == 4 then clear_render(target); target = nil; return "flashlight view cleared" end
     local id, instance, switch = math.tointeger(tonumber(fields[5])), math.tointeger(tonumber(fields[6])), math.tointeger(tonumber(fields[7]))
-    local profile, power = power_profile(fields[8])
+    local profile, power, offhand = power_profile(fields[8])
     local values = numbers(fields, 8)
     if #fields ~= 17 or not finite(id, 0, 2147483647) or not finite(instance, 1, 2147483647)
         or not finite(switch, 0, 2147483647) or not profile or not values
         or id == avatar.player_id(state.local_pawn) then error("flashlight view receipt is invalid", 0) end
     local prior = target and target.epoch == epoch and target.id == id and target.instance == instance
         and same(target.pawn, pawn) and same(target.connection, connection) and target
-    if prior and (switch < prior.switch or profile ~= prior.profile) then error("flashlight view receipt is stale", 0) end
+    if prior and (switch < prior.switch or profile ~= prior.profile or offhand ~= prior.offhand) then
+        error("flashlight view receipt is stale", 0)
+    end
     if not prior then clear_render(target) end
     target = {world = state.world, driver = driver, connection = connection, map = state.map, pawn = pawn, epoch = epoch,
         phase = phase, id = id,
-        instance = instance, switch = switch, power = power, profile = profile,
+        instance = instance, switch = switch, power = power, profile = profile, offhand = offhand,
         values = profile == heavy and profile.pose or values, next_retry = 0,
         rendered = prior and prior.rendered or nil,
         click_until = prior and switch > prior.switch and os.clock() + .75 or nil, heard = prior and prior.heard or nil}
+    if offhand then
+        target.aim = {Pitch = values[4], Yaw = values[5], Roll = values[6]}
+        target.aim_from = prior and prior.aim_current or target.aim
+        target.aim_at = os.clock()
+    end
     project(state, pawn, target)
     return "stock flashlight beam view received"
 end
@@ -341,6 +424,11 @@ function flashlight.rows(state, phase, row)
     end
     if phase == "connected" and target and same(target.world, state.world) and target.map == state.map then
         local rendered = target.rendered
+        if target.offhand then
+            return row("native-flashlight-view", target.epoch, target.id, target.instance, target.switch, power_token(target),
+                rendered and valid(rendered.light) and rendered.light:IsVisible() and 1 or 0, target.heard or "-",
+                target.aim.Pitch, target.aim.Yaw, target.aim.Roll)
+        end
         return row("native-flashlight-view", target.epoch, target.id, target.instance, target.switch, power_token(target),
             rendered and valid(rendered.light) and rendered.light:IsVisible() and 1 or 0, target.heard or "-")
     end

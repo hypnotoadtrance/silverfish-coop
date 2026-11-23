@@ -830,6 +830,14 @@ end
 
 avatar.player_id = player_id
 
+function avatar.offhand_body(pawn)
+    local entry = valid(pawn) and avatars[pawn:GetAddress()]
+    if entry and entry.status == "default_body" and valid(entry.body)
+        and entry.firearm_class == "/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C" then
+        return entry.body
+    end
+end
+
 function avatar.equipment_mesh(pawn, path)
     local entry = valid(pawn) and avatars[pawn:GetAddress()]
     if not entry then return end

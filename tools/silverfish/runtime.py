@@ -1586,7 +1586,7 @@ class Bridge:
                     data[native_lantern.KEY] = native_lantern.parse(fields, data.get("state"), data.get("map"))
                 elif fields[0] == native_flashlight.SOURCE_TAG and len(fields) == 14 and native_flashlight.KEY not in data:
                     data[native_flashlight.KEY] = native_flashlight.parse_source(fields, data.get("state"))
-                elif fields[0] == native_flashlight.VIEW_TAG and len(fields) == 8 and native_flashlight.VIEW not in data:
+                elif fields[0] == native_flashlight.VIEW_TAG and len(fields) in (8, 11) and native_flashlight.VIEW not in data:
                     data[native_flashlight.VIEW] = native_flashlight.parse_view(fields, data.get("state"))
                 elif fields[0] == native_flashlight.GUEST_SOURCE_TAG and len(fields) == 5 and native_flashlight.GUEST_SOURCE not in data:
                     data[native_flashlight.GUEST_SOURCE] = native_flashlight.parse_guest_source(fields, data.get("state"))
