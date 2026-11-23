@@ -5098,7 +5098,8 @@ class Client:
         self.empty_zone_retry = native_zone_rejoin.EmptyZoneRetry()
         self.game_visit: tuple[str, str, str] | None = None
         self.last_reload_intent = 0
-        self.last_equipment_selection = 0
+        self.last_equipment_selection = None
+        self.equipment_selection_retry = None, 0.0
         self.last_flare_intent = 0
         self.guest_primary_input = guest_primary_input
         self.guest_held_input = native_smg_hold.GuestInput(self) if invite.get("native_guest_held_fire") else None

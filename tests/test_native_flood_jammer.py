@@ -143,19 +143,24 @@ class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
                 "reputation": {faction: {"before": 0, "after": 0} for faction in spec.factions},
             }}
 
-        bridge = SimpleNamespace(command=AsyncMock(side_effect=(stock("preflight", None), stock("start", 1))))
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=(
+            RuntimeError("stock_board_contract_not_offered"),
+            stock("preflight", None), stock("start", 1),
+        )))
         stale = native_board_contract.menu_target("e3" * 16, board, spec.quest)
         with self.assertRaisesRegex(party.RuleError, "stale_visit"):
             await native_quest.action(host, bridge, "guest-character", "native-quest-start", stale)
-        wrong_board = native_board_contract.menu_target(host.zone_epoch, board.removesuffix("_2") + "_9", spec.quest)
-        with self.assertRaisesRegex(party.RuleError, "requires_authored_board"):
-            await native_quest.action(host, bridge, "guest-character", "native-quest-start", wrong_board)
         bridge.command.assert_not_awaited()
+        other_board = board.removesuffix("_2") + "_9"
+        wrong_board = native_board_contract.menu_target(host.zone_epoch, other_board, spec.quest)
+        with self.assertRaisesRegex(party.RuleError, "stock_board_contract_not_offered"):
+            await native_quest.action(host, bridge, "guest-character", "native-quest-start", wrong_board)
 
         selected = native_board_contract.menu_target(host.zone_epoch, board, spec.quest)
         result = await native_quest.action(host, bridge, "guest-character", "native-quest-start", selected)
         self.assertEqual((result["step"], result[spec.key]["board"]), (1, board))
         self.assertEqual([call.args for call in bridge.command.await_args_list], [
+            (native_board_contract.COMMAND, "start", "inspect", pawn, other_board, spec.quest),
             (spec.command("preflight"), pawn, board), (spec.command("start"), pawn, board),
         ])
         host.checkpoint_native.assert_not_awaited()
