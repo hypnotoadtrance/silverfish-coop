@@ -58,6 +58,17 @@ local function item_actor(pawn, spec)
         and same(item:GetOwner(), pawn) and same(item:GetWorld(), pawn:GetWorld()) and not item:IsActorBeingDestroyed()
 end
 
+local function retired(actor, world)
+    if not valid(actor) or actor:IsActorBeingDestroyed() then return true end
+    local live = {}
+    asset("/Script/Engine.Default__GameplayStatics"):GetAllActorsOfClass(world, asset(specs[1].class), live)
+    for _, value in ipairs(live.OutActors or live) do
+        if value and type(value.type) == "function" and value:type() == "RemoteUnrealParam" then value = value:get() end
+        if same(value, actor) then return false end
+    end
+    return true
+end
+
 local function make_rows(pawn)
     local save, ids = pawn.Save, {}
     assert(valid(save) and save.PlayerEquipment:GetArrayNum() >= 8, "fixture stock equipment array unavailable")
@@ -138,17 +149,16 @@ local function exercise(pawn, ids)
     unequip(pawn, specs[1].index, ids[1], 1)
     local after = rows(save, ids)
     local held = item_actor(pawn, specs[2]) and "fallback" or same(pawn.EquipedItem, pistol) and "pistol" or "other"
-    local retired = not valid(pistol) or pistol:IsActorBeingDestroyed()
-    return table.concat({before, inactive, after, tostring(save.PlayerEquipIndex), held, tostring(retired), tostring(live)}, ";")
+    return table.concat({before, inactive, after, tostring(save.PlayerEquipIndex), held,
+        tostring(retired(pistol, pawn:GetWorld())), tostring(live)}, ";")
 end
 
 local function settled(pawn, capture)
     local held = item_actor(pawn, specs[1]) and "pistol" or item_actor(pawn, specs[2]) and "fallback" or "other"
     local pistol = capture.pistol
-    local retired = not valid(pistol) or pistol:IsActorBeingDestroyed()
     local equipped = pawn.EquipedItem
     return table.concat({rows(pawn.Save, capture.ids), tostring(pawn.Save.PlayerEquipIndex),
-        held, tostring(retired), valid(equipped) and tostring(equipped.Ammo) or "-"}, ";")
+        held, tostring(retired(pistol, pawn:GetWorld())), valid(equipped) and tostring(equipped.Ammo) or "-"}, ";")
 end
 
 local function run(action, argument)
