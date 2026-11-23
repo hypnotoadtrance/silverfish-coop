@@ -150,28 +150,37 @@ assert(requests_pause(menu), "An expired world binding cannot change pause")
 world.NetDriver = driver
 
 controller.MenuStack = {menu, GetArrayNum = function(self) return #self end}
+bridge.sync(state, "hosting")
+assert(not invite_button, "A Direct IP host has no Steam lobby row")
 fs[steam_host] = row(1, second, "ready") .. "\n"
 bridge.sync(state, "hosting")
 assert(not invite_button, "Ignore a Steam marker from a different host session")
 fs[steam_host] = row(1, first, "ready") .. "\n"
-bridge.sync(state, "hosting")
-assert(invite_button.widget.text == "Invite Steam Friend" and invite_button.widget.enabled)
-invite_button.callback()
-assert(fs[steam_request] == row(1, first, "invite") .. "\n")
-fs[steam_host] = row(1, first, "friends") .. "\n"
+state.listening = false
+bridge.sync(state, "ready")
+assert(not invite_button, "Singleplayer has no Steam lobby row even with a leftover host marker")
+state.listening = true
+
+local function expect_steam(status, label, hint, enabled)
+    fs[steam_request] = nil
+    fs[steam_host] = row(1, first, status) .. "\n"
+    bridge.sync(state, "hosting")
+    assert(invite_button.widget.text == label and invite_button.widget.enabled == enabled)
+    assert(invite_button.widget.tooltip:find(hint, 1, true))
+    invite_button.callback()
+    assert(fs[steam_request] == (enabled and row(1, first, "invite") .. "\n" or nil))
+    return invite_button
+end
+
+local invite_widget = expect_steam("ready", "Invite Steam Friends", "Steam friends list", true)
+assert(invite_widget == expect_steam("friends", "Steam friends can join", "Join Game", true))
+assert(invite_widget == expect_steam("overlay", "Steam invites unavailable", "Check the Steam overlay", true))
+assert(not invite_widget.widget.tooltip:find("Join Game", 1, true))
+assert(invite_widget == expect_steam("opening", "Opening Steam…", "Waiting for Steam", false))
+assert(invite_widget == expect_steam("retry", "Retry Steam Lobby", "could not create", true))
+assert(invite_widget == expect_steam("ready", "Invite Steam Friends", "Steam friends list", true))
+
 fs[steam_request] = nil
-bridge.sync(state, "hosting")
-assert(invite_button.widget.enabled and invite_button.widget.text == "Steam friends can join"
-    and invite_button.widget.tooltip:find("Join Game", 1, true))
-invite_button.callback()
-assert(fs[steam_request] == row(1, first, "invite") .. "\n")
-fs[steam_host] = row(1, first, "opening") .. "\n"
-fs[steam_request] = nil
-bridge.sync(state, "hosting")
-assert(not invite_button.widget.enabled)
-invite_button.callback()
-assert(fs[steam_request] == nil)
-fs[steam_host] = row(1, first, "ready") .. "\n"
 local stale_click = invite_button.callback
 controller.MenuStack[2] = object(57)
 bridge.sync(state, "hosting")
@@ -224,7 +233,10 @@ pawn.GetAddress = method
 
 authority, state.server, world.NetDriver.ServerConnection = false, true, object(12)
 descriptor(third, "guest", 109)
+fs[steam_host] = row(1, third, "ready") .. "\n"
 bridge.sync(state, "connected")
+assert(not invite_button and fs[steam_request] == nil, "A connected guest cannot open a Steam host invite")
+fs[steam_host] = nil
 assert(fs[eligible] == table.concat({1, third, "client", "a", "14", "1e", 109}, "\t") .. "\n")
 assert(not requests_pause(menu), "The client's exact stock pause menu keeps the world running")
 capture(third, 4, "quit_to_menu")

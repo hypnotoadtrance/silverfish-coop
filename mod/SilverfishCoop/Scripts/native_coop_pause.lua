@@ -154,12 +154,13 @@ local function owned_pause(value, scene)
         and same(value:GetOuter(), scene.world.OwningGameInstance) and value:IsInViewport()
 end
 
-local steam_labels = {
-    ready = "Invite Steam Friends",
-    friends = "Invite Steam Friends",
-    opening = "Opening Steam…",
-    retry = "Retry Steam Lobby",
-    overlay = "Invite Steam Friends",
+local steam_views = {
+    ready = {label = "Invite Steam Friends", hint = "Open the Steam friends list."},
+    friends = {label = "Steam friends can join",
+        hint = "Friends can use Join Game in Steam. Select here to retry the invite."},
+    opening = {label = "Opening Steam…", hint = "Waiting for Steam."},
+    retry = {label = "Retry Steam Lobby", hint = "Steam could not create the lobby. Select here to retry."},
+    overlay = {label = "Steam invites unavailable", hint = "Check the Steam overlay, then select here to retry."},
 }
 
 local function can_invite(status)
@@ -170,7 +171,7 @@ local function steam_status(scene)
     local data = read(steam_host_path, 80)
     if not data then return end
     local generation, status = data:match("^1\t([0-9a-f]+)\t([a-z_]+)\n$")
-    if generation == scene.generation and steam_labels[status] then return status end
+    if generation == scene.generation and steam_views[status] then return status end
 end
 
 local function top_pause(scene)
@@ -193,7 +194,7 @@ local function sync_steam_invite(scene)
         local controls = require("native_menu_controls")
         local record = {controls = controls, menu = menu, generation = scene.generation}
         steam_invite = record
-        local added, button = pcall(controls.create, scene, parent, steam_labels[status], function()
+        local added, button = pcall(controls.create, scene, parent, steam_views[status].label, function()
             local latest = active_scene
             if steam_invite ~= record or requested or lease("host") ~= record.generation
                 or not latest or latest.generation ~= record.generation
@@ -204,12 +205,9 @@ local function sync_steam_invite(scene)
     end
     if steam_invite.button and steam_invite.status ~= status then
         local widget = steam_invite.button.widget
-        widget:UpdateText(FText(steam_labels[status]))
-        local hint = status == "friends" and "Steam overlay is unavailable. Friends can use Join Game."
-            or status == "overlay" and "Enable the Steam overlay to send invites."
-            or status == "retry" and "Steam could not create this lobby. Try again."
-            or "Open the Steam friends list."
-        widget:SetToolTipText(FText(hint))
+        local view = steam_views[status]
+        widget:UpdateText(FText(view.label))
+        widget:SetToolTipText(FText(view.hint))
         widget:SetIsEnabled(can_invite(status))
         steam_invite.status = status
     end
