@@ -39,6 +39,9 @@ LoopInGameThreadWithDelay(1, function()
         request:close()
         if id and #id == 16 and id:match("^%x+$") and nonce ~= id then
             nonce, deadline, previous = id, now + 6, now
+            local armed = assert(io.open(bridge .. "/cabinet-cold-" .. nonce .. ".armed", "wb"))
+            assert(armed:write(nonce, "\n"))
+            assert(armed:close())
         end
     end
 end)

@@ -254,8 +254,16 @@ async def exercise(work: Path, canary: Path, seed: int, source: Path | None):
         before_pickup = campaign_save_hashes(resumed)
         mailbox, = (run / "game-bridge").iterdir()
         nonce = uuid.uuid4().hex[:16]
-        (mailbox / "measure-cabinet-cold").write_text(nonce + "\n", encoding="ascii")
-        await asyncio.sleep(.75)
+        request = nonce + "\n"
+        (mailbox / "measure-cabinet-cold").write_text(request, encoding="ascii", newline="")
+        armed = mailbox / f"cabinet-cold-{nonce}.armed"
+        async with asyncio.timeout(8):
+            while not armed.is_file() or armed.read_bytes() != request.encode("ascii"):
+                await asyncio.sleep(.05)
+        proof["probe_armed"] = True
+        await asyncio.sleep(.60)
+        trace = mailbox / f"cabinet-cold-{nonce}.tsv"
+        assert not trace.exists(), "Cabinet probe expired before the pickup"
         started_at = time.perf_counter()
         await local(run, native_world_loot.FIXTURE, target=identity)
 
@@ -268,7 +276,6 @@ async def exercise(work: Path, canary: Path, seed: int, source: Path | None):
         proof.update(source_campaign=str(source), revision=saved["revision"], escrow_slot=roll["escrow"]["slot"],
                      class_path=item["class_path"], guid=item["guid"],
                      fixture_to_settled_ms=1000 * (time.perf_counter() - started_at))
-        trace = mailbox / f"cabinet-cold-{nonce}.tsv"
         async with asyncio.timeout(15):
             while not trace.is_file() or not trace.read_bytes().endswith(b"\n"):
                 await asyncio.sleep(.10)
