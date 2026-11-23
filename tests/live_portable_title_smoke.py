@@ -121,7 +121,7 @@ def shop_lease_overlay(game: Path):
     return portable_script_overlay(game, "native_finite_shop.lua", allow_isolated_approach)
 
 
-def stash_memory_overlays(probes: ExitStack, game: Path) -> dict:
+def stash_memory_overlays(probes: ExitStack, game: Path, *, large: bool = False) -> dict:
     def replace(text, original, updated):
         if text.count(original) != 1:
             raise ValueError("The replica lacks the exact released stash fixture")
@@ -129,10 +129,18 @@ def stash_memory_overlays(probes: ExitStack, game: Path) -> dict:
 
     def approach(text):
         original = '            or os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1" then'
-        return replace(text, original,
+        text = replace(text, original,
             '            or (os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1"\n'
             '                and (fields[2] ~= "native-stash-approach-fixture"\n'
             '                    or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") ~= "1")) then')
+        if not large:
+            return text
+        seed = (Path(__file__).with_name("fixtures") / "portable_large_stash_authority.lua").read_text(encoding="utf-8")
+        command = "function stash.command(fields, state, phase)"
+        return replace(text, command, seed + "\n" + command + """
+    if fields[2] == "portable-large-stash-seed" or fields[2] == "portable-large-stash-clear" then
+        return portable_large_stash(fields, state, phase)
+    end""")
 
     def stock_view(text):
         gate = 'local fixtures = headless and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"'
@@ -152,9 +160,10 @@ def stash_memory_overlays(probes: ExitStack, game: Path) -> dict:
 """
         text = replace(text, start, stock.removesuffix("\n"))
         text = replace(text, '    current.state = "rendered"',
-                       '    current.state, current.portable_memory_rendered = "rendered", resident')
+                       '    current.state, current.portable_memory_rendered = "rendered", resident'
+                       + ('\n    current.portable_memory_bytes = resident and #raw or 0' if large else ''))
         dispatch = '    local verb = fields[2]'
-        return replace(text, dispatch, dispatch + """
+        text = replace(text, dispatch, dispatch + """
     if verb == "portable-stash-memory-proof" and fixtures and #fields == 4 then
         local binding = report(state, phase)
         if not binding or not current or current.state ~= "rendered" or not current.portable_memory_rendered
@@ -169,6 +178,29 @@ def stash_memory_overlays(probes: ExitStack, game: Path) -> dict:
         return string.format("portable stock stash memory %s %d %s %d", fields[3], count,
             item and identifier(item[item_guid]) or "-", item and item[item_ammo] or 0)
     end""")
+        if not large:
+            return text
+        text = replace(text, '    if verb == "portable-stash-memory-proof" and fixtures and #fields == 4 then',
+            '    if verb == "portable-stash-memory-proof" and fixtures and (#fields == 4 or #fields == 5 and fields[5] == "large") then')
+        return replace(text, "        local first = count > 0 and entry(cards, 1)", """
+        if fields[5] == "large" then
+            assert(view.memory_body_limit() == 2500000 and current.portable_memory_bytes > 32768 and count == 384,
+                "portable large stash render did not cross the native ticket boundary")
+            local guids = {}
+            for index = 1, count do
+                local card = entry(cards, index)
+                local item = valid(card) and card.Item
+                local class = item and item[item_class]
+                local guid = item and identifier(item[item_guid])
+                assert(guid and valid(class)
+                    and class:GetFullName() == "BlueprintGeneratedClass /Game/Classes/Items/Item_Bandage.Item_Bandage_C"
+                    and item[item_ammo] == 1, "portable large stash stock card is invalid")
+                guids[index] = guid
+            end
+            return ("portable large stash memory %s %d %d %s"):format(
+                fields[3], count, current.portable_memory_bytes, table.concat(guids, ","))
+        end
+        local first = count > 0 and entry(cards, 1)""".lstrip("\n"))
 
     return {name: probes.enter_context(portable_script_overlay(game, name, patch_script)) for name, patch_script in (
         ("native_stash.lua", approach), ("native_stash_view.lua", stock_view))}
@@ -634,7 +666,7 @@ async def verify_guest_shop_lease(host: Seat, guest: Seat, pawn: str) -> dict:
     }
 
 
-async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str) -> dict:
+async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str, *, large: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     area = native_finite_shop.OBSERVATORY
     home, joined = await asyncio.gather(
@@ -644,6 +676,9 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str) -> dict:
                              and row.get("gameplay_fresh") and row.get("game", {}).get(native_stash.MEMORY_VIEW)),
     )
     assert home["game"]["map"] == joined["game"]["map"] == area
+    if large:
+        assert joined["game"].get(native_stash.LARGE_MEMORY_VIEW) is True, "The installed bridge lacks the large stash capability"
+        assert home["local_status_source"] == joined["local_status_source"] == "memory"
     local_pawn = joined["game"]["pawns"]["local"]["name"]
     site, authored = min(home["game"][native_stash.SITES].items(), key=lambda pair: pair[1]["actor"])
     assert authored["map"] == area and home["game"][native_stash.LIVE_CENSUS] and home["game"][native_stash.LIVE_MOVE]
@@ -686,35 +721,78 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str) -> dict:
         for pattern in ("native-stash-screen-*.tsv", ".native-stash-screen-*.tsv.*.tmp"):
             assert not list(guest.bridge.directory.glob(pattern)), pattern
 
-    async def readback(pending, count, item="-"):
+    async def wait_for_stash_render(pending):
         def rendered(frame):
             require_no_page_file()
             return (frame.get("local_bridge") == "memory" and
                     frame.get("game", {}).get(native_stash.VIEW) == {**pending, "state": "rendered"})
 
-        observed = await wait_resident_status(guest_run, rendered)
+        return (await wait_resident_status(guest_run, rendered))["game"][native_stash.VIEW]
+
+    async def readback(pending, count, item="-"):
+        observed = await wait_for_stash_render(pending)
         ack = await guest.bridge.command("portable-stash-memory-proof", str(pending["sequence"]), site)
         message = ack["ack"]["message"]
         proof = re.fullmatch(rf"portable stock stash memory {pending['sequence']} {count} {item} (-?[0-9]+)", message)
         assert proof, ack
-        return observed["game"][native_stash.VIEW], message, int(proof[1])
+        return observed, message, int(proof[1])
+
+    async def close():
+        assert (await submit(guest_run, "native-stash-view-click-fixture", target="close"))["ok"]
+        await wait_resident_status(guest_run, lambda row: native_stash.VIEW not in row.get("game", {}))
+        require_no_page_file()
+
+    def require_unchanged_saves(before):
+        changed = [(group, path) for group, (start, end) in enumerate(zip(before, saves(), strict=True))
+                   for path in sorted(start.keys() | end.keys()) if start.get(path) != end.get(path)]
+        assert not changed, ("The memory-backed stash view or transfer changed a campaign save", changed)
 
     before = saves()
     assert all(before)
     require_no_page_file()
-    listed = await submit(guest_run, "native-inventory-list")
-    assert listed["ok"], listed
-    item, = [row for row in listed["native_inventory"]["items"]
-             if row["source"] == "backpack" and row["class_path"] == native_guest_consumable.STARTER_BAGS["hyperrandom"]]
     initial = await submit(guest_run, native_stash.LIST, target=site)
     assert initial["ok"] and initial[native_stash.RESULT]["owner"] == joined["character_id"]
     assert initial[native_stash.RESULT]["items"] == []
+
+    if large:
+        seed = await host.bridge.command("portable-large-stash-seed", pawn, site, joined["character_id"], timeout=12)
+        expected = re.fullmatch(r"portable large stash seeded ([0-9A-F,]+)", seed["ack"]["message"])
+        assert expected, seed["ack"]
+        guids = expected[1].split(",")
+        assert len(guids) == len(set(guids)) == 384 and all(native_stash.valid_guid(guid) for guid in guids)
+        require_unchanged_saves(before)
+    else:
+        listed = await submit(guest_run, "native-inventory-list")
+        assert listed["ok"], listed
+        item, = [row for row in listed["native_inventory"]["items"]
+                 if row["source"] == "backpack" and row["class_path"] == native_guest_consumable.STARTER_BAGS["hyperrandom"]]
 
     opened = await submit(guest_run, "native-stash-view-fixture", target=site)
     assert opened["ok"], opened
     pending = opened[native_stash.VIEW]
     assert (pending["state"], pending["pawn"], pending["site"], pending["mode"], pending["item"]) == (
         "pending", local_pawn, site, "stash", None)
+    if large:
+        rendered = await wait_for_stash_render(pending)
+        receipt = await guest.bridge.command("portable-stash-memory-proof", str(pending["sequence"]), site, "large")
+        matched = re.fullmatch(rf"portable large stash memory {pending['sequence']} 384 (\d+) ([0-9A-F,]+)",
+                               receipt["ack"]["message"])
+        assert matched, receipt["ack"]
+        payload_bytes = int(matched[1])
+        visible_guids = matched[2].split(",")
+        assert visible_guids == guids and 32 * 1024 < payload_bytes <= native_stash.LARGE_MEMORY_VIEW_MAX_BYTES
+        require_unchanged_saves(before)
+        await close()
+        cleared = await host.bridge.command("portable-large-stash-clear", pawn, site, joined["character_id"])
+        assert cleared["ack"]["message"] == "portable large stash cleared without save", cleared["ack"]
+        require_unchanged_saves(before)
+        return {"stash_actor": authored["actor"], "site": site, "stock_view": rendered, "large_native_ticket": True,
+                "memory_payload_bytes": payload_bytes, "stock_card_count": len(guids),
+                "first_guid": guids[0], "last_guid": guids[-1], "ordered_card_guids": guids,
+                "local_bridge": {"host": home["local_bridge"], "guest": joined["local_bridge"]},
+                "stash_page_files_seen": False, "saves_unchanged_before_checkpoint": True,
+                "fixture_inventory_cleared": True}
+
     empty, empty_proof, empty_ammo = await readback(pending, 0)
     assert empty_ammo == 0
     moved = await submit(guest_run, "native-stash-view-click-fixture", target=f"drag-backpack:{item['guid']}")
@@ -730,13 +808,8 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str) -> dict:
     assert stored["ammo"] == ammo, stored
     backpack = await submit(guest_run, "native-inventory-list")
     assert backpack["ok"] and all(row["guid"] != item["guid"] for row in backpack["native_inventory"]["items"])
-    assert (await submit(guest_run, "native-stash-view-click-fixture", target="close"))["ok"]
-    await wait_resident_status(guest_run, lambda row: native_stash.VIEW not in row.get("game", {}))
-    require_no_page_file()
-    after = saves()
-    changed = [(group, path) for group, (start, end) in enumerate(zip(before, after, strict=True))
-               for path in sorted(start.keys() | end.keys()) if start.get(path) != end.get(path)]
-    assert not changed, ("The memory-backed stash view or transfer changed a campaign save", changed)
+    await close()
+    require_unchanged_saves(before)
     return {"stash_actor": authored["actor"], "site": site, "stashed_guid": item["guid"],
             "stock_empty": empty, "stock_filled": filled, "memory_readbacks": [empty_proof, filled_proof],
             "local_bridge": {"host": home["local_bridge"], "guest": joined["local_bridge"]},
@@ -1391,11 +1464,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
-                 guest_shop_lease: bool = False, guest_stash_memory: bool = False, zone_lease_preflight: bool = False,
+                 guest_shop_lease: bool = False, guest_stash_memory: bool = False, guest_stash_large_memory: bool = False,
+                 zone_lease_preflight: bool = False,
                  resident_cabinet_archive: Path | None = None,
                  resident_cabinet_checkpoint: Path | None = None,
                  resident_cabinet_candidate_sha256: str | None = None) -> None:
     guest_world_start = guest_world_start or guest_world_start_travel
+    guest_stash_memory = guest_stash_memory or guest_stash_large_memory
     container_nearby = container_nearby or guest_ui_memory
     roots = (work, first_game, second_game, original)
     if second_legacy_work is not None:
@@ -1462,7 +1537,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for key in ("script_source_overlay", "manifest_overlay_sha256"):
                 assert overlays[0][key] == overlays[1][key], "The enrolled seats need identical overlay source"
         if guest_stash_memory:
-            overlays = [stash_memory_overlays(probes, game) for game in games]
+            overlays = [stash_memory_overlays(probes, game, large=guest_stash_large_memory) for game in games]
             proof["stash_memory_overlay"] = dict(zip(map(str, games), overlays, strict=True))
             for name in overlays[0]:
                 for key in ("script_source_overlay", "manifest_overlay_sha256"):
@@ -1585,7 +1660,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         elif guest_shop_lease:
             proof["sessions"].append(await start_pair(first, second, "Merchant scout", on_join=verify_guest_shop_lease))
         elif guest_stash_memory:
-            proof["sessions"].append(await start_pair(first, second, "Stash scout", on_join=verify_guest_stash_memory,
+            async def check_stash(host, guest, pawn):
+                return await verify_guest_stash_memory(host, guest, pawn, large=guest_stash_large_memory)
+
+            proof["sessions"].append(await start_pair(first, second, "Stash scout", on_join=check_stash,
                                                       create_character=create_stock_bag_character,
                                                       wait_status=wait_resident_status))
         elif guest_ui_memory:
@@ -1698,8 +1776,11 @@ if __name__ == "__main__":
                         help="test normal crate status routing with one private muted portable pair and a temporary Lua overlay")
     parser.add_argument("--guest-shop-lease", action="store_true",
                         help="verify the Observatory stock shop remains open while guest interaction leases stay in memory")
-    parser.add_argument("--guest-stash-memory", action="store_true",
-                        help="verify empty and filled stock Observatory stash renders through the resident bridge")
+    stash_cases = parser.add_mutually_exclusive_group()
+    stash_cases.add_argument("--guest-stash-memory", action="store_true",
+                            help="verify empty and filled stock Observatory stash renders through the resident bridge")
+    stash_cases.add_argument("--guest-stash-large-memory", action="store_true",
+                            help="verify a stock Observatory stash larger than one ordinary resident command ticket")
     parser.add_argument("--compact-world-view", action="store_true",
                         help="verify one compact resident stock weather receipt in a private muted portable pair")
     parser.add_argument("--guest-world-start", action="store_true",
@@ -1728,14 +1809,15 @@ if __name__ == "__main__":
         parser.error("Use --nonmirrored-startup with two fresh private replicas and no other gameplay fixtures")
     if args.zone_lease_preflight and not args.guest_world_start_travel:
         parser.error("Use --zone-lease-preflight with --guest-world-start-travel")
-    if args.guest_stash_memory and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
+    if (args.guest_stash_memory or args.guest_stash_large_memory) and any((
+                                       args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
                                        args.projected_nearby, args.container_nearby, args.stock_use, args.stock_prop_grip,
                                        args.stock_host_prop_observer, args.nonmirrored_startup,
                                        args.stock_crate_ring, args.guest_world_start, args.guest_world_start_travel,
                                        args.guest_ui_memory, args.guest_shop_lease, args.compact_crate_status,
                                        args.compact_world_view, args.steam_cloud, args.resident_cabinet_archive,
                                        args.second_legacy_work)):
-        parser.error("Use --guest-stash-memory with two fresh private replicas and no other gameplay fixtures")
+        parser.error("Use the guest stash checks with two fresh private replicas and no other gameplay fixtures")
     if args.guest_shop_lease and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
                                      args.projected_nearby, args.container_nearby, args.stock_use, args.stock_prop_grip,
                                      args.stock_crate_ring, args.guest_world_start, args.guest_world_start_travel,
@@ -1805,6 +1887,7 @@ if __name__ == "__main__":
                        nonmirrored_startup=args.nonmirrored_startup,
                        compact_crate_status=args.compact_crate_status, compact_world_view=args.compact_world_view,
                        guest_shop_lease=args.guest_shop_lease, guest_stash_memory=args.guest_stash_memory,
+                       guest_stash_large_memory=args.guest_stash_large_memory,
                        zone_lease_preflight=args.zone_lease_preflight,
                        resident_cabinet_archive=cabinet_archive, resident_cabinet_checkpoint=cabinet_checkpoint,
                        resident_cabinet_candidate_sha256=args.resident_cabinet_candidate_sha256))
