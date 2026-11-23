@@ -2280,6 +2280,14 @@ async def smoke():
                 note("authored_return_exit_uses_destination_marker", {
                     "map": expected_map, "entrance": "DB_CR", "host": returned["game"]["pawns"]["local"]["location"],
                 })
+        if args.rook_motion:
+            # The dream return runs stock rest. Take the restored pawn's
+            # current health instead of the value from the earlier revive.
+            restored = await wait(run, lambda state: state["game"].get("map") == expected_map
+                                  and state.get("link_connected")
+                                  and state["game"].get("native_guest_save", {}).get("state") == "bound"
+                                  and "guest" in state["game"].get("pawns", {}))
+            native_health = restored["game"]["pawns"]["guest"]["health"]
         saved = await command("action", "--campaign", campaign, "checkpoint")
         assert saved["revision"] > 0
         checkpoint_path = run.parent / "save" / "campaign.json"
