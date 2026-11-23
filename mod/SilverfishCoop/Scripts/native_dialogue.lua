@@ -1,4 +1,5 @@
 local dialogue = {}
+local interaction_lease = require("guest_interaction_lease")
 local guest_save = require("guest_save")
 local mosby = require("native_dialogue_mosby")
 local shopkeep = require("native_dialogue_shopkeep")
@@ -240,13 +241,9 @@ local function same_scope(first, second)
         and same(first.target, second.target) and same(first.component, second.component)
 end
 
-local function fresh()
-    local file = io.open(heartbeat, "rb")
-    if not file then return false end
-    local raw = file:read(32)
-    file:close()
-    local stamp, now = tonumber(raw), os.time()
-    return stamp and stamp <= now and now <= stamp + 2
+local function fresh(current, now)
+    return interaction_lease.timestamp(heartbeat, interaction_lease.dialogue, current.profile.map, current.name,
+        now or os.time()) ~= nil
 end
 
 local function can_use(current, pending_response)
@@ -254,7 +251,7 @@ local function can_use(current, pending_response)
     local in_stock_trade = session and session.trade and sewer_stock.present(current)
     return current.controller.Loading == false and stack and (stack:GetArrayNum() == 0 or in_stock_trade)
         and current.pawn.Dead == false
-        and players.is_downed(current.pawn) == false and (pending_response or fresh())
+        and players.is_downed(current.pawn) == false and (pending_response or fresh(current))
         and reach(current.pawn, current.target, current.component, current.profile)
 end
 
@@ -345,7 +342,7 @@ function dialogue.sync(state, phase)
     if not same_scope(binding, current) then dialogue.clear(); binding = current end
     if sewer_stock.exists() and not sewer_stock.present(current) then sewer_stock.close(); session = nil end
     local standing, now = can_use(current, true), os.time()
-    local allow = standing and fresh() and not shop_view.reception_open(current.pawn)
+    local allow = standing and fresh(current, now) and not shop_view.reception_open(current.pawn)
     if session and (not standing or session.expires <= now
         or not current.profile.volume and not allow and not session.pending
         and not (session.response_grace and now <= session.response_grace)) then

@@ -1,3 +1,4 @@
+import asyncio
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -86,6 +87,104 @@ class NativeEventHeartbeatTests(unittest.IsolatedAsyncioTestCase):
                         publish.assert_called_once_with(1_800_000_000)
                     else:
                         publish.assert_not_called()
+
+
+class GuestInteractionLeaseTests(unittest.IsolatedAsyncioTestCase):
+    timestamp = 1_800_000_000
+    shop_file = "native-shop-view-heartbeat"
+    broker_file = "native-broker-input-heartbeat"
+    dialogue_file = service.native_dialogue.HEARTBEAT
+    mosby_file = service.native_mosby_station_view.HEARTBEAT
+
+    def setUp(self):
+        self.directory = Path(self.enterContext(TemporaryDirectory()))
+        self.market = service.native_broker.BLACK_MARKET
+        self.client = SimpleNamespace(
+            stopping=False, host_session="admitted", needs_travel=False, server_transitioning=False,
+            invite={"native_shop_view": True, "native_broker_input": True},
+            dialogue_view=SimpleNamespace(maps={OBSERVATORY}), mosby_station=object(),
+            transport=SimpleNamespace(connected=True), wire_board=None, mindcore_view=None,
+        )
+        self.bridge = self.client.bridge = SimpleNamespace(
+            process=Mock(poll=Mock(return_value=None)), directory=self.directory,
+            local_bridge=None, snapshot=Mock(),
+        )
+        clock = SimpleNamespace(time=lambda: self.timestamp + .8, monotonic=service.time.monotonic)
+        self.enterContext(patch.object(service, "time", clock))
+
+    def frame(self, area, sequence=1, suffix=4):
+        pawn = f"Player_FP_C {area}.Scene:PersistentLevel.Player_FP_C_{suffix}"
+        return {"map": area, "sequence": sequence, "state": "connected", "pawns": {"local": {"name": pawn}}}
+
+    async def test_resident_uses_one_scoped_lease_and_clears_it_on_travel_and_cancel(self):
+        inbox = self.bridge.local_bridge = Mock(guest_interaction_lease_available=True)
+        market, observatory = self.frame(self.market), self.frame(OBSERVATORY, 2, 5)
+        self.bridge.snapshot.side_effect = market, market, observatory
+        steps = iter(("travel", "arrived", "cancel"))
+
+        async def step(delay):
+            self.assertEqual(delay, .4)
+            self.assertEqual(list(self.directory.iterdir()), [])
+            match next(steps):
+                case "travel":
+                    self.client.server_transitioning = True
+                case "arrived":
+                    self.client.server_transitioning = False
+                case "cancel":
+                    raise asyncio.CancelledError
+
+        with patch.object(service.asyncio, "sleep", side_effect=step):
+            with self.assertRaises(asyncio.CancelledError):
+                await service.Client.renew_native_interactions(self.client)
+        self.assertEqual([entry.args for entry in inbox.publish_guest_interaction_lease.call_args_list], [
+            (self.timestamp, 3, self.market, market["pawns"]["local"]["name"]),
+            (0, 0),
+            (self.timestamp, 13, OBSERVATORY, observatory["pawns"]["local"]["name"]),
+            (0, 0),
+        ])
+
+    async def test_resident_stale_frame_and_disconnect_cannot_renew(self):
+        inbox = self.bridge.local_bridge = Mock(guest_interaction_lease_available=True)
+        self.bridge.snapshot.return_value = game = self.frame(self.market)
+        steps = iter(("fresh", "fresh", "disconnect", "stop"))
+
+        async def step(_):
+            match next(steps):
+                case "disconnect":
+                    self.bridge.snapshot.return_value = self.frame(self.market, 2)
+                    self.client.transport.connected = False
+                case "stop":
+                    self.client.stopping = True
+
+        # Give the unchanged frame 1.5 seconds to age, then publish a fresh frame while disconnected.
+        with (patch.object(service.asyncio, "sleep", side_effect=step),
+              patch.object(service.time, "monotonic", side_effect=(10, 10.4, 11.5, 12))):
+            await service.Client.renew_native_interactions(self.client)
+        active = (self.timestamp, 3, self.market, game["pawns"]["local"]["name"])
+        self.assertEqual([entry.args for entry in inbox.publish_guest_interaction_lease.call_args_list],
+                         [active, active, (0, 0)])
+
+    async def test_legacy_or_external_worker_keeps_each_applicable_file(self):
+        for inbox in (None, Mock(guest_interaction_lease_available=False)):
+            with self.subTest(inbox=inbox):
+                self.bridge.local_bridge = inbox
+                self.client.stopping = False
+                self.bridge.snapshot.return_value = self.frame(OBSERVATORY)
+
+                async def stop_after_poll(_):
+                    self.assertEqual({path.name: path.read_text(encoding="ascii")
+                                      for path in self.directory.iterdir()}, {
+                        self.shop_file: f"{self.timestamp}\n",
+                        self.dialogue_file: f"{self.timestamp}\n",
+                        self.mosby_file: f"{self.timestamp}\n",
+                    })
+                    self.client.stopping = True
+
+                with patch.object(service.asyncio, "sleep", side_effect=stop_after_poll):
+                    await service.Client.renew_native_interactions(self.client)
+                self.assertEqual(list(self.directory.iterdir()), [])
+                if inbox is not None:
+                    inbox.publish_guest_interaction_lease.assert_not_called()
 
 
 class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):

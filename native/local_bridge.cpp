@@ -21,6 +21,9 @@ namespace
     constexpr std::size_t input_capacity = 64;
     constexpr std::uint32_t prop_poses_limit = 4 * 257;
     constexpr std::uint32_t avatar_poses_limit = 512;
+    constexpr std::uint32_t guest_interaction_features = 0x0f;
+    constexpr std::uint32_t guest_interaction_area_limit = 160;
+    constexpr std::uint32_t guest_interaction_pawn_limit = 512;
 
     enum class State { idle, queued, taken, running, replied, too_large };
     std::mutex mutex;
@@ -40,6 +43,15 @@ namespace
     std::string local_avatar_pose;
     std::string remote_avatar_poses;
     std::int64_t native_events_heartbeat{}, stock_board_heartbeat{};
+
+    struct GuestInteractionLease
+    {
+        std::int64_t stamp{};
+        std::uint32_t features{};
+        std::string area;
+        std::string pawn;
+    };
+    GuestInteractionLease guest_interaction_lease;
 
     void clear()
     {
@@ -173,6 +185,30 @@ namespace
         return read_heartbeat(lua, stock_board_heartbeat);
     }
 
+    int read_guest_interaction_lease(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 2 || !lua.is_string(1) || !lua.is_string(2)) return 0;
+        const auto area = lua.get_string();
+        const auto pawn = lua.get_string();
+        bool active{};
+        std::int64_t stamp{};
+        std::uint32_t features{};
+        {
+            std::lock_guard lock(mutex);
+            active = attached;
+            if (active && guest_interaction_lease.area == area && guest_interaction_lease.pawn == pawn)
+            {
+                stamp = guest_interaction_lease.stamp;
+                features = guest_interaction_lease.features;
+            }
+        }
+        lua.set_bool(active);
+        if (!stamp) return 1;
+        lua.set_integer(stamp);
+        lua.set_integer(features);
+        return 3;
+    }
+
     int publish_heartbeat(std::int64_t stamp, std::int64_t& mailbox)
     {
         if (stamp <= 0) return 0;
@@ -239,6 +275,7 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
     local_avatar_pose.clear();
     remote_avatar_poses.clear();
     native_events_heartbeat = stock_board_heartbeat = 0;
+    guest_interaction_lease = {};
     clear();
 }
 
@@ -294,6 +331,28 @@ extern "C" __declspec(dllexport) int SilverfishBridgePublishNativeEventsHeartbea
 extern "C" __declspec(dllexport) int SilverfishBridgePublishStockBoardHeartbeatV1(std::int64_t stamp)
 {
     return publish_heartbeat(stamp, stock_board_heartbeat);
+}
+
+extern "C" __declspec(dllexport) int SilverfishBridgePublishGuestInteractionLeaseV1(
+    std::int64_t stamp, std::uint32_t features, const char* area, std::uint32_t area_size,
+    const char* pawn, std::uint32_t pawn_size)
+{
+    if (features & ~guest_interaction_features) return 0;
+    std::lock_guard lock(mutex);
+    if (!attached) return 0;
+    if (!features)
+    {
+        if (stamp || area_size || pawn_size) return 0;
+        guest_interaction_lease = {};
+        return 1;
+    }
+    if (stamp <= 0 || !area || !area_size || area_size > guest_interaction_area_limit ||
+        !pawn || !pawn_size || pawn_size > guest_interaction_pawn_limit) return 0;
+    guest_interaction_lease.stamp = stamp;
+    guest_interaction_lease.features = features;
+    guest_interaction_lease.area.assign(area, area_size);
+    guest_interaction_lease.pawn.assign(pawn, pawn_size);
+    return 1;
 }
 
 extern "C" __declspec(dllexport) int SilverfishBridgePublishPropPosesV1(const char* data, std::uint32_t size)
@@ -374,6 +433,7 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishTakeRemoteAvatarPoses", take_avatar_poses);
         lua.register_function("SilverfishReadLocalNativeEventsHeartbeat", read_native_events_heartbeat);
         lua.register_function("SilverfishReadLocalStockBoardHeartbeat", read_stock_board_heartbeat);
+        lua.register_function("SilverfishReadLocalGuestInteractionLease", read_guest_interaction_lease);
     }
 
     void stop()
@@ -388,6 +448,7 @@ namespace silverfish::local_bridge
         local_avatar_pose.clear();
         remote_avatar_poses.clear();
         native_events_heartbeat = stock_board_heartbeat = 0;
+        guest_interaction_lease = {};
         clear();
     }
 }

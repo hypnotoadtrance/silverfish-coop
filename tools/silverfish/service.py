@@ -28,6 +28,8 @@ from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS, AuthoredRou
 from .authored_world_view import WORLD_VIEW_ACTORS
 from .control import Control
 from .embedded_engine import BRIDGE_ENV, OPT_IN_ENV, EmbeddedEngine, select_save_scope
+from .local_bridge import (GUEST_INTERACTION_BROKER, GUEST_INTERACTION_DIALOGUE, GUEST_INTERACTION_MOSBY,
+                           GUEST_INTERACTION_SHOP)
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from . import native_guest_drop, native_guest_drop_projection, native_guest_drop_record
@@ -5630,42 +5632,74 @@ class Client:
 
     async def renew_native_interactions(self) -> None:
         features = (
-            (self.invite.get("native_shop_view"), native_finite_shop.MERCHANTS, "native-shop-view-heartbeat"),
-            (self.invite.get("native_broker_input"), (native_broker.BLACK_MARKET,), "native-broker-input-heartbeat"),
-            (self.dialogue_view is not None, self.dialogue_view.maps if self.dialogue_view else (), native_dialogue.HEARTBEAT),
-            (self.mosby_station is not None, native_mosby_station_view.ORDINARY_MAPS, native_mosby_station_view.HEARTBEAT),
+            (GUEST_INTERACTION_SHOP, self.invite.get("native_shop_view"),
+             native_finite_shop.MERCHANTS, "native-shop-view-heartbeat"),
+            (GUEST_INTERACTION_BROKER, self.invite.get("native_broker_input"),
+             (native_broker.BLACK_MARKET,), "native-broker-input-heartbeat"),
+            (GUEST_INTERACTION_DIALOGUE, self.dialogue_view is not None,
+             self.dialogue_view.maps if self.dialogue_view else (), native_dialogue.HEARTBEAT),
+            (GUEST_INTERACTION_MOSBY, self.mosby_station is not None,
+             native_mosby_station_view.ORDINARY_MAPS, native_mosby_station_view.HEARTBEAT),
         )
+        inbox = self.bridge.local_bridge
+        memory = inbox is not None and inbox.guest_interaction_lease_available
+        memory_armed = False
+        file_leases = set()
         sequence, seen = None, 0.0
-        while not self.stopping and self.bridge.process.poll() is None:
-            game = self.bridge.snapshot()
-            now = time.monotonic()
-            if game and game.get("sequence") != sequence:
-                sequence, seen = game["sequence"], now
-            if (game and game.get("state") == "connected"
-                    and self.transport.connected and self.host_session and not self.needs_travel
-                    and not self.server_transitioning and now - seen < 1.5):
-                timestamp = int(time.time())
-                heartbeat = f"{timestamp}\n"
-                if self.wire_board is not None and game.get("map") in self.allowed_maps - PLAYTEST_MAPS:
-                    with contextlib.suppress(OSError):
-                        native_wire_board.renew(self.bridge, game["map"], timestamp)
-                for enabled, maps, heartbeat_file in features:
-                    if enabled and game.get("map") in maps:
-                        with contextlib.suppress(OSError):
-                            write_text(self.bridge.directory / heartbeat_file, heartbeat)
-            if self.mindcore_view:
+        try:
+            while not self.stopping and self.bridge.process.poll() is None:
+                game = self.bridge.snapshot()
+                now = time.monotonic()
+                if game and game.get("sequence") != sequence:
+                    sequence, seen = game["sequence"], now
+                area = game.get("map") if game else None
                 pawn = game.get("pawns", {}).get("local", {}).get("name") if game else None
-                present = (native_mindcore_view.valid_pawn(pawn) and game.get("state") == "connected"
-                           and game.get("map") == native_mindcore.MAP and now - seen < 1.5)
-                leases = ((1, native_mindcore_view.HEARTBEAT), (2, native_mosby_station_view.DOWNLOAD_HEARTBEAT))
-                for stage, filename in leases:
-                    path = self.bridge.directory / filename
+                active = (game and game.get("state") == "connected" and self.transport.connected
+                          and self.host_session and not self.needs_travel and not self.server_transitioning
+                          and now - seen < 1.5)
+                stamp = int(time.time()) if active else 0
+                enabled = [(bit, filename) for bit, supported, maps, filename in features
+                           if active and supported and area in maps]
+                if active and self.wire_board is not None and area in self.allowed_maps - PLAYTEST_MAPS:
                     with contextlib.suppress(OSError):
-                        if present and self.mindcore_stage_ready(stage) and (stage == 1 or self.mosby_station):
-                            write_text(path, f"{int(time.time())}\t{pawn}\n")
-                        else:
+                        native_wire_board.renew(self.bridge, area, stamp)
+                if memory:
+                    was_armed = memory_armed
+                    memory_armed = False
+                    if (enabled and isinstance(pawn, str) and 0 < len(pawn) <= 512
+                            and pawn.isascii() and pawn.isprintable()):
+                        # Bind the lease to the sampled local pawn, so the old lease cannot arm its replacement.
+                        memory_armed = inbox.publish_guest_interaction_lease(
+                            stamp, sum(bit for bit, _ in enabled), area, pawn)
+                    if was_armed and not memory_armed:
+                        inbox.publish_guest_interaction_lease(0, 0)
+                else:
+                    current_files = {self.bridge.directory / filename for _, filename in enabled}
+                    for path in file_leases - current_files:
+                        with contextlib.suppress(OSError):
                             path.unlink(missing_ok=True)
-            await asyncio.sleep(.4)
+                    for path in current_files:
+                        with contextlib.suppress(OSError):
+                            write_text(path, f"{stamp}\n")
+                    file_leases = current_files
+                if self.mindcore_view:
+                    present = (native_mindcore_view.valid_pawn(pawn) and game.get("state") == "connected"
+                               and game.get("map") == native_mindcore.MAP and now - seen < 1.5)
+                    leases = ((1, native_mindcore_view.HEARTBEAT), (2, native_mosby_station_view.DOWNLOAD_HEARTBEAT))
+                    for stage, filename in leases:
+                        path = self.bridge.directory / filename
+                        with contextlib.suppress(OSError):
+                            if present and self.mindcore_stage_ready(stage) and (stage == 1 or self.mosby_station):
+                                write_text(path, f"{int(time.time())}\t{pawn}\n")
+                            else:
+                                path.unlink(missing_ok=True)
+                await asyncio.sleep(.4)
+        finally:
+            if memory_armed:
+                inbox.publish_guest_interaction_lease(0, 0)
+            for path in file_leases:
+                with contextlib.suppress(OSError):
+                    path.unlink(missing_ok=True)
 
     def mindcore_stage_ready(self, stage=1) -> bool:
         return (not self.stopping and self.transport.connected and self.transport.game_access

@@ -1,4 +1,5 @@
 local view = {}
+local interaction_lease = require("guest_interaction_lease")
 local shopkeep = require("native_dialogue_shopkeep")
 local focus_fixture = require("native_shop_focus_fixture")
 local stock = require("native_shop_stock")
@@ -63,17 +64,10 @@ local function integer(value, maximum)
     if number and number >= 0 and number <= maximum then return number end
 end
 
-local function renew_lease()
-    local file = io.open(heartbeat_path, "rb")
-    if not file then
-        lease_through = 0
-        return
-    end
-    local value = file:read(32)
-    file:close()
-    local timestamp = value and value:match("^(%d+)%s*$")
-    local sent = timestamp and #timestamp <= 12 and tonumber(timestamp)
-    if sent and sent <= os.time() then lease_through = sent + 2 else lease_through = 0 end
+local function renew_lease(current)
+    local sent = interaction_lease.timestamp(heartbeat_path, interaction_lease.shop, current.profile.map,
+        current.name, os.time(), true)
+    lease_through = sent and sent + 2 or 0
 end
 
 local function context(state, phase)
@@ -253,7 +247,7 @@ function view.sync(state, phase)
     if current and current.profile.reception then
         if current.host then view.clear(); return end
         if not same_context(current, binding) then view.clear() end
-        renew_lease()
+        renew_lease(current)
         binding = current
         if active() and (not can_use(current) or not in_reach(current) or os.time() > session.expires) then close() end
         stock_action()
@@ -265,7 +259,7 @@ function view.sync(state, phase)
         return
     end
     if not same_context(current, binding) then view.clear() end
-    if not current.host then renew_lease() end
+    if not current.host then renew_lease(current) end
     local accepting = can_open(current)
     if not SilverfishSetNativeShopViewScope(current.pawn:GetAddress(), current.host, accepting == true) then
         view.clear()

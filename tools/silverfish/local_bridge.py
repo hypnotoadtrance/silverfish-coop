@@ -7,6 +7,10 @@ import os
 from pathlib import Path
 
 STATUS_LIMIT = 2 * 1024 * 1024
+GUEST_INTERACTION_SHOP = 1
+GUEST_INTERACTION_BROKER = 2
+GUEST_INTERACTION_DIALOGUE = 4
+GUEST_INTERACTION_MOSBY = 8
 
 
 class LocalBridge:
@@ -37,6 +41,12 @@ class LocalBridge:
         if self._stock_board_heartbeat is not None:
             self._stock_board_heartbeat.argtypes = [ctypes.c_int64]
             self._stock_board_heartbeat.restype = ctypes.c_int
+        self._guest_interaction_lease = getattr(library, "SilverfishBridgePublishGuestInteractionLeaseV1", None)
+        if self._guest_interaction_lease is not None:
+            self._guest_interaction_lease.argtypes = [ctypes.c_int64, ctypes.c_uint32,
+                                                      ctypes.c_char_p, ctypes.c_uint32,
+                                                      ctypes.c_char_p, ctypes.c_uint32]
+            self._guest_interaction_lease.restype = ctypes.c_int
         self._prop_poses = getattr(library, "SilverfishBridgePublishPropPosesV1", None)
         if self._prop_poses is not None:
             self._prop_poses.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
@@ -142,6 +152,17 @@ class LocalBridge:
     def publish_stock_board_heartbeat(self, stamp: int) -> bool:
         return self._stock_board_heartbeat is not None and bool(self._stock_board_heartbeat(stamp))
 
+    @property
+    def guest_interaction_lease_available(self) -> bool:
+        return self._guest_interaction_lease is not None
+
+    def publish_guest_interaction_lease(self, stamp: int, features: int, area: str = "", pawn: str = "") -> bool:
+        if self._guest_interaction_lease is None:
+            return False
+        area_bytes, pawn_bytes = area.encode("utf-8"), pawn.encode("utf-8")
+        return bool(self._guest_interaction_lease(stamp, features, area_bytes, len(area_bytes),
+                                                  pawn_bytes, len(pawn_bytes)))
+
     def publish_prop_poses(self, frame: str) -> bool:
         if self._prop_poses is None:
             return False
@@ -173,5 +194,5 @@ class LocalBridge:
         return records
 
     def close(self):
-        self._native_events_heartbeat = self._stock_board_heartbeat = None
+        self._native_events_heartbeat = self._stock_board_heartbeat = self._guest_interaction_lease = None
         self._close()

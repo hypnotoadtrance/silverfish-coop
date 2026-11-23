@@ -1,4 +1,5 @@
 local broker_input = {}
+local interaction_lease = require("guest_interaction_lease")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_BROKER_INPUT") == "1"
@@ -49,15 +50,8 @@ local function same_context(first, second)
         and same(first.station, second.station)
 end
 
-local function fresh()
-    local file = io.open(heartbeat, "rb")
-    if not file then return false end
-    local raw = file:read(32)
-    file:close()
-    local stamp = raw and raw:match("^(%d+)%s*$")
-    local timestamp = stamp and #stamp <= 12 and tonumber(stamp)
-    local now = os.time()
-    return timestamp and timestamp <= now and now <= timestamp + 2 or false
+local function fresh(current)
+    return interaction_lease.timestamp(heartbeat, interaction_lease.broker, map, current.name, os.time(), true) ~= nil
 end
 
 local function distance_squared(a, b)
@@ -79,7 +73,7 @@ local function accepting(current)
     local stack = current.controller.MenuStack
     return current.controller.Loading == false and stack and stack:GetArrayNum() == 0
         and current.pawn.Dead == false and type(is_downed) == "function" and is_downed(current.pawn) == false
-        and fresh() and in_reach(current)
+        and fresh(current) and in_reach(current)
 end
 
 function broker_input.clear()

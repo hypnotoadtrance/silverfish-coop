@@ -1,4 +1,5 @@
 local view = {}
+local interaction_lease = require("guest_interaction_lease")
 local tape_profiles = require("native_tape_profiles")
 local profiles, instructions = tape_profiles.maps, tape_profiles.instructions
 
@@ -89,17 +90,16 @@ local function standing(current)
 end
 
 local function fresh(current, now)
-    local data_silo = current.profile == instructions
-    local file = io.open(data_silo and download_heartbeat or heartbeat, "rb")
-    if not file then return false end
-    local contents = file:read(data_silo and 600 or 32)
-    file:close()
-    local stamp = tonumber(contents)
-    if data_silo then
-        local seconds, pawn = (contents or ""):match("^(%d+)\t([^\r\n]+)[\r\n]*$")
-        if pawn ~= current.name then return false end
-        stamp = math.tointeger(tonumber(seconds))
+    if current.profile ~= instructions then
+        return interaction_lease.timestamp(heartbeat, interaction_lease.mosby, current.profile.map, current.name, now) ~= nil
     end
+    local file = io.open(download_heartbeat, "rb")
+    if not file then return false end
+    local contents = file:read(600)
+    file:close()
+    local seconds, pawn = (contents or ""):match("^(%d+)\t([^\r\n]+)[\r\n]*$")
+    if pawn ~= current.name then return false end
+    local stamp = math.tointeger(tonumber(seconds))
     return stamp and stamp <= now and now <= stamp + 2
 end
 

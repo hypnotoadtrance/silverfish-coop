@@ -407,11 +407,6 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
                 and "guest_sickness" in game.get("native_guest_sickness", {}).get(pawn, {}))
 
     game = await host.bridge.wait_for(qualified)
-    heartbeat = guest.bridge.directory / "native-shop-view-heartbeat"
-    async with asyncio.timeout(10):
-        while not heartbeat.is_file():
-            await asyncio.sleep(.1)
-    assert 0 <= int(time.time()) - int(heartbeat.read_text(encoding="ascii")) <= 5
     await guest.bridge.wait_for(lambda frame: frame.get("native_inventory_view_binding") == "ready")
     guest_run = guest.client / "run"
     async with asyncio.timeout(12):
