@@ -11,10 +11,19 @@ local psyche_class = "BlueprintGeneratedClass " .. psyche_path
 local dizzy_path = "/Game/Classes/Player/CS_Dizzy.CS_Dizzy_C"
 local whisper_path = "/Game/Assets/Sounds/WAVs/Anomaly_Wav/Misc_Whisper.Misc_Whisper"
 local psyche_mask = 16
+-- Stock DealDamage passes the difference between two world positions to the overlay.
+local hit_offset_limit = 1e9
 local shake_path = "/Game/Classes/Player/CS_Jumping.CS_Jumping_C"
 local shake_function = "/Script/Engine.PlayerController:ClientStartCameraShake"
+local damage_pulse = "/Game/Classes/Player/Player_FP.Player_FP_C:Pulse_Dmg_FX"
+local stock_hit_cues = {
+    ["SoundCue /Game/Assets/Sounds/CUEs/BulletHit_Cues/BullitImpact_Flesh_Cue.BullitImpact_Flesh_Cue"] = true,
+    ["SoundCue /Game/Assets/Sounds/CUEs/PhysImpact_Cues/Melee_Blunt_Cue.Melee_Blunt_Cue"] = true,
+    ["SoundCue /Game/Assets/Sounds/CUEs/PhysImpact_Cues/BurnDmg_Cue.BurnDmg_Cue"] = true,
+}
 local pending, health, events = {}, {}, {}
 local world, active_overlay, psyche_overlay, overlay_controller, visit, last_played
+local pulse_hooked
 local serial = 0
 local hit_sounds = {
     {1, "Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5", "ArmorPenitration_4_E48DD35840D3699D8F37E48678EF29E4",
@@ -52,6 +61,14 @@ local function mask_for(damage)
     return mask
 end
 
+local observed_hit, mute_post_process
+
+local function remote_victim(pawn)
+    if not world or not guest_save.matches(pawn) then return false end
+    local area = pawn:GetWorld()
+    return valid(area) and area:GetAddress() == world and not pawn:IsLocallyControlled()
+end
+
 function feedback.sync(state, phase)
     local hosting = phase == "hosting" and valid(state.world)
     local address = hosting and state.world:GetAddress() or nil
@@ -66,6 +83,20 @@ function feedback.sync(state, phase)
         if valid(save) and finite(save.PlayerHealth, 1e6) then
             health[pawn:GetAddress()] = {save = save, value = save.PlayerHealth}
         end
+    end
+    if not pulse_hooked and valid(StaticFindObject(damage_pulse)) then
+        RegisterHook(damage_pulse, function(context, amount, direction, _, damage)
+            local pawn = context:get()
+            if not remote_victim(pawn) then return end
+            -- Stock reuses DmgFX through Reset, so a BeginPlay hook misses later pulses.
+            pcall(function() observed_hit(pawn, amount:get(), direction:get(), damage:get()) end)
+            local effect = pawn.DmgFX
+            if valid(effect) and effect:GetClass():GetFullName() == damage_class
+                and same(effect.Player, pawn) and same(effect:GetWorld(), pawn:GetWorld()) then
+                mute_post_process(effect)
+            end
+        end)
+        pulse_hooked = true
     end
 end
 
@@ -89,17 +120,17 @@ local function record(pawn, amount, direction, mask)
     if #events > 12 then table.remove(events, 1) end
 end
 
-local function observed_hit(actor, pawn)
+observed_hit = function(pawn, amount, direction, damage)
     local previous = health[pawn:GetAddress()]
-    local direction, amount = actor.HitDirection, actor.Ammount
     if not previous or not same(previous.save, pawn.Save) or not finite(previous.save.PlayerHealth, 1e6)
         or previous.save.PlayerHealth >= previous.value or not finite(amount, 1e6) or amount < 1
-        or not direction or not finite(direction.X, 1) or not finite(direction.Y, 1) or not finite(direction.Z, 1) then return end
+        or not direction or not finite(direction.X, hit_offset_limit) or not finite(direction.Y, hit_offset_limit)
+        or not finite(direction.Z, hit_offset_limit) then return end
     previous.value = previous.save.PlayerHealth
-    record(pawn, amount, direction, mask_for(actor.Damage))
+    record(pawn, amount, direction, mask_for(damage))
 end
 
-local function mute_post_process(actor)
+mute_post_process = function(actor)
     for _, name in ipairs({"PostProcessDirection", "PostProcess_FX"}) do
         local component = actor[name]
         if valid(component) and same(component:GetOwner(), actor) then component.bEnabled = false end
@@ -123,13 +154,19 @@ function feedback.start(is_host)
             scale:set(0.0)
         end
     end)
-    if type(SilverfishIsNativeShadowFeedbackTarget) == "function" then
-        RegisterHook("/Script/Engine.GameplayStatics:PlaySound2D", function(_, source, _, volume)
+    RegisterHook("/Script/Engine.GameplayStatics:PlaySound2D", function(_, source, sound, volume)
+        if not is_host() then return end
+        local asset = sound:get()
+        if valid(asset) and stock_hit_cues[asset:GetFullName()] and remote_victim(source:get()) then
+            volume:set(0.0)
+        elseif type(SilverfishIsNativeShadowFeedbackTarget) == "function" then
             local actor = source:get()
             if valid(actor) and actor:GetClass():GetFullName() == psyche_class and shadow_target(actor.Player) then
                 volume:set(0.0)
             end
-        end)
+        end
+    end)
+    if type(SilverfishIsNativeShadowFeedbackTarget) == "function" then
         RegisterHook("/Script/Engine.GameplayStatics:SpawnSoundAttached",
             function(_, sound, component, _, _, _, _, _, volume)
                 local asset, attached = sound:get(), component:get()
@@ -161,7 +198,7 @@ function feedback.start(is_host)
                 record(victim, actor.Ammount, {X = 0, Y = 0, Z = 0}, psyche_mask)
             end
         else
-            pcall(observed_hit, actor, victim)
+            pcall(observed_hit, victim, actor.Ammount, actor.HitDirection, actor.Damage)
         end
     end)
     RegisterBeginPlayPostHook(function(context)
@@ -244,7 +281,7 @@ function feedback.command(fields, state, phase)
     local id, amount, x, y, z, mask = table.unpack({tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8]),
         tonumber(fields[9]), tonumber(fields[10]), tonumber(fields[11])})
     if math.type(id) ~= "integer" or id < 1 or id >= 2^53 or not finite(amount, 1000) or amount < 1
-        or not finite(x, 1) or not finite(y, 1) or not finite(z, 1)
+        or not finite(x, hit_offset_limit) or not finite(y, hit_offset_limit) or not finite(z, hit_offset_limit)
         or math.type(mask) ~= "integer" or mask < 0 or mask > psyche_mask
         or (mask == psyche_mask and (amount > 10 or x ~= 0 or y ~= 0 or z ~= 0
             or state.map ~= "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P")) then

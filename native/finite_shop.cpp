@@ -1,5 +1,6 @@
 #include "finite_shop.hpp"
 #include "stock_wallet.hpp"
+#include "shop_view.hpp"
 
 #include <algorithm>
 #include <array>
@@ -21,6 +22,7 @@
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
+#include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/Property/FTextProperty.hpp>
 #include <Unreal/UnrealInitializer.hpp>
@@ -186,6 +188,31 @@ namespace
         bool host{};
     };
 
+    struct StockWatch
+    {
+        Unreal::FWeakObjectPtr shop;
+        Unreal::UFunction* save{};
+        std::uint64_t revision{};
+        bool dirty{};
+    };
+
+    constexpr auto max_stock_revision = (1ULL << 53) - 1;
+    thread_local StockWatch stock_watch;
+    thread_local unsigned stock_mutations{};
+
+    struct StockMutation
+    {
+        StockMutation() { ++stock_mutations; }
+        ~StockMutation() { --stock_mutations; }
+        StockMutation(const StockMutation&) = delete;
+        StockMutation& operator=(const StockMutation&) = delete;
+    };
+
+    void mark_stock_changed(Unreal::UObject* actor)
+    {
+        if (actor && stock_watch.shop.Get() == actor) stock_watch.dirty = true;
+    }
+
     bool qualified_host_connection(const Context& context)
     {
         auto* controller = read_object(context.pawn, STR("Controller"));
@@ -319,29 +346,75 @@ namespace
             read_bool(shop, STR("LimitedCash"), true);
     }
 
+    bool exact_merchant(Context& context, const MerchantProfile& profile)
+    {
+        context.world = find<Unreal::UWorld>(profile.world);
+        auto* data = find<Unreal::UObject>(profile.data);
+        return live(context.world) && exact(context.shop, find<Unreal::UClass>(shop_class)) &&
+            authority(context.shop, context.world) && live(data) &&
+            static_cast<Unreal::AActor*>(context.shop)->GetLevel() == read_object(context.world, STR("PersistentLevel")) &&
+            read_object(context.shop, STR("MerchantData")) == data && read_bool(context.shop, STR("IsCheatShop"), false);
+    }
+
+    const MerchantProfile* find_merchant(Address requested, Context& context)
+    {
+        for (const auto& profile : merchants)
+        {
+            auto* actor = find<Unreal::UObject>(profile.actor);
+            if (actor && address(actor) == requested)
+            {
+                context.shop = actor;
+                return &profile;
+            }
+        }
+        return nullptr;
+    }
+
+    int read_stock_revision(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto requested = lua.get_integer(1);
+        if (requested <= 0)
+        {
+            stock_watch = {};
+            return 0;
+        }
+        if (!silverfish::native_shop_view::observes_stock_saves()) return 0;
+        if (auto* current = stock_watch.shop.Get(); current && address(current) == static_cast<Address>(requested))
+        {
+            if (std::exchange(stock_watch.dirty, false) && stock_watch.revision < max_stock_revision)
+                ++stock_watch.revision;
+            lua.set_integer(stock_watch.revision);
+            return 1;
+        }
+        stock_watch = {};
+        Context context;
+        const auto* profile = find_merchant(static_cast<Address>(requested), context);
+        if (!profile || !exact_merchant(context, *profile)) return 0;
+        auto* instance = read_object(context.world, STR("OwningGameInstance"));
+        auto* driver = read_object(context.world, STR("NetDriver"));
+        auto* save = read_object(instance, STR("SaveSlot_Ref"));
+        auto* capture = find<Unreal::UFunction>(save_inventory);
+        if (!exact(instance, find<Unreal::UClass>(instance_class)) ||
+            read_object(context.shop, STR("As Game Instance FP")) != instance ||
+            !exact(save, find<Unreal::UClass>(save_class)) || !live(driver) ||
+            read_object(driver, STR("World")) != context.world || read_object(driver, STR("ServerConnection")) ||
+            !capture || capture->GetOuterPrivate() != context.shop->GetClassPrivate() || capture->GetNumParms() != 0 ||
+            capture->GetReturnProperty() || capture->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net))
+            return 0;
+        stock_watch = {context.shop, capture, 1};
+        lua.set_integer(stock_watch.revision);
+        return 1;
+    }
+
     std::string_view bind_context(const std::array<Address, 5>& input, Context& context, bool allow_host = false)
     {
-        const MerchantProfile* profile = nullptr;
-        for (const auto& listed : merchants)
-        {
-            auto* actor = find<Unreal::UObject>(listed.actor);
-            if (!actor || address(actor) != input[3]) continue;
-            context.shop = actor;
-            profile = &listed;
-            break;
-        }
-        if (!profile) return "shop_exact_merchant_unavailable";
+        const auto* profile = find_merchant(input[3], context);
+        if (!profile || !exact_merchant(context, *profile)) return "shop_exact_merchant_unavailable";
         context.camera_only = profile->camera_only;
         context.smuggler = profile->smuggler;
         context.guards_neutral_purchase = profile->cash_barter_replacement && !profile->camera_only;
-        context.world = find<Unreal::UWorld>(profile->world);
-        auto* data = find<Unreal::UObject>(profile->data);
-        if (!live(context.world) || !exact(context.shop, find<Unreal::UClass>(shop_class)) ||
-            !authority(context.shop, context.world) || !live(data) ||
-            static_cast<Unreal::AActor*>(context.shop)->GetLevel() != read_object(context.world, STR("PersistentLevel")) ||
-            read_object(context.shop, STR("MerchantData")) != data || !read_bool(context.shop, STR("IsCheatShop"), false))
-            return "shop_exact_merchant_unavailable";
-
+        auto* data = read_object(context.shop, STR("MerchantData"));
         auto* pawn_type = find<Unreal::UClass>(pawn_class);
         auto* panel_type = find<Unreal::UClass>(panel_class);
         if (!pawn_type || !panel_type) return "shop_class_unavailable";
@@ -1013,6 +1086,7 @@ namespace
             rows = encode(selected);
         }
 
+        const StockMutation mutation;
         const auto add = backpack.AddValue();
         if (add == old_size && backpack.Num() == old_size + 1)
         {
@@ -1040,7 +1114,10 @@ namespace
             for (int i = 0; verified && i < old_size; ++i)
                 verified = layout.ident(backpack.GetRawPtr(i), previous_bag.GetRawPtr(i));
             if (verified)
+            {
+                mark_stock_changed(context.shop);
                 return response(lua, true, "purchased", rows, money, money - selected.price, cash, cash + selected.price);
+            }
         }
         source_property->CopyCompleteValue(source, source_before.get());
         layout.backpack->CopyCompleteValue(target, target_before.get());
@@ -1285,6 +1362,7 @@ namespace
         if (!source_before || !target_before || !finite_before || !saved_before || !flags_before || !transferred)
             return response(lua, false, "shop_sale_before_image_unavailable");
 
+        const StockMutation mutation;
         const auto inserted = sale.add_buyback(context, transferred.get(), old_buyback);
         bool verified = buyback.Num() == old_buyback + 1 && inserted >= 0 && inserted < buyback.Num() &&
             sale.matches_buyback(layout, transferred.get(), buyback.GetRawPtr(inserted), day) &&
@@ -1304,7 +1382,10 @@ namespace
                 wallet.amount(context.instance) == money + selected.price && qualified_connection(context) &&
                 read_object(context.pawn, STR("Save")) == context.guest &&
                 read_object(context.instance, STR("SaveSlot_Ref")) == context.stock && layout.verify_saved(context, true))
+            {
+                mark_stock_changed(context.shop);
                 return response(lua, true, "sold", encode(selected), money, money + selected.price, cash, cash - selected.price);
+            }
         }
 
         layout.backpack->CopyCompleteValue(source, source_before.get());
@@ -1325,9 +1406,17 @@ namespace
 
 namespace silverfish::finite_shop
 {
+    void observe_stock_save(Unreal::UObject* shop, Unreal::UFunction* action)
+    {
+        // Stock host trade has changed its actor stock before reaching the
+        // canonical in-memory save hook. Native transactions mark only after readback.
+        if (stock_mutations == 0 && action && action == stock_watch.save) mark_stock_changed(shop);
+    }
+
     void register_lua(Lua& lua)
     {
         if (!enabled()) return;
+        lua.register_function("SilverfishReadNativeFiniteShopRevision", read_stock_revision);
         lua.register_function("SilverfishReadNativeFiniteShop", transact<false>);
         lua.register_function("SilverfishBuyNativeFiniteShop", transact<true>);
         lua.register_function("SilverfishBuyNativeShopQuantity", transact<true, true>);

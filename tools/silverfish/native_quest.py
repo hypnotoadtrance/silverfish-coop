@@ -54,7 +54,11 @@ async def action(host, bridge, actor: str, verb: str, target: str | None) -> dic
         visit, board, target = native_board_contract.menu_selection(target)
         native_board_contract.require_visit(host, visit)
         area, _, _ = native_board_contract.scope(host, actor, board)
-        if target in AUTHORED_BOARD_ACTIONS and board != native_computer_board.BOARDS.get(area):
+        jammer_board = (board == native_flood_jammer.OBSERVATORY_BOUNTY_BOARD
+                        and target in native_flood_jammer.OBSERVATORY_BOUNTIES)
+        if target in AUTHORED_BOARD_ACTIONS and board != native_computer_board.BOARDS.get(area) and not jammer_board:
+            if verb == "native-quest-start":
+                return await native_board_contract.perform(host, bridge, actor, "start", target, board=board, visit=visit)
             raise party.RuleError("native_board_contract_requires_authored_board")
     if target == native_subway_valve.QUEST:
         if verb not in ("native-quest-start", "native-quest-turnin"):
@@ -87,7 +91,8 @@ async def action(host, bridge, actor: str, verb: str, target: str | None) -> dic
         if verb not in ("native-quest-start", "native-quest-turnin"):
             raise party.RuleError(f"{jammer.key}_requires_the_authored_objective")
         operation = jammer.command("start" if verb == "native-quest-start" else "turn-in")
-        return await native_flood_jammer.act(host, bridge, actor, operation)
+        selected_board = board if board == native_flood_jammer.OBSERVATORY_BOUNTY_BOARD else None
+        return await native_flood_jammer.act(host, bridge, actor, operation, selected_board=selected_board)
     if isinstance(target, str) and target in native_broker.QUESTS:
         return await native_broker.action(host, bridge, actor, verb, quest_id=target)
     if native_board_contract.quest_id(target) and stock_verb:

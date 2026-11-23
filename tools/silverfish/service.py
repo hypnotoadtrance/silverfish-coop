@@ -47,6 +47,7 @@ from . import native_player_avatar
 from . import native_pickup_audio
 from . import native_damage_feedback, native_weather_view
 from . import native_voice
+from . import native_footsteps
 from . import native_anomaly_effects
 from . import native_drum_fire
 from . import native_weapon_fire_view
@@ -90,7 +91,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         *native_computer_board.PREFLIGHTS, *native_flood_jammer.PREFLIGHTS, native_meet_broker.PREFLIGHT,
                         native_subway_valve.PREFLIGHT, native_subway_valve.ACTIVATE,
                         "native-inventory-list", native_inventory.SPLIT, native_inventory.TAKE_AMMO, native_inventory.SORT,
-                        native_inventory.STORE_EQUIPMENT,
+                        native_inventory.STORE_EQUIPMENT, native_inventory.UNEQUIP,
                         native_stash.LIST, native_stash.MOVE,
                         native_guest_ui.ACTION,
                         "native-loot-inspect", "native-loot-open", "native-loot-claim", *native_loot.PRY_TOOL_ACTIONS.values(),
@@ -297,6 +298,7 @@ class Host:
         self.pickup_audio, self.pickup_playback = native_pickup_audio.PickupAudio(), native_pickup_audio.Playback()
         self.voice_audio, self.voice_playback = native_voice.VoiceQueue(), native_voice.Playback()
         self.guest_avatar_aims = {}
+        self.guest_avatar_lighters = {}
         self.guest_flashlights = {}
         self.guest_sprints = {}
         self.applied_guest_sprints = None
@@ -959,6 +961,9 @@ class Host:
         balance = self.last_game.get("native_wallet")
         if self.native_zones and type(balance) is int:
             view["shared_wallet"] = balance
+        merchant_revision = self.last_game.get(native_finite_shop.STOCK_REVISION)
+        if merchant_revision and merchant_revision["map"] == self.last_game.get("map") and not self.transitioning:
+            view[native_finite_shop.STOCK_REVISION] = {**merchant_revision, "epoch": self.zone_epoch}
         view["native_backpacks"] = native_inventory_death.visible_bags(self.party)
         if self.last_game.get(native_guest_drop_record.CAPABILITY) == 1:
             view[native_guest_drop_record.CAPABILITY] = 1
@@ -1026,8 +1031,7 @@ class Host:
         if self.native_guest:
             view["native_inventory_projected"] = self.native_pickup.projected()
         if view["wipe"] and self.party["wipe"].get("native") and not self.party["wipe"].get("native_committed"):
-            view["wipe"].update(native_inventory_ready=True,
-                                remaining_seconds=max(0, min(30, view["wipe"]["deadline"] - time.time())))
+            view["wipe"].update(native_inventory_ready=True, deadline=None, remaining_seconds=None)
         return view
 
     def act(self, actor: str, operation_id: str, action: str, target: str | None,
@@ -1097,7 +1101,7 @@ class Host:
                 self.guest["restore"]["native_guest_save"] = frame
 
     def travel_refusal(self, destination: str, roles: dict[str, str], *, respawning: bool = False,
-                       staying: bool = False) -> dict | None:
+                       staying: bool = False, exit_crossing: int | None = None) -> dict | None:
         if native_kill_volume.pending(self.last_game):
             return {"ok": False, "error": native_kill_volume.PENDING}
         if self.party["wipe"] and not respawning:
@@ -1107,8 +1111,10 @@ class Host:
         current = self.last_game.get("map", "")
         gate = travel_decision("host", current, destination, ("host",) if respawning else tuple(roles.values()),
                                self.authoritative_pawns(roles), allowed_maps=self.allowed_maps, allow_same_zone=staying)
-        if not gate["allowed"]:
-            return {"ok": False, "error": "travel_blocked", "blockers": gate["blockers"]}
+        # A stock crossing is rechecked against its original regroup point in the game thread.
+        blockers = [blocker for blocker in gate["blockers"] if exit_crossing is None or blocker["reason"] != "too_far"]
+        if blockers:
+            return {"ok": False, "error": "travel_blocked", "blockers": blockers}
         return None
 
     def travel_party_proof(self, roles: dict[str, str]) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
@@ -1154,7 +1160,7 @@ class Host:
                           dream_plan: dict | None = None, random_plan: tuple[str, dict] | None = None,
                           matrix_plan: dict | None = None, authored_plan: AuthoredRoute | None = None,
                           respawn_plan: dict | None = None, source_flushed: bool = False,
-                          recheck_party: bool = False) -> dict:
+                          recheck_party: bool = False, exit_crossing: int | None = None) -> dict:
         if holds := getattr(self, "smg_holds", None):
             await holds.settle(bridge, stop_all=True)
         source_frame = self.last_game
@@ -1193,8 +1199,11 @@ class Host:
                         and (observed_roster.get("state"), observed_roster.get("driver"))
                         != ("qualified", expected_roster.get("driver")))):
                 return {"ok": False, "error": "travel_source_changed"}
-            roles = self.roles()
-            if refusal := self.travel_refusal(destination, roles):
+            live_roles = self.roles()
+            if exit_crossing is not None and live_roles != roles:
+                return {"ok": False, "error": "travel_source_changed"}
+            roles = live_roles
+            if refusal := self.travel_refusal(destination, roles, exit_crossing=exit_crossing):
                 return refusal
             guests = self.travelling_guests()
             if source_frame.get("native_zone_party_guard") or snapshot.get("native_zone_party_guard"):
@@ -1203,7 +1212,11 @@ class Host:
                 except (KeyError, ValueError):
                     return {"ok": False, "error": "native_roster_unavailable"}
                 step = str(authored_plan.travel_time_step or 0) if authored_plan else "-"
+                if exit_crossing is not None:
+                    step = f"{step}:{exit_crossing}"
                 departure_proof = (current, step, driver, observed_host["name"], observed_host["controller"], *exact_guests)
+            if exit_crossing is not None and not departure_proof:
+                return {"ok": False, "error": "exit_crossing_unavailable"}
         stock_loading = (departure_proof is not None and (authored_plan is not None or entrance is not None)
                          and source_frame.get("native_zone_loading_support") is True
                          and not (gold_guid or blue_plan or dream_plan or random_plan or matrix_plan or respawn_plan))
@@ -1244,7 +1257,8 @@ class Host:
                             self.begin_zone_guests(transport)
                             raise
                         message = departure.get("ack", {}).get("message")
-                        if message in ("travel_source_changed", "native_roster_unavailable", "game_snapshot_unavailable", native_kill_volume.PENDING):
+                        if message in ("travel_source_changed", "native_roster_unavailable", "game_snapshot_unavailable",
+                                       "exit_crossing_unavailable", native_kill_volume.PENDING):
                             return {"ok": False, "error": message}
                         if departure_proof:
                             moving = {f"travel_blocked:{index}": character for index, character in enumerate(characters, 1)}
@@ -1343,17 +1357,20 @@ class Host:
             raise RuntimeError("The stock authored arrival could not be verified")
         return snapshot
 
-    async def travel_authored(self, bridge: Bridge, transport, route: AuthoredRoute) -> dict:
+    async def travel_authored(self, bridge: Bridge, transport, route: AuthoredRoute,
+                              *, exit_crossing: int | None = None) -> dict:
         if (not self.expanded_zones or self.stopping or self.transitioning or self.item_travel_pending()
                 or self.last_game.get("state") != "hosting" or self.last_game.get("map") != route.source):
             return {"ok": False, "error": "authored_route_unavailable"}
+        if exit_crossing is not None and (route.kind != "overlap" or not self.last_game.get("native_zone_party_guard")):
+            return {"ok": False, "error": "exit_crossing_unavailable"}
         roles = self.roles()
-        if refusal := self.travel_refusal(route.destination, roles):
+        if refusal := self.travel_refusal(route.destination, roles, exit_crossing=exit_crossing):
             return refusal
         self.transitioning = True
         try:
             return await self.switch_zone(bridge, transport, route.destination, route.entrance,
-                                          roles, authored_plan=route, recheck_party=True)
+                                          roles, authored_plan=route, recheck_party=True, exit_crossing=exit_crossing)
         finally:
             self.transitioning = False
 
@@ -1909,6 +1926,10 @@ class Host:
             gameplay[native_inventory.SORT_CAPABILITY] = 1
         if self.last_game.get(native_inventory.STORE_CAPABILITY) == 1:
             gameplay[native_inventory.STORE_CAPABILITY] = 1
+        if self.last_game.get(native_inventory.UNEQUIP_CAPABILITY) == 1:
+            gameplay[native_inventory.UNEQUIP_CAPABILITY] = 1
+        if self.last_game.get(native_inventory.UNEQUIP_WORN_CAPABILITY) == 1:
+            gameplay[native_inventory.UNEQUIP_WORN_CAPABILITY] = 1
         roles = self.roles()
         character = roles.get(role, "")
         gameplay["native_backpacks"] = native_inventory_death.visible_bags(self.party, character)
@@ -2032,7 +2053,7 @@ class Host:
         role, character = identity
         if request.get("action") == "snapshot" and request.keys() <= {
             "action", "voice_events", "avatar_aim", "sprinting", "zone_epoch", native_guest_clock.WORLD_START,
-            native_flashlight.GUEST_SOURCE,
+            native_flashlight.GUEST_SOURCE, native_player_avatar.GUEST_LIGHTER,
         }:
             if request.get("zone_epoch") == self.zone_epoch and not self.transitioning:
                 member = self.native_recipients().get(character) if self.native_guest else None
@@ -2042,6 +2063,8 @@ class Host:
                         self.voice_audio.received(self.last_game, self.zone_epoch, member["pawn"], request["voice_events"])
                     if type(request.get("avatar_aim")) is bool:
                         native_player_avatar.guest_aim(self, character, member, request["avatar_aim"])
+                    if native_player_avatar.GUEST_LIGHTER in request:
+                        native_player_avatar.guest_lighter(self, character, member, request[native_player_avatar.GUEST_LIGHTER])
                     if native_flashlight.GUEST_SOURCE in request:
                         native_flashlight.receive_guest(self, character, member["pawn"], request[native_flashlight.GUEST_SOURCE])
                     if type(request.get("sprinting")) is bool:
@@ -2185,6 +2208,9 @@ class Host:
                 result = await native_inventory.sort_backpack(self, bridge, character, target, request["operation_id"])
             elif action == native_inventory.STORE_EQUIPMENT:
                 result = await native_inventory.store_equipment(self, bridge, character, target, request["operation_id"])
+            elif action == native_inventory.UNEQUIP:
+                result = await native_inventory.store_equipment(
+                    self, bridge, character, target, request["operation_id"], unequip=True)
             elif action == native_flare.ACTION:
                 result = await native_flare.perform(self, bridge, character, target, request["operation_id"])
             elif action == native_guest_ui.ACTION:
@@ -2436,8 +2462,7 @@ class Host:
                         offline_owners=guests - leased,
                     )
                     candidate = party.load_party(self.party)
-                    candidate["wipe"].update(native=frozen, keep_slots=slots, drop_backpacks=drops,
-                                             deadline=time.time() + (30 if slots else 0))
+                    candidate["wipe"].update(native=frozen, keep_slots=slots, drop_backpacks=drops, deadline=None)
                     self.checkpoint(candidate)
                     self.party = candidate
                     draft = self.party["wipe"]
@@ -2446,7 +2471,13 @@ class Host:
                     return
                 finally:
                     self.transitioning = was_transitioning
-        result = wipe.finish_wipe(draft, now)
+        required = None
+        if draft.get("native") and draft["keep_slots"]:
+            # An active or temporarily disconnected guest keeps their turn.
+            # Expired leases stop blocking the party but keep their stock escrow.
+            leased = native_inventory_death.leased_characters(self.store.status())
+            required = {"host"} | (leased & set(draft["roster"]))
+        result = wipe.finish_wipe(draft, now, required=required)
         if result is None:
             return
         checkpoint = result["checkpoint"]
@@ -3957,11 +3988,12 @@ class Host:
                 if self.stopping:
                     return
         if self.expanded_zones:
-            for sequence, route in bridge.authored_zone_requests():
-                result = await self.travel_authored(bridge, transport, route)
+            for sequence, route, crossing in bridge.authored_zone_requests():
+                result = await self.travel_authored(bridge, transport, route, exit_crossing=crossing)
                 self.control.event("native_authored_zone_request", sequence=sequence, source=route.source,
                                    destination=route.destination, actor=route.actor, entrance=route.entrance,
-                                   kind=route.kind, travel_time_step=route.travel_time_step, result=result)
+                                   kind=route.kind, travel_time_step=route.travel_time_step,
+                                   exit_crossing=crossing, result=result)
                 if not result["ok"]:
                     await self.release_native_exit(bridge, route.source)
         if self.matrix_supported:
@@ -4059,7 +4091,11 @@ class Host:
         pause_exit = (native_session_exit.PauseExit(bridge.directory, self.control, "host", engine=engine)
                       if engine is not None and self.native_zones else None)
         heartbeat = asyncio.create_task(self.renew_native_scope(bridge)) if self.native_events else None
-        weapon_shots = (asyncio.create_task(native_weapon_fire_view.relay(self, bridge, transport))
+        footstep_io = (native_footsteps.HostFootsteps(self, bridge, transport)
+                       if pose_link and self.native_guest and native_footsteps.enabled(bridge) else None)
+        if footstep_io is not None:
+            transport.set_footstep_handler(footstep_io.receive)
+        weapon_shots = (asyncio.create_task(native_weapon_fire_view.relay(self, bridge, transport, footsteps=footstep_io))
                         if self.native_guest else None)
         loot_motion = (asyncio.create_task(native_stock_enemy_drops.relay_motion(self, transport))
                        if self.native_events else None)
@@ -4073,6 +4109,8 @@ class Host:
             self.prop_carry_bridge = None
             if pose_link:
                 transport.set_prop_pose_handler(None)
+            if footstep_io is not None:
+                transport.set_footstep_handler(None)
             for task in (heartbeat, weapon_shots, loot_motion, lean):
                 if task:
                     task.cancel()
@@ -4762,6 +4800,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     timeout=7,
                 )
                 control.event("native_seed_restored", **initial_game["native_seed"])
+            if resident_engine is not None:
+                # Pending stock travel may run before the title sees a live host frame.
+                resident_engine.record_initial_host_world(entry_map, initial_game)
             saved = old_world.get("host", {})
             if saved.get("map") == entry_map:
                 try:
@@ -5036,6 +5077,7 @@ class Client:
         self.next_snapshot = 0.0
         self.last_sprint_sent = None
         self.last_aim_sent = None
+        self.last_lighter_sent = None
         self.last_flashlight_sent = None
         self.next_projection = 0.0
         self.gameplay_seen = 0.0
@@ -5084,6 +5126,8 @@ class Client:
         self.world_loot = native_world_loot.Projection()
         self.primary_scope = None
         self.next_primary_renewal = 0.0
+        self.primary_magazine = None
+        self.primary_magazine_attempt = None
         self.bag_projection_key = None
         self.stack_drop_projection = native_guest_drop_projection.Projection()
         self.stopping = False
@@ -5131,7 +5175,7 @@ class Client:
         self.native_return_reservation = None
         self.native_return_retry_allowed = False
         self.next_snapshot = 0.0
-        self.last_sprint_sent = self.last_aim_sent = None
+        self.last_sprint_sent = self.last_aim_sent = self.last_lighter_sent = None
         self.last_flashlight_sent = None
         self.stack_drop_projection.rebind()
         self.crate_lids.reset()
@@ -5439,6 +5483,20 @@ class Client:
                 self.primary_scope = None
                 self.next_primary_renewal = now + 0.8
                 self.control.event("native_guest_primary_scope_rejected", reason=str(error))
+        if not scope:
+            self.primary_magazine = None
+        elif scope == self.primary_scope and kind in native_guest_weapon.FIRE_CLASSES:
+            rounds = equipment.get("rounds")
+            if type(rounds) is int and 0 <= rounds <= 4096:
+                magazine = self.host_session, self.zone_epoch, scope, rounds
+                attempt = magazine, self.gameplay_seen
+                if self.primary_magazine != magazine and self.primary_magazine_attempt != attempt:
+                    self.primary_magazine_attempt = attempt
+                    try:
+                        self.last_game = await self.bridge.command("native-guest-weapon-magazine", *scope, str(rounds), timeout=2)
+                        self.primary_magazine = magazine
+                    except (OSError, RuntimeError) as error:
+                        self.control.event("native_guest_magazine_projection_deferred", reason=str(error))
         for sequence, event_area, event_pawn, event_guid, event_kind, *extra in self.bridge.native_primary_input_requests():
             if sequence <= self.last_primary_intent:
                 continue
@@ -5594,11 +5652,11 @@ class Client:
             return
         sequence, area, pawn, guid, item_class = entries[-1]
         view = self.last_game.get("native_guest_inventory_equip_view", {})
-        armor = native_guest_armor.EQUIP_ACTIONS.get(item_class)
-        flare = item_class in native_flare.CLASSES
+        armor = native_guest_armor.equip_action(item_class)
+        throwable = item_class in native_flare.CLASSES
         if (view != {"sequence": sequence, "map": area, "pawn": pawn, "guid": guid, "state": "equipping"}
                 or area != self.last_game.get("map") or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")
-                or not native_gold.valid_guid(guid) or not (armor or flare or item_class in native_guest_weapon.CLASS_PATHS)):
+                or not native_gold.valid_guid(guid) or not (armor or throwable or item_class in native_guest_weapon.CLASS_PATHS)):
             return
         epoch = self.host_session, self.zone_epoch
         identifier = f"{epoch[0]}:{epoch[1]}:{pawn}:inventory-equip:{sequence}"
@@ -5616,7 +5674,7 @@ class Client:
             if ((self.host_session, self.zone_epoch) != epoch or current.get("native_guest_inventory_equip_view") != view
                     or native_inventory.displayed_offset(current, sequence, area, pawn) != offset):
                 raise ValueError("The inventory equip confirmation expired")
-            action = armor or (native_inventory.STORE_EQUIPMENT if flare else "native-guest-weapon-equip")
+            action = armor or (native_inventory.STORE_EQUIPMENT if throwable else "native-guest-weapon-equip")
             equipped = await self.gameplay_action(action, operation, guid)
             key = "native_guest_helmet" if action == native_guest_armor.HELMET_ACTION else "native_guest_armor"
             if armor and equipped.get(key, {}).get("class_path") != item_class:
@@ -5776,17 +5834,22 @@ class Client:
             self.source_fade = source_visit, destination, time.monotonic()
 
     async def sync_zone_loading(self, destination: object) -> None:
+        state = self.last_game
         if (not self.host_session or not self.zone_epoch or self.needs_travel
-                or self.last_game.get("state") != "connected" or self.last_game.get("map") != self.expected_zone):
+                or state.get("map") != self.expected_zone
+                or (state.get("state") != "connected"
+                    and (state.get("mode"), state.get("state")) != ("client", "disconnected"))):
             return
         if not self.server_transitioning:
             await self.clear_zone_loading()
             return
-        if (self.last_game.get("native_zone_loading_support") is not True
+        if (state.get("native_zone_loading_support") is not True
                 or not isinstance(destination, str) or destination not in self.allowed_maps
-                or destination == self.expected_zone or destination == self.loading_zone):
+                or destination == self.expected_zone):
             return
-        await self.start_guest_zone_loading((self.host_session, self.zone_epoch, self.expected_zone), destination)
+        visit = self.host_session, self.zone_epoch, self.expected_zone
+        if not self.source_fade or self.source_fade[:2] != (visit, destination):
+            await self.start_guest_zone_loading(visit, destination)
 
     async def _request_gameplay_snapshot(self, request: dict) -> tuple[dict, float]:
         reply = await self.transport.request(request, timeout=2)
@@ -5805,11 +5868,16 @@ class Client:
         aim_update = (self.zone_epoch, aim) if type(aim) is bool else None
         flashlight_ready = active and self.gameplay.get(native_flashlight.GUEST_SUPPORT) is True
         flashlight_update = native_flashlight.guest_update(self.last_game, self.zone_epoch) if flashlight_ready else None
+        outfit_frame = self.gameplay.get(native_player_avatar.KEY, {})
+        lighter_ready = active and isinstance(outfit_frame, dict) and "lighter_modes" in outfit_frame
+        lighter_mode = self.last_game.get(native_player_avatar.LOCAL_LIGHTER) if lighter_ready else None
+        lighter_update = (self.zone_epoch, lighter_mode) if lighter_mode is not None else None
+        lighter_changed = lighter_ready and lighter_update != self.last_lighter_sent
         sprint_changed = sprint_update is not None and sprint_update != self.last_sprint_sent
         aim_changed = aim_update is not None and aim_update != self.last_aim_sent
         flashlight_changed = flashlight_ready and native_flashlight.guest_edge(flashlight_update) != native_flashlight.guest_edge(
             self.last_flashlight_sent)
-        if not (sprint_changed or aim_changed or flashlight_changed) and (edges_only or now < self.next_snapshot):
+        if not (sprint_changed or aim_changed or flashlight_changed or lighter_changed) and (edges_only or now < self.next_snapshot):
             return
         self.next_snapshot = now + 0.5
         request = {"action": "snapshot"}
@@ -5820,11 +5888,14 @@ class Client:
                 request.update(avatar_aim=aim, zone_epoch=self.zone_epoch)
             if sprint_update is not None:
                 request.update(sprinting=sprint, zone_epoch=self.zone_epoch)
+            if lighter_update is not None or lighter_changed:
+                request.update({native_player_avatar.GUEST_LIGHTER: lighter_mode or "-", "zone_epoch": self.zone_epoch})
             if flashlight_update is not None or flashlight_changed:
                 request.update({native_flashlight.GUEST_SOURCE: flashlight_update[1] if flashlight_update else None,
                                 "zone_epoch": self.zone_epoch})
         self.last_sprint_sent, self.last_aim_sent = sprint_update, aim_update
         self.last_flashlight_sent = flashlight_update
+        self.last_lighter_sent = lighter_update
         self.snapshot_request = asyncio.create_task(self._request_gameplay_snapshot(request))
 
     async def refresh_gameplay(self, *, project: bool = True, wait: bool = True) -> None:
@@ -6299,6 +6370,7 @@ class Client:
         held = asyncio.create_task(self.guest_held_input.run()) if self.guest_held_input else None
         lean = (asyncio.create_task(native_avatar_lean.follow(self))
                 if native_avatar_lean.enabled(self.bridge) else None)
+        footstep_io = asyncio.create_task(native_footsteps.follow(self)) if native_footsteps.enabled(self.bridge) else None
         prop_poses = (asyncio.create_task(self.prop_carry.stream_local_poses())
                       if self.prop_carry.has_local_pose_stream else None)
         try:
@@ -6311,7 +6383,7 @@ class Client:
             if self.mindcore_carry:
                 self.mindcore_carry.close()
             self.prop_carry.close()
-            for task in (held, lean, prop_poses):
+            for task in (held, lean, prop_poses, footstep_io):
                 if task:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):

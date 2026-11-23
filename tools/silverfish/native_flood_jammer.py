@@ -58,6 +58,8 @@ LENNY = StockKillContract("Asn_Lenny_01", "native_lenny", BLACK_MARKET, BLACK_MA
 SPRATT = StockKillContract(native_spratt.QUEST, "native_spratt", BLACK_MARKET, BLACK_MARKET_BOARD,
                            native_spratt.AREA, 5000, frozenset({"5", "8"}), fixture_xp=7)
 CONTRACTS = {spec.quest: spec for spec in (FLOOD, BLACK_LAKE, CROSSROADS_JAMMER, LENNY, SPRATT)}
+OBSERVATORY_BOUNTY_BOARD = SIMMI_BOARD.removesuffix("_0") + "_2"
+OBSERVATORY_BOUNTIES = frozenset({CROSSROADS_JAMMER.quest, BLACK_LAKE.quest})
 OBJECTIVES = {spec.objective_map: spec for spec in (FLOOD, BLACK_LAKE, CROSSROADS_JAMMER)}
 COMMANDS = {
     spec.command(verb): spec
@@ -89,13 +91,16 @@ def _pawn(host, actor, spec):
     return pawn
 
 
-async def _command(host, bridge, action, pawn, spec):
+async def _command(host, bridge, action, pawn, spec, *, selected_board=None):
     area = host.last_game.get("map")
     board = spec.board_at(area)
-    if board is None:
+    if board is None or selected_board is not None and (
+        area != OBSERVATORY or selected_board != OBSERVATORY_BOUNTY_BOARD or spec.quest not in OBSERVATORY_BOUNTIES
+    ):
         raise party.RuleError(f"{spec.key}_board_unavailable")
+    arguments = (pawn,) if selected_board is None else (pawn, selected_board)
     try:
-        snapshot = await bridge.command(action, pawn, timeout=8)
+        snapshot = await bridge.command(action, *arguments, timeout=8)
     except RuntimeError as error:
         if str(error).startswith(f"stock_{spec.key.removeprefix('native_')}_"):
             host.native_checkpoint_unsafe = False
@@ -103,7 +108,7 @@ async def _command(host, bridge, action, pawn, spec):
         raise
     proof = snapshot.get(spec.key, {})
     if (snapshot.get("state"), snapshot.get("map"), *(proof.get(key) for key in ("operation", "map", "pawn", "board", "quest"))) != (
-            "hosting", area, action, area, pawn, board, spec.quest
+            "hosting", area, action, area, pawn, selected_board or board, spec.quest
     ) or proof.get("reputation", {}).keys() != spec.factions:
         raise RuntimeError("The stock jammer board did not report the exact authored contract")
     if (any(key not in proof or proof[key] not in STEPS for key in ("step_before", "step_after"))
@@ -206,7 +211,7 @@ def _objective_ready(record, spec):
             and proof["cash_before"] == proof["cash_after"] and proof["xp_before"] == proof["xp_after"])
 
 
-async def act(host, bridge, actor, action):
+async def act(host, bridge, actor, action, *, selected_board=None):
     spec = COMMANDS.get(action)
     if not spec or action not in (spec.command("start"), spec.command("turn-in")):
         raise party.RuleError("Choose a supported stock jammer operation")
@@ -226,7 +231,7 @@ async def act(host, bridge, actor, action):
         raise party.RuleError(f"{spec.key}_objective_incomplete")
     host.transitioning = True
     try:
-        before = await _command(host, bridge, spec.command("preflight"), pawn, spec)
+        before = await _command(host, bridge, spec.command("preflight"), pawn, spec, selected_board=selected_board)
         if before["step_after"] != expected[0]:
             if not starting and legacy_stock:
                 raise party.RuleError(f"{spec.key}_objective_incomplete")
@@ -234,7 +239,7 @@ async def act(host, bridge, actor, action):
         if spec is SPRATT and starting and before["xp_after"] < spec.fixture_xp:
             raise party.RuleError("stock_spratt_quest_not_offered")
         host.native_checkpoint_unsafe = True
-        proof = await _command(host, bridge, action, pawn, spec)
+        proof = await _command(host, bridge, action, pawn, spec, selected_board=selected_board)
         cash = proof["cash_after"] - proof["cash_before"]
         xp = proof["xp_after"] - proof["xp_before"]
         if ((proof["step_before"], proof["step_after"], cash, xp) != expected

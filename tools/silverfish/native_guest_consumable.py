@@ -33,6 +33,7 @@ class Meal:
     gain: int
     unit_value: int
     infection: int = 0
+    fatigue: int = 0
 
 
 MEALS = {
@@ -40,10 +41,12 @@ MEALS = {
     CANNED_PEACHES: Meal(CANNED_PEACHES_CLASS, 12, 0, 8),
     CANNED_BEANS: Meal(CANNED_BEANS_CLASS, 14, 0, 14),
     BROWN_MUSHROOM: Meal(BROWN_MUSHROOM_CLASS, 3.5, 0, 1),
+    "native-guest-honey-egg": Meal("/Game/Classes/Items/Item_HoneyEgg.Item_HoneyEgg_C", 5, 0, 6, fatigue=5),
     **{
         f"native-guest-{kind}": Meal(f"/Game/Classes/Items/Item_{asset}.Item_{asset}_C", food, 0, value, infection)
         for kind, asset, food, value, infection in (
             ("canned-beef", "CannedBeef", 16, 30, 8),
+            ("leftovers", "Leftovers", 18, 5, 0),
             ("canned-soup", "CannedSoup", 10, 12, 3),
             ("canned-tuna", "CannedTuna", 6, 9, 4),
             ("dead-beetle", "DeadBeetle", 3, 2, 3),
@@ -61,7 +64,7 @@ RESULT = {action: action.replace("-", "_") for action in COMMANDS.values()}
 
 
 def parse_meal(fields: list[str]) -> dict:
-    if len(fields) not in (17, 19, 22):
+    if len(fields) not in (17, 19, 22, 25):
         raise ValueError("Invalid stock food report size")
     (tag, status, area, pawn, guid, initial, remaining, food_before, food_after,
      regen_before, regen_after, hp, maximum, intox_before, intox_after, host_intox, hemophilia, *food_traits) = fields
@@ -75,8 +78,8 @@ def parse_meal(fields: list[str]) -> dict:
     trait = hemophilia == "1"
     gourmand, healthy_eating = map(int, food_traits[:2]) if food_traits else (0, 0)
     infection = {}
-    if len(food_traits) == 5:
-        sick_before, sick_after, dose = map(int, food_traits[2:])
+    if len(food_traits) >= 5:
+        sick_before, sick_after, dose = map(int, food_traits[2:5])
         if (not all(-2**31 <= value < 2**31 for value in (sick_before, sick_after))
                 or dose not in (0, meal.infection)
                 or (not 1 <= sick_after - sick_before <= dose if dose else sick_before != sick_after)):
@@ -84,6 +87,17 @@ def parse_meal(fields: list[str]) -> dict:
         infection = {"sickness_before": sick_before, "sickness_after": sick_after, "infection_dose": dose}
     elif meal.infection:
         raise ValueError("Missing stock food infection proof")
+    fatigue = {}
+    if meal.fatigue:
+        if len(food_traits) != 8:
+            raise ValueError("Missing stock food fatigue proof")
+        before_fatigue, after_fatigue, minimum_fatigue = map(int, food_traits[5:])
+        if (not 0 <= before_fatigue <= 100 or minimum_fatigue not in (0, 15)
+                or after_fatigue != min(max(before_fatigue + meal.fatigue, minimum_fatigue), 100)):
+            raise ValueError("Invalid stock food fatigue proof")
+        fatigue = {"fatigue_before": before_fatigue, "fatigue_after": after_fatigue}
+    elif len(food_traits) == 8:
+        raise ValueError("Unexpected stock food fatigue proof")
     if not (0 <= gourmand <= 1025 and 0 <= healthy_eating <= 1025):
         raise ValueError("Invalid stock food traits")
     appetite = meal.food * (1 - gourmand * 0.2)
@@ -104,7 +118,7 @@ def parse_meal(fields: list[str]) -> dict:
             "regen_before": regen, "regen_after": buffered, "health_before": health, "health_after": health,
             "max_health": max_health, "hemophilia": trait, "gourmand": gourmand, "healthy_eating": healthy_eating,
             "intox_before": intox_start, "intox_after": intox_end,
-            "host_intox_before": shared_intox, "host_intox_after": shared_intox, **infection}
+            "host_intox_before": shared_intox, "host_intox_after": shared_intox, **infection, **fatigue}
 
 
 def starter_awards(guid, awards) -> bool:

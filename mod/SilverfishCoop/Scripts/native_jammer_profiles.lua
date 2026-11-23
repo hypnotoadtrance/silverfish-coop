@@ -64,4 +64,5 @@ return {
     by_tag = {[flood.tag] = flood, [lake.tag] = lake, [crossroads.tag] = crossroads, [lenny.tag] = lenny, [spratt.tag] = spratt},
     by_map = {[flood.objective_map] = flood, [lake.objective_map] = lake, [crossroads.objective_map] = crossroads},
     alternate = {[lake.tag] = at_simmi(lake)},
+    observatory_bounty_board = "BountyBoard_BP_C " .. simmi_world .. ":PersistentLevel.BountyBoard_BP_C_2",
 }

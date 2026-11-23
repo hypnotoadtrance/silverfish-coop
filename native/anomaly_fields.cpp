@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <string_view>
 
@@ -45,8 +47,14 @@ namespace
     constexpr auto observer_class = STR("/Game/Classes/Anomalies/Observers_BP.Observers_BP_C");
     constexpr auto item_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto crossroads_world = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P");
+    constexpr auto rook_world = STR("/Game/Classes/Maps/Dreams/TheRook_P.TheRook_P");
+    constexpr auto vortex_class = STR("/Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C");
     constexpr auto roaming_teleport_class = STR("/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C");
     constexpr auto physics_prop = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
+    constexpr auto bottle_class = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Bottle_Booze01.Prop_Bottle_Booze01_C");
+    constexpr auto bottle_splash = STR("/Game/Assets/PFX/NI_BrokenBottle_WtLiquid.NI_BrokenBottle_WtLiquid");
+    constexpr auto bottle_sound =
+        STR("/Game/Assets/Sounds/CUEs/BulletHit_Cues/Impact_Glass_Liquid_Cue.Impact_Glass_Liquid_Cue");
     constexpr auto fixed_prop = STR("/Game/Assets/StaticMeshes/Destructable/Explosive_Prop_Master_BP.Explosive_Prop_Master_BP_C");
     constexpr auto drum_fire_class = STR("/Game/Classes/Anomalies/Fire_Molotov.Fire_Molotov_C");
     constexpr std::array<std::wstring_view, 3> canister_classes{
@@ -57,7 +65,7 @@ namespace
     constexpr std::array<std::wstring_view, 5> replicated_classes{
         STR("/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C"),
         STR("/Game/Classes/Anomalies/BurnerTrap_BP.BurnerTrap_BP_C"),
-        STR("/Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C"),
+        vortex_class,
         electrode_class,
         roaming_teleport_class,
     };
@@ -83,7 +91,7 @@ namespace
     std::array<U::FName, 7> roaming_events;
     std::array<U::FName, canister_classes.size()> canister_names;
     std::array<U::FName, 16> canister_events;
-    U::FName fuel_drum, fuel_drum_graph, prop_broken, receive_tick, drum_fire_name;
+    U::FName fuel_drum, fuel_drum_graph, prop_broken, receive_tick, drum_fire_name, bottle_name;
     std::array<U::FName, 5> fixed_prop_events;
     thread_local bool guest_session{};
     thread_local U::FWeakObjectPtr observed_world;
@@ -438,6 +446,15 @@ namespace
         auto* entry = roster ? U::CastField<U::FClassProperty>(roster->GetInner()) : nullptr;
         if (!entry) return false;
         U::FScriptArrayHelper classes(roster, roster->ContainerPtrToValuePtr<void>(field));
+        if (classes.Num() == 2 && world && world->GetPathName() == rook_world &&
+            field->HasAnyFlags(U::RF_WasLoaded) && field->GetOuterPrivate() == object(world, STR("PersistentLevel")))
+        {
+            auto* first = entry->GetObjectPropertyValue(classes.GetRawPtr(0));
+            auto* second = entry->GetObjectPropertyValue(classes.GetRawPtr(1));
+            if (!first || !second) return false;
+            const auto a = first->GetPathName(), b = second->GetPathName();
+            return (a == gravity_class && b == vortex_class) || (a == vortex_class && b == gravity_class);
+        }
         if (classes.Num() != 1) return false;
         auto* type = entry->GetObjectPropertyValue(classes.GetRawPtr(0));
         if (trap_class(type)) return true;
@@ -475,6 +492,113 @@ namespace
         // A guest can enter stock BeginPlay before the new world's driver has been published.
         auto* pending = loading.driver.Get();
         return loading.context && (!driver || driver == pending) && server_connection(pending, loading.connection.Get());
+    }
+
+    struct BottleBreak
+    {
+        const Iteration* call{};
+        U::FWeakObjectPtr actor, world;
+        std::array<double, 3> point{};
+    };
+
+    struct BottleCue
+    {
+        U::FWeakObjectPtr world;
+        std::array<double, 3> point{};
+        Clock::time_point expires{};
+    };
+
+    thread_local std::array<BottleBreak, 4> bottle_breaks;
+    thread_local std::array<BottleCue, 8> bottle_cues;
+
+    void begin_bottle_break(Iteration& call, U::UObject* actor, U::UFunction* function, const void* locals)
+    {
+        if (!function || function->GetFName() != prop_broken || !actor || !locals ||
+            !U::IsInGameThreadRaw() || call.OriginalFunctionCallPrevented()) return;
+        auto* type = actor->GetClassPrivate();
+        auto* binding = function->GetOuterPrivate();
+        if (!type || type->GetFName() != bottle_name || type->GetPathName() != bottle_class ||
+            !binding || binding->GetPathName() != physics_prop || !type->IsChildOf(static_cast<U::UClass*>(binding)) ||
+            function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || function->GetNumParms() != 2 ||
+            function->GetParmsSize() != 32 || function->GetReturnProperty() || actor->IsUnreachable()) return;
+        auto* world = static_cast<U::AActor*>(actor)->GetWorld();
+        auto* driver = object(world, STR("NetDriver"));
+        if (!world || !driver || object(driver, STR("World")) != world || !property<U::FObjectProperty>(driver, STR("ServerConnection")))
+            return;
+        auto* role = property<U::FByteProperty>(actor, STR("Role"));
+        auto* destroys = property<U::FBoolProperty>(actor, STR("DestroyIfBroken"));
+        auto* damage = property<U::FBoolProperty>(actor, STR("DamageOnImpact"));
+        auto* particle = object(actor, STR("Break_PFX"));
+        auto* sound = object(actor, STR("Break_SFX"));
+        if (!role || !destroys || !destroys->GetPropertyValueInContainer(actor) ||
+            !damage || !damage->GetPropertyValueInContainer(actor) || !particle || particle->GetPathName() != bottle_splash ||
+            !sound || sound->GetPathName() != bottle_sound || object(actor, STR("FireRef"))) return;
+
+        auto* server = object(driver, STR("ServerConnection"));
+        const auto local_role = role->GetPropertyValueInContainer(actor);
+        if (guest_session)
+        {
+            // A simulated or autonomous replica disappears through existing host replication.
+            // Skip a competing local destruction or replay of the same presentation.
+            if (server_connection(driver, server) && (local_role == 1 || local_role == 2))
+                call.PreventOriginalFunctionCall();
+            return;
+        }
+        auto* broken = property<U::FBoolProperty>(actor, STR("Broken"));
+        if (server || local_role != 3 || !broken || broken->GetPropertyValueInContainer(actor)) return;
+        if (std::ranges::any_of(bottle_breaks, [actor](const auto& entry) { return entry.actor.Get() == actor; })) return;
+        const auto slot = std::ranges::find_if(bottle_breaks, [](const auto& entry) { return !entry.call; });
+        if (slot == bottle_breaks.end()) return;
+        auto* hit = property<U::FStructProperty>(function, STR("HitLoc"));
+        auto* instigator = property<U::FObjectProperty>(function, STR("Instigator"));
+        auto* vector = hit ? hit->GetStruct().Get() : nullptr;
+        std::array<double, 3> point{};
+        if (!vector || vector->GetPathName() != STR("/Script/CoreUObject.Vector") ||
+            hit->GetOffset_Internal() != 0 || hit->GetSize() != sizeof(point) ||
+            !instigator || instigator->GetOffset_Internal() != sizeof(point)) return;
+        std::memcpy(point.data(), locals, sizeof(point));
+        if (!std::ranges::all_of(point, [](double value) { return std::isfinite(value) && std::abs(value) <= 1e7; }))
+            return;
+        *slot = {&call, actor, world, point};
+    }
+
+    void end_bottle_break(Iteration& call, U::UFunction* function)
+    {
+        if (!function || function->GetFName() != prop_broken || !U::IsInGameThreadRaw()) return;
+        const auto slot = std::ranges::find_if(bottle_breaks, [&call](const auto& entry) { return entry.call == &call; });
+        if (slot == bottle_breaks.end()) return;
+        const auto observed = *slot;
+        *slot = {};
+        auto* actor = observed.actor.Get();
+        auto* world = observed.world.Get();
+        auto* broken = property<U::FBoolProperty>(actor, STR("Broken"));
+        if (!world || !broken || !broken->GetPropertyValueInContainer(actor) ||
+            call.OriginalFunctionCallPrevented()) return;
+        const auto now = Clock::now();
+        auto pending = std::ranges::find_if(bottle_cues, [world, now](const auto& cue) {
+            return cue.world.Get() != world || cue.expires <= now;
+        });
+        if (pending == bottle_cues.end()) pending = std::ranges::min_element(bottle_cues, {}, &BottleCue::expires);
+        *pending = {world, observed.point, now + std::chrono::milliseconds(1250)};
+    }
+
+    int take_bottle_cue(const Lua& lua)
+    {
+        if (guest_session || !U::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto world = static_cast<std::uintptr_t>(lua.get_integer());
+        const auto now = Clock::now();
+        auto next = bottle_cues.end();
+        for (auto it = bottle_cues.begin(); it != bottle_cues.end(); ++it)
+        {
+            if (reinterpret_cast<std::uintptr_t>(it->world.Get()) != world || it->expires <= now)
+                *it = {};
+            else if (next == bottle_cues.end() || it->expires < next->expires)
+                next = it;
+        }
+        if (next == bottle_cues.end()) return 0;
+        for (const auto axis : next->point) lua.set_number(axis);
+        *next = {};
+        return 3;
     }
 
     void intercept(Iteration& call, U::UObject* actor, U::UFunction* function)
@@ -548,7 +672,13 @@ namespace
         }
         else if (gravity_well || pyrogeist_body || pyrogeist_jet || shadow_sphere || angler_lamp || observing)
         {
-            if (!world || world->GetPathName() != crossroads_world) return;
+            if (!world) return;
+            const auto path = world->GetPathName();
+            if (path != crossroads_world)
+            {
+                auto* role = property<U::FByteProperty>(actor, STR("Role"));
+                if (!gravity_well || path != rook_world || !role || role->GetPropertyValueInContainer(actor) != 1) return;
+            }
         }
         else if (!canister && !fixed && !roaming && (function->GetNumParms() != 6 || !trap_class(type))) return;
         if (!guest_world(world)) return;
@@ -603,6 +733,8 @@ namespace
                 loading = {};
                 drum_fires = {};
                 drum_breaks = {};
+                bottle_breaks = {};
+                bottle_cues = {};
             }
         }
         lua.set_bool(valid);
@@ -696,6 +828,7 @@ namespace silverfish::native_anomaly_fields
         fuel_drum = U::FName{STR("Prop_FuelDrum_C"), U::FNAME_Add};
         fuel_drum_graph = U::FName{STR("ExecuteUbergraph_Prop_FuelDrum"), U::FNAME_Add};
         prop_broken = U::FName{STR("PropBroken"), U::FNAME_Add};
+        bottle_name = U::FName{STR("Prop_Bottle_Booze01_C"), U::FNAME_Add};
         drum_fire_name = U::FName{STR("Fire_Molotov_C"), U::FNAME_Add};
         receive_tick = U::FName{STR("ReceiveTick"), U::FNAME_Add};
         canister_names = {
@@ -735,10 +868,12 @@ namespace silverfish::native_anomaly_fields
             begin_observer_offering(call, actor, frame);
         };
         hooks[0] = H::RegisterProcessEventPreCallback(
-            [](Iteration& call, U::UObject* actor, U::UFunction* function, void*) {
+            [](Iteration& call, U::UObject* actor, U::UFunction* function, void* locals) {
                 intercept(call, actor, function);
                 if (stock_actor_begin != H::ERROR_ID && stock_event_post != H::ERROR_ID)
                     begin_drum_break(call, actor, function);
+                if (stock_event_post != H::ERROR_ID)
+                    begin_bottle_break(call, actor, function, locals);
             },
             {false, false, owner, STR("Suppress independent guest trap field generation")});
         hooks[1] = H::RegisterProcessLocalScriptFunctionPreCallback(
@@ -746,6 +881,8 @@ namespace silverfish::native_anomaly_fields
                 script(call, actor, frame, result);
                 if (stock_actor_begin != H::ERROR_ID && stock_script_post != H::ERROR_ID)
                     begin_drum_break(call, actor, frame.Node());
+                if (stock_script_post != H::ERROR_ID)
+                    begin_bottle_break(call, actor, frame.Node(), frame.Locals());
             },
             {false, false, owner, STR("Suppress guest trap field Blueprint calls")});
         hooks[2] = H::RegisterProcessInternalPreCallback(
@@ -753,6 +890,8 @@ namespace silverfish::native_anomaly_fields
                 script(call, actor, frame, result);
                 if (stock_actor_begin != H::ERROR_ID && stock_internal_post != H::ERROR_ID)
                     begin_drum_break(call, actor, frame.Node());
+                if (stock_internal_post != H::ERROR_ID)
+                    begin_bottle_break(call, actor, frame.Node(), frame.Locals());
             },
             {false, false, owner, STR("Suppress guest trap field reflected calls")});
         hooks[3] = H::RegisterLoadMapPreCallback(
@@ -774,6 +913,7 @@ namespace silverfish::native_anomaly_fields
             }, {false, true, owner, STR("Release the guest trap map loading scope")});
         const auto stock_result = [](Iteration& call, U::UObject* actor, U::FFrame& frame, void* result) {
             end_drum_break(call, frame.Node());
+            end_bottle_break(call, frame.Node());
             if (observer_enabled)
             {
                 end_observer_check(call, actor, frame, result);
@@ -785,8 +925,10 @@ namespace silverfish::native_anomaly_fields
         stock_internal_post = H::RegisterProcessInternalPostCallback(
             stock_result, {false, false, owner, STR("Read reflected anomaly and prop results")});
         stock_event_post = H::RegisterProcessEventPostCallback(
-            [](Iteration& call, U::UObject*, U::UFunction* function, void*) { end_drum_break(call, function); },
-            {false, false, owner, STR("Finish stock fuel drum actor scope")});
+            [](Iteration& call, U::UObject*, U::UFunction* function, void*) {
+                end_drum_break(call, function);
+                end_bottle_break(call, function);
+            }, {false, false, owner, STR("Read stock prop break results")});
         stock_actor_begin = H::RegisterBeginPlayPostCallback(
             [](Iteration& call, U::AActor* actor) {
                 capture_drum_fire(call, actor);
@@ -799,6 +941,8 @@ namespace silverfish::native_anomaly_fields
     {
         drum_fires = {};
         drum_breaks = {};
+        bottle_breaks = {};
+        bottle_cues = {};
         for (auto* post : {&stock_script_post, &stock_internal_post, &stock_event_post, &stock_actor_begin})
         {
             if (*post != H::ERROR_ID) H::UnregisterCallback(*post);
@@ -814,6 +958,7 @@ namespace silverfish::native_anomaly_fields
     void register_lua(Lua& lua)
     {
         lua.register_function("SilverfishSetNativeAnomalyGuest", set_guest);
+        lua.register_function("SilverfishTakeNativeBottleBreakCue", take_bottle_cue);
         lua.register_function("SilverfishReadNativeAnomalySkips", count);
         if (stock_actor_begin != H::ERROR_ID &&
             (stock_event_post != H::ERROR_ID || stock_script_post != H::ERROR_ID || stock_internal_post != H::ERROR_ID))

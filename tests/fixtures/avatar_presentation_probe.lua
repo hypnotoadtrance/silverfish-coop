@@ -10,10 +10,20 @@ local guest_fixture = mailbox and mailbox:match("[/\\]clients[/\\]avatar%-%x+[/\
     and (pose_fixture or rifle_fixture or sprint_fixture or os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_EQUIPMENT") == "1")
 local host_fixture = mailbox and mailbox:match("[/\\]campaigns[/\\]avatar%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
-if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not (guest_fixture or host_fixture) then return end
+local portable_fixture = mailbox
+    and mailbox:match("[/\\]portable%-title%-%x+[/\\]first[/\\]titles[/\\]local[/\\]run[/\\]game%-bridge[/\\]%x+$")
+    and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
+local wipe_fixture = mailbox and mailbox:match("[/\\]clients[/\\]stock%-wipe%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
+    and os.getenv("SILVERFISH_COOP_WIPE_AIM_PROBE") == "1"
+local wipe_host = mailbox and mailbox:match("[/\\]campaigns[/\\]stock%-wipe%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
+    and os.getenv("SILVERFISH_COOP_WIPE_AIM_PROBE") == "1"
+    and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
+if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1"
+    or not (guest_fixture or host_fixture or portable_fixture or wipe_fixture or wipe_host) then return end
 
 local command, reply = mailbox .. "/avatar-probe-command.tsv", mailbox .. "/avatar-probe-reply.tsv"
-local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
+local map = (portable_fixture or wipe_fixture or wipe_host) and "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
+    or "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local mesh_root = "/Game/Classes/Player/PlayerAssets/HelmetMeshes/"
 local inventory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
@@ -348,7 +358,55 @@ local function movement_probe(operation, local_pawn, remote_pawn)
     end
 end
 
+local function held_equipment_row(pawn)
+    local slots, index = pawn.Save.PlayerEquipment, pawn.Save.PlayerEquipIndex
+    local selected = index >= 0 and index < slots:GetArrayNum() and slots[index + 1][item_class]
+    local held = pawn.EquipedItem
+    return table.concat({valid(held) and not held:IsActorBeingDestroyed() and held:GetClass():GetFullName() or "-",
+        valid(selected) and selected:GetFullName() or "-"}, "\t")
+end
+
 local function run(operation)
+    if wipe_host then
+        assert(operation == "heldstate", "avatar_probe_unknown_wipe_operation")
+        local _, guest = player_pair()
+        return held_equipment_row(guest)
+    end
+    if wipe_fixture then
+        local viewport = FindFirstOf("GameViewportClient")
+        local world = valid(viewport) and viewport.World
+        local driver = valid(world) and world.NetDriver
+        assert(valid(driver) and valid(driver.ServerConnection)
+            and world:GetFullName() == "World /Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P",
+            "avatar_probe_wipe_connection_unavailable")
+        local pawn
+        for _, candidate in ipairs(FindAllOf("Player_FP_C") or {}) do
+            if valid(candidate) and same(candidate:GetWorld(), world) and candidate:IsLocallyControlled()
+                and not candidate:HasAuthority() and not candidate:IsActorBeingDestroyed() then
+                assert(not pawn, "avatar_probe_duplicate_local_guest")
+                pawn = candidate
+            end
+        end
+        assert(pawn, "avatar_probe_rig_pending")
+        if operation == "heldstate" then return held_equipment_row(pawn) end
+        if operation == "aim" then
+            assert(not pawn.IsWeaponBlocked and valid(pawn.Save), "avatar_probe_wipe_aim_unavailable")
+            local held = pawn.EquipedItem
+            if not valid(held) then
+                local slots = pawn.Save.PlayerEquipment
+                assert(slots:GetArrayNum() > 1 and valid(slots[2][item_class]), "avatar_probe_rig_pending")
+                pawn:Equip_NextItem(1, false)
+                held = pawn.EquipedItem
+            end
+            assert(valid(held) and same(held.User, pawn), "avatar_probe_rig_pending")
+            held:Use_Item_Secondary(true)
+            assert(pawn.Aiming, "avatar_probe_stock_aim_failed")
+        else
+            assert(operation == "aimstate", "avatar_probe_unknown_wipe_operation")
+        end
+        return pawn.Aiming and "aiming" or "lowered"
+    end
+    assert(not portable_fixture or operation == "consume", "avatar_probe_unknown_portable_operation")
     local movement_operation = sprint_fixture and movement_operations[operation]
         or aim_movement_fixture and aim_movement_operations[operation]
     if guest_fixture then
@@ -473,6 +531,14 @@ local function run(operation)
         actor:Use_Item_Primary(true, 0)
         assert(actor.BeingUsed == true and host.UsingItem == true and valid(actor.UseSound),
             "avatar_probe_stock_bandage_use_unverified")
+        if portable_fixture then
+            local state = valid(host.PlayerState) and host.PlayerState or host.Controller.PlayerState
+            local ok, id = pcall(function() return state:GetPlayerId() end)
+            if not ok or id == nil then id = state.PlayerId end
+            assert(type(id) == "number" and math.tointeger(id) and id >= 0 and same(actor:GetOwner(), host),
+                "avatar_probe_host_identity_unavailable")
+            return ("%d\t%s"):format(id, actor:GetClass():GetFullName())
+        end
     elseif operation == "equip" then
         style(host, "SM_Head_UV_02_EarRing", "SM_Plumage_007", { R = .2, G = .7, B = .35, A = 1 })
         style(guest, "SM_Head_UV_Fangs_01", "SM_Plumage_012", { R = .8, G = .25, B = .33, A = 1 })
@@ -513,13 +579,13 @@ LoopInGameThreadWithDelay(sprint_fixture and 16 or pose_fixture and 40 or 250, f
     if not file then return false end
     local content = file:read(100) or ""
     file:close()
-    local id, operation = content:match("^(%x+)\t([a-z0-9]+)\n$")
+    local id, operation = content:match("^(%x+)\t([a-z0-9]+)\r?\n$")
     if not id or #id ~= 32 or id == last then return false end
     last = id
     local success, issue = pcall(run, operation)
     local output = io.open(reply, "wb")
     if output then
-        local result = success and (issue and "ok\t" .. issue or "ok") or tostring(issue)
+        local result = success and (issue and "ok\t" .. issue or "ok") or ("error\t" .. tostring(issue))
         output:write(id .. "\t" .. result .. "\n")
         output:close()
     end

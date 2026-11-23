@@ -1,0 +1,95 @@
+local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
+if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") ~= "1"
+    or not mailbox or not mailbox:match("[/\\]portable%-title%-%x+[/\\][%a]+[/\\]titles[/\\]local[/\\]run[/\\]game%-bridge[/\\]%x+$") then return end
+
+local prefix = mailbox .. "/portable-guest-food-"
+local map = "World /Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
+local meal_path = "/Game/Classes/Items/Item_MRE.Item_MRE_C"
+local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
+local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
+local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
+local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
+local last
+
+local function valid(value) return value and value:IsValid() end
+local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
+local function asset(path)
+    local object = StaticFindObject(path)
+    if not valid(object) then LoadAsset(path); object = StaticFindObject(path) end
+    assert(valid(object), "stock asset unavailable: " .. path)
+    return object
+end
+
+local function guest_read(pawn, save, tick)
+    local stack = pawn.Controller.MenuStack
+    local screen = stack[stack:GetArrayNum()]
+    if screen and type(screen.type) == "function" and screen:type() == "RemoteUnrealParam" then screen = screen:get() end
+    assert(valid(screen) and screen:IsVisible() and same(screen:GetOwningPlayer(), pawn.Controller)
+        and same(screen:GetClass(), asset("/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C")), "stock Backpack unavailable")
+    local info = screen.PlayerInfoBox
+    assert(valid(info) and same(info["As Player FP"], pawn) and valid(info.TextBlock_Hunger), "stock hunger widget is not bound to the guest")
+    -- The offscreen NullRHI viewport does not tick this stock widget after construction.
+    if tick then info:Tick(info:GetCachedGeometry(), 0) end
+    return ("%.6f,%.6f,%s"):format(save.PlayerFood, save.PlayerRegen, info.TextBlock_Hunger:GetText():ToString())
+end
+
+local function host_read(pawn, save, world, action)
+    local remote
+    for _, candidate in ipairs(FindAllOf("Player_FP_C") or {}) do
+        if valid(candidate) and candidate:HasAuthority() and not candidate:IsLocallyControlled()
+            and not candidate:IsActorBeingDestroyed() and same(candidate:GetWorld(), world) then
+            assert(not remote, "only one enrolled guest is supported by this fixture")
+            remote = candidate
+        end
+    end
+    local detached = remote and remote.Save
+    assert(valid(detached) and not same(detached, save), "detached authoritative guest save unavailable")
+    if action == "host-read" then
+        return ("%.6f,%.6f,%.6f,%.6f"):format(save.PlayerFood, save.PlayerRegen, detached.PlayerFood, detached.PlayerRegen)
+    end
+    assert(action == "seed", "unknown host food fixture action")
+    local food, out = asset(meal_path), {}
+    local pack = detached.PlayerBackpack
+    for index = 1, pack:GetArrayNum() do
+        assert(not same(pack[index][item_class], food), "unexpected preexisting meal")
+    end
+    asset(factory):ItemActorToStruct(food:GetCDO(), remote, out)
+    local row = out.Item or out
+    assert(same(row[item_class], food), "stock meal converter returned a different class")
+    row[ammo] = 1
+    pack[pack:GetArrayNum() + 1] = row
+    detached.PlayerFood, detached.PlayerRegen, detached.PlayerHealth = 38, 230, 220
+    local id = row[item_guid]
+    return ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
+end
+
+local function run(action)
+    local viewport = FindFirstOf("GameViewportClient")
+    local world = valid(viewport) and viewport.World
+    assert(valid(world) and world:GetFullName() == map, "stock Observatory unavailable")
+    local pawn = asset("/Script/Engine.Default__GameplayStatics"):GetPlayerPawn(world, 0)
+    local save = valid(pawn) and pawn.Save
+    assert(valid(save) and pawn:IsLocallyControlled() and same(save, world.OwningGameInstance.SaveSlot_Ref), "bound local co-op pawn unavailable")
+    if action == "guest-read" or action == "guest-tick" then
+        assert(not pawn:HasAuthority(), "the guest meal readback requires a joined player")
+        return guest_read(pawn, save, action == "guest-tick")
+    end
+    assert(pawn:HasAuthority(), "the meal fixture must seed the detached save on the host")
+    return host_read(pawn, save, world, action)
+end
+
+LoopInGameThreadWithDelay(40, function()
+    local request = io.open(prefix .. "command.tsv", "rb")
+    if not request then return end
+    local data = request:read(96)
+    request:close()
+    if not data then return end
+    local ticket, action = data:match("^(%x+)\t([a-z%-]+)$")
+    if not ticket or #ticket ~= 32 or ticket == last then return end
+    last = ticket
+    local ok, response = pcall(run, action)
+    local output = assert(io.open(prefix .. "reply.tsv", "wb"))
+    local message = tostring(response):gsub("[\r\n\t]", " ")
+    output:write(ticket, "\t", ok and "ok" or "error", "\t", message)
+    output:close()
+end)

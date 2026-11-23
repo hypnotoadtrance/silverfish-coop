@@ -6,7 +6,6 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local fixtures = enabled and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local jacket = "/Game/Classes/Armor_Items/Armor_BomberJacket.Armor_BomberJacket_C"
-local hazop = "/Game/Classes/Armor_Items/Armor_HazOp.Armor_HazOp_C"
 local hunter_jacket = "/Game/Classes/Armor_Items/Armor_HunterJacket.Armor_HunterJacket_C"
 local hazard_suit = "/Game/Classes/Armor_Items/Armor_HazzardSuit.Armor_HazzardSuit_C"
 local dust_filter = "/Game/Classes/Armor_Items/Helm_DustFilter.Helm_DustFilter_C"
@@ -25,11 +24,11 @@ local disguise_probe = "native-guest-disguise-probe-fixture"
 local dead_bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 
 function armor.is_body_path(path)
-    return path == jacket or path == hazop or path == hunter_jacket or path == hazard_suit or path == conscript_uniform
+    return type(path) == "string" and path:match("^/Game/Classes/Armor_Items/[%w_/]*[/]?(Armor_[%w_]+)%.%1_C$") ~= nil
 end
 
 function armor.is_helmet_path(path)
-    return path == dust_filter or path == basic_helmet or path == goggles or path == standard_infantry_helmet
+    return type(path) == "string" and path:match("^/Game/Classes/Armor_Items/[%w_/]*[/]?(Helm_[%w_]+)%.%1_C$") ~= nil
 end
 
 local function guid_text(parts)

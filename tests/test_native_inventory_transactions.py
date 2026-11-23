@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish import native_computer_board, native_finite_shop, party
+from tools.silverfish import native_computer_board, native_finite_shop, native_inventory, party
 from tools.silverfish.campaign import CampaignStore
 from tools.silverfish.control import Control
 from tools.silverfish.multi_host import MultiHost
@@ -50,6 +50,22 @@ class NativeInventoryTransactionTests(unittest.IsolatedAsyncioTestCase):
             "merchant_cash_before": 500, "merchant_cash_after": 500 - wallet_delta,
             "offers": [offer], "count": 1,
         }}
+
+    async def test_unequip_retains_detached_inventory_and_replays_one_receipt(self):
+        host = self.host_without_fresh_guest_frame(OBSERVATORY)
+        host.last_game.update({native_inventory.UNEQUIP_CAPABILITY: 1, "native_guest_save_retention": True})
+        host.pending_guest_saves = {GUEST: (PAWN,)}
+        proof = {"map": OBSERVATORY, "pawn": PAWN, "state": "unequipped", "guid": GUID, "slot": 1, "ammo": 3}
+        bridge = SimpleNamespace(command=AsyncMock(return_value={**host.last_game, native_inventory.UNEQUIP_KEY: proof}))
+        args = (host, bridge, GUEST, f"{GUID}|1", OPERATION_ID)
+        result = await native_inventory.store_equipment(*args, unequip=True)
+        self.assertEqual(result[native_inventory.UNEQUIP_KEY], dict(proof, owner=GUEST))
+        self.assertEqual(await native_inventory.store_equipment(*args, unequip=True), result)
+        with self.assertRaisesRegex(party.RuleError, "operation_id_conflict"):
+            await native_inventory.store_equipment(host, bridge, GUEST, f"{GUID}|2", OPERATION_ID, unequip=True)
+        bridge.command.assert_awaited_once_with(native_inventory.UNEQUIP, PAWN, GUID, "1", timeout=6)
+        host.checkpoint_native.assert_not_awaited()
+        self.assertFalse(host.native_checkpoint_unsafe)
 
     async def test_guest_shop_buy_and_sale_require_the_inventory_frame_with_wallet_and_receipt(self):
         for action, before, after, delta in (("buy", "listed", "purchased", -125), ("sell", "sale-quote", "sold", 125)):

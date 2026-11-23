@@ -61,6 +61,8 @@ STOCK_MENU = {LAKE_JAMMER.quest: LAKE_JAMMER, CROSSROADS_JAMMER.quest: CROSSROAD
 
 
 def catalog_specialists(area, board):
+    if area == OBSERVATORY and board == native_flood_jammer.OBSERVATORY_BOUNTY_BOARD:
+        return native_flood_jammer.OBSERVATORY_BOUNTIES
     if board is not None and board != BOARDS.get(area):
         return frozenset()
     # These contracts still use the existing authored action handlers.
@@ -218,8 +220,10 @@ class WireBoardView:
                 return snapshot
         verb, state = ("native-quest-start", "accepted") if starting else ("native-quest-turnin", "completed")
         try:
-            target = (native_board_contract.menu_target(visit, board, quest)
-                      if projected and quest not in catalog_specialists(area, board) else quest)
+            target = quest
+            observatory_jammer = area == OBSERVATORY and quest in native_flood_jammer.OBSERVATORY_BOUNTIES
+            if projected and (observatory_jammer or quest not in catalog_specialists(area, board)):
+                target = native_board_contract.menu_target(visit, board, quest)
             result = await action(verb, operation, target)
             step = result.get("step")
             valid_step = type(step) is int and (step > 0 if projected and starting else step == (1 if starting else -10))

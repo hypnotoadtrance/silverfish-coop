@@ -78,23 +78,31 @@ async def verify(work, vanilla_saved):
         smg = next(profile.path for profile in FIREARMS if profile.kind == "smg-standard")
         await wait(run, lambda state: state.get("game", {}).get("native_player_avatars", {}).get(pawn, {}).get("weapon_meshes"))
 
-        async def recoil_after(rounds):
+        def visual_cycle(state):
+            return state.get("game", {}).get("native_avatar_cycle", {}).get(pawn, {})
+
+        async def recoil_after(rounds, previous_cycles):
             def settled(state):
                 row = state.get("game", {}).get("native_avatar_recoil", {}).get(pawn, {})
-                cycle = state.get("game", {}).get("native_avatar_cycle", {}).get(pawn, {})
+                cycle = visual_cycle(state)
                 return ((row.get("weapon"), row.get("count"), row.get("restored")) == (smg, rounds, True)
-                        and (cycle.get("weapon"), cycle.get("count"), cycle.get("active")) == (smg, rounds, False)
+                        and (cycle.get("weapon"), cycle.get("count"), cycle.get("active")) ==
+                        (smg, previous_cycles + rounds, False)
                         and cycle.get("travel_cm", 0) > .1)
             state = await wait(run, settled, timeout=8)
             row = state["game"]["native_avatar_recoil"][pawn]
             assert not row["active"] and max(row["kick_cm"], row["rotation_degrees"]) > .1, row
             return row, state["game"]["native_avatar_cycle"][pawn]
 
-        for loaded in (16, 25):
+        for reload_count, loaded in enumerate((16, 25), start=1):
             reserve = uuid.uuid4().hex.upper()
             await call("action", *host, "native-guest-weapon-seed-ammo", "--item-guid", reserve)
             outcome = (await call("action", *client, "native-guest-weapon-reload", "--target", guid))["native_guest_weapon"]
             assert (outcome["guid"], outcome["after"], outcome["reserve_after"]) == (guid, loaded, 0), outcome
+            reloaded = await wait(run, lambda state: (visual_cycle(state).get("count"), visual_cycle(state).get("active"))
+                                  == (reload_count, False), timeout=8)
+        previous_cycles = visual_cycle(reloaded)["count"]
+        proof["reload_cycles_before_fire"] = previous_cycles
 
         other = uuid.uuid4().hex.upper()
         refused = await call("action", *host, FIXTURE, "--target", "guest", "--item-guid", other,
@@ -107,14 +115,14 @@ async def verify(work, vanilla_saved):
         assert (release["guid"], release["status"], release["before"]) == (guid, "released", 25), release
         assert release["rounds"] == release["projectiles"] == 25 - release["after"] >= 2, release
         proof["release"] = release
-        proof["release_recoil"], proof["release_cycle"] = await recoil_after(release["rounds"])
+        proof["release_recoil"], proof["release_cycle"] = await recoil_after(release["rounds"], previous_cycles)
         expiry = (await call("action", *host, FIXTURE, "--target", "guest", "--item-guid", guid,
                              "--milliseconds", "650"))[KEY]
         assert (expiry["guid"], expiry["status"], expiry["before"]) == (guid, "expired", release["after"]), expiry
         assert expiry["rounds"] == expiry["projectiles"] == release["after"] - expiry["after"] >= 2, expiry
         assert expiry["serial"] != release["serial"] and expiry["pawn"] == release["pawn"], expiry
         proof["expiry"] = expiry
-        proof["expiry_recoil"], proof["expiry_cycle"] = await recoil_after(release["rounds"] + expiry["rounds"])
+        proof["expiry_recoil"], proof["expiry_cycle"] = await recoil_after(release["rounds"] + expiry["rounds"], previous_cycles)
 
         await stop(host, authority)
         await stop(client, guest)

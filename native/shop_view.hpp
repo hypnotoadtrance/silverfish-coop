@@ -8,6 +8,7 @@ namespace RC::LuaMadeSimple
 namespace silverfish::native_shop_view
 {
     void install_hooks();
+    bool observes_stock_saves();
     void uninstall_hooks();
     void register_lua(RC::LuaMadeSimple::Lua& lua);
     void clear_scope();

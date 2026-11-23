@@ -92,6 +92,26 @@ class NativeGuestArmorTests(unittest.IsolatedAsyncioTestCase):
                             dict(replaced_class_path=armor.HAZOP_CLASS_PATH)):
             self.assertFalse(armor.effects({**swap, **replacement}))
 
+    def test_runtime_head_and_chest_defaults_require_matching_slots_and_combined_stats(self):
+        head_path = "/Game/Classes/Armor_Items/Helm_Demo.Helm_Demo_C"
+        chest_path = "/Game/Classes/Armor_Items/Armor_LabCoat.Armor_LabCoat_C"
+        head = f"{head_path},1.7,.1,.2,.5,20,1"
+        chest = f"{chest_path},.5,.15,.3,.3,22,0"
+        fields = ["native-guest-helmet", "area", "Player_FP_C area.Test", "AB" * 16,
+                  "equip", "1", "equipped", "2", "1", "6", "5.15", "22", ".1", ".2",
+                  head, "-", "-", chest, ".25", ".5", ".8", "1"]
+        proof = armor.parse(fields)
+        self.assertEqual(proof["class_path"], head_path)
+        self.assertEqual(armor.equip_action(head_path), armor.HELMET_ACTION)
+        self.assertEqual(armor.equip_action(chest_path), armor.ACTION)
+        self.assertTrue(armor.helmet_effects(proof))
+        for index, value in ((14, chest), (20, ".5"), (21, "0")):
+            with self.subTest(index=index):
+                changed = list(fields)
+                changed[index] = value
+                with self.assertRaises(ValueError):
+                    armor.parse(changed)
+
     def test_legacy_and_exact_profile_status_frames(self):
         old = ["native-guest-armor", "area", "pawn", "AB" * 16, "equip", "1", "equipped", "2", "1", "6", "5.75", "25", ".2", ".2"]
         self.assertTrue(armor.effects(armor.parse(old)))

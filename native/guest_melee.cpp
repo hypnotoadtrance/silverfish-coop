@@ -72,6 +72,7 @@ namespace
     constexpr std::size_t max_fenced_pipes = 32;
     constexpr double sweep_range = 230.0;
     constexpr float sweep_radius = 65.0f;
+    constexpr int max_stock_sweep_contacts = 128;
 
     bool env(const char* name)
     {
@@ -393,7 +394,8 @@ namespace
         sphere.library->ProcessEvent(sphere.fn, data);
         U::FScriptArrayHelper contacted(hits, hits->ContainerPtrToValuePtr<void>(data));
         if (contacted.Num() < 1) return reject("sphere_empty");
-        if (contacted.Num() > 16) return reject("sphere_bounds");
+        // Several hit components can belong to the same stock NPC, especially with armor and weapons equipped.
+        if (contacted.Num() > (enemy ? 16 : max_stock_sweep_contacts)) return reject("sphere_bounds");
         U::UObject* first{};
         for (int index = 0; index < contacted.Num(); ++index)
         {
@@ -599,8 +601,9 @@ namespace
         std::optional<FixtureContact> fixture;
         struct Damage
         {
-            U::FWeakObjectPtr target{}, component{}, sweep{}, deal{}, library{}, graph{};
+            U::FWeakObjectPtr target{}, component{}, sweep{}, deal{}, library{}, graph{}, contact_candidate{};
             std::string target_name{"-"};
+            std::string_view contact_status{"awaiting_contact"};
             U::FFrame *contact_frame{}, *sweep_frame{}, *deal_frame{};
             Vector origin{}, direction{};
             int sweeps{}, calls{};
@@ -672,6 +675,39 @@ namespace
             maximum->GetPropertyValueInContainer(actor) != 160.0 || !boolean(actor, STR("Alive"), true) ||
             !boolean(actor, STR("bActorIsBeingDestroyed"), false)) return false;
         return true;
+    }
+
+    bool combat_target(U::UObject* candidate, U::UWorld* world, bool ordinary, std::string_view* status = nullptr)
+    {
+        if (!ordinary) return qualified_enemy(candidate, world);
+        const auto reject = [&](std::string_view cause) {
+            if (status) *status = cause;
+            return false;
+        };
+        const auto* base = find<U::UClass>(npc_class);
+        if (!live(world) || !live(candidate) || !base || !candidate->GetClassPrivate()->IsChildOf(base))
+            return reject("target_class_unqualified");
+        auto* actor = static_cast<U::AActor*>(candidate);
+        auto* role = field<U::FByteProperty>(actor, STR("Role"));
+        if (actor->GetWorld() != world || !role || role->GetPropertyValueInContainer(actor) != 3)
+            return reject("target_authority_unqualified");
+        if (!boolean(actor, STR("Alive"), true) || !boolean(actor, STR("bActorIsBeingDestroyed"), false))
+            return reject("target_life_unqualified");
+        const double hp = enemy_health(actor);
+        return std::isfinite(hp) && hp > 0.0 ? true : reject("target_health_unqualified");
+    }
+
+    // Ordinary attacks can reach Blueprint children that override the stock damage graph.
+    U::UFunction* combat_damage(U::UObject* actor)
+    {
+        const U::FName name{STR("DealDamage")};
+        auto* definition = find<U::UFunction>(STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:DealDamage"));
+        auto* call = actor ? actor->GetFunctionByNameInChain(name) : nullptr;
+        if (!definition || !call || call->GetNumParms() != 7 || call->GetReturnProperty() ||
+            call->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return nullptr;
+        for (auto* inherited = static_cast<U::UStruct*>(call); inherited; inherited = inherited->GetSuperStruct())
+            if (inherited == definition) return call;
+        return nullptr;
     }
 
     U::UObject* placed_enemy(U::UWorld* world)
@@ -861,20 +897,22 @@ namespace
         const bool ordinary = swing.mode == SwingMode::ordinary;
         auto* world = static_cast<U::UWorld*>(swing.world.Get());
         auto* enemy = swing.damage.target.Get();
-        const auto eligible = [world](U::UObject* actor) {
-            return qualified_enemy(actor, world) && nonlethal_health(enemy_health(actor));
-        };
-        if (!passives_unchanged(swing) || (!ordinary && (!eligible(enemy) ||
+        if (!passives_unchanged(swing) || (!ordinary && (!qualified_enemy(enemy, world) ||
+                !nonlethal_health(enemy_health(enemy)) ||
                 health(swing.canonical.Get()) != swing.host_health || health(swing.save.Get()) != swing.guest_health)))
             return refuse("mutation_unverified_guest_melee_damage_scope");
         TraceDiagnostic diagnostic;
-        auto trace = stock_trace(receiver, swing.pawn.Get(), ordinary ? nullptr : enemy, nullptr,
+        auto trace = stock_trace(receiver, swing.pawn.Get(), ordinary ? nullptr : enemy, &swing.damage.contact_status,
             swing.fixture ? &diagnostic : nullptr);
         if (ordinary && trace) enemy = trace->first->GetOuterPrivate();
-        bool allowed = trace && (!ordinary || eligible(enemy));
+        if (trace) swing.damage.contact_candidate = enemy;
+        bool allowed = trace && (!ordinary || combat_target(enemy, world, true, &swing.damage.contact_status));
         if (swing.fixture)
         {
             auto& staged = *swing.fixture;
+            const auto eligible = [world](U::UObject* actor) {
+                return qualified_enemy(actor, world) && nonlethal_health(enemy_health(actor));
+            };
             auto* expected = staged.target.Get();
             const bool registered = trace && qualified_enemy(enemy, world);
             const auto hp = enemy_health(expected);
@@ -888,7 +926,7 @@ namespace
             if (diagnostic.origin) staged.eye_drift = displacement(staged.eye, *diagnostic.origin);
             if (diagnostic.direction) staged.direction_dot = direction_dot(staged.direction, *diagnostic.direction);
             if (const auto origin = enemy_origin(expected)) staged.target_drift = displacement(staged.target_origin, *origin);
-            allowed = allowed && enemy == expected;
+            allowed = allowed && enemy == expected && eligible(expected);
             // The idle headless client can overwrite look rotation during the stock montage. Only replay a verified
             // fixture camera angle if the two real actors have barely moved, then run the same stock sweep qualification.
             if (!allowed && diagnostic.direction && staged.direction_dot < 0.99 && staged.eye_drift >= 0 &&
@@ -929,12 +967,16 @@ namespace
         }
         if (ordinary)
         {
-            auto* deal = local_function(enemy, find<U::UClass>(npc_class), STR("DealDamage"), 7);
+            auto* deal = combat_damage(enemy);
             if (!deal)
             {
+                swing.damage.contact_status = "damage_function_unqualified";
                 if (swing.fixture && !restore_fixture_camera(*swing.fixture, swing.pawn.Get()))
                     return refuse("mutation_unverified_guest_melee_fixture_camera_restore");
-                return refuse("mutation_unverified_guest_melee_stock_damage_path");
+                call.PreventOriginalFunctionCall();
+                ++swing.qualified;
+                swing.damage.fenced_miss = true;
+                return;
             }
             swing.damage.target = enemy;
             swing.damage.deal = deal;
@@ -994,6 +1036,14 @@ namespace
         for (int remaining = 8; ancestor && ancestor != proof.sweep_frame && remaining > 0; --remaining)
             ancestor = ancestor->PreviousFrame();
         if (ancestor != proof.sweep_frame) return;
+        const bool ordinary = swing.mode == SwingMode::ordinary;
+        if (ordinary && proof.deal_frame && receiver == proof.target.Get() &&
+            frame.PreviousFrame() != proof.sweep_frame) return;
+        if (ordinary && (proof.calls || receiver != proof.target.Get()))
+        {
+            call.PreventOriginalFunctionCall();
+            return;
+        }
         auto* fn = frame.Node();
         auto* args = frame.Locals();
         const SweepHit hit;
@@ -1003,7 +1053,8 @@ namespace
         auto* blunt = field<U::FDoubleProperty>(damage_type, blunt_name);
         if (call.OriginalFunctionCallPrevented() || !swing.pending || proof.calls ||
             frame.PreviousFrame() != proof.sweep_frame || receiver != proof.target.Get() ||
-            !qualified_enemy(receiver, static_cast<U::UWorld*>(swing.world.Get())) || fn != proof.deal.Get() || !args ||
+            !combat_target(receiver, static_cast<U::UWorld*>(swing.world.Get()), ordinary) ||
+            fn != proof.deal.Get() || !args ||
             !hit.bound() || !hit_value || hit_value->GetStruct().Get() != hit.type ||
             hit.owned_component(hit_value->ContainerPtrToValuePtr<void>(args), receiver) != proof.component.Get() ||
             !damage || !damage_type || damage->GetStruct().Get() != damage_type || !blunt ||
@@ -1011,7 +1062,7 @@ namespace
             read_object(parameter<U::FObjectProperty>(fn, STR("Instigator")), args) != swing.pawn.Get())
             return refuse("mutation_unverified_guest_melee_stock_damage_path");
         proof.before = enemy_health(receiver);
-        if (!std::isfinite(proof.before) || proof.before < 100.0 || proof.before > 160.0)
+        if (!std::isfinite(proof.before) || proof.before <= 0.0 || (!ordinary && !nonlethal_health(proof.before)))
             return refuse("mutation_unverified_guest_melee_stock_damage_health");
         proof.deal_frame = &frame;
         ++proof.calls;
@@ -1035,14 +1086,17 @@ namespace
             auto* amount = total ? output(frame, total) : nullptr;
             auto* dead = lethal ? output(frame, lethal) : nullptr;
             proof.after = enemy_health(receiver);
-            if (call.OriginalFunctionCallPrevented() || !amount || !dead || lethal->GetPropertyValue(dead) ||
-                receiver != proof.target.Get() || !boolean(receiver, STR("Alive"), true) ||
+            const bool killed = dead && lethal->GetPropertyValue(dead);
+            const bool ordinary = swing.mode == SwingMode::ordinary;
+            if (call.OriginalFunctionCallPrevented() || !amount || !dead || (killed && !ordinary) ||
+                receiver != proof.target.Get() || !boolean(receiver, STR("Alive"), !killed) ||
                 object(receiver, STR("LastDamagedMe")) != swing.pawn.Get() || !std::isfinite(proof.after) ||
-                proof.after <= 0.0 || proof.after >= proof.before)
+                killed != (proof.after <= 0.0) || proof.after >= proof.before)
                 return finish("mutation_unverified_guest_melee_stock_damage_readback");
             proof.total = total->GetPropertyValue(amount);
-            if (!std::isfinite(proof.total) || proof.total <= 0.0 || proof.total > 90.0 ||
-                std::abs((proof.before - proof.after) - proof.total) > 1e-6)
+            if (!std::isfinite(proof.total) || proof.total <= 0.0 || (!ordinary && proof.total > 90.0) ||
+                (killed && proof.after == 0.0 ? proof.total + 1e-6 < proof.before :
+                                                std::abs((proof.before - proof.after) - proof.total) > 1e-6))
                 return finish("mutation_unverified_guest_melee_stock_damage_amount");
         }
         if (proof.sweep_frame == &frame) proof.sweep_frame = nullptr;
@@ -1065,7 +1119,7 @@ namespace
             [](Iteration&, U::UEngine*, float, bool) { if (U::IsInGameThreadRaw()) tick(); },
             {false, false, owner, STR("Bound the isolated guest Old Pipe animation receipt")});
         callbacks[2] = H::RegisterProcessLocalScriptFunctionPostCallback(
-            observe_post, {false, false, owner, STR("Read back the exact Dead Bridge stock damage")});
+            observe_post, {false, false, owner, STR("Read back the qualified stock melee damage")});
         if (ready()) return true;
         silverfish::native_guest_melee::uninstall_hooks();
         return false;
@@ -1349,15 +1403,22 @@ namespace
 
 bool silverfish::native_guest_melee::ordinary_world(RC::Unreal::UWorld* world)
 {
-    if (!live(world)) return false;
-    const auto name = world->GetPathName();
-    return std::ranges::any_of(cqc::worlds, [&](const auto* path) { return name == path && find<U::UWorld>(path) == world; });
+    return live(world) && world->GetClassPrivate() == find<U::UClass>(STR("/Script/Engine.World")) &&
+        world->GetPathName().starts_with(STR("/Game/Classes/Maps/"));
 }
 
 void silverfish::native_guest_melee::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (!enabled()) return;
     lua.register_function("SilverfishStartNativeGuestOldPipeSwing", start<SwingMode::ordinary>);
+    if (env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_TITLE_FIXTURES"))
+        lua.register_function("SilverfishReadNativeGuestMeleeContactStatus", [](const Lua& state) {
+            auto cause = std::string{swing.damage.contact_status};
+            auto* candidate = swing.damage.contact_candidate.Get();
+            if (live(candidate)) cause += " " + RC::to_utf8_string(candidate->GetFullName());
+            state.set_string(cause);
+            return 1;
+        });
     if (fixture_enabled())
     {
         lua.register_function("SilverfishStartNativeGuestMeleeCanary", start<SwingMode::surface_fixture>);

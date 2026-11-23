@@ -40,6 +40,51 @@ class MerchantPageTests(unittest.IsolatedAsyncioTestCase):
         client.gameplay_action.assert_awaited_once()
         bridge.command.assert_awaited_once_with("native-shop-view-refresh-stock", "1", GUNSMITH, timeout=2)
 
+    async def test_authoritative_revision_retries_but_only_for_the_active_merchant_and_visit(self):
+        actor, pawn = MERCHANTS[GUNSMITH], "exact stock guest"
+        epoch = ("session", "current")
+        base = {"stock": True, "state": "ready", "sequence": 1, "map": GUNSMITH,
+                "actor": actor, "pawn": pawn, "wallet": 500}
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            {"ack": {"message": "stock shop refresh deferred"}, "native_shop_view": base},
+            {"ack": {"message": "stock shop refresh queued"}, "native_shop_view": dict(base, state="pending")},
+        ]))
+        revision = {"map": GUNSMITH, "actor": actor, "epoch": epoch[1], "revision": 8}
+        gameplay = {"shared_wallet": 500, native_finite_shop.STOCK_REVISION: dict(revision, epoch="previous")}
+        client = SimpleNamespace(bridge=bridge, gameplay=gameplay, gameplay_action=AsyncMock())
+        view = ShopView()
+        view.stock_catalog = ((*epoch, 1, GUNSMITH, pawn, actor), 500, [])
+        view.stock_poll_after = 60
+        view.stock_revision = 7
+
+        await view._sync_stock(client, epoch, base, 10.0)
+        bridge.command.assert_not_awaited()
+        gameplay[native_finite_shop.STOCK_REVISION] = revision
+        await view._sync_stock(client, epoch, base, 10.1)
+        self.assertTrue(view.stock_refresh_needed)
+        bridge.command.assert_awaited_once_with("native-shop-view-refresh-stock", "1", GUNSMITH, timeout=2)
+        await view._sync_stock(client, epoch, base, 10.3)
+        self.assertEqual(bridge.command.await_count, 1)
+        # A dirty result must survive a deferred native refresh and a snapshot gap.
+        del gameplay[native_finite_shop.STOCK_REVISION]
+        await view._sync_stock(client, epoch, base, 10.9)
+        self.assertFalse(view.stock_refresh_needed)
+        self.assertEqual(bridge.command.await_count, 2)
+        self.assertEqual(client.last_game["native_shop_view"]["state"], "pending")
+        client.gameplay_action.assert_not_awaited()
+
+    def test_merchant_revision_requires_exact_host_actor_and_positive_bounded_sequence(self):
+        fields = ["native-finite-shop-stock-revision", GUNSMITH, MERCHANTS[GUNSMITH], "1"]
+        self.assertEqual(native_finite_shop.parse_stock_revision(fields, "hosting", GUNSMITH),
+                         {"map": GUNSMITH, "actor": MERCHANTS[GUNSMITH], "revision": 1})
+        for value in ("0", str(2**53), "١", "-1"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "merchant revision"):
+                native_finite_shop.parse_stock_revision([*fields[:3], value], "hosting", GUNSMITH)
+        with self.assertRaisesRegex(ValueError, "merchant revision"):
+            native_finite_shop.parse_stock_revision(fields, "connected", GUNSMITH)
+        with self.assertRaisesRegex(ValueError, "merchant revision"):
+            native_finite_shop.parse_stock_revision(fields, "hosting", native_finite_shop.OBSERVATORY)
+
     def test_scientist_display_accepts_complete_authority_catalog_with_purchase_validation(self):
         from tools.silverfish.native_finite_shop import SCIENTIST_SHOP
 

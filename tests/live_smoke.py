@@ -15,6 +15,7 @@ import time
 import uuid
 
 from live_multi_smoke import campaign_save_hashes
+from rook_mixed_field_fixture import stage_rook_probe, verify_rook_mixed_fields
 from stock_acid_fixture import exercise_acid, stage_acid_probe
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -64,6 +65,8 @@ options.add_argument("--dream-stone", action="store_true", help="return from Bla
 options.add_argument("--dream-nothing", action="store_true", help="continue from Black Ocean into Nothing and return as the host")
 options.add_argument("--dream-tarot", choices=("rook", "obelisk", "night", "black-stag"), help="stage a stock Tarot route")
 options.add_argument("--rook-motion", action="store_true", help="test the Rook's wandering anomaly through the stock return")
+options.add_argument("--rook-mixed-fields", nargs="?", const="baseline", choices=("baseline", "authority"),
+                     help="read the stock Rook fields and optionally verify host-only spawns")
 options.add_argument("--fruiting-stardust", action="store_true", help="use the stock Fruiting Dream Dust stack")
 options.add_argument("--native-seed", action="store_true", help="verify the saved seed reaches the stock day cycle on restart")
 options.add_argument("--native-world-view", action="store_true", help="verify the guest renders the authenticated stock sun")
@@ -224,6 +227,8 @@ if args.dream_early and args.dream_tarot not in (None, "rook"):
     options.error("The current stock power fixture supports Exchange and Rook")
 if args.rook_motion and (not args.native_stardust or args.dream_tarot != "rook" or not args.dream_early):
     options.error("--rook-motion requires --native-stardust --dream-tarot rook --dream-early")
+if args.rook_mixed_fields and not args.rook_motion:
+    options.error("--rook-mixed-fields requires --rook-motion")
 if args.native_host_save and not args.native_stardust:
     options.error("--native-host-save uses the Stardust stock inventory fixture")
 if args.native_world_view and not args.authored_zone:
@@ -237,7 +242,8 @@ authored_route = any((args.authored_zone, args.native_door, args.native_gold, ar
 if args.native_acid and (authored_route or broker_map):
     options.error("--native-acid requires the default PlaytestMap start")
 work = args.work.resolve()
-profile = ("acid-proof-" if args.native_acid else "validation-") + uuid.uuid4().hex[:8]
+profile_prefix = "rook-mixed-" if args.rook_mixed_fields else "acid-proof-" if args.native_acid else "validation-"
+profile = profile_prefix + uuid.uuid4().hex[:8]
 campaign = profile
 run = work / "campaigns" / campaign / "run"
 client_run = work / "clients" / profile / "run"
@@ -310,6 +316,9 @@ async def command(*args, check=True):
 async def start(*args, env=None):
     path = run / (args[0] + "-" + str(len(processes)) + ".txt")
     path.parent.mkdir(parents=True, exist_ok=True)
+    if args[0] in ("host", "join") and profile_prefix == "rook-mixed-":
+        env = dict(os.environ if env is None else env,
+                   SILVERFISH_COOP_ROOK_MIXED_FIELDS="host" if args[0] == "host" else "guest")
     with path.open("wb") as output:
         process = await asyncio.create_subprocess_exec(*base, *args, stdout=output, stderr=output, env=env)
     processes.append((process, path))
@@ -461,8 +470,8 @@ async def gold_action(operation, guid):
     return report
 
 
-async def wait_campaign_event(event_name, guid, *, after=None):
-    until = time.monotonic() + deadline
+async def wait_campaign_event(event_name, identifier, *, field="guid", after=None, timeout=None):
+    until = time.monotonic() + (deadline if timeout is None else timeout)
     while time.monotonic() < until:
         try:
             lines = (run / "events.jsonl").read_text(encoding="utf-8").splitlines()
@@ -473,11 +482,11 @@ async def wait_campaign_event(event_name, guid, *, after=None):
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if (event.get("event") == event_name and event.get("guid") == guid
+            if (event.get("event") == event_name and event.get(field) == identifier
                     and (after is None or event.get("sequence", 0) > after)):
                 return event
         await asyncio.sleep(0.2)
-    raise TimeoutError(f"No {event_name} outcome for {guid} after sequence {after}")
+    raise TimeoutError(f"No {event_name} outcome for {identifier} after sequence {after}")
 
 
 async def position_for_native_exit(target, where, *, entrance=None):
@@ -1066,6 +1075,8 @@ async def stardust_visit(character_id, host_session):
     assert math.dist(pawns["local"]["location"], arrival["location"]) <= 250, pawns
     assert math.dist(pawns["local"]["location"], pawns["guest"]["location"]) <= 250, pawns
     await peer_in(dream_map)
+    if args.rook_mixed_fields:
+        await verify_rook_mixed_fields(wait, note, run, client_run, authority=args.rook_mixed_fields == "authority")
     if args.rook_motion:
         await verify_rook_anomaly_motion()
     await dust("inspect", dream_map, pawns["local"]["name"], "present", starting_quantity - 1)
@@ -1148,13 +1159,11 @@ async def stardust_visit(character_id, host_session):
             assert power["native_dream_isolation"]["state"] == "ready", power
             assert power["native_dream_isolation"]["early_requested"] is True, power
 
-        def shortened(status):
-            visit = campaign_party(status).get("stardust_visit") or {}
-            return (status.get("game", {}).get("map") == visit_map and visit.get("id") == active["id"]
-                    and visit.get("deadline", original_deadline) < original_deadline)
-
-        accelerated = await wait(run, shortened, timeout=8)
-        return_deadline = campaign_party(accelerated)["stardust_visit"]["deadline"]
+        # A short return can finish before the next status read. The event records the committed deadline.
+        accelerated = await wait_campaign_event("stardust_early_return_requested", active["id"],
+                                                field="id", timeout=8)
+        return_deadline = accelerated["deadline"]
+        assert math.isfinite(return_deadline) and return_deadline < original_deadline, accelerated
         note("stock_dream_early_action_shortens_durable_countdown", {
             "visit_id": active["id"], "before": original_deadline, "after": return_deadline,
         })
@@ -2271,6 +2280,14 @@ async def smoke():
                 note("authored_return_exit_uses_destination_marker", {
                     "map": expected_map, "entrance": "DB_CR", "host": returned["game"]["pawns"]["local"]["location"],
                 })
+        if args.rook_motion:
+            # The dream return runs stock rest. Take the restored pawn's
+            # current health instead of the value from the earlier revive.
+            restored = await wait(run, lambda state: state["game"].get("map") == expected_map
+                                  and state.get("link_connected")
+                                  and state["game"].get("native_guest_save", {}).get("state") == "bound"
+                                  and "guest" in state["game"].get("pawns", {}))
+            native_health = restored["game"]["pawns"]["guest"]["health"]
         saved = await command("action", "--campaign", campaign, "checkpoint")
         assert saved["revision"] > 0
         checkpoint_path = run.parent / "save" / "campaign.json"
@@ -2528,5 +2545,6 @@ async def smoke():
         (run / "live-verification.json").write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
         print(run, flush=True)
 
-with stage_acid_probe(work) if args.native_acid else nullcontext():
+probe = stage_rook_probe if args.rook_mixed_fields else stage_acid_probe if args.native_acid else None
+with probe(work) if probe else nullcontext():
     asyncio.run(smoke())

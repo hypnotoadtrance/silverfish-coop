@@ -2,6 +2,7 @@ local wire = require("native_wire_quest")
 local guest_save = require("guest_save")
 local aim_fixture = require("native_flood_jammer_aim_fixture")
 local profiles = require("native_jammer_profiles")
+local board_accepts = require("native_board_contract").board_accepts
 
 local quest = {}
 local code_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C"
@@ -206,10 +207,18 @@ function quest.command(fields, state, phase)
     end
     if not commands[operation] or operation == "xp-fixture" and not profile.xp_fixture then return end
     last = nil
-    local pawn = fields[3]
-    if #fields ~= 3 or state.map ~= profile.map then refuse(profile, "arguments_unqualified") end
+    local pawn, selected_board = fields[3], fields[4]
+    local selected = #fields == 4 and selected_board == profiles.observatory_bounty_board
+        and (tag == "native-crossroads-jammer" or alternate and profile == alternate)
+        and (operation == "preflight" or operation == "start" or operation == "turn-in")
+    if state.map ~= profile.map or (#fields ~= 3 and not selected) then refuse(profile, "arguments_unqualified") end
     if operation == "approach" then return wire_check(profile, wire.stock_board_approach, state, phase, pawn, profile) end
-    local context = wire_check(profile, wire.stock_board_context, state, phase, pawn, false, profile)
+    local context
+    if selected then
+        context = wire_check(profile, wire.live_stock_board_context, state, phase, pawn, selected_board, profile.quest_id)
+    else
+        context = wire_check(profile, wire.stock_board_context, state, phase, pawn, false, profile)
+    end
     context.jammer_profile = profile
     local template = wire_check(profile, wire.stock_quest_table):FindRow(profile.quest_id)
     recipe(profile, template)
@@ -243,6 +252,11 @@ function quest.command(fields, state, phase)
         after = observed
     elseif operation == "turn-in" then
         if before.step ~= 2 then refuse(profile, "quest_objective_not_complete") end
+        if selected then
+            local active = wire_check(profile, wire.stock_row, context.save.ActiveQuests, context.key)
+            local qualified, accepts = pcall(board_accepts, context.board, context.key, active)
+            if not qualified or accepts ~= true then refuse(profile, "redemption_board_unqualified") end
+        end
         after = redeem(context, before)
     end
     last = {operation = full_operation, pawn = pawn, context = context, before = before, after = after}
@@ -296,7 +310,7 @@ function quest.rows(state, phase, status_row)
         return {}
     end
     local before, after = proof.before, proof.after
-    local rows = {status_row(profile.tag, proof.operation, profile.map, proof.pawn, profile.board_name,
+    local rows = {status_row(profile.tag, proof.operation, profile.map, proof.pawn, proof.context.board:GetFullName(),
         profile.quest_id, before.step, after.step, before.cash, after.cash, before.xp, after.xp)}
     for _, faction in ipairs(profile.factions) do
         rows[#rows + 1] = status_row(profile.tag .. "-reputation", faction, before.rep[faction].amount, after.rep[faction].amount)

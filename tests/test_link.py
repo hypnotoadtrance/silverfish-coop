@@ -828,6 +828,38 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.client.take_avatar_pose())
         recipient.assert_not_called()
 
+    async def test_footsteps_preserve_queued_cues_on_admitted_game_links(self):
+        guest_id = self.request["guest_id"]
+        inbound = asyncio.Queue()
+        self.host.set_footstep_handler(lambda guest, data: inbound.put_nowait((guest, data)))
+        self.assertFalse(self.client.send_footstep(b"pre-admission"))
+        self.assertTrue((await self.connect_guest())["accepted"])
+        self.assertTrue(self.client.send_footstep(b"guest step"))
+        self.assertFalse(self.client.send_footstep(bytes(link._FOOTSTEP_MAX_SIZE + 1)))
+        self.assertEqual(await asyncio.wait_for(inbound.get(), 1), (guest_id, b"guest step"))
+
+        self.host.send_footstep(b"excluded", lambda _: False)
+        with self.host.hold_game_routes():
+            self.host.send_footstep(b"during travel", lambda _: True)
+            protocol = self.host._protocols[guest_id]
+            protocol.quic_event_received(DatagramFrameReceived(link._FOOTSTEP_HEADER + b"during travel"))
+        self.assertTrue(inbound.empty())
+
+        self.host.send_footstep(b"step 1", lambda target: target == guest_id)
+        self.host.send_footstep(b"step 2", lambda target: target == guest_id)
+        async with asyncio.timeout(1):
+            while len(self.client._footsteps) < 2:
+                await asyncio.sleep(.005)
+        self.assertEqual(self.client.take_footsteps(), [b"step 1", b"step 2"])
+        self.assertTrue(self.host_inbox.messages.empty())
+        self.assertTrue(self.client_inbox.messages.empty())
+
+        protocol = self.client._protocol
+        protocol.quic_event_received(DatagramFrameReceived(link._FOOTSTEP_HEADER + b"expired"))
+        later = protocol._loop.time() + link._FOOTSTEP_MAX_AGE + .01
+        with patch.object(protocol._loop, "time", return_value=later):
+            self.assertEqual(self.client.take_footsteps(), [])
+
     async def test_weapon_cues_reach_current_game_guest_without_entering_unreal(self):
         guest_id = self.request["guest_id"]
         self.assertTrue((await self.connect_guest())["accepted"])

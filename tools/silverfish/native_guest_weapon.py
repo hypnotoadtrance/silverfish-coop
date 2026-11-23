@@ -24,6 +24,7 @@ CLASS_PATHS = {*FIRE_CLASSES.values(), CAMERA_PATH, OLD_PIPE, BLOWTORCH_PATH, CR
 PRIMARY_KINDS = frozenset((*FIRE_CLASSES, "camera", "blowtorch", "crowbar", native_guest_melee.KIND))
 SEED_KINDS = frozenset(firearm.kind for firearm in guest_weapon_profiles.FIREARMS if firearm.headless_seed) | {
     "blowtorch", "crowbar", "smg-standard-full", "stock-flare", "stock-flare-blue", "stock-flare-yellow",
+    "stock-bolt",
 }
 PROJECTILES_PER_ROUND = {
     firearm.kind: firearm.magazine.ammo.projectile_count
@@ -188,7 +189,7 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
         elif old_pipe:
             status = proof["status"]
             if ((operation != "inspect" and (operation != "equip" or status != "old_pipe_equipped"))
-                    or actor != -1 or stored != -1 or source not in native_guest_melee.BY_MAP):
+                    or actor != -1 or stored != -1 or not native_guest_melee.ordinary_map(source)):
                 raise RuntimeError("Native guest stock Old Pipe equipment did not verify")
         elif blowtorch:
             status = proof["status"]

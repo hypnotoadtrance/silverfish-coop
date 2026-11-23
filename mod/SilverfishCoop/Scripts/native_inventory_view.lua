@@ -1,7 +1,6 @@
 local inventory_view = {}
 local weapon_profiles = require("guest_weapon_registry")
-local flares = require("native_flare").equipment
-local cqc = require("native_enemy_loot_registry")
+local throwables = require("native_flare").equipment
 local drop_maps = require("native_guest_drop_maps")
 local drop_items = require("native_guest_drop_items")
 local save_scope = require("native_save_scope")
@@ -212,9 +211,8 @@ local function page(fields)
         slots[position] = true
         seen[guid] = true
         local equippable = ((source == "backpack" or source == "equipment")
-            and (weapon_profiles.kinds[class] ~= nil or class == camera_path or pry_tool_paths[class] or flares[class]
-                or (class == "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
-                    and cqc[fields[4]] ~= nil)))
+            and (weapon_profiles.kinds[class] ~= nil or class == camera_path or pry_tool_paths[class] or throwables[class]
+                or class == "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"))
             or (source == "backpack" and (body_armor.is_body_path(class) or body_armor.is_helmet_path(class)))
         local name = item:gsub("_", " ")
         local consumable = class == bandage_path and "Bandage" or starter_bags[class] or mre_enabled and meals.label(class)
@@ -700,15 +698,20 @@ local function finish_stock_drop(fields, current, state, phase)
     local created = #fields == 6 and fields[6]
     local split = pending and pending.split and remaining == pending.expected - pending.split
         and created and #created == 32 and created:match("^[0-9A-F]+$") and created:find("[^0]") and created ~= pending.guid
-    local slot = pending and pending.equip and fields[5] == "equipped" and #fields == 7 and integer(fields[6], 7)
+    local slot = pending and pending.equip and fields[5] == "equipped" and #fields == 7 and integer(fields[6], 9)
     local displaced = slot and fields[7]
     local equipped = slot and (not pending.expected or pending.expected == 0 or slot + 1 == pending.expected)
         and (displaced == "-" or #displaced == 32 and displaced:match("^[0-9A-F]+$")
         and displaced:find("[^0]") and displaced ~= pending.guid)
-    if (not split and not equipped and #fields ~= 5) or not pending or not same_context(current, pending.context)
+    local source = pending and pending.entry == "unequip" and fields[5] == "unequipped" and #fields == 7
+        and integer(fields[6], 9)
+    local rounds = source and fields[7]:match("^%-?%d+$") and math.tointeger(fields[7])
+    local unequipped = source and pending.expected == source + 1 and rounds and rounds >= -1 and rounds <= 2147483647
+    if (not split and not equipped and not unequipped and #fields ~= 5) or not pending or not same_context(current, pending.context)
         or fields[3] ~= pending.epoch or integer(fields[4], 9007199254740991) ~= pending.sequence
-        or (not sorted and not split and not equipped
-            and (not remaining or pending.sort or pending.split or pending.equip) and fields[5] ~= "refused") then
+        or (not sorted and not split and not equipped and not unequipped
+            and (not remaining or pending.sort or pending.split or pending.equip or pending.entry == "unequip")
+            and fields[5] ~= "refused") then
         error("The stock inventory settlement belongs to another request", 0)
     end
     stock_drop = nil
@@ -719,12 +722,35 @@ local function finish_stock_drop(fields, current, state, phase)
                                                                                   pending.live == true) then
             error("The stock inventory settlement lost its isolated backpack", 0)
         end
-        local finished, status = SilverfishFinishNativeGuestDropRequest(pawn, pending.epoch, pending.sequence)
+        local finished, status
+        if unequipped then
+            finished, status = SilverfishFinishNativeGuestDropRequest(pawn, pending.epoch, pending.sequence, rounds)
+        else
+            finished, status = SilverfishFinishNativeGuestDropRequest(pawn, pending.epoch, pending.sequence)
+        end
         if pending.live and finished and status == "screen_closed" then return "verified stock inventory settlement" end
+        if unequipped then
+            if not finished or status ~= "refreshed" then
+                error("Stock unequip could not refresh: " .. tostring(status), 0)
+            end
+            local widget = widget_at(pending.screen.ItemManager.EquipSlots, source + 1)
+            local item = source < 8 and save.PlayerEquipment[source + 1] or source == 8 and save.PlayerHelmet or save.PlayerArmor
+            local index = source < 8 and source or source - 8
+            if not valid(widget) or widget.ItemIndex ~= index
+                or widget.InventoryIndex ~= (source < 8 and 0 or 1)
+                or valid(item[item_class]) or stock_card_guid(widget.ItemCard) == pending.guid
+                or not stock_cards(pending.screen, save, pending.guid, rounds, false, true) then
+                error("The stock equipment slot and returned backpack item did not verify", 0)
+            end
+            return ("verified stock unequip from slot %d"):format(source)
+        end
         if equipped then
             local widget = widget_at(pending.screen.ItemManager.EquipSlots, slot + 1)
-            if not finished or status ~= "refreshed" or not valid(widget) or widget.ItemIndex ~= slot
-                or stock_card_guid(widget.ItemCard) ~= pending.guid or stock_item_guid(save.PlayerEquipment[slot + 1]) ~= pending.guid
+            local item = slot < 8 and save.PlayerEquipment[slot + 1] or slot == 8 and save.PlayerHelmet or save.PlayerArmor
+            local index = slot < 8 and slot or slot - 8
+            if not finished or status ~= "refreshed" or not valid(widget) or widget.ItemIndex ~= index
+                or widget.InventoryIndex ~= (slot < 8 and 0 or 1)
+                or stock_card_guid(widget.ItemCard) ~= pending.guid or stock_item_guid(item) ~= pending.guid
                 or not stock_cards(pending.screen, save, pending.guid, 0) then
                 error("The stock equipment slot did not reflect the host's saved item", 0)
             end

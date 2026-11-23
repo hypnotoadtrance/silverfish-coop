@@ -15,6 +15,9 @@ class WipeView:
         self.offset = 0
         self.scope = None
         self.next_lease = 0.0
+        self.next_page = None
+        self.retry_at = 0.0
+        self.last_error = None
         self.sequence = 0
 
     def read_events(self) -> list[list[str]]:
@@ -35,11 +38,14 @@ class WipeView:
         limit, remaining, identifier = draft["keep_slots"], draft.get("remaining_seconds"), draft["id"]
         pawn = game.get("pawns", {}).get("local", {}).get("name")
         area = game.get("map")
-        if (type(limit) is not int or not 1 <= limit <= 10 or type(remaining) not in (int, float)
-                or not 0 < remaining <= 30 or not isinstance(identifier, str) or not party.REQUEST_ID.fullmatch(identifier)
-                or not area or not pawn):
+        if (type(limit) is not int or not 1 <= limit <= 10
+                or not isinstance(identifier, str) or not party.REQUEST_ID.fullmatch(identifier) or not area or not pawn):
             return None
         owner = identifier, area, pawn, self.owner
+        if draft.get("deadline", 0) is None and remaining is None:
+            return (*owner, "0")
+        if type(remaining) not in (int, float) or not 0 < remaining <= 30:
+            return None
         now = time.time()
         deadline = self.scope[4] if self.scope and self.scope[:4] == owner else str(int(now + remaining))
         return (*owner, deadline) if int(deadline) > now else None
@@ -53,7 +59,8 @@ class WipeView:
                 or not 0 <= offset <= total or type(items) is not list or len(items) != min(native_inventory.PAGE_SIZE, total - offset)):
             raise RuntimeError("The frozen stock inventory page did not match the current wipe")
         rows = tuple("|".join(str(value) for value in (
-            row["guid"], row["source"], row["index"], row["quantity"], row["class_path"], native_inventory_wipe.selection_policy(row),
+            row["guid"], row["source"], row["index"], row["quantity"], row["class_path"],
+            native_inventory_wipe.selection_policy(row), int(row["stackable"]),
         )) for row in items)
         snapshot = await self.bridge.command("native-wipe-view-render", *scope, str(limit), str(forced), str(offset),
                                              str(total), *rows, timeout=4)
@@ -62,10 +69,13 @@ class WipeView:
                 or observed.get("offset") != offset or observed.get("total") != total):
             raise RuntimeError("The native wipe overlay did not render the current frozen inventory page")
         self.next_lease = time.monotonic() + .8
+        self.next_page = offset + len(items) if (observed.get("screen"), observed.get("state")) == ("stock", "paging") else None
         return snapshot
 
     async def fixture(self, action: str, key: str) -> dict:
-        if not self.scope or key not in ("up", "down", "toggle", "submit", "back"):
+        if not self.scope or not isinstance(key, str) or (
+                key not in ("up", "down", "toggle", "submit", "back", "stock-submit")
+                and not (key.startswith("stock-keep-") and valid_guid(key[11:]))):
             raise ValueError("Select an input for the active staged wipe overlay")
         return await self.bridge.command(action, *self.scope[:4], key, timeout=4)
 
@@ -76,12 +86,20 @@ class WipeView:
             with contextlib.suppress(OSError, RuntimeError, ValueError):
                 game = await self.bridge.command("native-wipe-view-clear", *self.scope[:4], timeout=2)
             self.scope = None
+            self.next_page = None
         if not scope:
+            self.retry_at = 0.0
+            self.last_error = None
             return game
         try:
             if self.scope is None:
+                if time.monotonic() < self.retry_at:
+                    return game
                 game = await self.render(scope, draft["keep_slots"], 0, fetch)
                 self.scope = scope
+                self.last_error = None
+            elif self.next_page is not None:
+                game = await self.render(scope, draft["keep_slots"], self.next_page, fetch)
             for row in events:
                 if (len(row) < 7 or tuple(row[2:6]) != scope[:4] or not row[1].isascii() or not row[1].isdigit()
                         or len(row[1]) > 16 or not self.sequence < (sequence := int(row[1])) < 2**53):
@@ -107,6 +125,11 @@ class WipeView:
                 game = await self.bridge.command("native-wipe-view-lease", *scope, timeout=2)
                 self.next_lease = time.monotonic() + .8
         except (KeyError, OSError, TypeError, ValueError, RuntimeError) as error:
-            self.control.event("native_wipe_view_unavailable", wipe_id=scope[0], reason=str(error))
+            reason = str(error)
+            if self.last_error != reason:
+                self.control.event("native_wipe_view_unavailable", wipe_id=scope[0], reason=reason)
+                self.last_error = reason
             self.scope = None
+            self.next_page = None
+            self.retry_at = time.monotonic() + 1
         return game

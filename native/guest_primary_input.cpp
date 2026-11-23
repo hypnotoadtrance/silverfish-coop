@@ -149,7 +149,7 @@ namespace
         return env("SILVERFISH_COOP_NATIVE_HOST_CAMERA_PRIMARY_INPUT") && env("SILVERFISH_COOP_NATIVE_ZONE");
     }
 
-    bool enabled() { return host_enabled() != guest_enabled(); }
+    bool enabled() { return host_enabled() || guest_enabled(); }
 
     bool held_enabled() { return guest_enabled() && env("SILVERFISH_COOP_NATIVE_GUEST_HELD_FIRE"); }
 
@@ -920,12 +920,18 @@ namespace
         return result(lua, true, scope.seat.mirrored ? "stock_held" : "host_equipped");
     }
 
-    int take(const Lua& lua)
+    int take(const Lua& lua, bool host)
     {
-        if (!available() || !count || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        if (!available() || scope.seat.host != host || !count || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
         const auto pawn = lua.get_integer();
         const auto now = Clock::now();
-        if (pawn != address(scope.seat.pawn.Get()) || !qualified(scope, now) || !can_act(scope.seat)) return 0;
+        if (pawn != address(scope.seat.pawn.Get()) || !qualified(scope, now)) return 0;
+        if (!can_act(scope.seat))
+        {
+            // Pending taps cannot fire when a temporary weapon lock expires.
+            head = count = 0;
+            return 0;
+        }
         discard_expired(now);
         if (!count) return 0;
         lua.set_integer(static_cast<std::int64_t>(receipts[head].sequence));
@@ -940,7 +946,7 @@ namespace
     int read_aim(const Lua& lua)
     {
         auto* pawn = scope.seat.pawn.Get();
-        if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1) ||
+        if (!available() || scope.seat.host || lua.get_stack_size() != 1 || !lua.is_integer(1) ||
             lua.get_integer() != address(pawn)) return 0;
         if (scope.aiming && (!qualified(scope, Clock::now()) || !can_act(scope.seat) ||
             !false_field(pawn, STR("Sprinting")))) scope.aiming = false;
@@ -983,9 +989,9 @@ namespace
         return 4;
     }
 
-    int clear(const Lua&)
+    int clear(bool host)
     {
-        if (U::IsInGameThreadRaw())
+        if (U::IsInGameThreadRaw() && scope.seat.host == host)
         {
             scope = {};
             head = count = 0;
@@ -1052,9 +1058,9 @@ namespace
         }
     };
 
-    int probe(const Lua& lua)
+    int probe(const Lua& lua, bool host)
     {
-        if (!available() || !fixtures(scope.seat.host) || lua.get_stack_size() != 1 || !lua.is_integer(1))
+        if (!available() || scope.seat.host != host || !fixtures(host) || lua.get_stack_size() != 1 || !lua.is_integer(1))
             return result(lua, false, "native_guest_primary_fixture_unavailable");
         const auto now = Clock::now();
         auto* pawn = scope.seat.pawn.Get();
@@ -1305,21 +1311,22 @@ namespace silverfish::native_guest_primary_input
         if (host_enabled())
         {
             lua.register_function("SilverfishSetNativeHostCameraScope", [](const Lua& lua) { return set_scope(lua, true); });
-            lua.register_function("SilverfishTakeNativeHostCameraIntent", take);
-            lua.register_function("SilverfishClearNativeHostCameraScope", clear);
+            lua.register_function("SilverfishTakeNativeHostCameraIntent", [](const Lua& lua) { return take(lua, true); });
+            lua.register_function("SilverfishClearNativeHostCameraScope", [](const Lua&) { return clear(true); });
             if (fixtures(true))
             {
-                lua.register_function("SilverfishProbeNativeHostCameraInput", probe);
+                lua.register_function("SilverfishProbeNativeHostCameraInput", [](const Lua& lua) { return probe(lua, true); });
                 lua.register_function("SilverfishEquipNativeHostCameraFixture", equip_host_fixture);
             }
         }
-        else
+        if (guest_enabled())
         {
             lua.register_function("SilverfishSetNativeGuestPrimaryScope", [](const Lua& lua) { return set_scope(lua, false); });
-            lua.register_function("SilverfishTakeNativeGuestPrimaryIntent", take);
-            lua.register_function("SilverfishClearNativeGuestPrimaryScope", clear);
+            lua.register_function("SilverfishTakeNativeGuestPrimaryIntent", [](const Lua& lua) { return take(lua, false); });
+            lua.register_function("SilverfishClearNativeGuestPrimaryScope", [](const Lua&) { return clear(false); });
             lua.register_function("SilverfishReadNativeGuestAim", read_aim);
-            if (fixtures(false)) lua.register_function("SilverfishProbeNativeGuestPrimaryInput", probe);
+            if (fixtures(false))
+                lua.register_function("SilverfishProbeNativeGuestPrimaryInput", [](const Lua& lua) { return probe(lua, false); });
             if (held_enabled())
             {
                 lua.register_function("SilverfishTakeNativeGuestHeldFireIntent", take_held);

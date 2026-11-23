@@ -1,4 +1,4 @@
-"""Commit a physically present stock flare thrown from a guest's equipped stack."""
+"""Commit a stock flare or bolt thrown from a guest's equipped stack."""
 
 import re
 import time
@@ -17,6 +17,7 @@ CLASSES = {
         ("Eqp_Flare", "Flare_Projectile_BP_C"),
         ("Eqp_Flare_Blue", "Blue_Flare_Projectile_BP_C"),
         ("Eqp_Flare_Yellow", "Yellow_Flare_Projectile_BP_C"),
+        ("Eqp_Bolt", "Bolt_Projectile_BP_C"),
     )
 }
 
@@ -80,7 +81,7 @@ async def perform(host, bridge, character, selection, operation):
         proof = snapshot.get(PROOF, {})
         if (snapshot.get("state"), snapshot.get("map"), proof.get("map"), proof.get("pawn"), proof.get("guid"),
                 proof.get("toss")) != ("hosting", area, area, pawn, guid, toss):
-            raise RuntimeError("The stock flare did not verify the exact guest slot")
+            raise RuntimeError("The stock throw did not verify the exact guest slot")
         result = {PROOF: dict(proof, owner=character)}
         candidate = party.load_party(host.party)
         receipts = candidate["receipts"].setdefault(character, [])

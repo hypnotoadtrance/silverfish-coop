@@ -16,6 +16,7 @@ from . import party, runtime
 ACTION = "native-guest-ui-read"
 HEALTH = "native_guest_health"
 HEALTH_PROJECT = "native-guest-health-project"
+VITALS = "native_guest_vitals"
 MAX_BYTES = runtime.GUEST_UI_MAX_BYTES
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _READY = re.compile(r"stock co-op inventory and Journal projected (\d+) (\d+) (\d+) (\d+) (\d+)")
@@ -24,6 +25,18 @@ _READY = re.compile(r"stock co-op inventory and Journal projected (\d+) (\d+) (\
 def bounded_health(health, maximum):
     return (type(health) in (int, float) and type(maximum) in (int, float)
             and 1 <= maximum <= 1_000_000 and 0 <= health <= maximum)
+
+
+def _vital_values(frame, maximum):
+    food, regen = frame.get("food"), frame.get("regen")
+    return (
+        food if type(food) in (int, float) and 0 <= food <= 200 else None,
+        regen if type(regen) in (int, float) and 0 <= regen <= maximum else None,
+    )
+
+
+def _matches_vital(current, expected):
+    return expected is None or type(current) in (int, float) and math.isclose(current, expected, abs_tol=.01)
 
 
 def health_frame(game, epoch, owner, member, player):
@@ -36,7 +49,13 @@ def health_frame(game, epoch, owner, member, player):
     maximum = pawn.get("max_health")
     if not bounded_health(health, maximum) or health == 0 and not player.get("downed"):
         return None
-    return {"map": game["map"], "epoch": epoch, "owner": owner, "health": health, "maximum": maximum}
+    frame = {"map": game["map"], "epoch": epoch, "owner": owner, "health": health, "maximum": maximum}
+    food, regen = _vital_values(game.get(VITALS, {}).get(member["pawn"], {}), maximum)
+    if food is not None:
+        frame["food"] = food
+    if regen is not None:
+        frame["regen"] = regen
+    return frame
 
 
 def validate(contents: bytes, area: str, character: str) -> str:
@@ -142,20 +161,26 @@ class GuestView:
             return
         identity = (session, character, area, epoch, name)
         checked = (identity, client.gameplay_seen)
-        receipt = (identity, health, maximum)
+        food, regen = _vital_values(frame, maximum)
+        receipt = (identity, health, maximum, food, regen)
         if self.health_checked == checked:
             return
         self.health_checked = checked
         current, current_maximum = pawn.get("health"), pawn.get("max_health")
-        if (self.health_receipt == receipt and (current is None or math.isclose(current, health, abs_tol=.01))
-                and current_maximum == maximum):
+        current_vitals = game.get(VITALS, {}).get(name, {})
+        if (self.health_receipt is not None and self.health_receipt[:3] == receipt[:3]
+                and (current is None or _matches_vital(current, health)) and current_maximum == maximum
+                and _matches_vital(current_vitals.get("food"), food) and _matches_vital(current_vitals.get("regen"), regen)):
             return
+        vitals = tuple("-" if value is None else str(value) for value in (food, regen)) if (food, regen) != (None, None) else ()
         try:
             updated = await client.bridge.command(HEALTH_PROJECT, area, session, epoch, token, name,
-                                                  str(health), str(maximum), timeout=1.5)
+                                                  str(health), str(maximum), *vitals, timeout=1.5)
+            projected = updated.get(VITALS, {}).get(name, {})
             if ((updated.get("state"), updated.get("map"), updated.get("save_scope")) != ("connected", area, token)
                     or updated.get("pawns", {}).get("local", {}).get("name") != name
-                    or updated.get("ack", {}).get("message") != "stock co-op guest health projected"):
+                    or updated.get("ack", {}).get("message") != "stock co-op guest health projected"
+                    or not _matches_vital(projected.get("food"), food) or not _matches_vital(projected.get("regen"), regen)):
                 raise RuntimeError("The isolated stock health view did not verify")
         except (OSError, RuntimeError) as error:
             reason = str(error)

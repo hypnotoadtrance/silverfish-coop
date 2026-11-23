@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <cstdint>
 #include <cstdlib>
@@ -15,6 +16,9 @@
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
+#include <Unreal/FFrame.hpp>
+#include <Unreal/FWeakObjectPtr.hpp>
+#include <Unreal/Hooks.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/World.hpp>
@@ -22,6 +26,7 @@
 namespace
 {
     namespace Unreal = RC::Unreal;
+    namespace Hook = Unreal::Hook;
     using Lua = RC::LuaMadeSimple::Lua;
     using Address = std::uintptr_t;
     using Guid = std::array<std::uint32_t, 4>;
@@ -36,6 +41,27 @@ namespace
     constexpr std::array guid_names{STR("A"), STR("B"), STR("C"), STR("D")};
     constexpr int max_array_rows = 4096;
     constexpr int max_items = 2 * max_array_rows + 2;
+    constexpr auto wipe_screen_path =
+        STR("/Game/Classes/GUI/GameOver_RespawnPenalties_Widget.GameOver_RespawnPenalties_Widget_C");
+    constexpr std::array protected_screen_functions{
+        STR("BndEvt__GameOver_RespawnPenalties_Widget_Button_Continue_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature"),
+        STR("Manage_InventorySlots"),
+        STR("Compile Data and Respawn"),
+        STR("ExitFade"),
+        STR("BndEvt__GameOver_RespawnPenalties_Widget_Button_DebugCam_K2Node_ComponentBoundEvent_0_Pressed__DelegateSignature"),
+    };
+
+    struct ScreenScope
+    {
+        Unreal::FWeakObjectPtr widget;
+        std::array<Unreal::UFunction*, protected_screen_functions.size()> functions{};
+        unsigned pending{};
+    };
+
+    std::atomic<bool> screen_hooks_installed{};
+    std::atomic<Unreal::UClass*> guarded_screen_class{};
+    thread_local std::array<ScreenScope, 8> screens;
+    std::array<Hook::GlobalCallbackId, 2> screen_callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
 
     template <typename T>
     T* find(const Unreal::TCHAR* name)
@@ -58,12 +84,115 @@ namespace
         return object && !object->HasAnyFlags(excluded) && !object->IsUnreachable();
     }
 
-    bool enabled()
+    bool flag(const char* key)
     {
         std::array<char, 2> value{};
         std::size_t size{};
-        return getenv_s(&size, value.data(), value.size(), "SILVERFISH_COOP_NATIVE_ZONE") == 0 &&
+        return getenv_s(&size, value.data(), value.size(), key) == 0 &&
                size == value.size() && value[0] == '1';
+    }
+
+    bool enabled()
+    {
+        return flag("SILVERFISH_COOP_NATIVE_ZONE");
+    }
+
+    void intercept_screen(Hook::TCallbackIterationData<void>& iteration, Unreal::UObject* widget, Unreal::UFunction* callee)
+    {
+        auto* type = guarded_screen_class.load(std::memory_order_acquire);
+        if (!type || !widget || !callee || widget->GetClassPrivate() != type ||
+            !Unreal::IsInGameThreadRaw() || iteration.OriginalFunctionCallPrevented()) return;
+        for (auto& screen : screens)
+        {
+            if (widget != screen.widget.Get()) continue;
+            const auto found = std::ranges::find(screen.functions, callee);
+            if (found == screen.functions.end()) return;
+            iteration.PreventOriginalFunctionCall();
+            if (iteration.OriginalFunctionCallPrevented())
+                screen.pending |= 1U << (found - screen.functions.begin());
+            return;
+        }
+    }
+
+    void intercept_screen_event(Hook::TCallbackIterationData<void>& iteration, Unreal::UObject* widget,
+                                Unreal::UFunction* callee, void*)
+    {
+        intercept_screen(iteration, widget, callee);
+    }
+
+    void intercept_screen_script(Hook::TCallbackIterationData<void>& iteration, Unreal::UObject* widget,
+                                 Unreal::FFrame& frame, void*)
+    {
+        intercept_screen(iteration, widget, frame.Node());
+    }
+
+    bool bind_screen(Address address)
+    {
+        auto* type = find<Unreal::UClass>(wipe_screen_path);
+        if (!type) return false;
+        Unreal::UObject* widget = nullptr;
+        Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* object, int, int) {
+            if (reinterpret_cast<Address>(object) != address) return RC::LoopAction::Continue;
+            if (live(object) && object->GetClassPrivate() == type) widget = object;
+            return RC::LoopAction::Break;
+        });
+        if (!widget) return false;
+
+        auto position = screens.end();
+        for (auto entry = screens.begin(); entry != screens.end(); ++entry)
+        {
+            if (entry->widget.Get() == widget) return true;
+            if (position == screens.end() && !entry->widget.Get()) position = entry;
+        }
+        if (position == screens.end()) return false;
+
+        ScreenScope scope{};
+        scope.widget = widget;
+        for (std::size_t index = 0; index < protected_screen_functions.size(); ++index)
+        {
+            auto* function = widget->GetFunctionByNameInChain(Unreal::FName(protected_screen_functions[index]));
+            if (!function || function->GetOuterPrivate() != type || function->GetNumParms() ||
+                function->GetParmsSize() || function->GetReturnProperty() ||
+                function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return false;
+            scope.functions[index] = function;
+        }
+        // Keep the guard active until Unreal destroys the widget so a deferred
+        // callback cannot start the stock respawn after the menu is removed.
+        *position = scope;
+        guarded_screen_class.store(type, std::memory_order_release);
+        return true;
+    }
+
+    int arm_screen(const Lua& lua)
+    {
+        bool armed = false;
+        if (screen_hooks_installed.load(std::memory_order_acquire) && Unreal::IsInGameThreadRaw() &&
+            lua.get_stack_size() == 1 && lua.is_integer(1))
+        {
+            const auto address = lua.get_integer();
+            armed = address > 0 && bind_screen(static_cast<Address>(address));
+        }
+        lua.set_bool(armed);
+        return 1;
+    }
+
+    int take_screen_actions(const Lua& lua)
+    {
+        unsigned pending = 0;
+        if (screen_hooks_installed.load(std::memory_order_acquire) && Unreal::IsInGameThreadRaw() &&
+            lua.get_stack_size() == 1 && lua.is_integer(1))
+        {
+            const auto address = lua.get_integer();
+            for (auto& screen : screens)
+            {
+                if (address <= 0 || reinterpret_cast<Address>(screen.widget.Get()) != static_cast<Address>(address)) continue;
+                pending = screen.pending;
+                screen.pending = 0;
+                break;
+            }
+        }
+        lua.set_integer(pending);
+        return 1;
     }
 
     int result(const Lua& lua, bool ok, std::string_view message)
@@ -776,6 +905,34 @@ namespace
 
 namespace silverfish::inventory_wipe
 {
+    void install_screen_hooks()
+    {
+        if (!enabled() || !flag("SILVERFISH_COOP_NATIVE_WIPE_VIEW") ||
+            screen_hooks_installed.load(std::memory_order_acquire)) return;
+        constexpr auto owner = STR("SilverfishCoopNative");
+        screen_callbacks[0] = Hook::RegisterProcessEventPreCallback(
+            intercept_screen_event, {false, false, owner, STR("Stock co-op wipe screen events")});
+        screen_callbacks[1] = Hook::RegisterProcessLocalScriptFunctionPreCallback(
+            intercept_screen_script, {false, false, owner, STR("Stock co-op wipe screen script")});
+        if (screen_callbacks[0] == Hook::ERROR_ID || screen_callbacks[1] == Hook::ERROR_ID)
+        {
+            uninstall_screen_hooks();
+            return;
+        }
+        screen_hooks_installed.store(true, std::memory_order_release);
+    }
+
+    void uninstall_screen_hooks()
+    {
+        screen_hooks_installed.store(false, std::memory_order_release);
+        guarded_screen_class.store(nullptr, std::memory_order_release);
+        for (auto& callback : screen_callbacks)
+        {
+            if (callback != Hook::ERROR_ID) Hook::UnregisterCallback(callback);
+            callback = Hook::ERROR_ID;
+        }
+    }
+
     void register_lua(RC::LuaMadeSimple::Lua& lua)
     {
         if (!enabled()) return;
@@ -783,5 +940,10 @@ namespace silverfish::inventory_wipe
         lua.register_function("SilverfishVerifyPreparedNativeInventory", verify_prepared);
         lua.register_function("SilverfishApplyPreparedNativeInventory", apply_prepared);
         lua.register_function("SilverfishRecoverNativeInventoryBag", recover_bag);
+        if (flag("SILVERFISH_COOP_NATIVE_WIPE_VIEW"))
+        {
+            lua.register_function("SilverfishArmNativeWipeScreen", arm_screen);
+            lua.register_function("SilverfishTakeNativeWipeScreenActions", take_screen_actions);
+        }
     }
 }

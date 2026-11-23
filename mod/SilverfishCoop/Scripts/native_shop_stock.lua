@@ -101,6 +101,44 @@ local function read_rows(path, expected)
     return rows, seen
 end
 
+local function rebuild_stock(panel)
+    for index, side in ipairs(sides) do
+        panel[cards[side]]:Empty()
+        panel:LayoutCards(index - 1)
+    end
+    panel:FullRefresh()
+end
+
+local function idle(screen)
+    local manager = screen.ItemManager
+    local menu = valid(manager) and manager.ItemContextMenu
+    return valid(manager) and manager.HoldingItem == false and manager.IsTakingItem == false
+        and manager.IsSplittingStack == false and (not valid(menu) or not menu:IsVisible())
+end
+
+function stock.idle(session)
+    return stock.present(session, true) and idle(session.screen)
+end
+
+function stock.refresh_host(controller, actor)
+    if not valid(controller) then return true end
+    local stack = controller.MenuStack
+    local count = stack:GetArrayNum()
+    if count > 32 then return false end
+    for index = count, 1, -1 do
+        local screen = stack[index]
+        if valid(screen) and same(screen:GetClass(), StaticFindObject(screen_path))
+            and same(screen:GetOwningPlayer(), controller) and same(screen.Shop, actor)
+            and valid(screen.ShopPanel) and same(screen.ShopPanel.Target, actor) then
+            if index ~= count or not idle(screen) then return false end
+            rebuild_stock(screen.ShopPanel)
+            return true
+        end
+    end
+    -- A reopened menu reads the already-updated authoritative actor.
+    return true
+end
+
 function stock.render(session, actor, state, phase, wallet, path, total)
     local rows, offers = read_rows(path, total)
     local save, pawn = scope.bind_guest(state, phase)
@@ -144,11 +182,7 @@ function stock.render(session, actor, state, phase, wallet, path, total)
         or not SilverfishSetNativeShopScreen(address, false) or not SilverfishReplaceNativeShopPreview(table.unpack(inputs)) then
         error("The exact stock merchant screen could not bind its catalog", 0)
     end
-    for index, side in ipairs(sides) do
-        screen.ShopPanel[cards[side]]:Empty()
-        screen.ShopPanel:LayoutCards(index - 1)
-    end
-    screen.ShopPanel:FullRefresh()
+    rebuild_stock(screen.ShopPanel)
     screen.BackpackPanel:FullRefresh()
     for _, side in ipairs(sides) do
         local displayed = screen.ShopPanel[cards[side]]

@@ -2,17 +2,21 @@ local flare = {}
 local guest_save = require("guest_save")
 
 local folder = "/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/"
-local classes = {}
+local bolt = "BlueprintGeneratedClass " .. folder .. "Bolt_Projectile_BP.Bolt_Projectile_BP_C"
+local pipe_bomb = "BlueprintGeneratedClass " .. folder .. "PipeBomb_Projectile_BP.PipeBomb_Projectile_BP_C"
+local classes = {[bolt] = "bolt", [pipe_bomb] = "pipebomb"}
 for _, name in ipairs({"Flare_Projectile_BP", "Blue_Flare_Projectile_BP", "Yellow_Flare_Projectile_BP"}) do
-    classes["BlueprintGeneratedClass " .. folder .. name .. "." .. name .. "_C"] = true
+    classes["BlueprintGeneratedClass " .. folder .. name .. "." .. name .. "_C"] = "flare"
 end
 flare.equipment = {}
-for _, name in ipairs({"Eqp_Flare", "Eqp_Flare_Blue", "Eqp_Flare_Yellow"}) do
+for _, name in ipairs({"Eqp_Flare", "Eqp_Flare_Blue", "Eqp_Flare_Yellow", "Eqp_Bolt"}) do
     flare.equipment["/Game/Classes/Equipment/" .. name .. "." .. name .. "_C"] = true
 end
 local intent, receipt
-local projectiles = {}
-local next_flare_check = 0
+local projectiles, replicas = {}, {}
+local next_flare_check, next_replica_check = 0, 0
+local look_trace, blocking, ignore = 4, 2, 0 -- Stock LookTrace uses ECC_Camera.
+local query_and_physics, no_collision = 3, 0
 local replica_fuse = 24 * 60 * 60
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
@@ -38,31 +42,133 @@ local function qualified(context, client)
     local actor = context:get()
     if not valid(actor) then return end
     local class = actor:GetClass()
-    if not valid(class) or not classes[class:GetFullName()] or actor:IsActorBeingDestroyed() then return end
+    local kind = valid(class) and classes[class:GetFullName()]
+    if not kind or actor:IsActorBeingDestroyed() then return end
     local world = actor:GetWorld()
     local driver = valid(world) and world.NetDriver
     if not valid(driver) or not valid(driver.World) or driver.World:GetAddress() ~= world:GetAddress()
         or valid(driver.ServerConnection) ~= client then return end
-    if client and actor:GetLocalRole() == 1 or not client and actor:HasAuthority() then return actor end
+    if client and actor:GetLocalRole() == 1 or not client and actor:HasAuthority() then return actor, kind end
+end
+
+local function capsule(actor)
+    local root = actor.Capsule
+    local class = StaticFindObject("/Script/Engine.CapsuleComponent")
+    if same(root, actor.RootComponent) and same(root:GetClass(), class)
+        and same(root:GetOwner(), actor) then return root end
+end
+
+function flare.carry_root(actor, world)
+    if not valid(actor) then return end
+    local key = actor:GetAddress()
+    local entry = projectiles[key] or replicas[key]
+    if not entry or not same(entry.actor, actor) or not valid(entry.root) or actor:IsActorBeingDestroyed()
+        or not same(actor:GetWorld(), world) or actor.bReplicateMovement ~= true then return end
+    if same(actor.RootComponent, entry.root) and same(entry.root:GetOwner(), actor) then return entry.root end
+end
+
+local function enable_grip(actor, root)
+    local class = StaticFindObject("/Script/Engine.PrimitiveComponent")
+    if not valid(class) then return end
+    local parts = actor:K2_GetComponentsByClass(class)
+    if not parts or #parts < 3 or #parts > 12 then return end
+    actor:SetActorEnableCollision(false)
+    local found = false
+    for index = 1, #parts do
+        local part = parts[index]
+        if type(part) == "userdata" and type(part.type) == "function" and part:type() == "RemoteUnrealParam" then
+            part = part:get()
+        end
+        if not valid(part) or not same(part:GetOwner(), actor) then return end
+        part:SetGenerateOverlapEvents(false)
+        part:SetNotifyRigidBodyCollision(false)
+        part:SetCollisionResponseToAllChannels(ignore)
+        if same(part, root) then found = true else part:SetCollisionEnabled(no_collision) end
+    end
+    if not found then return end
+    -- The inert replica needs a stock trace target and a body for PhysicsHandle.
+    -- Object collision responses stay ignored, which prevents local impact/ignition.
+    root:SetCollisionResponseToChannel(look_trace, blocking)
+    for channel = 0, 31 do
+        if root:GetCollisionResponseToChannel(channel) ~= (channel == look_trace and blocking or ignore) then return end
+    end
+    root:SetEnableGravity(false)
+    root:SetCollisionEnabled(query_and_physics)
+    actor:SetActorEnableCollision(true)
+    if not root:IsAnySimulatingPhysics() then root:SetSimulatePhysics(true) end
+    if root:IsAnySimulatingPhysics() and root:GetCollisionEnabled() == query_and_physics then return root end
+end
+
+local function landed(actor)
+    local movement = actor.ReplicatedMovement
+    return movement and movement.bRepPhysics == true
+end
+
+local function update_replica_grips(state, phase)
+    if not next(replicas) then return end
+    local active = phase == "connected" and state.server == true and state.listening
+    local now = os.clock()
+    if active and now < next_replica_check then return end
+    next_replica_check = now + .25
+    for key, entry in pairs(replicas) do
+        local actor = entry.actor
+        if not valid(actor) or actor:IsActorBeingDestroyed() or actor:GetLocalRole() ~= 1 then
+            replicas[key] = nil
+        elseif not active or not same(actor:GetWorld(), state.world) then
+            if entry.root then actor:SetActorEnableCollision(false) end
+            entry.root = nil
+            if not same(actor:GetWorld(), state.world) then replicas[key] = nil end
+        elseif not entry.refused then
+            local known, rigid = pcall(landed, actor)
+            if known and rigid and actor.Lit == true and actor.bReplicateMovement == true then
+                if not entry.root then
+                    local ok, root = pcall(function()
+                        local owned = capsule(actor)
+                        if owned then return enable_grip(actor, owned) end
+                    end)
+                    if ok and root then
+                        entry.root = root
+                    else
+                        actor:SetActorEnableCollision(false)
+                        entry.refused = true
+                    end
+                end
+            elseif entry.root then
+                actor:SetActorEnableCollision(false)
+                entry.root = nil
+            end
+        end
+    end
 end
 
 function flare.start(role)
     if type(RegisterBeginPlayPreHook) ~= "function" or type(RegisterBeginPlayPostHook) ~= "function" then return end
     RegisterBeginPlayPreHook(function(context)
-        if role() ~= "client" then return end
-        local actor = qualified(context, true)
-        if actor then
+        local current = role()
+        if current ~= "host" and current ~= "client" then return end
+        local client = current == "client"
+        local actor, kind = qualified(context, client)
+        if not actor then return end
+        if client then
             actor:SetActorEnableCollision(false)
-            -- FuseTime is supplied by the equipped flare and is not replicated.
-            -- The host retires this actor after the real stock fuse and fade.
-            actor.FuseTime = replica_fuse
+            if kind ~= "bolt" then
+                -- FuseTime is supplied at the throw and is local to each engine.
+                -- Only the authority applies the actual fuse, effects and damage.
+                actor.FuseTime = replica_fuse
+            end
+        elseif kind ~= "flare" then
+            -- These projectiles can hit and disappear on the first bounce.
+            actor.NetUpdateFrequency = 30
+            actor:SetReplicates(true)
+            actor:SetReplicateMovement(true)
+            actor:ForceNetUpdate()
         end
     end)
     RegisterBeginPlayPostHook(function(context)
         local current = role()
         if current ~= "host" and current ~= "client" then return end
         local client = current == "client"
-        local actor = qualified(context, client)
+        local actor, kind = qualified(context, client)
         if not actor then return end
         if client then
             actor:SetActorEnableCollision(false)
@@ -70,12 +176,16 @@ function flare.start(role)
             if valid(movement) then movement:Deactivate() end
             local spin = actor.RotatingMovement
             if valid(spin) then spin:Deactivate() end
+            -- A bolt's stock bounce replaces it with a separate ground item.
+            if kind == "flare" then replicas[actor:GetAddress()] = {actor = actor} end
         else
-            actor.NetUpdateFrequency = 24
-            actor:SetReplicates(true)
-            actor:SetReplicateMovement(true)
+            if kind == "flare" then
+                actor.NetUpdateFrequency = 24
+                actor:SetReplicates(true)
+                actor:SetReplicateMovement(true)
+                projectiles[actor:GetAddress()] = {actor = actor, root = capsule(actor)}
+            end
             actor:ForceNetUpdate()
-            projectiles[actor:GetAddress()] = actor
         end
     end)
 end
@@ -89,7 +199,8 @@ local function retire_spent(state)
     local now = os.clock()
     if now < next_flare_check then return end
     next_flare_check = now + .25
-    for key, actor in pairs(projectiles) do
+    for key, entry in pairs(projectiles) do
+        local actor = entry.actor
         if not valid(actor) or actor:IsActorBeingDestroyed() or not same(actor:GetWorld(), state.world) then
             projectiles[key] = nil
         elseif actor.Lit == false and faded(actor.PointLight) and faded(actor.PointLight1) then
@@ -103,6 +214,7 @@ end
 
 function flare.sync(state, phase)
     if phase == "hosting" then retire_spent(state) end
+    update_replica_grips(state, phase)
     if phase ~= "connected" or not state.server or not state.listening or type(SilverfishTakeLocalGuestFlare) ~= "function" then
         intent = nil
         return
@@ -157,7 +269,7 @@ local function complete(fields, state, phase)
     elseif actor.Ammo ~= after or updated[ammo_field] ~= after then
         error("native_guest_flare_local_consumption_unverified", 0)
     end
-    return "stock flare charge reconciled"
+    return "stock throwable charge reconciled"
 end
 
 function flare.command(fields, state, phase)
@@ -174,7 +286,7 @@ function flare.command(fields, state, phase)
         pawn:GetAddress(), detached:GetAddress(), guid, toss == "1")
     if not ok then error(reason, 0) end
     receipt = {state.map, name, guid, toss, before, after, class, projectile}
-    return "stock flare thrown"
+    return "stock throwable thrown"
 end
 
 function flare.rows(state, phase, row)

@@ -23,6 +23,12 @@ namespace
     constexpr std::uint32_t prop_poses_limit = 4 * 257;
     constexpr std::uint32_t avatar_poses_limit = 512;
     constexpr std::uint32_t local_prop_pose_limit = 768;
+    constexpr std::uint32_t remote_footsteps_limit = 2048;
+    constexpr std::uint32_t weapon_cues_limit = 16 * 1024;
+    constexpr std::size_t weapon_cue_capacity = 36;
+    constexpr std::size_t weapon_cue_limit = 1024;
+    constexpr std::size_t weapon_cue_area_limit = 160;
+    constexpr std::int64_t weapon_cue_ttl_ms = 250;
     constexpr std::uint32_t zone_roster_limit = 8192;
     constexpr std::uint32_t guest_interaction_features = 0x0f;
     constexpr std::uint32_t guest_interaction_area_limit = 160;
@@ -46,6 +52,17 @@ namespace
     std::string local_prop_pose;
     std::string local_avatar_pose;
     std::string remote_avatar_poses;
+    std::string remote_footsteps;
+    std::chrono::steady_clock::time_point remote_footsteps_expires;
+    struct WeaponCue
+    {
+        std::string record;
+        std::chrono::steady_clock::time_point expires;
+    };
+    std::deque<WeaponCue> weapon_cues;
+    std::string weapon_cue_area;
+    std::size_t weapon_cue_bytes{};
+    bool weapon_cues_enabled{};
     std::int64_t native_events_heartbeat{}, stock_board_heartbeat{}, host_dig_heartbeat{};
     std::int64_t zone_heartbeat{};
     std::string zone_roster;
@@ -280,6 +297,21 @@ namespace
         return take_presentation(lua, remote_avatar_poses);
     }
 
+    int take_remote_footsteps(const Lua& lua)
+    {
+        std::string frame;
+        {
+            std::lock_guard lock(mutex);
+            if (attached && std::chrono::steady_clock::now() < remote_footsteps_expires)
+                frame.swap(remote_footsteps);
+            else
+                remote_footsteps.clear();
+        }
+        if (frame.empty()) return 0;
+        lua.set_string(frame);
+        return 1;
+    }
+
     int publish_presentation(const Lua& lua, std::string& mailbox, std::uint32_t limit)
     {
         if (lua.get_stack_size() != 1 || !lua.is_string()) return 0;
@@ -300,6 +332,56 @@ namespace
     int publish_local_prop_pose(const Lua& lua)
     {
         return publish_presentation(lua, local_prop_pose, local_prop_pose_limit);
+    }
+
+    void clear_weapon_cues()
+    {
+        weapon_cues.clear();
+        weapon_cue_area.clear();
+        weapon_cue_bytes = 0;
+    }
+
+    int publish_weapon_cue(const Lua& lua)
+    {
+        if (lua.get_stack_size() != 3 || !lua.is_string(1) || !lua.is_string(2) || !lua.is_integer(3)) return 0;
+        const auto area = lua.get_string();
+        const auto record = lua.get_string();
+        const auto remaining = lua.get_integer();
+        if (area.empty() || area.size() > weapon_cue_area_limit || area.find_first_of("\r\n") != area.npos ||
+            record.empty() || record.size() > weapon_cue_limit || record.find_first_of("\r\n") != record.npos ||
+            remaining <= 0 || remaining > weapon_cue_ttl_ms) return 0;
+        const auto expires = std::chrono::steady_clock::now() + std::chrono::milliseconds(remaining);
+        bool active{};
+        {
+            std::lock_guard lock(mutex);
+            active = attached && weapon_cues_enabled;
+            if (active)
+            {
+                if (weapon_cue_area != area)
+                {
+                    clear_weapon_cues();
+                    weapon_cue_area.assign(area);
+                }
+                const auto cost = record.size() + 1;
+                while (weapon_cues.size() >= weapon_cue_capacity ||
+                       area.size() + 1 + weapon_cue_bytes + cost > weapon_cues_limit)
+                {
+                    weapon_cue_bytes -= weapon_cues.front().record.size() + 1;
+                    weapon_cues.pop_front();
+                }
+                weapon_cues.push_back({std::string(record), expires});
+                weapon_cue_bytes += cost;
+            }
+        }
+        lua.set_bool(active);
+        return 1;
+    }
+
+    int clear_local_weapon_cues(const Lua&)
+    {
+        std::lock_guard lock(mutex);
+        clear_weapon_cues();
+        return 0;
     }
 
     std::uint32_t take_local_pose(std::string& mailbox, char* buffer, std::uint32_t capacity)
@@ -332,6 +414,9 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
     local_prop_pose.clear();
     local_avatar_pose.clear();
     remote_avatar_poses.clear();
+    remote_footsteps.clear();
+    weapon_cues_enabled = false;
+    clear_weapon_cues();
     native_events_heartbeat = stock_board_heartbeat = host_dig_heartbeat = 0;
     guest_interaction_lease = {};
     zone_heartbeat = 0;
@@ -451,12 +536,57 @@ extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeTakeLocalPropPose
     return take_local_pose(local_prop_pose, buffer, capacity);
 }
 
+extern "C" __declspec(dllexport) int SilverfishBridgeEnableLocalWeaponCuesV1()
+{
+    std::lock_guard lock(mutex);
+    weapon_cues_enabled = attached;
+    return weapon_cues_enabled;
+}
+
+extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeTakeLocalWeaponCuesV1(char* buffer, std::uint32_t capacity)
+{
+    if (!buffer || capacity < weapon_cues_limit) return 0;
+    std::deque<WeaponCue> pending;
+    std::string area;
+    {
+        std::lock_guard lock(mutex);
+        if (!weapon_cues_enabled || weapon_cues.empty()) return 0;
+        pending.swap(weapon_cues);
+        area.swap(weapon_cue_area);
+        weapon_cue_bytes = 0;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    std::size_t size{};
+    auto append = [&](const std::string& row) {
+        std::memcpy(buffer + size, row.data(), row.size());
+        size += row.size();
+        buffer[size++] = '\n';
+    };
+    for (const auto& entry : pending)
+    {
+        if (entry.expires <= now) continue;
+        if (!size) append(area);
+        append(entry.record);
+    }
+    return static_cast<std::uint32_t>(size);
+}
+
 extern "C" __declspec(dllexport) int SilverfishBridgePublishAvatarPosesV1(const char* data, std::uint32_t size)
 {
     if (!data || !size || size > avatar_poses_limit) return 0;
     std::lock_guard lock(mutex);
     if (!attached) return 0;
     remote_avatar_poses.assign(data, size);
+    return 1;
+}
+
+extern "C" __declspec(dllexport) int SilverfishBridgePublishFootstepsV1(const char* data, std::uint32_t size)
+{
+    if (!data || !size || size > remote_footsteps_limit) return 0;
+    std::lock_guard lock(mutex);
+    if (!attached) return 0;
+    remote_footsteps.assign(data, size);
+    remote_footsteps_expires = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
     return 1;
 }
 
@@ -520,8 +650,11 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishEnqueueLocalBridgeInput", enqueue_input);
         lua.register_function("SilverfishTakeLocalPropPoses", take_prop_poses);
         lua.register_function("SilverfishPublishLocalPropPose", publish_local_prop_pose);
+        lua.register_function("SilverfishPublishLocalWeaponCue", publish_weapon_cue);
+        lua.register_function("SilverfishClearLocalWeaponCues", clear_local_weapon_cues);
         lua.register_function("SilverfishPublishLocalAvatarPose", publish_avatar_pose);
         lua.register_function("SilverfishTakeRemoteAvatarPoses", take_avatar_poses);
+        lua.register_function("SilverfishTakeRemoteFootsteps", take_remote_footsteps);
         lua.register_function("SilverfishReadLocalNativeEventsHeartbeat", read_native_events_heartbeat);
         lua.register_function("SilverfishReadLocalStockBoardHeartbeat", read_stock_board_heartbeat);
         lua.register_function("SilverfishReadLocalHostDigHeartbeat", read_host_dig_heartbeat);
@@ -542,6 +675,9 @@ namespace silverfish::local_bridge
         local_prop_pose.clear();
         local_avatar_pose.clear();
         remote_avatar_poses.clear();
+        remote_footsteps.clear();
+        weapon_cues_enabled = false;
+        clear_weapon_cues();
         native_events_heartbeat = stock_board_heartbeat = host_dig_heartbeat = 0;
         guest_interaction_lease = {};
         zone_heartbeat = 0;

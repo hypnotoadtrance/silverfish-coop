@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from contextlib import nullcontext
 from hashlib import file_digest
 import json
 import math
@@ -12,7 +13,8 @@ import uuid
 
 from live_ai_smoke import status, wait
 from live_computer_board_smoke import stock_flags
-from live_guest_held_fire_smoke import events
+from live_dynamic_board_smoke import probe, staged_probe
+from live_guest_held_fire_smoke import events, wait_event
 from live_multi_smoke import saved_hashes
 from live_turret_photo_smoke import BOROUGH, CITY, RAIL, RUINS
 
@@ -22,7 +24,7 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.native_flood_jammer import (
-    BLACK_LAKE, CROSSROADS_JAMMER, FLOOD, LENNY, POSE, SPRATT, same_pose,
+    BLACK_LAKE, CROSSROADS_JAMMER, FLOOD, LENNY, OBSERVATORY_BOUNTY_BOARD, POSE, SPRATT, same_pose,
 )
 from tools.silverfish import native_lenny, native_spratt, native_spratt_fixture
 from tools.silverfish.guest_weapon_profiles import NINE_MM_BALL, TWELVE_GAUGE_BUCK
@@ -34,7 +36,7 @@ def quest_record(campaign, quest):
 
 
 async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=False, spec=FLOOD, stock_menu=False,
-                   late_join=False):
+                   late_join=False, simmi_dialogue=False):
     lake, crossroads, lenny = spec == BLACK_LAKE, spec == CROSSROADS_JAMMER, spec == LENNY
     spratt = spec == SPRATT
     assassination = lenny or spratt
@@ -62,7 +64,8 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
         outbound = ((lake_area, "BlackMarket"), (CROSSROADS, "Lake_Cave"), (area, "CR_Cstrn"))
         returning = ((CROSSROADS, "CR_Cstrn"), (lake_area, "Lake_Cave"), (board_map, "BlackMarket"))
         qualification_route = (*outbound, *returning)
-    name = spec.command().removeprefix("native-") + "-" + uuid.uuid4().hex[:8]
+    prefix = "simmi-jobs" if simmi_dialogue else spec.command().removeprefix("native-")
+    name = prefix + "-" + uuid.uuid4().hex[:8]
     host, client = ("--campaign", name), ("--profile", name)
     campaign = work / "campaigns" / name
     run, client_run = campaign / "run", work / "clients" / name / "run"
@@ -211,6 +214,68 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
             result[owner] = {key: flags.get(key, 0) for key in ("Player_Cash", "Player_Xp", *objective_flags)}
         return result
 
+    async def verify_simmi_dialogue():
+        simmi_board, physical = spec.board, OBSERVATORY_BOUNTY_BOARD
+        lake_quest = BLACK_LAKE.quest
+        host_bridge, = (run / "game-bridge").iterdir()
+        guest_bridge, = (client_run / "game-bridge").iterdir()
+
+        async def seat_probe(bridge, operation):
+            return await probe(bridge, operation, prefix="simmi-jobs", timeout=19)
+
+        async def approach(spot, directory):
+            position = tuple(map(float, (await seat_probe(host_bridge, spot)).split(",")))
+            await wait(directory, lambda frame: (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+                       and math.dist(point, position) <= 25)
+
+        async def visible(bridge, directory, board, *, instance=None):
+            await wait(directory, lambda frame: (menu := frame.get("game", {}).get("native_wire_board_stock", {}))
+                       and (menu.get("board"), menu.get("state")) == (board, "visible"))
+            actual, identity, choices = (await seat_probe(bridge, "read")).split(";")
+            assert actual == board and (instance is None or identity == instance), (actual, identity, instance)
+            return set(filter(None, choices.split(",")))
+
+        async def physical_offers():
+            await approach("board", client_run)
+            await action(client, "native-wire-board-stock-f-fixture", "--target", physical)
+            found = await visible(guest_bridge, client_run, physical)
+            assert await seat_probe(guest_bridge, "close") == "closed"
+            await wait(client_run, lambda frame: not frame.get("game", {}).get("native_wire_board_stock"))
+            return found
+
+        await action(host, "checkpoint")
+        before = save_files()
+        original = await physical_offers()
+        assert {quest, lake_quest} <= original, original
+        await approach("host", run)
+        await approach("guest", client_run)
+        host_menu = await seat_probe(host_bridge, "talk")
+        guest_menu = await seat_probe(guest_bridge, "talk")
+        for bridge, directory, identity in ((host_bridge, run, host_menu), (guest_bridge, client_run, guest_menu)):
+            found = await visible(bridge, directory, simmi_board, instance=identity)
+            assert {quest, lake_quest} <= found, found
+
+        await stock_button("start", "starting")
+        accepted = await committed(1)
+        assert (accepted["actor"], accepted["quest_id"]) == (character, quest), accepted
+        assert await seat_probe(guest_bridge, "closesimmi") == "closed"
+        await wait(client_run, lambda frame: not frame.get("game", {}).get("native_wire_board_stock"))
+        remaining = await physical_offers()
+        assert remaining == original - {quest}, (original, remaining)
+
+        accepted_host = await action(host, "native-wire-board-stock-fixture", "--target", f"{lake_quest}|start")
+        assert accepted_host["native_wire_board_stock"]["state"] == "starting", accepted_host
+        for directory in (run, client_run):
+            await wait(directory, lambda frame: (row := frame.get("gameplay", {}).get("native_quests", {}).get(lake_quest, {}))
+                       and (row.get("step"), row.get("actor")) == (1, "host"))
+        await wait_event(client_run, "native_guest_ui_projected", lambda row: row.get("quests", 0) >= 2)
+        for bridge in (host_bridge, guest_bridge):
+            assert await seat_probe(bridge, "journal") == "1,1", bridge
+        require_deferred_save("Simmi stock dialogue and physical board refresh", before)
+        evidence["simmi_dialogue"] = {"host_and_guest_visible": True, "menus_reused": True,
+                                      "physical_before": sorted(original), "physical_after": sorted(remaining),
+                                      "crossroads_actor": character, "lake_actor": "host"}
+
     async def projected(*states, directory=client_run):
         key = f"{spec.key}_projection"
         client_state = await wait(directory, lambda frame: (view := frame.get("game", {}).get(key, {}))
@@ -346,6 +411,10 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
 
             peer = current_pose(await wait(client_run, synced, timeout=20))
             evidence.update(host_jammer=authority, guest_jammer=peer, verified=True)
+            return
+        if simmi_dialogue:
+            await verify_simmi_dialogue()
+            evidence["verified"] = True
             return
         port = current["endpoint"]["port"]
         if spratt:
@@ -662,10 +731,11 @@ if __name__ == "__main__":
     parser.add_argument("--client-projection", action="store_true", help="require the exact client-local jammer to disappear after the stock kill")
     parser.add_argument("--pose-only", action="store_true", help="compare both authored jammer transforms before the bounty")
     parser.add_argument("--stock-bounty-menu", action="store_true", help="use the stock Black Market bounty buttons")
+    parser.add_argument("--simmi-dialogue-only", action="store_true", help="verify both stock Simmi dialogue menus and the physical board")
     parser.add_argument("--late-join", action="store_true", help="join with a fresh guest after the Black Lake stock jammer is destroyed")
     profiles = parser.add_mutually_exclusive_group()
     profiles.add_argument("--black-lake", action="store_true", help="run the authored Black Market and Black Lake contract")
-    profiles.add_argument("--simmi", action="store_true", help="accept and turn in the Crossroads jammer through Simmi's stock menu")
+    profiles.add_argument("--simmi", action="store_true", help="run the Crossroads jammer in Simmi's stock jobs board")
     profiles.add_argument("--lenny", action="store_true", help="run Lenny's House and its stock quest-gated NPC spawn")
     profiles.add_argument("--spratt", action="store_true", help="run Kill Spratt through its stock board, Cistern spawn, and redemption")
     arguments = parser.parse_args()
@@ -675,9 +745,16 @@ if __name__ == "__main__":
         parser.error("The stock bounty menu fixture requires --black-lake or --simmi")
     if arguments.late_join and (not arguments.black_lake or arguments.pose_only):
         parser.error("--late-join requires the Black Lake bounty")
-    asyncio.run(exercise(arguments.work.resolve(), arguments.vanilla_saved,
-                         client_projection=arguments.client_projection or arguments.late_join,
-                         pose_only=arguments.pose_only, stock_menu=arguments.stock_bounty_menu,
-                         late_join=arguments.late_join,
-                         spec=SPRATT if arguments.spratt else LENNY if arguments.lenny else BLACK_LAKE if arguments.black_lake
-                         else CROSSROADS_JAMMER if arguments.simmi else FLOOD))
+    if arguments.simmi_dialogue_only and (not arguments.simmi or arguments.pose_only or not arguments.vanilla_saved):
+        parser.error("--simmi-dialogue-only requires --simmi, a save canary, and a private isolated stage")
+    work = arguments.work.resolve()
+    if arguments.simmi_dialogue_only and any(part.casefold() == "steamapps" for part in work.parts):
+        parser.error("Use a private stage for the stock dialogue fixture")
+    overlay = staged_probe(work / "stage", "simmi_jobs_probe") if arguments.simmi_dialogue_only else nullcontext()
+    with overlay:
+        asyncio.run(exercise(work, arguments.vanilla_saved,
+                             client_projection=arguments.client_projection or arguments.late_join,
+                             pose_only=arguments.pose_only, stock_menu=arguments.stock_bounty_menu,
+                             late_join=arguments.late_join, simmi_dialogue=arguments.simmi_dialogue_only,
+                             spec=SPRATT if arguments.spratt else LENNY if arguments.lenny else BLACK_LAKE if arguments.black_lake
+                             else CROSSROADS_JAMMER if arguments.simmi else FLOOD))

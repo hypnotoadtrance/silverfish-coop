@@ -1,4 +1,7 @@
 local view = {}
+local lighter = require("native_avatar_lighter")
+view.lighter_override = lighter.override
+view.hide_lighter = lighter.hide
 
 local equipment_type = "/Game/Classes/Equipment/Equipment_Master_BP.Equipment_Master_BP_C"
 local firearm_type = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
@@ -19,6 +22,7 @@ local kinds = { s = {static_type, "StaticMesh", "/Script/Engine.StaticMesh"},
 local rigs = {r = true, h = true}
 local active_cycle = {}
 local maximum_parts = 12
+local minimum_scale = .01
 local active_recoil = {}
 local kick_time = .05
 local identity = {
@@ -56,7 +60,7 @@ local function valid_pose(values)
     for index = 1, 9 do
         local value = values[index]
         if not value or value ~= value or math.abs(value) > (index < 4 and 250 or index < 7 and 180 or 4)
-            or (index >= 7 and math.abs(value) < .01) then
+            or (index >= 7 and math.abs(value) < minimum_scale) then
             return false
         end
     end
@@ -66,8 +70,9 @@ end
 function view.decode(model)
     if model == "-" then return {} end
     if type(model) ~= "string" or #model > 4096 or model == "" then return end
+    local shape, mode = lighter.split(model)
     local parts, has_rig, needs_rig = {}, false, false
-    for encoded in (model .. "|"):gmatch("([^|]*)|") do
+    for encoded in (shape .. "|"):gmatch("([^|]*)|") do
         local fields = {}
         for field in (encoded .. "@"):gmatch("([^@]*)@") do fields[#fields + 1] = field end
         local kind, socket = fields[1], fields[12]
@@ -88,11 +93,21 @@ function view.decode(model)
         parts[#parts + 1] = {kind = kind, path = fields[2], pose = pose, socket = socket}
     end
     if needs_rig and not has_rig then return end
-    return parts
+    if mode and (#parts ~= 2 or parts[1].kind ~= "s" or parts[2].kind ~= "s"
+        or parts[1].socket or parts[2].socket or parts[1].path ~= lighter.body_path or parts[2].path ~= lighter.lid_path) then return end
+    return parts, mode, shape
 end
 
 local function encode_pose(location, rotation, scale)
     local values = { location.X, location.Y, location.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, scale.X, scale.Y, scale.Z }
+    -- Stock 0.01 socket scales can be stored as a float just below the wire minimum.
+    for index = 7, 9 do
+        local value = values[index]
+        local magnitude = value and math.abs(value)
+        if magnitude and magnitude < minimum_scale and magnitude >= minimum_scale - 1e-9 then
+            values[index] = value < 0 and -minimum_scale or minimum_scale
+        end
+    end
     if not valid_pose(values) then return end
     for index, value in ipairs(values) do values[index] = string.format("%.2f", value) end
     return table.concat(values, "@")
@@ -118,20 +133,43 @@ local function cycle_rig(equipment, root)
     return rig, table.concat({kind, path, pose}, "@")
 end
 
-function view.observe(pawn, save, cached)
+local function equipped(pawn, save)
     local equipment = pawn.EquipedItem
     if not valid(equipment) or not same(equipment.User, pawn) or not same(equipment:GetWorld(), pawn:GetWorld())
         or not equipment:HasAuthority() or equipment:IsActorBeingDestroyed() or not same(equipment:GetAttachParentActor(), pawn) then
-        return "-", nil
+        return
     end
     local selected, slots = math.tointeger(save.PlayerEquipIndex), save.PlayerEquipment
     local row = selected and slots and selected >= 0 and selected < slots:GetArrayNum() and slots[selected + 1]
-    if not row or not same(row[item_class], equipment:GetClass()) then return "-", nil end
-    if cached and same(equipment, cached.actor) then return cached.model, cached end
+    if row and same(row[item_class], equipment:GetClass()) then return equipment end
+end
+
+function view.local_lighter(pawn)
+    if not valid(pawn.Save) then return end
+    local equipment = equipped(pawn, pawn.Save)
+    if equipment and lighter.parts(equipment) then return lighter.state(equipment) end
+end
+
+function view.observe(pawn, save, cached)
+    local equipment = equipped(pawn, save)
+    if not equipment then return "-", nil end
+    if cached and same(equipment, cached.actor) then
+        local mode = cached.lighter and lighter.state(equipment)
+        return mode and cached.model .. "~" .. mode or cached.model, cached
+    end
     local class = StaticFindObject(equipment_type)
     local root, math_api = equipment.RootComponent, StaticFindObject(math_library)
     if not valid(class) or not equipment:IsA(class) or not valid(root) or not valid(math_api) then return "-", nil end
     local root_transform, parts = root:K2_GetComponentToWorld(), {}
+    local body, lid = lighter.parts(equipment)
+    if body then
+        local body_pose, lid_pose = root_pose(body, math_api, root_transform), root_pose(lid, math_api, root_transform)
+        local mode = lighter.state(equipment)
+        if body_pose and lid_pose and mode then
+            local model = "s@" .. lighter.body_path .. "@" .. body_pose .. "|s@" .. lighter.lid_path .. "@" .. lid_pose
+            return model .. "~" .. mode, {actor = equipment, model = model, lighter = true}
+        end
+    end
     local rig, rig_description = cycle_rig(equipment, root)
     if rig then parts[1] = rig_description end
     for _, kind in ipairs({"s", "k"}) do
@@ -152,8 +190,14 @@ function view.observe(pawn, save, cached)
                         local name = attachment:ToString()
                         if socket_name(name) and (name == "None" or rig:DoesSocketExist(attachment)) then socket = name end
                     end
-                    local pose = socket and encode_pose(component.RelativeLocation, component.RelativeRotation, component.RelativeScale3D)
-                        or root_pose(component, math_api, root_transform)
+                    local pose
+                    if socket then
+                        pose = encode_pose(component.RelativeLocation, component.RelativeRotation, component.RelativeScale3D)
+                    end
+                    if not pose then
+                        socket = nil
+                        pose = root_pose(component, math_api, root_transform)
+                    end
                     if pose then parts[#parts + 1] = table.concat({kind, path, pose, socket}, "@") end
                 end
             end
@@ -172,6 +216,26 @@ local function restore_stock(entry)
     entry.stock_weapon_actor, entry.stock_weapon_masks = nil, nil
 end
 
+local function matches_displayed_mesh(entry, actor)
+    local class = StaticFindObject(mesh_type)
+    if not valid(class) then return false end
+    local components = actor:K2_GetComponentsByClass(class)
+    if not components or #components > 24 then return false end
+    for index = 1, #components do
+        local component = unwrap(components[index])
+        if valid(component) and same(component:GetOwner(), actor) then
+            for _, profile in pairs(kinds) do
+                local component_type = StaticFindObject(profile[1])
+                if valid(component_type) and component:IsA(component_type) then
+                    local mesh = component[profile[2]]
+                    if valid(mesh) and entry.weapon_meshes and entry.weapon_meshes[mesh:GetAddress()] then return true end
+                end
+            end
+        end
+    end
+    return false
+end
+
 local function stock_held_actor(entry)
     local pawn, firearm = entry.pawn, entry.firearm_class
     local base = StaticFindObject(equipment_type)
@@ -184,16 +248,21 @@ local function stock_held_actor(entry)
     end
     if qualifies(pawn.EquipedItem) then return pawn.EquipedItem end
     if qualifies(entry.stock_weapon_actor) then return entry.stock_weapon_actor end
-    -- Unreal can replicate the actor attachment without replicating the
-    -- remote pawn's first-person equipped-item reference.
-    if firearm == "-" then return end
+    -- Unreal can replicate the attachment without the equipped-item reference.
+    -- Non-firearms need a match to a mesh in the current observer's held model.
     local output = {}
     pawn:GetAttachedActors(output, true, false)
     local attached = output.OutActors or output
+    if #attached > 24 then return end
+    local result
     for index = 1, #attached do
         local actor = unwrap(attached[index])
-        if qualifies(actor) then return actor end
+        if qualifies(actor) and (firearm ~= "-" or matches_displayed_mesh(entry, actor)) then
+            if result then return end
+            result = actor
+        end
     end
+    return result
 end
 
 function view.suppress_stock(entry)
@@ -217,6 +286,7 @@ function view.suppress_stock(entry)
 end
 
 function view.clear(entry)
+    lighter.clear(entry)
     restore_stock(entry)
     active_recoil[entry] = nil
     active_cycle[entry] = nil
@@ -225,6 +295,7 @@ function view.clear(entry)
     end
     if valid(entry.weapon_anchor) and valid(entry.pawn) then entry.weapon_anchor:K2_DestroyComponent(entry.pawn) end
     entry.weapon_parts, entry.weapon_model, entry.weapon_anchor, entry.weapon_rig = nil, nil, nil, nil
+    entry.weapon_shape, entry.weapon_meshes = nil, nil
     entry.weapon_stance = nil
     entry.weapon_slide = nil
 end
@@ -243,7 +314,7 @@ local function align_bat_grip(component, body, socket)
     end
 end
 
-local function attach(entry, parts)
+local function attach(entry, parts, lighter_mode)
     local socket = FName("Weapon_Socket01", EFindName.FNAME_Find)
     if not entry.body:DoesSocketExist(socket) then error("Stock weapon hand socket was unavailable") end
     local parent, none = entry.body, FName("None", EFindName.FNAME_Find)
@@ -258,6 +329,7 @@ local function attach(entry, parts)
         end
         parent = anchor
     end
+    local body, lid
     local function attach_part(part)
         local is_rig = rigs[part.kind]
         local profile = is_rig and kinds.k or kinds[part.kind]
@@ -287,6 +359,9 @@ local function attach(entry, parts)
             {Pitch = p[4], Yaw = p[5], Roll = p[6]}, false, {}, true)
         component:SetRelativeScale3D({X = p[7], Y = p[8], Z = p[9]})
         if part.kind == "s" then component:SetStaticMesh(asset) else component:SetSkeletalMeshAsset(asset) end
+        entry.weapon_meshes[asset:GetAddress()] = true
+        if lighter_mode and part.path == lighter.body_path then body = component end
+        if lighter_mode and part.path == lighter.lid_path then lid = component end
         if part.path == bat_mesh and part.kind == "s" then align_bat_grip(component, entry.body, socket) end
         local visible = part.kind ~= "h"
         component:SetHiddenInGame(not visible, false)
@@ -306,18 +381,24 @@ local function attach(entry, parts)
     for _, part in ipairs(parts) do
         if not rigs[part.kind] then attach_part(part) end
     end
+    if lighter_mode then lighter.mount(entry, body, lid) end
 end
 
 function view.apply(entry, model, firearm)
     firearm = firearm or "-"
     if entry.weapon_model == model and entry.firearm_class == firearm then return end
+    local parts, mode, shape = view.decode(model)
+    if not parts or mode and firearm ~= "-" then error("Invalid stock held weapon model") end
+    if mode and entry.lighter and entry.weapon_shape == shape and entry.firearm_class == firearm then
+        lighter.apply(entry, mode)
+        entry.weapon_model = model
+        return
+    end
     view.clear(entry)
-    local parts = view.decode(model)
-    if not parts then error("Invalid stock held weapon model") end
     entry.firearm_class = firearm
-    entry.weapon_parts = {}
+    entry.weapon_parts, entry.weapon_meshes = {}, {}
     if #parts > 0 then
-        local ok, failure = pcall(attach, entry, parts)
+        local ok, failure = pcall(attach, entry, parts, mode)
         if not ok then
             view.clear(entry)
             error(failure, 0)
@@ -335,7 +416,8 @@ function view.apply(entry, model, firearm)
             end
         end
     end
-    entry.weapon_model = model
+    if mode then lighter.apply(entry, mode) end
+    entry.weapon_model, entry.weapon_shape = model, shape
 end
 
 function view.recoil(entry, world, path, serial, values)
@@ -353,6 +435,7 @@ function view.recoil(entry, world, path, serial, values)
 end
 
 function view.animate_recoil(get_world)
+    lighter.animate(get_world)
     if not next(active_recoil) then return end
     local world, clock = get_world(), StaticFindObject(statics_type)
     if not valid(world) or not valid(clock) then return end
@@ -448,6 +531,7 @@ function view.cycle(entry, world, weapon, serial, path)
     local previous = active_cycle[entry]
     local bone = previous and previous.bone or moving_bone(rig)
     local rest = previous and previous.rest or mechanism_position(rig, entry.weapon_slide, bone)
+    local previous_tick = previous and previous.previous_tick or rig.VisibilityBasedAnimTickOption
     rig.VisibilityBasedAnimTickOption = 0
     rig:SetAnimationMode(1, false)
     rig:SetAnimation(clip)
@@ -457,9 +541,32 @@ function view.cycle(entry, world, weapon, serial, path)
     local prior = entry.last_cycle
     local cycle = {world = world:GetAddress(), start = clock:GetRealTimeSeconds(world), duration = length,
         clip = path, weapon = weapon, serial = serial, count = prior and prior.count + 1 or 1, peak = 0,
-        bone = bone, rest = rest, sounds = read and sounds or {}, sound_index = 1}
+        bone = bone, rest = rest, sounds = read and sounds or {}, sound_index = 1, previous_tick = previous_tick}
     active_cycle[entry], entry.last_cycle = cycle, cycle
     return true
+end
+
+local local_reload
+
+local function clear_local_reload()
+    local current = local_reload and active_cycle[local_reload]
+    if current and valid(local_reload.weapon_rig) then
+        local_reload.weapon_rig.VisibilityBasedAnimTickOption = current.previous_tick
+    end
+    if local_reload then active_cycle[local_reload] = nil end
+    local_reload = nil
+end
+
+function view.local_reload(pawn, world, weapon, serial, path)
+    local held = pawn.EquipedItem
+    if not valid(held) or not same(held.User, pawn) or not same(held:GetWorld(), world)
+        or held:GetClass():GetFullName() ~= "BlueprintGeneratedClass " .. weapon then return false end
+    local rig, clip = held.Wep_Skeli, StaticFindObject(path)
+    if not valid(rig) or not same(rig:GetOwner(), held) or not valid(clip)
+        or not (same(clip, held.Reload_Wet_Anim) or same(clip, held.Reload_Dry_Anim)) then return false end
+    if local_reload and not same(local_reload.weapon_rig, rig) then clear_local_reload() end
+    local_reload = local_reload or {pawn = pawn, weapon_rig = rig, firearm_class = weapon}
+    return view.cycle(local_reload, world, weapon, serial, path)
 end
 
 function view.animate_cycle(get_world)
@@ -469,11 +576,14 @@ function view.animate_cycle(get_world)
     local now, scope = clock:GetRealTimeSeconds(world), world:GetAddress()
     for entry, cycle in pairs(active_cycle) do
         local rig = entry.weapon_rig
-        if not valid(rig) or scope ~= cycle.world then
-            active_cycle[entry] = nil
+        local local_view = entry == local_reload
+        if not valid(rig) or scope ~= cycle.world
+            or local_view and (not valid(entry.pawn) or not same(entry.pawn.EquipedItem, rig:GetOwner())) then
+            if local_view then clear_local_reload() else active_cycle[entry] = nil end
         elseif cycle.finished then
-            rig.VisibilityBasedAnimTickOption = 4
+            rig.VisibilityBasedAnimTickOption = cycle.previous_tick
             active_cycle[entry] = nil
+            if local_view then local_reload = nil end
         else
             if cycle.rest then
                 local point = mechanism_position(rig, entry.weapon_slide, cycle.bone)

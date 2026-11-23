@@ -113,15 +113,36 @@ local function host_context(state, phase, pawn_name, profile)
         statics = statics, instance = instance, save = save}
 end
 
+local function vector(value)
+    return value and finite(value.X) and finite(value.Y) and finite(value.Z)
+end
+
 local function close_to_bed(pawn, box)
-    local first, second = pawn:K2_GetActorLocation(), box:K2_GetComponentLocation()
-    local range = pawn.InteractionRange
-    if not first or not second or not finite(first.X) or not finite(first.Y) or not finite(first.Z)
-        or not finite(second.X) or not finite(second.Y) or not finite(second.Z) or not finite(range) or range <= 0 then
+    local camera = pawn.Camera
+    local math_api = StaticFindObject(math_path)
+    local range, center = pawn.InteractionRange, box:K2_GetComponentLocation()
+    if not exact(camera, StaticFindObject("/Script/Engine.CameraComponent")) or not same(camera:GetOwner(), pawn)
+        or not valid(math_api) or not vector(center) or not finite(range) or range <= 0 then
         error("native_rest_stock_interaction_range_unavailable", 0)
     end
-    local x, y, z = first.X - second.X, first.Y - second.Y, first.Z - second.Z
-    return math.sqrt(x * x + y * y + z * z), range, second
+
+    -- Stock LookTrace measures a camera ray to the bed's collision surface.
+    -- A pawn-to-center check can reject the resulting stock sleep selection.
+    local eye, extent = camera:K2_GetComponentLocation(), box:GetUnscaledBoxExtent()
+    local transform = box:K2_GetComponentToWorld()
+    local scale = transform and transform.Scale3D
+    if not vector(eye) or not vector(extent) or extent.X <= 0 or extent.Y <= 0 or extent.Z <= 0
+        or not vector(scale) or scale.X == 0 or scale.Y == 0 or scale.Z == 0 then
+        error("native_rest_stock_interaction_range_unavailable", 0)
+    end
+    local relative = math_api:InverseTransformLocation(transform, eye)
+    if not vector(relative) then error("native_rest_stock_interaction_range_unavailable", 0) end
+    local x = math.max(math.abs(relative.X) - extent.X, 0) * scale.X
+    local y = math.max(math.abs(relative.Y) - extent.Y, 0) * scale.Y
+    local z = math.max(math.abs(relative.Z) - extent.Z, 0) * scale.Z
+    local distance = math.sqrt(x * x + y * y + z * z)
+    if not finite(distance) then error("native_rest_stock_interaction_range_unavailable", 0) end
+    return distance, range, center
 end
 
 local insomnia_selection
@@ -159,7 +180,7 @@ local function inspect_bed(state, phase, pawn_name, requested_actor)
     if type(passive.EffectActive) ~= "boolean" then error("native_rest_insomnia_unavailable", 0) end
 
     -- Neutral beds use a random sleep duration when the stock Insomnia effect is active.
-    local denied = distance >= range and "out_of_range"
+    local denied = distance > range and "out_of_range"
         or profile.faction ~= 0 and reputation.Points < actor.MinSafeRep and "reputation_too_low"
         or profile.faction == 0 and passive.EffectActive and "insomnia_requires_stock_sleep_selection"
         or nil

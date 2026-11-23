@@ -9,6 +9,7 @@ local native_replication_budget = require("native_replication_budget")
 local native_zone_loading = require("native_zone_loading")
 local native_pickup_audio = require("native_pickup_audio")
 local native_voice = require("native_voice")
+native_voice.footsteps = require("native_footsteps")
 local native_weapon_fire_view = require("native_weapon_fire_view")
 local native_time_shift = require("native_time_shift")
 local native_avatar_capture_fixture = require("native_avatar_capture_fixture")
@@ -531,10 +532,22 @@ local function run_command(fields, state, current_phase)
     if command == "travel-party" then
         if not party_travel_guard_available() then return "native_roster_unavailable" end
         if native_kill_volume.capture_blocked(state, current_phase) then return "stock_kill_volume_recovery_in_progress" end
-        local checked, refusal = pcall(native_roster.verify_party_departure, state, current_phase, fields)
+        local step = fields[5]
+        local crossing
+        if step then
+            local authored_step, ticket = step:match("^(%d+):([1-9]%d*)$")
+            if ticket then
+                crossing = math.tointeger(ticket)
+                if not crossing or not expanded_routes or type(SilverfishCheckNativeExitCrossing) ~= "function"
+                    or not SilverfishCheckNativeExitCrossing(crossing, argument, tonumber(authored_step)) then
+                    return "exit_crossing_unavailable"
+                end
+                step = authored_step
+            end
+        end
+        local checked, refusal = pcall(native_roster.verify_party_departure, state, current_phase, fields, crossing)
         if not checked then return "native_roster_unavailable" end
         if refusal then return refusal end
-        local step = fields[5]
         if step ~= "-" and (not expanded_routes or not math.tointeger(tonumber(step))) then
             error("Expected the stock authored travel time step", 0)
         end
@@ -1313,12 +1326,22 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         local seen = native_world_view.status(state, current_phase)
         if seen then rows[#rows + 1] = world_view_row("applied", seen) end
     end
-    local viewed_health = native_save_scope.guest_health(state, current_phase)
+    local viewed_health, viewed_food, viewed_regen = native_save_scope.guest_vitals(state, current_phase)
     for _, details in ipairs(state.pawns) do
         if finite(details.x) and finite(details.y) and finite(details.z) then
             local health = details == state.local_pawn and viewed_health or details.health
             rows[#rows + 1] = status_row("pawn", details.slot or details.kind, details.name, health or "-",
                 details.x, details.y, details.z, details.controller, details.max_health or "-")
+            local food, regen
+            if details == state.local_pawn then
+                food, regen = viewed_food, viewed_regen
+            elseif current_phase == "hosting" and valid(details.save) and guest_save.matches(details.pawn) then
+                food, regen = details.save.PlayerFood, details.save.PlayerRegen
+            end
+            if finite(food) or finite(regen) then
+                rows[#rows + 1] = status_row("native-guest-vitals", details.name, finite(food) and food or "-",
+                    finite(regen) and regen or "-")
+            end
         end
     end
     for _, row in ipairs(native_player_avatar.rows(status_row)) do rows[#rows + 1] = row end
@@ -1639,10 +1662,12 @@ local function tick(fields, pending, periodic)
     pcall(native_voice.sync, state, current_phase)
     pcall(native_damage_feedback.sync, state, current_phase)
     pcall(native_weapon_fire_view.sync, state, current_phase, native_player_avatar)
+    pcall(native_voice.footsteps.sync, state, current_phase, native_player_avatar.player_id)
     pcall(native_time_shift.sync, state, current_phase)
     native_guest_armor.sync(state, current_phase)
     native_world_view.sync(state, current_phase)
     native_inventory_view.sync(state, current_phase)
+    native_finite_shop.sync(state, current_phase)
     native_shop_view.sync(state, current_phase)
     native_npc_barter.sync(state, current_phase)
     native_loot_view.sync(state, current_phase)
@@ -1822,7 +1847,10 @@ local next_snapshot = 0
 LoopInGameThreadWithDelay(25, function()
     pcall(native_zone_loading.refresh, current_world)
     if not leaving then pcall(native_prop_carry.update) end
+    if role == "client" and not leaving then pcall(native_corpse_view.animate, current_world) end
+    if role == "host" and not leaving then pcall(native_zone.update_exit, current_world) end
     if role == "host" and not leaving then pcall(native_weapon_fire_view.flush, current_world) end
+    if not leaving then pcall(native_voice.footsteps.update, current_world) end
     if native_avatar_lean_bridge.enabled then pcall(native_avatar_lean_bridge.update, current_world, role, leaving) end
     if not leaving then pcall(native_player_avatar.animate_head, current_world) end
     if not leaving then pcall(native_flashlight.animate, current_world) end

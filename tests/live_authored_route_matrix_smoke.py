@@ -2,7 +2,10 @@
 
 import argparse
 import asyncio
+from collections import Counter
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
+from hashlib import sha256
 import json
 import math
 from pathlib import Path
@@ -16,11 +19,13 @@ from live_multi_smoke import saved_hashes
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+from tools.silverfish import runtime
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import submit
 from tools.silverfish.native_rest import site
-from tools.silverfish.travel import GOLD_NEXUS
+from tools.silverfish.travel import CROSSROADS, GOLD_NEXUS, OBSERVATORY
 
+TUTORIAL_DOCK = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
 
 def select_routes(selectors):
     routes = []
@@ -41,8 +46,51 @@ def select_routes(selectors):
     return routes
 
 
+
+@contextmanager
+def staged_probe(work, name):
+    scripts = work / "stage/SilverFish/Binaries/Win64/ue4ss/Mods/SilverfishCoop/Scripts"
+    fixture = scripts / f"{name}.lua"
+    main = scripts / "main.lua"
+    original = main.read_bytes()
+    manifest = runtime.stage_manifest(work / "stage")
+    manifest_bytes = manifest.read_bytes()
+    metadata = json.loads(manifest_bytes)
+    with fixture.open("xb") as handle:
+        handle.write((Path(__file__).with_name("fixtures") / fixture.name).read_bytes())
+    try:
+        main.write_bytes(original + f'\nrequire("{name}")\n'.encode("ascii"))
+        if isinstance(inventory := metadata.get("lua_files"), dict):
+            inventory.update({path.name: sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+                              for path in (main, fixture)})
+            manifest.write_text(json.dumps(metadata), encoding="utf-8")
+        yield
+    finally:
+        manifest.write_bytes(manifest_bytes)
+        main.write_bytes(original)
+        fixture.unlink()
+
+
+async def probe_command(run, name, action, argument):
+    mailbox, = (run / "game-bridge").iterdir()
+    ticket = uuid.uuid4().hex
+    runtime.write_text(mailbox / f"{name}-command.tsv", f"{ticket}\t{action}\t{argument}")
+    async with asyncio.timeout(8):
+        while True:
+            try:
+                row = (mailbox / f"{name}-reply.tsv").read_text(encoding="utf-8").split("\t", 2)
+            except (FileNotFoundError, PermissionError):
+                row = []
+            if len(row) == 3 and row[0] == ticket:
+                if row[1] != "ok":
+                    raise RuntimeError(f"{name} {action} failed: {row[2]}")
+                return row[2]
+            await asyncio.sleep(.05)
+
+
 async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=False, insomnia=False,
-                 check_network_budget=False, check_transition_presentation=False):
+                 check_network_budget=False, check_transition_presentation=False, fast_boundary=False,
+                 intro_npc_census=False):
     name = "authored-route-" + uuid.uuid4().hex[:8]
     campaign = ("--campaign", name)
     profile = ("--profile", name)
@@ -181,30 +229,44 @@ async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=Fals
                         return lane
                 raise RuntimeError(f"All tested approaches to {route.actor} were obstructed")
 
-            guest_lane = await near_probe("guest", "guest_veto", ("guest_denied",) if door else ("wall",))
-            distant = await submit(run, position, target="guest", exit_position="far", **options)
-            if door and not distant.get("ok") and distant.get("error", "").endswith(
-                    "No verified stock floor near the named transition door"):
-                # An enclosed corridor may only offer walkable ground beside its other stock door.
-                for anchor in AUTHORED_ROUTES:
-                    if anchor.source != route.source or anchor.kind != "door" or anchor.entrance == route.entrance:
-                        continue
-                    placement = await submit(run, position, target="guest", exit_position="near", entrance=anchor.entrance)
-                    if placement.get("ok"):
-                        leg["distant_door_anchor"] = anchor.actor
-                        distant = placement
-                        break
-            if not distant.get("ok"):
-                raise RuntimeError(f"{position} refused with {distant.get('error')}")
-            host_lane = await near_probe("host", "distance_veto", ("host_out_of_range",) if door else ("wall",), guest_lane)
-            if check_regroup:
-                named = await wait(run, lambda state: any(
-                    member["role"] == "guest" and member["name"] == "Pathfinder" and member["distance_m"] > 15
-                    for member in state.get("game", {}).get("native_zone_regroup", {}).get("blockers", [])), timeout=12)
-                leg["regroup"] = named["game"]["native_zone_regroup"]
-                assert leg["regroup"]["map"] == route.source and leg["regroup"]["display"] == "headless", leg["regroup"]
-            await near_probe("host", "group_probe", ("host_opening", "travel_requested") if door else ("clear",),
-                             host_lane, group=True)
+            if fast_boundary:
+                await act(position, target="host", exit_position="near", **options)
+                pawn = current["game"]["pawns"]["guest"]["name"]
+                placed = await probe_command(run, "fast-stock-exit", "place", pawn)
+                assert 1470 <= float(placed) <= 1490, placed
+                leg["boundary"] = {"guest": pawn, "placed_cm": float(placed)}
+                wall_ready = await wait(run, lambda state: state["zone_epoch"] == current["zone_epoch"]
+                                        and state.get("game", {}).get("native_zone_wall", {}).get("host_open"))
+                before, beyond, crossed, swept = (await probe_command(run, "fast-stock-exit", "cross", pawn)).split(",", 3)
+                leg["boundary"].update(admitted_cm=float(before), before_overlap_cm=float(beyond),
+                                       after_sweep_cm=float(crossed), stock_sweep=swept,
+                                       source_sequence=wall_ready["game"]["sequence"])
+                assert 1465 <= float(before) < 1500 < min(float(beyond), float(crossed)), leg["boundary"]
+            else:
+                guest_lane = await near_probe("guest", "guest_veto", ("guest_denied",) if door else ("wall",))
+                distant = await submit(run, position, target="guest", exit_position="far", **options)
+                if door and not distant.get("ok") and distant.get("error", "").endswith(
+                        "No verified stock floor near the named transition door"):
+                    # An enclosed corridor may only offer walkable ground beside its other stock door.
+                    for anchor in AUTHORED_ROUTES:
+                        if anchor.source != route.source or anchor.kind != "door" or anchor.entrance == route.entrance:
+                            continue
+                        placement = await submit(run, position, target="guest", exit_position="near", entrance=anchor.entrance)
+                        if placement.get("ok"):
+                            leg["distant_door_anchor"] = anchor.actor
+                            distant = placement
+                            break
+                if not distant.get("ok"):
+                    raise RuntimeError(f"{position} refused with {distant.get('error')}")
+                host_lane = await near_probe("host", "distance_veto", ("host_out_of_range",) if door else ("wall",), guest_lane)
+                if check_regroup:
+                    named = await wait(run, lambda state: any(
+                        member["role"] == "guest" and member["name"] == "Pathfinder" and member["distance_m"] > 15
+                        for member in state.get("game", {}).get("native_zone_regroup", {}).get("blockers", [])), timeout=12)
+                    leg["regroup"] = named["game"]["native_zone_regroup"]
+                    assert leg["regroup"]["map"] == route.source and leg["regroup"]["display"] == "headless", leg["regroup"]
+                await near_probe("host", "group_probe", ("host_opening", "travel_requested") if door else ("clear",),
+                                 host_lane, group=True)
             current = await paired(route.destination, current["zone_epoch"])
             event, = (entry for entry in events("zone_travel_ready", current["generation"])
                       if entry.get("epoch") == current["zone_epoch"])
@@ -214,6 +276,25 @@ async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=Fals
             ), arrival
             leg["arrival"] = arrival
             leg["destination_epoch"] = current["zone_epoch"]
+            if intro_npc_census:
+                census = {}
+                for seat, directory in (("host", run), ("guest", client_run)):
+                    viewer, *actors = (await probe_command(directory, "intro-npc", "census", "-")).split("|")
+                    assert viewer == seat and actors, (viewer, actors)
+                    counts = Counter(tuple(actor.split(";")) for actor in actors)
+                    census[seat] = [{"family": family, "class": path, "role": int(role),
+                                     "replicates": replicates == "true",
+                                     "alive": None if alive == "-" else alive == "true", "count": count}
+                                    for (family, path, role, replicates, alive), count in sorted(counts.items())]
+                leg["intro_npc_census"] = census
+            if fast_boundary:
+                request, = [entry for entry in events("native_authored_zone_request", current["generation"])
+                            if (entry["source"], entry["destination"], entry["entrance"], entry["actor"]) ==
+                               (route.source, route.destination, route.entrance, route.actor)]
+                assert type(request.get("exit_crossing")) is int and request["exit_crossing"] > 0, request
+                assert request["result"]["ok"] is True and request["result"]["travel_epoch"] == current["zone_epoch"], request
+                leg["boundary"]["native_crossing"] = request
+                leg["boundary"]["party_arrived"] = True
         if check_network_budget or check_transition_presentation:
             journal = (client_run / "events.jsonl").read_text(encoding="utf-8").splitlines()
             covered = [entry for line in journal if (entry := json.loads(line)).get("event") == "native_zone_loading_transition"]
@@ -258,6 +339,7 @@ async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=Fals
                     if process.returncode is None:
                         process.terminate()
                         await process.wait()
+        evidence["workers_closed"] = all(process.returncode is not None for _, process in processes)
         evidence["original_saves_verified"] = saved_hashes(vanilla) == originals
         (run / "live-authored-route-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
         assert evidence["original_saves_verified"], "The original Saved directory changed during the run"
@@ -269,6 +351,8 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--route", action="append", required=True, metavar="MAP@ENTRANCE[@ACTOR]")
     parser.add_argument("--verify-regroup-message", action="store_true")
+    parser.add_argument("--fast-boundary", action="store_true", help="verify the exact Observatory 15 m approach crossing")
+    parser.add_argument("--intro-npc-census", action="store_true", help="compare Tutorial Dock NPCs after stock travel")
     parser.add_argument("--verify-network-budget", action="store_true")
     parser.add_argument("--verify-transition-presentation", action="store_true")
     parser.add_argument("--sleep-and-wipe", action="store_true",
@@ -279,10 +363,19 @@ if __name__ == "__main__":
         selected = select_routes(config.route)
         if config.sleep_and_wipe and (site(selected[0].source) is None or selected[-1].destination == selected[0].source):
             raise ValueError("Choose a starting map with a stock bed and finish in a different map")
+        if config.fast_boundary and (len(selected) != 1 or (selected[0].source, selected[0].destination,
+                selected[0].actor, selected[0].entrance) != (OBSERVATORY, CROSSROADS, "Level_Exit_BP_C_1", "Obsv_Etr")):
+            raise ValueError("Choose only Observitory_P@Obsv_Etr@Level_Exit_BP_C_1 for --fast-boundary")
         if config.stock_insomnia and not config.sleep_and_wipe:
             raise ValueError("--stock-insomnia requires --sleep-and-wipe at a neutral bed")
+        if config.intro_npc_census and (len(selected) != 1 or selected[0].destination != TUTORIAL_DOCK
+                or config.fast_boundary):
+            raise ValueError("--intro-npc-census requires a single stock route into Tutorial Dock")
     except ValueError as error:
         parser.error(str(error))
-    asyncio.run(verify(config.work.resolve(), config.vanilla_saved.resolve(), selected,
-                       config.verify_regroup_message, config.sleep_and_wipe, config.stock_insomnia,
-                       config.verify_network_budget, config.verify_transition_presentation))
+    fixture = "fast_stock_exit_probe" if config.fast_boundary else "intro_npc_probe" if config.intro_npc_census else None
+    with staged_probe(config.work.resolve(), fixture) if fixture else nullcontext():
+        asyncio.run(verify(config.work.resolve(), config.vanilla_saved.resolve(), selected,
+                           config.verify_regroup_message, config.sleep_and_wipe, config.stock_insomnia,
+                           config.verify_network_budget, config.verify_transition_presentation, config.fast_boundary,
+                           config.intro_npc_census))

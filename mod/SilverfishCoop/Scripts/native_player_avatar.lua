@@ -1,5 +1,6 @@
 local guest_save = require("guest_save")
 local weapon_view = require("native_avatar_weapon_view")
+local handgun_view = require("native_avatar_handgun")
 local character_view = require("native_avatar_character_view")
 local avatar = {}
 
@@ -19,8 +20,10 @@ local max_lean = 40
 local lean_timeout = .45
 local zero_rotation = {Pitch = 0, Yaw = 0, Roll = 0}
 local zero_location = {X = 0, Y = 0, Z = 0}
-local aimed = {pistol = {"HandGun_Idle_3", "HandGun_Walk"}, rifle = {"Rifle_Aiming_Idle", "Rifle_Walk"}}
-local lowered = {pistol = "HandGun_Idle", rifle = "Rifle_Idle_1_"}
+-- The stock handgun lowers through HandGun_Lowered_BlendSpace and uses the
+-- alert gunman's RifleWalk_BlendSpace for the raised stance.
+local aimed = {pistol = {"Rifle_Aiming_Low_Close1", "Walk_Forward"}, rifle = {"Rifle_Aiming_Idle", "Rifle_Walk"}}
+local lowered = {pistol = "HandGun_Idle_2", rifle = "Rifle_Idle_1_"}
 local running = {pistol = "HandGun_Run", rifle = "Rifle_Run_Forward"}
 local melee_clips = {slash = "Standing_Melee_Attack_Horizontal", backhand = "Standing_Melee_Attack_Backhand",
     overhead = "Standing_Melee_Attack_Downward"}
@@ -36,7 +39,7 @@ local observations, client_outfits = {}, {}
 local observed_weapons = {}
 local client_world, client_map, client_receipt
 local host_world, host_aim_receipt, host_aims
-local holding_aim
+local holding_aim, lighter_mode
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local armor_root = "/Game/Classes/Armor_Items/"
 
@@ -132,9 +135,13 @@ end
 
 local function sync_local_aim(state, phase)
     local pawn = phase == "connected" and state.local_pawn and state.local_pawn.pawn or nil
-    holding_aim = nil
+    holding_aim, lighter_mode = nil, nil
     if not valid(pawn) or not pawn:IsLocallyControlled() then return end
     holding_aim = false
+    if not pawn.Dead then
+        local read, mode = pcall(weapon_view.local_lighter, pawn)
+        if read then lighter_mode = mode end
+    end
     if pawn.Dead or pawn.Sprinting or pawn.IsWeaponBlocked then return end
     -- The stock ADS state works for all local firearms, including ones that
     -- have no registered interception path for primary-fire input.
@@ -218,6 +225,10 @@ end
 local function visual_component(entry, field, parent, socket_name, skeletal)
     local class = skeletal and "/Script/Engine.SkeletalMeshComponent" or head_class
     return attach_component(entry, field, parent, socket_name, class)
+end
+
+local function create_handgun_hardpoint(entry)
+    return attach_component(entry, "handgun_hardpoint", entry.body, "Weapon_Socket01", scene_class)
 end
 
 local function position_head(entry)
@@ -323,9 +334,11 @@ local function stop_use(entry)
         if valid(part) then part:SetHiddenInGame(false, false) end
     end
     entry.hidden_for_use = nil
+    weapon_view.hide_lighter(entry, false)
 end
 
 local function hide_held_item(entry)
+    weapon_view.hide_lighter(entry, true)
     for _, part in ipairs(entry.weapon_parts or {}) do
         if valid(part) and part.bHiddenInGame == false then
             entry.hidden_for_use[part:GetAddress()] = part
@@ -338,6 +351,7 @@ local function remove(entry)
     swings[entry] = nil
     stop_use(entry)
     weapon_view.clear(entry)
+    handgun_view.clear(entry)
     character_view.clear(entry)
     if valid(entry.helmet) and valid(entry.pawn) then
         entry.helmet:K2_DestroyComponent(entry.pawn)
@@ -580,6 +594,12 @@ function avatar.animate_head(get_world)
                 end
             end
             aim_head(entry, now, lean_changed, math_api)
+            if entry.handgun_view and entry.handgun_view.requested then
+                math_api = math_api or StaticFindObject(math_library)
+                if valid(math_api) and not pcall(handgun_view.update, entry, math_api) then
+                    pcall(handgun_view.release, entry)
+                end
+            end
         end
     end
 end
@@ -721,7 +741,9 @@ function avatar.sync(state, phase)
                             if not cosmetics then error("Invalid remote character appearance") end
                             apply_outfit(entry, outfit, cosmetics)
                             character_view.apply(entry, cosmetics, appearance, asset, visual_component)
-                            weapon_view.apply(entry, outfit and outfit.weapon or "-", outfit and outfit.firearm or "-")
+                            local equipment = outfit and outfit.weapon or "-"
+                            if phase == "hosting" then equipment = weapon_view.lighter_override(equipment, host_aims[entry.id]) end
+                            weapon_view.apply(entry, equipment, outfit and outfit.firearm or "-")
                             weapon_view.suppress_stock(entry)
                             if uses[entry] then hide_held_item(entry) end
                             local aim = outfit and outfit.aim or "-"
@@ -729,6 +751,9 @@ function avatar.sync(state, phase)
                                 aim = outfit and host_aims[entry.id] == outfit.gun and outfit.gun or "-"
                             end
                             apply_locomotion(entry, aim, outfit)
+                            if not pcall(handgun_view.sync, entry, aim == "pistol" and not uses[entry], create_handgun_hardpoint) then
+                                pcall(handgun_view.release, entry)
+                            end
                         end
                         if entry.weapon_parts and #entry.weapon_parts > 0 then
                             local socket = entry.body:GetSocketTransform(FName("Weapon_Socket01", EFindName.FNAME_Find), 2)
@@ -760,7 +785,8 @@ function avatar.command(fields, state, phase)
         local aims = {}
         for index = 5, #fields, 2 do
             local id, mode = math.tointeger(tonumber(fields[index])), fields[index + 1]
-            if not id or id < 0 or id > 2147483647 or aims[id] or not aimed[mode] then
+            if not id or id < 0 or id > 2147483647 or aims[id]
+                or not (aimed[mode] or mode == "closed" or mode == "open" or mode == "lit") then
                 error("Invalid hosted avatar aim")
             end
             aims[id] = mode
@@ -825,6 +851,7 @@ function avatar.rows(row)
     if client_receipt then rows[#rows + 1] = row("native-avatar-outfits-receipt", client_receipt) end
     if host_aim_receipt then rows[#rows + 1] = row("native-avatar-host-aim-receipt", host_aim_receipt) end
     if holding_aim ~= nil then rows[#rows + 1] = row("native-avatar-local-aim", holding_aim and 1 or 0) end
+    if lighter_mode then rows[#rows + 1] = row("native-avatar-local-lighter", lighter_mode) end
     return rows
 end
 
@@ -832,8 +859,7 @@ avatar.player_id = player_id
 
 function avatar.offhand_body(pawn)
     local entry = valid(pawn) and avatars[pawn:GetAddress()]
-    if entry and entry.status == "default_body" and valid(entry.body)
-        and entry.firearm_class == "/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C" then
+    if entry and entry.status == "default_body" and valid(entry.body) then
         return entry.body
     end
 end

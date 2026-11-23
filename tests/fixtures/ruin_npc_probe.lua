@@ -236,18 +236,92 @@ local function stock_refresh()
         population, stock_cap, applied_cap, tostring(active_population), count_calls}, "\t")
 end
 
+local function stock_corpse(npc, world, viewer)
+    local mesh = npc.Mesh
+    assert(valid(mesh) and same(mesh:GetOwner(), npc), "exact stock NPC mesh unavailable")
+    local class = StaticFindObject("/Script/Engine.TargetPoint")
+    local marker
+    for _, candidate in ipairs(FindAllOf("TargetPoint") or {}) do
+        if valid(candidate) and same(candidate:GetClass(), class) and same(candidate:GetWorld(), world)
+            and same(candidate:GetOwner(), npc) and candidate:GetLocalRole() == npc:GetLocalRole()
+            and not candidate:IsActorBeingDestroyed() then
+            assert(not marker, "multiple corpse markers own the exact stock NPC")
+            marker = candidate
+        end
+    end
+    local number = 0
+    if marker then
+        local rotation = marker:K2_GetActorRotation()
+        local function byte(angle) return math.floor(angle / (360 / 256) + .5) % 256 end
+        number = byte(rotation.Roll) * 256 + byte(rotation.Yaw)
+    end
+    return ("%s\t%s\t%s\t%s\t%d"):format(viewer, npc:GetFullName(), tostring(npc.Alive),
+        tostring(mesh:IsAnySimulatingPhysics() and mesh:IsVisible()), number)
+end
+
+local function damage_probe(operation, name)
+    local world, _, viewer = active_ruin()
+    local kind, path
+    if name then kind, path = name:match("^(NPC_[%w_]+) (.+)$") end
+    assert(kind and path:sub(1, #level_path) == level_path, "expected an enrolled ambient NPC name")
+    local base = StaticFindObject("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C")
+    local npc
+    for _, candidate in ipairs(FindAllOf(kind) or {}) do
+        if valid(candidate) and same(candidate:GetWorld(), world) and candidate:GetFullName() == name then
+            assert(not npc, "duplicate enrolled ambient NPC")
+            npc = candidate
+        end
+    end
+    assert(valid(base) and valid(npc) and npc:IsA(base), "exact stock ambient NPC unavailable")
+    assert(npc.bReplicates and npc:GetLocalRole() == (viewer == "client" and 1 or 3),
+        "expected a replicated ambient NPC in this process")
+    if operation == "corpse" then return stock_corpse(npc, world, viewer) end
+    assert(npc.Alive, "expected a living ambient NPC")
+    local before = npc.Health
+    if operation == "damage" or operation == "kill" then
+        assert((operation == "damage") == (viewer == "client")
+            and os.getenv("SILVERFISH_COOP_RUIN_NPC_REFRESH_PROBE") == "1", "damage requires the isolated test seat")
+        local pawn = StaticFindObject("/Script/Engine.Default__GameplayStatics"):GetPlayerPawn(world, 0)
+        assert(valid(pawn) and same(pawn:GetWorld(), world) and pawn:IsLocallyControlled()
+            and pawn:HasAuthority() == (viewer == "host"), "exact local test pawn required")
+        local total, lethal = {}, {}
+        npc:DealDamage({Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5 = 200}, {}, pawn,
+            {X=0, Y=0, Z=0}, false, total, lethal)
+        if operation == "kill" then
+            assert(total.TotalDamage > 0 and lethal.IsLethal and npc.Health <= 0,
+                "stock host damage did not deal a lethal hit")
+            if npc.Alive then npc:ResolveDeath() end
+            return stock_corpse(npc, world, viewer)
+        end
+        assert(npc.Alive and npc.Health == before and total.TotalDamage == 0 and lethal.IsLethal == false,
+            ("guest damage ran on %s at %.2f HP, damage=%s, lethal=%s"):format(
+                name, npc.Health, tostring(total.TotalDamage), tostring(lethal.IsLethal)))
+        npc:ResolveDeath()
+        assert(npc.Alive and npc.Health == before and not npc.Mesh:IsAnySimulatingPhysics(),
+            "guest death ran on the authoritative replica")
+    end
+    return ("%s\t%s\t%.6f"):format(viewer, name, npc.Health)
+end
+
 LoopInGameThreadWithDelay(150, function()
     local file = io.open(bridge .. "/ruin-npc-command.tsv", "rb")
     if not file then return false end
-    local request = file:read(64) or ""
+    local request = file:read(560) or ""
     file:close()
-    local ticket, operation = request:match("^(%x+)\t([a-z]+)\n$")
+    local ticket, operation, actor = request:match("^(%x+)\t([a-z]+)\t([^\r\n]+)\n$")
+    if not ticket then ticket, operation = request:match("^(%x+)\t([a-z]+)\n$") end
     if not ticket then ticket, operation = request:match("^(%x+)\n$"), "census" end
-    if not ticket or #ticket ~= 32 or ticket == last or (operation ~= "refresh" and operation ~= "census") then
+    if not ticket or #ticket ~= 32 or ticket == last then
         return false
     end
     last = ticket
-    local ok, result = pcall(operation == "refresh" and stock_refresh or census)
+    local ok, result = pcall(function()
+        if operation == "census" then return census() end
+        if operation == "refresh" then return stock_refresh() end
+        assert(operation == "damage" or operation == "health" or operation == "kill" or operation == "corpse",
+            "unknown private NPC action")
+        return damage_probe(operation, actor)
+    end)
     local output = assert(io.open(bridge .. "/ruin-npc-reply.tsv", "wb"))
     output:write(ticket, ok and "\n" or "\nerror\t", result, "\nend\n")
     output:close()

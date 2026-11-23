@@ -8,4 +8,6 @@ Use a gameplay-time disk write only when an operation requires durable storage t
 
 Group related gameplay changes before running live tests. Use a small set of representative smoke tests for the shared paths changed by the batch. Run them in muted, isolated replicas with copied checkpoints. Add a focused check when the batch changes a distinct path that the representative tests do not exercise.
 
+For each candidate, start one private host and guest and run compatible checks in sequence on those same processes. Reset or verify each check's starting state and keep its result and timing. Use a fresh private session for clean-start, save-reopen, transport setup, or other checks that depend on their starting state. The portable smoke runner supports combining `--stock-campfire`, `--resident-weapon-cues`, and `--stock-food`. Select only the checks affected by the change.
+
 Reserve the full automated suite for major releases or when the user explicitly requests it. Leave in-depth foreground and two-PC playtesting to the players. In release handoffs, identify the behaviors to try, the expected results, and which symptoms or details to report.

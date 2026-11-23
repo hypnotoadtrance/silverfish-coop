@@ -42,7 +42,6 @@ namespace
     };
     constexpr auto press_timeout = std::chrono::seconds(2);
     constexpr auto intent_timeout = std::chrono::seconds(3);
-    constexpr float hold_threshold = 0.2f;
     constexpr std::uint64_t max_sequence = (std::uint64_t{1} << 53) - 1;
 
     template <typename T>
@@ -126,7 +125,6 @@ namespace
     {
         Unreal::FWeakObjectPtr pawn{};
         Clock::time_point expires{};
-        bool held{};
     };
 
     struct Intent
@@ -235,12 +233,14 @@ namespace
         if (press.pawn.Get() != pawn || now >= press.expires) return;
         if (index == 1)
         {
-            if (triggered > hold_threshold) press.held = true;
+            press.expires = now + press_timeout;
             return;
         }
-        const bool short_release = !press.held && triggered <= hold_threshold && elapsed <= hold_threshold;
         press = {};
-        if (!short_release || sequence == max_sequence) return;
+        // The stock Completed event checks whether the ammo menu actually opened.
+        // Press duration alone does not turn a reload into an ammo selection.
+        auto* changing_ammo = field<Unreal::FBoolProperty>(pawn, STR("IsChangingAmmo"));
+        if (!changing_ammo || changing_ammo->GetPropertyValueInContainer(pawn) || sequence == max_sequence) return;
         pending.pawn = pawn;
         pending.expires = now + intent_timeout;
         ++sequence;
@@ -307,8 +307,8 @@ namespace
         alignas(std::max_align_t) std::array<std::byte, 0x30> parameters{};
         StructParameter value(event.value, parameters.data());
         factory.fill(event.value, parameters.data(), pressed);
-        event.elapsed->SetPropertyValueInContainer(parameters.data(), pressed ? 0.0f : 0.05f);
-        event.triggered->SetPropertyValueInContainer(parameters.data(), pressed ? 0.0f : 0.05f);
+        event.elapsed->SetPropertyValueInContainer(parameters.data(), pressed ? 0.0f : 0.3f);
+        event.triggered->SetPropertyValueInContainer(parameters.data(), pressed ? 0.0f : 0.3f);
         event.source->SetObjectPropertyValue(event.source->ContainerPtrToValuePtr<void>(parameters.data()), schema.input.Get());
         pawn->ProcessEvent(static_cast<Unreal::UFunction*>(event.function.Get()), parameters.data());
     }

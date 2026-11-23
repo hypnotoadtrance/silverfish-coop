@@ -1,5 +1,9 @@
 local view = {}
+local npc_melee = require("native_npc_melee_view")
+local weapon_view = require("native_avatar_weapon_view")
 
+local npc_base = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
+local turret_base = "/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C"
 local weapon_base = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
 local consumable_base = "/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C"
 local melee_base = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C"
@@ -10,15 +14,21 @@ local play_animation = "/Script/Engine.SkeletalMeshComponent:PlayAnimation"
 local attack_animation = "Animation_2_C8CAEADF40C9F2C76A885BA8E5E9AA27"
 local attack_rate = "SwingRate_17_17DEA9B2431C48BC143445BD3516142E"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
+local attached_sound = "/Script/Engine.GameplayStatics:SpawnSoundAttached"
+local sound_at_location = "/Script/Engine.GameplayStatics:PlaySoundAtLocation"
+local trigger_click = "/Game/Assets/Sounds/CUEs/Weapon_Cues/Reload_Cues/TriggerClick_Cue.TriggerClick_Cue"
 local math_path = "/Script/Engine.Default__KismetMathLibrary"
 local stock_rest_inverse = {Pitch = 0, Yaw = 90, Roll = 0}
+local turret_concurrency = "/Game/Assets/Sounds/SoundClasses/Weapons_SoundConcurrency.Weapons_SoundConcurrency"
 local attenuation_path = "/Game/Assets/Sounds/SoundClasses/Weapon_Attenuation.Weapon_Attenuation"
 local local_attenuation = "/Game/Assets/Sounds/SoundClasses/SmallSound_Attenuation.SmallSound_Attenuation"
+local npc_impact_attenuation = "/Game/Assets/Sounds/SoundClasses/Default_Attenuation.Default_Attenuation"
+local sound_types = {SoundCue = true, SoundWave = true, MetaSoundSource = true}
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 local maximum, range = 36, 30000
 local current, hooked, melee_hooked, recoil_hooked, cycle_hooked, visit, last_played, last_round
 local serial, published, pending = 0, 0, {}
-local use_hooked
+local use_hooked, location_sound_hooked, turret_hooked
 
 local function valid(object) return object and object:IsValid() end
 local function same(first, second)
@@ -40,8 +50,20 @@ local function stock_weapon(path)
     return package and package:match("([%w_%-]+)$") == class
 end
 
+local function stock_turret(path)
+    if type(path) ~= "string" or #path > 160 then return false end
+    local package, class = path:match("^(/Game/Classes/NPCs/[%w_/%-]+)%.(Turret_[%w_%-]+)_C$")
+    return package and package:match("([%w_%-]+)$") == class
+end
+
 local function bounded(n, minimum, maximum)
     return type(n) == "number" and n >= minimum and n <= maximum
+end
+
+local function stock_npc_impact(path)
+    if type(path) ~= "string" or #path > 192 then return false end
+    local package, name = path:match("^(/Game/Assets/Sounds/[%w_/%-]+)%.([%w_%-]+)$")
+    return package and package:match("([%w_%-]+)$") == name
 end
 
 local function stock_consumable(path)
@@ -56,12 +78,12 @@ local function consumable_defaults(path)
     if valid(defaults) and valid(base) and defaults:IsA(base) then return defaults end
 end
 
-local function use_sound(defaults, listener, point)
+local function play_quiet_sound(sound, listener, point)
     local statics, attenuation = StaticFindObject(statics_path), asset(local_attenuation)
-    if not valid(statics) or not valid(attenuation) or not valid(defaults.UseSound) then return false end
+    if not valid(statics) or not valid(attenuation) or not valid(sound) then return false end
     local origin = listener:K2_GetActorLocation()
     if (origin.X - point.X)^2 + (origin.Y - point.Y)^2 + (origin.Z - point.Z)^2 > 1800^2 then return false end
-    statics:PlaySoundAtLocation(listener, defaults.UseSound, point, {Pitch = 0, Yaw = 0, Roll = 0},
+    statics:PlaySoundAtLocation(listener, sound, point, {Pitch = 0, Yaw = 0, Roll = 0},
         1, 1, 0, attenuation, nil, nil, nil)
     return true
 end
@@ -87,6 +109,63 @@ local function record(row)
     if #pending > maximum then table.remove(pending, 1) end
 end
 
+local function record_npc_melee(now, id, path, rate, blend_in, blend_out)
+    serial = serial + 1
+    record({serial, "npc-melee", id, path, rate, blend_in, blend_out, expires = now + .25})
+end
+
+local function record_dry_fire(pawn, point)
+    if not point or not bounded(point.X, -1e7, 1e7) or not bounded(point.Y, -1e7, 1e7)
+        or not bounded(point.Z, -1e7, 1e7) then return end
+    serial = serial + 1
+    record({serial, "dry", point.X, point.Y, point.Z, expires = current.statics:GetRealTimeSeconds(pawn) + .25})
+end
+
+local function capture_location_sound(_, source, sound, location, _, volume, pitch, start, attenuation)
+    if not current then return end
+    local cue = sound:get()
+    if not valid(cue) then return end
+    local sound_class, path = cue:GetFullName():match("^(%S+) (%S+)$")
+    local actor = source:get()
+    if sound_class == "SoundCue" and path == trigger_click then
+        local weapon, pawn = equipped_player(actor)
+        if weapon then record_dry_fire(pawn, location:get()) end
+        return
+    end
+    if not sound_types[sound_class] or not stock_npc_impact(path) or not valid(actor) then return end
+    if not valid(current.npc_class) then current.npc_class = StaticFindObject(npc_base) end
+    if not valid(current.npc_class) or not actor:IsA(current.npc_class) or not actor:HasAuthority()
+        or not same(actor:GetWorld(), current.world) or not same(actor.Melee_SFX, cue) then return end
+    local radius, point = attenuation:get(), location:get()
+    -- ResolveMelee plays the NPC's stock cue at the verified trace contact.
+    if not valid(radius) or radius:GetFullName() ~= "SoundAttenuation " .. npc_impact_attenuation
+        or volume:get() ~= 1 or pitch:get() ~= 1 or start:get() ~= 0 or not point
+        or not bounded(point.X, -1e7, 1e7) or not bounded(point.Y, -1e7, 1e7)
+        or not bounded(point.Z, -1e7, 1e7) then return end
+    serial = serial + 1
+    record({serial, "npc-impact", path, point.X, point.Y, point.Z,
+        expires = current.statics:GetRealTimeSeconds(actor) + .25})
+end
+
+local function play_npc_impact(pawn, path, point)
+    local sound, radius = asset(path), asset(npc_impact_attenuation)
+    local statics = StaticFindObject(statics_path)
+    if not valid(sound) or not sound_types[sound:GetFullName():match("^(%S+) ")]
+        or not valid(radius) or not valid(statics) then return false end
+    statics:PlaySoundAtLocation(pawn, sound, point, {Pitch = 0, Yaw = 0, Roll = 0},
+        1, 1, 0, radius, nil, nil, nil)
+    return true
+end
+
+function view.dry_fired(pawn)
+    if not current or not valid(pawn) or pawn:IsLocallyControlled() then return end
+    local weapon = equipped_player(pawn.EquipedItem)
+    if not weapon or weapon.Ammo ~= 0 or not bounded(weapon.AmmoCost_PerShot, 1, 16) then return end
+    local point = weapon:K2_GetActorLocation()
+    record_dry_fire(pawn, point)
+    if valid(current.listener) then play_quiet_sound(asset(trigger_click), current.listener, point) end
+end
+
 function view.consumed(pawn, path, stock_played)
     if not current or not valid(pawn) or not pawn:HasAuthority() or not stock_consumable(path)
         or not same(pawn:GetWorld(), current.world) then return end
@@ -98,7 +177,7 @@ function view.consumed(pawn, path, stock_played)
     if not stock_played and valid(current.listener) then
         local defaults = consumable_defaults(path)
         if not defaults then return end
-        pcall(use_sound, defaults, current.listener, point)
+        pcall(play_quiet_sound, defaults.UseSound, current.listener, point)
         pcall(current.avatar.play_consumable, current.world, player, path, defaults, serial)
     end
 end
@@ -118,9 +197,22 @@ local function capture_use(context)
     view.consumed(pawn, path, true)
 end
 
+local function npc_shooter(weapon)
+    if not current or not valid(weapon) or not weapon:HasAuthority() or not same(weapon:GetWorld(), current.world) then
+        return
+    end
+    local npc, base = weapon.Instigator, StaticFindObject(npc_base)
+    if valid(npc) and valid(base) and npc:IsA(base) and npc:HasAuthority() and npc.Alive == true
+        and same(npc:GetWorld(), current.world) and same(npc.Weapon_Ranged, weapon) then
+        return npc
+    end
+end
+
 local function capture(context)
-    local weapon, pawn = equipped_player(context:get())
-    if not weapon then return end
+    local weapon = context:get()
+    local _, player = equipped_player(weapon)
+    local shooter = player or npc_shooter(weapon)
+    if not shooter then return end
     local muzzle = weapon.Arrow_Muzzle
     if not valid(muzzle) or not same(muzzle:GetOwner(), weapon) then return end
     local path = weapon:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
@@ -129,11 +221,36 @@ local function capture(context)
     local scale, volume, pitch = weapon.MuzzleFlash_Scale, weapon.Fire_Volume, weapon.Fire_PitchShift
     if not bounded(scale, 0, 10) or not bounded(volume, 0, 10) or not bounded(pitch, -24, 24) then return end
     serial = serial + 1
-    local now = current.statics:GetRealTimeSeconds(pawn)
+    local now = current.statics:GetRealTimeSeconds(shooter)
     local row = {serial, path, position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw,
         rotation.Roll, scale, volume, pitch - 2, expires = now + .25}
-    last_round = {row = row, weapon = weapon, at = now}
+    if player then
+        local id = current.avatar.player_id({pawn = player, controller_object = player.Controller})
+        if id then
+            row[12] = id
+            last_round = {row = row, weapon = weapon, at = now}
+        end
+    end
     record(row)
+end
+
+local function capture_turret(_, sound, attachment)
+    if not current then return end
+    local muzzle = attachment:get()
+    local turret = valid(muzzle) and muzzle:GetOwner()
+    if not valid(turret) then return end
+    local path = turret:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
+    if not stock_turret(path) then return end
+    local base = StaticFindObject(turret_base)
+    if not valid(base) or not turret:IsA(base) or not turret:HasAuthority()
+        or turret.Alive ~= true or not same(turret:GetWorld(), current.world)
+        or not same(turret.Arrow_Muzzle, muzzle) or not same(turret.FireSound, sound:get()) then return end
+    local volume = turret.Fire_Volume
+    if not bounded(volume, 0, 10) then return end
+    local position, rotation = muzzle:K2_GetComponentLocation(), muzzle:K2_GetComponentRotation()
+    serial = serial + 1
+    record({serial, path, position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw,
+        rotation.Roll, 1, volume, 0, expires = current.statics:GetRealTimeSeconds(turret) + .25})
 end
 
 local function valid_recoil(player, values)
@@ -145,7 +262,7 @@ end
 
 local function capture_recoil(context, target, orientation)
     local weapon, pawn = equipped_player(context:get())
-    if not weapon or not last_round or not same(last_round.weapon, weapon) or #last_round.row ~= 11
+    if not weapon or not last_round or not same(last_round.weapon, weapon) or #last_round.row ~= 12
         or current.statics:GetRealTimeSeconds(pawn) - last_round.at > .06 then return end
     local offset, rotation = target:get(), orientation:get()
     local math_api = StaticFindObject(math_path)
@@ -225,12 +342,19 @@ function view.reloaded(pawn, previous_ammo)
     record_cycle(weapon, pawn, animation)
 end
 
+local function clear_local_cues()
+    if current and type(SilverfishClearLocalWeaponCues) == "function" then SilverfishClearLocalWeaponCues() end
+end
+
 function view.sync(state, phase, avatar)
+    npc_melee.sync(state, phase, record_npc_melee)
     if phase ~= "hosting" or not valid(state.world) then
+        clear_local_cues()
         current, pending, last_round = nil, {}, nil
         return
     end
     if not current or not same(current.world, state.world) then
+        clear_local_cues()
         current = {world = state.world, map = state.map, statics = StaticFindObject(statics_path), avatar = avatar}
         pending, last_round = {}, nil
     end
@@ -263,15 +387,38 @@ function view.sync(state, phase, avatar)
         RegisterHook(play_animation, function(context, clip, looping) pcall(capture_cycle, context, clip, looping) end)
         cycle_hooked = true
     end
+    if not turret_hooked and valid(StaticFindObject(attached_sound)) then
+        RegisterHook(attached_sound, function(...) pcall(capture_turret, ...) end)
+        turret_hooked = true
+    end
+    if not location_sound_hooked and valid(StaticFindObject(sound_at_location)) then
+        RegisterHook(sound_at_location, function(...) pcall(capture_location_sound, ...) end)
+        location_sound_hooked = true
+    end
 end
 
 function view.flush(get_world)
     if not current or not bridge or published == serial or #pending == 0 then return end
     local world = get_world()
     if not same(world, current.world) then return end
-    local now, rows = current.statics:GetRealTimeSeconds(world), {current.map}
+    local now = current.statics:GetRealTimeSeconds(world)
     while pending[1] and pending[1].expires <= now do table.remove(pending, 1) end
     if #pending == 0 then return end
+    if type(SilverfishPublishLocalWeaponCue) == "function" then
+        for _, entry in ipairs(pending) do
+            if entry[1] > published then
+                local remaining = math.max(1, math.min(250, math.floor((entry.expires - now) * 1000)))
+                local offered = SilverfishPublishLocalWeaponCue(current.map, table.concat(entry, "|"), remaining)
+                if offered == false then break end
+                current.memory_cues = true
+            end
+        end
+        if current.memory_cues then
+            published, pending = serial, {}
+            return
+        end
+    end
+    local rows = {current.map}
     for _, entry in ipairs(pending) do rows[#rows + 1] = table.concat(entry, "|") end
     local target = bridge .. "/native-weapon-shots"
     local temporary = target .. ".tmp"
@@ -288,8 +435,19 @@ function view.flush(get_world)
     end
 end
 
+local function local_muzzle(pawn, path)
+    local weapon = pawn.EquipedItem
+    if not valid(weapon) or not same(weapon:GetWorld(), pawn:GetWorld()) or not same(weapon.User, pawn)
+        or weapon:GetClass():GetFullName() ~= "BlueprintGeneratedClass " .. path then return end
+    local muzzle = weapon.Arrow_Muzzle
+    if valid(muzzle) and same(muzzle:GetOwner(), weapon) then
+        return muzzle:K2_GetComponentLocation(), muzzle:K2_GetComponentRotation()
+    end
+end
+
 local function play(pawn, path, point, rotation, scale, volume, pitch, distance)
-    local class, base = asset(path), asset(weapon_base)
+    local turret = stock_turret(path)
+    local class, base = asset(path), asset(turret and turret_base or weapon_base)
     local defaults = valid(class) and class:GetCDO()
     if not valid(defaults) or not valid(base) or not defaults:IsA(base) then return end
     local attenuation, sound = asset(attenuation_path), defaults.FireSound
@@ -302,8 +460,10 @@ local function play(pawn, path, point, rotation, scale, volume, pitch, distance)
         particles = valid(component) == true
     end
     if volume > 0 and valid(statics) and valid(sound) and valid(attenuation) then
+        local concurrency
+        if turret then concurrency = asset(turret_concurrency) else concurrency = defaults["Concurrency Settings"] end
         local component = statics:SpawnSoundAtLocation(pawn, sound, point, rotation, volume, 1, 0,
-            attenuation, defaults["Concurrency Settings"], true)
+            attenuation, concurrency, true)
         if valid(component) then
             component:SetFloatParameter(FName("Distance"), distance)
             component:SetFloatParameter(FName("PitchShift"), pitch)
@@ -323,10 +483,41 @@ function view.command(args, state, phase, avatar)
     local scope = tostring(state.world:GetAddress()) .. epoch
     if scope ~= visit then visit, last_played = scope, 0 end
     local origin, receipts = pawn:K2_GetActorLocation(), {}
+    local local_id = avatar.player_id(state.local_pawn)
     for index = 5, #args do
         local values = {}
         for field in (args[index] .. "|"):gmatch("([^|]*)|") do values[#values + 1] = field end
         local id, path = math.tointeger(tonumber(values[1])), values[2]
+        if #values == 6 and id and id > last_played and path == "npc-impact" and stock_npc_impact(values[3]) then
+            local x, y, z = tonumber(values[4]), tonumber(values[5]), tonumber(values[6])
+            if bounded(x, -1e7, 1e7) and bounded(y, -1e7, 1e7) and bounded(z, -1e7, 1e7) then
+                last_played = id
+                if (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= range^2 then
+                    local ok, heard = pcall(play_npc_impact, pawn, values[3], {X = x, Y = y, Z = z})
+                    if ok and heard then receipts[#receipts + 1] = ("%d:npc_impact"):format(id) end
+                end
+            end
+            goto next_cue
+        end
+        if #values == 7 and id and id > last_played and path == "npc-melee" then
+            local member = math.tointeger(tonumber(values[3]))
+            last_played = id
+            local ok, accepted = pcall(npc_melee.offer, state.world, member, values[4],
+                tonumber(values[5]), tonumber(values[6]), tonumber(values[7]))
+            if ok and accepted then receipts[#receipts + 1] = ("%d:npc_melee"):format(id) end
+            goto next_cue
+        end
+        if #values == 5 and id and id > last_played and path == "dry" then
+            local x, y, z = tonumber(values[3]), tonumber(values[4]), tonumber(values[5])
+            if bounded(x, -1e7, 1e7) and bounded(y, -1e7, 1e7) and bounded(z, -1e7, 1e7) then
+                last_played = id
+                local ok, heard = pcall(function()
+                    return play_quiet_sound(asset(trigger_click), pawn, {X = x, Y = y, Z = z})
+                end)
+                if ok and heard then receipts[#receipts + 1] = ("%d:dry"):format(id) end
+            end
+            goto next_cue
+        end
         if (#values == 6 or #values == 7) and id and id > last_played and path == "consume"
             and stock_consumable(values[3]) then
             local x, y, z = tonumber(values[4]), tonumber(values[5]), tonumber(values[6])
@@ -334,7 +525,7 @@ function view.command(args, state, phase, avatar)
                 last_played = id
                 local resolved, defaults = pcall(consumable_defaults, values[3])
                 if resolved and defaults then
-                    local ok, heard = pcall(use_sound, defaults, pawn, {X = x, Y = y, Z = z})
+                    local ok, heard = pcall(play_quiet_sound, defaults.UseSound, pawn, {X = x, Y = y, Z = z})
                     if ok and heard then receipts[#receipts + 1] = ("%d:consume"):format(id) end
                     local player = math.tointeger(tonumber(values[7]))
                     if player and player >= 0 and player <= 2147483647 then
@@ -349,7 +540,12 @@ function view.command(args, state, phase, avatar)
             local player = math.tointeger(tonumber(values[3]))
             if player and player >= 0 and player <= 2147483647 and stock_weapon(values[4]) and stock_cycle(values[5]) then
                 last_played = id
-                local ok, played = pcall(avatar.play_cycle, state.world, player, values[4], id, values[5])
+                local ok, played
+                if player == local_id then
+                    ok, played = pcall(weapon_view.local_reload, pawn, state.world, values[4], id, values[5])
+                else
+                    ok, played = pcall(avatar.play_cycle, state.world, player, values[4], id, values[5])
+                end
                 if ok and played then receipts[#receipts + 1] = ("%d:cycle"):format(id) end
             end
             goto next_cue
@@ -369,18 +565,31 @@ function view.command(args, state, phase, avatar)
         x, y, z = tonumber(x), tonumber(y), tonumber(z)
         pitch_angle, yaw, roll = tonumber(pitch_angle), tonumber(yaw), tonumber(roll)
         scale, volume, pitch = tonumber(scale), tonumber(volume), tonumber(pitch)
-        if (#values == 11 or #values == 19) and id and id > last_played and stock_weapon(path)
+        if id and id > last_played and ((#values == 11 and (stock_weapon(path) or stock_turret(path)))
+            or ((#values == 12 or #values == 19) and stock_weapon(path)
+                and math.tointeger(tonumber(values[12])) and tonumber(values[12]) >= 0
+                and tonumber(values[12]) <= 2147483647))
             and bounded(x, -1e7, 1e7) and bounded(y, -1e7, 1e7) and bounded(z, -1e7, 1e7)
             and bounded(pitch_angle, -180, 180) and bounded(yaw, -180, 180) and bounded(roll, -180, 180)
             and bounded(scale, 0, 10) and bounded(volume, 0, 10) and bounded(pitch, -26, 24) then
             last_played = id
-            local distance = math.sqrt((origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2)
+            local point, rotation = {X = x, Y = y, Z = z}, {Pitch = pitch_angle, Yaw = yaw, Roll = roll}
+            local source = tonumber(values[12])
+            if source ~= nil and source == local_id then
+                local muzzle, orientation = local_muzzle(pawn, path)
+                if muzzle then
+                    point, rotation = muzzle, orientation
+                else
+                    -- The shooter may already have holstered or switched weapons.
+                    point, scale = origin, 0
+                end
+            end
+            local distance = math.sqrt((origin.X - point.X)^2 + (origin.Y - point.Y)^2 + (origin.Z - point.Z)^2)
             if distance <= range then
-                local ok, particles, audio, stock_sound = pcall(play, pawn, path, {X = x, Y = y, Z = z},
-                    {Pitch = pitch_angle, Yaw = yaw, Roll = roll}, scale, volume, pitch, distance)
+                local ok, particles, audio, stock_sound = pcall(play, pawn, path, point, rotation,
+                    scale, volume, pitch, distance)
                 local recoil = false
-                if #values == 19 then
-                    local source = math.tointeger(tonumber(values[12]))
+                if #values == 19 and source ~= local_id then
                     local kick = {}
                     for index = 1, 7 do kick[index] = tonumber(values[12 + index]) end
                     if valid_recoil(source, kick) then

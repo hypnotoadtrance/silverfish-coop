@@ -22,7 +22,10 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_host_save
 from tools.silverfish.campaign import CampaignStore
-from ruin_npc_probe import RUIN, RUIN_LEVEL, capture, compare, installed_probe, read_director_trace, stock_refresh as probe_ruin_refresh
+from ruin_npc_probe import (
+    RUIN, RUIN_LEVEL, capture, compare, installed_probe, read_director_trace, request as ruin_probe,
+    stock_refresh as probe_ruin_refresh,
+)
 
 
 MAP = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
@@ -837,6 +840,25 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                 if fixture.get("guest_outcome") == "stock_ruin_guest_class_unloaded":
                     raise RuntimeError("The stock Worker was selected but its unloaded class left the stock spawn active")
                 if denials and fixture["host_mixed_cohort_verified"]:
+                    member = next(name for name in sorted(required) if name.startswith("NPC_Doe_C "))
+                    replica = matched["matched"][member]["replica"]
+                    before, = await ruin_probe(host, f"health\t{member}")
+                    attack, = await ruin_probe(guest, f"damage\t{replica}")
+                    after, = await ruin_probe(host, f"health\t{member}")
+                    assert before == after and attack.split("\t")[:2] == ["client", replica], (before, attack, after)
+                    fixture["guest_damage_and_death_veto"] = {"host": before, "guest": attack}
+                    killed, = await ruin_probe(host, f"kill\t{member}")
+                    seat, actor, alive, visible_ragdoll, identifier = killed.split("\t")
+                    assert (seat, actor, alive, visible_ragdoll) == ("host", member, "false", "true"), killed
+                    assert int(identifier) > 0, killed
+                    fixture["host_corpse"] = killed
+                    async with asyncio.timeout(10):
+                        while True:
+                            mirrored, = await ruin_probe(guest, f"corpse\t{replica}")
+                            fixture["guest_corpse"] = mirrored
+                            if mirrored.split("\t") == ["client", replica, "false", "true", identifier]:
+                                break
+                            await asyncio.sleep(.2)
                     return
                 limitation = "No mixed stag/doe cohort and matching Worker veto both verified"
             elif denials:

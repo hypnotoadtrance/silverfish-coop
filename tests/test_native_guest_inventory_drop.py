@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 import uuid
 
-from tools.silverfish import native_guest_drop as drop, native_guest_drop_record as record, native_inventory
+from tools.silverfish import native_guest_armor, native_guest_drop as drop, native_guest_drop_record as record, native_inventory
 from tools.silverfish.guest_weapon_profiles import FIREARMS, MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL
 
 
@@ -120,8 +120,11 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
         envelope = [record.STOCK_ACTION_ROW, MAP, PAWN, client.zone_epoch, "5", "equip", GUID, "1"]
         intent = record.parse_stock_action([*envelope, "8"], client.last_game)
         self.assertEqual((intent["mode"], intent["expected"]), ("equip", 8))
+        for worn in ("9", "10"):
+            intent = record.parse_stock_action([*envelope, worn], client.last_game)
+            self.assertEqual((intent["mode"], intent["expected"]), ("equip", int(worn)))
         with self.assertRaisesRegex(ValueError, "Invalid stock backpack operation"):
-            record.parse_stock_action([*envelope, "9"], client.last_game)
+            record.parse_stock_action([*envelope, "11"], client.last_game)
 
         receipt = {"owner": client.invite["character_id"], "map": MAP, "guid": GUID, "slot": 7, "displaced": "-"}
         client.gameplay_action.side_effect = None
@@ -143,6 +146,72 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
         client.bridge.command.assert_awaited_once_with(
             "native-inventory-stock-drop-finish", client.zone_epoch, "5", "refused", timeout=3,
         )
+
+    async def test_stock_unequip_returns_host_round_count_to_the_exact_open_screen(self):
+        client = self.client()
+        client.gameplay[native_inventory.UNEQUIP_CAPABILITY] = 1
+        client.guest_ui = SimpleNamespace(refresh=AsyncMock())
+        operation = "a" * 32
+        envelope = [record.STOCK_ACTION_ROW, MAP, PAWN, client.zone_epoch, "5", "unequip", GUID]
+        intent = record.parse_stock_action([*envelope, "1", "2"], client.last_game)
+        self.assertEqual((intent["mode"], intent["expected"]), ("unequip", 2))
+        for count, slot in (("1", "0"), ("1", "11"), ("2", "2")):
+            with self.assertRaisesRegex(ValueError, "Invalid stock backpack operation"):
+                record.parse_stock_action([*envelope, count, slot], client.last_game)
+        frame = [native_inventory.UNEQUIP, MAP, PAWN, GUID, "1", record.LIGHT_PISTOL]
+        receipt = dict(native_inventory.unequip_receipt([*frame, "3"], MAP), owner=client.invite["character_id"])
+        for ammo in ("-2", "2147483648", "+3"):
+            with self.assertRaises(ValueError):
+                native_inventory.unequip_receipt([*frame, ammo], MAP)
+        self.assertEqual(native_inventory.unequip_receipt([*frame, "-1"], MAP)["ammo"], -1)
+        client.gameplay_action.side_effect = None
+        client.gameplay_action.return_value = {native_inventory.UNEQUIP_KEY: receipt}
+        args = (client, MAP, client.zone_epoch, operation, "unequip", "unequip", GUID, 1, "5", "2", None)
+        self.assertEqual((await drop.settle_stock_action(*args))[native_inventory.UNEQUIP_KEY], receipt)
+        client.gameplay_action.assert_awaited_once_with(native_inventory.UNEQUIP, operation, f"{GUID}|1")
+        client.guest_ui.refresh.assert_awaited_once_with(client)
+        client.bridge.command.assert_awaited_once_with(
+            "native-inventory-stock-drop-finish", client.zone_epoch, "5", "unequipped", "1", "3", timeout=5,
+        )
+
+        client.bridge.command.reset_mock()
+        client.guest_ui.refresh.reset_mock()
+        client.gameplay_action.return_value = {native_inventory.UNEQUIP_KEY: {**receipt, "slot": 3}}
+        with self.assertRaisesRegex(RuntimeError, "did not verify returning"):
+            await drop.settle_stock_action(*args)
+        client.guest_ui.refresh.assert_not_awaited()
+        client.bridge.command.assert_awaited_once_with(
+            "native-inventory-stock-drop-finish", client.zone_epoch, "5", "refused", timeout=3,
+        )
+
+    async def test_worn_unequip_takes_the_exact_helmet_or_armor_slot(self):
+        for slot, item in ((8, native_guest_armor.DUST_FILTER_PATH), (9, native_guest_armor.HUNTER_JACKET_PATH)):
+            with self.subTest(slot=slot):
+                client = self.client()
+                client.gameplay = {native_inventory.UNEQUIP_CAPABILITY: 1}
+                client.guest_ui = SimpleNamespace(refresh=AsyncMock())
+                operation = "a" * 32
+                view = record.parse_stock_action(
+                    [record.STOCK_ACTION_ROW, MAP, PAWN, client.zone_epoch, "5", "unequip", GUID, "1", str(slot + 1)],
+                    client.last_game)
+                self.assertEqual((view["mode"], view["expected"]), ("unequip", slot + 1))
+                args = (client, MAP, client.zone_epoch, operation, "unequip", "unequip", GUID, 1, "5", str(slot + 1), None)
+                with self.assertRaisesRegex(RuntimeError, "no host-authoritative Unequip"):
+                    await drop.settle_stock_action(*args)
+                client.gameplay_action.assert_not_awaited()
+                client.bridge.command.reset_mock()
+
+                client.gameplay[native_inventory.UNEQUIP_WORN_CAPABILITY] = 1
+                fields = [native_inventory.UNEQUIP, MAP, PAWN, GUID, str(slot), item, "1"]
+                receipt = dict(native_inventory.unequip_receipt(fields, MAP), owner=client.invite["character_id"])
+                with self.assertRaises(ValueError):
+                    native_inventory.equipment_receipt(fields, MAP)
+                client.gameplay_action.side_effect = None
+                client.gameplay_action.return_value = {native_inventory.UNEQUIP_KEY: receipt}
+                self.assertEqual((await drop.settle_stock_action(*args))[native_inventory.UNEQUIP_KEY], receipt)
+                client.gameplay_action.assert_awaited_once_with(native_inventory.UNEQUIP, operation, f"{GUID}|{slot}")
+                client.bridge.command.assert_awaited_once_with(
+                    "native-inventory-stock-drop-finish", client.zone_epoch, "5", "unequipped", str(slot), "1", timeout=5)
 
     def test_take_ammo_result_must_match_registered_primary_ammo_and_capacity(self):
         for weapon in FIREARMS:

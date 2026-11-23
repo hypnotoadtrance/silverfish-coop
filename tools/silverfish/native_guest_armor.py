@@ -3,6 +3,7 @@
 import asyncio
 from dataclasses import dataclass
 import math
+import re
 import time
 
 from . import native_inventory, party
@@ -61,6 +62,38 @@ SEED_PROFILES = {"basic-helmet": HEAD_PROFILES["basic-helmet"], "goggles": HEAD_
                  "standard-infantry-helmet": HEAD_PROFILES["standard-infantry-helmet"]}
 
 
+_WORN_CLASS = re.compile(r"/Game/Classes/Armor_Items/(?:[A-Za-z0-9_]+/)*(?P<name>(?:Armor|Helm)_[A-Za-z0-9_]+)\.(?P=name)_C")
+
+
+def equip_action(class_path):
+    match = _WORN_CLASS.fullmatch(class_path) if isinstance(class_path, str) and len(class_path) <= 256 else None
+    if match is None:
+        return None
+    return HELMET_ACTION if match["name"].startswith("Helm_") else ACTION
+
+
+def _profile(token, named, *, head=False):
+    # Runtime receipts are produced by the host's local Unreal bridge after it
+    # qualifies the actual class and item row. Clients never provide these stats.
+    if not isinstance(token, str) or len(token) > 512:
+        return None
+    if token in named:
+        return named[token]
+    parts = token.split(",")
+    if (len(parts) != 7 or parts[6] not in ("0", "1")
+            or equip_action(parts[0]) != (HELMET_ACTION if head else ACTION)):
+        return None
+    try:
+        weight, slash, acid, poison, minimum = map(float, parts[1:6])
+    except ValueError:
+        return None
+    voice_filter = parts[6] == "1"
+    if (not all(math.isfinite(value) and value >= 0 for value in (weight, slash, acid, poison, minimum))
+            or head and minimum != 20.0 or not head and voice_filter):
+        return None
+    return GearProfile(parts[0], weight, slash, acid, poison, minimum, voice_filter)
+
+
 def parse(fields):
     head = fields[0] in ("native-guest-helmet", "native-guest-helmet-projection")
     if (head and len(fields) not in (21, 22) or not head and len(fields) not in (14, 17)):
@@ -75,21 +108,26 @@ def parse(fields):
     }
     if len(fields) >= 17:
         profiles = HEAD_PROFILES if head else PROFILES
-        if not head and proof["action"] == "seed":
-            profiles = {"bomber": PROFILES["bomber"], **SEED_PROFILES}
         profile, previous, guid = fields[14:17]
-        if (profile not in (*profiles, "-") or profile == "-" and proof["ok"]
-                or previous not in (*profiles, "-") or not (guid == "-" if previous == "-" else valid_guid(guid))):
+        if not head and proof["action"] == "seed":
+            fixture_profiles = {"bomber": PROFILES["bomber"], **SEED_PROFILES}
+            selected, displaced = fixture_profiles.get(profile), fixture_profiles.get(previous)
+        else:
+            selected = _profile(profile, profiles, head=head)
+            displaced = _profile(previous, profiles, head=head)
+        if ((not selected and (profile != "-" or proof["ok"]))
+                or (not displaced and previous != "-")
+                or not (guid == "-" if previous == "-" else valid_guid(guid))):
             raise ValueError("Invalid exact stock armor profile receipt")
         proof.update(profile=None if profile == "-" else profile, replaced_profile=None if previous == "-" else previous,
                      replaced_guid=None if guid == "-" else guid)
-        if proof["profile"]:
-            proof["class_path"] = profiles[profile].class_path
-        if proof["replaced_profile"]:
-            proof["replaced_class_path"] = profiles[previous].class_path
+        if selected:
+            proof["class_path"] = selected.class_path
+        if displaced:
+            proof["replaced_class_path"] = displaced.class_path
     if head:
         torso, slash, acid, poison = fields[17:21]
-        if (torso not in (*PROFILES, "-") or proof["action"] not in ("equip", "project")
+        if ((torso != "-" and not _profile(torso, PROFILES)) or proof["action"] not in ("equip", "project")
                 or fields[5] not in ("0", "1") or not valid_guid(proof["guid"])
                 or not proof["pawn"].startswith("Player_FP_C " + proof["map"] + ".")):
             raise ValueError("Invalid stock helmet identity")
@@ -119,12 +157,12 @@ def parse_recognition(fields):
     return proof
 
 
-def _weight_debit(proof, profile, profiles, selected):
+def _weight_debit(proof, profile, profiles, *, head=False):
     previous = proof.get("replaced_profile")
     status = proof.get("status")
     if status == "swapped":
-        prior = profiles.get(previous)
-        if (not prior or previous == selected or not valid_guid(proof.get("replaced_guid"))
+        prior = _profile(previous, profiles, head=head)
+        if (not prior or prior.class_path == profile.class_path or not valid_guid(proof.get("replaced_guid"))
                 or proof.get("replaced_guid") == proof.get("guid")
                 or proof.get("replaced_class_path", prior.class_path) != prior.class_path):
             return None
@@ -140,18 +178,18 @@ def effects(proof):
         return False
     carry_before, carry_after, minimum, slash, acid = values
     selected = proof.get("profile", "bomber")
-    profile = PROFILES.get(selected)
+    profile = _profile(selected, PROFILES)
     if not profile or proof.get("class_path", profile.class_path) != profile.class_path:
         return False
-    debit = _weight_debit(proof, profile, PROFILES, selected)
+    debit = _weight_debit(proof, profile, PROFILES)
     return (debit is not None and math.isclose(carry_before - carry_after, debit, abs_tol=1e-6)
             and (minimum, slash, acid) == (profile.minimum, profile.slash, profile.acid))
 
 
 def helmet_effects(proof):
     selected = proof.get("profile")
-    profile = HEAD_PROFILES.get(selected)
-    torso = PROFILES.get(proof.get("torso_profile"))
+    profile = _profile(selected, HEAD_PROFILES, head=True)
+    torso = _profile(proof.get("torso_profile"), PROFILES)
     if (not profile or proof.get("class_path") != profile.class_path
             or (torso is None and proof.get("torso_profile") is not None)
             or proof.get("voice_filter", profile.voice_filter) is not profile.voice_filter
@@ -162,7 +200,7 @@ def helmet_effects(proof):
     if not all(type(value) in (int, float) and math.isfinite(value) and value >= 0 for value in values):
         return False
     carry_before, carry_after, minimum, slash, acid, combined_slash, combined_acid, combined_poison = values
-    debit = _weight_debit(proof, profile, HEAD_PROFILES, selected)
+    debit = _weight_debit(proof, profile, HEAD_PROFILES, head=True)
     return (debit is not None and math.isclose(carry_before - carry_after, debit, abs_tol=1e-6)
             and (minimum, slash, acid) == (torso.minimum if torso else profile.minimum, profile.slash, profile.acid)
             and math.isclose(combined_slash, (torso.slash if torso else 0) + slash, abs_tol=1e-9)
@@ -227,19 +265,20 @@ async def perform(host, bridge, character, operation_id, action, guid, *, seed_k
         before, after = proof.get("before"), proof.get("after")
         selected = proof.get("profile", "bomber")
         delta = 1 if seed else -1 if status == "equipped" else 0
-        profiles = HEAD_PROFILES if head else PROFILES
         if seed:
             expected = seed_kind or "bomber"
             profiles = SEED_PROFILES if seed_kind else PROFILES
+            profile = profiles[expected]
             verified = (status == "seeded" and selected == expected
-                        and proof.get("class_path", profiles[expected].class_path) == profiles[expected].class_path)
+                        and proof.get("class_path", profile.class_path) == profile.class_path)
         else:
+            profile = _profile(selected, HEAD_PROFILES if head else PROFILES, head=head)
             verified = status in _APPLIED and (helmet_effects(proof) if head else effects(proof))
-        if (type(before) is not int or type(after) is not int or not 0 <= before <= 4096
+        if (not profile or type(before) is not int or type(after) is not int or not 0 <= before <= 4096
                 or not 0 <= after <= 4096 or after != before + delta or not verified):
             raise RuntimeError("The typed stock armor slot and derived stats did not verify")
         host.last_game, host.last_seen = snapshot, time.monotonic()
-        result = {key: dict(proof, class_path=profiles[selected].class_path)}
+        result = {key: dict(proof, class_path=profile.class_path)}
         candidate = party.load_party(host.party)
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation_id, "request": fingerprint, "result": result})

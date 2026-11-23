@@ -1,9 +1,12 @@
 import time
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock, call, patch
 
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.link import HostLink
+from tools.silverfish.runtime import Bridge
 from tools.silverfish.service import Host
 
 from tools.silverfish.travel import PLAYTEST_MAPS, travel_decision
@@ -85,6 +88,25 @@ class TravelGateTests(unittest.TestCase):
         self.assertEqual(blocked["blockers"], [{"id": "guest", "reason": "too_far"}])
 
 
+class AuthoredCrossingEventTests(unittest.TestCase):
+    def test_only_exact_stock_overlaps_carry_a_positive_ticket(self):
+        overlap = next(route for route in AUTHORED_ROUTES if route.kind == "overlap")
+        door = next(route for route in AUTHORED_ROUTES if route.kind == "door")
+
+        def event(sequence, route, *tail):
+            step = "-" if route.travel_time_step is None else str(route.travel_time_step)
+            return "\t".join(("authored-request", str(sequence), route.source, route.destination, route.entrance,
+                              route.actor, route.kind, step, *tail)) + "\n"
+
+        with tempfile.TemporaryDirectory() as directory:
+            bridge = Bridge(Path(directory), Mock())
+            (bridge.directory / "native-authored-exit-events").write_text(
+                event(1, door) + event(2, overlap) + event(3, overlap, "17") + event(4, door, "18")
+                + event(5, overlap, "0") + event(6, overlap, str(2**53)), encoding="utf-8", newline="")
+            self.assertEqual(bridge.authored_zone_requests(), [(1, door, None), (2, overlap, None), (3, overlap, 17)])
+            self.assertEqual(bridge.authored_zone_requests(), [])
+
+
 class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
     def host(self, source, destination):
         host = Host.__new__(Host)
@@ -158,6 +180,38 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
                 bridge.command.assert_not_awaited()
                 self.assertFalse(host.transitioning)
                 self.assertFalse(host.stopping)
+
+    async def test_crossing_reaches_live_native_guard_when_host_outruns_regroup_radius(self):
+        route = next(route for route in AUTHORED_ROUTES if route.kind == "overlap")
+        host = self.host(route.source, route.destination)
+        host.last_game = self.frame(route.source, 1, 1750, guarded=True)
+        bridge = self.bridge(self.frame(route.source, 2, 1500), self.frame(route.source, 3, 1900, guarded=True))
+        bridge.command.side_effect = None
+        bridge.command.return_value = {"ack": {"message": "exit_crossing_unavailable"}}
+
+        result = await host.travel_authored(bridge, None, route, exit_crossing=17)
+
+        self.assertEqual(result, {"ok": False, "error": "exit_crossing_unavailable"})
+        host.flush_native_world.assert_awaited_once_with(bridge)
+        host.checkpoint_native.assert_awaited_once_with(bridge)
+        bridge.command.assert_awaited_once_with(
+            "travel-party", route.destination, route.source, f"{route.travel_time_step or 0}:17", "d1",
+            "host-pawn", "host-controller", "c1", "IpConnection game-guest",
+            "PlayerControler_FP_C guest-controller", "Player_FP_C guest-pawn")
+        host.begin_zone_guests.assert_not_called()
+        self.assertFalse(host.transitioning)
+        self.assertFalse(host.stopping)
+
+    async def test_crossing_cannot_survive_an_application_roster_change(self):
+        route = next(route for route in AUTHORED_ROUTES if route.kind == "overlap")
+        host = self.host(route.source, route.destination)
+        host.last_game = self.frame(route.source, 1, 1750, guarded=True)
+        host.roles.side_effect = [{"host": "host", "guest": "scout"}, {"host": "host", "guest": "new-scout"}]
+        bridge = self.bridge(self.frame(route.source, 2, 1500), self.frame(route.source, 3, 1900, guarded=True))
+
+        self.assertEqual(await host.travel_authored(bridge, None, route, exit_crossing=17),
+                         {"ok": False, "error": "travel_source_changed"})
+        bridge.command.assert_not_awaited()
 
     async def test_rejects_departure_without_fresh_same_world_census(self):
         for latest, error in ((None, "game_snapshot_unavailable"),
@@ -286,7 +340,7 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
                 host.travel_authored = AsyncMock(return_value={"ok": False, "error": "native_roster_unavailable"})
                 bridge = Mock(command=AsyncMock(side_effect=RuntimeError("The source scope disappeared")),
                               native_rest_requests=Mock(return_value=()),
-                              authored_zone_requests=Mock(return_value=((1, route),)),
+                              authored_zone_requests=Mock(return_value=((1, route, None),)),
                               native_cube_requests=Mock(return_value=()),
                               native_zone_requests=Mock(return_value=()))
                 await host.service_native_zones(bridge, None, time.monotonic())

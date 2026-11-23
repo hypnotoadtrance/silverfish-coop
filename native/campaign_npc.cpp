@@ -72,6 +72,21 @@ namespace
     constexpr auto perceive_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:Proscess_TargetPerception");
     constexpr auto melee_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:ResolveMelee");
     constexpr auto player_damage_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:DealDamage");
+    constexpr auto drone_base = STR("/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C");
+    constexpr auto drone_damage_path = STR("/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C:DealDamage");
+    constexpr auto drone_die_path = STR("/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C:Die");
+    constexpr auto turret_base = STR("/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C");
+    constexpr auto turret_damage_path = STR("/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C:DealDamage");
+    constexpr auto turret_die_path = STR("/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C:Die");
+    constexpr auto turret_fire_path = STR("/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C:FireRound");
+    struct InactiveTargets
+    {
+        std::uintptr_t world{};
+        std::array<std::uintptr_t, 5> pawns{};
+    };
+    InactiveTargets inactive_targets;
+
+    constexpr auto npc_die_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:Die");
     constexpr auto npc_damage_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:DealDamage");
     constexpr auto npc_death_path = STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:ResolveDeath");
     constexpr auto projectile_base = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C");
@@ -1508,29 +1523,170 @@ namespace
         if (!next.cohort.empty() || published->latest.cohort.empty()) published->latest = std::move(next);
     }
 
+    int set_inactive_targets(const Lua& lua)
+    {
+        if (!hook_ready() || !production_roster) return 0;
+        inactive_targets = {};
+        const auto count = lua.get_stack_size();
+        if (count < 2 || count > 6) return 0;
+        for (int i = 1; i <= count; ++i)
+            if (!lua.is_integer(i)) return 0;
+        inactive_targets.world = static_cast<std::uintptr_t>(lua.get_integer());
+        for (int i = 1; i < count; ++i)
+            inactive_targets.pawns[static_cast<std::size_t>(i - 1)] = static_cast<std::uintptr_t>(lua.get_integer());
+        return 0;
+    }
+
+    bool inactive_target(U::UWorld* world, U::UObject* target)
+    {
+        return target && inactive_targets.world == reinterpret_cast<std::uintptr_t>(world) &&
+            std::ranges::find(inactive_targets.pawns, reinterpret_cast<std::uintptr_t>(target)) != inactive_targets.pawns.end();
+    }
+
+    bool guard_npc_combat(Iteration& call, U::UObject* receiver, U::UFunction* function, void* parameters)
+    {
+        if (!production_roster || !receiver || !function || call.OriginalFunctionCallPrevented()) return false;
+        struct Action
+        {
+            U::FName name;
+            const U::TCHAR* path;
+            const U::TCHAR* target;
+            bool attack;
+        };
+        static const std::array actions{
+            Action{U::FName{STR("Begin_MeleeStrike")}, STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:Begin_MeleeStrike"), nullptr, true},
+            Action{U::FName{STR("ResolveMelee")}, melee_path, nullptr, true},
+            Action{U::FName{STR("TargetedMelee")}, STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:TargetedMelee"), STR("TargetActor"), true},
+            Action{U::FName{STR("Fire_Volly")}, STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:Fire_Volly"), nullptr, true},
+            Action{U::FName{STR("Agro_Buffer")}, STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:Agro_Buffer"), STR("AgroSource"), false},
+            Action{U::FName{STR("Proscess_TargetPerception")}, perceive_path, STR("PercivedActor"), false},
+        };
+        const auto action = std::ranges::find(actions, function->GetFName(), &Action::name);
+        if (action == actions.end() || !live(receiver) || function->GetReturnProperty() ||
+            function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return false;
+        // The stock parent also covers children that implement their own strike.
+        auto* base = find<U::UClass>(npc_base);
+        auto* declared = find<U::UFunction>(action->path);
+        auto* owner = U::Cast<U::UClass>(function->GetOuterPrivate());
+        if (!base || !declared || !owner || !owner->IsChildOf(base) ||
+            !receiver->GetClassPrivate()->IsChildOf(owner)) return false;
+        auto* ancestor = static_cast<U::UStruct*>(function);
+        while (ancestor && ancestor != declared) ancestor = ancestor->GetSuperStruct();
+        if (!ancestor) return false;
+
+        auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
+        auto* driver = object(world, STR("NetDriver"));
+        if (!in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
+            object(driver, STR("World")) != world) return false;
+        const auto role = byte_field(receiver, STR("Role"));
+        auto* connection = object(driver, STR("ServerConnection"));
+        if (role == 1 && action->attack && bool_field(receiver, STR("bReplicates"), true) && server_connection(connection, driver))
+        {
+            call.PreventOriginalFunctionCall();
+            return call.OriginalFunctionCallPrevented();
+        }
+        if (role != 3 || connection || inactive_targets.world != reinterpret_cast<std::uintptr_t>(world)) return false;
+        auto* target = object(receiver, STR("CombatTarget"));
+        if (action->target)
+        {
+            auto* argument = field<U::FObjectProperty>(function, action->target);
+            if (!parameters || !argument || !argument->HasAnyPropertyFlags(U::CPF_Parm) ||
+                argument->HasAnyPropertyFlags(U::CPF_OutParm) || argument->GetOffset_Internal() != 0) return false;
+            target = get_object(argument, parameters);
+        }
+        if (!inactive_target(world, target)) return false;
+        call.PreventOriginalFunctionCall();
+        return call.OriginalFunctionCallPrevented();
+    }
+
+    bool guard_turret_fire(Iteration& call, U::UObject* receiver, U::UFunction* function)
+    {
+        static const U::FName fire{STR("FireRound")};
+        if (!production_roster || !receiver || !function || function->GetFName() != fire ||
+            call.OriginalFunctionCallPrevented() || !live(receiver)) return false;
+        auto* base = find<U::UClass>(turret_base);
+        if (!base || !receiver->GetClassPrivate()->IsChildOf(base) || function != find<U::UFunction>(turret_fire_path))
+            return false;
+        auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
+        auto* driver = object(world, STR("NetDriver"));
+        if (!in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
+            object(driver, STR("World")) != world) return false;
+        const auto role = byte_field(receiver, STR("Role"));
+        auto* connection = object(driver, STR("ServerConnection"));
+        if (role == 1 && bool_field(receiver, STR("bReplicates"), true) && server_connection(connection, driver))
+        {
+            call.PreventOriginalFunctionCall();
+            return call.OriginalFunctionCallPrevented();
+        }
+        if (role != 3 || connection ||
+            inactive_targets.world != reinterpret_cast<std::uintptr_t>(world)) return false;
+
+        auto* property = field<U::FArrayProperty>(receiver, STR("Targets"));
+        auto* item = property ? U::CastField<U::FObjectProperty>(property->GetInner()) : nullptr;
+        if (!item || item->GetOffset_Internal() != 0) return false;
+        U::FScriptArrayHelper targets(property, property->ContainerPtrToValuePtr<void>(receiver));
+        // Keep the stock order of viable targets. If the first target changed, skip
+        // this shot so the stock targeting loop can turn the barrel before firing again.
+        const auto count = targets.Num();
+        auto* previous_target = count ? item->GetObjectPropertyValue(targets.GetRawPtr(0)) : nullptr;
+        for (int i = count - 1; i >= 0; --i)
+        {
+            auto* target = item->GetObjectPropertyValue(targets.GetRawPtr(i));
+            if (inactive_target(world, target)) targets.RemoveValues(i, 1);
+        }
+        if (targets.Num() > 0 && item->GetObjectPropertyValue(targets.GetRawPtr(0)) == previous_target)
+            return false;
+        call.PreventOriginalFunctionCall();
+        return call.OriginalFunctionCallPrevented();
+    }
+
     bool prevent_roster_damage(Iteration& call, U::UObject* receiver, U::UFunction* function,
                                U::FFrame* frame, void* parameters)
     {
         if (!production_roster || !receiver || !function || call.OriginalFunctionCallPrevented()) return false;
-        static const U::FName damage_name{STR("DealDamage")}, death_name{STR("ResolveDeath")};
+        static const U::FName damage_name{STR("DealDamage")}, death_name{STR("ResolveDeath")}, die_name{STR("Die")};
         const auto name = function->GetFName();
         const bool damage = name == damage_name;
-        if ((!damage && name != death_name) || function != find<U::UFunction>(damage ? npc_damage_path : npc_death_path)
+        if ((!damage && name != death_name && name != die_name)
             || function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)
-            || byte_field(receiver, STR("Role")) != 1 || !bool_field(receiver, STR("bReplicates"), true)) return false;
-        const auto family = npc_family(receiver);
-        if (!publishes(family) ||
-            (family == NpcFamily::NotDeer && byte_field(receiver, STR("Faction")) != not_deer_profile.faction)) return false;
-        const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld());
-        if (active.seat != Seat::Client || !roster_family(active, family) || !in_level(receiver, active.world) ||
-            (frame && frame->Object() != receiver)) return false;
+            || !live(receiver) || byte_field(receiver, STR("Role")) != 1 ||
+            !bool_field(receiver, STR("bReplicates"), true) || (frame && frame->Object() != receiver)) return false;
+
+        const auto* owner = U::Cast<U::UClass>(function->GetOuterPrivate());
+        const auto* type = receiver->GetClassPrivate();
+        if (!owner || !type || !type->IsChildOf(owner)) return false;
+
+        const U::UFunction* declaration{};
+        if (const auto* base = find<U::UClass>(npc_base); base && owner->IsChildOf(base))
+            declaration = find<U::UFunction>(damage ? npc_damage_path : name == die_name ? npc_die_path : npc_death_path);
+        else if (name != death_name)
+        {
+            // The flying stock drone and turret families have separate Blueprint roots.
+            if (const auto* drone = find<U::UClass>(drone_base); drone && owner->IsChildOf(drone))
+                declaration = find<U::UFunction>(damage ? drone_damage_path : drone_die_path);
+            else if (const auto* turret = find<U::UClass>(turret_base); turret && owner->IsChildOf(turret))
+                declaration = find<U::UFunction>(damage ? turret_damage_path : turret_die_path);
+        }
+        if (!declaration) return false;
+        // Some stock NPCs override the damage or death graph. Follow its
+        // reflected parent function so an unrelated Blueprint event stays unaffected.
+        const U::UStruct* inherited = function;
+        while (inherited && inherited != declaration) inherited = inherited->GetSuperStruct();
+        if (!inherited) return false;
+
+        auto* total = damage ? hit_field<U::FDoubleProperty>(function, STR("TotalDamage"), 0x178, true) : nullptr;
+        auto* lethal = damage ? hit_field<U::FBoolProperty>(function, STR("IsLethal"), 0x180, true) : nullptr;
+        if (damage && (!total || !lethal)) return false;
+        auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
+        auto* driver = object(world, STR("NetDriver"));
+        // A stock simulated NPC only exists here because the host published it.
+        // The director profile limits spawn capture, not damage on existing replicas.
+        if (!in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
+            object(driver, STR("World")) != world || !server_connection(object(driver, STR("ServerConnection")), driver))
+            return false;
         call.PreventOriginalFunctionCall();
         if (!call.OriginalFunctionCallPrevented()) return false;
         if (!damage) return true;
-
-        auto* total = hit_field<U::FDoubleProperty>(function, STR("TotalDamage"), 0x178, true);
-        auto* lethal = hit_field<U::FBoolProperty>(function, STR("IsLethal"), 0x180, true);
-        if (!total || !lethal) return true;
         if (frame)
         {
             if (auto* output = hit_output(*frame, total);
@@ -1662,7 +1818,8 @@ namespace
             static const U::FName pool_name{STR("GetCombinedPool")};
             if (name == pool_name) observe_director_pool(receiver, frame);
         }
-        if (prevent_roster_damage(call, receiver, frame.Node(), &frame, nullptr)) return;
+        if (guard_turret_fire(call, receiver, frame.Node()) || guard_npc_combat(call, receiver, frame.Node(), frame.Locals()) ||
+            prevent_roster_damage(call, receiver, frame.Node(), &frame, nullptr)) return;
         if (name == damage_name)
         {
             if (watch_combat) before_stock_melee(receiver, frame);
@@ -2486,14 +2643,17 @@ namespace silverfish::campaign_npc
             on_post, {false, false, STR("SilverfishCoopNative"), STR("Observe natural CrossRoads Husk squads")});
         callbacks[2] = Hook::RegisterProcessEventPreCallback(
             [](Iteration& call, U::UObject* receiver, U::UFunction* function, void* parameters) {
-                if (hook_ready() && !prevent_roster_damage(call, receiver, function, nullptr, parameters))
+                if (hook_ready() && !guard_turret_fire(call, receiver, function) &&
+                    !guard_npc_combat(call, receiver, function, parameters) &&
+                    !prevent_roster_damage(call, receiver, function, nullptr, parameters))
                     prevent_replica_brain(call, receiver, function);
             }, {false, false, STR("SilverfishCoopNative"), STR("Guard stock CrossRoads Husk replica brains")});
         callbacks[3] = Hook::RegisterProcessInternalPreCallback(
             [](Iteration& call, U::UObject* receiver, U::FFrame& frame, void*) {
                 if (!hook_ready() || (!operate && !veto_flayer_spawns && !operate_not_deer && !operate_boars) || !receiver || !frame.Node() ||
                     call.OriginalFunctionCallPrevented()) return;
-                if (prevent_roster_damage(call, receiver, frame.Node(), &frame, nullptr)) return;
+                if (guard_turret_fire(call, receiver, frame.Node()) || guard_npc_combat(call, receiver, frame.Node(), frame.Locals()) ||
+                    prevent_roster_damage(call, receiver, frame.Node(), &frame, nullptr)) return;
                 static const U::FName spawn_name{STR("SpawnSquadFromData")};
                 static const U::FName load_name{STR("LoadSquad")};
                 const auto name = frame.Node()->GetFName();
@@ -2572,7 +2732,11 @@ namespace silverfish::campaign_npc
     {
         lua.register_function("SilverfishReadCampaignNpc", report);
         lua.register_function("SilverfishClearCampaignNpc", reset);
-        if (production_roster) lua.register_function("SilverfishReadCampaignNpcHostRoster", report_host_roster);
+        if (production_roster)
+        {
+            lua.register_function("SilverfishReadCampaignNpcHostRoster", report_host_roster);
+            lua.register_function("SilverfishSetInactiveNpcTargets", set_inactive_targets);
+        }
         if (watch_director) lua.register_function("SilverfishReadAmbientDirectorDiagnostic", read_director_diagnostic);
         if (watch_flayer_projectiles)
             lua.register_function("SilverfishReadCampaignFlayerProjectile", read_flayer_projectile);
@@ -2596,6 +2760,7 @@ namespace silverfish::campaign_npc
             antfarm_load = {};
             combat_watch = {};
             flayer_hit = {};
+            inactive_targets = {};
         }
     }
 }

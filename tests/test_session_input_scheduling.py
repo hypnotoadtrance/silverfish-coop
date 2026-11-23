@@ -345,6 +345,30 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
                     client.leave_for_rejoin.assert_awaited_once_with(*expected_leave)
                     client.open_game_link.assert_awaited_once()
 
+    async def test_zone_loading_retries_an_unconfirmed_cover_in_the_disconnecting_source(self):
+        source, destination = sorted(PLAYTEST_MAPS)
+        client = self.guest(AsyncMock())
+        client.host_session, client.zone_epoch, client.expected_zone = "session", "current", source
+        client.server_transitioning = True
+        client.last_game = {"state": "connected", "mode": "client", "map": source,
+                            "native_zone_loading_support": True}
+        client.bridge.command = AsyncMock(side_effect=[{"map": source}, {
+            "map": source,
+            "native_zone_loading_cover": destination,
+            "native_zone_loading_cue": {"destination": destination, "seat": "guest", "dispatched": True},
+        }])
+        await client.sync_zone_loading(destination)
+        self.assertIsNone(client.source_fade)
+        self.assertEqual(client.loading_zone, destination)
+        client.last_game["state"] = "disconnected"
+        await client.sync_zone_loading(destination)
+        await client.sync_zone_loading(destination)
+        self.assertEqual(client.source_fade[:2], (("session", "current", source), destination))
+        self.assertEqual(client.bridge.command.await_args_list, [
+            call("native-zone-loading-start", destination, source, timeout=2),
+            call("native-zone-loading-start", destination, source, timeout=2),
+        ])
+
     async def test_stock_door_receipt_projects_before_the_next_world_snapshot(self):
         door = native_stock_door
         area = "/Game/Classes/Maps/Observatory_P"

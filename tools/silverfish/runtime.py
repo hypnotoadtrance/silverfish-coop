@@ -21,6 +21,7 @@ import time
 import uuid
 
 from .native_gold import GoldRequest, INVENTORY_ENTRIES, valid_guid
+from . import native_finite_shop
 from .native_finite_shop import parse_item as parse_finite_shop_item, parse_summary as parse_finite_shop_summary
 from . import native_board_contract
 from . import native_authored_pickup, native_borough_barter, native_dead_drop, native_dialogue, native_downed_markers, native_enemy_shells, native_flood_jammer, native_mosby_station_view, native_mosby_tape
@@ -1154,7 +1155,7 @@ class Bridge:
         return [request for line in batch[:end].splitlines()
                 if (request := parse_matrix_request(line.decode("utf-8", errors="replace").split("\t")))]
 
-    def authored_zone_requests(self) -> list[tuple[int, AuthoredRoute]]:
+    def authored_zone_requests(self) -> list[tuple[int, AuthoredRoute, int | None]]:
         try:
             with (self.directory / "native-authored-exit-events").open("rb") as stream:
                 stream.seek(self.authored_zone_offset)
@@ -1166,15 +1167,22 @@ class Bridge:
         requests = []
         for raw in batch[:end].splitlines():
             fields = raw.decode("utf-8", errors="replace").split("\t")
-            if len(fields) != 8 or fields[0] != "authored-request" or not fields[1].isascii() \
+            if len(fields) not in (8, 9) or fields[0] != "authored-request" or not fields[1].isascii() \
                     or not fields[1].isdigit() or len(fields[1]) > 12:
                 continue
-            source, destination, entrance, actor, kind, step = fields[2:]
+            source, destination, entrance, actor, kind, step = fields[2:8]
+            crossing = None
+            if len(fields) == 9:
+                token = fields[8]
+                if (kind != "overlap" or not token.isascii() or not token.isdigit() or len(token) > 16
+                        or not 0 < int(token) < 2**53):
+                    continue
+                crossing = int(token)
             match = next((route for route in AUTHORED_ROUTES if route.source == source and route.actor == actor), None)
             if match and (match.destination, match.entrance, match.kind,
                           "-" if match.travel_time_step is None else str(match.travel_time_step)) == (
                           destination, entrance, kind, step):
-                requests.append((int(fields[1]), match))
+                requests.append((int(fields[1]), match, crossing))
         return requests
 
     def snapshot(self) -> dict | None:
@@ -2034,8 +2042,11 @@ class Bridge:
                       and (selection := _held_input_sequence(fields[3]))):
                     data["native_guest_equipment_selection"] = {"map": fields[1], "pawn": fields[2],
                                                                   "sequence": selection, "guid": fields[4]}
-                elif fields[0] == "native-guest-equipped-weapon" and len(fields) == 4 and fields[3] in PRIMARY_KINDS:
-                    data.setdefault("native_guest_equipped_weapons", {})[fields[1]] = {"guid": fields[2], "kind": fields[3]}
+                elif fields[0] == "native-guest-equipped-weapon" and len(fields) in (4, 5) and fields[3] in PRIMARY_KINDS:
+                    equipped = {"guid": fields[2], "kind": fields[3]}
+                    if len(fields) == 5 and re.fullmatch(r"[0-9]{1,4}", fields[4]) and int(fields[4]) <= 4096:
+                        equipped["rounds"] = int(fields[4])
+                    data.setdefault("native_guest_equipped_weapons", {})[fields[1]] = equipped
                 elif fields[0] == "native-guest-primary-fixture" and len(fields) == 6:
                     data["native_guest_primary_fixture"] = {"map": fields[1], "pawn": fields[2], "guid": fields[3],
                                                             "sequence": int(fields[4]), "stock_wrappers": int(fields[5])}
@@ -2137,11 +2148,13 @@ class Bridge:
                     data.setdefault("native_guest_revivals", {})[fields[2]] = {
                         "map": fields[1], "pawn": fields[2], "owner": fields[3], "health": _finite(fields[4]), "maximum": _finite(fields[5]),
                     }
-                elif fields[0] == "native-wipe-view" and len(fields) == 13:
+                elif fields[0] == "native-wipe-view" and len(fields) in (13, 14):
                     data["native_wipe_view"] = {"state": fields[1], "id": fields[2], "map": fields[3], "pawn": fields[4],
                                                 "owner": fields[5], "deadline": int(fields[6]), "offset": int(fields[7]),
                                                 "total": int(fields[8]), "guid": fields[9], "selected": int(fields[10]),
                                                 "limit": int(fields[11]), "sequence": int(fields[12])}
+                    if len(fields) == 14:
+                        data["native_wipe_view"]["screen"] = fields[13]
                 elif (fields[0] == "native-loot-crate-input" and len(fields) in (4, 5)
                       and AUTHORED_CRATES.get(fields[2]) == fields[1] and fields[3] in ("ready", "exhausted")):
                     row = {"map": fields[1], "crate": fields[2], "state": fields[3]}
@@ -2277,6 +2290,12 @@ class Bridge:
                     data[native_inventory.STORE_CAPABILITY] = 1
                 elif fields[0] == native_inventory.STORE_EQUIPMENT and len(fields) == 7:
                     data[native_inventory.STORE_KEY] = native_inventory.equipment_receipt(fields, data.get("map"))
+                elif fields == [native_inventory.UNEQUIP + "-capability", "1"]:
+                    data[native_inventory.UNEQUIP_CAPABILITY] = 1
+                elif fields == [native_inventory.UNEQUIP + "-worn-capability", "1"]:
+                    data[native_inventory.UNEQUIP_WORN_CAPABILITY] = 1
+                elif fields[0] == native_inventory.UNEQUIP and len(fields) == 7:
+                    data[native_inventory.UNEQUIP_KEY] = native_inventory.unequip_receipt(fields, data.get("map"))
                 elif fields == ["native-inventory-split-capability", "1"]:
                     data[native_inventory.SPLIT_CAPABILITY] = 1
                 elif (fields[0] == native_inventory.SPLIT and len(fields) == 9 and data.get("map") == fields[1]
@@ -2332,6 +2351,11 @@ class Bridge:
                 elif fields[0] == "native-bag-projection-interaction" and len(fields) == 6:
                     data["native_bag_projection_interaction"] = {"map": fields[1], "epoch": fields[2], "bag": fields[3],
                                                                  "sequence": int(fields[4]), "entry": fields[5]}
+                elif fields[0] == "native-finite-shop-stock-revision" and len(fields) == 4:
+                    key = native_finite_shop.STOCK_REVISION
+                    if key in data:
+                        raise ValueError("Duplicate stock merchant revision")
+                    data[key] = native_finite_shop.parse_stock_revision(fields, data.get("state"), data.get("map"))
                 elif fields[0] == "native-finite-shop" and len(fields) == 10:
                     data["native_finite_shop"] = parse_finite_shop_summary(fields)
                 elif fields[0] == "native-finite-shop-item" and len(fields) in {6, 11, 12} and "native_finite_shop" in data:
@@ -3064,6 +3088,10 @@ class Bridge:
                                                "location": [_finite(axis) for axis in fields[4:7]],
                                                "controller": fields[7],
                                                "max_health": _finite(fields[8]) if len(fields) == 9 else None}
+                elif (fields[0] == "native-guest-vitals" and len(fields) == 4
+                      and data.get("state") in ("hosting", "connected") and fields[1].startswith("Player_FP_C ")):
+                    food, regen = map(_finite, fields[2:])
+                    data.setdefault("native_guest_vitals", {})[fields[1]] = {"food": food, "regen": regen}
                 elif fields[0] == "native-player-avatar" and len(fields) in (5, 8, 10, 11, 14):
                     area, pawn, status, diagnostic = fields[1:5]
                     if area == data.get("map") and status in ("default_body", "stock_body", "unavailable"):
@@ -3143,6 +3171,9 @@ class Bridge:
                 elif (fields[0] == "native-avatar-local-aim" and len(fields) == 2
                       and data.get("state") == "connected" and fields[1] in ("0", "1")):
                     data[native_player_avatar.LOCAL_AIM] = fields[1] == "1"
+                elif (fields[0] == "native-avatar-local-lighter" and len(fields) == 2
+                      and data.get("state") == "connected" and fields[1] in native_player_avatar.LIGHTER_MODES):
+                    data[native_player_avatar.LOCAL_LIGHTER] = fields[1]
                 elif (fields[0] == "player-local-sprint" and len(fields) == 2
                       and data.get("state") == "connected" and fields[1] in ("0", "1")):
                     data["player_local_sprint"] = fields[1] == "1"

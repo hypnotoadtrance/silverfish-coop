@@ -2152,11 +2152,16 @@ namespace
             U::FVector position;
         };
         std::vector<Nearby> nearby;
-        for (const auto& [_, loose] : loose_sources)
+        for (auto& [_, loose] : loose_sources)
         {
-            auto* actor = loose.scope.actor.Get();
+            auto& scope = loose.scope;
+            auto* actor = static_cast<U::AActor*>(scope.actor.Get());
             if (!live(actor)) continue;
-            auto at = loose.scope.hidden_at ? *loose.scope.hidden_at : static_cast<U::AActor*>(actor)->K2_GetActorLocation();
+            // The stock guest respawn path can re-enable a level item after the
+            // host has hidden it. Retain the host's claim until a show arrives.
+            if (!scope.host && scope.claimed && (actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), true)))
+                set_visibility(scope, true);
+            auto at = scope.hidden_at ? *scope.hidden_at : actor->K2_GetActorLocation();
             const auto dx = at.GetX() - center.GetX(), dy = at.GetY() - center.GetY(), dz = at.GetZ() - center.GetZ();
             const auto distance = dx * dx + dy * dy + dz * dz;
             if (std::isfinite(distance) && distance <= 1800.0 * 1800.0)

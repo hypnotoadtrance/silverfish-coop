@@ -468,6 +468,8 @@ end
 local function apply_downed(record)
     local pawn, movement = record.pawn, record.movement
     if not writable(record) or not valid(movement) then return end
+    -- Removing the input mapping can swallow the stock aim-release event.
+    if pawn.Aiming then pawn:CancelScope() end
     pawn.HoldingCrouch = true
     pawn.HoldingJump = false
     pawn.Sprinting = false

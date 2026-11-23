@@ -86,6 +86,16 @@ class NativeMreTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 consume.parse_meal(fields)
 
+    def test_honey_egg_verifies_its_guest_fatigue_and_nutrition(self):
+        frame = ["native-guest-honey-egg", "used", BOROUGH, PAWN, GUID, "1", "0", "17", "22",
+                 "230", "230", "210", "250", "42", "42", "4", "0", "0", "0", "12", "12", "0",
+                 "3", "15", "15"]
+        proof = consume.parse_meal(frame)
+        self.assertEqual((proof["food_after"], proof["fatigue_before"], proof["fatigue_after"]), (22, 3, 15))
+        for fields in (frame[:-3], frame[:-2] + ["8", "15"], frame[:-3] + ["98", "102", "0"]):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                consume.parse_meal(fields)
+
     def test_stock_beans_and_mushroom_keep_exact_food_and_intoxication(self):
         for action, food_after, intox_after in ((consume.CANNED_BEANS, "31", "41"),
                                                 (consume.BROWN_MUSHROOM, "20.5", "42")):

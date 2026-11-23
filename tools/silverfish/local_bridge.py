@@ -8,6 +8,7 @@ from pathlib import Path
 
 STATUS_LIMIT = 2 * 1024 * 1024
 ZONE_ROSTER_LIMIT = 8192
+WEAPON_CUES_LIMIT = 16 * 1024
 GUEST_INTERACTION_SHOP = 1
 GUEST_INTERACTION_BROKER = 2
 GUEST_INTERACTION_DIALOGUE = 4
@@ -71,6 +72,17 @@ class LocalBridge:
             self._take_local_prop_pose.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
             self._take_local_prop_pose.restype = ctypes.c_uint32
             self._local_prop_pose_buffer = ctypes.create_string_buffer(768)
+        self._publish_footsteps = getattr(library, "SilverfishBridgePublishFootstepsV1", None)
+        if self._publish_footsteps is not None:
+            self._publish_footsteps.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
+            self._publish_footsteps.restype = ctypes.c_int
+        self._take_local_weapon_cues = getattr(library, "SilverfishBridgeTakeLocalWeaponCuesV1", None)
+        self._enable_local_weapon_cues = getattr(library, "SilverfishBridgeEnableLocalWeaponCuesV1", None)
+        self._local_weapon_cues_buffer = None
+        if self._take_local_weapon_cues is not None and self._enable_local_weapon_cues is not None:
+            self._take_local_weapon_cues.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            self._take_local_weapon_cues.restype = ctypes.c_uint32
+            self._enable_local_weapon_cues.argtypes, self._enable_local_weapon_cues.restype = [], ctypes.c_int
         self._take_avatar_pose = getattr(library, "SilverfishBridgeTakeAvatarPoseV1", None)
         self._publish_avatar_poses = getattr(library, "SilverfishBridgePublishAvatarPosesV1", None)
         self._avatar_pose_buffer = None
@@ -114,6 +126,7 @@ class LocalBridge:
         if not bridge._open():
             return None
         bridge.enable_status()
+        bridge.enable_local_weapon_cues()
         return bridge
 
     def enable_status(self) -> None:
@@ -221,6 +234,29 @@ class LocalBridge:
         return buffer[:size] if size else None
 
     @property
+    def local_weapon_cues_available(self) -> bool:
+        return self._local_weapon_cues_buffer is not None
+
+    def enable_local_weapon_cues(self) -> None:
+        if (self._take_local_weapon_cues is not None and self._enable_local_weapon_cues is not None
+                and self._enable_local_weapon_cues()):
+            self._local_weapon_cues_buffer = ctypes.create_string_buffer(WEAPON_CUES_LIMIT)
+
+    def take_local_weapon_cues(self) -> bytes | None:
+        buffer = self._local_weapon_cues_buffer
+        if buffer is None:
+            return None
+        size = self._take_local_weapon_cues(buffer, len(buffer))
+        return buffer[:size] if 0 < size <= len(buffer) else None
+
+    @property
+    def footsteps_available(self) -> bool:
+        return self.local_weapon_cues_available and self._publish_footsteps is not None
+
+    def publish_footsteps(self, frame: bytes) -> bool:
+        return self.footsteps_available and bool(self._publish_footsteps(frame, len(frame)))
+
+    @property
     def avatar_pose_available(self) -> bool:
         return self._avatar_pose_buffer is not None
 
@@ -247,4 +283,5 @@ class LocalBridge:
     def close(self):
         self._native_events_heartbeat = self._stock_board_heartbeat = None
         self._host_dig_heartbeat = self._guest_interaction_lease = self._native_zone_lease = None
+        self._local_weapon_cues_buffer = None
         self._close()

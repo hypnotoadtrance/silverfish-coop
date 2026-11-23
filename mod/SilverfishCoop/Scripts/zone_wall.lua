@@ -14,6 +14,7 @@ local no_collision, query_only = 0, 1
 local world_static, pawn_channel = 0, 2
 local ignore, block = 0, 2
 local range_squared = 1500 * 1500
+local approach_range, retreat_margin = 480, 60
 local records = {}
 local status, failure = "inactive", ""
 local observation
@@ -22,6 +23,7 @@ local retry_at = {}
 local scanned_world
 local scanned_actors = {}
 local scan_after = 0
+local approach_scope, open_exit
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -59,6 +61,7 @@ local function clear_record(index)
     if not record then return end
     pcall(set_ignore, record.host_capsule, record.actor, false)
     if valid(record.actor) then pcall(function() record.actor:K2_DestroyActor() end) end
+    if open_exit == record then open_exit = nil end
     records[index] = nil
     retry_at[index] = nil
     if observation and observation.index == index then observation = nil end
@@ -72,7 +75,7 @@ function wall.clear()
     for key in pairs(records) do clear_record(key) end
     retry_at = {}
     observation = nil
-    primary_key = nil
+    primary_key, approach_scope, open_exit = nil, nil, nil
     scanned_world, scanned_actors, scan_after = nil, {}, 0
     status, failure = "inactive", ""
     regroup.clear()
@@ -130,7 +133,9 @@ local function create(world, fixture)
             or not same_rotation(component:K2_GetComponentRotation(), rotation) then
             error("The staged wall's collision geometry could not be verified", 0)
         end
-        return { actor = actor, component = component, fixture = fixture, original = original, world = world }
+        return { actor = actor, component = component, fixture = fixture, original = original, world = world,
+            center = center, extent = {extent.X, extent.Y, extent.Z},
+            axes = {original:GetForwardVector(), original:GetRightVector(), original:GetUpVector()} }
     end)
     if not ok then
         pcall(function() actor:K2_DestroyActor() end)
@@ -200,24 +205,68 @@ local function in_world(actor, world)
     return valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
 end
 
-local function nearby_exit(location)
-    local name, nearest = nil, 450 ^ 2
+local function nearby_exit(location, range, managed)
+    local name, nearest = nil, range ^ 2
     for key, record in pairs(records) do
-        local shape = record.component
-        local center, extent = shape:K2_GetComponentLocation(), shape:GetScaledBoxExtent()
-        local directions = {shape:GetForwardVector(), shape:GetRightVector(), shape:GetUpVector()}
-        local x, y, z = location.X - center.X, location.Y - center.Y, location.Z - center.Z
-        local squared = 0
-        for index, length in ipairs({extent.X, extent.Y, extent.Z}) do
-            local axis = directions[index]
-            local outside = math.max(0, math.abs(x * axis.X + y * axis.Y + z * axis.Z) - length)
-            squared = squared + outside ^ 2
-        end
-        if squared < nearest or (squared == nearest and name and key < name) then
-            name, nearest = key, squared
+        if not managed or record.managed then
+            local center = record.center
+            local x, y, z = location.X - center.X, location.Y - center.Y, location.Z - center.Z
+            local squared = 0
+            for index, length in ipairs(record.extent) do
+                local axis = record.axes[index]
+                local outside = math.max(0, math.abs(x * axis.X + y * axis.Y + z * axis.Z) - length)
+                squared = squared + outside ^ 2
+            end
+            if squared < nearest or (squared == nearest and name and key < name) then
+                name, nearest = key, squared
+            end
         end
     end
-    return name
+    return name, nearest
+end
+
+local function close_approach()
+    if open_exit then
+        set_ignore(open_exit.host_capsule, open_exit.actor, false)
+        open_exit.host_capsule, open_exit.nearest = nil, nil
+        open_exit = nil
+    end
+end
+
+function wall.update(get_world)
+    local scope = approach_scope
+    if not scope then return end
+    if not valid(scope.pawn) or not same(scope.pawn:GetWorld(), scope.world) then
+        close_approach()
+        approach_scope = nil
+        return
+    end
+    local key, squared = nearby_exit(scope.pawn:K2_GetActorLocation(), approach_range, true)
+    local selected = key and records[key]
+    if not selected and not open_exit then return end
+    if not same(scope.world, get_world()) or not same(scope.capsule, scope.pawn.CapsuleComponent) then
+        close_approach()
+        approach_scope = nil
+        SilverfishSetNativeExitApproach("")
+        return
+    end
+    if open_exit and selected ~= open_exit then
+        close_approach()
+        SilverfishSetNativeExitApproach("")
+    elseif open_exit and math.sqrt(squared) > open_exit.nearest + retreat_margin then
+        close_approach()
+        SilverfishSetNativeExitApproach("")
+        return
+    end
+    if selected and in_world(selected.fixture, scope.world) and SilverfishSetNativeExitApproach(key) then
+        if not open_exit then
+            set_ignore(scope.capsule, selected.actor, true)
+            selected.host_capsule, open_exit = scope.capsule, selected
+        end
+        selected.nearest = math.min(selected.nearest or approach_range, math.sqrt(squared))
+    else
+        close_approach()
+    end
 end
 
 local function entrance_name(actor)
@@ -312,6 +361,9 @@ function wall.sync(state, phase, fixture, accepting, secondary)
     local permitted, blockers
     if hosting then permitted, blockers = host_can_pass(state, local_pawn, world, accepting) end
     local desired = permitted and local_capsule or nil
+    local manages_overlap = hosting and type(SilverfishSetNativeExitApproach) == "function"
+    approach_scope = manages_overlap and accepting and {pawn = local_pawn, capsule = local_capsule, world = world} or nil
+    if not approach_scope then close_approach() end
     local sources = wall_sources(world, state.map, route, fixture, secondary)
     for key in pairs(records) do
         if not sources[key] then clear_record(key) end
@@ -320,13 +372,21 @@ function wall.sync(state, phase, fixture, accepting, secondary)
     local first_ready, diagnostics, had_error = nil, {}, false
     for key, source in pairs(sources) do
         local source_actor = in_world(source.fixture, world) and source.fixture or nil
-        local ready, problem = sync_shape(key, world, source_actor, desired)
+        local managed = manages_overlap and source.kind == "overlap"
+        local keep = records[key] and records[key].host_capsule
+        local target
+        if managed then
+            if approach_scope then target = keep end
+        else
+            target = desired
+        end
+        local ready, problem = sync_shape(key, world, source_actor, target)
         if not ready then
             had_error = had_error or problem ~= nil
             diagnostics[#diagnostics + 1] = key .. " (" .. (problem or source.problem or "waiting for wall geometry") .. ")"
         else
             local record = records[key]
-            record.tag, record.approach, record.kind = source.tag, source.approach, source.kind
+            record.tag, record.approach, record.kind, record.managed = source.tag, source.approach, source.kind, managed
             if not first_ready or key < first_ready then first_ready = key end
         end
     end
@@ -334,8 +394,8 @@ function wall.sync(state, phase, fixture, accepting, secondary)
     status = primary_key and records[primary_key] and "ready" or had_error and "error" or "arming"
     table.sort(diagnostics)
     failure = table.concat(diagnostics, ", ")
-    local near = blockers and #blockers > 0 and nearby_exit(local_pawn:K2_GetActorLocation())
-    if near then
+    local near = blockers and #blockers > 0 and nearby_exit(local_pawn:K2_GetActorLocation(), 450)
+    if near and not valid(records[near].host_capsule) then
         regroup.show(state, near, blockers)
     else
         regroup.clear()
@@ -519,7 +579,7 @@ end
 function wall.rows(status_row)
     if not enabled then return {} end
     local primary = records[primary_key]
-    local host_open = primary and valid(primary.host_capsule)
+    local host_open = open_exit ~= nil or primary and valid(primary.host_capsule)
     local rows = {status_row("native-zone-wall", status, host_open and 1 or 0,
         observation and observation.slot or "-", observation and observation.outcome or "-",
         observation and observation.remaining or "-", failure)}

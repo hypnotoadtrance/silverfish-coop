@@ -4,6 +4,7 @@ local scope = require("native_save_scope")
 local creator = require("native_guest_creator")
 local appearance = require("native_avatar_character_view")
 local native_world = require("native_world")
+local guest_weapon = require("native_guest_weapon")
 local statics = "/Script/Engine.Default__GameplayStatics"
 local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local item_class = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
@@ -45,6 +46,19 @@ end
 
 local function exact(object, path)
     return valid(object) and object:GetClass():GetAddress() == StaticFindObject(path):GetAddress()
+end
+
+local function stock_player_info(state)
+    local stack = state.controller.MenuStack
+    for index = math.min(stack:GetArrayNum(), 32), 1, -1 do
+        local widget = stack[index]
+        if widget and type(widget.type) == "function" and widget:type() == "RemoteUnrealParam" then
+            widget = widget:get()
+        end
+        if exact(widget, "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C") then
+            return widget.PlayerInfoBox
+        end
+    end
 end
 
 local function encode(value)
@@ -294,9 +308,16 @@ local function project(state, phase, character, path, raw)
         for index = 1, layout[key] do array[index] = positions[index] or {} end
         if count(array) ~= layout[key] then error("The stock co-op inventory layout failed readback", 0) end
     end
+    local selected = old.PlayerEquipIndex
+    local cleared_slot = selected == layout.selected and selected >= 0 and selected < count(old.PlayerEquipment)
+        and valid(old.PlayerEquipment[selected + 1][item.class]) and not item_positions.equipment[selected + 1]
+    -- Magazine updates use the live equipment snapshot. A slower inventory
+    -- response must leave that count in place for the same held item.
+    guest_weapon.preserve_magazine(pawn, old, view.PlayerEquipment, layout.selected)
     for _, name in pairs(slots) do old[name] = view[name] end
     old.PlayerEquipIndex = layout.selected
     if old.PlayerEquipIndex ~= layout.selected then error("The stock co-op equipped slot failed readback", 0) end
+    if cleared_slot then guest_weapon.clear_empty_slot_hold(pawn, old) end
     if view.Character[creator.name_field]:ToString() ~= "" then
         local old_voice, old_pitch = creator.voice(old.Character)
         local voice, pitch = creator.voice(view.Character)
@@ -341,20 +362,10 @@ local function project(state, phase, character, path, raw)
         instance:Compile_PassiveEffects()
     end
     instance:Calc_CarryWeight()
-    local stack = state.controller.MenuStack
-    for index = math.min(stack:GetArrayNum(), 32), 1, -1 do
-        local widget = stack[index]
-        if widget and type(widget.type) == "function" and widget:type() == "RemoteUnrealParam" then
-            widget = widget:get()
-        end
-        if exact(widget, "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C") then
-            local info = widget.PlayerInfoBox
-            if valid(info) then
-                info:RefreshPassives()
-                info:UpdateStats()
-            end
-            break
-        end
+    local info = stock_player_info(state)
+    if valid(info) then
+        info:RefreshPassives()
+        info:UpdateStats()
     end
     return ("stock co-op inventory and Journal projected %d %d %d %d %d"):format(
         items, note_count, quest_count, completed, attachments)
@@ -367,8 +378,11 @@ end
 local function project_health(fields, state, phase)
     local area, session, epoch, token, name = fields[3], fields[4], fields[5], fields[6], fields[7]
     local health, maximum = tonumber(fields[8]), tonumber(fields[9])
-    if #fields ~= 9 or phase ~= "connected" or state.map ~= area or scope.selected() ~= token
+    local food, regen = tonumber(fields[10]), tonumber(fields[11])
+    if (#fields ~= 9 and #fields ~= 11) or phase ~= "connected" or state.map ~= area or scope.selected() ~= token
         or not health or not maximum or not (1 <= maximum and maximum <= 1000000 and 0 <= health and health <= maximum)
+        or #fields == 11 and ((fields[10] ~= "-" and not (food and 0 <= food and food <= 200))
+            or (fields[11] ~= "-" and not (regen and 0 <= regen and regen <= maximum)))
         or type(SilverfishReadNativeClientDamageScope) ~= "function" then
         error("The authenticated stock health view is unavailable", 0)
     end
@@ -383,8 +397,17 @@ local function project_health(fields, state, phase)
     end
     if not matches_health(pawn.MaxHealth, maximum) then pawn.MaxHealth = maximum end
     if not matches_health(save.PlayerHealth, health) then save.PlayerHealth = health end
-    if not matches_health(pawn.MaxHealth, maximum) or not matches_health(save.PlayerHealth, health) then
+    local food_changed = food ~= nil and not matches_health(save.PlayerFood, food)
+    if food_changed then save.PlayerFood = food end
+    if regen ~= nil and not matches_health(save.PlayerRegen, regen) then save.PlayerRegen = regen end
+    if not matches_health(pawn.MaxHealth, maximum) or not matches_health(save.PlayerHealth, health)
+        or food ~= nil and not matches_health(save.PlayerFood, food)
+        or regen ~= nil and not matches_health(save.PlayerRegen, regen) then
         error("The stock health view failed readback", 0)
+    end
+    if food_changed then
+        local info = stock_player_info(state)
+        if valid(info) then info:UpdateStats() end
     end
     return "stock co-op guest health projected"
 end

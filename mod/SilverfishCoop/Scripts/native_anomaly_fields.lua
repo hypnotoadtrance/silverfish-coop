@@ -26,6 +26,7 @@ local wandering_overlap = "BndEvt__Wandering_Teleport_BP_Capsule_K2Node_Componen
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local host_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local crossroads = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+local rook = "/Game/Classes/Maps/Dreams/TheRook_P"
 local pending, active, pending_fires, fires, fixtures = {}, {}, {}, {}, {}
 local world, world_map, fixture_kind, wandering_hook, wandering_probe
 
@@ -62,7 +63,10 @@ local function trap_kind(actor, class)
     if class == gravity or class == pyrogeist.body or shadows.enabled and class == shadows.class
         or lamps.enabled and class == lamps.class or observers.enabled and class == observers.class then
         local at = actor:GetWorld()
-        if valid(at) and at:GetFullName() == "World " .. crossroads .. ".CrossRoads_P" then
+        if not valid(at) then return end
+        local name = at:GetFullName()
+        if class == gravity and name == "World " .. rook .. ".TheRook_P" then return "gravity" end
+        if name == "World " .. crossroads .. ".CrossRoads_P" then
             if class == gravity then return "gravity" end
             if class == pyrogeist.body then return "pyrogeist" end
             if class == observers.class then return "observer" end
@@ -369,7 +373,18 @@ function fields.rows(state, phase, row)
         lamps.clear()
         observers.clear_visuals()
         -- Initial replicated actors can finish BeginPlay while the new driver is still pending.
-        if phase == "connected" and state.map == crossroads then
+        if state.map == rook then
+            -- The forced fields can finish before the listener or connection is ready.
+            for _, name in ipairs({"GravityAnomaly_BP_C", "VortexTrap_BP_C"}) do
+                for _, actor in ipairs(FindAllOf(name) or {}) do
+                    if in_world(actor, world) and (phase == "hosting" and actor:HasAuthority()
+                        and actor:ActorHasTag(FName("Anomaly")) or phase == "connected" and replica(actor)) then
+                        local kind = trap_kind(actor, actor:GetClass():GetFullName())
+                        if kind then pending[actor:GetAddress()] = {actor = actor, kind = kind} end
+                    end
+                end
+            end
+        elseif phase == "connected" and state.map == crossroads then
             local names = {"GravityAnomaly_BP_C", "Pyrogeist_BP_C"}
             if shadows.enabled then names[#names + 1] = "ShadowSphere_BP_C" end
             if lamps.enabled then names[#names + 1] = "AnglerLamp_BP_C" end
@@ -389,9 +404,9 @@ function fields.rows(state, phase, row)
         local actor = entry.actor
         if in_world(actor, world) then
             if phase == "connected" then
-                if disables_replica_tick(entry.kind) and replica(actor) then
+                if replica(actor) then
                     actor:SetActorEnableCollision(false)
-                    actor:SetActorTickEnabled(false)
+                    if disables_replica_tick(entry.kind) then actor:SetActorTickEnabled(false) end
                 end
                 if actor:GetActorEnableCollision() == false then active[address] = entry end
             elseif entry.placed or actor:ActorHasTag(FName("Anomaly")) then
@@ -486,6 +501,7 @@ function fields.rows(state, phase, row)
         end
     end
     if phase == "hosting" then
+        effects.observe_bottle_breaks(world)
         for _, cue in ipairs(effects.rows(row)) do rows[#rows + 1] = cue end
         for _, electrode in ipairs(electrodes.retired_rows(row)) do rows[#rows + 1] = electrode end
     else

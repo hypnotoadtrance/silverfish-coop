@@ -3,6 +3,7 @@ local pickup = require("native_pickup")
 local players = require("players")
 local shopkeep = require("native_dialogue_shopkeep")
 local focus_fixture = require("native_shop_focus_fixture")
+local stock_view = require("native_shop_stock")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
@@ -48,7 +49,8 @@ local actions = {
     ["native-finite-shop-sale-quote"] = {native = "SilverfishQuoteNativeFiniteShopSale", fields = 4, result = "sale-quote"},
     ["native-finite-shop-sell"] = {native = "SilverfishSellNativeFiniteShop", fields = 7, result = "sold"},
 }
-local last
+local last, watch, refresh_host
+local refresh_after = 0
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -283,6 +285,36 @@ function shop.fixture_position(state, phase, pawn_name)
     refused("fixture_safe_merchant_approach_unavailable")
 end
 
+function shop.sync(state, phase)
+    local profile = merchants[state.map]
+    local read = SilverfishReadNativeFiniteShopRevision
+    if not enabled or phase ~= "hosting" or not state.listening or state.server ~= false or not profile or not valid(state.world)
+        or type(read) ~= "function" then
+        if watch and type(read) == "function" then read(0) end
+        watch, refresh_host = nil, nil
+        return
+    end
+    if not watch or watch.map ~= state.map or not same(watch.world, state.world) then
+        read(0)
+        watch = {map = state.map, world = state.world, next_lookup = 0}
+        refresh_host = nil
+    end
+    if (not valid(watch.actor) or not watch.ready) and os.time() >= watch.next_lookup then
+        watch.next_lookup = os.time() + 1
+        local target = state.map .. "." .. profile.level .. ":PersistentLevel." .. profile.actor
+        local actor = StaticFindObject(target)
+        if exact(actor, shop_class) and same(actor:GetWorld(), state.world) and actor:HasAuthority() then
+            watch.actor, watch.name = actor, actor:GetFullName()
+            watch.ready = read(actor:GetAddress()) ~= nil
+        end
+    end
+    if refresh_host and os.clock() >= refresh_after and same(watch.actor, refresh_host) then
+        refresh_after = os.clock() + .2
+        local okay, refreshed = pcall(stock_view.refresh_host, state.controller, refresh_host)
+        if okay and refreshed then refresh_host = nil end
+    end
+end
+
 function shop.command(fields, state, phase)
     local operation = fields[2]
     if operation == "native-finite-shop-approach" then
@@ -333,13 +365,24 @@ function shop.command(fields, state, phase)
     last = {world = state.world, map = state.map, actor = context.name, status = status, pawn = fields[3],
         before = before, after = after,
         cash_before = cash_before, cash_after = cash_after, rows = rows}
+    if mutates then refresh_host, refresh_after = context.actor, 0 end
     return "exact stock finite merchant verified"
 end
 
 function shop.rows(state, phase, status_row)
-    if not last or phase ~= "hosting" or state.map ~= last.map or not same(last.world, state.world) then return {} end
-    local rows = { status_row("native-finite-shop", last.status, last.map, last.pawn, last.actor, last.before,
-        last.after, last.cash_before, last.cash_after, #last.rows) }
+    local rows = {}
+    if phase ~= "hosting" then return rows end
+    if watch and watch.ready and state.map == watch.map and same(watch.world, state.world) and valid(watch.actor) then
+        local revision = SilverfishReadNativeFiniteShopRevision(watch.actor:GetAddress())
+        if revision then
+            rows[1] = status_row("native-finite-shop-stock-revision", watch.map, watch.name, revision)
+        else
+            watch.ready = false
+        end
+    end
+    if not last or state.map ~= last.map or not same(last.world, state.world) then return rows end
+    rows[#rows + 1] = status_row("native-finite-shop", last.status, last.map, last.pawn, last.actor, last.before,
+        last.after, last.cash_before, last.cash_after, #last.rows)
     for _, row in ipairs(last.rows) do rows[#rows + 1] = status_row("native-finite-shop-item", table.unpack(row)) end
     return rows
 end

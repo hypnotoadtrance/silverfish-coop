@@ -4,6 +4,7 @@ local guest_save = require("guest_save")
 local observers = require("native_observer_target")
 local players = require("players")
 local loot = require("native_guest_drop_projection")
+local flares = require("native_flare")
 
 local prop_path = "/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C"
 local item_path = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
@@ -65,10 +66,14 @@ local function item_body(actor)
     if box and actor.Physics == true then return loot.carry_body(actor) end
 end
 
+local function unflagged_body(actor)
+    return item_body(actor) or flares.carry_root(actor, world)
+end
+
 local function mesh(actor)
     local base = StaticFindObject(prop_path)
     if not valid(base) or not valid(actor) or not actor:IsA(base) or actor_class(actor) == core_path
-        or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return item_body(actor) end
+        or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return unflagged_body(actor) end
     local root = actor.PropMesh
     if same(root, actor.RootComponent) and same(root:GetOwner(), actor) then return root end
 end
@@ -79,12 +84,12 @@ local function handle(pawn)
 end
 
 local function held(pawn, actor, grip, corpse)
-    local item = not corpse and item_body(actor)
-    local part = corpse and corpse.part or item or mesh(actor)
+    local unflagged = not corpse and unflagged_body(actor)
+    local part = corpse and corpse.part or unflagged or mesh(actor)
     return valid(pawn) and valid(actor) and not actor:IsActorBeingDestroyed()
         and valid(part) and valid(grip) and same(grip:GetGrabbedComponent(), part) and same(pawn.HeldObject, actor)
         and (corpse and actor.Alive == false
-            or not corpse and (item ~= nil or actor.BeingHeld == true and same(actor["Holding Actor"], pawn)))
+            or not corpse and (unflagged ~= nil or actor.BeingHeld == true and same(actor["Holding Actor"], pawn)))
 end
 
 local function rigid_root(entry, grip, bone)
@@ -198,10 +203,10 @@ end
 local function observe(pawn, throwing, dropping)
     local local_pawn = state and state.local_pawn and state.local_pawn.pawn
     if phase == "hosting" and not throwing and not dropping and same(pawn, local_pawn) then
-        -- Stock props mark themselves as held; the dead NPC Blueprint does not.
+        -- Dead NPCs, loose items and stock flare projectiles lack the prop ownership fields.
         -- Discard a competing local grip before the next physics step.
         for _, entry in pairs(holdings) do
-            if (entry.corpse or item_body(entry.actor)) and same(pawn.HeldObject, entry.actor) then
+            if (entry.corpse or unflagged_body(entry.actor)) and same(pawn.HeldObject, entry.actor) then
                 pawn:Grab_Release_Object(false, true, false)
                 return
             end
@@ -307,9 +312,11 @@ local function trace(pawn, pitch, yaw, number, expected_bone, claimed, expected_
         local selected = placement and StaticFindObject(placement)
         local part, collision = impact(along(range))
         local actor = valid(part) and part:GetOwner()
-        if valid(actor) and (not placement or same(actor, selected))
-            and same(actor, enrolled[actor:GetAddress()]) and same(part, mesh(actor)) and point(collision) then
-            return actor, math.sqrt(dist2(origin, collision))
+        if valid(actor) and (not placement or same(actor, selected)) and point(collision) then
+            local tracked = same(actor, enrolled[actor:GetAddress()]) and same(part, mesh(actor))
+            local lit_flare = not tracked and not placement and same(part, flares.carry_root(actor, world))
+                and actor:HasAuthority() and actor.Lit == true and part:IsAnySimulatingPhysics()
+            if tracked or lit_flare then return actor, math.sqrt(dist2(origin, collision)) end
         end
         if expected_class and expected_class:match("^/Game/Classes/") and point(claimed) then
             local matched, center
@@ -445,14 +452,14 @@ local function remove(entry, kind, pitch, yaw)
     if not valid(pawn) and valid(grip) and same(grip:GetGrabbedComponent(), part) then
         grip:ReleaseComponent()
     end
-    if not entry.corpse and not item_body(actor) and not valid(pawn) and mesh(actor) and actor:HasAuthority() and actor.BeingHeld == true
+    if not entry.corpse and not unflagged_body(actor) and not valid(pawn) and mesh(actor) and actor:HasAuthority() and actor.BeingHeld == true
         and not valid(actor["Holding Actor"]) then
         actor:PickUp_Object(false, nil)
         if actor.BeingHeld ~= false then return false end
     end
     if valid(grip) and same(grip:GetGrabbedComponent(), part) then return false end
     if valid(pawn) and same(pawn.HeldObject, actor) then return false end
-    if not entry.corpse and not item_body(actor) and valid(actor) and same(actor["Holding Actor"], pawn) then return false end
+    if not entry.corpse and not unflagged_body(actor) and valid(actor) and same(actor["Holding Actor"], pawn) then return false end
     holdings[entry.lease] = nil
     if valid(actor) then actor:ForceNetUpdate() end
     return true
@@ -724,7 +731,8 @@ function carry.command(fields, current, seat)
             error("native_prop_carry_stock_target_unavailable", 0)
         end
         local item = loot_id and item_box(actor) or item_body(actor)
-        if corpse or item then
+        local unflagged = item or flares.carry_root(actor, world)
+        if corpse or unflagged then
             local host = current.local_pawn and current.local_pawn.pawn
             if valid(host) and same(host.HeldObject, actor) then
                 if fixtures then error("native_prop_carry_stock_target_unavailable:host grip", 0) end
@@ -735,7 +743,7 @@ function carry.command(fields, current, seat)
             end
         end
         if not corpse and (dist2(position, actor:K2_GetActorLocation()) > 35^2
-            or not item and actor.BeingHeld ~= false) then
+            or not unflagged and actor.BeingHeld ~= false) then
             if fixtures and item then
                 error(("native_prop_carry_stock_target_unavailable: item moved %.1f cm"):format(
                     math.sqrt(dist2(position, actor:K2_GetActorLocation()))), 0)

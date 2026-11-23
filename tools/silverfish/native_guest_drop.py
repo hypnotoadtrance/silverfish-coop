@@ -8,7 +8,7 @@ import time
 import uuid
 
 from . import native_guest_drop_record as record
-from . import native_guest_consumable
+from . import native_guest_armor, native_guest_consumable
 from . import native_guest_stack_drop as probe
 from . import native_host_save, native_inventory, native_inventory_death, native_loot, native_pickup_audio, party
 from .native_gold import valid_guid
@@ -159,18 +159,44 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
             if entry != "equip" or quantity != 1:
                 raise ValueError("The native action did not select one equipment item")
             requested_slot = int(expected or 0) - 1
-            if not -1 <= requested_slot < 8:
+            if not -1 <= requested_slot <= 9:
                 raise ValueError("The stock equipment destination is invalid")
             target = guid if requested_slot == -1 else f"{guid}|{requested_slot}"
-            key = native_inventory.STORE_KEY
-            receipt = (await client.gameplay_action(native_inventory.STORE_EQUIPMENT, operation, target)).get(key)
-            if (not isinstance(receipt, dict)
-                    or (receipt.get("owner"), receipt.get("map"), receipt.get("guid")) != (client.invite["character_id"], area, guid)
-                    or type(slot := receipt.get("slot")) is not int or not 0 <= slot < 8
-                    or requested_slot != -1 and slot != requested_slot
-                    or ((displaced := receipt.get("displaced")) != "-" and (not valid_guid(displaced) or displaced == guid))):
-                raise RuntimeError("The host did not verify the saved stock equipment slot")
+            if requested_slot >= 8:
+                head = requested_slot == 8
+                action = native_guest_armor.HELMET_ACTION if head else native_guest_armor.ACTION
+                key = "native_guest_helmet" if head else "native_guest_armor"
+                receipt = (await client.gameplay_action(action, operation, guid)).get(key)
+                if (not isinstance(receipt, dict) or receipt.get("guid") != guid or receipt.get("map") != area
+                        or receipt.get("ok") is not True or receipt.get("action") != "equip"
+                        or native_guest_armor.equip_action(receipt.get("class_path")) != action):
+                    raise RuntimeError("The host did not verify the saved stock worn slot")
+                slot, displaced = requested_slot, receipt.get("replaced_guid") or "-"
+            else:
+                key = native_inventory.STORE_KEY
+                receipt = (await client.gameplay_action(native_inventory.STORE_EQUIPMENT, operation, target)).get(key)
+                if (not isinstance(receipt, dict)
+                        or (receipt.get("owner"), receipt.get("map"), receipt.get("guid")) != (client.invite["character_id"], area, guid)
+                        or type(slot := receipt.get("slot")) is not int or not 0 <= slot < 8
+                        or requested_slot != -1 and slot != requested_slot):
+                    raise RuntimeError("The host did not verify the saved stock equipment slot")
+                displaced = receipt.get("displaced")
+            if displaced != "-" and (not valid_guid(displaced) or displaced == guid):
+                raise RuntimeError("The host returned an invalid displaced item")
             committed = ("equipped", str(slot), displaced)
+        elif mode == "unequip":
+            slot = int(expected or 0) - 1
+            capability = native_inventory.UNEQUIP_CAPABILITY if slot < 8 else native_inventory.UNEQUIP_WORN_CAPABILITY
+            if entry != "unequip" or quantity != 1 or not 0 <= slot <= 9 or client.gameplay.get(capability) != 1:
+                raise ValueError("The selected stock slot has no host-authoritative Unequip action")
+            key = native_inventory.UNEQUIP_KEY
+            receipt = (await client.gameplay_action(native_inventory.UNEQUIP, operation, f"{guid}|{slot}")).get(key)
+            if (not isinstance(receipt, dict) or type(receipt.get("slot")) is not int
+                    or tuple(receipt.get(field) for field in ("state", "owner", "map", "guid", "slot"))
+                    != ("unequipped", client.invite["character_id"], area, guid, slot)
+                    or type(rounds := receipt.get("ammo")) is not int or not -1 <= rounds < 2**31):
+                raise RuntimeError("The host did not verify returning the stock equipment to the backpack")
+            committed = ("unequipped", str(slot), str(rounds))
         elif mode == "use":
             action = f"native-guest-{entry.removeprefix('use-')}"
             meal = native_guest_consumable.MEALS.get(action)

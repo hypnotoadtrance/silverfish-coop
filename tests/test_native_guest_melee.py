@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish import native_authored_pickup as pickup, native_guest_melee as melee, party
 from tools.silverfish.service import Client
-from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, REFINERY
+from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY, REFINERY
 
 
 GUID = "AB" * 16
@@ -184,10 +184,20 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(melee.verified_damage(row))
                     fields[1] = REFINERY if area == DEAD_BRIDGE else DEAD_BRIDGE
                     self.assertIsNone(melee.parse(fields))
-                    fields[1], fields[12] = area, target[:-1] + "8"
-                    self.assertIsNone(melee.parse(fields))
         fields = self.damage_fields()
         fields[12] = melee.BY_MAP[DEAD_BRIDGE].actors[1]
+        self.assertIsNone(melee.parse(fields))
+
+    def test_ordinary_swing_accepts_lethal_damage_to_an_unregistered_campaign_actor(self):
+        fields = self.damage_fields()
+        fields[0], fields[1] = melee.SWING, OBSERVATORY
+        level = OBSERVATORY.rsplit("/", 1)[1]
+        fields[12] = f"NPC_State_Conscript_C {OBSERVATORY}.{level}:PersistentLevel.NPC_State_Conscript_C_184"
+        fields[15:18] = ["8", "0", "22.5"]
+        key, row = melee.parse(fields)
+        self.assertEqual((key, row["target"]), (melee.SWING_KEY, fields[12]))
+        self.assertTrue(melee.verified_damage(row))
+        fields[17] = "7"
         self.assertIsNone(melee.parse(fields))
 
     async def test_headless_aim_can_name_second_registered_actor_but_swing_cannot(self):
