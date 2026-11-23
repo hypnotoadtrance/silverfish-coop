@@ -174,6 +174,16 @@ def copy_checkpoint(source: Path, destination: Path, seed: int):
     return before, saved, roll, item
 
 
+def host_command(work: Path, campaign: str, *, fresh_seed: int | None = None) -> list[str]:
+    args = [sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work), "host",
+            "--campaign", campaign, "--port", "0", "--headless", "--fixtures", "--native-events",
+            "--native-guest", "--native-zones", "--native-expanded-zones"]
+    if fresh_seed is not None:
+        args.extend(("--start-zone", OBSERVATORY, "--native-start-preset", "wanderer",
+                     "--native-world-seed", str(fresh_seed)))
+    return args
+
+
 async def exercise(work: Path, canary: Path, seed: int, source: Path | None):
     root = work / "campaigns"
     run_id = uuid.uuid4().hex[:8]
@@ -186,17 +196,14 @@ async def exercise(work: Path, canary: Path, seed: int, source: Path | None):
     assert original
     proof = {"cabinet": CABINET, "seed": seed, "verified": False}
     processes = []
-    base = [sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work), "host", "--port", "0",
-            "--start-zone", OBSERVATORY, "--headless", "--fixtures", "--native-events", "--native-guest",
-            "--native-zones", "--native-expanded-zones", "--native-start-preset", "wanderer",
-            "--native-world-seed", str(seed)]
 
-    async def start(campaign):
+    async def start(campaign, *, fresh_seed=None):
         control = campaign / "run"
         control.mkdir(parents=True, exist_ok=True)
         log = control / "cabinet-worker.log"
         with log.open("wb") as output:
-            process = await asyncio.create_subprocess_exec(*base, "--campaign", campaign.name, cwd=ROOT,
+            args = host_command(work, campaign.name, fresh_seed=fresh_seed)
+            process = await asyncio.create_subprocess_exec(*args, cwd=ROOT,
                 env=dict(os.environ, SILVERFISH_COOP_RENDER_CAPTURE="host"),
                 stdout=output, stderr=output, creationflags=subprocess.CREATE_NO_WINDOW)
         processes.append((control, process))
@@ -225,7 +232,7 @@ async def exercise(work: Path, canary: Path, seed: int, source: Path | None):
 
     try:
         if source is None:
-            process = await start(prepare)
+            process = await start(prepare, fresh_seed=seed)
             control = prepare / "run"
             before_open = campaign_save_hashes(prepare)
             initial_revision = checkpoint(prepare)["revision"]
@@ -239,8 +246,8 @@ async def exercise(work: Path, canary: Path, seed: int, source: Path | None):
             assert revision == committed["revision"] and revision > initial_revision
             source = prepare
         before_source, saved, roll, item = copy_checkpoint(source, resumed, seed)
-        await start(resumed)
-        assert checkpoint(resumed)["revision"] == saved["revision"]
+        process = await start(resumed)
+        assert checkpoint(resumed) == saved
         identity = native_world_loot.crate_identity(roll["id"], item["guid"])
         await wait(run, lambda state: identity in state.get("game", {}).get(native_world_loot.KEY, {}))
         await local(run, native_world_loot.APPROACH, target=f"host@{identity}")
@@ -266,9 +273,15 @@ async def exercise(work: Path, canary: Path, seed: int, source: Path | None):
             while not trace.is_file() or not trace.read_bytes().endswith(b"\n"):
                 await asyncio.sleep(.10)
         proof["timings"] = summarize(trace)
+        # The normal stop below explicitly saves. Compare the pickup against the live checkpoint first.
         proof["unchanged_after_pickup"] = campaign_save_hashes(resumed) == before_pickup
         proof["source_preserved"] = campaign_save_hashes(source) == before_source
         assert proof["unchanged_after_pickup"] and proof["source_preserved"]
+        revision = await stop(run, process)
+        proof.update(shutdown_revision=revision, coordinator_exit_code=process.returncode)
+        assert revision is not None and checkpoint(resumed)["revision"] == revision > saved["revision"]
+        proof["source_preserved"] = campaign_save_hashes(source) == before_source
+        assert proof["source_preserved"]
         proof["verified"] = True
     finally:
         for control, process in reversed(processes):
