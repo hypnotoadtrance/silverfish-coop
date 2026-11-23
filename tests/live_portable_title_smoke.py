@@ -503,7 +503,7 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
                if stock_drop_proof else {})}
 
 
-async def verify_container_pickup(host: Seat, guest: Seat, pawn: str) -> dict:
+async def verify_container_pickup(host: Seat, guest: Seat, pawn: str, *, memory_ui: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     game = await host.bridge.wait_for(lambda frame: frame.get("state") == "hosting")
     area = game["map"]
@@ -527,6 +527,22 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str) -> dict:
 
     assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+    def save_state():
+        return (campaign_save_hashes(host.campaign), saved_hashes(host.profile / "Saved/SaveGames"),
+                saved_hashes(guest.profile / "Saved/SaveGames"))
+
+    def projections():
+        rows = (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        return [row for line in rows if (row := json.loads(line))["event"] == "native_guest_ui_projected"]
+
+    if memory_ui:
+        for run in (host_run, guest_run):
+            await wait(run, lambda state: state.get("local_bridge") == "memory"
+                       and state.get("game", {}).get(runtime.GUEST_UI_MEMORY) is True)
+        before = save_state()
+        projections_before = len(projections())
+        assert before[0] and projections_before
+
     clicked = await submit(guest_run, native_loose_pickup.STOCK_CARD_FIXTURE, target=actor)
     assert clicked["ok"] and clicked["proof"].startswith("stock Nearby Items card requested"), clicked
 
@@ -552,6 +568,12 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str) -> dict:
     assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_before
     duplicate = await submit(host_run, "native-loot-claim", target=f"{item['guid']}@{crate}")
     assert duplicate.get("error") == "native_loot_already_claimed", duplicate
+    memory_proof = {}
+    if memory_ui:
+        refreshed = projections()[projections_before:]
+        assert refreshed and refreshed[-1]["items"] >= 1, refreshed
+        assert save_state() == before
+        memory_proof = {"resident_ui_projection": refreshed[-1], "saves_unchanged_before_checkpoint": True}
     checkpoint = await submit(host_run, "checkpoint")
     assert checkpoint["ok"], checkpoint
     saved = json.loads((host.campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
@@ -562,7 +584,7 @@ async def verify_container_pickup(host: Seat, guest: Seat, pawn: str) -> dict:
     assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
     await wait(guest_run, lambda state: state.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
     return {"crate": crate, "roll": roll["id"], "item": committed, "rendered": clicked["proof"], "received": received,
-            "duplicate": duplicate["error"]}
+            "duplicate": duplicate["error"], **memory_proof}
 
 
 async def verify_stock_use(host: Seat, guest: Seat, pawn: str, *, starter: bool) -> dict:
@@ -773,8 +795,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
                  stock_use: bool = False, memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
-                 guest_world_start_travel: bool = False) -> None:
+                 guest_world_start_travel: bool = False, guest_ui_memory: bool = False) -> None:
     guest_world_start = guest_world_start or guest_world_start_travel
+    container_nearby = container_nearby or guest_ui_memory
     roots = (work, first_game, second_game, original)
     if second_legacy_work is not None:
         roots += (second_legacy_work,)
@@ -868,7 +891,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     await wait(run, lambda state: state.get("local_status_source") == "memory")
                 evidence["memory_status_both_peers"] = True
             if container_nearby:
-                evidence["guest_stock_nearby_container_pickup"] = await verify_container_pickup(host, guest, pawn)
+                evidence["guest_stock_nearby_container_pickup"] = await verify_container_pickup(
+                    host, guest, pawn, memory_ui=guest_ui_memory)
             return evidence
         if guest_world_start:
             startup = GuestWorldStartProof(second)
@@ -888,6 +912,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["sessions"].append(await start_pair(first, second, "Lantern scout", on_join=verify_stock_prop_grip))
         elif stock_crate_ring:
             proof["sessions"].append(await start_pair(first, second, "Crate scout", on_join=verify_stock_crate_ring))
+        elif guest_ui_memory:
+            proof["sessions"].append(await start_pair(first, second, "Inventory scout", on_join=check_gameplay))
         else:
             create = create_stock_split_character if stock_split or stock_equip else create_stock_drop_character if stock_drop else None
             proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
@@ -910,7 +936,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             assert observed == hashes and await stock_profile(seat.bridge) == preferences
             assert seat.bridge.process.poll() is None
         proof.update(verified=True, solo_slots_and_settings_preserved=True,
-                     both_titles_reused=not (stock_prop_grip or stock_crate_ring or guest_world_start),
+                     both_titles_reused=not (stock_prop_grip or stock_crate_ring or guest_world_start or guest_ui_memory),
                      launched_without_coop_environment=True)
     except Exception as error:
         if guest_world_start_travel:
@@ -953,6 +979,8 @@ if __name__ == "__main__":
     parser.add_argument("--steam-cloud", action="store_true", help="test a copied cloud backup through Host Load Game")
     parser.add_argument("--memory-bridge", action="store_true", help="verify both embedded workers use the native bridge")
     parser.add_argument("--memory-status", action="store_true", help="verify both workers consume live frames through memory")
+    parser.add_argument("--guest-ui-memory", action="store_true",
+                        help="verify the resident guest UI refresh on one stock Nearby Items container pickup")
     parser.add_argument("--stock-prop-grip", action="store_true", help="verify default guest carry filtering in one portable lantern session")
     parser.add_argument("--stock-crate-ring", action="store_true", help="verify one guest stock F crate open through the in-process ring")
     parser.add_argument("--guest-world-start", action="store_true",
@@ -962,6 +990,11 @@ if __name__ == "__main__":
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
+    if args.guest_ui_memory and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
+                                     args.projected_nearby, args.container_nearby, args.stock_use, args.stock_prop_grip,
+                                     args.stock_crate_ring, args.guest_world_start, args.guest_world_start_travel,
+                                     args.steam_cloud, args.second_legacy_work)):
+        parser.error("Use --guest-ui-memory without other gameplay fixtures")
     if args.projected_nearby and (args.stock_drop == args.stock_split or args.stock_nearby):
         parser.error("Use --projected-nearby with either --stock-drop or --stock-split and without --stock-nearby")
     if args.stock_use and (args.stock_drop or args.stock_split or args.stock_equip):
@@ -986,4 +1019,4 @@ if __name__ == "__main__":
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
                        stock_use=args.stock_use, memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
-                       guest_world_start_travel=args.guest_world_start_travel))
+                       guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory))
