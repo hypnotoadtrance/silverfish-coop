@@ -587,7 +587,8 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str) -> dict:
 
     # Let the installed worker mirror the already committed guest creation
     # before measuring writes during the interactive stash window.
-    checkpoint = CampaignStore.read_existing(host.campaign / "save", verify_world=service.verify_travel_checkpoint)
+    checkpoint = menu_host_checkpoint(host.campaign, profile=host.profile, require_scoped=True)
+    assert checkpoint is not None, "The installed host has no committed campaign to baseline"
     campaign_hex = uuid.UUID(checkpoint["campaign_id"]).hex
     backup = host.profile / "Saved/SaveGames" / FOLDER / f"SFCoopBackup-{campaign_hex}.sav"
     async with asyncio.timeout(25):
