@@ -19,7 +19,8 @@ from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY
 
 
-async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, drag: bool = False, reorder: bool = False):
+async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, drag: bool = False, reorder: bool = False,
+                 split_stack: bool = False):
     name = "stash-screen-" + uuid.uuid4().hex[:8]
     run = work / "campaigns" / name / "run"
     guest_run = work / "clients" / name / "run"
@@ -94,7 +95,7 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
         answer = await ask(guest_run, "native-stash-view-click-fixture", target=key)
         return (answer[native_stash.VIEW] or {}).get("sequence", 0)
 
-    async def move_by_screen(site, item, mode, direction):
+    async def move_by_screen(site, item, mode, direction, *, split=None):
         async def open_screen():
             seen = await ask(guest_run, "native-stash-view-fixture", target=site)
             opened = seen[native_stash.VIEW]["sequence"]
@@ -102,14 +103,21 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
             return opened
 
         opened = await open_screen()
-        if drag:
+        if split is not None:
+            original = await stash_items(guest_run, site)
+            assert await click(f"split-{mode}:{item}:{split}:cancel") == opened
+            assert await stash_items(guest_run, site) == original
+            direction = f"split-{direction}"
+            await click(f"split-{mode}:{item}:{split}:move")
+        elif drag:
             original = await stash_items(guest_run, site)
             for gesture in ("cancel", "return"):
                 assert await click(f"{gesture}-{mode}:{item}") == opened
             assert await click(f"close-{mode}:{item}") == 0
             assert await stash_items(guest_run, site) == original
             opened = await open_screen()
-        await click(f"{'drag-' if drag else ''}{mode}:{item}")
+        if split is None:
+            await click(f"{'drag-' if drag else ''}{mode}:{item}")
         await render(mode, after=opened)
         events = (guest_run / "events.jsonl").read_text(encoding="utf-8").splitlines()
         receipt = next(event for line in reversed(events) if (event := json.loads(line))["event"] == "native_stash_view_item_moved"
@@ -117,8 +125,18 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
         await click("close")
         await wait(guest_run, lambda state: not state.get("game", {}).get(native_stash.VIEW))
         target = f"{site}|{direction}|{item}"
+        if split is not None:
+            target += f"|{split}|{split + receipt['remaining']}"
         result = await ask(guest_run, native_stash.MOVE, target=target, operation_id=receipt["operation_id"])
         return result[native_stash.MOVED]
+
+    async def stack_quantities(site=None):
+        if site:
+            page = (await ask(guest_run, native_stash.LIST, target=f"{site}|0"))[native_stash.RESULT]
+        else:
+            page = (await ask(guest_run, "native-inventory-list"))["native_inventory"]
+        assert not page.get("next_offset"), page
+        return {row["guid"]: row["quantity"] for row in page["items"] if row.get("stackable")}
 
     try:
         host = await launch("host", run, *host_args, "--port", "0", "--start-zone", DEAD_BRIDGE)
@@ -132,6 +150,46 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
 
         await ask(run, "native-stash-setting-fixture", target="0")
         await approach("guest", first)
+        if split_stack:
+            assert state["game"].get(native_stash.LIVE_SPLIT) is True
+            source = uuid.uuid4().hex.upper()
+            await ask(run, "native-guest-weapon-seed-ammo", target="guest", item_guid=source)
+            source_amount = (await stack_quantities())[source]
+            assert source_amount > 3
+            original = save_hashes()
+            deposited = await move_by_screen(first, source, "backpack", "deposit", split=3)
+            first_portion = deposited["created_guid"]
+            assert deposited["remaining"] == source_amount - 3 and deposited["quantity"] == 3
+            assert (await stack_quantities())[source] == source_amount - 3
+            assert await stack_quantities(first) == {first_portion: 3}
+            await approach("guest", second)
+            await move_by_screen(second, source, "backpack", "deposit")
+            assert await stack_quantities(second) == {source: source_amount - 3}
+            await approach("guest", first)
+            withdrawn = await move_by_screen(first, first_portion, "stash", "withdraw", split=1)
+            second_portion = withdrawn["created_guid"]
+            assert len({source, first_portion, second_portion}) == 3
+            assert (withdrawn["remaining"], withdrawn["quantity"]) == (2, 1)
+            assert await stack_quantities(first) == {first_portion: 2}
+            assert (await stack_quantities())[second_portion] == 1
+            await approach("host", first)
+            assert await stash_items(run, first) == []
+            assert save_hashes() == original, "Partial stash transfers wrote an early save"
+            await ask(run, "checkpoint")
+            await stop(guest, guest_run)
+            await stop(host, run)
+            host = await launch("host-restart", run, *host_args, "--port", str(state["endpoint"]["port"]))
+            await wait(run, lambda status: status.get("state") == "hosting" and status["generation"] != state["generation"])
+            await join(await ask(run, "refresh-invite", target=invite["guest_id"]), "guest-restart")
+            await approach("guest", first)
+            assert await stack_quantities(first) == {first_portion: 2}
+            assert (await stack_quantities())[second_portion] == 1
+            await approach("guest", second)
+            assert await stack_quantities(second) == {source: source_amount - 3}
+            evidence.update(split_deposit=deposited, split_withdraw=withdrawn, seed_amount=source_amount,
+                            stock_split_cancel=True, no_save_on_stash_interaction=True, verified=True)
+            return
+
         item = uuid.uuid4().hex.upper()
         await ask(run, "native-guest-weapon-seed", target="guest", item_guid=item, kind="light-pistol-suppressed")
         second_item = uuid.uuid4().hex.upper() if reorder else None
@@ -236,7 +294,10 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--same-map", action="store_true", help="check two Dead Bridge stashes without zone travel")
     parser.add_argument("--drag", action="store_true", help="test the stock held-item cursor, cancel, and cross-panel insert")
-    parser.add_argument("--reorder", action="store_true", help="verify the stock same-panel drag order of two weapons")
+    feature = parser.add_mutually_exclusive_group()
+    feature.add_argument("--reorder", action="store_true", help="verify the stock same-panel drag order of two weapons")
+    feature.add_argument("--split-stack", action="store_true", help="verify stock partial deposit, withdrawal, and cancel")
     options = parser.parse_args()
     asyncio.run(verify(options.work.resolve(strict=True), options.vanilla_saved.resolve(strict=True),
-                       same_map=options.same_map or options.reorder, drag=options.drag, reorder=options.reorder))
+                       same_map=options.same_map or options.reorder, drag=options.drag, reorder=options.reorder,
+                       split_stack=options.split_stack))
