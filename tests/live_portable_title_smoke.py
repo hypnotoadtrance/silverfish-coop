@@ -438,6 +438,41 @@ def weapon_cue_files(host, guest):
             if os.path.lexists(path := seat.bridge.directory / name)]
 
 
+async def verify_resident_footsteps(host: Seat, guest: Seat) -> list[dict]:
+    async def command(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-footstep", action)
+
+    for seat in (host, guest):
+        assert await command(seat, "arm") == "armed"
+        async with asyncio.timeout(5):
+            while await command(seat, "ready") != "true":
+                await asyncio.sleep(.05)
+
+    receipts = []
+    for direction, sender, observer in (("host_to_guest", host, guest), ("guest_to_host", guest, host)):
+        for seat in (sender, observer):
+            assert await command(seat, "clear") == "clear"
+        original = await command(sender, "step")
+        assert original.startswith("SoundCue /Game/Assets/Sounds/CUEs/") and "|" not in original, original
+        async with asyncio.timeout(5):
+            while True:
+                local, remote = (await command(observer, "read")).split(";")
+                if remote:
+                    break
+                await asyncio.sleep(.05)
+        await asyncio.sleep(.2)
+        assert await command(sender, "read") == f"{original};", "footstep echoed to sender"
+        local, remote = (await command(observer, "read")).split(";")
+        assert not local and "|" not in remote, (local, remote)
+        cue, gain, pitch, offset, distance = remote.split(",")
+        assert ",".join((cue, gain, pitch)) == original, (original, remote)
+        assert float(offset) <= 2 and 0 < float(distance) <= 3000, remote
+        receipts.append({"direction": direction, "cue": cue, "gain": float(gain), "pitch": float(pitch),
+                         "offset_from_emitter_feet_cm": float(offset), "listener_distance_cm": float(distance),
+                         "observer_replays": 1, "sender_echoes": 0})
+    return receipts
+
+
 async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_frame, guest_frame = await asyncio.gather(
@@ -485,11 +520,13 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str) -> dic
     assert {entry["serial"] for entry in cues} == {prop["serial"]}, (cues, prop)
     visual, = [entry for entry in cues if entry["event"] == event_names[1]]
     assert visual["player_id"] == player_id, visual
-    assert not weapon_cue_files(host, guest), "Stock use wrote a legacy weapon cue mailbox"
+    footsteps = await verify_resident_footsteps(host, guest)
+    assert not weapon_cue_files(host, guest), "Stock player cues wrote a legacy weapon cue mailbox"
     assert save_state() == before, "Stock use wrote a campaign save before the normal checkpoint"
     return {"resident_weapon_cues": {"stock_player_id": player_id, "source": class_name, "observer_cues": cues,
                                      "prop": prop, "local_bridge_both_peers": "memory",
-                                     "no_cue_mailbox": True, "saves_unchanged_before_checkpoint": True}}
+                                     "no_cue_mailbox": True, "saves_unchanged_before_checkpoint": True,
+                                     "stock_footsteps": footsteps}}
 def unequip_rows(raw):
     result = []
     for entry in raw.split("|"):
@@ -1782,6 +1819,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if resident_weapon_cues:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableWeaponCueProbe",
                                                  fixture="avatar_presentation_probe.lua"))
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableFootstepProbe",
+                                                     fixture="portable_footstep_probe.lua"))
         if stock_unequip:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableUnequipProbe",

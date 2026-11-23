@@ -28,7 +28,7 @@ local function live_pawn(pawn, world, role)
         and same(pawn:GetWorld(), world)
 end
 
-local function capture(_, sound, component, _, _, _, _, volume, pitch, _, attenuation, concurrency)
+local function capture(_, sound, component, _, _, _, _, _stop_with_owner, volume, pitch, _, attenuation, concurrency)
     local scope = current
     if not scope or not same(concurrency:get(), scope.concurrency) then return end
     if not same(component:get(), scope.capsule) or not live_pawn(scope.pawn, scope.world, scope.local_role)

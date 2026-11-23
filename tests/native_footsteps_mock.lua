@@ -59,7 +59,7 @@ local state = {world = game_world, map = area, local_pawn = {name = listener_nam
 footsteps.sync(state, "connected", function(details) return details.id end)
 
 local function step(owner, selected_concurrency, sound)
-    hook(nil, parameter(sound), parameter(owner.CapsuleComponent), nil, nil, nil, nil, parameter(.2),
+    hook(nil, parameter(sound), parameter(owner.CapsuleComponent), nil, nil, nil, nil, parameter(true), parameter(.2),
         parameter(.95), nil, parameter(att), parameter(selected_concurrency))
 end
 step(remote, conc, stone)
