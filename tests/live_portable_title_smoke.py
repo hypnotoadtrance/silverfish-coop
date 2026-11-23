@@ -3304,7 +3304,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         elif resident_checks:
             results = proof["resident_check_results"] = {}
             campaign_started = time.perf_counter()
-            exit_actions = ("prompt", "confirm") if tutorial_dock_combat or stock_bandage_revisit or stock_shovel else ("save_and_quit",)
+            leave_in_field = tutorial_dock_combat or stock_bandage_revisit or stock_shovel or stock_weather_travel
+            exit_actions = ("prompt", "confirm") if leave_in_field else ("save_and_quit",)
 
             async def run_resident_checks(host, guest, pawn):
                 proof["join_seconds"] = round(time.perf_counter() - campaign_started, 3)

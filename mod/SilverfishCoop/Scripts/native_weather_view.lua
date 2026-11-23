@@ -72,15 +72,18 @@ function view.skip_wet_rain(frame)
     return nullrhi == true
 end
 
-function view.read_rain(current_world)
+local function stock_rain_actor(current_world)
     local rain = current_world.day.RainController
-    if not valid(rain) then return {rain_intensity = 0, rain_x = 0, rain_y = 0, rain_z = 1} end
-    if not exact(rain, rain_class) or not same(rain:GetWorld(), current_world.world)
-        or rain:IsActorBeingDestroyed() then return nil end
+    if exact(rain, rain_class) and same(rain:GetWorld(), current_world.world)
+        and not rain:IsActorBeingDestroyed() then return rain end
+end
+
+function view.read_rain(current_world)
+    local rain = stock_rain_actor(current_world)
+    if not rain or rain.Intensity == 0 then return {rain_intensity = 0, rain_x = 0, rain_y = 0, rain_z = 1} end
     local particles, direction, amount = rain.NI_Rain_01, rain.RainVector, rain.Intensity
     if not exact(particles, niagara_class) or not same(particles:GetOwner(), rain)
         or not same(particles.Asset, StaticFindObject(particle_path)) or not bounded(amount, 0, 20) then return nil end
-    if amount == 0 then return {rain_intensity = 0, rain_x = 0, rain_y = 0, rain_z = 1} end
     local report = {rain_intensity = amount, rain_x = direction.X, rain_y = direction.Y, rain_z = direction.Z}
     return view.valid_rain(report) and report or nil
 end
@@ -90,9 +93,8 @@ function view.copy_rain(dst, src)
 end
 
 local function local_rain_actor(current_world)
-    local rain = current_world.day.RainController
-    if exact(rain, rain_class) and rain:HasAuthority()
-        and same(rain:GetWorld(), current_world.world) and not rain:IsActorBeingDestroyed() then return rain end
+    local rain = stock_rain_actor(current_world)
+    if rain and rain:HasAuthority() then return rain end
 end
 
 function view.restore_local_rain(current_world, original)

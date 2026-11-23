@@ -38,9 +38,19 @@ local function rain_state(day)
         tostring(particles:IsVisible()), audio.VolumeMultiplier, loop.VolumeMultiplier)
 end
 
+local function rain_diagnosis(day, world)
+    local rain = day.RainController
+    if not valid(rain) then return "absent" end
+    local niagara, vector = rain.NI_Rain_01, rain.RainVector
+    local identity = valid(niagara) and valid(niagara.Asset) and niagara.Asset:GetFullName() or "-"
+    return ("%s;%s;%s;%s;%s;%s;%s;%s;%s"):format(rain.Intensity, tostring(vector.X), tostring(vector.Y),
+        tostring(vector.Z), tostring(same(rain:GetWorld(), world)), tostring(rain:IsActorBeingDestroyed()),
+        tostring(rain:HasAuthority()), rain:GetClass():GetFullName(), identity)
+end
+
 local function stock_rain(world, statics, pawn, day, amount)
     local rain = day.RainController
-    if not valid(rain) or rain:IsActorBeingDestroyed() then
+    if not valid(rain) or not same(rain:GetWorld(), world) or rain:IsActorBeingDestroyed() or not rain:HasAuthority() then
         if amount == 0 then return "absent" end
         local transform = {Translation = pawn:K2_GetActorLocation(),
             Rotation = {X = 0, Y = 0, Z = 0, W = 1}, Scale3D = {X = 1, Y = 1, Z = 1}}
@@ -51,7 +61,7 @@ local function stock_rain(world, statics, pawn, day, amount)
         rain = statics:FinishSpawningActor(created, transform, 0)
         day.RainController = rain
     end
-    assert(same(rain:GetWorld(), world) and rain:HasAuthority(), "The stock rain actor is not locally owned")
+    assert(same(rain:GetWorld(), world) and rain:HasAuthority(), rain_diagnosis(day, world))
     rain:UpdateIntensity(amount, false)
     return rain_state(day)
 end
@@ -76,6 +86,7 @@ LoopInGameThreadWithDelay(100, function()
         local day = find(crossroads .. ":PersistentLevel.DayCycle_SunControler_BP_C_1")
         assert(valid(pawn) and pawn:IsLocallyControlled() and same(day:GetWorld(), world))
         if action == "read" then return rain_state(day) end
+        if action == "diagnose" then return rain_diagnosis(day, world) end
         if action == "siren" and guest then return tostring(heard or 0) end
         if action == "particles" and guest then
             local count = 0

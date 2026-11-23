@@ -34,7 +34,12 @@ async def verify_weather_travel(host, guest, pawn, probe):
                     and bool(view.get("rain_skipped_nullrhi")) is (intensity > 0)
                     and math.isclose(view.get("rain_intensity", -1), intensity, abs_tol=.001))
 
-        return (await wait_resident_status(guest_run, matches))["game"]["native_world_view"]
+        try:
+            return (await wait_resident_status(guest_run, matches, timeout=18))["game"]["native_world_view"]
+        except RuntimeError:
+            authority = await weather(host, "diagnose")
+            local = await weather(guest, "diagnose")
+            raise RuntimeError(f"Guest missed the {intensity} rain update. Host {authority}. Guest stock {local}.") from None
 
     await wait_resident_status(host_run, lambda f: f["game"]["map"] == CROSSROADS
                                and not f.get("awaiting_zone_guest")
