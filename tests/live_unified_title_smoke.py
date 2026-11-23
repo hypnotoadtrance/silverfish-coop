@@ -41,7 +41,8 @@ async def offered(seat):
 
 
 async def start_pair(host, guest, character_name, *, on_join=None, create_character=None,
-                     before_join=None, after_reconnect=None, wait_status=wait):
+                     before_join=None, after_reconnect=None, wait_status=wait,
+                     host_exit_actions=("save_and_quit",), after_exit=None):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_pid, guest_pid = host.bridge.process.pid, guest.bridge.process.pid
     host_form = "native-title-host-form-fixture"
@@ -101,10 +102,12 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
 
     await host.bridge.wait_for(lambda game: game.get("stock_pause_exit", {}).get("state") == "armed")
     await stock_pause(host.bridge, "open")
-    await stock_pause(host.bridge, "save_and_quit")
+    for action in host_exit_actions:
+        await stock_pause(host.bridge, action)
+    stopped = {}
     for run in (host_run, guest_run):
-        stopped = await wait_status(run, lambda frame: frame.get("state") == "stopped")
-        assert stopped["stop_reason"] == "host_session_ended"
+        stopped[run] = await wait_status(run, lambda frame: frame.get("state") == "stopped")
+        assert stopped[run]["stop_reason"] == "host_session_ended"
     await asyncio.gather(offered(host), offered(guest))
     assert not owns_udp_port(host_pid, host.port) and not owns_udp_port(guest_pid, joined["unreal_local_port"])
 
@@ -113,6 +116,8 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
         verify_checkpoint=lambda data: native_host_save.verify_checkpoint(host.profile, data),
     )
     assert saved["characters"][character]["state"]["native_guest_save"]
+    if after_exit:
+        await after_exit(host, stopped[host_run], saved, character)
     return {"host_pid": host_pid, "guest_pid": guest_pid, "campaign_id": saved["campaign_id"],
             "revision": saved["revision"], "character_id": character, "same_pawn_after_reconnect": True,
             "title_return_and_sockets_closed": True, **gameplay}

@@ -30,6 +30,8 @@ async def wait_resident_status(directory, predicate, *, timeout=42):
 
 async def resident_events(run, frame):
     if frame.get("event_source") == "memory":
+        if frame.get("active") is False:
+            return frame["recent_events"]
         result = await submit(run, "events-recent", tail=64)
         assert result["ok"], result
         return result["events"]
@@ -212,3 +214,24 @@ class GuestWorldStartProof:
             transitions[-1]["host_travel_receipt"] = transition
             transitions[-1]["guest_title_rejoin"] = leave
             previous, local_pawn = epoch, next_pawn
+
+    async def verify_travel_exit(self, host, stopped, saved, character):
+        last = self.evidence["stock_travel"][-1]
+        assert last["destination"] == RUIN_FIELDS and stopped["generation"] == self.session
+        assert uuid.UUID(character).hex == self.character
+        events = await resident_events(host.campaign / "run", stopped)
+        exit_event, = [event for event in events if event["event"] == "stock_pause_exit"
+                       and event["generation"] == self.session]
+        assert (exit_event["reason"], exit_event["result"]) == ("quit_to_menu", "ok"), exit_event
+        assert exit_event["receipt"] == {"revision": saved["revision"], "peers_acknowledged": 1}, exit_event
+        assert saved["revision"] > last["host_travel_receipt"]["revision"]
+        world = saved["world"]
+        host_save = world["native_host_save"]
+        guest_save = saved["characters"][character]["state"]["native_guest_save"]
+        assert uuid.UUID(saved["campaign_id"]).hex == world["native_save_scope"]
+        assert world["map"] == host_save["map"] == guest_save["map"] == RUIN_FIELDS
+        assert guest_save["character_id"] == character and host_save["slot"] != guest_save["slot"]
+        self.evidence["ruin_stock_exit"] = {
+            "receipt": exit_event, "map": RUIN_FIELDS, "revision": saved["revision"],
+            "host_save": host_save, "guest_save": guest_save,
+        }

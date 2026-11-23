@@ -878,10 +878,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 if guest_world_start_travel:
                     await startup.travel(first, guest, portable_probe_command)
 
+            exit_options = {"host_exit_actions": ("prompt", "confirm"), "after_exit": startup.verify_travel_exit} \
+                if guest_world_start_travel else {}
             proof["sessions"].append(await start_pair(first, second, "Observatory startup scout",
                                                       before_join=startup.arm, on_join=startup.joined,
                                                       after_reconnect=check_reconnect,
-                                                      wait_status=wait_resident_status))
+                                                      wait_status=wait_resident_status, **exit_options))
         elif stock_prop_grip:
             proof["sessions"].append(await start_pair(first, second, "Lantern scout", on_join=verify_stock_prop_grip))
         elif stock_crate_ring:
