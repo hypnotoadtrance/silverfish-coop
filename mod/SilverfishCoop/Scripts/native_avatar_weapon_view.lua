@@ -19,6 +19,7 @@ local kinds = { s = {static_type, "StaticMesh", "/Script/Engine.StaticMesh"},
 local rigs = {r = true, h = true}
 local active_cycle = {}
 local maximum_parts = 12
+local minimum_scale = .01
 local active_recoil = {}
 local kick_time = .05
 local identity = {
@@ -56,7 +57,7 @@ local function valid_pose(values)
     for index = 1, 9 do
         local value = values[index]
         if not value or value ~= value or math.abs(value) > (index < 4 and 250 or index < 7 and 180 or 4)
-            or (index >= 7 and math.abs(value) < .01) then
+            or (index >= 7 and math.abs(value) < minimum_scale) then
             return false
         end
     end
@@ -93,6 +94,14 @@ end
 
 local function encode_pose(location, rotation, scale)
     local values = { location.X, location.Y, location.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, scale.X, scale.Y, scale.Z }
+    -- Stock 0.01 socket scales can be stored as a float just below the wire minimum.
+    for index = 7, 9 do
+        local value = values[index]
+        local magnitude = value and math.abs(value)
+        if magnitude and magnitude < minimum_scale and magnitude >= minimum_scale - 1e-9 then
+            values[index] = value < 0 and -minimum_scale or minimum_scale
+        end
+    end
     if not valid_pose(values) then return end
     for index, value in ipairs(values) do values[index] = string.format("%.2f", value) end
     return table.concat(values, "@")
@@ -152,8 +161,14 @@ function view.observe(pawn, save, cached)
                         local name = attachment:ToString()
                         if socket_name(name) and (name == "None" or rig:DoesSocketExist(attachment)) then socket = name end
                     end
-                    local pose = socket and encode_pose(component.RelativeLocation, component.RelativeRotation, component.RelativeScale3D)
-                        or root_pose(component, math_api, root_transform)
+                    local pose
+                    if socket then
+                        pose = encode_pose(component.RelativeLocation, component.RelativeRotation, component.RelativeScale3D)
+                    end
+                    if not pose then
+                        socket = nil
+                        pose = root_pose(component, math_api, root_transform)
+                    end
                     if pose then parts[#parts + 1] = table.concat({kind, path, pose, socket}, "@") end
                 end
             end
