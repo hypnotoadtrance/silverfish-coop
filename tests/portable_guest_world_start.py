@@ -160,7 +160,8 @@ class GuestWorldStartProof:
                 expected = f"Level_Exit_BP_C {source}.CrossRoads_P:PersistentLevel.{actor}"
                 for step in ("guest-near", "host-near", "host-inside"):
                     actual = await probe_command(host.bridge, "portable-ruin-exit", f"{step}\t{pawn}")
-                    assert actual == expected, actual
+                    # The stock lookup can resolve a load-qualified instance name.
+                    assert actual in (expected, expected + "0"), actual
 
             arrived = await wait_resident_status(host_run, lambda frame: host_ready(frame, destination), timeout=60)
             epoch = arrived["zone_epoch"]
