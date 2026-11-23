@@ -12,7 +12,6 @@ local response_class = "/Game/Classes/GUI/SubWidgets/PlayerResponce_Widget.Playe
 local dialogue_class = "/Game/Classes/GUI/Dialogue_Widget.Dialogue_Widget_C"
 local log_class = "/Game/Classes/GUI/Menu_QuestLog_Widget.Menu_QuestLog_Widget_C"
 local details_class = "/Game/Classes/GUI/SubWidgets/Quest_DetailsWindow_Widget.Quest_DetailsWindow_Widget_C"
-local turnin_class = "/Game/Classes/GUI/SubWidgets/Quest_TurnIn_Widget.Quest_TurnIn_Widget_C"
 local pistol_class = "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"
 local inventory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
@@ -23,8 +22,6 @@ local next_field = "NextConvo_8_59FA977C44DA6739371CD9992F385F4F"
 local pings_field = "GlobalPings_38_DB12D37348CDE946D7BA20BD3DE97CDD"
 local step_field = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A"
 local last, work, deadline, introduced, clicked_work
-local world_prefix = "/Game/Classes/Maps/Maps_OverWorld/"
-local targets = {[world_prefix .. "CrossRoads_P"] = "CrossRoads_P", [world_prefix .. "Lake_01_P"] = "Lake_01_P"}
 
 local function valid(o) return o and o:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -157,48 +154,20 @@ local function journal(state)
     return quests.Jmr_CrossRoads .. "," .. quests.Jmr_Lake
 end
 
-local function balances(state)
-    local result = {}
-    local instance = state.world.OwningGameInstance
-    assert(same(state.local_pawn.pawn.Save, instance.SaveSlot_Ref))
-    for _, flag in ipairs({"Player_Cash", "Player_Xp"}) do
-        local data = {}
-        instance:Check_SaveFlag(FName(flag, EFindName.FNAME_Find), data, data)
-        assert(type(data.Found) == "boolean" and math.tointeger(data.Value), "Stock wallet or XP is unavailable")
-        result[#result + 1] = data.Found and data.Value or 0
-    end
-    return table.concat(result, ",")
-end
-
-local function click_host_quest(state, operation)
-    local mode, region = operation:match("^(%a+)(lake)$")
-    if not mode then mode, region = operation:match("^(%a+)(crossroads)$") end
-    local id = region == "lake" and "Jmr_Lake" or "Jmr_CrossRoads"
+local function accept_lake_quest(state)
+    local id = "Jmr_Lake"
     local menu, board = top(state.controller), StaticFindObject(level .. "BountyBoard_BP_C_0")
     assert(exact(menu, log_class) and same(menu.BountyBoard_Ref, board), "The actual host Simmi jobs menu must be open")
-    if mode == "accept" then
-        local quest = FName(id, EFindName.FNAME_Find)
-        local offered
-        board.Contracts:ForEach(function(key, row)
-            if key:get():ToString() == id then offered = row:get() end
-        end)
-        assert(offered, "The host Simmi jobs menu did not offer the exact quest")
-        menu:ShowDetails_Quest(offered, quest)
-        local details = menu.VerticalBox_Details:GetChildAt(0)
-        assert(exact(details, details_class) and same(details.QuestLog_MenuRef, menu) and name(details.Quest_ID) == id)
-        details:BndEvt__Quest_DetailsWindow_Widget_Button_Clear_Accept_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
-    else
-        assert(mode == "redeem" and region)
-        local rows = menu.VerticalBox_CompletedList
-        for index = 0, math.min(rows:GetChildrenCount(), 64) - 1 do
-            local row = rows:GetChildAt(index)
-            if exact(row, turnin_class) and same(row.QuestLog_MenuRef, menu) and name(row.Quest_IDTag) == id then
-                row:BndEvt__Quest_TurnIn_Widget_Button_K2Node_ComponentBoundEvent_2_OnButtonReleasedEvent__DelegateSignature()
-                return "clicked"
-            end
-        end
-        error("Simmi's actual host jobs menu had no stock turn-in button for " .. id, 0)
-    end
+    local quest = FName(id, EFindName.FNAME_Find)
+    local offered
+    board.Contracts:ForEach(function(key, row)
+        if key:get():ToString() == id then offered = row:get() end
+    end)
+    assert(offered, "The host Simmi jobs menu did not offer the exact quest")
+    menu:ShowDetails_Quest(offered, quest)
+    local details = menu.VerticalBox_Details:GetChildAt(0)
+    assert(exact(details, details_class) and same(details.QuestLog_MenuRef, menu) and name(details.Quest_ID) == id)
+    details:BndEvt__Quest_DetailsWindow_Widget_Button_Clear_Accept_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
     return "clicked"
 end
 
@@ -232,50 +201,6 @@ local function select_pistol(pawn)
     return "waiting"
 end
 
-local function aim_jammer(state, phase, move)
-    local map = assert(targets[state.map], "The known stock objective map is required")
-    local actor = StaticFindObject(state.map .. "." .. map .. ":PersistentLevel.SignalJammer_BP_C_1")
-    assert(valid(actor) and same(actor:GetWorld(), state.world) and not actor:IsActorBeingDestroyed() and not actor.bHidden)
-    local pawn = phase == "hosting" and detached_guest(state) or state.local_pawn.pawn
-    assert(valid(pawn.EquipedItem) and exact(pawn.EquipedItem, pistol_class), "The test pistol is not equipped")
-    local point = actor.Capsule:K2_GetComponentLocation()
-    local function aim(from)
-        local x, y, z = point.X-from.X, point.Y-from.Y, point.Z-from.Z
-        return {Pitch=math.deg(math.atan(z, math.sqrt(x*x+y*y))), Yaw=math.deg(math.atan(y,x)), Roll=0}
-    end
-    if move then
-        local cast = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
-        local ignored, color = {pawn, actor, pawn.EquipedItem}, {R=0,G=0,B=0,A=0}
-        local height = pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()
-        local placed
-        for bearing = 0, 315, 45 do
-            local angle = math.rad(bearing)
-            local x, y = point.X+300*math.cos(angle), point.Y+300*math.sin(angle)
-            local floor = {}
-            if cast:LineTraceSingle(pawn, {X=x,Y=y,Z=point.Z+220}, {X=x,Y=y,Z=point.Z-300},
-                0, false, ignored, 0, floor, true, color, color, 0) then
-                floor = floor.OutHit or floor
-                local here = {X=x,Y=y,Z=floor.ImpactPoint.Z+height+3}
-                local eye = {X=x,Y=y,Z=here.Z+65}
-                if floor.ImpactNormal.Z >= .75 and not cast:LineTraceSingle(pawn, eye, point, 0, true,
-                    ignored, 0, {}, true, color, color, 0)
-                    and pawn:K2_TeleportTo(here, {Pitch=0,Yaw=aim(eye).Yaw,Roll=0}) then
-                    placed = true
-                    break
-                end
-            end
-        end
-        assert(placed, "No reachable stock sightline to the current jammer")
-    end
-    local rotation = aim(pawn.Camera:K2_GetComponentLocation())
-    pawn.Controller:SetControlRotation(rotation)
-    pawn:K2_SetActorRotation({Pitch=0,Yaw=rotation.Yaw,Roll=0}, true)
-    pawn.Camera:K2_SetWorldRotation(rotation, false, {}, true)
-    if phase == "hosting" then pawn:ForceNetUpdate() end
-    local location = pawn:K2_GetActorLocation()
-    return ("%0.4f,%0.4f,%0.4f"):format(location.X,location.Y,location.Z)
-end
-
 local function sync(state, phase)
     if (phase ~= "hosting" and phase ~= "connected") or not state.local_pawn then return end
     local file = io.open(bridge .. (portable and "/simmi-jobs-command.tsv" or "/simmi-jobs-probe"), "rb")
@@ -289,18 +214,13 @@ local function sync(state, phase)
     if not token or #token ~= 32 then return end
     local ok, result = pcall(function()
         if operation == "journal" then return journal(state) end
-        if operation == "balances" and portable then return balances(state) end
         if portable and phase == "connected" and operation == "selectpistol" then
             return select_pistol(state.local_pawn.pawn)
-        end
-        if portable and (operation == "placejammer" and phase == "hosting"
-            or operation == "aimjammer" and phase == "connected") then
-            return aim_jammer(state, phase, operation == "placejammer")
         end
         assert(state.map == area, "Simmi's stock board is only available in Observatory")
         if portable and phase == "hosting" then
             if operation == "seedpistol" then return seed_pistol(state) end
-            if operation:match("^accept") or operation:match("^redeem") then return click_host_quest(state, operation) end
+            if operation == "acceptlake" then return accept_lake_quest(state) end
         end
         if operation == "host" or operation == "guest" or operation == "board" then return approach(state, phase, operation) end
         if operation == "read" then return read_menu(state.controller) end

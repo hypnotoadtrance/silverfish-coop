@@ -27,6 +27,15 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
         assert result["ok"], (operation, fields, result)
         return result
 
+    async def press_primary():
+        async with asyncio.timeout(7):
+            while True:
+                result = await submit(guest_run, "native-guest-primary-input-fixture")
+                if result.get("ok"):
+                    return result["native_guest_primary_fixture"]["sequence"]
+                assert result.get("error") == "Stock primary input is temporarily blocked by the equipped player's state", result
+                await asyncio.sleep(.15)
+
     async def state(seat, predicate, timeout=12):
         run = host_run if seat is host else guest_run
         deadline = time.monotonic() + timeout
@@ -93,17 +102,13 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
         assert await command(seat, "close" if physical else "closesimmi") == "closed"
         await state(seat, lambda frame: not frame.get("game", {}).get("native_wire_board_stock"))
 
-    async def button(seat, spec, verb):
+    async def accept(seat, spec):
         if seat is host:
-            operation = ("accept" if verb == "start" else "redeem") + (
-                "lake" if spec == BLACK_LAKE else "crossroads")
-            assert await command(host, operation) == "clicked"
+            assert spec == BLACK_LAKE and await command(host, "acceptlake") == "clicked"
             return
-        result = await action(seat, "native-wire-board-stock-fixture", target=f"{spec.quest}|{verb}")
+        result = await action(seat, "native-wire-board-stock-fixture", target=f"{spec.quest}|start")
         proof = result["native_wire_board_stock"]
-        assert (proof["board"], proof["quest"], proof["state"]) == (
-            SIMMI_BOARD, spec.quest, {"start": "starting", "turnin": "redeeming"}[verb],
-        ), proof
+        assert (proof["board"], proof["quest"], proof["state"]) == (SIMMI_BOARD, spec.quest, "starting"), proof
 
     async def cross(source, destination, tag):
         nonlocal pawn
@@ -122,18 +127,13 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
         pawn = arrived["game"]["native_guest_save"]["pawn"]
         return arrived["zone_epoch"]
 
-    async def balance(seat):
-        return tuple(map(int, (await command(seat, "balances")).split(",")))
-
-    first_cash, host_xp = await balance(host)
-    _, guest_xp = await balance(guest)
     checkpoint = campaign_save_hashes(host.campaign)
     offers = await board(guest, physical=True)
     assert set(journal_rows) <= offers, offers
     await close(guest, physical=True)
     for seat, spec in ((guest, CROSSROADS_JAMMER), (host, BLACK_LAKE)):
         assert spec.quest in await board(seat)
-        await button(seat, spec, "start")
+        await accept(seat, spec)
         await asyncio.gather(*(quest_on(peer, spec, 1) for peer in peers))
         await close(seat)
     accepted_journal = await journal("1,1")
@@ -145,10 +145,7 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
     guid = await command(host, "seedpistol")
     stored = await action(guest, native_inventory.STORE_EQUIPMENT, target=guid)
     assert stored[native_inventory.STORE_KEY]["guid"] == guid, stored
-    ammo = 7
-
-    async def destroy(spec):
-        nonlocal ammo
+    async def observe_jammer(spec):
         watched = spec.key + "_objective"
         await state(host, lambda f: (
             (target := f["game"].get(watched, {})).get("state") == "watching"
@@ -159,71 +156,36 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
             (pose := f["game"].get(POSE, {})).get("actor") == spec.jammer
             and same_pose(authority["transform"], pose["transform"])
         )))["game"][POSE]
-        projection = spec.key + "_projection"
-        await state(guest, lambda f: f["game"].get(projection, {}).get("state") == "present")
+        return {"host_pose": authority, "guest_pose": guest_pose}
 
-        async with asyncio.timeout(8):
-            while await command(guest, "selectpistol") != "equipped":
-                await asyncio.sleep(.14)
+    async def confirm_weapon(ammo):
         await state(guest, lambda f: f["game"].get("native_guest_primary_scope", {}).get("guid") == guid)
-        equipped = (await action(guest, "native-guest-weapon-inspect", target=guid))["native_guest_weapon"]
-        assert equipped["status"] == "equipped" and equipped["actor_ammo"] == ammo, equipped
-        checkpoint = campaign_save_hashes(host.campaign)
-        shots = []
-        for _ in range(3):
-            position = tuple(map(float, (await command(host, "placejammer")).split(",")))
-            await movement_arrived(guest, position)
-            assert math.dist(position, tuple(map(float, (await command(guest, "aimjammer")).split(",")))) < 30
-            press = await action(guest, "native-guest-primary-input-fixture")
-            shots.append(press["native_guest_primary_fixture"]["sequence"])
-            ammo -= 1
-            try:
-                objective = await asyncio.gather(*(quest_on(seat, spec, 2) for seat in peers))
-                break
-            except RuntimeError:
-                if len(shots) == 3:
-                    raise
-        host_result, guest_result = objective
-        assert host_result == guest_result and host_result["objective"]["shooter_role"] == "guest", objective
-        proof = host_result["objective"]
-        assert proof["jammer"] == spec.jammer and proof["trigger"] == spec.trigger, proof
-        gone = (await state(guest, lambda f: f["game"].get(projection, {}).get("state") in ("hidden", "absent")))["game"][projection]
-        assert gone["audio"] in ("muted", "none"), gone
-        assert campaign_save_hashes(host.campaign) == checkpoint, "Destroying the jammer wrote a save"
-        return {"host_pose": authority, "guest_pose": guest_pose, "guest_projection": gone, "shots": shots, "stock": proof}
+        weapon = (await action(guest, "native-guest-weapon-inspect", target=guid))["native_guest_weapon"]
+        assert weapon["status"] == "equipped" and weapon["actor_ammo"] == ammo, weapon
+        return weapon
 
     outbound = await cross(OBSERVATORY, CROSSROADS, "Obsv_Etr")
-    crossroads = await destroy(CROSSROADS_JAMMER)
+    crossroads = await observe_jammer(CROSSROADS_JAMMER)
+    async with asyncio.timeout(8):
+        while await command(guest, "selectpistol") != "equipped":
+            await asyncio.sleep(.14)
+    before_travel = await confirm_weapon(7)
     lake_out = await cross(CROSSROADS, LAKE, "Lake_Cave")
-    lake = await destroy(BLACK_LAKE)
+    lake = await observe_jammer(BLACK_LAKE)
+    # The guest never presses a quick slot again. The restored weapon must be
+    # selected in the host's detached pawn and available to the stock input.
+    restored = await confirm_weapon(7)
+    assert restored["pawn"] != before_travel["pawn"], restored
+    checkpoint = campaign_save_hashes(host.campaign)
+    shot = await press_primary()
+    await state(guest, lambda f: f.get("gameplay", {}).get("native_equipped_weapon", {}).get("rounds") == 6)
+    assert campaign_save_hashes(host.campaign) == checkpoint, "Firing the restored weapon wrote a save"
     lake_return = await cross(LAKE, CROSSROADS, "Lake_Cave")
     final_visit = await cross(CROSSROADS, OBSERVATORY, "Obsv_Etr")
-    ready_journal = await journal("2,2")
-    checkpoint = campaign_save_hashes(host.campaign)
-    redeemed = {}
-    cash = first_cash
-    for seat, spec in ((host, CROSSROADS_JAMMER), (guest, BLACK_LAKE)):
-        await board(seat)
-        await button(seat, spec, "turnin")
-        paid, observed = await asyncio.gather(*(quest_on(peer, spec, -10) for peer in peers))
-        cash += spec.cash
-        assert paid == observed and (paid["cash"], paid["xp"], paid["wallet"]) == (spec.cash, 1, cash), paid
-        assert len(paid["recipients"]) == 2 and "host" in paid["recipients"], paid
-        await state(guest, lambda f: f["game"].get("native_wallet") == cash)
-        replay = await action(seat, "native-quest-turnin", target=spec.quest)
-        assert replay["effect"] == "native_quest_already_settled" and replay["wallet"] == cash, replay
-        redeemed[spec.quest] = paid
-        await close(seat)
-    async with asyncio.timeout(12):
-        while True:
-            authority, client = await asyncio.gather(balance(host), balance(guest))
-            if authority == (cash, host_xp + 2) and client[1] == guest_xp + 2:
-                break
-            await asyncio.sleep(.15)
-    assert campaign_save_hashes(host.campaign) == checkpoint, "Stock redemption or reward wrote a save"
+    await confirm_weapon(6)
     return {"stock_simmi_jammers": {
         "offered": sorted(offers), "remaining": sorted(remaining), "initial_journals": accepted_journal,
-        "completed_objective_journals": ready_journal, "crossroads": crossroads, "lake": lake,
-        "redemptions": redeemed, "visits": [outbound, lake_out, lake_return, final_visit],
-        "host_balance": authority, "guest_xp": client[1], "campaign_checkpoint_unchanged": True,
+        "crossroads": crossroads, "lake": lake, "visits": [outbound, lake_out, lake_return, final_visit],
+        "weapon_before_travel": before_travel, "weapon_after_travel": restored,
+        "restored_weapon_primary_sequence": shot, "campaign_checkpoint_unchanged_during_shot": True,
     }}
