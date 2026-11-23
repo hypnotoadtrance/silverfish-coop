@@ -7,9 +7,9 @@ from contextlib import suppress
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
-from aioquic.quic.events import ConnectionTerminated, DatagramFrameReceived
+from aioquic.quic.events import ConnectionTerminated, DatagramFrameReceived, StreamDataReceived
 from cryptography.hazmat.primitives import serialization
 
 from tools.silverfish import link, party
@@ -670,6 +670,32 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client_stats["snapshot_received_bytes"], host_stats["snapshot_encoded_bytes"])
         self.assertGreater(host_stats["snapshot_encode_total_ns"], 0)
         self.assertGreater(client_stats["snapshot_decode_total_ns"], 0)
+
+    async def test_repeated_empty_fin_does_not_redispatch_a_completed_stream(self):
+        self.application_handler = AsyncMock(return_value={"ok": True})
+        self.assertTrue((await self.connect_guest())["accepted"])
+        server = self.host._protocols[self.request["guest_id"]]
+        client = self.client._protocol
+        stream = client._quic.get_next_available_stream_id()
+        self.assertEqual(await self.client.request({"action": "snapshot"}), {"ok": True})
+        self.assertNotIn(stream, server._actions)
+
+        repeat = StreamDataReceived(data=b"", end_stream=True, stream_id=stream)
+        with patch.object(self.host, "_spawn", wraps=self.host._spawn) as spawn:
+            server.quic_event_received(repeat)
+            spawn.assert_not_called()
+        self.application_handler.assert_awaited_once_with(self.request["guest_id"], {"action": "snapshot"})
+
+    async def test_repeated_admission_fin_leaves_both_seats_connected(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        server = self.host._protocols[self.request["guest_id"]]
+        client = self.client._protocol
+        repeat = StreamDataReceived(data=b"", end_stream=True, stream_id=link._ADMISSION_STREAM)
+        for protocol in (server, client):
+            with patch.object(protocol, "close", wraps=protocol.close) as close:
+                protocol.quic_event_received(repeat)
+                close.assert_not_called()
+        await self.exchange(1200)
 
     async def test_prop_pose_reaches_only_the_current_authenticated_game_route(self):
         guest_id = self.request["guest_id"]

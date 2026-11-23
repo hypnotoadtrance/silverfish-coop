@@ -672,6 +672,9 @@ class _LinkProtocol(QuicConnectionProtocol):
                 self._next_game_expiry = None
 
     def _admission_payload(self, event: events.StreamDataReceived) -> bytes | None:
+        # aioquic can report a retransmitted FIN as an empty end event.
+        if event.stream_id == _ADMISSION_STREAM and self._admission_finished and event.end_stream and not event.data:
+            return None
         if event.stream_id != _ADMISSION_STREAM or self._admission_finished:
             self.close(error_code=_APP_ERROR, reason_phrase="unexpected admission stream")
             return None
@@ -766,6 +769,9 @@ class _HostProtocol(_LinkProtocol):
 
         action = self._actions.get(stream_id)
         if action is None:
+            # A FIN can finish a buffered request, but cannot start a request with no bytes.
+            if event.end_stream and not event.data:
+                return
             if len(self._actions) >= _MAX_ACTIONS or len(self.host._tasks) >= _MAX_HOST_TASKS:
                 self.close(error_code=_APP_ERROR, reason_phrase="application request limit exceeded")
                 return
