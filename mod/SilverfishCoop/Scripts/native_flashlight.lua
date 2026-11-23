@@ -10,6 +10,7 @@ local maths = "/Script/Engine.Default__KismetMathLibrary"
 local statics = "/Script/Engine.Default__GameplayStatics"
 local avatar = require("native_player_avatar")
 local offhand_view = require("native_avatar_offhand")
+local guest_save = require("guest_save")
 local players = require("players")
 local owner, guest_owner, target, peers, serial = nil, nil, nil, nil, 0
 local equipment_path = "/Game/Classes/Equipment/"
@@ -76,19 +77,24 @@ local function selected_stock(pawn, equipment)
         and same(slots[index + 1][item_class], equipment:GetClass())
 end
 
-local function stock_offhand(pawn, world)
+local function offhand_loadout(pawn)
     local pistol = pawn.EquipedItem
-    local camera, item = pawn.Camera, pawn.OffhandEquipment
-    if pawn.Save.PlayerOffhandingFlashlight ~= true or not exact(pistol, "/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C")
-        or not pistol:HasAuthority() or not same(pistol.User, pawn) or not selected_stock(pawn, pistol)
-        or not exact(item, regular.class) or item:IsActorBeingDestroyed() or item.bReplicates ~= false
-        or not same(item.User, pawn) or not same(item:GetWorld(), world) or not valid(camera)
-        or not same(camera:GetOwner(), pawn) or not valid(item.Box) or not same(item.Box:GetAttachParent(), camera) then return end
+    if not exact(pistol, "/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C") or not pistol:HasAuthority()
+        or not same(pistol.User, pawn) or not selected_stock(pawn, pistol) then return end
     local slots = pawn.Save.PlayerEquipment
-    local class = item:GetClass()
+    local class = StaticFindObject(regular.class)
+    if not valid(class) then return end
     for index = 1, math.min(slots:GetArrayNum(), 8) do
-        if same(slots[index][item_class], class) then return item end
+        if same(slots[index][item_class], class) then return true end
     end
+end
+
+local function stock_offhand(pawn, world)
+    local camera, item = pawn.Camera, pawn.OffhandEquipment
+    if pawn.Save.PlayerOffhandingFlashlight == true and offhand_loadout(pawn)
+        and exact(item, regular.class) and not item:IsActorBeingDestroyed() and item.bReplicates == false
+        and same(item.User, pawn) and same(item:GetWorld(), world) and valid(camera)
+        and same(camera:GetOwner(), pawn) and valid(item.Box) and same(item.Box:GetAttachParent(), camera) then return item end
 end
 
 local function stock_beam(equipment, world, profile)
@@ -122,12 +128,12 @@ local function capture(state, pawn, previous, guest)
     if pawn:HasAuthority() ~= (not guest) or not valid(instance) or not same(pawn.Save, instance.SaveSlot_Ref) then return end
     local profile = held(equipment, pawn, state.world)
     local offhand = false
-    if not profile and not guest then
+    if not profile then
         local item = stock_offhand(pawn, state.world)
         if item then equipment, profile, offhand = item, regular, true end
     end
     if not profile or not equipment:HasAuthority() or not same(equipment.User, pawn)
-        or guest and not selected_stock(pawn, equipment) then return end
+        or guest and not offhand and not selected_stock(pawn, equipment) then return end
     local spot, source = stock_beam(equipment, state.world, profile)
     local model = equipment.SM_Prop_Torch_01
     if not spot or not source:HasAuthority() or type(source.Powered) ~= "boolean" or source.Powered ~= spot:IsVisible()
@@ -279,8 +285,18 @@ local function project_offhand(view, pawn)
 end
 
 function flashlight.animate(get_world)
-    if target and target.offhand and target.rendered and same(target.world, get_world()) then
-        aim_offhand(target, os.clock())
+    local world
+    if target and target.offhand and target.rendered then
+        world = get_world()
+        if same(target.world, world) then aim_offhand(target, os.clock()) end
+    end
+    if peers then
+        for _, view in pairs(peers.views) do
+            if view.offhand and view.rendered then
+                world = world or get_world()
+                if same(peers.world, world) then aim_offhand(view, os.clock()) end
+            end
+        end
     end
 end
 
@@ -328,6 +344,15 @@ local function clear_peers()
     end
 end
 
+local function set_aim(view, prior, pitch, yaw, roll)
+    if not finite(pitch, -180, 180) or not finite(yaw, -180, 180) or not finite(roll, -180, 180) then
+        error("invalid offhand flashlight direction", 0)
+    end
+    view.aim = {Pitch = pitch, Yaw = yaw, Roll = roll}
+    view.aim_from = prior and prior.aim_current or view.aim
+    view.aim_at = os.clock()
+end
+
 function flashlight.sync(state, phase)
     local pawn, driver, connection = scope(state, phase)
     local host_ok, host_source = false, nil
@@ -356,29 +381,37 @@ function flashlight.command(fields, state, phase)
         error("flashlight view requires an active co-op listener", 0)
     end
     if guest_views then
-        if (#fields - 4) % 4 ~= 0 or #fields > 68 then error("invalid guest flashlight list", 0) end
+        if #fields > 116 then error("invalid guest flashlight list", 0) end
         if #fields == 4 then clear_peers(); return "guest flashlight views cleared" end
         local previous = current(peers, state, phase, pawn, driver, connection) and peers.epoch == epoch and peers.views or {}
         local views, local_id = {}, avatar.player_id(state.local_pawn)
-        for index = 5, #fields, 4 do
+        local index, count = 5, 0
+        while index <= #fields do
             local id = math.tointeger(tonumber(fields[index]))
             local instance = math.tointeger(tonumber(fields[index + 1]))
             local switch = math.tointeger(tonumber(fields[index + 2]))
             local profile, power, offhand = power_profile(fields[index + 3])
-            if not finite(id, 0, 2147483647) or not finite(instance, 1, 2147483647)
-                or not finite(switch, 0, 2147483647) or not profile or offhand or views[id] or id == local_id then
+            count = count + 1
+            if count > 16 or not finite(id, 0, 2147483647) or not finite(instance, 1, 2147483647)
+                or not finite(switch, 0, 2147483647) or not profile or views[id] or id == local_id then
                 error("invalid guest flashlight view", 0)
             end
             local prior = previous[id]
             if prior and (instance < prior.instance
-                or instance == prior.instance and (switch < prior.switch or profile ~= prior.profile)) then
+                or instance == prior.instance and (switch < prior.switch or profile ~= prior.profile or offhand ~= prior.offhand)) then
                 error("stale guest flashlight view", 0)
             end
             local same_source = prior and instance == prior.instance
-            views[id] = {guest = true, id = id, instance = instance, switch = switch, power = power,
+            local view = {guest = true, id = id, instance = instance, switch = switch, power = power, offhand = offhand,
                 profile = profile, values = profile.pose, next_retry = 0, rendered = same_source and prior.rendered or nil,
                 click_until = same_source and (switch > prior.switch and os.clock() + .75 or prior.click_until) or nil,
                 heard = same_source and prior.heard or nil}
+            index = index + 4
+            if offhand then
+                set_aim(view, same_source and prior, tonumber(fields[index]), tonumber(fields[index + 1]), tonumber(fields[index + 2]))
+                index = index + 3
+            end
+            views[id] = view
         end
         if peers and previous ~= peers.views then clear_peers() end
         for id, prior in pairs(previous) do
@@ -409,9 +442,7 @@ function flashlight.command(fields, state, phase)
         rendered = prior and prior.rendered or nil,
         click_until = prior and switch > prior.switch and os.clock() + .75 or nil, heard = prior and prior.heard or nil}
     if offhand then
-        target.aim = {Pitch = values[4], Yaw = values[5], Roll = values[6]}
-        target.aim_from = prior and prior.aim_current or target.aim
-        target.aim_at = os.clock()
+        set_aim(target, prior, values[4], values[5], values[6])
     end
     project(state, pawn, target)
     return "stock flashlight beam view received"
@@ -437,8 +468,13 @@ end
 function flashlight.peer_rows(state, phase, row)
     local rows = {}
     if guest_owner and phase == "connected" and same(guest_owner.world, state.world) then
-        rows[#rows + 1] = row("native-guest-flashlight-source", state.local_pawn.name, guest_owner.instance,
-            guest_owner.switch, power_token(guest_owner))
+        if guest_owner.offhand then
+            rows[#rows + 1] = row("native-guest-flashlight-source", state.local_pawn.name, guest_owner.instance,
+                guest_owner.switch, power_token(guest_owner), guest_owner.values[4], guest_owner.values[5], guest_owner.values[6])
+        else
+            rows[#rows + 1] = row("native-guest-flashlight-source", state.local_pawn.name, guest_owner.instance,
+                guest_owner.switch, power_token(guest_owner))
+        end
     elseif phase == "hosting" then
         for _, details in ipairs(state.guests) do
             local pawn = details.pawn
@@ -451,6 +487,12 @@ function flashlight.peer_rows(state, phase, row)
                     if id ~= nil then
                         rows[#rows + 1] = row("native-guest-flashlight-authority", id, details.name, profile == heavy and "heavy" or nil)
                     end
+                elseif offhand_loadout(pawn) then
+                    local ok, bound, save = pcall(guest_save.exact_item_context, state, phase, details.name)
+                    local id = avatar.player_id(details)
+                    if ok and id ~= nil and same(bound, pawn) and same(save, pawn.Save) then
+                        rows[#rows + 1] = row("native-guest-flashlight-authority", id, details.name, "offhand")
+                    end
                 end
             end
         end
@@ -459,7 +501,8 @@ function flashlight.peer_rows(state, phase, row)
         for id, view in pairs(peers.views) do
             local rendered = view.rendered
             rows[#rows + 1] = row("native-guest-flashlight-view", peers.epoch, id, view.instance, view.switch,
-                power_token(view), rendered and valid(rendered.light) and rendered.light:IsVisible() and 1 or 0, view.heard or "-")
+                power_token(view), rendered and valid(rendered.light) and rendered.light:IsVisible() and 1 or 0, view.heard or "-",
+                view.offhand and view.aim.Pitch or nil, view.offhand and view.aim.Yaw or nil, view.offhand and view.aim.Roll or nil)
         end
     end
     return rows

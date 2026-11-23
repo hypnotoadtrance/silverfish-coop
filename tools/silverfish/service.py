@@ -5807,7 +5807,8 @@ class Client:
         flashlight_update = native_flashlight.guest_update(self.last_game, self.zone_epoch) if flashlight_ready else None
         sprint_changed = sprint_update is not None and sprint_update != self.last_sprint_sent
         aim_changed = aim_update is not None and aim_update != self.last_aim_sent
-        flashlight_changed = flashlight_ready and flashlight_update != self.last_flashlight_sent
+        flashlight_changed = flashlight_ready and native_flashlight.guest_edge(flashlight_update) != native_flashlight.guest_edge(
+            self.last_flashlight_sent)
         if not (sprint_changed or aim_changed or flashlight_changed) and (edges_only or now < self.next_snapshot):
             return
         self.next_snapshot = now + 0.5

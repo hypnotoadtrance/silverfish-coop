@@ -69,7 +69,7 @@ def parse_source(fields, phase):
 
 def parse_view(fields, phase):
     tag, epoch, player, instance, switch, token, visible, heard, *direction = fields
-    power, profile = _power_profile(token, offhand=tag == VIEW_TAG)
+    power, profile = _power_profile(token, offhand=tag in (VIEW_TAG, GUEST_VIEW_TAG))
     identity = tuple(map(int, (player, instance, switch)))
     heard = None if heard == "-" else int(heard)
     permitted = ("connected", "hosting") if fields[0] == GUEST_VIEW_TAG else ("connected",)
@@ -91,21 +91,31 @@ def parse_view(fields, phase):
 
 
 def _source_sample(values):
-    return (isinstance(values, (list, tuple))
-            and (len(values) == 3 or len(values) == 4 and values[3] == HEAVY)
-            and _identity(0, values[0], values[1]) and type(values[2]) is bool)
+    if (not isinstance(values, (list, tuple)) or len(values) < 3
+            or not _identity(0, values[0], values[1]) or type(values[2]) is not bool):
+        return False
+    return (len(values) == 3 or len(values) == 4 and values[3] == HEAVY
+            or len(values) == 7 and values[3] == OFFHAND and _directions(values[4:]))
+
+
+def _directions(angles):
+    return len(angles) == 3 and all(type(axis) in (int, float) and -180 <= axis <= 180 for axis in angles)
 
 
 def _sample_profile(sample):
-    return HEAVY if len(sample) == 4 else None
+    return sample[3] if len(sample) > 3 else None
 
 
 def parse_guest_source(fields, phase):
-    _, pawn, instance, switch, token = fields
-    power, profile = _power_profile(token)
+    _, pawn, instance, switch, token, *direction = fields
+    power, profile = _power_profile(token, offhand=True)
     sample = [int(instance), int(switch), power]
     if profile:
         sample.append(profile)
+    if profile == OFFHAND:
+        sample.extend(map(float, direction))
+    elif direction:
+        raise ValueError("Unexpected guest handheld flashlight direction")
     if (phase != "connected" or not pawn.startswith("Player_FP_C ") or len(pawn) > 480
             or not _source_sample(sample)):
         raise ValueError("Invalid local guest flashlight source")
@@ -116,7 +126,7 @@ def parse_guest_authority(fields, phase):
     _, player, pawn, *profile = fields
     player = int(player)
     if (phase != "hosting" or not _identity(player, 1, 0) or not pawn.startswith("Player_FP_C ") or len(pawn) > 480
-            or profile not in ([], [HEAVY])):
+            or profile not in ([], [HEAVY], [OFFHAND])):
         raise ValueError("Invalid guest flashlight authority")
     return player, {"pawn": pawn, "profile": profile[0] if profile else None}
 
@@ -127,6 +137,12 @@ def guest_update(game, epoch):
     sample = source.get("sample")
     if _identifier(epoch) and pawn and source.get("pawn") == pawn and _source_sample(sample):
         return epoch, tuple(sample)
+
+
+def guest_edge(update):
+    if update is not None:
+        epoch, sample = update
+        return epoch, sample[:4]
 
 
 def receive_guest(host, character, pawn, sample):
@@ -160,7 +176,7 @@ def peer_frame(host, exclude=None):
     players = host.party.get("players", {})
     members = host.native_recipients()
     ids = {row["pawn"]: (int(player), row["profile"]) for player, row in game.get(GUEST_AUTHORITY, {}).items()}
-    rows, heavy_rows = [], []
+    rows = {None: [], HEAVY: [], OFFHAND: []}
     for character, (scope, state, seen) in tuple(host.guest_flashlights.items()):
         member = members.get(character, {})
         pawn = member.get("pawn")
@@ -169,11 +185,13 @@ def peer_frame(host, exclude=None):
                 or players.get(character, {}).get("downed") is not False or player is None or _sample_profile(state) != profile):
             del host.guest_flashlights[character]
         elif character != exclude:
-            (heavy_rows if profile == HEAVY else rows).append([player, *state[:3]])
-    if 0 < len(rows) + len(heavy_rows) <= MAX_GUEST_SOURCES:
-        result = {"map": game["map"], "epoch": epoch, "sources": sorted(rows)}
-        if heavy_rows:
-            result["heavy_sources"] = sorted(heavy_rows)
+            rows[profile].append([player, *state[:3], *state[4:]])
+    if 0 < sum(map(len, rows.values())) <= MAX_GUEST_SOURCES:
+        result = {"map": game["map"], "epoch": epoch, "sources": sorted(rows[None])}
+        if rows[HEAVY]:
+            result["heavy_sources"] = sorted(rows[HEAVY])
+        if rows[OFFHAND]:
+            result["offhand_sources"] = sorted(rows[OFFHAND])
         return result
 
 
@@ -189,25 +207,27 @@ async def project_peers(bridge, game, incoming, epoch):
         if not isinstance(incoming, dict) or (incoming.get("map"), incoming.get("epoch")) != (area, epoch):
             return game
         expected = {}
-        rows, heavy_rows = incoming.get("sources"), incoming.get("heavy_sources", [])
-        if (not isinstance(rows, list) or not isinstance(heavy_rows, list)
-                or not 0 < len(rows) + len(heavy_rows) <= MAX_GUEST_SOURCES):
+        groups = {None: incoming.get("sources"), HEAVY: incoming.get("heavy_sources", []),
+                  OFFHAND: incoming.get("offhand_sources", [])}
+        if (any(not isinstance(rows, list) for rows in groups.values())
+                or not 0 < sum(map(len, groups.values())) <= MAX_GUEST_SOURCES):
             return game
-        for group, profile in ((rows, None), (heavy_rows, HEAVY)):
-            for row in group:
-                if (not isinstance(row, list) or len(row) != 4 or not _identity(*row[:3])
-                        or type(row[3]) is not bool or str(row[0]) in expected):
+        for profile, rows in groups.items():
+            for row in rows:
+                if (not isinstance(row, list) or len(row) != (7 if profile == OFFHAND else 4)
+                        or not _identity(*row[:3]) or type(row[3]) is not bool or str(row[0]) in expected
+                        or profile == OFFHAND and not _directions(row[4:])):
                     return game
-                expected[str(row[0])] = epoch, *row[1:], profile
+                expected[str(row[0])] = epoch, *row[1:4], profile, row[4:] if profile == OFFHAND else None
 
     def assigned(value):
-        return {key: (row["epoch"], row["instance"], row["switch"], row["power"], row.get("profile"))
+        return {key: (row["epoch"], row["instance"], row["switch"], row["power"], row.get("profile"), row.get("aim"))
                 for key, row in value.items()}
 
     if assigned(applied) == expected:
         return game
-    fields = [str(value) for player, (_, instance, switch, power, profile) in expected.items()
-              for value in (player, instance, switch, _power_token(power, profile))]
+    fields = [str(value) for player, (_, instance, switch, power, profile, aim) in expected.items()
+              for value in (player, instance, switch, _power_token(power, profile), *(aim or ()))]
     result = await bridge.command(GUEST_VIEW_TAG, area, epoch, *fields, timeout=2)
     if assigned(result.get(GUEST_VIEW, {})) != expected:
         raise RuntimeError("The observer did not accept the guest flashlight views")

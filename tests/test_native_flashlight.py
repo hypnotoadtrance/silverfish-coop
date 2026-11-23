@@ -150,3 +150,50 @@ class FlashlightViewTests(unittest.IsolatedAsyncioTestCase):
             flashlight.parse_guest_source([flashlight.GUEST_SOURCE_TAG, "Player_FP_C Guest", "9", "0", "1o"], "connected")
         with self.assertRaises(ValueError):
             flashlight.parse_view([flashlight.GUEST_VIEW_TAG, self.epoch, "257", "9", "0", "1o", "1", "-"], "hosting")
+
+    def test_guest_offhand_requires_matching_authoritative_loadout_and_keeps_aim_off_the_edge(self):
+        pawn = "Player_FP_C /Game/Crossroads.Player_42"
+        _, authority = flashlight.parse_guest_authority([flashlight.GUEST_AUTHORITY_TAG, "258", pawn], "hosting")
+        local = {"pawns": {"local": {"name": pawn}}, flashlight.GUEST_SOURCE: flashlight.parse_guest_source(
+            [flashlight.GUEST_SOURCE_TAG, pawn, "9", "0", "1o", "12.5", "20", "0"], "connected")}
+        first = flashlight.guest_update(local, self.epoch)
+        local[flashlight.GUEST_SOURCE]["sample"][4] = 22.5
+        aimed = flashlight.guest_update(local, self.epoch)
+        self.assertNotEqual(first, aimed)
+        self.assertEqual(flashlight.guest_edge(first), flashlight.guest_edge(aimed))
+        self.assertNotEqual(flashlight.guest_edge(aimed), flashlight.guest_edge(None))
+
+        sources = {"258": authority}
+        host = SimpleNamespace(last_game={"state": "hosting", "map": self.area, flashlight.GUEST_AUTHORITY: sources},
+                               zone_epoch=self.epoch, transitioning=False, last_seen=10,
+                               party={"players": {"guest": {"downed": False}}},
+                               native_recipients=lambda: {"guest": {"pawn": pawn, "connected": True}},
+                               guest_flashlights={})
+        with patch.object(flashlight.time, "monotonic", return_value=10):
+            flashlight.receive_guest(host, "guest", pawn, aimed[1])
+            self.assertIsNone(flashlight.peer_frame(host))
+            _, sources["258"] = flashlight.parse_guest_authority([flashlight.GUEST_AUTHORITY_TAG, "258", pawn, "offhand"],
+                                                                "hosting")
+            flashlight.receive_guest(host, "guest", pawn, [*aimed[1][:-1], 181])
+            self.assertIsNone(flashlight.peer_frame(host))
+            flashlight.receive_guest(host, "guest", pawn, aimed[1])
+            self.assertEqual(flashlight.peer_frame(host)["offhand_sources"], [[258, 9, 0, True, 22.5, 20., 0.]])
+            self.assertIsNone(flashlight.peer_frame(host, exclude="guest"))
+            sources.clear()
+            self.assertIsNone(flashlight.peer_frame(host))
+
+    async def test_guest_offhand_aim_and_regular_beam_share_the_existing_observer_batch(self):
+        game = {"state": "hosting", "map": self.area}
+        frame = {"map": self.area, "epoch": self.epoch, "sources": [[258, 3, 1, True]],
+                 "offhand_sources": [[259, 4, 0, True, 12.5, 20, 0]]}
+        regular = flashlight.parse_view([flashlight.GUEST_VIEW_TAG, self.epoch, "258", "3", "1", "1", "1", "1"], "hosting")
+        offhand = flashlight.parse_view([flashlight.GUEST_VIEW_TAG, self.epoch, "259", "4", "0", "1o", "1", "-",
+                                         "12.5", "20", "0"], "hosting")
+        applied = dict(game, **{flashlight.GUEST_VIEW: {"258": regular, "259": offhand}})
+        bridge = SimpleNamespace(command=AsyncMock(return_value=applied))
+        self.assertIs(await flashlight.project_peers(bridge, game, frame, self.epoch), applied)
+        bridge.command.assert_awaited_once_with(flashlight.GUEST_VIEW_TAG, self.area, self.epoch,
+                                               "258", "3", "1", "1", "259", "4", "0", "1o", "12.5", "20", "0", timeout=2)
+        self.assertIs(await flashlight.project_peers(bridge, applied, frame, self.epoch), applied)
+        duplicate = dict(frame, offhand_sources=[[258, 4, 0, True, 12.5, 20, 0]])
+        self.assertIs(await flashlight.project_peers(bridge, applied, duplicate, self.epoch), applied)
