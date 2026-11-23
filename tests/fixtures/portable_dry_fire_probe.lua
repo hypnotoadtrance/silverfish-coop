@@ -7,6 +7,7 @@ local map = "World /Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P
 local click = "SoundCue /Game/Assets/Sounds/CUEs/Weapon_Cues/Reload_Cues/TriggerClick_Cue.TriggerClick_Cue"
 local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local pistol_path = "/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C"
+local reserve_path = "/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
@@ -25,10 +26,13 @@ local function asset(path)
     return object
 end
 
-local function identify(row)
-    if not same(row[item_class], asset(pistol_path)) then return "-" end
+local function row_identity(row)
     local guid = row[item_guid]
     return ("%08X%08X%08X%08X"):format(guid.A & 0xffffffff, guid.B & 0xffffffff, guid.C & 0xffffffff, guid.D & 0xffffffff)
+end
+
+local function identify(row)
+    return same(row[item_class], asset(pistol_path)) and row_identity(row) or "-"
 end
 
 local function peer_muzzle(component)
@@ -104,6 +108,27 @@ local function ready(pawn)
     return ("%s,%d,%d"):format(identify(row), weapon.Ammo, row[ammo])
 end
 
+local function read_reserve(pawn)
+    local pack, rounds, rows = pawn.Save.PlayerBackpack, asset(reserve_path), {}
+    for index = 1, pack:GetArrayNum() do
+        local row = pack[index]
+        if same(row[item_class], rounds) then rows[#rows + 1] = ("%s,%d"):format(row_identity(row), row[ammo]) end
+    end
+    return table.concat(rows, "|")
+end
+
+local function seed_reserve()
+    assert(local_pawn:HasAuthority() and peer:HasAuthority() and valid(peer.Save) and not same(local_pawn.Save, peer.Save),
+        "stock reload requires a detached authoritative guest inventory")
+    assert(read_reserve(peer) == "", "fixture expected no preexisting 9mm reserve")
+    local pack, output = peer.Save.PlayerBackpack, {}
+    asset(factory):ItemActorToStruct(asset(reserve_path):GetCDO(), peer, output)
+    local row = output.Item or output
+    assert(same(row[item_class], asset(reserve_path)) and row[ammo] == 9, "stock 9mm reserve factory did not produce nine rounds")
+    pack[pack:GetArrayNum() + 1] = row
+    return read_reserve(peer)
+end
+
 local function run(action)
     if action == "arm" then return arm() end
     if action == "seed-local" then return seed(local_pawn, 0) end
@@ -116,6 +141,9 @@ local function run(action)
     end
     if action == "ready" then return ready(local_pawn) end
     if action == "peer-ready" then return ready(peer) end
+    if action == "seed-reserve" then return seed_reserve() end
+    if action == "reserve" then return read_reserve(local_pawn) end
+    if action == "peer-reserve" then return read_reserve(peer) end
     if action == "face-away" then
         local from, other = local_pawn:K2_GetActorLocation(), peer:K2_GetActorLocation()
         local_pawn.Controller:SetControlRotation({Pitch = 35, Yaw = math.deg(math.atan(from.Y - other.Y, from.X - other.X)), Roll = 0})

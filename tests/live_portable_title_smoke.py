@@ -496,6 +496,15 @@ async def verify_resident_pistol(host: Seat, guest: Seat) -> dict:
         assert kind == source and len(position) == 3, clicks
         return [float(axis) for axis in position]
 
+    async def input_result(event, sequence):
+        async with asyncio.timeout(6):
+            while True:
+                for entry in await resident_events(guest_run, guest_frame):
+                    if entry.get("sequence") == sequence and entry["event"] in (event, event + "_rejected"):
+                        assert entry["event"] == event, entry
+                        return entry["native_guest_weapon"]
+                await asyncio.sleep(.08)
+
     for seat in (host, guest):
         assert await command(seat, "arm") == "armed"
     host_guid = await command(host, "seed-local")
@@ -523,14 +532,7 @@ async def verify_resident_pistol(host: Seat, guest: Seat) -> dict:
         assert await command(seat, "clear") == "clear"
     loaded_press = await submit(guest_run, "native-guest-primary-input-fixture")
     assert loaded_press["ok"], loaded_press
-    loaded_sequence = loaded_press["native_guest_primary_fixture"]["sequence"]
-    async with asyncio.timeout(6):
-        while not (loaded_result := next((entry for entry in await resident_events(guest_run, guest_frame)
-                                          if entry.get("sequence") == loaded_sequence and entry["event"] in {
-                                              "native_guest_primary_input", "native_guest_primary_input_rejected"}), None)):
-            await asyncio.sleep(.08)
-    assert loaded_result["event"] == "native_guest_primary_input", loaded_result
-    shot = loaded_result["native_guest_weapon"]
+    shot = await input_result("native_guest_primary_input", loaded_press["native_guest_primary_fixture"]["sequence"])
     assert (shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (guest_guid, 1, 0, 1), shot
     await wait_for(host, "peer-ready", f"{guest_guid},0,0")
     await wait_for(guest, "ready", f"{guest_guid},0,0")
@@ -556,12 +558,28 @@ async def verify_resident_pistol(host: Seat, guest: Seat) -> dict:
     guest_input, = [entry for entry in since if entry["event"] == "native_guest_primary_input_rejected"
                     and entry.get("sequence") == press["native_guest_primary_fixture"]["sequence"]]
     assert guest_input["reason"] == "guest_weapon_preloaded_magazine_required", guest_input
+
+    reserve = await command(host, "seed-reserve")
+    assert re.fullmatch(r"[0-9A-F]{32},9", reserve), reserve
+    await wait_for(guest, "reserve", reserve)
+    reloaded = await submit(guest_run, "native-guest-reload-input-fixture")
+    assert reloaded["ok"] and reloaded["native_guest_reload_fixture"]["stock_wrappers"] == 2, reloaded
+    reload = await input_result("native_guest_reload_input", reloaded["native_guest_reload_fixture"]["sequence"])
+    assert (reload["guid"], reload["before"], reload["after"], reload["reserve_before"], reload["reserve_after"]) == (
+        guest_guid, 0, 9, 9, 0), reload
+    await wait_for(host, "peer-ready", f"{guest_guid},9,9")
+    await wait_for(guest, "ready", f"{guest_guid},9,9")
+    await wait_for(guest, "reserve", "")
+    assert await command(host, "peer-reserve") == "" and await command(host, "reserve") == ""
+    assert await command(host, "ready") == f"{host_guid},0,0"
     return {"host_stock_click": host_click, "guest_heard_host": guest_heard, "guest_primary_input": press,
             "host_heard_guest": host_heard, "guest_click": guest_click, "guest_cue_receipts": events,
             "guest_live_round": shot, "host_guest_shot_dispatch": {"projectile_calls": host_shot[0],
                 "shot_sounds": host_shot[1], "muzzle_flashes": host_shot[2]},
             "guest_empty_magazine_receipt": guest_input,
-            "pistols_still_empty": True, "projectiles_spawned": 0, "observers_played_shot_effects": 0}
+            "pistols_still_empty_after_dry_fire": True, "projectiles_spawned": 0, "observers_played_shot_effects": 0,
+            "guest_reload_input": reloaded, "guest_reload": reload, "retired_reserve": reserve,
+            "both_games_projected_reloaded_magazine": True, "host_magazine_and_reserve_unchanged": True}
 
 
 async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str) -> dict:
@@ -576,9 +594,11 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str) -> dic
     item = native_guest_consumable.BANDAGE_CLASS
     event_names = ("native_avatar_use_sound_played", "native_avatar_use_visual_played")
     campaign = host.campaign / "save"
+    cloud = host.profile / "Saved/SaveGames" / FOLDER
 
     def save_state():
-        native = (path for seat in (host, guest) for path in (seat.profile / "Saved/SaveGames").rglob("*.sav"))
+        native = (path for seat in (host, guest) for path in (seat.profile / "Saved/SaveGames").rglob("*.sav")
+                  if not path.is_relative_to(seat.profile / "Saved/SaveGames" / FOLDER))
         return {path: (fingerprint(path), path.stat().st_mtime_ns) for path in (*campaign.glob("campaign*.json"), *native)}
 
     def use_events(events):
@@ -589,6 +609,8 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str) -> dic
     assert not use_events(await resident_events(guest_run, guest_frame)), "The observer already has a Bandage cue"
     before = save_state()
     assert campaign / "campaign.json" in before
+    backup_before = {path: fingerprint(path) for path in cloud.glob("SFCoopBackup-*.sav")}
+    checkpoint = json.loads((campaign / "campaign.json").read_bytes())
     result = await portable_probe_command(host.bridge, "avatar-probe", "consume\n")
     player_id, class_name = result.strip().split("\t")
     player_id = int(player_id)
@@ -614,10 +636,21 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str) -> dic
     footsteps = await verify_resident_footsteps(host, guest)
     pistol = await verify_resident_pistol(host, guest)
     assert not weapon_cue_files(host, guest), "Stock player cues wrote a legacy weapon cue mailbox"
-    assert save_state() == before, "Stock use wrote a campaign save before the normal checkpoint"
+    after = save_state()
+    changed = [path for path in before.keys() | after.keys() if before.get(path) != after.get(path)]
+    assert not changed, f"Campaign saves changed during stock player actions: {changed}"
+    # An asynchronous Auto-Cloud copy may catch up with the preceding enrollment checkpoint.
+    backup_revisions = []
+    for path in cloud.glob("SFCoopBackup-*.sav"):
+        if fingerprint(path) != backup_before.get(path):
+            with ZipFile(path) as archive:
+                backed_up = json.loads(archive.read("campaign.json"))
+            assert backed_up == checkpoint, "The cloud mirror backed up a new checkpoint during stock player actions"
+            backup_revisions.append(backed_up["revision"])
     return {"resident_weapon_cues": {"stock_player_id": player_id, "source": class_name, "observer_cues": cues,
                                      "prop": prop, "local_bridge_both_peers": "memory",
                                      "no_cue_mailbox": True, "saves_unchanged_before_checkpoint": True,
+                                     "previous_checkpoint_cloud_copies": backup_revisions,
                                      "stock_footsteps": footsteps, "stock_pistol": pistol}}
 def unequip_rows(raw):
     result = []
