@@ -68,6 +68,82 @@ async def avatar_probe(run, operation, *, allow_pending=False):
             await asyncio.sleep(.025 if operation == "rig" else .1)
 
 
+def flashlight_owner(values):
+    player, source, role, replicated, powered, visible, *data = values
+    x, y, z, pitch, yaw, roll, intensity, radius, inner, outer, cookie, calls, clicks = data
+    return dict(player=int(player), source=source, role=role, replicated=replicated == "true",
+                powered=powered == "true", visible=visible == "true", location=list(map(float, (x, y, z))),
+                rotation=list(map(float, (pitch, yaw, roll))), intensity=float(intensity), radius=float(radius),
+                inner=float(inner), outer=float(outer), light_cookie=cookie, power_calls=int(calls), click_calls=int(clicks))
+
+
+def flashlight_observer(values):
+    remote, sources, powered, spotlights, pawn_lights, held_sources, display_meshes = values
+    return dict(remote=remote, sources=int(sources), powered_sources=int(powered), visible_source_spotlights=int(spotlights),
+                visible_pawn_spotlights=int(pawn_lights), stock_held_source_count=int(held_sources),
+                displayed_flashlight_mesh_count=int(display_meshes))
+
+
+async def observe_guest_stock_flashlight(host_run, guest_run):
+    proof_path = host_run / "live-guest-flashlight-source-probe.json"
+    proof = {"verified": False, "phases": {}}
+    selection_events = ("native_guest_equipment_selected", "native_guest_equipment_selection_rejected")
+
+    def record():
+        proof["selection_events"] = {key: events(guest_run, key)[-4:] for key in selection_events}
+        proof_path.write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
+
+    def owner(values):
+        guid, stacks, mode = values[-3:]
+        return dict(flashlight_owner(values[:-3]), slot_guid=guid, stacks=stacks, stock_mode=mode)
+
+    async def phase(name, row):
+        table = proof["phases"][name] = {"owner": row}
+        record()
+        values = await avatar_probe(host_run, f"observe{row['player']}")
+        guid, held_class, mode, power = values[-4:]
+        table["host"] = dict(flashlight_observer(values[:-4]), slot_guid=guid, authoritative_equipment=held_class,
+                             authoritative_mode=mode, authoritative_power=power)
+        record()
+        host_guest = status(host_run)["game"]["pawns"]["guest"]["name"]
+        assert table["host"]["remote"] == host_guest, (table["host"], host_guest)
+
+    guid, = await avatar_probe(host_run, "seedguest")
+    proof["seeded_guid"] = guid
+    record()
+    try:
+        async with asyncio.timeout(15):
+            while not (selected := await avatar_probe(guest_run, f"selectlight{guid}", allow_pending=True)):
+                await asyncio.sleep(.1)
+        equipped = owner(selected)
+        baseline = owner(await avatar_probe(guest_run, "lightoff")) if equipped["powered"] else equipped
+        # Give the normal quickslot relay one bounded window to accept or refuse the selected GUID.
+        # The stock owner read remains useful when the capture build has no selection relay.
+        try:
+            async with asyncio.timeout(4):
+                while not any(events(guest_run, key) for key in selection_events):
+                    await asyncio.sleep(.1)
+        except TimeoutError:
+            pass
+        await phase("off", baseline)
+        lit = owner(await avatar_probe(guest_run, "lighton"))
+        await phase("on", lit)
+        unlit = owner(await avatar_probe(guest_run, "lightoff"))
+        await phase("off_again", unlit)
+        host_rows = [phase["host"] for phase in proof["phases"].values()]
+        assert all(row["slot_guid"] == guid and row["player"] == equipped["player"]
+                   and row["source"] == equipped["source"] for row in (baseline, lit, unlit)), proof
+        assert all(row["slot_guid"] == guid and row["remote"] == host_rows[0]["remote"] for row in host_rows), proof
+        assert [(row["powered"], row["visible"]) for row in (baseline, lit, unlit)] == [
+            (False, False), (True, True), (False, False),
+        ], proof
+        assert (lit["click_calls"] - baseline["click_calls"], unlit["click_calls"] - lit["click_calls"]) == (1, 1), proof
+        proof["verified"] = True
+    finally:
+        record()
+    return proof
+
+
 async def observe_stock_flashlight(host_run, guest_run, *, verify_view=False):
     proof_path = host_run / "live-flashlight-projection-probe.json"
     diagnostic = {"verified": False, "phases": {}}
@@ -77,19 +153,10 @@ async def observe_stock_flashlight(host_run, guest_run, *, verify_view=False):
             proof_path.write_text(json.dumps(diagnostic, indent=2) + "\n", encoding="utf-8")
 
     async def owner(operation):
-        values = await avatar_probe(host_run, operation)
-        player, source, role, replicated, powered, visible, *data = values
-        x, y, z, pitch, yaw, roll, intensity, radius, inner, outer, cookie, calls, clicks = data
-        return dict(player=int(player), source=source, role=role, replicated=replicated == "true",
-                    powered=powered == "true", visible=visible == "true", location=list(map(float, (x, y, z))),
-                    rotation=list(map(float, (pitch, yaw, roll))), intensity=float(intensity), radius=float(radius),
-                    inner=float(inner), outer=float(outer), light_cookie=cookie, power_calls=int(calls), click_calls=int(clicks))
+        return flashlight_owner(await avatar_probe(host_run, operation))
 
     async def observer(player):
-        remote, sources, powered, spotlights, pawn_lights, held_sources, display_meshes = await avatar_probe(guest_run, f"observe{player}")
-        return dict(remote=remote, sources=int(sources), powered_sources=int(powered), visible_source_spotlights=int(spotlights),
-                    visible_pawn_spotlights=int(pawn_lights), stock_held_source_count=int(held_sources),
-                    displayed_flashlight_mesh_count=int(display_meshes))
+        return flashlight_observer(await avatar_probe(guest_run, f"observe{player}"))
 
     async def view_receipt(phase, owner_state, *, click):
         player, powered = owner_state["player"], owner_state["powered"]
@@ -408,15 +475,17 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
                   melee: bool = False, pose: bool = False, rifle: bool = False,
                   consumable: bool = False, movement: bool = False, movement_traits: bool = False,
                   aim_movement: bool = False, stock_shotgun_aim: bool = False, flashlight_source: bool = False,
-                  flashlight_view: bool = False) -> None:
+                  flashlight_view: bool = False, guest_flashlight_source: bool = False) -> None:
     profile = "avatar-" + uuid.uuid4().hex[:8]
     host_dir = work / "campaigns" / profile
     guest_dir = work / "clients" / profile
     host_run, guest_run = host_dir / "run", guest_dir / "run"
     host_run.mkdir(parents=True)
     env = dict(os.environ, SILVERFISH_COOP_RENDER_CAPTURE="guest")
-    if flashlight_source:
+    if flashlight_source or guest_flashlight_source:
         env["SILVERFISH_COOP_FLASHLIGHT_PROBE"] = "1"
+    if guest_flashlight_source:
+        env["SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE"] = "1"
     if pose:
         env["SILVERFISH_COOP_RENDER_CAPTURE_POSE"] = "1"
     if rifle or aim_movement:
@@ -478,10 +547,13 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             state = await wait(run, projections)
             evidence[role] = projections(state)
             assert all(row["state"] == "default_body" for row in evidence[role].values()), evidence
-        if flashlight_source:
+        if flashlight_source or guest_flashlight_source:
             await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
-            evidence["stock_flashlight_source_observation"] = await observe_stock_flashlight(
-                host_run, guest_run, verify_view=flashlight_view)
+            if guest_flashlight_source:
+                evidence["guest_stock_flashlight_source_observation"] = await observe_guest_stock_flashlight(host_run, guest_run)
+            else:
+                evidence["stock_flashlight_source_observation"] = await observe_stock_flashlight(
+                    host_run, guest_run, verify_view=flashlight_view)
             (host_run / "live-avatar-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
             return
         if lifecycle:
@@ -763,9 +835,12 @@ if __name__ == "__main__":
     light.add_argument("--flashlight-source", action="store_true",
                        help="observe a stock flashlight switch, beam source, and remote visibility in a private pair")
     light.add_argument("--flashlight-view", action="store_true", help="also require the observer's flashlight beam and switch receipt")
+    light.add_argument("--guest-flashlight-source", action="store_true",
+                       help="compare an equipped guest's stock beam with its host authority pawn")
     options = parser.parse_args()
     options.flashlight_source |= options.flashlight_view
-    if options.flashlight_source and any((options.lifecycle, options.equipment, options.melee, options.pose, options.rifle,
+    use_flashlight_fixture = options.flashlight_source or options.guest_flashlight_source
+    if use_flashlight_fixture and any((options.lifecycle, options.equipment, options.melee, options.pose, options.rifle,
                                          options.consumable, options.movement, options.movement_traits, options.aim_movement,
                                          options.stock_shotgun_aim)):
         parser.error("Use --flashlight-source without other avatar fixtures")
@@ -784,14 +859,15 @@ if __name__ == "__main__":
         parser.error("--stock-shotgun-aim requires --aim-movement and replaces the break-action rifle")
     work = options.work.resolve(strict=True)
     original = options.vanilla_saved.resolve(strict=True)
-    if options.flashlight_source and (any(part.casefold() == "steamapps" for part in work.parts)
+    if use_flashlight_fixture and (any(part.casefold() == "steamapps" for part in work.parts)
                                      or work.is_relative_to(original) or original.is_relative_to(work)):
         parser.error("Use a private flashlight replica separate from the comparison saves")
-    fixture = "flashlight_source_probe.lua" if options.flashlight_source else "avatar_presentation_probe.lua"
+    fixture = "flashlight_source_probe.lua" if use_flashlight_fixture else "avatar_presentation_probe.lua"
     with installed_probe(work, fixture) if any(
         (options.equipment, options.pose, options.rifle, options.consumable, options.movement, options.aim_movement)
-    ) or options.flashlight_source else nullcontext():
+    ) or use_flashlight_fixture else nullcontext():
         asyncio.run(capture(work, original,
                             options.lifecycle, options.equipment, options.melee, options.pose,
                             options.rifle, options.consumable, options.movement, options.movement_traits,
-                            options.aim_movement, options.stock_shotgun_aim, options.flashlight_source, options.flashlight_view))
+                            options.aim_movement, options.stock_shotgun_aim, options.flashlight_source, options.flashlight_view,
+                            options.guest_flashlight_source))

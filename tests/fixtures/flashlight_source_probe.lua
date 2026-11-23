@@ -9,7 +9,9 @@ local mesh_name = "StaticMesh /Game/Assets/StaticMeshes/Mesh_Props/PropActor_Mes
 local source_path = "/Game/Classes/Equipment/Equipment_Assets/FlashLight_Source_BP.FlashLight_Source_BP_C"
 local click_path = "SoundCue /Game/Assets/Sounds/CUEs/Mechanical_Cues/Switch_Reset_Cue.Switch_Reset_Cue"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
+local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local equip_factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
+local guest_source = os.getenv("SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE") == "1"
 local source, cue_calls, power_calls, hooked = nil, 0, 0, false
 
 local function valid(value) return value and value:IsValid() end
@@ -56,6 +58,15 @@ local function owned_source(pawn, world)
         and same(child:GetOwner(), equipped) and same(actor:GetParentActor(), equipped)
         and valid(spot) and same(spot:GetOwner(), actor), "flashlight_probe_child_light_unavailable")
     return equipped, actor, spot
+end
+
+local function slot_guid(pawn)
+    local rows = valid(pawn.Save) and pawn.Save.PlayerEquipment
+    local row = rows and rows:GetArrayNum() >= 1 and rows[1]
+    if not row or not same(row[item_class], asset(equipment_path)) then return "-" end
+    local guid = row[item_guid]
+    return string.format("%08x%08x%08x%08x", guid.A & 0xffffffff, guid.B & 0xffffffff,
+        guid.C & 0xffffffff, guid.D & 0xffffffff)
 end
 
 local function owner_row(pawn, actor, spot)
@@ -108,8 +119,20 @@ local function observe(world, local_pawn, id)
             display_meshes = display_meshes + 1
         end
     end
-    return string.format("%s\t%d\t%d\t%d\t%d\t%d\t%d", remote:GetFullName(), sources, powered, visible, components,
+    local census = string.format("%s\t%d\t%d\t%d\t%d\t%d\t%d", remote:GetFullName(), sources, powered, visible, components,
         held_sources, display_meshes)
+    if not guest_source then return census end
+    assert(remote:HasAuthority() and valid(remote.Save) and not same(remote.Save, local_pawn.Save),
+        "flashlight_probe_observer_guest_authority_unavailable")
+    local held = remote.EquipedItem
+    local held_class = valid(held) and held:GetClass():GetFullName() or "-"
+    local mode, stock_power = "-", "-"
+    if held_class == "BlueprintGeneratedClass " .. equipment_path then
+        local equipment, actor = owned_source(remote, world)
+        assert(equipment:HasAuthority(), "flashlight_probe_observer_equipment_authority_unavailable")
+        mode, stock_power = tostring(equipment.Tertiary_Mode), tostring(actor.Powered)
+    end
+    return table.concat({census, slot_guid(remote), held_class, mode, stock_power}, "\t")
 end
 
 local function run(operation)
@@ -119,13 +142,52 @@ local function run(operation)
     assert(valid(driver) and world:GetFullName() == map, "flashlight_probe_world_unavailable")
     local pawn = asset("/Script/Engine.Default__GameplayStatics"):GetPlayerPawn(world, 0)
     assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn:GetWorld(), world), "flashlight_probe_local_pawn_unavailable")
-    if valid(driver.ServerConnection) then
+    local connected = valid(driver.ServerConnection)
+    if connected and not guest_source then
         return observe(world, pawn, assert(math.tointeger(operation:match("^observe(%d+)$"))))
     end
-    assert(pawn:HasAuthority() and #driver.ClientConnections == 1 and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
-        and same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref), "flashlight_probe_host_scope_unavailable")
+    assert(same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref), "flashlight_probe_local_save_unavailable")
+    if not connected then
+        assert(pawn:HasAuthority() and #driver.ClientConnections == 1 and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1",
+            "flashlight_probe_host_scope_unavailable")
+    end
 
-    if operation == "seedlight" then
+    if guest_source and not connected then
+        if operation ~= "seedguest" then
+            return observe(world, pawn, assert(math.tointeger(operation:match("^observe(%d+)$"))))
+        end
+        local guest
+        for _, candidate in ipairs(FindAllOf("Player_FP_C") or {}) do
+            if valid(candidate) and candidate:HasAuthority() and not candidate:IsLocallyControlled()
+                and same(candidate:GetWorld(), world) and not candidate:IsActorBeingDestroyed() then
+                assert(not guest, "flashlight_probe_duplicate_guest")
+                guest = candidate
+            end
+        end
+        assert(guest and valid(guest.Save) and not same(guest.Save, pawn.Save), "flashlight_probe_detached_guest_unavailable")
+        local rows = guest.Save.PlayerEquipment
+        assert(rows:GetArrayNum() >= 1 and not valid(rows[1][item_class]), "flashlight_probe_guest_slot_occupied")
+        local output = {}
+        local type = asset(equipment_path)
+        asset(equip_factory):MakeDefaultItem(type, guest, output)
+        local row = output.Item or output
+        assert(same(row[item_class], type), "flashlight_probe_stock_item_factory_failed")
+        rows[1] = row
+        local guid = slot_guid(guest)
+        assert(guid ~= "-" and guid ~= string.rep("0", 32), "flashlight_probe_detached_guest_slot_readback")
+        return guid
+    end
+
+    local selected = guest_source and operation:match("^selectlight(%x+)$")
+    if selected then
+        assert(#selected == 32, "flashlight_probe_guest_slot_scope_invalid")
+        if slot_guid(pawn) ~= selected then error("avatar_probe_rig_pending", 0) end
+        assert(not valid(pawn.EquipedItem), "flashlight_probe_expected_empty_active_slot")
+        pawn:Equip_NextItem(0, false)
+        assert(pawn.Save.PlayerEquipIndex == 0, "flashlight_probe_guest_selection_failed")
+    end
+
+    if operation == "seedlight" and not connected then
         local type = asset(equipment_path)
         assert(not valid(pawn.EquipedItem), "flashlight_probe_expected_empty_active_slot")
         local output = {}
@@ -145,7 +207,7 @@ local function run(operation)
         equipment:Use_Item_Primary(true, 0)
         equipment:Use_Item_Primary(false, 0)
         assert(actor.Powered == requested and spot:IsVisible() == requested, "flashlight_probe_stock_power_readback_failed")
-    elseif operation == "clearlight" then
+    elseif operation == "clearlight" and not connected then
         if actor.Powered then equipment:Use_Item_Primary(true, 0) end
         local index = math.tointeger(pawn.Save.PlayerEquipIndex)
         local row = index and pawn.Save.PlayerEquipment[index + 1]
@@ -154,9 +216,14 @@ local function run(operation)
         assert(not valid(pawn.Save.PlayerEquipment[index + 1][item_class]), "flashlight_probe_removal_failed")
         return "restored"
     else
-        assert(operation == "seedlight" or operation == "readlight", "flashlight_probe_unknown_action")
+        assert(selected or operation == "seedlight" and not connected or operation == "readlight",
+            "flashlight_probe_unknown_action")
     end
-    return owner_row(pawn, actor, spot)
+    local row = owner_row(pawn, actor, spot)
+    if guest_source then
+        return table.concat({row, slot_guid(pawn), tostring(equipment.Stacks), tostring(equipment.Tertiary_Mode)}, "\t")
+    end
+    return row
 end
 
 local last
