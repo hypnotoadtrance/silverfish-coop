@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import contextlib
+from hashlib import sha256
 import json
 import math
 from pathlib import Path
@@ -16,7 +17,7 @@ from live_multi_smoke import campaign_save_hashes, saved_hashes
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from tools.silverfish import native_board_contract as dynamic, native_computer_board, native_wire_board, travel
+from tools.silverfish import native_board_contract as dynamic, native_computer_board, native_wire_board, runtime, travel
 from tools.silverfish.native_gold import valid_guid
 
 
@@ -31,21 +32,32 @@ def staged_probe(work):
     scripts = work / "stage/SilverFish/Binaries/Win64/ue4ss/Mods/SilverfishCoop/Scripts"
     main, fixture = scripts / "main.lua", scripts / "eye_board_probe.lua"
     original = main.read_bytes()
+    manifest = runtime.stage_manifest(work / "stage")
+    original_manifest = manifest.read_bytes()
     source = Path(__file__).with_name("fixtures") / fixture.name
     with fixture.open("xb") as stream:
         stream.write(source.read_bytes())
     try:
-        main.write_bytes(original + b'\nrequire("eye_board_probe")\n')
+        anchor = b"native_wire_board.sync(state, current_phase)"
+        if original.count(anchor) != 1:
+            raise ValueError("The staged board tick is unavailable for this fixture")
+        main.write_bytes(original.replace(anchor, anchor + b'\n        require("eye_board_probe").sync(state, current_phase)'))
+        staged = json.loads(original_manifest)
+        if "lua_files" in staged:
+            for path in (main, fixture):
+                staged["lua_files"][path.name] = sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+            manifest.write_text(json.dumps(staged) + "\n", encoding="utf-8")
         yield
     finally:
         main.write_bytes(original)
+        manifest.write_bytes(original_manifest)
         fixture.unlink()
 
 
 async def probe(run, operation):
     bridge, = (run / "game-bridge").iterdir()
     nonce = uuid.uuid4().hex
-    (bridge / "eye-board-probe").write_text(f"{operation}|{nonce}\n", encoding="ascii")
+    (bridge / "eye-board-probe").write_bytes(f"{operation}|{nonce}\n".encode("ascii"))
     async with asyncio.timeout(8):
         while True:
             await asyncio.sleep(.05)

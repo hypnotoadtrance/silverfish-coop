@@ -1,7 +1,7 @@
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
-local world_name = "World /Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P.Shop_ShopKeep_P"
+local shopkeep = "/Game/Classes/Maps/Maps_SafeZones/Shop_ShopKeep_P"
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") ~= "1"
-    or not bridge or not bridge:find("eye%-board%-%x+") then return end
+    or not bridge or not bridge:find("eye%-board%-%x+") then return {sync = function() end} end
 
 local class_path = "/Game/Classes/Items/Item_MonsterEye.Item_MonsterEye_C"
 local factory_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
@@ -18,7 +18,8 @@ local function identity(item)
     return ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
 end
 
-local function prepare(world, host, operation)
+local function prepare(state, host, operation)
+    local world = state.world
     local instance, driver = world.OwningGameInstance, world.NetDriver
     local connections = driver.ClientConnections
     assert(host:HasAuthority() and same(host.Save, instance.SaveSlot_Ref) and connections:GetArrayNum() == 1)
@@ -26,7 +27,7 @@ local function prepare(world, host, operation)
         assert(not leveled and #host.Save.ActiveQuests == 0)
         local before, after = {}, {}
         instance:Check_SaveFlag(FName("Player_Xp"), before, before)
-        assert(before.Value == 0)
+        assert((before.Found and before.Value or 0) == 0)
         instance:GivePlayer_XP(5)
         instance:Check_SaveFlag(FName("Player_Xp"), after, after)
         assert(after.Value == 5)
@@ -37,8 +38,8 @@ local function prepare(world, host, operation)
     assert(operation == "eye" and not seeded)
     local remote = connections[1].PlayerController.Pawn
     assert(valid(remote) and not same(remote, host) and same(remote:GetWorld(), world) and remote:HasAuthority())
-    local save = remote.Save
-    assert(valid(save) and not same(save, instance.SaveSlot_Ref))
+    local owner, save = require("guest_save").exact_item_context(state, "hosting", remote:GetFullName())
+    assert(same(owner, remote) and same(save, remote.Save) and not same(save, instance.SaveSlot_Ref))
     local item = StaticFindObject(class_path)
     if not valid(item) then LoadAsset(class_path); item = StaticFindObject(class_path) end
     local factory = StaticFindObject(factory_path)
@@ -56,24 +57,21 @@ local function prepare(world, host, operation)
     return guid
 end
 
-LoopInGameThreadWithDelay(100, function()
-    local viewport = FindFirstOf("GameViewportClient")
-    local world = valid(viewport) and viewport.World
-    if not valid(world) or world:GetFullName() ~= world_name or not valid(world.NetDriver)
-        or valid(world.NetDriver.ServerConnection) then return end
-    local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-    local host = statics:GetPlayerPawn(world, 0)
-    if not valid(host) or not host:IsLocallyControlled() then return end
+local function sync(state, phase)
+    if phase ~= "hosting" or state.map ~= shopkeep or state.clients ~= 1 or not state.local_pawn then return end
+    local host = state.local_pawn.pawn
     local input = io.open(bridge .. "/eye-board-probe", "rb")
     if not input then return end
     local request = input:read("*l")
     input:close()
     if not request or request == previous then return end
     previous = request
-    local operation, nonce = request:match("^(%a+)|(%x+)$")
+    local operation, nonce = request:gsub("\r$", ""):match("^(%a+)|(%x+)$")
     if not nonce then return end
-    local ok, result = pcall(prepare, world, host, operation)
+    local ok, result = pcall(prepare, state, host, operation)
     local output = assert(io.open(bridge .. "/eye-board-reply", "wb"))
     output:write(nonce, "|", ok and "ok|" or "error|", tostring(result))
     output:close()
-end)
+end
+
+return {sync = sync}
