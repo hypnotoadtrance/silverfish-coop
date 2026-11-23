@@ -46,7 +46,7 @@ class PumpTapeTests(unittest.IsolatedAsyncioTestCase):
         state = party.new_party()
         party.add_player(state, OWNER)
         host = SimpleNamespace(
-            party=state, native_profile=True, native_guest=True, native_zones=True, last_seen=time.monotonic(),
+            party=state, native_profile=True, native_loot_input=False, native_guest=True, native_zones=True, last_seen=time.monotonic(),
             last_game=game, transitioning=False, stopping=False, native_checkpoint_unsafe=False,
             native_recipients=lambda: {OWNER: {"pawn": PAWN, "connected": True}}, checkpoint_native=AsyncMock(return_value=7),
             control=Mock(),

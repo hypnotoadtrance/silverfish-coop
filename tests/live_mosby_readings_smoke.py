@@ -33,7 +33,7 @@ FROM_DRILL_HEAD = ((CISTERN, "Cistern_Sci"), (CROSSROADS, "CR_Cstrn"), (RUIN_FIE
 
 async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False, stock_station=False, stock_board=False,
                    equip_reward=False, prototype_dialogue=False, prototype_pickup=False, prototype_chamber_staged=False,
-                   prototype_redeem=False, verify_deferred_turn_in=False):
+                   prototype_redeem=False, verify_deferred_turn_in=False, verify_deferred_exchange=False):
     if prototype_redeem:
         prototype_pickup = prototype_chamber_staged = True
     name = "stone-maze-readings-" + uuid.uuid4().hex[:8]
@@ -495,6 +495,8 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         approach = (await action(authority, tape.APPROACH, "--target", "guest"))["native_mosby_tape_approach"]
         before = (await action(client, tape.PREFLIGHT, "--target", blank))["native_mosby_tape"]
         assert (before["station"], before["pawn"], before["blank_guid"]) == (tape.STATION, approach["pawn"], blank), before
+        before_exchange = campaign_save_hashes(campaign)
+        assert str(Path("save/campaign.json")) in before_exchange
         if stock_station:
             def stationary(status):
                 return status.get("game", {}).get(station_view.KEY, {})
@@ -528,9 +530,13 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
             assert (pending["state"], pending["open"], pending["blank_guid"]) == ("trading", checked["open"], blank)
             exchanged = stationary(await wait(client_run, lambda status: stationary(status).get("state") == "exchanged", timeout=26))
             assert (exchanged["sequence"], exchanged["blank_guid"]) == (pending["sequence"], blank)
-            receipt = saved()["world"]["party"][tape.EXCHANGES][blank]
+            events = (json.loads(line) for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines())
+            receipt, = (row for row in events if row["event"] == tape.STONE.key + "_committed"
+                         and row.get("blank_guid") == blank and row.get("owner") == character)
             assert receipt["filled_guid"] == exchanged["filled_guid"]
-            converted, operation = {"effect": "stone_maze_tape_exchanged", **receipt}, receipt["operation_id"]
+            operation = receipt["operation_id"]
+            converted = {"effect": "stone_maze_tape_exchanged", "owner": character, "blank_guid": blank,
+                         "filled_guid": receipt["filled_guid"], "operation_id": operation}
             evidence["stock_station"] = {"offer": shown, "trade": exchanged}
         else:
             operation = uuid.uuid4().hex
@@ -544,10 +550,17 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         assert (replayed["effect"], replayed["filled_guid"]) == ("stone_maze_tape_already_exchanged", product), replayed
         wrong = await action(client, "native-quest-turnin", "--target", tape.MOSBY_QUEST, expected=False)
         assert wrong["error"] == "native_mosby_tape_exact_zone_unavailable", wrong
+        if verify_deferred_exchange:
+            assert campaign_save_hashes(campaign) == before_exchange, "A station exchange or replay wrote campaign files"
+            evidence["deferred_exchange"] = {"unchanged_save_files": len(before_exchange)}
         evidence.update(stock_offer=before, exchange=converted, wrong_zone=wrong["error"])
 
         for destination, portal in TO_SCIENTIST:
             current = await cross(current, destination, portal)
+        if verify_deferred_exchange:
+            persisted = saved()["world"]["party"][tape.EXCHANGES][blank]
+            assert persisted["filled_guid"] == product and persisted["owner"] == character
+            evidence["deferred_exchange"]["save_after_travel"] = saved()["revision"]
         board = await identify_board()
         assert board["objective_guid"] == product and board["objective_owner"] == "guest", board
         await action(authority, "checkpoint")
@@ -668,6 +681,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-station", action="store_true", help="exercise two stock station presses and the exact authenticated offer")
     parser.add_argument("--stock-board", action="store_true", help="review and turn in the exact Scientist contract with stock Interact")
     parser.add_argument("--equip-reward", action="store_true", help="equip the earned HazOp gear and verify both exact swaps and restart")
+    parser.add_argument("--verify-deferred-exchange", action="store_true",
+                        help="require the Stone Maze conversion and replay to leave saves unchanged until travel")
     parser.add_argument("--verify-deferred-turn-in", action="store_true",
                         help="require Stone Maze turn-in and replay to leave saves unchanged until checkpoint")
     prototype = parser.add_mutually_exclusive_group()
@@ -684,4 +699,4 @@ if __name__ == "__main__":
                          stock_station=args.stock_station, stock_board=args.stock_board, equip_reward=args.equip_reward,
                          prototype_dialogue=args.prototype_dialogue, prototype_pickup=args.prototype_pickup,
                          prototype_chamber_staged=args.prototype_chamber_staged, prototype_redeem=args.prototype_redeem,
-                         verify_deferred_turn_in=args.verify_deferred_turn_in))
+                         verify_deferred_turn_in=args.verify_deferred_turn_in, verify_deferred_exchange=args.verify_deferred_exchange))

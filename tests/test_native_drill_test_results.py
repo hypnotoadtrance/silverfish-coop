@@ -2,7 +2,7 @@ import time
 import unittest
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import native_host_save, native_mosby_tape as tape, party
 from tools.silverfish.campaign import CampaignFormatError
@@ -37,7 +37,7 @@ def listening(*, completed=True):
     if completed:
         state["native_quests"] = {DRILL_QUEST: completion()}
     snapshot = {"state": "hosting", "map": DRILL.map, "pawns": {"local": {"name": HOST_PAWN}}}
-    return SimpleNamespace(party=state, native_profile=True, native_guest=True, native_zones=True, last_seen=time.monotonic(),
+    return SimpleNamespace(party=state, native_profile=True, native_loot_input=False, native_guest=True, native_zones=True, last_seen=time.monotonic(),
                            last_game=snapshot, transitioning=False, stopping=False, native_checkpoint_unsafe=False,
                            native_recipients=lambda: {GUEST: {"pawn": GUEST_PAWN, "connected": True}},
                            checkpoint_native=AsyncMock(return_value=17), control=Mock())
@@ -102,6 +102,29 @@ class DrillTestResultsTests(unittest.IsolatedAsyncioTestCase):
                 host.party["native_quests"].clear()
                 with self.assertRaises(CampaignFormatError):
                     native_host_save._escrow_frames(saved)
+
+    async def test_resident_exchange_retains_exact_inventory_without_a_checkpoint(self):
+        for actor, pawn in (("host", HOST_PAWN), (GUEST, GUEST_PAWN)):
+            with self.subTest(actor=actor):
+                host = listening()
+                host.native_loot_input = True
+                host.pending_host_save = None
+                host.last_game["native_guest_save_retention"] = True
+                generated = product(actor)
+                preflight = snapshot(host, frame(pawn))
+                converted = snapshot(host, frame(pawn, "convert", "exchanged", generated))
+                bridge = SimpleNamespace(command=AsyncMock(side_effect=(preflight, converted)))
+                with patch.object(tape.native_wire_quest, "_retain_reward_guest", AsyncMock(return_value=True)) as retain:
+                    result = await tape.convert(host, bridge, actor, BLANK, OPERATION, profile=DRILL)
+                self.assertEqual((result["owner"], result["filled_guid"]), (actor, generated))
+                self.assertEqual(host.party[DRILL.ledger][BLANK]["filled_guid"], generated)
+                host.checkpoint_native.assert_not_awaited()
+                if actor == "host":
+                    self.assertTrue(host.pending_host_save)
+                    retain.assert_not_awaited()
+                else:
+                    retain.assert_awaited_once_with(host, bridge, actor, pawn)
+                    self.assertIsNone(host.pending_host_save)
 
     async def test_changed_stock_flag_fences_unverified_exchange(self):
         host = listening()

@@ -18,6 +18,7 @@ RESULTS = uuid.uuid5(uuid.NAMESPACE_URL, f"{DRILL.namespace}:{CHARACTER}:{RESULT
 
 def compiled_host(stage=2):
     value = host(stage)
+    value.native_loot_input = False
     value.party[DRILL.ledger][RESULTS_BLANK].update(
         blank_guid=RESULTS_BLANK, filled_guid=RESULTS, operation_id="c" * 32, mosby_drill_test=1,
     )

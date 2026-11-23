@@ -212,10 +212,13 @@ async def convert(host, bridge, character, blank_guid, operation, *, profile=STO
         before = await _command(host, bridge, preflight, pawn, blank_guid)
         if before["blank_guid"] != blank_guid:
             raise party.RuleError("native_mosby_tape_blank_not_owned")
-        if profile == INSTRUCTIONS:
-            await host.checkpoint_native(bridge, require_guest_frames=frozenset({character}))
+        defer_save = native_wire_quest.defer_reward_save(host)
+        if defer_save:
+            if character != "host" and not await native_wire_quest._retain_reward_guest(host, bridge, character, pawn):
+                raise party.RuleError("native_mosby_tape_exact_guest_required")
         else:
-            await host.checkpoint_native(bridge)
+            required = frozenset({character}) if profile == INSTRUCTIONS else frozenset()
+            await host.checkpoint_native(bridge, require_guest_frames=required)
         if character == "host":
             if (host.last_game.get("state"), host.last_game.get("map"),
                     host.last_game.get("pawns", {}).get("local", {}).get("name")) != ("hosting", profile.map, pawn):
@@ -246,7 +249,12 @@ async def convert(host, bridge, character, blank_guid, operation, *, profile=STO
         if profile == INSTRUCTIONS:
             receipt["console_status"] = after["console_status"]
         candidate.setdefault(profile.ledger, {})[blank_guid] = receipt
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
+        revision = None
+        if defer_save:
+            if character == "host":
+                host.pending_host_save = True
+        else:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset({character} - {"host"}))
         host.party, host.native_checkpoint_unsafe = candidate, False
         host.control.event(profile.key + "_committed", revision=revision, **receipt)
         return {"effect": profile.effect + "_exchanged", **receipt}

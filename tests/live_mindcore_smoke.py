@@ -525,6 +525,9 @@ async def exercise(work, baseline, vanilla_saved, *, resume=False, resume_mounte
         product = uuid.uuid5(uuid.NAMESPACE_URL, f"{INSTRUCTIONS.namespace}:{character}:{owned_blank}").hex.upper()
         assert exchanged["filled_guid"] == product
         current, stock_flags_after = await flags()
+        if not current["world"]["party"].get(INSTRUCTIONS.ledger):
+            await action(run, "checkpoint")
+            current, stock_flags_after = await flags()
         assert stock_flags_after == compiled_flags
         current_party = current["world"]["party"]
         account = current_party[INSTRUCTIONS.ledger][owned_blank]

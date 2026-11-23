@@ -23,7 +23,7 @@ def offer(verb=tape.PREFLIGHT, state="offer", blank=BLANK, filled="-"):
 class MosbyTapeTests(unittest.IsolatedAsyncioTestCase):
     async def test_exact_tape_is_traded_once_and_commit_requires_guest_frame(self):
         game = {"state": "hosting", "map": tape.STONE_MAZE}
-        host = SimpleNamespace(native_profile=True, native_zones=True, native_guest=True, transitioning=False, stopping=False,
+        host = SimpleNamespace(native_profile=True, native_loot_input=False, native_zones=True, native_guest=True, transitioning=False, stopping=False,
                                native_checkpoint_unsafe=False, party=party.new_party(), last_game=game, last_seen=time.monotonic(),
                                control=SimpleNamespace(event=Mock()))
         party.add_player(host.party, CHARACTER)

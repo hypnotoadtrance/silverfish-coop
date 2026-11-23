@@ -331,6 +331,8 @@ async def exercise(work: Path, baseline: Path, vanilla_saved: Path) -> dict:
         delivered = await displayed("exchanged", second, 30)
         filled = delivered["filled_guid"]
         assert filled == uuid.uuid5(uuid.NAMESPACE_URL, f"{DRILL.namespace}:{character}:{blank}").hex.upper() and filled != blank
+        if not saved()["world"]["party"].get(DRILL.ledger):
+            await action(host_run, "checkpoint")
         durable, stock_after = await capture_flags()
         receipt = durable["world"]["party"][DRILL.ledger][blank]
         assert (receipt["owner"], receipt["blank_guid"], receipt["filled_guid"], receipt["map"], receipt["station"],
