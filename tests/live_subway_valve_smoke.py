@@ -20,7 +20,7 @@ from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.travel import BOROUGH, CITY
 
 
-async def verify(work: Path, vanilla_saved: Path):
+async def verify(work: Path, vanilla_saved: Path, *, deferred_save: bool = False):
     name = "subway-valve-" + uuid.uuid4().hex[:8]
     host, guest = ("--campaign", name), ("--profile", name)
     campaign = work / "campaigns" / name
@@ -34,6 +34,8 @@ async def verify(work: Path, vanilla_saved: Path):
     host_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones", "--native-expanded-zones")
     guest_flags = ("--headless", "--native-zones")
     evidence, jobs = {"routes": [], "verified": False}, []
+    if deferred_save:
+        evidence["deferred_save"] = {}
 
     async def command(*args, accepted=True):
         proc = await asyncio.create_subprocess_exec(*cli, *args, cwd=REPO, stdout=asyncio.subprocess.PIPE,
@@ -111,24 +113,51 @@ async def verify(work: Path, vanilla_saved: Path):
         frame = await wait(run, lambda status: status.get("gameplay", {}).get("native_quests", {}).get(valve.QUEST, {}).get("step") == step)
         return frame["gameplay"]["native_quests"][valve.QUEST]
 
-    async def inventory(owner, ids):
+    async def inventory(owner, ids, *, classes=()):
         matched, offset = {}, 0
         while offset is not None:
             options = ("--amount", str(offset)) if owner == host else ("--target", str(offset))
             page = (await action(owner, "native-inventory-list", *options))["native_inventory"]
-            matched.update((row["guid"], row) for row in page["items"] if row["guid"] in ids)
+            for row in page["items"]:
+                guid = row["guid"]
+                if guid in ids or row["class_path"] in classes:
+                    assert guid not in matched, row
+                    matched[guid] = row
             offset = page["next_offset"]
         return matched
 
-    async def balances(area):
-        await action(host, "checkpoint")
-        saved = json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
+    def disk_checkpoint():
+        return json.loads((campaign / "save" / "campaign.json").read_text(encoding="utf-8"))
+
+    def save_snapshot():
+        saved = disk_checkpoint()
+        quest = saved["world"].get("party", {}).get("native_quests", {}).get(valve.QUEST, {})
+        return {
+            "host": saved_hashes(campaign / "game-user/Saved/SaveGames"),
+            "guest": saved_hashes(guest_run.parent / "game-user/Saved/SaveGames"),
+            "host_generation": saved["world"].get("native_host_save"),
+            "guest_generation": saved["characters"][character]["state"].get("native_guest_save"),
+            "durable_step": quest.get("step"),
+        }
+
+    def unchanged_save(operation, before):
+        after = save_snapshot()
+        evidence["deferred_save"][operation] = {"before": before, "after": after}
+        assert before["host"] and before["host_generation"] and before == after, (operation, before, after)
+
+    async def balances(area, *, checkpoint=True, departure=None):
+        if checkpoint:
+            await action(host, "checkpoint")
+        saved = disk_checkpoint()
         frames = [saved["world"]["native_host_save"], saved["characters"][character]["state"]["native_guest_save"]]
         assert frames[0]["slot"] != frames[1]["slot"] and frames[1]["character_id"] == character, frames
+        # Travel can carry the guest's verified departure generation into the destination.
+        guest_area = frames[1]["map"]
+        assert guest_area in (area, departure), frames[1]
         root = native_host_save.directory(campaign / "game-user")
         flags = ("SubValve_Closed", "Player_Cash", "Player_Xp", "Rep_Commune", "Rep_State", "Rep_Coup", "Adv_Commune")
         return [{name: values.get(name, 0) for name in flags}
-                for values in (stock_flags(root, item, area) for item in frames)]
+                for values in (stock_flags(root, frames[0], area), stock_flags(root, frames[1], guest_area))]
 
     try:
         host_proc = await launch(host, "host", "host", *host, "--port", "0", "--start-zone", BOROUGH, *host_flags)
@@ -143,20 +172,31 @@ async def verify(work: Path, vanilla_saved: Path):
         await board_state("armed", "focused", selected=False)
         await board_press("loading")
         await board_state("offer")
+        if deferred_save:
+            before_acceptance = save_snapshot()
         await board_press("starting")
         assert (await committed(1))["actor"] == character
         refused = await action(guest, "native-quest-turnin", "--target", valve.QUEST, accepted=False)
         assert refused["error"] == "stock_subway_valve_quest_objective_not_complete", refused
-        initial = await balances(BOROUGH)
-        evidence["baseline"] = initial
+        if deferred_save:
+            unchanged_save("acceptance", before_acceptance)
+            assert before_acceptance["durable_step"] is None, before_acceptance
+        else:
+            initial = await balances(BOROUGH)
 
         current = await cross(current, CITY, "City_Borough")
+        if deferred_save:
+            initial = await balances(CITY, checkpoint=False, departure=BOROUGH)
+            assert save_snapshot()["durable_step"] == 1
+        evidence["baseline"] = initial
         current = await cross(current, valve.SUBWAY, "Subway")
         await wait(run, lambda frame: frame.get("game", {}).get(valve.SCENE, {}).get("state") == "present")
         await wait(guest_run, lambda frame: frame.get("game", {}).get(valve.SCENE, {}).get("state") == "present")
         refused = await action(guest, valve.ACTIVATE, "--target", uuid.uuid4().hex, accepted=False)
         assert refused["error"] == "stock_subway_valve_stale_visit", refused
         aim = (await action(host, valve.POSITION))[valve.FIXTURE_KEY]
+        if deferred_save:
+            before_valve = save_snapshot()
         fire = (await action(host, valve.PRESS))[valve.FIXTURE_KEY]
         assert (aim["pawn"], fire["map"], fire["state"]) == (fire["pawn"], valve.SUBWAY, "stock_input"), (aim, fire)
         objective = await committed(2)
@@ -164,48 +204,97 @@ async def verify(work: Path, vanilla_saved: Path):
             "host", fire["pawn"], current["zone_epoch"]), objective
         replica = await wait(guest_run, lambda frame: (scene := frame.get("game", {}).get(valve.SCENE, {}))
                              and scene.get("state") == "closed" and scene.get("epoch") == current["zone_epoch"])
-        live = await balances(valve.SUBWAY)
+        if not deferred_save:
+            live = await balances(valve.SUBWAY)
+        replay = await action(guest, valve.ACTIVATE, "--target", current["zone_epoch"])
+        assert replay["effect"] == "native_subway_valve_already_closed", replay
+        evidence.update(stock_valve_input=fire, authority_objective=objective, replica=replica["game"][valve.SCENE])
+        if deferred_save:
+            unchanged_save("valve_and_replay", before_valve)
+            assert before_valve["durable_step"] == 1, before_valve
+
+        current = await cross(current, CITY, "Subway")
+        if deferred_save:
+            live = await balances(CITY, checkpoint=False, departure=valve.SUBWAY)
+            assert save_snapshot()["durable_step"] == 2
         assert live[0] == dict(initial[0], SubValve_Closed=1, Rep_Commune=initial[0]["Rep_Commune"]+20,
                                Adv_Commune=initial[0]["Adv_Commune"]+200), live
         assert live[1] == initial[1], live
-        replay = await action(guest, valve.ACTIVATE, "--target", current["zone_epoch"])
-        assert replay["effect"] == "native_subway_valve_already_closed", replay
-        evidence.update(stock_valve_input=fire, authority_objective=objective,
-                        replica=replica["game"][valve.SCENE], objective_flags=live)
-
-        current = await cross(current, CITY, "Subway")
+        evidence["objective_flags"] = live
         current = await cross(current, BOROUGH, "City_Borough")
         await action(host, valve.APPROACH, "--target", "guest")
         await board_state("armed", "focused", selected=False)
         await board_press("loading")
         await board_state("ready")
         quote = (await action(guest, valve.PREFLIGHT))[valve.BOARD_KEY]
+        members = ((host, "host"), (guest, character))
+        reward_classes = (valve.ARTIFACT, valve.HELMET) if deferred_save else ()
+        if deferred_save:
+            existing_rewards = {member: await inventory(owner, (), classes=reward_classes) for owner, member in members}
+            before_turn_in = save_snapshot()
         await board_press("redeeming")
         result = await committed(-10)
         assert (result["actor"], result["xp"], result["cash"], set(result["recipients"])) == (character, 1, 0, {"host", character}), result
         ids = result["rewards"]["host"] + result["rewards"][character]
         assert len(ids) == len(set(ids)) == 4, result
-        for owner, member in ((host, "host"), (guest, character)):
-            items = await inventory(owner, ids)
+        rewarded = {}
+        for owner, member in members:
+            items = await inventory(owner, ids, classes=reward_classes)
+            if deferred_save:
+                assert set(items) - set(existing_rewards[member]) == set(result["rewards"][member]), items
+                rewarded[member] = items
+                items = {guid: row for guid, row in items.items() if guid in ids}
             assert set(items) == set(result["rewards"][member]), items
             assert [items[guid]["class_path"] for guid in result["rewards"][member]] == [valve.ARTIFACT, valve.HELMET], items
             assert all(row["source"] == "backpack" and row["quantity"] == 1 for row in items.values()), items
-        after = await balances(BOROUGH)
+        if deferred_save:
+            replay = await action(guest, "native-quest-turnin", "--target", valve.QUEST)
+            assert replay["effect"] == "native_quest_already_settled", replay
+            for owner, member in members:
+                assert await inventory(owner, ids, classes=reward_classes) == rewarded[member]
+            unchanged_save("turn_in_and_replay", before_turn_in)
+            assert before_turn_in["durable_step"] == 2, before_turn_in
+            evidence["deferred_save"]["replay_before_checkpoint"] = replay
+            await stop(host, host_proc)
+            settled = save_snapshot()
+            evidence["deferred_save"]["normal_save"] = settled
+            assert settled["durable_step"] == -10, settled
+            for frame in ("host_generation", "guest_generation"):
+                assert settled[frame] and settled[frame] != before_turn_in[frame], settled
+            saved_party = disk_checkpoint()["world"]["party"]
+            assert valve.PENDING not in saved_party, saved_party[valve.PENDING]
+            assert all(saved_party["players"][member]["quest_xp"] == 1 for _, member in members)
+            after = await balances(BOROUGH, checkpoint=False)
+        else:
+            after = await balances(BOROUGH)
         assert after[0] == dict(live[0], Player_Xp=live[0]["Player_Xp"]+1,
                                Rep_State=quote["reputation"]["4"]["before"]-40, Rep_Coup=quote["reputation"]["5"]["before"]-50,
                                Rep_Commune=quote["reputation"]["2"]["before"]+150), after
         assert after[1] == dict(live[1], Player_Xp=live[1]["Player_Xp"]+1), after
         evidence.update(stock_turn_in=result, final_flags=after)
 
-        await stop(host, host_proc)
+        if not deferred_save:
+            await stop(host, host_proc)
         await stop(guest, guest_proc)
         await launch(host, "host-restart", "host", *host, "--port", str(first["endpoint"]["port"]), *host_flags)
         await wait(run, lambda frame: frame.get("state") == "hosting" and frame.get("generation") != first["generation"])
         renewed = await action(host, "refresh-invite", "--target", invite["guest_id"])
         await launch(guest, "guest-restart", "join", *guest, "--invite", renewed["invite_file"], *guest_flags)
         await paired(BOROUGH)
-        assert await balances(BOROUGH) == after
-        assert set(await inventory(guest, ids)) == set(result["rewards"][character])
+        assert await balances(BOROUGH, checkpoint=not deferred_save) == after
+        if deferred_save:
+            def typed_rows(rows):
+                return {guid: (row["class_path"], row["source"], row["quantity"]) for guid, row in rows.items()}
+
+            restored = {member: typed_rows(await inventory(owner, ids, classes=reward_classes)) for owner, member in members}
+            assert restored == {member: typed_rows(rows) for member, rows in rewarded.items()}, restored
+            evidence["deferred_save"]["restored_inventory"] = restored
+            await action(host, valve.APPROACH, "--target", "guest")
+            reopened = (await action(guest, valve.PREFLIGHT))[valve.BOARD_KEY]
+            assert (reopened["step_before"], reopened["step_after"], reopened["flag"]) == (-10, -10, 1), reopened
+            evidence["deferred_save"]["restored_stock_quest"] = reopened
+        else:
+            assert set(await inventory(guest, ids)) == set(result["rewards"][character])
         assert (await action(guest, "native-quest-turnin", "--target", valve.QUEST))["effect"] == "native_quest_already_settled"
         evidence["verified"] = True
     except BaseException as error:
@@ -230,5 +319,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--deferred-save", action="store_true", help="verify stock interactions leave save files untouched until a save boundary")
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve()))
+    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), deferred_save=args.deferred_save))
