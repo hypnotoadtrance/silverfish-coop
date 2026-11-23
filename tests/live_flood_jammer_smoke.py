@@ -33,7 +33,8 @@ def quest_record(campaign, quest):
     return campaign.get("world", {}).get("party", {}).get("native_quests", {}).get(quest, {})
 
 
-async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=False, spec=FLOOD, stock_menu=False):
+async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=False, spec=FLOOD, stock_menu=False,
+                   late_join=False):
     lake, crossroads, lenny = spec == BLACK_LAKE, spec == CROSSROADS_JAMMER, spec == LENNY
     spratt = spec == SPRATT
     assassination = lenny or spratt
@@ -74,6 +75,8 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
     host_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones", "--native-expanded-zones")
     if stock_menu:
         host_flags += ("--native-shop-view",)
+    if late_join:
+        host_flags += ("--max-guests", "2")
     client_flags = ("--headless", "--native-zones", "--native-guest-primary-input")
     evidence = {"quest": quest, "routes": [], "shots": [], "stock_board_input": stock_board_input,
                 "stock_menu": stock_menu, "client_projection_requested": client_projection}
@@ -208,12 +211,38 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
             result[owner] = {key: flags.get(key, 0) for key in ("Player_Cash", "Player_Xp", *objective_flags)}
         return result
 
-    async def projected(*states):
+    async def projected(*states, directory=client_run):
         key = f"{spec.key}_projection"
-        client_state = await wait(client_run, lambda frame: (view := frame.get("game", {}).get(key, {}))
+        client_state = await wait(directory, lambda frame: (view := frame.get("game", {}).get(key, {}))
                                   and (view.get("map"), view.get("actor")) == (area, spec.jammer)
                                   and view.get("state") in states, timeout=20)
         return client_state["game"][key]
+
+    async def verify_late_join(visitor, ticket, completed):
+        baseline = status(run)
+        visit = baseline["generation"], baseline["zone_epoch"]
+        before = save_files()
+        await stop(client, visitor)
+        late_profile = name + "-late"
+        late_owner = ("--profile", late_profile)
+        late_run = work / "clients" / late_profile / "run"
+        observer = ticket["character_id"]
+        assert observer != character
+        await launch(late_owner, "late-guest", "join", *late_owner, "--invite", ticket["invite_file"], *client_flags)
+        joined = await wait(late_run, lambda state: state.get("state") == "connected"
+                            and state.get("link_connected") is True and state.get("character_id") == observer
+                            and (state.get("host_session"), state.get("zone_epoch")) == visit
+                            and state.get("game", {}).get("map") == area
+                            and live_quest(state).get("objective") == completed["objective"], timeout=60)
+        crew = await wait(run, lambda state: any(lease["character_id"] == observer and lease["state"] == "active"
+                                                 for lease in state.get("campaign", {}).get("leases", ())))
+        assert (crew["generation"], crew["zone_epoch"], crew["game"]["map"]) == (*visit, area)
+        view = await projected("hidden", "absent", directory=late_run)
+        assert (view["state"], view["audio"]) in {("hidden", "muted"), ("absent", "none")}, view
+        assert live_quest(joined)["step"] == 2 and live_quest(crew) == completed
+        require_deferred_save("fresh guest observes completed objective", before)
+        evidence["late_join"] = {"character": observer, "host_session": visit[0], "zone_epoch": visit[1],
+                                 "quest": live_quest(joined), "projection": view}
 
     async def fire(guid, magazine):
         try:
@@ -298,6 +327,8 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
             await action(host, "native-wire-quest-approach", "--target", "host")
             evidence["stock_xp_eligibility_fixture"] = await action(host, "native-turret-photo-xp-fixture")
         invitation = await command("invite", *host, "--name", "Jammer guest", "--character", "Signal Hunter")
+        late_invitation = await command("invite", *host, "--name", "Black Lake late guest", "--character",
+                                        "Signal Observer") if late_join else None
         character = invitation["character_id"]
         visitor = await launch(client, "guest", "join", *client, "--invite", invitation["invite_file"], *client_flags)
         current = await enrolled(start_map)
@@ -489,6 +520,10 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
             evidence["client_projection_after"] = concealed
             assert (concealed["state"], concealed["audio"]) in {("hidden", "muted"), ("absent", "none")}, concealed
         require_deferred_save("objective", objective_save_files)
+        if late_invitation:
+            await verify_late_join(visitor, late_invitation, completed)
+            evidence["verified"] = True
+            return
 
         for destination, tag in returning:
             current = await cross(current, destination, tag)
@@ -627,6 +662,7 @@ if __name__ == "__main__":
     parser.add_argument("--client-projection", action="store_true", help="require the exact client-local jammer to disappear after the stock kill")
     parser.add_argument("--pose-only", action="store_true", help="compare both authored jammer transforms before the bounty")
     parser.add_argument("--stock-bounty-menu", action="store_true", help="use the stock Black Market bounty buttons")
+    parser.add_argument("--late-join", action="store_true", help="join with a fresh guest after the Black Lake stock jammer is destroyed")
     profiles = parser.add_mutually_exclusive_group()
     profiles.add_argument("--black-lake", action="store_true", help="run the authored Black Market and Black Lake contract")
     profiles.add_argument("--simmi", action="store_true", help="accept and turn in the Crossroads jammer through Simmi's stock menu")
@@ -637,7 +673,11 @@ if __name__ == "__main__":
         parser.error("The pose check requires an authored jammer")
     if arguments.stock_bounty_menu and not (arguments.black_lake or arguments.simmi):
         parser.error("The stock bounty menu fixture requires --black-lake or --simmi")
-    asyncio.run(exercise(arguments.work.resolve(), arguments.vanilla_saved, client_projection=arguments.client_projection,
+    if arguments.late_join and (not arguments.black_lake or arguments.pose_only):
+        parser.error("--late-join requires the Black Lake bounty")
+    asyncio.run(exercise(arguments.work.resolve(), arguments.vanilla_saved,
+                         client_projection=arguments.client_projection or arguments.late_join,
                          pose_only=arguments.pose_only, stock_menu=arguments.stock_bounty_menu,
+                         late_join=arguments.late_join,
                          spec=SPRATT if arguments.spratt else LENNY if arguments.lenny else BLACK_LAKE if arguments.black_lake
                          else CROSSROADS_JAMMER if arguments.simmi else FLOOD))
