@@ -1,4 +1,5 @@
 local zone = {}
+local zone_lease = require("native_zone_lease")
 local wall = require("zone_wall")
 local routes = require("zone_maps")
 
@@ -64,14 +65,7 @@ local function find_fixture(local_pawn, route)
 end
 
 local function heartbeat_fresh()
-    local file = io.open(heartbeat_path, "rb")
-    if not file then return false end
-    local text = file:read(32)
-    file:close()
-    local timestamp = text and text:match("^(%d+)%s*$")
-    if not timestamp or #timestamp > 12 then return false end
-    local age = os.time() - tonumber(timestamp)
-    return age >= 0 and age <= 2
+    return zone_lease.fresh(heartbeat_path)
 end
 
 local function clear()

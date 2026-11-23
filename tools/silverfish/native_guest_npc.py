@@ -68,7 +68,7 @@ def _require_instrumented(game: dict, phase: str) -> dict:
 
 
 async def host_fixture(service, bridge, action: str, target: str | None) -> dict:
-    from .runtime import write_text
+    from . import native_zone_lease
 
     before = _require_instrumented(service.last_game, "hosting")
     if action not in HOST_ACTIONS or not service.fixtures or set(service.roles()) != {"host", "guest"} or not before.get("watched_pawn"):
@@ -84,7 +84,7 @@ async def host_fixture(service, bridge, action: str, target: str | None) -> dict
             raise ValueError("The stock Bandit spawn does not take a target")
         arguments = ()
 
-    write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
+    native_zone_lease.renew(bridge)
     snapshot = await bridge.command(action, *arguments, timeout=5)
     service.last_game, service.last_seen = snapshot, time.monotonic()
     return {"native_bandit": snapshot.get("native_bandit", {})}

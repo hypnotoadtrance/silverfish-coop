@@ -33,7 +33,7 @@ from .local_bridge import (GUEST_INTERACTION_BROKER, GUEST_INTERACTION_DIALOGUE,
 from .native_cube_draw import SOURCES as RANDOM_CUBE_SOURCES
 from .native_pickup import NativePickup, STAGED_SHOPS
 from . import native_guest_drop, native_guest_drop_projection, native_guest_drop_record
-from . import native_world_loot
+from . import native_world_loot, native_zone_lease
 from . import native_guest_melee
 from . import native_guest_ui
 from . import native_host_dig, native_host_dig_live, native_host_landmine, native_package_handoff_journal
@@ -332,6 +332,7 @@ class Host:
         if authored_zones and expanded_zones:
             self.allowed_maps |= EXPANDED_MAPS
         self.next_zone_heartbeat = 0.0
+        self._zone_roster = None
         self.native_checkpoint_unsafe = False
         # None means clean. Pending host changes record whether they need typed readback.
         self.pending_host_save: bool | None = None
@@ -1217,14 +1218,14 @@ class Host:
             if random_plan:
                 cube, itinerary = random_plan
                 authorization = (cube, itinerary["guid"])
-                write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
+                native_zone_lease.renew(bridge)
             returning = dream_plan and dream_plan["phase"] == "returning"
             if dream_plan:
                 authorization = ("stardust-return",) if returning else (dream_plan["kind"], dream_plan["guid"])
-                write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
+                native_zone_lease.renew(bridge)
             if matrix_plan:
                 authorization = ("matrix", matrix_plan["guid"])
-                write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
+                native_zone_lease.renew(bridge)
             if authored_plan:
                 authorization = ("authored", str(authored_plan.travel_time_step or 0))
             cqc_profile = native_enemy_loot.BY_MAP.get(current) if getattr(self, "native_dead_bridge_enemy_loot", False) else None
@@ -1364,7 +1365,7 @@ class Host:
         if (not native_gold.valid_guid(guid) or game.get("state") != "hosting" or not pawn
                 or area not in allowed or time.monotonic() - self.last_seen > POSITION_MAX_AGE):
             raise ValueError("Cube operations require a current host pawn and an exact item GUID")
-        write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
+        native_zone_lease.renew(bridge)
         snapshot = await bridge.command(f"native-{cube}-{operation}", pawn, guid, timeout=4)
         row = snapshot.get(f"native_{cube}", {})
         if (snapshot.get("state") != "hosting" or snapshot.get("map") != area
@@ -1657,7 +1658,7 @@ class Host:
                 or kind not in native_dream.BASE_SECONDS or area not in self.allowed_maps or area in PLAYTEST_MAPS
                 or time.monotonic() - self.last_seen > POSITION_MAX_AGE):
             raise ValueError("Stardust requires the active host pawn and an exact stack GUID")
-        write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
+        native_zone_lease.renew(bridge)
         snapshot = await bridge.command(f"native-{kind}-{operation}", pawn, guid, *arguments, timeout=4)
         row = snapshot.get("native_" + kind.replace("-", "_"), {})
         quantity = row.get("quantity")
@@ -1775,7 +1776,7 @@ class Host:
         if self.native_profile is None:
             raise RuntimeError("The Stardust effects require an isolated canonical host save")
         pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
-        write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
+        native_zone_lease.renew(bridge)
         snapshot = await bridge.command("native-dream-effects", pawn, trip["kind"], trip["destination"],
                                         trip["tarot"] or "-", timeout=5)
         proof = snapshot.get("native_dream_effects", {})
@@ -3773,13 +3774,13 @@ class Host:
                     flag, points = request.get("target"), request.get("amount")
                     if flag not in native_dream.TAROT_DESTINATIONS or not flag or type(points) is not int or not 1 <= points <= 100:
                         raise ValueError("The Tarot fixture requires a qualified flag and positive points")
-                    write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
+                    native_zone_lease.renew(bridge)
                     await bridge.command(action, flag, str(points), timeout=4)
                     result = {"flag": flag, "points": points}
                 elif action == "native-dream-power-fixture" and self.native_zones and self.fixtures:
                     if not self.dream_isolated(self.last_game) or not native_dream.visit(self.party):
                         raise ValueError("The stock power fixture requires an active isolated dream visit")
-                    write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
+                    native_zone_lease.renew(bridge)
                     snapshot = await bridge.command(action, timeout=4)
                     result = {"native_dream_isolation": snapshot.get("native_dream_isolation")}
                 elif action in ("native-dream-stone-position", "native-dream-stone-fixture") and self.native_zones and self.fixtures:
@@ -3790,7 +3791,7 @@ class Host:
                     pawn = binding.pawn if binding else self.last_game.get("pawns", {}).get(alias, {}).get("name")
                     if not pawn:
                         raise ValueError("The exact Black Ocean fixture pawn is unavailable")
-                    write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
+                    native_zone_lease.renew(bridge)
                     snapshot = await bridge.command(action, pawn, timeout=5)
                     self.last_game, self.last_seen = snapshot, time.monotonic()
                     result = {"native_black_stone": snapshot.get("native_black_stone", {})}
@@ -3925,16 +3926,22 @@ class Host:
             await bridge.command("native-exit-release", *arguments, timeout=3)
 
     def refresh_native_zone_heartbeat(self, bridge: Bridge, now: float) -> None:
-        if now >= self.next_zone_heartbeat and now - self.last_seen < 1:
-            if self.native_zone_walls:
-                recipients = self.native_recipients()
-                labels = self.store.character_names(recipients)
-                area = self.last_game.get("map", "")
-                listing = [area, *(f"{owner['pawn']}\t{owner['role']}\t{labels[character]}"
-                                   for character, owner in recipients.items() if character in labels)]
-                write_text(bridge.directory / "native-zone-roster", "\n".join(listing) + "\n")
-            write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
-            self.next_zone_heartbeat = now + 0.6
+        if now < self.next_zone_heartbeat or now - self.last_seen >= 1:
+            return
+        roster = signature = None
+        if self.native_zone_walls:
+            recipients = self.native_recipients()
+            labels = self.store.character_names(recipients)
+            area = self.last_game.get("map", "")
+            members = tuple((owner["pawn"], owner["role"], labels[character])
+                            for character, owner in recipients.items() if character in labels)
+            inbox = native_zone_lease.memory_bridge(bridge)
+            signature = inbox, area, members
+            if inbox is None or signature != self._zone_roster:
+                roster = "\n".join((area, *("\t".join(member) for member in members))) + "\n"
+        native_zone_lease.renew(bridge, roster)
+        self._zone_roster = signature
+        self.next_zone_heartbeat = now + 0.6
 
     async def service_native_zones(self, bridge: Bridge, transport, now: float) -> None:
         self.refresh_native_zone_heartbeat(bridge, now)

@@ -1,4 +1,5 @@
 local transport = {}
+local zone_lease = require("native_zone_lease")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_TRANSPORT") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
@@ -55,15 +56,7 @@ local function safe_field(value)
 end
 
 local function heartbeat_fresh()
-    if not heartbeat_path then return false end
-    local file = io.open(heartbeat_path, "rb")
-    if not file then return false end
-    local text = file:read(32)
-    file:close()
-    local timestamp = text and text:match("^(%d+)%s*$")
-    if not timestamp or #timestamp > 12 then return false end
-    local age = os.time() - tonumber(timestamp)
-    return age >= 0 and age <= 2
+    return zone_lease.fresh(heartbeat_path)
 end
 
 local function host_snapshot(state, phase)

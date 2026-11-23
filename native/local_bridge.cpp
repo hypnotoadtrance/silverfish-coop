@@ -21,6 +21,7 @@ namespace
     constexpr std::size_t input_capacity = 64;
     constexpr std::uint32_t prop_poses_limit = 4 * 257;
     constexpr std::uint32_t avatar_poses_limit = 512;
+    constexpr std::uint32_t zone_roster_limit = 8192;
     constexpr std::uint32_t guest_interaction_features = 0x0f;
     constexpr std::uint32_t guest_interaction_area_limit = 160;
     constexpr std::uint32_t guest_interaction_pawn_limit = 512;
@@ -43,6 +44,8 @@ namespace
     std::string local_avatar_pose;
     std::string remote_avatar_poses;
     std::int64_t native_events_heartbeat{}, stock_board_heartbeat{}, host_dig_heartbeat{};
+    std::int64_t zone_heartbeat{};
+    std::string zone_roster;
 
     struct GuestInteractionLease
     {
@@ -190,6 +193,26 @@ namespace
         return read_heartbeat(lua, host_dig_heartbeat);
     }
 
+    int read_zone_heartbeat(const Lua& lua)
+    {
+        return read_heartbeat(lua, zone_heartbeat);
+    }
+
+    int read_zone_roster(const Lua& lua)
+    {
+        bool active{};
+        std::string roster;
+        {
+            std::lock_guard lock(mutex);
+            active = attached;
+            if (active) roster = zone_roster;
+        }
+        lua.set_bool(active);
+        if (roster.empty()) return 1;
+        lua.set_string(roster);
+        return 2;
+    }
+
     int read_guest_interaction_lease(const Lua& lua)
     {
         if (lua.get_stack_size() != 2 || !lua.is_string(1) || !lua.is_string(2)) return 0;
@@ -281,6 +304,8 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
     remote_avatar_poses.clear();
     native_events_heartbeat = stock_board_heartbeat = host_dig_heartbeat = 0;
     guest_interaction_lease = {};
+    zone_heartbeat = 0;
+    zone_roster.clear();
     clear();
 }
 
@@ -341,6 +366,18 @@ extern "C" __declspec(dllexport) int SilverfishBridgePublishStockBoardHeartbeatV
 extern "C" __declspec(dllexport) int SilverfishBridgePublishHostDigHeartbeatV1(std::int64_t stamp)
 {
     return publish_heartbeat(stamp, host_dig_heartbeat, true);
+}
+
+extern "C" __declspec(dllexport) int SilverfishBridgePublishNativeZoneLeaseV1(
+    std::int64_t stamp, const char* roster, std::uint32_t size)
+{
+    if (stamp <= 0 || size >= zone_roster_limit || (size && !roster)) return 0;
+    std::lock_guard lock(mutex);
+    if (!attached) return 0;
+    // A one-off rest or transport command only renews the stamp.
+    if (roster) zone_roster.assign(roster, size);
+    zone_heartbeat = stamp;
+    return 1;
 }
 
 extern "C" __declspec(dllexport) int SilverfishBridgePublishGuestInteractionLeaseV1(
@@ -444,6 +481,8 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishReadLocalNativeEventsHeartbeat", read_native_events_heartbeat);
         lua.register_function("SilverfishReadLocalStockBoardHeartbeat", read_stock_board_heartbeat);
         lua.register_function("SilverfishReadLocalHostDigHeartbeat", read_host_dig_heartbeat);
+        lua.register_function("SilverfishReadLocalNativeZoneHeartbeat", read_zone_heartbeat);
+        lua.register_function("SilverfishReadLocalNativeZoneRoster", read_zone_roster);
         lua.register_function("SilverfishReadLocalGuestInteractionLease", read_guest_interaction_lease);
     }
 
@@ -460,6 +499,8 @@ namespace silverfish::local_bridge
         remote_avatar_poses.clear();
         native_events_heartbeat = stock_board_heartbeat = host_dig_heartbeat = 0;
         guest_interaction_lease = {};
+        zone_heartbeat = 0;
+        zone_roster.clear();
         clear();
     }
 }

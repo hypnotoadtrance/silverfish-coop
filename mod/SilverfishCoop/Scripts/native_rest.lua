@@ -1,7 +1,9 @@
 local rest = {}
+local zone_lease = require("native_zone_lease")
 local native_bed = require("native_bed")
 
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
+local heartbeat_path = bridge and bridge .. "/native-zone-heartbeat"
 local enabled = bridge and bridge ~= "" and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local headless_fixture = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
@@ -289,17 +291,6 @@ function rest.clear_hook()
     if type(SilverfishClearNativeStockRestScope) == "function" then SilverfishClearNativeStockRestScope() end
 end
 
-local function coordinator_recent()
-    local heartbeat = io.open(bridge .. "/native-zone-heartbeat", "rb")
-    if not heartbeat then return false end
-    local text = heartbeat:read(32)
-    heartbeat:close()
-    local timestamp = text and text:match("^(%d+)%s*$")
-    if not timestamp or #timestamp > 12 then return false end
-    local age = os.time() - tonumber(timestamp)
-    return age >= 0 and age <= 2
-end
-
 function rest.sync_hook(state, phase)
     if not enabled then return end
     local profile = native_bed.profile(state.map)
@@ -317,7 +308,7 @@ function rest.sync_hook(state, phase)
     if not host or type(SilverfishSetNativeStockRestScope) ~= "function"
         or type(SilverfishTakeNativeStockRestRequest) ~= "function" then return end
     -- An already scoped, stale UI call is vetoed by the native hook.
-    if not coordinator_recent() then return end
+    if not zone_lease.fresh(heartbeat_path) then return end
     local bed = stock_scope and stock_scope.bed
     if not valid(bed) or not same(state.world, bed:GetWorld()) or bed:GetFullName() ~= profile.actor_full_name then
         bed = world_actor("SavePoint_BP_C", bed_path, state.world, profile.actor_full_name)

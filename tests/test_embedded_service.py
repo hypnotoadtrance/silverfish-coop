@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, Mock, patch
 import uuid
 
 from test_title_handoff import ready
-from tools.silverfish import embedded_engine as embedded, runtime, service, win_job
+from tools.silverfish import embedded_engine as embedded, native_zone_lease, runtime, service, win_job
+from tools.silverfish.local_bridge import LocalBridge, ZONE_ROSTER_LIMIT
 from tools.silverfish.native_title_entry import MAP as TITLE_MAP
 from tools.silverfish.travel import OBSERVATORY
 
@@ -87,6 +88,80 @@ class NativeEventHeartbeatTests(unittest.IsolatedAsyncioTestCase):
                         publish.assert_called_once_with(1_800_000_000)
                     else:
                         publish.assert_not_called()
+
+
+class NativeZoneLeaseTests(unittest.TestCase):
+    stamp = 1_800_000_000
+
+    def setUp(self):
+        self.directory = Path(self.enterContext(TemporaryDirectory()))
+        self.clock = Mock(return_value=self.stamp + .8)
+        self.enterContext(patch.object(native_zone_lease, "time", SimpleNamespace(time=self.clock)))
+
+    def test_resident_roster_is_not_rebuilt_for_stamp_only_renewals(self):
+        inbox = Mock(native_zone_lease_available=True, publish_native_zone_lease=Mock(return_value=True))
+        bridge = SimpleNamespace(directory=self.directory, local_bridge=inbox)
+        pawn = "Player_FP_C /Game/Crossroads:PersistentLevel.Player_FP_C_5"
+        owner = {"pawn": pawn, "role": "guest2"}
+        host = SimpleNamespace(
+            native_zone_walls=True, next_zone_heartbeat=0, last_seen=10,
+            last_game={"map": service.CROSSROADS}, _zone_roster=None,
+            native_recipients=lambda: {"character": owner},
+            store=SimpleNamespace(character_names=lambda _: {"character": "Fern"}),
+        )
+
+        def refresh(now):
+            service.Host.refresh_native_zone_heartbeat(host, bridge, now)
+
+        refresh(10)
+        refresh(10.3)  # Below the pulse interval.
+        native_zone_lease.renew(bridge)  # A validated special command carries no roster.
+        host.last_seen = 10.8
+        refresh(10.8)  # Same rows and map.
+        host.last_seen = 11.5
+        host.last_game = {"map": OBSERVATORY}
+        host.native_recipients = lambda: {}
+        refresh(11.5)
+        refresh(13)  # A stale game frame must not re-arm the routes.
+
+        roster = f"{service.CROSSROADS}\n{pawn}\tguest2\tFern\n"
+        self.assertEqual([entry.args for entry in inbox.publish_native_zone_lease.call_args_list], [
+            (self.stamp, roster), (self.stamp, None), (self.stamp, None), (self.stamp, f"{OBSERVATORY}\n"),
+        ])
+        self.assertEqual(list(self.directory.iterdir()), [])
+
+    def test_file_only_and_older_workers_keep_the_original_formats(self):
+        for inbox in (None, Mock(native_zone_lease_available=False)):
+            with self.subTest(inbox=inbox):
+                bridge = SimpleNamespace(directory=self.directory, local_bridge=inbox)
+                body = f"{OBSERVATORY}\nPlayer_FP_C /Game/Exact\tguest\tFern\n"
+                native_zone_lease.renew(bridge, body)
+                roster = self.directory / native_zone_lease.ROSTER
+                heartbeat = self.directory / native_zone_lease.HEARTBEAT
+                self.assertEqual(roster.read_text(encoding="utf-8"), body)
+                self.assertEqual(heartbeat.read_text(encoding="ascii"), f"{self.stamp}\n")
+                roster_time = roster.stat().st_mtime_ns
+                native_zone_lease.renew(bridge)
+                self.assertEqual(roster.stat().st_mtime_ns, roster_time)
+                if inbox is not None:
+                    inbox.publish_native_zone_lease.assert_not_called()
+
+    def test_native_stamp_only_uses_null_and_overflow_clears_only_the_roster(self):
+        inbox = LocalBridge.__new__(LocalBridge)
+        inbox._native_zone_lease = Mock(return_value=True)
+        self.assertTrue(inbox.publish_native_zone_lease(self.stamp))
+        self.assertTrue(inbox.publish_native_zone_lease(self.stamp, "É"))
+        self.assertTrue(inbox.publish_native_zone_lease(self.stamp, "x" * ZONE_ROSTER_LIMIT))
+        self.assertEqual([entry.args for entry in inbox._native_zone_lease.call_args_list], [
+            (self.stamp, None, 0), (self.stamp, "É".encode("utf-8"), 2), (self.stamp, b"", 0),
+        ])
+
+    def test_attached_failure_cannot_create_a_legacy_lease(self):
+        inbox = Mock(native_zone_lease_available=True, publish_native_zone_lease=Mock(return_value=False))
+        bridge = SimpleNamespace(directory=self.directory, local_bridge=inbox)
+        with self.assertRaisesRegex(RuntimeError, "in-process stock zone lease"):
+            native_zone_lease.renew(bridge)
+        self.assertEqual(list(self.directory.iterdir()), [])
 
 
 class NativeHostDigHeartbeatTests(unittest.IsolatedAsyncioTestCase):

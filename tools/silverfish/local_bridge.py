@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 STATUS_LIMIT = 2 * 1024 * 1024
+ZONE_ROSTER_LIMIT = 8192
 GUEST_INTERACTION_SHOP = 1
 GUEST_INTERACTION_BROKER = 2
 GUEST_INTERACTION_DIALOGUE = 4
@@ -45,6 +46,10 @@ class LocalBridge:
         if self._host_dig_heartbeat is not None:
             self._host_dig_heartbeat.argtypes = [ctypes.c_int64]
             self._host_dig_heartbeat.restype = ctypes.c_int
+        self._native_zone_lease = getattr(library, "SilverfishBridgePublishNativeZoneLeaseV1", None)
+        if self._native_zone_lease is not None:
+            self._native_zone_lease.argtypes = [ctypes.c_int64, ctypes.c_char_p, ctypes.c_uint32]
+            self._native_zone_lease.restype = ctypes.c_int
         self._guest_interaction_lease = getattr(library, "SilverfishBridgePublishGuestInteractionLeaseV1", None)
         if self._guest_interaction_lease is not None:
             self._guest_interaction_lease.argtypes = [ctypes.c_int64, ctypes.c_uint32,
@@ -164,6 +169,19 @@ class LocalBridge:
         return self._host_dig_heartbeat is not None and bool(self._host_dig_heartbeat(stamp))
 
     @property
+    def native_zone_lease_available(self) -> bool:
+        return self._native_zone_lease is not None
+
+    def publish_native_zone_lease(self, stamp: int, roster: str | None = None) -> bool:
+        if self._native_zone_lease is None:
+            return False
+        payload = roster.encode("utf-8") if roster is not None else None
+        if payload is not None and len(payload) >= ZONE_ROSTER_LIMIT:
+            # The stock reader rejects oversized rosters. Clear the labels while keeping the lease fresh.
+            payload = b""
+        return bool(self._native_zone_lease(stamp, payload, len(payload) if payload else 0))
+
+    @property
     def guest_interaction_lease_available(self) -> bool:
         return self._guest_interaction_lease is not None
 
@@ -206,5 +224,5 @@ class LocalBridge:
 
     def close(self):
         self._native_events_heartbeat = self._stock_board_heartbeat = None
-        self._host_dig_heartbeat = self._guest_interaction_lease = None
+        self._host_dig_heartbeat = self._guest_interaction_lease = self._native_zone_lease = None
         self._close()

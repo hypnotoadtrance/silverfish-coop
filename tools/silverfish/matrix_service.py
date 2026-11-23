@@ -4,9 +4,8 @@ import math
 import time
 import uuid
 
-from . import native_matrix
+from . import native_matrix, native_zone_lease
 from .native_gold import valid_guid
-from .runtime import write_text
 
 
 RESULTS = {
@@ -34,7 +33,7 @@ async def _command(bridge, game: dict, operation: str, guid: str, *arguments: st
     pawn = game.get("pawns", {}).get("local", {}).get("name")
     if game.get("state") != "hosting" or source not in native_matrix.MAPS or not pawn:
         raise RuntimeError("The authoritative Matrix host is unavailable")
-    write_text(bridge.directory / "native-zone-heartbeat", f"{int(time.time())}\n")
+    native_zone_lease.renew(bridge)
     snapshot = await bridge.command(f"native-matrix-{operation}", source, pawn, guid, *arguments, timeout=6)
     proof = snapshot.get("native_matrix", {})
     if (snapshot.get("state") != "hosting" or snapshot.get("map") != source

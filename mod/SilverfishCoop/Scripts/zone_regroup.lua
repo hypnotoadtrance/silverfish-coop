@@ -1,4 +1,5 @@
 local regroup = {}
+local zone_lease = require("native_zone_lease")
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local widget_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
@@ -29,10 +30,7 @@ end
 
 local function labels(map)
     local result = {}
-    local file = path and io.open(path, "rb")
-    if not file then return result end
-    local body = file:read(8192)
-    file:close()
+    local body = zone_lease.roster(path)
     if not body or #body >= 8192 or body:match("^[^\r\n]+") ~= map then return result end
     for pawn, role, name in body:gmatch("\n(Player_FP_C /Game/[^%c]+)\t(guest%d?)\t([^%c]+)") do
         if #pawn <= 512 and #name <= 256 and (role == "guest" or role:match("^guest[2-4]$")) then
