@@ -161,13 +161,14 @@ def stock_nearby_overlay(game: Path):
 def bandage_revisit_overlay(game: Path):
     def add_bandage_observation(script):
         marker = '    if action == "native-loose-pickup-check" then'
-        observer = '''    if action == "fixture-bandage-visibility" and fixtures and title_fixtures
-        and (phase == "hosting" or phase == "connected") and state.map == "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P" then
-        local world = state.map .. ".Tut_Dock_P"
-        local actor = StaticFindObject(world .. ":PersistentLevel.Item_Bandage_C_1")
-        if not valid(actor) or not same(actor:GetWorld(), state.world) or actor:IsActorBeingDestroyed() then return "absent" end
-        if actor.bHidden == true and not actor:GetActorEnableCollision() then return "hidden" end
-        return "visible"
+        observer = '''    if action == "fixture-bandage-visibility" and fixtures and title_fixtures then
+        local dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
+        assert(state.map == dock and (phase == "hosting" or phase == "connected"), "The test needs Tutorial Dock")
+        local diagnosis = SilverfishDiagnoseLoosePickup(dock .. ".Tut_Dock_P:PersistentLevel.Item_Bandage_C_1")
+        if diagnosis == "actor_absent" then return "absent" end
+        if diagnosis == "hidden_or_disabled" then return "hidden" end
+        if diagnosis == "stock_item_available" then return "visible" end
+        error("Unexpected stock bandage state " .. tostring(diagnosis), 0)
     end
 '''
         if script.count(marker) != 1:
@@ -1015,15 +1016,18 @@ async def verify_tutorial_bandage_revisit(host: Seat, guest: Seat, pawn: str) ->
     await wait_resident_status(guest_run, lambda frame: bandage in frame.get("gameplay", {}).get(native_loose_pickup.STATE, []))
     await travel(dock, observatory, "Level_Exit_BP_C_1")
     revisit = await travel(observatory, dock, "Level_Exit_BP_C_213")
+    await host.bridge.wait_for(lambda game: game.get(native_loose_pickup.CHECK_KEY, {}).get(bandage) is False)
     await wait_resident_status(guest_run, lambda frame: frame.get("zone_epoch") == revisit["zone_epoch"]
                                and bandage in frame.get("gameplay", {}).get(native_loose_pickup.STATE, []), timeout=10)
-    assert await visibility(host) in ("hidden", "absent")
+    host_visibility = await visibility(host)
+    assert host_visibility in ("absent", "hidden"), host_visibility
     async with asyncio.timeout(8):
         while (guest_visibility := await visibility(guest)) == "visible":
             await asyncio.sleep(.05)
     assert guest_visibility in ("absent", "hidden"), guest_visibility
     return {"stock_bandage_revisit": {"actor": bandage, "claim": claimed[native_loose_pickup.PROOF],
-            "first_visit": first["zone_epoch"], "revisit": revisit["zone_epoch"], "guest": guest_visibility}}
+            "first_visit": first["zone_epoch"], "revisit": revisit["zone_epoch"],
+            "host_visibility": host_visibility, "guest_visibility": guest_visibility}}
 
 
 async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, retaliation: bool = False) -> dict:
