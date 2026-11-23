@@ -22,7 +22,7 @@ LOOSE_PICKUP = "observatory-comp-board"
 
 async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, authored_pickup: bool, stock_rules: bool,
                    wipe_view: bool, difficulty: str | None = None, downed_aim: bool = False,
-                   drop_held: bool = False, stock_screen_guard: bool = False) -> None:
+                   drop_held: bool = False, stock_screen: bool = False) -> None:
     name = "stock-wipe-" + uuid.uuid4().hex[:8]
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
@@ -96,9 +96,14 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
         character = invitation["character_id"]
         gun, reserve = (uuid.uuid4().hex.upper() for _ in range(2))
         retained_item = reserve if drop_held else gun
+        reserves = [reserve]
+        if stock_screen:
+            reserves.extend(uuid.uuid4().hex.upper() for _ in range(15))
+        all_items = {gun, *reserves}
         await action(primary, "native-guest-weapon-seed", "--item-guid", gun)
         await action(secondary, "native-guest-weapon-equip", "--target", gun)
-        await action(primary, "native-guest-weapon-seed-ammo", "--item-guid", reserve)
+        for item in reserves:
+            await action(primary, "native-guest-weapon-seed-ammo", "--item-guid", item)
         if downed_aim or drop_held:
             async with asyncio.timeout(10):
                 while not (aiming := await avatar_probe(guest, "aim", allow_pending=True)):
@@ -126,30 +131,35 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
                     draft = frame["native_wipe_items"]
                     break
                 await asyncio.sleep(.2)
-            assert draft and {item["guid"] for item in draft["items"]} == {gun, reserve}, draft
+            assert draft and draft["count"] == len(all_items), draft
+            assert {item["guid"] for item in draft["items"]} <= all_items, draft
         if wipe_view:
             async def key(owner, button):
                 return (await action(owner, "native-wipe-view-key-fixture", "--target", button))["native_wipe_view"]
 
             for directory in (host, guest):
                 await wait(directory, lambda status: status.get("game", {}).get("native_wipe_view", {}).get("state") == "selecting")
-            if stock_screen_guard:
-                for owner in (primary, secondary):
-                    guarded = await key(owner, "stock-guard")
-                    assert guarded["state"] == "selecting", guarded
             current = (await command("status", *secondary))["game"]["native_wipe_view"]
             assert current["deadline"] == 0, current
-            if current["guid"] != retained_item:
-                current = await key(secondary, "down")
-            assert current["guid"] == retained_item and current["limit"] == keep_slots and current["total"] == 2, current
-            selected = await key(secondary, "toggle")
-            assert selected["selected"] == 1 and selected["guid"] == retained_item, selected
+            assert current["limit"] == keep_slots and current["total"] == len(all_items), current
+            if stock_screen:
+                assert current["screen"] == "stock" and current["offset"] > 0, current
+                selected = await key(secondary, f"stock-keep-{retained_item}")
+            else:
+                if current["guid"] != retained_item:
+                    current = await key(secondary, "down")
+                assert current["guid"] == retained_item, current
+                selected = await key(secondary, "toggle")
+            assert selected["selected"] == 1, selected
             submitted = []
             for owner, count in ((secondary, 1), (primary, 0)):
-                confirmed = await key(owner, "submit")
-                assert confirmed["state"] == "confirming" and confirmed["selected"] == count, confirmed
-                ready = await key(owner, "submit")
-                assert ready["state"] == "submitting" and ready["sequence"] > 0, ready
+                if stock_screen:
+                    ready = await key(owner, "stock-submit")
+                else:
+                    confirmed = await key(owner, "submit")
+                    assert confirmed["state"] == "confirming" and confirmed["selected"] == count, confirmed
+                    ready = await key(owner, "submit")
+                assert ready["state"] == "submitting" and ready["sequence"] > 0 and ready["selected"] == count, ready
                 submitted.append(ready)
                 if owner == secondary:
                     waiting = await wait(host, lambda status: character in
@@ -166,7 +176,7 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
         owned = revived["gameplay"]["native_backpacks"]
         bag_id, = [key for key, value in owned.items() if value["owner_id"] == character]
         bag = owned[bag_id]
-        dropped_count = 1 if keep_slots else 2
+        dropped_count = len(all_items) - (1 if keep_slots else 0)
         assert bag["count"] == dropped_count and bag["position"]["map"] == OBSERVATORY, bag
         if difficulty:
             assert any(value["owner_id"] == "host" for value in owned.values()), owned
@@ -196,13 +206,19 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
         recovered = await action(secondary, *recover)
         assert recovered["count"] == dropped_count and (await action(secondary, *recover))["native_bag"] == bag_id, recovered
         after_recovery = (await action(secondary, "native-inventory-list"))["native_inventory"]
-        assert {row["guid"] for row in after_recovery["items"]} == {gun, reserve}, after_recovery
+        recovered_guids = {row["guid"] for row in after_recovery["items"]}
+        following = after_recovery["next_offset"]
+        while following is not None:
+            page = (await action(secondary, "native-inventory-list", "--target", str(following)))["native_inventory"]
+            recovered_guids.update(row["guid"] for row in page["items"])
+            following = page["next_offset"]
+        assert recovered_guids == all_items, after_recovery
         proof = {"rest": rest, "retained": after_wipe, "backpack": bag, "recovered": after_recovery,
                  "difficulty": difficulty, "keep_slots": keep_slots}
         if wipe_view:
             proof["native_inventory_selection_input"] = submitted
-        if stock_screen_guard:
-            proof["stock_wipe_screen_guard_verified"] = True
+        if stock_screen:
+            proof["stock_wipe_screen_selection_verified"] = True
         if downed_aim:
             proof["guest_aim_released_on_down"] = {"before": aiming[0], "downed": lowered[0],
                                                   "movement": downed["game"]["player_effects"]["local"]}
@@ -270,7 +286,7 @@ if __name__ == "__main__":
     arguments.add_argument("--wipe-view", action="store_true")
     arguments.add_argument("--downed-aim", action="store_true")
     arguments.add_argument("--drop-held", action="store_true")
-    arguments.add_argument("--stock-screen-guard", action="store_true")
+    arguments.add_argument("--stock-screen", action="store_true")
     options = arguments.parse_args()
     if options.difficulty and options.stock_rules:
         arguments.error("Choose a stock difficulty preset or custom stock extraction fields")
@@ -278,13 +294,15 @@ if __name__ == "__main__":
         arguments.error("Decimation has no retained item selector")
     if options.difficulty == "Decimation" and options.drop_held:
         arguments.error("The held weapon check retains a different item")
-    if options.stock_screen_guard and not options.wipe_view:
+    if options.stock_screen and not options.wipe_view:
         arguments.error("The stock screen guard uses an active wipe selection")
     work = options.work.resolve()
     weapon_probe = options.downed_aim or options.drop_held
     if weapon_probe:
         os.environ["SILVERFISH_COOP_WIPE_AIM_PROBE"] = "1"
+    if options.stock_screen:
+        os.environ["SILVERFISH_COOP_STOCK_WIPE_TEST"] = "1"
     with installed_probe(work) if weapon_probe else nullcontext():
         asyncio.run(validate(work, options.vanilla_saved, options.visible_bag, options.authored_pickup,
                              options.stock_rules, options.wipe_view, options.difficulty, options.downed_aim,
-                             options.drop_held, options.stock_screen_guard))
+                             options.drop_held, options.stock_screen))

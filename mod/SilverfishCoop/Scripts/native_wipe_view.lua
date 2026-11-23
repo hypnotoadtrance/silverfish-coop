@@ -3,6 +3,7 @@ local wipe_view = {}
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_WIPE_VIEW") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local stock_fixture = os.getenv("SILVERFISH_COOP_STOCK_WIPE_TEST") == "1"
 local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local display_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
@@ -14,6 +15,9 @@ local text_path = "/Script/UMG.TextBlock"
 local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
+local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
+local item_base = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
+local inventory_library = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local keys = {up = "PageUp", down = "PageDown", toggle = "SpaceBar", submit = "Home", back = "End"}
 local actions = {"back", "up", "down", "toggle", "submit"}
 local page_size, max_items, lease_seconds = 16, 8194, 2
@@ -75,15 +79,29 @@ local function clock(current)
     if type(seconds) == "number" and seconds >= 0 and seconds < math.huge then return seconds end
 end
 
-local function remove_display()
+local function close_stock_screen(row)
+    local screen = row and row.stock
+    if not valid(screen) then return end
+    local controller = row.context.controller
+    local stack = valid(controller) and controller.MenuStack
+    if stack and stack:GetArrayNum() == 1 and same(stack[1], screen) then
+        screen["Is Unclosable"] = false
+        controller:CloseMenu({})
+    end
+    if screen:IsInViewport() then screen:RemoveFromParent() end
+    row.stock = nil
+end
+
+local function remove_display(row)
+    close_stock_screen(row)
     local previous = display
     display, held = nil, {}
     if valid(previous) then previous:RemoveFromParent() end
 end
 
 function wipe_view.clear()
+    remove_display(view)
     view = nil
-    remove_display()
 end
 
 local function invalidate(reason)
@@ -107,6 +125,10 @@ local function can_choose(row)
     return (row.state == "selecting" or row.state == "confirming" or row.state == "refused")
         and current.controller.Loading == false and current.controller.MenuStack:GetArrayNum() == 0
         and valid(display) and same(display:GetOwningPlayer(), current.controller) and display:IsInViewport()
+end
+
+local function wants_stock()
+    return (not headless or stock_fixture) and type(SilverfishArmNativeWipeScreen) == "function"
 end
 
 local function integer(value, maximum)
@@ -136,8 +158,8 @@ local function page(fields, row, offset)
     end
     local records, locked_ordinal, guids, positions = {}, row.locked_ordinal, {}, {}
     for index = 12, #fields do
-        local guid, source, raw_slot, raw_amount, class, policy =
-            fields[index]:match("^([0-9A-F]+)|([a-z]+)|(%d+)|(%d+)|(/Game/[%w_/%-%%]+%.[%w_%-%%]+_C)|([a-z]+)$")
+        local guid, source, raw_slot, raw_amount, class, policy, stackable =
+            fields[index]:match("^([0-9A-F]+)|([a-z]+)|(%d+)|(%d+)|(/Game/[%w_/%-%%]+%.[%w_%-%%]+_C)|([a-z]+)|([01])$")
         local slot = integer(raw_slot, (source == "armor" or source == "helmet") and 0 or 4095)
         local amount = integer(raw_amount, 2147483647)
         local is_locked = source == "backpack" and class == black_stone
@@ -161,6 +183,7 @@ local function page(fields, row, offset)
         end
         local item = class:match("%.([%w_%-%%]+)_C$"):gsub("_", " ")
         records[#records + 1] = {guid = guid, policy = policy, source = source, slot = slot, class = class,
+            amount = amount, stackable = stackable == "1",
             label = string.format("%s   %d x %s", sources[source], amount, item:sub(1, 52))}
     end
     if row.total == count and (locked_ordinal ~= nil) ~= (row.locked == 1) then
@@ -248,11 +271,9 @@ local function stock_item_guid(item)
     return ("%08X%08X%08X%08X"):format(a & 0xffffffff, b & 0xffffffff, c & 0xffffffff, d & 0xffffffff)
 end
 
-local function load_stock_preview(screen, current, records)
-    local save = current.pawn.Save
-    if not valid(save) then error("The local stock wipe inventory is unavailable", 0) end
-    for index, record in ipairs(records) do
-        local item
+local function stock_item(current, record)
+    local save, item = current.pawn.Save
+    if valid(save) then
         if record.source == "armor" then item = save.PlayerArmor
         elseif record.source == "helmet" then item = save.PlayerHelmet
         else
@@ -260,47 +281,52 @@ local function load_stock_preview(screen, current, records)
             if record.slot < slots:GetArrayNum() then item = slots[record.slot + 1] end
         end
         local class = item and item[item_class]
-        if not valid(class) or class:GetFullName():match("^%S+ (.+)$") ~= record.class
-            or stock_item_guid(item) ~= record.guid then
-            error("The local stock item does not match the frozen wipe inventory", 0)
+        if valid(class) and class:GetFullName():match("^%S+ (.+)$") == record.class
+            and stock_item_guid(item) == record.guid then
+            return item
         end
-        screen.PlayerInventory[index] = item
-        if stock_item_guid(screen.PlayerInventory[index]) ~= record.guid then
-            error("The stock wipe inventory card failed readback", 0)
+    end
+    -- A guest's live inventory can lag behind the frozen inventory. Recreate
+    -- only the screen row from the validated class and authoritative identity.
+    if not valid(StaticFindObject(record.class)) then LoadAsset(record.class) end
+    local class, base = StaticFindObject(record.class), StaticFindObject(item_base)
+    local library = StaticFindObject(inventory_library)
+    if not valid(class) or not valid(base) or not class:GetCDO():IsA(base) or not valid(library) then
+        error("The frozen wipe item class could not be resolved", 0)
+    end
+    local out = {}
+    library:MakeDefaultItem(class, current.pawn, out)
+    local result = out.Item or out
+    if not same(result[item_class], class) then error("The stock wipe item factory failed", 0) end
+    local guid = record.guid
+    result[item_guid] = {A = tonumber(guid:sub(1, 8), 16), B = tonumber(guid:sub(9, 16), 16),
+        C = tonumber(guid:sub(17, 24), 16), D = tonumber(guid:sub(25), 16)}
+    return result
+end
+
+local function load_stock_preview(screen, current, records)
+    local count = 0
+    for _, record in ipairs(records) do
+        local projected
+        if record.policy == "locked" then
+            screen.ItemsToKeep[1] = stock_item(current, record)
+            projected = screen.ItemsToKeep[1]
+        elseif record.policy == "selectable" then
+            count = count + 1
+            screen.PlayerInventory[count] = stock_item(current, record)
+            projected = screen.PlayerInventory[count]
+        end
+        if projected then
+            if record.stackable then projected[item_ammo] = record.amount end
+            if stock_item_guid(projected) ~= record.guid then
+                error("The stock wipe inventory card failed readback", 0)
+            end
         end
     end
     screen.InventoryPanel:FullRefresh()
-    if screen.InventoryPanel.Cards:GetArrayNum() ~= #records then
+    if screen.InventoryPanel.Cards:GetArrayNum() ~= count then
         error("The stock wipe inventory did not render the frozen items", 0)
     end
-end
-
-local function probe_stock_screen(current, row)
-    local screen = open_guarded_stock_screen(current)
-    local address = screen:GetAddress()
-    local ok, failure = pcall(function()
-        if screen:AddToPlayerScreen(36) ~= true or not screen:IsInViewport()
-            or SilverfishTakeNativeWipeScreenActions(address) & 2 ~= 2
-            or screen.PlayerInventory:GetArrayNum() ~= 0 or screen.KeptItemSlots:GetArrayNum() ~= 0 then
-            error("Stock wipe construction did not stay isolated", 0)
-        end
-        load_stock_preview(screen, current, row.records)
-        for index = 0, row.limit - 1 do screen:CreateKeepSlot(index) end
-        if screen.KeptItemSlots:GetArrayNum() ~= row.limit then
-            error("The stock wipe keep slots did not render", 0)
-        end
-        local phase = screen.Phase
-        screen:BndEvt__GameOver_RespawnPenalties_Widget_Button_Continue_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
-        screen["Compile Data and Respawn"](screen)
-        screen:ExitFade()
-        screen:BndEvt__GameOver_RespawnPenalties_Widget_Button_DebugCam_K2Node_ComponentBoundEvent_0_Pressed__DelegateSignature()
-        if SilverfishTakeNativeWipeScreenActions(address) ~= 29 or screen.Phase ~= phase or screen.FadingOut
-            or not authority_is_current(current) then
-            error("A stock wipe action escaped the co-op screen guard", 0)
-        end
-    end)
-    if valid(screen) then screen:RemoveFromParent() end
-    if not ok then error(failure, 0) end
 end
 
 local function emit(kind, row, values)
@@ -313,6 +339,106 @@ local function emit(kind, row, values)
     local closed = file:close()
     row.sequence = sequence
     return written and closed
+end
+
+local function show_stock(row)
+    local current = row.context
+    if current.controller.Loading or current.controller.MenuStack:GetArrayNum() ~= 0 then
+        error("Close other menus before showing the stock wipe screen", 0)
+    end
+    local screen = open_guarded_stock_screen(current)
+    row.stock = screen
+    current.controller:AddMenu(screen)
+    local stack = current.controller.MenuStack
+    if stack:GetArrayNum() ~= 1 or not same(stack[1], screen) or not screen:IsInViewport()
+        or SilverfishTakeNativeWipeScreenActions(screen:GetAddress()) & 2 ~= 2
+        or screen.PlayerInventory:GetArrayNum() ~= 0 or screen.KeptItemSlots:GetArrayNum() ~= 0 then
+        error("The stock wipe menu did not join the local menu stack", 0)
+    end
+    screen["Is Unclosable"] = true
+    local targets = {}
+    for index = 1, row.limit do screen.ItemsToKeep[index] = {} end
+    load_stock_preview(screen, current, row.stock_records)
+    for index = 0, row.limit - 1 do
+        screen:CreateKeepSlot(index)
+        local slot = screen.KeptItemSlots[index + 1]
+        if index < row.locked then slot:SetIsEnabled(false)
+        else targets[#targets + 1] = slot end
+    end
+    screen.InventoryPanel:SetQuickMoveTargets(targets)
+end
+
+local function stock_choices(row)
+    local keep, selected, seen = row.stock.ItemsToKeep, {}, {}
+    if keep:GetArrayNum() ~= row.limit then return end
+    for index = 1, row.limit do
+        local item = keep[index]
+        if valid(item[item_class]) then
+            local guid = stock_item_guid(item)
+            local record = guid and row.stock_by_guid[guid]
+            if not record or record.policy == "excluded" or seen[guid]
+                or (record.stackable and item[item_ammo] ~= record.amount) then return end
+            seen[guid] = true
+            if record.policy == "selectable" then selected[#selected + 1] = guid end
+        end
+    end
+    if #selected <= row.cap then return selected end
+end
+
+local function stock_message(screen, message)
+    screen.Button_Continue.Button_Text = FText(message)
+end
+
+local function stock_continue(row)
+    local screen = row.stock
+    if row.state == "submitting" or screen.ItemManager.HoldingItem or screen.ItemManager.IsSplittingStack then return end
+    local chosen = stock_choices(row)
+    if not chosen then
+        row.state = "refused"
+        stock_message(screen, "Choose whole items or stacks")
+        return
+    end
+    row.count = #chosen
+    table.sort(chosen)
+    table.insert(chosen, 1, #chosen)
+    if emit("native-wipe-view-submit", row, chosen) then
+        row.state = "submitting"
+        stock_message(screen, "Waiting for the party")
+    else
+        row.state = "refused"
+        stock_message(screen, "Retry confirmation")
+    end
+end
+
+local function poll_stock(row)
+    local screen, controller = row.stock, row.context.controller
+    local stack = controller.MenuStack
+    if not valid(screen) or not screen:IsInViewport() or stack:GetArrayNum() ~= 1 or not same(stack[1], screen) then
+        invalidate("stock wipe menu closed")
+        return
+    end
+    if SilverfishTakeNativeWipeScreenActions(screen:GetAddress()) & 1 == 1 then stock_continue(row) end
+end
+
+local function stock_fixture_keep(row, guid)
+    local screen = row.stock
+    local panel, manager = screen.InventoryPanel, screen.ItemManager
+    for index = 1, panel.Cards:GetArrayNum() do
+        local card = panel.Cards[index]
+        if valid(card) and stock_item_guid(card.Item) == guid then
+            manager.HoveredCard = card
+            manager:QuickMove()
+            manager:QuickMove()
+            manager.HoveredCard = nil
+            local selected = stock_choices(row)
+            if selected and #selected == 1 and selected[1] == guid then
+                row.count = #selected
+                return true
+            end
+            break
+        end
+    end
+    error("The stock wipe Quick Move did not fill the keep slot", 0)
 end
 
 local function choose(row, action)
@@ -362,6 +488,7 @@ local function poll_keys()
     if not row then return end
     local now, reason = current_time(row.context, row)
     if not now then invalidate(reason) return end
+    if row.stock then poll_stock(row) return end
     if not can_choose(row) then held = {} return end
     local changed
     for _, action in ipairs(actions) do
@@ -417,6 +544,7 @@ function wipe_view.command(fields, state, phase)
                 locked = locked, cap = math.max(0, limit - locked), total = total, leased_at = now,
                 state = "selecting", count = 0, sequence = 0, selected = {}, verified = {},
                 guid_ordinals = {}, position_ordinals = {}}
+            if wants_stock() then row.stock_records, row.stock_by_guid = {}, {} end
         else
             row = view
             if not current_time(current, row) or row.state ~= "paging" or row.pending_offset ~= offset
@@ -432,7 +560,19 @@ function wipe_view.command(fields, state, phase)
             view = row
         end
         local ok, failure = pcall(function()
-            if matches then show(row) else render(current, row) end
+            if not row.stock_records then
+                if matches then show(row) else render(current, row) end
+                return
+            end
+            for _, item in ipairs(records) do
+                row.stock_records[#row.stock_records + 1] = item
+                row.stock_by_guid[item.guid] = item
+            end
+            if offset + #records < row.total then
+                row.state, row.pending_offset = "paging", offset + #records
+            else
+                show_stock(row)
+            end
         end)
         if not ok then wipe_view.clear() error(failure, 0) end
         return "verified frozen wipe inventory displayed"
@@ -447,20 +587,26 @@ function wipe_view.command(fields, state, phase)
         and choose(view, fields[7]) then
         return "verified headless wipe selection key"
     end
-    if op == "native-wipe-view-key-fixture" and #fields == 7 and headless and fields[7] == "stock-guard"
-        and can_choose(view) then
-        probe_stock_screen(current, view)
-        return "verified guarded stock wipe screen"
+    if op == "native-wipe-view-key-fixture" and #fields == 7 and headless and stock_fixture and view.stock then
+        local guid = fields[7]:match("^stock%-keep%-([0-9A-F]+)$")
+        if hex32(guid, "^[0-9A-F]+$") and stock_fixture_keep(view, guid) then
+            return "verified stock wipe keep slot"
+        end
+        if fields[7] == "stock-submit" then
+            view.stock:BndEvt__GameOver_RespawnPenalties_Widget_Button_Continue_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
+            poll_stock(view)
+            if view.state == "submitting" then return "verified stock wipe confirmation" end
+        end
     end
     if op == "native-wipe-view-result" and #fields == 7 then
         if fields[7] == "accepted" and view.state == "submitting" then
             view.state = "accepted"
-            remove_display()
+            remove_display(view)
             return "verified wipe selection accepted"
         end
         if fields[7] == "refused" and (view.state == "submitting" or view.state == "paging") then
             view.state, view.pending_offset, view.notice = "refused", nil, "The host declined the last request."
-            show(view)
+            if view.stock then stock_message(view.stock, "Retry confirmation") else show(view) end
             return "verified wipe request refused"
         end
     end
@@ -472,7 +618,8 @@ function wipe_view.rows(state, phase, status_row)
     if not row or not same_context(context(state, phase), row.context) then return {} end
     local focus = row.records[row.focus]
     return {status_row("native-wipe-view", row.state, row.id, row.context.map, row.context.name, row.character,
-        row.deadline, row.offset, row.total, focus and focus.guid or "-", row.count, row.cap, row.sequence)}
+        row.deadline, row.offset, row.total, focus and focus.guid or "-", row.count, row.cap, row.sequence,
+        row.stock_records and "stock" or "overlay")}
 end
 
 function wipe_view.start(bridge, downed_check)

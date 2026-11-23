@@ -2148,11 +2148,13 @@ class Bridge:
                     data.setdefault("native_guest_revivals", {})[fields[2]] = {
                         "map": fields[1], "pawn": fields[2], "owner": fields[3], "health": _finite(fields[4]), "maximum": _finite(fields[5]),
                     }
-                elif fields[0] == "native-wipe-view" and len(fields) == 13:
+                elif fields[0] == "native-wipe-view" and len(fields) in (13, 14):
                     data["native_wipe_view"] = {"state": fields[1], "id": fields[2], "map": fields[3], "pawn": fields[4],
                                                 "owner": fields[5], "deadline": int(fields[6]), "offset": int(fields[7]),
                                                 "total": int(fields[8]), "guid": fields[9], "selected": int(fields[10]),
                                                 "limit": int(fields[11]), "sequence": int(fields[12])}
+                    if len(fields) == 14:
+                        data["native_wipe_view"]["screen"] = fields[13]
                 elif (fields[0] == "native-loot-crate-input" and len(fields) in (4, 5)
                       and AUTHORED_CRATES.get(fields[2]) == fields[1] and fields[3] in ("ready", "exhausted")):
                     row = {"map": fields[1], "crate": fields[2], "state": fields[3]}
