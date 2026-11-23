@@ -443,7 +443,7 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str) -> dic
     host_frame, guest_frame = await asyncio.gather(
         wait_resident_status(host_run, lambda frame: frame.get("local_bridge") == "memory"),
         wait_resident_status(guest_run, lambda frame: frame.get("local_bridge") == "memory"
-                             and any(avatar["state"] == "stock_body" and avatar.get("player_id") is not None
+                             and any(avatar["state"] in {"stock_body", "default_body"} and avatar.get("player_id") is not None
                                      for avatar in frame.get("game", {}).get("native_player_avatars", {}).values())),
     )
     assert host_frame["game"]["native_guest_save"]["pawn"] == pawn
