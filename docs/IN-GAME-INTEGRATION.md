@@ -165,6 +165,8 @@ A separate RC `2abe7b2` diagnostic reopened a copied saved Observatory campaign 
 
 The same saved cabinet was tested in a muted pair running the installed mod. The host's stock F press reached the in-process input queue in 11 ms, the claim began 35 ms later, and the stock sound command completed 147 ms after the press. The longest nearby frame was 35 ms. Both games removed the same beans and the save files stayed unchanged until Save and Quit.
 
+RC `c2eadd9` combines host-side removal and playback of an already-loaded cue after the exact container claim is confirmed. Replaying the same copied cabinet checkpoint reached the combined removal and sound receipt 118 ms after F, with a longest nearby frame of 32 ms. The item disappeared for both players and the host received it once. The source checkpoint stayed byte-identical, and the trial campaign files changed only at Save and Quit. This is one muted local host comparison. Foreground pacing and guest pickup timing still need a two-PC check.
+
 Supported live guest weapon and inventory actions now keep the detached save in memory. This also covers ordinary melee, flares, mushroom harvesting, door prying, and consumable use. Two guests used stock reload and fired overlapping bursts in a muted trial. Releasing the triggers and losing one client's connection left the campaign files unchanged. An explicit save before stopping preserved each magazine through restart. [Held-fire trial](../tests/live_guest_held_fire_smoke.py)
 
 Stock inventory sorting and both direct and popup stack splitting also leave save files unchanged until a save. A muted two-player test restored the sorted and split inventory after restart. [Inventory trial](../tests/live_inventory_split_smoke.py)
