@@ -14,15 +14,19 @@ import subprocess
 import sys
 import time
 import uuid
+from zipfile import ZipFile
 
 from live_ai_smoke import wait
 from live_multi_smoke import campaign_save_hashes, saved_hashes
+from portable_guest_world_start import resident_events, wait_resident_status
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.silverfish import native_host_save, native_loot, native_world_loot, runtime
 from tools.silverfish.authored_loot import full_name
 from tools.silverfish.control import submit
+from tools.silverfish.service import menu_host_checkpoint
+from tools.silverfish.title_host_campaigns import saved_campaign
 from tools.silverfish.travel import OBSERVATORY
 
 
@@ -30,6 +34,7 @@ PRIVATE_RUNTIME = ROOT.parent / "Runtime"
 CABINET = full_name(OBSERVATORY, "LootCabnet_Small_BP_C_3")
 SEED = 441206
 PROFILE_MODULE = "cabinet_pickup_profile.lua"
+JOINT_PRESENTATION = "native-world-loot-present-host-claim"
 PROBES = {
     "native_loot_actions.lua": {
         "pcall(loot.claim_context, state, phase, pawn, crate, point)": (
@@ -54,25 +59,61 @@ PROBES = {
 }
 
 
-def source_with_probe(name: str, before: bytes) -> bytes:
+RESIDENT_PROBES = {
+    "native_guest_drop_projection.lua": {
+        "return pickup_fixture.press_world_loot(state, pawn, actor, actor.Box, function()": (
+            "return pickup_fixture.press_world_loot(state, pawn, actor, actor.Box, function()\n"
+            "            cabinet_probe.mark('stock-f', id)"
+        ),
+    },
+    "players.lua": {
+        "and SilverfishEnqueueLocalBridgeInput(record) then": (
+            "and SilverfishEnqueueLocalBridgeInput(record) then\n"
+            "        cabinet_probe.mark('input-memory', target and target:match('^world%-loot:%x+:(%x+):'))"
+        ),
+    },
+}
+
+
+CURRENT_MAIN_PROBES = {
+    "accepted, message = pcall(run_command, fields, state, current_phase)": (
+        "accepted, message = pcall(require('cabinet_pickup_profile').timed, 'command:' .. fields[2], "
+        "run_command, fields, state, current_phase)"
+    ),
+    "pcall(tick, fields, pending, periodic)": (
+        "pcall(require('cabinet_pickup_profile').timed, 'bridge:' .. (fields and fields[2] or 'idle'), "
+        "tick, fields, pending, periodic)"
+    ),
+}
+
+
+def source_with_probe(name: str, before: bytes, *, combined: bool = False) -> bytes:
     text = before.decode("utf-8")
-    for old, new in PROBES[name].items():
+    anchors = PROBES.get(name) or RESIDENT_PROBES[name]
+    if name == "main.lua" and "local function tick(fields, pending, periodic)" in text:
+        anchors = CURRENT_MAIN_PROBES
+    if combined and name == "main.lua":
+        publish = "SilverfishPublishLocalBridgeReply(pending.ticket, frame)"
+        anchors = {**anchors, publish: publish + "\n            "
+                   "require('cabinet_pickup_profile').acknowledge(pending.fields, acknowledged_result, acknowledged_message)"}
+    for old, new in anchors.items():
         if text.count(old) != 1:
             raise ValueError(f"The cabinet timing anchor has changed in {name}: {old}")
         text = text.replace(old, new)
     # main.lua already uses the Lua chunk's local-variable budget.
-    prefix = "" if name == "main.lua" else "local cabinet_probe = require('cabinet_pickup_profile')\n"
+    prefix = "local cabinet_probe = require('cabinet_pickup_profile')\n" if "cabinet_probe." in text else ""
     return (prefix + text).encode("utf-8")
 
 
 @contextmanager
-def instrument(work: Path):
-    """Temporarily add probes to the exact staged scripts, leaving the native binary alone."""
-    stage = work / "stage"
+def instrument(work: Path, *, release_archive: Path | None = None, combined: bool = False):
+    """Temporarily add probes to private scripts and restore their original bytes."""
+    stage = work if release_archive else work / "stage"
+    probe_names = PROBES | RESIDENT_PROBES if release_archive else PROBES
     scripts = stage / runtime.SHIPPING.parent / runtime.MOD_SCRIPTS
     manifest = runtime.stage_manifest(stage)
     helper = scripts / PROFILE_MODULE
-    paths = [*(scripts / name for name in PROBES), manifest]
+    paths = [*(scripts / name for name in probe_names), manifest]
     if stage.resolve(strict=True) != stage or not work.is_relative_to(PRIVATE_RUNTIME.resolve(strict=True)):
         raise ValueError("Use a private diagnostic stage in the project Runtime directory")
     for path in paths:
@@ -80,9 +121,19 @@ def instrument(work: Path):
             raise ValueError(f"The profiling overlay requires an unshared file under the stage: {path}")
     if os.path.lexists(helper):
         raise ValueError("The stage already has a cabinet timing overlay")
-    runtime.verify_installed_lua(work)
+
+    def verify_lua():
+        with runtime.installed_content(work, stage):
+            runtime.verify_installed_lua(work)
+
+    verify_lua()
     originals = {path: path.read_bytes() for path in paths}
-    updates = {path: source_with_probe(path.name, originals[path]) for path in paths[:-1]}
+    if release_archive:
+        with ZipFile(release_archive) as release:
+            for path, data in originals.items():
+                if release.read(path.relative_to(stage).as_posix()) != data:
+                    raise ValueError(f"The portable source differs from the pinned archive: {path}")
+    updates = {path: source_with_probe(path.name, originals[path], combined=combined) for path in paths[:-1]}
     updates[helper] = (Path(__file__).with_name("fixtures") / PROFILE_MODULE).read_bytes()
     metadata = json.loads(originals[manifest])
     if "lua_files" in metadata:
@@ -92,17 +143,16 @@ def instrument(work: Path):
     try:
         for path, data in updates.items():
             path.write_bytes(data)
-        runtime.verify_installed_lua(work)
+        verify_lua()
         yield
     finally:
         for path, data in originals.items():
-            if path in updates:
-                path.write_bytes(data)
+            path.write_bytes(data)
         helper.unlink(missing_ok=True)
-        runtime.verify_installed_lua(work)
+        verify_lua()
 
 
-def summarize(trace: Path) -> dict:
+def summarize(trace: Path, *, resident: bool = False, combined_operation: str | None = None) -> dict:
     entries = []
     for line in trace.read_text(encoding="utf-8").splitlines():
         label, *measurements = line.split("\t")
@@ -113,8 +163,8 @@ def summarize(trace: Path) -> dict:
     frames = [row for row in entries if row["label"] == "frame"]
     native = [row for row in entries if row["label"] == "claim-native"]
     loads = [row for row in entries if row["label"] == "escrow-load"]
-    if len(native) != 1 or len(loads) != 1:
-        raise ValueError(f"Expected one cold escrow load and one native claim, saw {len(loads)} and {len(native)}")
+    if len(native) != 1 or len(loads) > 1 or (not resident and len(loads) != 1):
+        raise ValueError(f"Unexpected escrow load or native claim count: {len(loads)} loads and {len(native)} claims")
     claim, = [row for row in entries if row["label"] == "command:native-loot-claim"]
     enclosing, = [row for row in entries if row["label"] == "bridge:native-loot-claim"]
     if not all(enclosing["start"] <= row["start"] <= row["stop"] <= enclosing["stop"] for row in (*loads, *native, claim)):
@@ -132,12 +182,67 @@ def summarize(trace: Path) -> dict:
     idle = [row["elapsed_ms"] for row in frames if row["stop"] < enclosing["start"] - .2]
     if not nearby or not idle:
         raise ValueError("Missing baseline or claim frame samples")
-    return dict(escrow_load_ms=loads[0]["elapsed_ms"], native_claim_ms=native[0]["elapsed_ms"],
-                command_ms=claim["elapsed_ms"], bridge_tick_ms=enclosing["elapsed_ms"],
-                input_fixture_end_to_claim_ms=round((claim["stop"] - press["stop"]) * 1000, 3),
-                input_fixture_end_to_presentation_ms=presentation,
-                nearby_frames_ms=nearby, max_nearby_frame_ms=max(nearby), idle_frame_median_ms=median(idle),
-                frame_count=len(frames))
+    summary = dict(escrow_load_ms=loads[0]["elapsed_ms"] if loads else None, native_claim_ms=native[0]["elapsed_ms"],
+                   command_ms=claim["elapsed_ms"], bridge_tick_ms=enclosing["elapsed_ms"],
+                   nearby_frames_ms=nearby, max_nearby_frame_ms=max(nearby), idle_frame_median_ms=median(idle),
+                   frame_count=len(frames))
+    if not resident:
+        summary.update(input_fixture_end_to_claim_ms=round((claim["stop"] - press["stop"]) * 1000, 3),
+                       input_fixture_end_to_presentation_ms=presentation)
+    if resident:
+        stock, = [row for row in entries if row["label"] == "stock-f"]
+        queued, = [row for row in entries if row["label"] == "input-memory"]
+        def presentation_command(name):
+            tick, = [row for row in entries if row["label"] == "bridge:" + name]
+            command, = [row for row in entries if row["label"] == "command:" + name]
+            if not tick["start"] <= command["start"] <= command["stop"] <= tick["stop"]:
+                raise ValueError("A presentation command escaped its bridge tick")
+            return tick, command
+
+        retire_name, sound_name = "native-world-loot-retire", "native-sound-pickup"
+        if combined_operation is None:
+            retire, retire_command = presentation_command(retire_name)
+            sound, sound_command = presentation_command(sound_name)
+            presentation_edges = (retire["start"], retire["stop"], sound["start"])
+        else:
+            joint, joint_command = presentation_command(JOINT_PRESENTATION)
+            acknowledgments = [row for row in entries if row["label"].startswith("presentation-ack:")]
+            wanted = "presentation-ack:accepted:retired|" + combined_operation
+            if len(acknowledgments) != 1 or acknowledgments[0]["label"] != wanted:
+                raise ValueError(f"The joint pickup ACK did not prove both effects: {acknowledgments}")
+            ack = acknowledgments[0]
+            if (not joint_command["stop"] <= ack["start"] <= joint["stop"]
+                    or any(row["label"] in {"bridge:" + retire_name, "bridge:" + sound_name} for row in entries)):
+                raise ValueError("The joint pickup ACK was outside its command or used separate fallback commands")
+            retire = sound = joint
+            presentation_edges = (joint["start"], joint_command["stop"], ack["start"])
+        edges = (stock["start"], queued["start"], enclosing["start"], enclosing["stop"], *presentation_edges)
+        if tuple(sorted(edges)) != edges:
+            raise ValueError("The stock press, in-process input, claim, retirement and sound are out of order")
+
+        def ms(stop, start):
+            return round((stop - start) * 1000, 3)
+
+        presentation = [row["elapsed_ms"] for row in frames
+                        if row["start"] < sound["stop"] + .06 and row["stop"] > stock["start"] - .06]
+        if not presentation:
+            raise ValueError("Missing frame samples around the measured presentation")
+        summary.update(stock_f_to_input_ms=ms(queued["start"], stock["start"]),
+                       input_to_claim_ms=ms(enclosing["start"], queued["start"]),
+                       input_to_claim_command_end_ms=ms(claim["stop"], queued["start"]),
+                       stock_f_to_claim_command_end_ms=ms(claim["stop"], stock["start"]),
+                       stock_f_to_claim_tick_end_ms=ms(enclosing["stop"], stock["start"]),
+                       claim_to_retire_ms=ms(retire["start"], enclosing["stop"]),
+                       max_presentation_frame_ms=max(presentation), stock_f_to_sound_ms=ms(sound["stop"], stock["start"]))
+        if combined_operation is None:
+            summary.update(retire_to_sound_ms=ms(sound["start"], retire["stop"]),
+                           retire_command_ms=retire_command["elapsed_ms"], retire_tick_ms=retire["elapsed_ms"],
+                           sound_command_ms=sound_command["elapsed_ms"], sound_tick_ms=sound["elapsed_ms"])
+        else:
+            summary.update(joint_command_ms=joint_command["elapsed_ms"], joint_tick_ms=joint["elapsed_ms"],
+                           stock_f_to_joint_ack_ms=ms(ack["start"], stock["start"]),
+                           joint_ack=ack["label"].removeprefix("presentation-ack:"))
+    return summary
 
 
 def checkpoint(campaign: Path) -> dict:
@@ -184,6 +289,38 @@ def copy_checkpoint(source: Path, destination: Path, seed: int):
     return before, saved, roll, item
 
 
+def copy_resident_checkpoint(source: Path, campaign: Path, profile: Path):
+    """Copy only the verified cabinet generation into this test title's private save namespace."""
+    private = PRIVATE_RUNTIME.resolve(strict=True)
+    if (not all(path.is_relative_to(private) for path in (source, campaign, profile))
+            or source.is_relative_to(campaign) or campaign.is_relative_to(source)
+            or source.is_relative_to(profile) or profile.is_relative_to(source)
+            or any(path.resolve() != path for path in (source, campaign, profile))
+            or source.parent.name != "campaigns" or campaign.parent.name != "campaigns"):
+        raise ValueError("Use separate private source and resident campaign locations")
+    before = campaign_save_hashes(source)
+    saved, roll, item = durable_cabinet(source, SEED)
+    if saved["characters"] or saved.get("leases") or native_host_save.SCOPE_FIELD in saved["world"]:
+        raise ValueError("The timing source must be the standalone campaign with no guest saves")
+    scope = uuid.UUID(saved["campaign_id"]).hex
+    scoped = {**saved, "world": {**saved["world"], native_host_save.SCOPE_FIELD: scope}}
+    source_storage = native_host_save.checkpoint_profile(source / "game-user", saved)
+    target_storage = native_host_save.checkpoint_profile(profile, scoped)
+    target_directory = native_host_save.directory(target_storage)
+    target_directory.mkdir(parents=True, exist_ok=False)
+    (campaign / "save").mkdir(parents=True, exist_ok=False)
+    for reference in native_host_save.references(saved):
+        slot = reference["slot"]
+        original = native_host_save.slot_path(source_storage, slot)
+        target = native_host_save.slot_path(target_storage, slot)
+        shutil.copyfile(original, target)
+    runtime.write_json(campaign / "save/campaign.json", scoped)
+    assert menu_host_checkpoint(campaign, profile=profile, require_scoped=True) == scoped
+    assert saved_campaign(campaign, profile / "Saved", campaign.name) == (campaign, OBSERVATORY)
+    assert campaign_save_hashes(source) == before
+    return saved, roll, item
+
+
 def host_command(work: Path, campaign: str, *, fresh_seed: int | None = None) -> list[str]:
     args = [sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work), "host",
             "--campaign", campaign, "--port", "0", "--headless", "--fixtures", "--native-events",
@@ -192,6 +329,117 @@ def host_command(work: Path, campaign: str, *, fresh_seed: int | None = None) ->
         args.extend(("--start-zone", OBSERVATORY, "--native-start-preset", "wanderer",
                      "--native-world-seed", str(fresh_seed)))
     return args
+
+
+async def arm_probe(mailbox: Path, identity: str | None = None) -> Path:
+    nonce = uuid.uuid4().hex[:16]
+    request = (f"{nonce}\t{identity}" if identity else nonce) + "\n"
+    (mailbox / "measure-cabinet-cold").write_text(request, encoding="ascii", newline="")
+    armed = mailbox / f"cabinet-cold-{nonce}.armed"
+    async with asyncio.timeout(8):
+        while not armed.is_file() or armed.read_bytes() != request.encode("ascii"):
+            await asyncio.sleep(.05)
+    await asyncio.sleep(.60)
+    trace = mailbox / f"cabinet-cold-{nonce}.tsv"
+    assert not trace.exists(), "Cabinet probe expired before the pickup"
+    return trace
+
+
+async def finish_probe(trace: Path) -> None:
+    async with asyncio.timeout(15):
+        while not trace.is_file() or not trace.read_bytes().endswith(b"\n"):
+            await asyncio.sleep(.10)
+
+
+async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dict, dict, dict], *,
+                                 combined: bool = False) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+
+    def memory(state):
+        return state.get("local_bridge") == state.get("local_status_source") == "memory"
+
+    host_state, _ = await asyncio.gather(wait_resident_status(host_run, memory), wait_resident_status(guest_run, memory))
+    game = host_state["game"]
+    host_pawn = game["pawns"]["local"]["name"]
+    assert game["map"] == OBSERVATORY
+    if combined:
+        assert game.get("native_world_loot_host_presentation") is True, "The packed worker lacks the joint pickup capability"
+
+    async def submit_ok(run, action, **arguments):
+        result = await submit(run, action, **arguments)
+        assert result["ok"], result
+        return result
+
+    saved, roll, item = source
+    assert game["save_scope"] == uuid.UUID(saved["campaign_id"]).hex
+    assert game["native_scene"]["instance_seed"] == SEED
+    assert host_state["gameplay"][native_loot.STATE_KEY][CABINET]["id"] == roll["id"]
+
+    restored, = [row for row in await resident_events(host_run, host_state) if row["event"] == "native_host_save_restored"]
+    assert (restored["state"], restored["slot"], restored["map"]) == (
+        "restored", saved["world"]["native_host_save"]["slot"], OBSERVATORY)
+    guid = item["guid"]
+    identity = native_world_loot.crate_identity(roll["id"], guid)
+
+    def visible(state, within):
+        frame = state.get("game", {})
+        position = frame.get("pawns", {}).get("local", {}).get("location")
+        return (memory(state) and frame.get("map") == OBSERVATORY and position
+                and math.dist(position, item["transform"]["position"]) <= within
+                and frame.get(native_world_loot.KEY, {}).get(identity, {}).get("class_path") == item["class_path"])
+
+    await wait_resident_status(host_run, lambda state: visible(state, 350))
+    for pawn in (guest_pawn, host_pawn):
+        approached = await host.bridge.command(native_world_loot.APPROACH, identity, pawn, timeout=5)
+        assert approached["ack"]["message"] == "stock loot height and line of sight verified"
+    await asyncio.gather(wait_resident_status(host_run, lambda state: visible(state, 250)),
+                         wait_resident_status(guest_run, lambda state: visible(state, 250)))
+    before = campaign_save_hashes(host.campaign), saved_hashes(host.profile / "Saved/SaveGames")
+    assert all(before)
+
+    trace = await arm_probe(host.bridge.directory, identity)
+    fired = await host.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
+    assert fired["ack"]["message"] == "stock world loot interaction intercepted", fired["ack"]
+
+    def settled(state):
+        rows = state.get("gameplay", {}).get(native_loot.STATE_KEY, {}).get(CABINET, {}).get("items", ())
+        return identity not in state.get("game", {}).get(native_world_loot.KEY, {}) and any(
+            row["guid"] == guid and row.get("claimed_by") == "host" for row in rows)
+
+    await asyncio.gather(wait_resident_status(host_run, settled), wait_resident_status(guest_run, settled))
+    await finish_probe(trace)
+    records = await resident_events(host_run, host_state)
+    claim, = [row for row in records if row["event"] == "native_loot_claim_accepted" and row.get("guid") == guid]
+    receipt = claim["operation_id"]
+    played, = [row for row in records if row["event"] == "native_pickup_sound_played" and row.get("operation_id") == receipt]
+    inventory = (await submit_ok(host_run, "native-inventory-list"))["native_inventory"]
+    inventory_guid = claim.get("inventory_guid", guid)
+    received, = [row for row in inventory["items"] if row["guid"] == inventory_guid]
+    assert received["class_path"] == item["class_path"]
+    if received["stackable"]:
+        assert received["quantity"] == claim.get("stack_merge", {}).get("after", item["ammo"])
+    assert before == (campaign_save_hashes(host.campaign), saved_hashes(host.profile / "Saved/SaveGames"))
+    timings = summarize(trace, resident=True, combined_operation=receipt if combined else None)
+    assert timings["escrow_load_ms"] is not None, "The measurement did not exercise the copied cold escrow"
+    return {"cabinet": CABINET, "stock_class": item["class_path"], "guid": guid, "projection": identity,
+            "operation": receipt, "inventory": received, "native_claim_unix": claim["time_unix"],
+            "sound_receipt_unix": played["time_unix"], "timings": timings,
+            "restored_source_revision": saved["revision"], "restored_scope": game["save_scope"],
+            "restored_host_slot": restored["slot"], "restored_seed": SEED, "escrow_slot": roll["escrow"]["slot"],
+            "trace": str(trace), "local_bridge": "memory", "both_projected_views_retired": True,
+            "saves_unchanged_after_pickup": True}
+
+
+async def verify_saved_pickup(host, stopped, saved, source):
+    original, roll, item = source
+    committed = saved["world"]["party"][native_loot.STATE_KEY][CABINET]
+    pickup, = [row for row in committed["items"] if row["guid"] == item["guid"]]
+    assert committed["id"] == roll["id"] and pickup == {**item, "claimed_by": "host"}, committed
+    assert saved["revision"] > original["revision"]
+    events = await resident_events(host.campaign / "run", stopped)
+    exit_event, = [row for row in events if row["event"] == "stock_pause_exit" and row.get("reason") == "save_and_quit"]
+    assert exit_event["result"] == "ok", exit_event
+    return {"revision": saved["revision"], "claimed_guid": pickup["guid"], "claimed_by": pickup["claimed_by"]}
 
 
 async def exercise(work: Path, canary: Path, seed: int, source: Path | None):
@@ -263,17 +511,8 @@ async def exercise(work: Path, canary: Path, seed: int, source: Path | None):
         await local(run, native_world_loot.APPROACH, target=f"host@{identity}")
         before_pickup = campaign_save_hashes(resumed)
         mailbox, = (run / "game-bridge").iterdir()
-        nonce = uuid.uuid4().hex[:16]
-        request = nonce + "\n"
-        (mailbox / "measure-cabinet-cold").write_text(request, encoding="ascii", newline="")
-        armed = mailbox / f"cabinet-cold-{nonce}.armed"
-        async with asyncio.timeout(8):
-            while not armed.is_file() or armed.read_bytes() != request.encode("ascii"):
-                await asyncio.sleep(.05)
+        trace = await arm_probe(mailbox)
         proof["probe_armed"] = True
-        await asyncio.sleep(.60)
-        trace = mailbox / f"cabinet-cold-{nonce}.tsv"
-        assert not trace.exists(), "Cabinet probe expired before the pickup"
         started_at = time.perf_counter()
         await local(run, native_world_loot.FIXTURE, target=identity)
 
@@ -286,9 +525,7 @@ async def exercise(work: Path, canary: Path, seed: int, source: Path | None):
         proof.update(source_campaign=str(source), revision=saved["revision"], escrow_slot=roll["escrow"]["slot"],
                      class_path=item["class_path"], guid=item["guid"],
                      fixture_to_settled_ms=1000 * (time.perf_counter() - started_at))
-        async with asyncio.timeout(15):
-            while not trace.is_file() or not trace.read_bytes().endswith(b"\n"):
-                await asyncio.sleep(.10)
+        await finish_probe(trace)
         proof["timings"] = summarize(trace)
         # The normal stop below explicitly saves. Compare the pickup against the live checkpoint first.
         proof["unchanged_after_pickup"] = campaign_save_hashes(resumed) == before_pickup

@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import uuid
+from zipfile import ZipFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
@@ -32,6 +33,7 @@ from tools.silverfish.win_job import GameProcess
 from live_installed_title_smoke import boot_states, native_mailbox
 from live_loose_pickup_smoke import DEFAULT_ACTOR
 from live_ai_smoke import wait
+from live_cold_cabinet_pickup_smoke import copy_resident_checkpoint, instrument, verify_resident_pickup, verify_saved_pickup
 from live_multi_smoke import campaign_save_hashes, saved_hashes
 from live_resident_host_smoke import stock_profile, stock_save_hashes
 from live_same_process_listener_smoke import choose_ports
@@ -40,6 +42,9 @@ from live_stock_pause_exit_smoke import stock_pause
 from live_unified_title_smoke import Seat, offered, start_pair
 from portable_guest_world_start import GuestWorldStartProof, wait_resident_status
 from portable_world_view_receipt import patch_world_view_receipts, verify_world_view_receipt
+
+
+CABINET_RELEASE_SHA256 = "e35f410f7231f2c510b4ec43c34fb59ff7e9574187e2cd32fe66a61b3e87c14c"
 
 
 @dataclass(frozen=True)
@@ -211,6 +216,35 @@ def qualify_release(game: Path, legacy_work: Path | None) -> PortableRelease:
         seat_name = legacy["seat"]
         boot.update({key: legacy[key] for key in ("campaign", "bind", "port")})
     return PortableRelease(package, digest, Path("titles") / seat_name, boot, activation)
+
+
+def cabinet_provenance(archive: Path, games: tuple[Path, Path], releases: tuple[PortableRelease, PortableRelease],
+                       candidate_sha256: str | None) -> dict:
+    expected = CABINET_RELEASE_SHA256 if candidate_sha256 is None else candidate_sha256
+    if not re.fullmatch(r"[0-9a-f]{64}", expected) or runtime._file_sha256(archive) != expected:
+        raise ValueError("The cabinet archive differs from its expected SHA-256 digest")
+    if candidate_sha256 == CABINET_RELEASE_SHA256:
+        raise ValueError("The published cabinet baseline cannot stand in for the joint presentation candidate")
+    with ZipFile(archive) as bundle:
+        for game, release in zip(games, releases, strict=True):
+            # qualify_release has already verified all installed files pinned by this manifest.
+            manifest = release.package / install_stage.MANIFEST
+            embedded = release.package.parent
+            gameplay = game / runtime.SHIPPING.parent / runtime.CPP_ADDON_DLL
+            for path in (manifest, embedded / "resident-portable.json", embedded / "dlls/main.dll", gameplay):
+                data = bundle.read(path.relative_to(game).as_posix())
+                if sha256(data).hexdigest() != fingerprint(path):
+                    raise ValueError(f"The portable cabinet replica differs from the pinned archive: {path}")
+            revision = json.loads(manifest.read_bytes()).get("app_revision", "")
+            if not re.fullmatch(r"[0-9a-f]{40}", revision) or (not candidate_sha256 and not revision.startswith("2abe7b2")):
+                raise ValueError("The cabinet release does not identify its packed source revision")
+        if candidate_sha256:
+            projection = runtime.SHIPPING.parent / runtime.MOD_SCRIPTS / "native_guest_drop_projection.lua"
+            if b"native-world-loot-present-host-claim" not in bundle.read(projection.as_posix()):
+                raise ValueError("The pinned candidate does not include the joint pickup command")
+    return {"release_source": revision[:7], "release_revision": revision, "release_archive_sha256": expected,
+            "native_sha256": fingerprint(gameplay), "runtime_manifest_sha256": release.manifest_sha256,
+            "cabinet_presentation": "combined" if candidate_sha256 else "separate"}
 
 
 async def discover_mailbox(root: Path, process: GameProcess) -> Path:
@@ -1023,7 +1057,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
-                 guest_shop_lease: bool = False) -> None:
+                 guest_shop_lease: bool = False,
+                 resident_cabinet_archive: Path | None = None,
+                 resident_cabinet_checkpoint: Path | None = None,
+                 resident_cabinet_candidate_sha256: str | None = None) -> None:
     guest_world_start = guest_world_start or guest_world_start_travel
     container_nearby = container_nearby or guest_ui_memory
     roots = (work, first_game, second_game, original)
@@ -1033,6 +1070,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             or any(a.is_relative_to(b) or b.is_relative_to(a) for a, b in combinations(roots, 2))):
         raise ValueError("Use separate private replica and work directories outside the original saves")
     before = saved_hashes(original)
+    if ((resident_cabinet_archive is None) != (resident_cabinet_checkpoint is None)
+            or resident_cabinet_candidate_sha256 and not resident_cabinet_archive):
+        raise ValueError("The cabinet profile needs the exact release archive and cold checkpoint")
+    combined_presentation = resident_cabinet_candidate_sha256 is not None
+    source_before = campaign_save_hashes(resident_cabinet_checkpoint) if resident_cabinet_checkpoint else None
     stock_slots = sorted((original / "SaveGames").glob("*.sav"))
     if not before or len(stock_slots) < 2 or not any(path.name == "Config.sav" for path in stock_slots):
         raise ValueError("Supply the original Saved directory with a stock configuration and at least one campaign slot")
@@ -1052,8 +1094,17 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     proof = {"verified": False, "native_bridges": [], "sessions": []}
     processes, seats, baselines = [], [], []
     probes = ExitStack()
+    seeded = None
 
+    single_scenario = (stock_prop_grip or stock_crate_ring or guest_world_start or guest_ui_memory
+                       or compact_crate_status or compact_world_view or guest_shop_lease or resident_cabinet_archive is not None)
     try:
+        if resident_cabinet_archive:
+            proof.update(cabinet_provenance(resident_cabinet_archive, games, qualified, resident_cabinet_candidate_sha256),
+                         test_only_timing_probes=True)
+            for game in games:
+                probes.enter_context(instrument(game, release_archive=resident_cabinet_archive,
+                                                combined=combined_presentation))
         if guest_world_start:
             probes.enter_context(installed_probe(second_game, mod="SilverfishPortableGuestWorldStartProbe",
                                                  fixture="portable_guest_world_start_probe.lua"))
@@ -1098,12 +1149,14 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             hashes = stock_save_hashes(profile)
             del hashes["Config.sav"]
 
+            campaign = workspace / "campaigns" / ("title-host-settings-" + uuid.uuid4().hex[:8])
+            if resident_cabinet_checkpoint and game == first_game:
+                seeded = copy_resident_checkpoint(resident_cabinet_checkpoint, campaign, profile)
             process = launch_portable(game, profile)
             processes.append((game, process))
             mailbox = await discover_mailbox(mailbox_root, process)
             assert runtime.read_json(mailbox / embedded_startup.UNIFIED_FILE) == release.selection
-            campaign = "title-host-settings-" + uuid.uuid4().hex[:8]
-            seat = Seat(profile, workspace / "campaigns" / campaign, workspace / "clients" / title.name,
+            seat = Seat(profile, campaign, workspace / "clients" / title.name,
                         port, runtime.Bridge(mailbox, process))
             seats.append(seat)
             await offered(seat)
@@ -1174,6 +1227,21 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["sessions"].append(await start_pair(first, second, "Merchant scout", on_join=verify_guest_shop_lease))
         elif guest_ui_memory:
             proof["sessions"].append(await start_pair(first, second, "Inventory scout", on_join=check_gameplay))
+        elif resident_cabinet_checkpoint:
+            assert seeded is not None
+            cabinet_evidence = {}
+            proof["cabinet_pickup"] = cabinet_evidence
+
+            async def check_cabinet(host, guest, pawn):
+                cabinet_evidence.update(await verify_resident_pickup(host, guest, pawn, seeded, combined=combined_presentation))
+                return cabinet_evidence
+
+            async def check_cabinet_saved(host, stopped, saved, character):
+                cabinet_evidence["stock_save_and_quit"] = await verify_saved_pickup(host, stopped, saved, seeded)
+
+            proof["sessions"].append(await start_pair(first, second, "Cabinet scout", on_join=check_cabinet,
+                                                      load_existing=True, wait_status=wait_resident_status,
+                                                      after_exit=check_cabinet_saved))
         else:
             create = create_stock_split_character if stock_split or stock_equip else create_stock_drop_character if stock_drop else None
             proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
@@ -1196,8 +1264,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             assert observed == hashes and await stock_profile(seat.bridge) == preferences
             assert seat.bridge.process.poll() is None
         proof.update(verified=True, solo_slots_and_settings_preserved=True,
-                     both_titles_reused=not (stock_prop_grip or stock_crate_ring or guest_world_start or guest_ui_memory
-                                             or compact_crate_status or compact_world_view or guest_shop_lease),
+                     both_titles_reused=not single_scenario,
                      launched_without_coop_environment=True)
     except Exception as error:
         if compact_crate_status:
@@ -1206,6 +1273,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["world_view_receipt_failure"] = str(error) or type(error).__name__
         if guest_shop_lease:
             proof["shop_lease_failure"] = str(error) or type(error).__name__
+        if resident_cabinet_checkpoint:
+            proof["cabinet_pickup_failure"] = str(error) or type(error).__name__
         if guest_world_start_travel:
             proof["stock_travel_failure"] = str(error)
         raise
@@ -1214,18 +1283,21 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         for _, process in reversed(processes):
             if process.poll() is None:
                 await runtime.stop_game(process)
-        if (stock_prop_grip or stock_crate_ring or guest_world_start
-                or compact_crate_status or compact_world_view or guest_shop_lease):
+        if single_scenario:
             proof["processes_closed"] = len(processes) == 2 and all(process.poll() is not None for _, process in processes)
             proof["verified"] &= proof["processes_closed"]
         probes.close()
         proof["original_saves_verified"] = saved_hashes(original) == before
+        if resident_cabinet_checkpoint:
+            proof["resident_source_preserved"] = campaign_save_hashes(resident_cabinet_checkpoint) == source_before
+            proof["verified"] &= proof["resident_source_preserved"]
         proof["portable_files_and_existing_activation_preserved"] = all(
             fingerprint(path) == digest for release in qualified for path, digest in release.activation.items()
         )
         proof["verified"] &= proof["original_saves_verified"] and proof["portable_files_and_existing_activation_preserved"]
         runtime.write_json(case / "portable-title-verification.json", proof)
         assert proof["original_saves_verified"], "The original player saves changed"
+        assert proof.get("resident_source_preserved", True), "The source cabinet checkpoint changed"
         assert proof["portable_files_and_existing_activation_preserved"], "The portable marker or existing activation changed"
         if guest_world_start or guest_shop_lease:
             assert all(process.poll() is not None for _, process in processes), "A portable test process is still running"
@@ -1261,6 +1333,12 @@ if __name__ == "__main__":
                         help="verify first stock guest map startup and short reconnect in one portable session")
     parser.add_argument("--guest-world-start-travel", action="store_true",
                         help="also verify stock guest startup through Crossroads and Ruin Fields")
+    parser.add_argument("--resident-cabinet-archive", type=Path,
+                        help="profile one stock C_3 pickup using the published baseline or pinned candidate ZIP")
+    parser.add_argument("--resident-cabinet-candidate-sha256",
+                        help="expected archive SHA-256 for the joint pickup candidate, omitted for the published baseline")
+    parser.add_argument("--resident-cabinet-checkpoint", type=Path,
+                        help="closed standalone Observatory C_3 checkpoint whose stock escrow will be copied")
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
@@ -1302,6 +1380,18 @@ if __name__ == "__main__":
             args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby, args.projected_nearby,
             args.container_nearby, args.stock_use, args.stock_prop_grip, args.stock_crate_ring, args.steam_cloud)):
         parser.error("Use the guest world-start checks without other gameplay fixtures")
+    if ((args.resident_cabinet_archive is None) != (args.resident_cabinet_checkpoint is None)
+            or args.resident_cabinet_candidate_sha256 and not args.resident_cabinet_archive):
+        parser.error("Use --resident-cabinet-archive and --resident-cabinet-checkpoint together")
+    if args.resident_cabinet_archive and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
+                                              args.projected_nearby, args.container_nearby, args.stock_use, args.steam_cloud,
+                                              args.stock_prop_grip, args.stock_crate_ring, args.guest_world_start,
+                                              args.guest_world_start_travel, args.guest_ui_memory,
+                                              args.compact_crate_status, args.compact_world_view, args.guest_shop_lease,
+                                              args.second_legacy_work)):
+        parser.error("Use --resident-cabinet-archive with two fresh private replicas and no other gameplay fixtures")
+    cabinet_archive = args.resident_cabinet_archive.resolve(strict=True) if args.resident_cabinet_archive else None
+    cabinet_checkpoint = args.resident_cabinet_checkpoint.resolve(strict=True) if args.resident_cabinet_checkpoint else None
     legacy = args.second_legacy_work.resolve(strict=True) if args.second_legacy_work else None
     asyncio.run(verify(args.work.resolve(strict=True), args.first_game.resolve(strict=True),
                        args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy,
@@ -1312,4 +1402,6 @@ if __name__ == "__main__":
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
                        compact_crate_status=args.compact_crate_status, compact_world_view=args.compact_world_view,
-                       guest_shop_lease=args.guest_shop_lease))
+                       guest_shop_lease=args.guest_shop_lease,
+                       resident_cabinet_archive=cabinet_archive, resident_cabinet_checkpoint=cabinet_checkpoint,
+                       resident_cabinet_candidate_sha256=args.resident_cabinet_candidate_sha256))

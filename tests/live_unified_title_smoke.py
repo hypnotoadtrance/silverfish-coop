@@ -42,12 +42,22 @@ async def offered(seat):
 
 async def start_pair(host, guest, character_name, *, on_join=None, create_character=None,
                      before_join=None, after_reconnect=None, wait_status=wait,
-                     host_exit_actions=("save_and_quit",), after_exit=None):
+                     host_exit_actions=("save_and_quit",), after_exit=None, load_existing=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_pid, guest_pid = host.bridge.process.pid, guest.bridge.process.pid
     host_form = "native-title-host-form-fixture"
     await host.bridge.command(host_form, "open")
-    await host.bridge.command(host_form, "campaign", host.campaign.name)
+    if load_existing:
+        listing = host.bridge.directory / "title-host-campaigns.tsv"
+        async with asyncio.timeout(12):
+            while not listing.is_file():
+                await asyncio.sleep(.10)
+        await host.bridge.command(host_form, "browse")
+        selected = await host.bridge.command(host_form, "saved-state")
+        assert selected["ack"]["message"].endswith(":" + host.campaign.name), selected["ack"]
+        await host.bridge.command(host_form, "choose-saved")
+    else:
+        await host.bridge.command(host_form, "campaign", host.campaign.name)
     await host.bridge.command(host_form, "port", str(host.port))
     await host.bridge.command(host_form, "submit")
     hosted = await wait_status(host_run, lambda frame: frame.get("state") == "hosting")
