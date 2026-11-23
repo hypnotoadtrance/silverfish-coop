@@ -31,6 +31,8 @@ An unofficial UE4SS mod that adds co-op via Steam invites or Direct IP to the Wi
 
 For LAN play, use the host’s LAN address. For internet play, the guest needs a route to the host’s UDP port. This may require a host firewall exception and router port forwarding. Co-op saves default to `%LOCALAPPDATA%\SilverfishCoop\Resident`. The mod can back up host campaigns through Steam Cloud. Keep a local copy of important campaigns before changing builds. [Co-op backups](docs/PLAYING-COOP.md#steam-cloud-backups)
 
+Development builds can break compatibility with older co-op campaigns. When a release requires a fresh campaign, its notes identify the affected builds and explain how to reset co-op saves. [Co-op save reset](docs/PLAYING-COOP.md#reset-co-op-campaigns)
+
 ## Screenshots
 
 | Join by Direct IP | A teammate as seen by the other player |
