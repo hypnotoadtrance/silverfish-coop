@@ -1,17 +1,21 @@
--- Private source qualification for an equipped stock Eqp_Flashlight.
+-- Private source qualification for equipped stock handheld flashlights.
 local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_FLASHLIGHT_PROBE") ~= "1"
     or not mailbox or not mailbox:match("[/\\]avatar%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$") then return end
 
 local map = "World /Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
-local equipment_path = "/Game/Classes/Equipment/Eqp_Flashlight.Eqp_Flashlight_C"
-local mesh_name = "StaticMesh /Game/Assets/StaticMeshes/Mesh_Props/PropActor_Meshes/SM_Prop_Flashlight_01.SM_Prop_Flashlight_01"
+local guest_source = os.getenv("SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE") == "1"
+local heavy = os.getenv("SILVERFISH_COOP_HEAVY_FLASHLIGHT_PROBE") == "1"
+local heavy_view = heavy and os.getenv("SILVERFISH_COOP_HEAVY_FLASHLIGHT_VIEW_PROBE") == "1"
+local equipment_asset = heavy and "Eqp_Heavy_Flashlight" or "Eqp_Flashlight"
+local mesh_asset = heavy and "SM_Prop_Flashlight_02" or "SM_Prop_Flashlight_01"
+local equipment_path = "/Game/Classes/Equipment/" .. equipment_asset .. "." .. equipment_asset .. "_C"
+local mesh_name = "StaticMesh /Game/Assets/StaticMeshes/Mesh_Props/PropActor_Meshes/" .. mesh_asset .. "." .. mesh_asset
 local source_path = "/Game/Classes/Equipment/Equipment_Assets/FlashLight_Source_BP.FlashLight_Source_BP_C"
 local click_path = "SoundCue /Game/Assets/Sounds/CUEs/Mechanical_Cues/Switch_Reset_Cue.Switch_Reset_Cue"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local equip_factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
-local guest_source = os.getenv("SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE") == "1"
 local source, cue_calls, power_calls, hooked, selected_guid = nil, 0, 0, false, nil
 
 local function valid(value) return value and value:IsValid() end
@@ -79,6 +83,23 @@ local function owner_row(pawn, actor, spot)
         valid(cookie) and cookie:GetFullName() or "-", power_calls, cue_calls)
 end
 
+local function measure_local_beam(spot, mesh, color)
+    local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
+    local relative = math_api:MakeRelativeTransform(spot:K2_GetComponentToWorld(), mesh:K2_GetComponentToWorld())
+    local point, aim, scale = relative.Translation, math_api:Quat_Rotator(relative.Rotation), relative.Scale3D
+    return string.format("%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f",
+        point.X, point.Y, point.Z, aim.Pitch, aim.Yaw, aim.Roll,
+        scale.X, scale.Y, scale.Z, color.R, color.G, color.B)
+end
+
+local function heavy_measurement(equipment, actor, spot)
+    local mesh = equipment.SM_Prop_Torch_01
+    assert(valid(mesh) and same(mesh:GetOwner(), equipment) and valid(mesh.StaticMesh)
+        and mesh.StaticMesh:GetFullName() == mesh_name, "flashlight_probe_heavy_torch_unavailable")
+    return table.concat({mesh.StaticMesh:GetFullName(), tostring(actor.Type),
+        measure_local_beam(spot, mesh, actor.Color)}, "\t")
+end
+
 local function observe(world, local_pawn, id)
     local remote
     for _, candidate in ipairs(FindAllOf("Player_FP_C") or {}) do
@@ -90,6 +111,7 @@ local function observe(world, local_pawn, id)
     end
     assert(remote, "flashlight_probe_remote_not_ready")
     local sources, powered, visible, components, held_sources, display_meshes = 0, 0, 0, 0, 0, 0
+    local visible_component, avatar_torch, visible_stock, stock_torch
     for _, actor in ipairs(FindAllOf("FlashLight_Source_BP_C") or {}) do
         if valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed() then
             local parent = actor:GetParentActor()
@@ -100,6 +122,12 @@ local function observe(world, local_pawn, id)
                 sources = sources + 1
                 if valid(parent) and parent:GetClass():GetFullName() == "BlueprintGeneratedClass " .. equipment_path then
                     held_sources = held_sources + 1
+                    local torch = parent.SM_Prop_Torch_01
+                    if heavy_view and valid(actor.SpotLight) and actor.SpotLight:IsVisible()
+                        and valid(torch) and same(torch:GetOwner(), parent) and valid(torch.StaticMesh)
+                        and torch.StaticMesh:GetFullName() == mesh_name then
+                        visible_stock, stock_torch = actor.SpotLight, torch
+                    end
                 end
                 if actor.Powered then powered = powered + 1 end
                 if valid(actor.SpotLight) and actor.SpotLight:IsVisible() then visible = visible + 1 end
@@ -109,30 +137,45 @@ local function observe(world, local_pawn, id)
     for _, parameter in ipairs(remote:K2_GetComponentsByClass(asset("/Script/Engine.SpotLightComponent"))) do
         local spot = type(parameter.type) == "function" and parameter:type() == "RemoteUnrealParam"
             and parameter:get() or parameter
-        if valid(spot) and same(spot:GetOwner(), remote) and spot:IsVisible() then components = components + 1 end
+        if valid(spot) and same(spot:GetOwner(), remote) and spot:IsVisible() then
+            components, visible_component = components + 1, spot
+        end
     end
     for _, parameter in ipairs(remote:K2_GetComponentsByClass(asset("/Script/Engine.StaticMeshComponent"))) do
         local component = type(parameter.type) == "function" and parameter:type() == "RemoteUnrealParam"
             and parameter:get() or parameter
         local mesh = valid(component) and component.StaticMesh
         if valid(mesh) and mesh:GetFullName() == mesh_name and same(component:GetOwner(), remote) then
-            display_meshes = display_meshes + 1
+            display_meshes, avatar_torch = display_meshes + 1, component
         end
     end
     local census = string.format("%s\t%d\t%d\t%d\t%d\t%d\t%d", remote:GetFullName(), sources, powered, visible, components,
         held_sources, display_meshes)
-    if not guest_source then return census end
-    assert(remote:HasAuthority() and valid(remote.Save) and not same(remote.Save, local_pawn.Save),
-        "flashlight_probe_observer_guest_authority_unavailable")
-    local held = remote.EquipedItem
-    local held_class = valid(held) and held:GetClass():GetFullName() or "-"
-    local mode, stock_power = "-", "-"
-    if held_class == "BlueprintGeneratedClass " .. equipment_path then
-        local equipment, actor = owned_source(remote, world)
-        assert(equipment:HasAuthority(), "flashlight_probe_observer_equipment_authority_unavailable")
-        mode, stock_power = tostring(equipment.Tertiary_Mode), tostring(actor.Powered)
+    local row = census
+    if guest_source then
+        assert(remote:HasAuthority() and valid(remote.Save) and not same(remote.Save, local_pawn.Save),
+            "flashlight_probe_observer_guest_authority_unavailable")
+        local held = remote.EquipedItem
+        local held_class = valid(held) and held:GetClass():GetFullName() or "-"
+        local mode, stock_power = "-", "-"
+        if held_class == "BlueprintGeneratedClass " .. equipment_path then
+            local equipment, actor = owned_source(remote, world)
+            assert(equipment:HasAuthority(), "flashlight_probe_observer_equipment_authority_unavailable")
+            mode, stock_power = tostring(equipment.Tertiary_Mode), tostring(actor.Powered)
+        end
+        row = table.concat({row, slot_guid(remote), held_class, mode, stock_power}, "\t")
     end
-    return table.concat({census, slot_guid(remote), held_class, mode, stock_power}, "\t")
+    if not heavy_view then return row end
+    local spot, mount = visible_component, avatar_torch
+    if not spot and not guest_source then spot, mount = visible_stock, stock_torch end
+    if not spot then return row .. "\t-" end
+    assert(components + visible == 1 and display_meshes == 1
+        and (not visible_component or same(spot:GetAttachParent(), mount)), "flashlight_probe_heavy_observer_mount_unavailable")
+    local cookie = spot.LightFunctionMaterial
+    local geometry = measure_local_beam(spot, mount, spot:GetLightColor())
+    return table.concat({row, mount.StaticMesh:GetFullName(), spot:GetFullName(),
+        valid(cookie) and cookie:GetFullName() or "-", spot.InnerConeAngle, spot.OuterConeAngle,
+        spot.Intensity, spot.AttenuationRadius, geometry}, "\t")
 end
 
 local function run(operation)
@@ -223,8 +266,9 @@ local function run(operation)
     end
     local row = owner_row(pawn, actor, spot)
     if guest_source then
-        return table.concat({row, slot_guid(pawn), tostring(equipment.Stacks), tostring(equipment.Tertiary_Mode)}, "\t")
+        row = table.concat({row, slot_guid(pawn), tostring(equipment.Stacks), tostring(equipment.Tertiary_Mode)}, "\t")
     end
+    if heavy then row = row .. "\t" .. heavy_measurement(equipment, actor, spot) end
     return row
 end
 
