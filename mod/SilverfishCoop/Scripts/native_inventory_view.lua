@@ -706,7 +706,7 @@ local function finish_stock_drop(fields, current, state, phase)
         and (displaced == "-" or #displaced == 32 and displaced:match("^[0-9A-F]+$")
         and displaced:find("[^0]") and displaced ~= pending.guid)
     local source = pending and pending.entry == "unequip" and fields[5] == "unequipped" and #fields == 7
-        and integer(fields[6], 7)
+        and integer(fields[6], 9)
     local rounds = source and fields[7]:match("^%-?%d+$") and math.tointeger(fields[7])
     local unequipped = source and pending.expected == source + 1 and rounds and rounds >= -1 and rounds <= 2147483647
     if (not split and not equipped and not unequipped and #fields ~= 5) or not pending or not same_context(current, pending.context)
@@ -733,8 +733,10 @@ local function finish_stock_drop(fields, current, state, phase)
         if pending.live and finished and status == "screen_closed" then return "verified stock inventory settlement" end
         if unequipped then
             local widget = widget_at(pending.screen.ItemManager.EquipSlots, source + 1)
-            local item = save.PlayerEquipment[source + 1]
-            if not finished or status ~= "refreshed" or not valid(widget) or widget.ItemIndex ~= source
+            local item = source < 8 and save.PlayerEquipment[source + 1] or source == 8 and save.PlayerHelmet or save.PlayerArmor
+            local index = source < 8 and source or source - 8
+            if not finished or status ~= "refreshed" or not valid(widget) or widget.ItemIndex ~= index
+                or widget.InventoryIndex ~= (source < 8 and 0 or 1)
                 or valid(item[item_class]) or stock_card_guid(widget.ItemCard) == pending.guid
                 or not stock_cards(pending.screen, save, pending.guid, rounds, false, true) then
                 error("The stock equipment slot and returned backpack item did not verify", 0)

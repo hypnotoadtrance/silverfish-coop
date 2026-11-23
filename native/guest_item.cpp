@@ -2874,7 +2874,7 @@ bool silverfish::native_guest_item::finish_local_unequip(Unreal::UObject* pawn, 
                                                        Unreal::UObject* prior_actor, int slot,
                                                        std::string_view identity, int rounds)
 {
-    if (!Unreal::IsInGameThreadRaw() || slot < 0 || slot >= quick_slots ||
+    if (!Unreal::IsInGameThreadRaw() || slot < 0 || slot > 9 ||
         silverfish::native_interaction_input::current_guest_pawn(reinterpret_cast<std::uintptr_t>(pawn)) != pawn ||
         !live(pawn) || !live(save) || object(pawn, STR("Save")) != save) return false;
     Context context;
@@ -2887,6 +2887,27 @@ bool silverfish::native_guest_item::finish_local_unequip(Unreal::UObject* pawn, 
     Inventory inventory;
     if (!locate(context, inventory).empty() || !inventory.item || inventory.backpack_index < 0 ||
         inventory.ammo->GetPropertyValueInContainer(inventory.item) != rounds) return false;
+    if (slot >= quick_slots)
+    {
+        const bool head = slot == 8;
+        auto* worn = head ? inventory.helmet : inventory.armor;
+        const auto* row = worn->ContainerPtrToValuePtr<void>(save);
+        auto* update = find<Unreal::UFunction>(head
+            ? STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:UpdateHelmet")
+            : STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C:UpdateArmor"));
+        auto* derived = field<Unreal::FStructProperty>(pawn, head ? STR("Helm_Struct") : STR("Armor_Struct"));
+        auto* defaults = pawn->GetClassPrivate()->GetClassDefaultObject().Get();
+        if (prior_actor || inventory.row_class(row) || inventory.identity(row) != Guid{} || !update || !derived ||
+            !defaults || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
+            update->GetOuterPrivate() != context.instance->GetClassPrivate() ||
+            update->GetNumParms() != 0 || update->GetParmsSize() != 0 || update->GetReturnProperty() ||
+            update->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return false;
+        // These stock functions target player zero in this guest process and
+        // read only its verified private SaveSlot_Ref.
+        context.instance->ProcessEvent(update, nullptr);
+        return derived->Identical(derived->ContainerPtrToValuePtr<void>(pawn),
+                                  derived->ContainerPtrToValuePtr<void>(defaults));
+    }
     Unreal::FScriptArrayHelper slots(inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(save));
     if (slot >= slots.Num() || inventory.row_class(slots.GetRawPtr(slot)) ||
         inventory.identity(slots.GetRawPtr(slot)) != Guid{}) return false;

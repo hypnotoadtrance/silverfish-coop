@@ -173,9 +173,9 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
             committed = ("equipped", str(slot), displaced)
         elif mode == "unequip":
             slot = int(expected or 0) - 1
-            if (entry != "unequip" or quantity != 1 or not 0 <= slot < 8
-                    or client.gameplay.get(native_inventory.UNEQUIP_CAPABILITY) != 1):
-                raise ValueError("The selected quick slot has no host-authoritative Unequip action")
+            capability = native_inventory.UNEQUIP_CAPABILITY if slot < 8 else native_inventory.UNEQUIP_WORN_CAPABILITY
+            if entry != "unequip" or quantity != 1 or not 0 <= slot <= 9 or client.gameplay.get(capability) != 1:
+                raise ValueError("The selected stock slot has no host-authoritative Unequip action")
             key = native_inventory.UNEQUIP_KEY
             receipt = (await client.gameplay_action(native_inventory.UNEQUIP, operation, f"{guid}|{slot}")).get(key)
             if (not isinstance(receipt, dict) or type(receipt.get("slot")) is not int

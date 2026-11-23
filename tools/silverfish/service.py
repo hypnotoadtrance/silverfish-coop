@@ -1929,6 +1929,8 @@ class Host:
             gameplay[native_inventory.STORE_CAPABILITY] = 1
         if self.last_game.get(native_inventory.UNEQUIP_CAPABILITY) == 1:
             gameplay[native_inventory.UNEQUIP_CAPABILITY] = 1
+        if self.last_game.get(native_inventory.UNEQUIP_WORN_CAPABILITY) == 1:
+            gameplay[native_inventory.UNEQUIP_WORN_CAPABILITY] = 1
         roles = self.roles()
         character = roles.get(role, "")
         gameplay["native_backpacks"] = native_inventory_death.visible_bags(self.party, character)

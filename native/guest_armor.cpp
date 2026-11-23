@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 
+#include <Helpers/String.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
@@ -751,11 +752,12 @@ namespace
         return report(lua, true, "seeded", proof);
     }
 
-    int apply(const Lua& lua, const Scope& scope, const Inventory& inventory, const Guid& id, bool restore_only, bool head)
+    int apply(const Lua& lua, const Scope& scope, const Inventory& inventory, const Guid& id,
+              bool restore_only, bool head, bool remove)
     {
         int index{};
         bool worn{};
-        if (!inventory.locate(scope.guest, id, index, worn, head) || (!worn && (restore_only || index < 0)))
+        if (!inventory.locate(scope.guest, id, index, worn, head) || (!worn && (restore_only || remove || index < 0)))
             return report(lua, false, "native_guest_armor_exact_owned_row_required");
         auto* bag = inventory.backpack->ContainerPtrToValuePtr<void>(scope.guest);
         auto* slot = head ? inventory.helmet : inventory.armor;
@@ -788,6 +790,11 @@ namespace
         const auto* approved = worn ? active : current.GetRawPtr(index);
         const auto* selected = qualify(approved, head);
         if (!selected) return report(lua, false, "native_guest_armor_exact_class_required");
+        auto* rounds = remove ? field<U::FIntProperty>(inventory.item->GetStruct().Get(),
+            STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788")) : nullptr;
+        const auto returned_rounds = rounds ? rounds->GetPropertyValueInContainer(approved) : -2;
+        if (remove && (current.Num() >= max_items || returned_rounds < -1))
+            return report(lua, false, "native_guest_armor_removed_item_unqualified");
         const ArmorProfile* previous{};
         Guid replaced{};
         if (!worn && !empty(slot, active))
@@ -805,21 +812,22 @@ namespace
             (other_profile && !isolated_rows(scope, inventory, inventory.item_guid(other))))
             return report(lua, false, "native_guest_armor_exact_owned_row_required");
 
-        const auto* torso = head ? other_profile : selected;
-        const auto* helmet = head ? selected : other_profile;
+        const auto* torso = head ? other_profile : remove ? nullptr : selected;
+        const auto* helmet = head ? (remove ? nullptr : selected) : other_profile;
         const auto state_gear = [](const ArmorProfile* profile) {
             return profile && profile->disguise_faction == state_faction;
         };
         const bool state_torso = state_gear(torso);
         const bool state_helmet = state_gear(helmet);
         DisguiseProjection disguise;
-        if ((state_torso || state_helmet || state_gear(previous)) && !disguise.bind(scope.pawn))
+        if ((state_torso || state_helmet || state_gear(previous) || (remove && state_gear(selected))) && !disguise.bind(scope.pawn))
             return report(lua, false, "native_guest_armor_disguise_schema_unqualified");
         // The stock character copies the selected class's voice filter to this pawn.
-        auto* vox = helmet ? field<U::FObjectProperty>(scope.pawn, STR("Vox Effect")) : nullptr;
+        const bool sets_voice = helmet || (remove && head);
+        auto* vox = sets_voice ? field<U::FObjectProperty>(scope.pawn, STR("Vox Effect")) : nullptr;
         auto* next_voice = helmet ? object(armor_defaults(*helmet), STR("VoxEffect")) : nullptr;
-        if (helmet && (!vox || vox->GetPropertyClass().Get() != find<U::UClass>(vox_class) ||
-                       (helmet->vox && !next_voice)))
+        if (sets_voice && (!vox || vox->GetPropertyClass().Get() != find<U::UClass>(vox_class) ||
+                          (helmet && helmet->vox && !next_voice)))
             return report(lua, false, "native_guest_armor_voice_filter_unqualified");
         auto* voice_slot = vox ? vox->ContainerPtrToValuePtr<void>(scope.pawn) : nullptr;
         auto* old_voice = voice_slot ? vox->GetObjectPropertyValue(voice_slot) : nullptr;
@@ -831,7 +839,7 @@ namespace
         Copy original_bag(inventory.backpack, bag);
         Copy next_bag(inventory.backpack, bag);
         Copy original_slot(slot, active);
-        Copy next_slot(slot, approved);
+        Copy next_slot(slot, remove ? slot->ContainerPtrToValuePtr<void>(save_defaults) : approved);
         Copy original_body(projection.body, body);
         Copy original_helm(projection.helm, helm);
         Copy original_resist(projection.resist, resist);
@@ -848,7 +856,14 @@ namespace
         proof.replaced = replaced;
         proof.torso = torso;
         U::FScriptArrayHelper prepared(inventory.backpack, next_bag.value);
-        if (previous) inventory.item->CopyCompleteValue(prepared.GetRawPtr(index), active);
+        if (remove)
+        {
+            auto* returned = prepared.GetRawPtr(prepared.AddValue());
+            inventory.item->CopyCompleteValue(returned, active);
+            if (!original_slot.matches(returned) || !empty(slot, next_slot.value))
+                return report(lua, false, "native_guest_armor_prepared_return_unqualified");
+        }
+        else if (previous) inventory.item->CopyCompleteValue(prepared.GetRawPtr(index), active);
         else if (!worn) prepared.RemoveValues(index, 1);
         proof.after = prepared.Num();
         if (previous && (proof.after != proof.before || inventory.item_guid(prepared.GetRawPtr(index)) != replaced ||
@@ -873,7 +888,11 @@ namespace
         const auto matches = [&] {
             int restored_index{};
             bool restored_worn{};
-            return exact_worn(id, head) &&
+            const bool destination_matches = remove
+                ? inventory.locate(scope.guest, id, restored_index, restored_worn, head) &&
+                  !restored_worn && restored_index == proof.before
+                : exact_worn(id, head);
+            return destination_matches &&
                 (!previous || (inventory.locate(scope.guest, replaced, restored_index, restored_worn, head) &&
                                !restored_worn && restored_index == index)) &&
                 next_bag.matches(bag) && next_slot.matches(active) && next_body.matches(body) && next_helm.matches(helm) && next_resist.matches(resist) &&
@@ -882,10 +901,19 @@ namespace
                 (!voice_slot || vox->GetObjectPropertyValue(voice_slot) == next_voice);
         };
         const auto success = [&](std::string_view status) {
+            if (remove)
+            {
+                lua.set_bool(true);
+                lua.set_string("unequipped");
+                lua.set_integer(head ? 8 : 9);
+                lua.set_string(RC::to_utf8_string(selected->path));
+                lua.set_integer(returned_rounds);
+                return 5;
+            }
             proof.voice_filter = voice_slot && vox->GetObjectPropertyValue(voice_slot);
             return report(lua, true, status, proof);
         };
-        if (worn && matches())
+        if (worn && !remove && matches())
         {
             if (disguise.refresh(scope, state_torso && state_helmet)) return success("already_applied");
             disguise.rollback(scope.pawn);
@@ -894,7 +922,7 @@ namespace
         }
 
         // The two saved rows remain independent. Only the guest pawn's derived stats combine them.
-        if (!worn)
+        if (!worn || remove)
         {
             next_slot.restore(active);
             next_bag.restore(bag);
@@ -908,7 +936,7 @@ namespace
         if (scope.current() && matches() && disguise.refresh(scope, state_torso && state_helmet) && matches())
             return success(previous ? "swapped" : worn ? "reapplied" : "equipped");
 
-        if (!worn)
+        if (!worn || remove)
         {
             original_slot.restore(active);
             original_bag.restore(bag);
@@ -928,14 +956,16 @@ namespace
         return report(lua, false, rolled_back ? "native_guest_armor_rolled_back" : "mutation_unverified_guest_armor_equip", proof);
     }
 
-    enum class Operation { Equip, Project, Seed, EquipHelmet, ProjectHelmet };
+    enum class Operation { Equip, Project, Seed, EquipHelmet, ProjectHelmet, Unequip };
 
     template <Operation operation> int run(const Lua& lua)
     {
         constexpr bool seed_operation = operation == Operation::Seed;
+        constexpr bool remove = operation == Operation::Unequip;
         const auto arguments = lua.get_stack_size();
         const bool named_seed = seed_operation && arguments == 4 && lua.is_string(4);
-        if (!enabled() || !U::IsInGameThreadRaw() || (arguments != 3 && !named_seed) ||
+        const bool removal_slot = remove && arguments == 4 && lua.is_integer(4);
+        if (!enabled() || !U::IsInGameThreadRaw() || (remove ? !removal_slot : (arguments != 3 && !named_seed)) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3))
             return report(lua, false, "native_guest_armor_exact_context_required");
         const auto pawn = lua.get_integer();
@@ -946,7 +976,9 @@ namespace
             !scope.bind(static_cast<std::uintptr_t>(pawn), static_cast<std::uintptr_t>(guest)))
             return report(lua, false, "native_guest_armor_exact_owner_required");
         constexpr bool project = operation == Operation::Project || operation == Operation::ProjectHelmet;
-        constexpr bool head = operation == Operation::EquipHelmet || operation == Operation::ProjectHelmet;
+        const auto slot = remove ? lua.get_integer(4) : -1;
+        if (remove && slot != 8 && slot != 9) return report(lua, false, "native_guest_armor_worn_slot_unqualified");
+        const bool head = operation == Operation::EquipHelmet || operation == Operation::ProjectHelmet || (remove && slot == 8);
         if constexpr (!project)
         {
             auto* health = field<U::FDoubleProperty>(scope.guest, STR("PlayerHealth"));
@@ -978,7 +1010,7 @@ namespace
             if (!defaults) return report(lua, false, "native_guest_armor_stock_schema_unqualified");
             return seed(lua, scope, inventory, *profile, defaults, guid);
         }
-        return apply(lua, scope, inventory, guid, project, head);
+        return apply(lua, scope, inventory, guid, project, head, remove);
     }
 }
 
@@ -1009,5 +1041,6 @@ void silverfish::native_guest_armor::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishProjectNativeGuestArmor", run<Operation::Project>);
     lua.register_function("SilverfishEquipNativeGuestHelmet", run<Operation::EquipHelmet>);
     lua.register_function("SilverfishProjectNativeGuestHelmet", run<Operation::ProjectHelmet>);
+    lua.register_function("SilverfishUnequipNativeGuestArmor", run<Operation::Unequip>);
     if (fixtures()) lua.register_function("SilverfishSeedNativeGuestArmor", run<Operation::Seed>);
 }

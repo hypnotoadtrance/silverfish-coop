@@ -34,14 +34,16 @@ STORE_CAPABILITY = "native_inventory_store_equipment_capability"
 STORE_KEY = "native_inventory_store_equipment"
 UNEQUIP = "native-inventory-unequip"
 UNEQUIP_CAPABILITY = "native_inventory_unequip_capability"
+UNEQUIP_WORN_CAPABILITY = "native_inventory_unequip_worn_capability"
 UNEQUIP_KEY = "native_inventory_unequip"
 _STORE_TARGET = re.compile(r"([0-9A-F]{32})(?:\|([0-7]))?\Z")
+_UNEQUIP_TARGET = re.compile(r"([0-9A-F]{32})\|([0-9])\Z")
 _STOCK_CLASS = re.compile(r"/Game/Classes/[A-Za-z0-9_./-]+_C\Z")
 
 
-def _equipment_identity(fields, area):
+def _equipment_identity(fields, area, slots="01234567"):
     _, world, pawn, item, slot, item_class = fields[:6]
-    if (world != area or not valid_guid(item) or slot not in "01234567" or len(slot) != 1
+    if (world != area or not valid_guid(item) or slot not in slots or len(slot) != 1
             or len(item_class) > 256 or not _STOCK_CLASS.fullmatch(item_class)):
         raise ValueError("Invalid stock equipment slot report")
     return dict(map=world, pawn=pawn, guid=item, slot=int(slot), class_path=item_class)
@@ -56,7 +58,7 @@ def equipment_receipt(fields, area):
 
 
 def unequip_receipt(fields, area):
-    row = _equipment_identity(fields, area)
+    row = _equipment_identity(fields, area, "0123456789")
     value = fields[6]
     if not re.fullmatch(r"-1|0|[1-9][0-9]{0,9}", value) or int(value) > 2**31 - 1:
         raise ValueError("Invalid returned stock equipment ammo")
@@ -262,11 +264,14 @@ async def store_equipment(host, bridge, character: str, target, operation: str, 
     action, capability, key = (UNEQUIP, UNEQUIP_CAPABILITY, UNEQUIP_KEY) if unequip else (
         STORE_EQUIPMENT, STORE_CAPABILITY, STORE_KEY)
     suffix = "unequip" if unequip else "equip"
-    selection = _STORE_TARGET.fullmatch(target) if isinstance(target, str) else None
-    if (not selection or not valid_guid(selection[1]) or unequip and selection[2] is None
+    pattern = _UNEQUIP_TARGET if unequip else _STORE_TARGET
+    selection = pattern.fullmatch(target) if isinstance(target, str) else None
+    if (not selection or not valid_guid(selection[1])
             or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation)):
         raise party.RuleError(f"native_inventory_{suffix}_requires_item_and_operation")
     item, requested_slot = selection.groups()
+    if unequip and int(requested_slot) >= 8:
+        capability = UNEQUIP_WORN_CAPABILITY
     game = host.last_game
     if (not host.native_guest or not host.native_profile or host.stopping or host.transitioning
             or host.native_checkpoint_unsafe or game.get("state") != "hosting" or game.get(capability) != 1
