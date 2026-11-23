@@ -155,6 +155,8 @@ A muted two-instance Direct IP trial kept a guest's unsaved crate pickup through
 
 A private Ruin Fields trial reached the stock ambient director through the authored routes. The native hook qualified the director and its selected marker through the stock marker array. At about 07:28, the host had three local feral dogs and the guest had three local workers. The trial produced no supported Husk or boar cohort on either seat. The next checks cover the stock squad choice, the guest clock during director startup, and whether a supported cohort appears and replicates.
 
+The muted NullRHI weather fixture kept the guest clock and sky and fog projection active during a wet Crossroads frame. The guest dispatched the authored storm warning once and verified the return to dry weather. NullRHI skipped the wet Niagara particles. Tests with a real renderer still check their stock readback. [Weather projection trial](../tests/live_weather_projection_smoke.py)
+
 Supported live guest weapon and inventory actions now keep the detached save in memory. This also covers ordinary melee, flares, mushroom harvesting, door prying, and consumable use. Two guests used stock reload and fired overlapping bursts in a muted trial. Releasing the triggers and losing one client's connection left the campaign files unchanged. An explicit save before stopping preserved each magazine through restart. [Held-fire trial](../tests/live_guest_held_fire_smoke.py)
 
 Stock inventory sorting and both direct and popup stack splitting also leave save files unchanged until a save. A muted two-player test restored the sorted and split inventory after restart. [Inventory trial](../tests/live_inventory_split_smoke.py)
