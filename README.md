@@ -11,7 +11,7 @@ Anyone is free to use, modify, fork, and redistribute the original mod code for 
 
 An unofficial UE4SS mod that adds co-op via Steam invites or Direct IP to the Windows Steam version of Project Silverfish. Open **Multiplayer** from the game’s title screen to host a campaign or join a friend. The mod runs in the existing Steam installation and keeps multiplayer campaigns separate from singleplayer saves.
 
-[Download a release candidate](https://github.com/hypnotoadtrance/silverfish-coop/releases) · [Player guide](docs/PLAYING-COOP.md) · [18-rule design](docs/DESIGN.md) · [Contribute with a coding agent](CONTRIBUTING.md) · [Build and publish a release](docs/RELEASING.md)
+[Download a release candidate](https://github.com/hypnotoadtrance/silverfish-coop/releases) · [Known Issues](docs/KNOWN-ISSUES.md) · [Player guide](docs/PLAYING-COOP.md) · [18-rule design](docs/DESIGN.md) · [Contribute with a coding agent](CONTRIBUTING.md) · [Build and publish a release](docs/RELEASING.md)
 
 ![Project Silverfish title screen showing the Singleplayer and Multiplayer choices](docs/screenshots/title-menu.png)
 
@@ -54,6 +54,8 @@ Captured in development builds. The Direct IP form shows a test port.
 [Verified native scenarios](docs/NATIVE-INTEGRATION.md) · [Current integration and known gaps](docs/IN-GAME-INTEGRATION.md) · [Machine-readable controls](docs/PLAYING-COOP.md#machine-readable-controls)
 
 ## Limitations and known issues
+
+See the [Known Issues backlog](docs/KNOWN-ISSUES.md) for reported bugs, current work, and cases that need a two-PC retest.
 
 - **Campaign coverage.** Co-op is still in development. Some quests and dialogue triggers, faction updates, inventory actions, NPC behaviors, map exits, and scripted events lack complete multiplayer coverage.
 - **Visual and physical state.** Muted tests have covered guest-carried physics props, red flares, boar ragdoll dragging, and selected enemies and anomalies. Coverage varies by actor, weapon, item, and map. Release notes list the checks for each ZIP.
