@@ -13,6 +13,8 @@ local inventory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local jug_suffixes = {["0"] = true, ["1"] = true, ["18"] = true, ["19"] = true}
+local exact_jug = "Prop_PlasticJug_C " .. observatory
+    .. ":PersistentLevel.Prop_PlasticJug_GEN_VARIABLE_Prop_PlasticJug_C_CAT_0"
 local hit_event = "/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C:"
     .. "BndEvt__PhysicsProp_Master_BP_PropMesh_K2Node_ComponentBoundEvent_0_ComponentHitSignature__DelegateSignature"
 local damage_event = "/Game/Classes/Player/Player_FP.Player_FP_C:DealDamage"
@@ -22,9 +24,9 @@ local command, reply = mailbox .. "/npc-jug-command.tsv", mailbox .. "/npc-jug-r
 local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
 local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
 local color = {R = 0, G = 0, B = 0, A = 0}
-local jug, npc, collision_target
+local jug, npc, collision_target, thrower
 local impact, host_hits, guest_hits = 0, 0, 0
-local largest_impulse
+local largest_impulse, largest_thrower_impulse
 local impulses_decoded, impact_instigator, npc_damage_calls, npc_damage_instigator = 0, "-", 0, "-"
 local armed, thrown, hook, guest_fired, previous = false, false, false, false, nil
 
@@ -114,6 +116,7 @@ local function select_prop(world, pawn, center, toolbox)
         local path = name(actor)
         local authored = toolbox and path:match("%.Observitory_P:PersistentLevel%.Prop_ToolBox01_C_7$")
             or not toolbox and jug_suffixes[path:match("Prop_PlasticJug_C_CAT_(%d+)$")]
+        if guest_fired and not toolbox then authored = path == exact_jug end
         if authored and same(actor:GetClass(), class) and actor:HasAuthority()
             and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed() and actor.Broken == false
             and same(actor.PropMesh, actor.RootComponent) and same(actor.PropMesh:GetOwner(), actor)
@@ -159,7 +162,12 @@ end
 
 local function prepare(world, pawn, guest, target, toolbox)
     local prop = select_prop(world, pawn, target:K2_GetActorLocation(), toolbox)
-    local center = place_players(pawn, guest, target, prop)
+    if guest_fired then
+        assert(same(target, npc) and target.Alive == true and same(target.CombatTarget, guest)
+            and npc_damage_calls == 1 and npc_damage_instigator == name(guest) and not valid(pawn.HeldObject),
+            "the exact stalker must already target the genuine guest attacker")
+    end
+    local center = guest_fired and target:K2_GetActorLocation() or place_players(pawn, guest, target, prop)
     local eye = pawn.Camera:K2_GetComponentLocation()
     orient(pawn, angle(eye, center))
     local direction = pawn.Camera:GetForwardVector()
@@ -236,15 +244,20 @@ local function register_hooks()
     assert(valid(StaticFindObject(hit_event)) and valid(StaticFindObject(damage_event))
         and valid(StaticFindObject(npc_damage_event)), "stock hit or damage hook unavailable")
     RegisterHook(hit_event, function(context_value, _, other, _other_component, normal_impulse)
-        if armed and same(unwrap(context_value), jug) and same(unwrap(other), npc) then
+        if armed and thrown and same(unwrap(context_value), jug) and same(unwrap(other), npc) then
             impact, collision_target = impact + 1, name(npc)
-            impact_instigator = name(jug:GetInstigator())
             local vector = unwrap(normal_impulse)
             local x, y, z = vector and vector.X, vector and vector.Y, vector and vector.Z
             if type(x) == "number" and type(y) == "number" and type(z) == "number" then
                 impulses_decoded = impulses_decoded + 1
                 local strength = math.sqrt(x*x + y*y + z*z)
-                largest_impulse = math.max(largest_impulse or 0, strength)
+                local instigator = jug:GetInstigator()
+                if not largest_impulse or strength > largest_impulse then
+                    largest_impulse, impact_instigator = strength, name(instigator)
+                end
+                if same(instigator, thrower) then
+                    largest_thrower_impulse = math.max(largest_thrower_impulse or 0, strength)
+                end
             end
         end
     end)
@@ -276,7 +289,8 @@ local function sample(actor, pawn, guest)
     return {name(actor), actor:HasAuthority() and 1 or 0, name(actor.Controller), name(actor.CombatTarget),
         actor.Health, actor.Aggro_Level, actor.HasTargetLOS and 1 or 0, name(pawn), health(pawn), name(guest), health(guest),
         table.concat(threats, "|"), impact, collision_target or "-", host_hits, guest_hits,
-        largest_impulse or "-", impact_instigator, impulses_decoded, npc_damage_calls, npc_damage_instigator}
+        largest_impulse or "-", impact_instigator, impulses_decoded, npc_damage_calls, npc_damage_instigator,
+        largest_thrower_impulse or "-"}
 end
 
 local function stock_health(world, pawn)
@@ -356,12 +370,16 @@ local function observe(operation)
     if operation == "throw" then
         assert(same(actor, npc) and same(pawn.HeldObject, jug) and not thrown, "no exact Observatory jug is held")
         local eye, center = pawn.Camera:K2_GetComponentLocation(), actor:K2_GetActorLocation()
+        local holder = name(jug["Holding Actor"])
+        local before_instigator = name(jug:GetInstigator())
         orient(pawn, angle(eye, center))
-        armed, thrown = true, true
+        armed, thrown, thrower = true, true, pawn
         pawn:Grab_Release_Object(true, false, false)
         assert(not same(pawn.HeldObject, jug) and not same(pawn.PhysicsHandle:GetGrabbedComponent(), jug.PropMesh),
             "stock throw did not release the jug")
-        return {name(jug), name(actor)}
+        local velocity = jug.PropMesh:GetPhysicsLinearVelocity(FName("None"))
+        local speed = math.sqrt(velocity.X^2 + velocity.Y^2 + velocity.Z^2)
+        return {name(jug), name(actor), holder, before_instigator, name(jug:GetInstigator()), speed}
     end
     error("unknown Observatory jug probe operation", 0)
 end

@@ -19,7 +19,8 @@ from tools.silverfish.control import submit
 
 FIELDS = ("npc", "authority", "controller", "target", "npc_health", "aggro", "target_los", "local_pawn",
           "local_health", "guest", "guest_health", "threats", "impacts", "collision_target", "host_hits", "guest_hits",
-          "largest_impulse", "impact_instigator", "impulses_decoded", "npc_damage_calls", "npc_damage_instigator")
+          "largest_impulse", "impact_instigator", "impulses_decoded", "npc_damage_calls", "npc_damage_instigator",
+          "largest_thrower_impulse")
 
 
 @contextmanager
@@ -71,7 +72,7 @@ async def sample(run: Path) -> dict:
     row = dict(zip(FIELDS, await probe(run, "sample"), strict=True))
     for key in ("authority", "target_los", "impacts", "host_hits", "guest_hits", "impulses_decoded", "npc_damage_calls"):
         row[key] = int(row[key])
-    for key in ("npc_health", "local_health", "guest_health", "largest_impulse"):
+    for key in ("npc_health", "local_health", "guest_health", "largest_impulse", "largest_thrower_impulse"):
         row[key] = None if row[key] == "-" else float(row[key])
     row["threats"] = row["threats"].split("|") if row["threats"] else []
     return row
@@ -86,7 +87,7 @@ async def stock_health(run: Path) -> dict:
 
 
 async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damage: bool,
-                   require_stock_health: bool = False) -> None:
+                   require_stock_health: bool = False, prop_retarget: bool = False) -> None:
     name = "observatory-jug-" + uuid.uuid4().hex[:8]
     host_run, guest_run = (work / folder / name / "run" for folder in ("campaigns", "clients"))
     evidence_path = host_run / "observatory-jug-verification.json"
@@ -95,7 +96,8 @@ async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damag
     assert original, "The canary Saved directory has no files"
     print(evidence_path, flush=True)
     cli = (sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work))
-    processes, evidence = [], {"attack": attack, "required_guest_damage": require_guest_damage}
+    processes, evidence = [], {"attack": attack, "prop_retarget": prop_retarget,
+                               "required_guest_damage": require_guest_damage}
     loop = asyncio.get_running_loop()
 
     async def start(role, run, *arguments):
@@ -146,7 +148,7 @@ async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damag
         assert baseline["host"]["guest"] == enrolled["game"]["pawns"]["guest"]["name"], baseline
 
         pre_host_health = baseline["host"]["npc_health"]
-        both_threats = attack == "pistols"
+        both_threats = attack == "pistols" or prop_retarget
         if both_threats:
             guid = uuid.uuid4().hex.upper()
             evidence["guest_seed"] = await checked(host_run, "native-guest-weapon-seed", target="guest", item_guid=guid,
@@ -175,7 +177,10 @@ async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damag
             keys = ("prop", "npc", "host_pawn", "guest_pawn", "mass_kg", "hold_limit_kg")
             values = await probe(host_run, "grabtoolbox" if attack == "toolbox" else "grab")
             await asyncio.sleep(.3)
-            assert await probe(host_run, "throw") == values[:2], values
+            release_fields = ("prop", "npc", "holder", "instigator_before", "instigator_after", "speed_cm_s")
+            released = evidence["stock_throw"] = dict(zip(release_fields, await probe(host_run, "throw"), strict=True))
+            released["speed_cm_s"] = float(released["speed_cm_s"])
+            assert (released["prop"], released["npc"]) == tuple(values[:2]), released
         stock = evidence["stock_attack"] = dict(zip(keys, values, strict=True))
         assert (stock["npc"], stock["host_pawn"], stock["guest_pawn"]) == tuple(
             baseline["host"][key] for key in ("npc", "local_pawn", "guest")), stock
@@ -187,6 +192,9 @@ async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damag
             hit = snapshot["host"]
             impact_verified = attack in ("pistol", "pistols") or (
                 hit["impacts"] > 0 and hit["collision_target"] == stock["npc"])
+            if prop_retarget:
+                # The stock prop passes damage to the NPC only above this normal-impulse threshold.
+                impact_verified = impact_verified and (hit["largest_thrower_impulse"] or 0) > 5000
             remembered = not both_threats or all(hit["threats"].count(stock[role]) == 1
                                                  for role in ("host_pawn", "guest_pawn"))
             if (impact_verified and hit["target"] == stock["host_pawn"]
@@ -197,6 +205,10 @@ async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damag
         else:
             if attack in ("jug", "toolbox") and hit["impacts"] == 0:
                 raise AssertionError("the authored prop missed the stalker")
+            if prop_retarget and (hit["largest_impulse"] is None or hit["largest_impulse"] <= 5000):
+                raise AssertionError("the authored prop hit the stalker without crossing the stock impact damage threshold")
+            if prop_retarget and (hit["largest_thrower_impulse"] or 0) <= 5000:
+                raise AssertionError("the stock prop impact did not retain the exact thrower as instigator")
             raise AssertionError("the stock attack did not establish damage and the host as the stalker's target")
 
         if require_stock_health:
@@ -298,17 +310,21 @@ if __name__ == "__main__":
     attack.add_argument("--pistols", dest="attack", action="store_const", const="pistols",
                         help="fire one guest round and one host round to establish both stock threats")
     parser.set_defaults(attack="jug")
+    parser.add_argument("--prop-retarget", action="store_true",
+                        help="establish a stock guest threat, then require qualifying damage from the host's original prop")
     parser.add_argument("--require-guest-damage", action="store_true",
                         help="also require one stock hit on the standing guest during 12 seconds after retargeting")
     parser.add_argument("--require-stock-health", action="store_true",
                         help="also verify the HUD and PlayerCard progress getters after a real guest hit")
     options = parser.parse_args()
-    if options.require_guest_damage and options.attack != "pistols":
-        parser.error("--require-guest-damage requires --pistols")
+    if options.prop_retarget and options.attack not in ("jug", "toolbox"):
+        parser.error("--prop-retarget requires the jug or toolbox")
+    if options.require_guest_damage and options.attack != "pistols" and not options.prop_retarget:
+        parser.error("--require-guest-damage requires --pistols or --prop-retarget")
     if options.require_stock_health and not options.require_guest_damage:
         parser.error("--require-stock-health requires --require-guest-damage")
     work = options.work.resolve()
     with installed_probe(work):
         asyncio.run(exercise(work, options.canary.resolve(), attack=options.attack,
                              require_guest_damage=options.require_guest_damage,
-                             require_stock_health=options.require_stock_health))
+                             require_stock_health=options.require_stock_health, prop_retarget=options.prop_retarget))
