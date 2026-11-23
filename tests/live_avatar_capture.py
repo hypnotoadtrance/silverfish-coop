@@ -68,7 +68,7 @@ async def avatar_probe(run, operation, *, allow_pending=False):
             await asyncio.sleep(.025 if operation == "rig" else .1)
 
 
-async def observe_stock_flashlight(host_run, guest_run):
+async def observe_stock_flashlight(host_run, guest_run, *, verify_view=False):
     async def owner(operation):
         values = await avatar_probe(host_run, operation)
         player, source, role, replicated, powered, visible, *data = values
@@ -83,6 +83,15 @@ async def observe_stock_flashlight(host_run, guest_run):
         return dict(remote=remote, sources=int(sources), powered_sources=int(powered), visible_source_spotlights=int(spotlights),
                     visible_pawn_spotlights=int(pawn_lights))
 
+    async def view_receipt(player, visible, *, click):
+        def matches(state):
+            view = state.get("game", {}).get("native_flashlight_view", {})
+            return (view.get("player") == player and view.get("visible") is visible and view.get("power") is visible
+                    and (view.get("heard") == view.get("switch") if click else view.get("heard") is None))
+
+        state = await wait(guest_run, matches, timeout=10)
+        return state["game"]["native_flashlight_view"]
+
     seeded = await owner("seedlight")
     try:
         equipped_mesh = "SM_Prop_Flashlight_01.SM_Prop_Flashlight_01"
@@ -94,10 +103,13 @@ async def observe_stock_flashlight(host_run, guest_run):
 
         mounted = await wait(guest_run, shows_flashlight)
         baseline = await owner("lightoff") if seeded["powered"] else seeded
+        off_view = await view_receipt(seeded["player"], False, click=False) if verify_view else None
         before = await observer(seeded["player"])
         lit = await owner("lighton")
+        on_view = await view_receipt(seeded["player"], True, click=True) if verify_view else None
         seen_lit = await observer(seeded["player"])
         unlit = await owner("lightoff")
+        reset_view = await view_receipt(seeded["player"], False, click=True) if verify_view else None
         seen_unlit = await observer(seeded["player"])
         assert seeded["source"] == lit["source"] == unlit["source"], (seeded, lit, unlit)
         assert not baseline["visible"] and lit["powered"] and lit["visible"] and not (unlit["powered"] or unlit["visible"])
@@ -107,8 +119,17 @@ async def observe_stock_flashlight(host_run, guest_run):
                     "owner": {"off": baseline, "on": lit, "off_again": unlit},
                     "observer": {"off": before, "on": seen_lit, "off_again": seen_unlit},
                     "stock_switch_cue_observed": unlit["click_calls"] - baseline["click_calls"]}
+        if verify_view:
+            assert on_view["switch"] == off_view["switch"] + 1 and reset_view["switch"] == on_view["switch"] + 1
+            assert on_view["instance"] == off_view["instance"] == reset_view["instance"]
+            assert [row["visible_source_spotlights"] + row["visible_pawn_spotlights"]
+                    for row in (before, seen_lit, seen_unlit)] == [0, 1, 0], evidence
+            assert all(row["powered_sources"] == 0 for row in (before, seen_lit, seen_unlit)), evidence
+            evidence["observer_view"] = {"off": off_view, "on": on_view, "off_again": reset_view}
     finally:
         assert await avatar_probe(host_run, "clearlight") == ["restored"]
+    if verify_view:
+        await wait(guest_run, lambda state: "native_flashlight_view" not in state.get("game", {}), timeout=8)
     return evidence
 
 
@@ -320,7 +341,8 @@ async def verify_aim_movement(host_run, guest_run, command, host, guest, project
 async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: bool = False,
                   melee: bool = False, pose: bool = False, rifle: bool = False,
                   consumable: bool = False, movement: bool = False, movement_traits: bool = False,
-                  aim_movement: bool = False, stock_shotgun_aim: bool = False, flashlight_source: bool = False) -> None:
+                  aim_movement: bool = False, stock_shotgun_aim: bool = False, flashlight_source: bool = False,
+                  flashlight_view: bool = False) -> None:
     profile = "avatar-" + uuid.uuid4().hex[:8]
     host_dir = work / "campaigns" / profile
     guest_dir = work / "clients" / profile
@@ -392,7 +414,8 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             assert all(row["state"] == "default_body" for row in evidence[role].values()), evidence
         if flashlight_source:
             await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
-            evidence["stock_flashlight_source_observation"] = await observe_stock_flashlight(host_run, guest_run)
+            evidence["stock_flashlight_source_observation"] = await observe_stock_flashlight(
+                host_run, guest_run, verify_view=flashlight_view)
             (host_run / "live-avatar-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
             return
         if lifecycle:
@@ -670,9 +693,12 @@ if __name__ == "__main__":
                         help="verify pistol and break-action ADS while strafing, crouching, and crouch-walking")
     parser.add_argument("--stock-shotgun-aim", action="store_true",
                         help="exercise the suppressed shotgun's native ADS without a primary-fire scope")
-    parser.add_argument("--flashlight-source", action="store_true",
-                        help="observe a stock flashlight switch, beam source, and remote visibility in a private pair")
+    light = parser.add_mutually_exclusive_group()
+    light.add_argument("--flashlight-source", action="store_true",
+                       help="observe a stock flashlight switch, beam source, and remote visibility in a private pair")
+    light.add_argument("--flashlight-view", action="store_true", help="also require the observer's flashlight beam and switch receipt")
     options = parser.parse_args()
+    options.flashlight_source |= options.flashlight_view
     if options.flashlight_source and any((options.lifecycle, options.equipment, options.melee, options.pose, options.rifle,
                                          options.consumable, options.movement, options.movement_traits, options.aim_movement,
                                          options.stock_shotgun_aim)):
@@ -702,4 +728,4 @@ if __name__ == "__main__":
         asyncio.run(capture(work, original,
                             options.lifecycle, options.equipment, options.melee, options.pose,
                             options.rifle, options.consumable, options.movement, options.movement_traits,
-                            options.aim_movement, options.stock_shotgun_aim, options.flashlight_source))
+                            options.aim_movement, options.stock_shotgun_aim, options.flashlight_source, options.flashlight_view))
