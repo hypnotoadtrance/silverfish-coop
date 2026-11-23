@@ -179,7 +179,8 @@ async def submit(run: Path, action: str, **arguments) -> dict:
         raise RuntimeError("No active controller for the chosen profile or campaign")
     request_id = uuid.uuid4().hex
     name = f"{request_id}.json"
-    write_json(run / "requests" / name, {
+    pending = run / "requests" / name
+    write_json(pending, {
         "generation": current["generation"], "action": action, **arguments,
     })
     output = run / "responses" / name
@@ -188,9 +189,17 @@ async def submit(run: Path, action: str, **arguments) -> dict:
              "native-dialogue-open": 32768, "native-dialogue-choose": 32768,
              "native-finite-shop-list": 131072, "native-inventory-list": 16384,
              "native-wipe-items": 16384}.get(action, 8192)
-    attempts = 15 if action in {"status-current", "events-recent"} else 200
-    for _ in range(attempts):
-        if output.is_file():
-            return read_json(output, limit=limit)
-        await asyncio.sleep(0.2)
-    raise TimeoutError(f"Command response timed out (id {request_id})")
+    query = action in {"status-current", "events-recent"}
+    try:
+        for _ in range(15 if query else 200):
+            if output.is_file():
+                return read_json(output, limit=limit)
+            await asyncio.sleep(0.2)
+        raise TimeoutError(f"Command response timed out (id {request_id})")
+    finally:
+        if query:
+            for path in (pending, output):
+                try:
+                    path.unlink(missing_ok=True)
+                except PermissionError:
+                    pass

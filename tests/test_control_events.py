@@ -29,6 +29,7 @@ class ControlEventTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([(entry["event"], entry["item"]) for entry in result["events"]],
                                  [("pickup", "second")])
                 self.assertFalse((run / "events.jsonl").exists())
+                self.assertFalse(list((run / "responses").glob("*.json")))
 
     async def test_recent_events_stay_bounded_and_are_readable_after_exit(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -84,6 +85,7 @@ class ControlEventTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(requester.returncode, 0, stderr.decode())
                 self.assertEqual(json.loads(stdout)["game"]["sequence"], 2)
                 self.assertEqual(file.read_bytes(), before)
+                self.assertFalse(list((run / "responses").glob("*.json")))
 
     async def test_legacy_diagnostic_log_remains_readable(self):
         with tempfile.TemporaryDirectory() as folder:
