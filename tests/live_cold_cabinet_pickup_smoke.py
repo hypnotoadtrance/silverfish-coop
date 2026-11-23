@@ -119,6 +119,14 @@ def summarize(trace: Path) -> dict:
     enclosing, = [row for row in entries if row["label"] == "bridge:native-loot-claim"]
     if not all(enclosing["start"] <= row["start"] <= row["stop"] <= enclosing["stop"] for row in (*loads, *native, claim)):
         raise ValueError("The cold escrow and claim must occur in the same bridge command")
+    press, = [row for row in entries if row["label"] == f"command:{native_world_loot.FIXTURE}"]
+    if press["stop"] > enclosing["start"]:
+        raise ValueError("The stock input must precede the claim")
+    presentation = {}
+    for stage, command in (("retire", native_world_loot.RETIRE), ("sound", "native-sound-pickup")):
+        matching = [row for row in entries if row["label"] == f"bridge:{command}" and row["start"] >= enclosing["stop"]]
+        if len(matching) == 1:
+            presentation[stage] = round((matching[0]["stop"] - press["stop"]) * 1000, 3)
     nearby = [row["elapsed_ms"] for row in frames
               if row["start"] < enclosing["stop"] + .12 and row["stop"] > enclosing["start"] - .12]
     idle = [row["elapsed_ms"] for row in frames if row["stop"] < enclosing["start"] - .2]
@@ -126,6 +134,8 @@ def summarize(trace: Path) -> dict:
         raise ValueError("Missing baseline or claim frame samples")
     return dict(escrow_load_ms=loads[0]["elapsed_ms"], native_claim_ms=native[0]["elapsed_ms"],
                 command_ms=claim["elapsed_ms"], bridge_tick_ms=enclosing["elapsed_ms"],
+                input_fixture_end_to_claim_ms=round((claim["stop"] - press["stop"]) * 1000, 3),
+                input_fixture_end_to_presentation_ms=presentation,
                 nearby_frames_ms=nearby, max_nearby_frame_ms=max(nearby), idle_frame_median_ms=median(idle),
                 frame_count=len(frames))
 
