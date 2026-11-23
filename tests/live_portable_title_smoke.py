@@ -719,7 +719,7 @@ async def verify_resident_turret_combat(host: Seat, guest: Seat, guest_frame: di
     await asyncio.sleep(1.2)
     death_effects = await asyncio.gather(*(command(seat, "turret-read-effects") for seat in (host, guest)))
     # Stock fire damage comes from a host-only gameplay actor. Guest smoke and blast are cosmetic.
-    assert death_effects == ["1,1,1,1", "1,1,1,0"], death_effects
+    assert [row.split(";")[0] for row in death_effects] == ["1,1,1,1", "1,1,1,0"], death_effects
     return {"stock_replication": replication == "true", "before": before, "after": after,
             "replica_fire_denied": True, "host_skipped_downed_target": True, "guest_stock_fire_cue": shot,
             "death_blast_sound_smoke_and_fire_fields": death_effects}

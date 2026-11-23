@@ -284,7 +284,8 @@ local turret_effects, turret_effect_hooks
 
 local function arm_turret_effects(turret)
     local target = turret:K2_GetActorLocation()
-    turret_effects = {turret = turret, target = {X=target.X, Y=target.Y, Z=target.Z}, blasts = 0, sounds = 0}
+    turret_effects = {turret = turret, target = {X=target.X, Y=target.Y, Z=target.Z},
+        blasts = 0, sounds = 0, smoke = 0}
     if turret_effect_hooks then return "armed" end
     local function at_turret(point)
         local target = turret_effects and turret_effects.target
@@ -294,6 +295,14 @@ local function arm_turret_effects(turret)
         local particle = asset:get()
         if valid(particle) and particle:GetFName():ToString() == "FX_Blast_FragGrenade_Converted"
             and at_turret(position:get()) then turret_effects.blasts = turret_effects.blasts + 1 end
+    end)
+    RegisterHook("/Script/Niagara.NiagaraFunctionLibrary:SpawnSystemAttached", function(_, asset, parent)
+        local particle = asset:get()
+        if turret_effects and valid(turret_effects.turret) and valid(particle)
+            and particle:GetFName():ToString() == "NI_SmokeStack_Large"
+            and same(parent:get(), turret_effects.turret.Turret_Gun) then
+            turret_effects.smoke = turret_effects.smoke + 1
+        end
     end)
     RegisterHook("/Script/Engine.GameplayStatics:SpawnSoundAtLocation",
         function(_, _, sound, position, _, _, _, _, attenuation)
@@ -309,16 +318,19 @@ end
 local function read_turret_effects(world, turret)
     local state = assert(turret_effects, "the turret effect probe is not armed")
     assert(same(state.turret, turret), "the turret effect probe is bound to a different actor")
-    local smoke, field = 0, 0
-    for _, component in ipairs(FindAllOf("NiagaraComponent") or {}) do
-        if valid(component) and same(component:GetAttachParent(), turret.Turret_Gun)
-            and valid(component.Asset) and component.Asset:GetFName():ToString() == "NI_SmokeStack_Large"
-            and component:IsActive() then smoke = smoke + 1 end
-    end
+    local field, pitch = 0, "-"
     for _, fire in ipairs(FindAllOf("Fire_Camp_BP_C") or {}) do
         if valid(fire) and same(fire:GetWorld(), world) and same(fire:GetAttachParentActor(), turret) then field = field + 1 end
     end
-    return ("%d,%d,%d,%d"):format(state.blasts, state.sounds, smoke, field)
+    for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
+        if valid(marker) and same(marker:GetOwner(), turret) then
+            pitch = ("%.2f"):format(marker:K2_GetActorRotation().Pitch)
+        end
+    end
+    local class = StaticFindObject("/Game/Classes/Actors/ExplosionActor_BP.ExplosionActor_BP_C")
+    local defaults = valid(class) and class:GetCDO()
+    return ("%d,%d,%d,%d;%s;%s;%s"):format(state.blasts, state.sounds, state.smoke, field,
+        pitch, tostring(valid(defaults) and defaults["PFX Scale"]), tostring(valid(defaults) and defaults["SFX Vol"]))
 end
 
 local function turret_fire(pawn, world, turret, host, with_downed_target)

@@ -198,7 +198,8 @@ local function present_turret(mirror, actor, pawn)
         return true
     end
     if phase == blast_phase and not mirror.played_blast and valid(pawn) and pawn:IsLocallyControlled() then
-        mirror.played_blast = effects.play_turret_blast(pawn, marker:K2_GetActorLocation())
+        local ok, played = pcall(effects.play_turret_blast, pawn, marker:K2_GetActorLocation())
+        mirror.played_blast = ok and played
     end
     if valid(mirror.smoke) then return end
     local gun = actor.Turret_Gun
@@ -206,7 +207,7 @@ local function present_turret(mirror, actor, pawn)
     local asset = StaticFindObject(turret_smoke)
     if not valid(gun) or not same(gun:GetOwner(), actor) or not valid(niagara) or not valid(asset) then return end
     mirror.smoke = niagara:SpawnSystemAttached(asset, gun, FName("None"),
-        {X = 0, Y = 0, Z = 0}, {Pitch = 0, Yaw = 0, Roll = 0}, 0, true, true, 0, true)
+        {X = 0, Y = 0, Z = 0}, {Pitch = 0, Yaw = 0, Roll = 0}, 0, true, true, 0, false)
 end
 
 local function apply(marker, world)
