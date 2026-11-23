@@ -2,7 +2,7 @@
 
 import argparse
 import asyncio
-from contextlib import AsyncExitStack, asynccontextmanager, nullcontext
+from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
 import json
 import math
 import os
@@ -126,7 +126,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                    automatic_cqc_loot: bool = False, both_cqc: bool = False, stock_shell_input: str | None = None,
                    restart_unclaimed_shells: bool = False, refinery_cqc: bool = False, stock_drop_census: bool = False,
                    stock_weapon_input: bool = False, restart_unclaimed_weapon: bool = False,
-                   resident_game: Path | None = None, verify_shell_stacking: bool = False, carry_weapon: bool = False) -> dict:
+                   resident_game: Path | None = None, verify_shell_stacking: bool = False, carry_weapon: bool = False,
+                   verify_cqc_corpse: bool = False) -> dict:
     placed_cqc = dead_bridge_cqc or refinery_cqc
     area = REFINERY if refinery_cqc else DEAD_BRIDGE if dead_bridge_cqc else MAP
     first_target, second_target = (REFINERY_CQC, REFINERY_CQC_SECOND) if refinery_cqc else (CQC, CQC_SECOND)
@@ -150,6 +151,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
         from tools.silverfish.control import submit
     original = saved_hashes(original_save) if original_save else None
     processes = []
+    if verify_cqc_corpse:
+        import cqc_corpse_probe
     resident = AsyncExitStack()
     guest_bridge = None
     print(run, flush=True)
@@ -274,6 +277,10 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 evidence["client_cqc_before_combat"] = cqc_counterpart(guest_run, first_target, area)
             before = visible["game"]["native_enemy_loot_death_view"]
             assert (before["actor"], before["hidden"], before["collision"]) == (first_target, False, True), before
+            if verify_cqc_corpse:
+                living = await cqc_corpse_probe.observe_cqc_pair(run, guest_run, first_target)
+                cqc_corpse_probe.expect_live(living)
+                evidence["stock_cqc_body"] = {"living": living}
             if not automatic_cqc_loot:
                 wrong = await combat_action(run, "native-enemy-loot-watch", CQC.removesuffix("_0") + "_1")
                 assert wrong.get("ok") is False and wrong.get("error") == "Choose the exact staged stock enemy", wrong
@@ -786,6 +793,10 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     assert saved["world"]["map"] == area, saved["world"]
                     if defer_until_restart:
                         return
+                    if verify_cqc_corpse:
+                        body = proof_log["stock_cqc_body"]
+                        body["before_reconnect"] = await cqc_corpse_probe.observe_cqc_death(
+                            run, guest_run, target, body["living"])
                     accepted("suspend the guest link", await combat_action(guest_run, "drop-link"))
                     await wait(guest_run, lambda state: state.get("reconnect_suspended") and not state.get("link_connected"))
                     await wait(run, lambda state: not state.get("link_connected"))
@@ -798,6 +809,11 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                         settled["game"]["pawns"]["local"]["name"], exact_pawn
                     )
                     proof_log["client_cqc_death_view_after_reconnect"] = actor_proof(rejoined, "native_enemy_loot_death_view", target)
+                    if verify_cqc_corpse:
+                        body["after_reconnect"] = await cqc_corpse_probe.observe_cqc_death(
+                            run, guest_run, target, body["living"])
+                        cqc_corpse_probe.verify_reconnect(body["before_reconnect"], body["after_reconnect"])
+
         async def pickup_stock_weapon(payload, stock_source):
             from tools.silverfish import native_host_save, native_stock_enemy_drops, native_world_loot
 
@@ -969,7 +985,17 @@ async def main(args) -> None:
 
     work = args.work.resolve()
     subjects = ("host", "guest") if args.subject == "both" else (args.subject,)
-    with staged_carry_probe(work) if args.carry_weapon else nullcontext():
+    with ExitStack() as probes:
+        if args.carry_weapon:
+            probes.enter_context(staged_carry_probe(work))
+        if args.verify_cqc_corpse:
+            from live_stock_creator_smoke import installed_probe
+            stage = (work / "stage").resolve(strict=True)
+            original = args.vanilla_saved.resolve(strict=True)
+            if (not stage.is_relative_to(work) or original.is_relative_to(work) or work.is_relative_to(original)
+                    or any(part.casefold() == "steamapps" for part in stage.parts)):
+                raise ValueError("Use a private staged game outside the original Saved and Steam directories")
+            probes.enter_context(installed_probe(stage, mod="SilverfishCqcCorpseProbe", fixture="cqc_corpse_probe.lua"))
         for subject in subjects:
             await exercise(work, subject, hostile=args.hostile, require_combat=args.require_combat,
                        require_movement=args.require_movement, require_damage=args.require_damage,
@@ -980,7 +1006,8 @@ async def main(args) -> None:
                        refinery_cqc=args.refinery_cqc, stock_drop_census=args.stock_drop_census,
                        stock_weapon_input=args.stock_weapon_input, restart_unclaimed_weapon=args.restart_unclaimed_weapon,
                        resident_game=args.resident_game.resolve(strict=True) if args.resident_game else None,
-                       verify_shell_stacking=args.verify_shell_stacking, carry_weapon=args.carry_weapon)
+                       verify_shell_stacking=args.verify_shell_stacking, carry_weapon=args.carry_weapon,
+                       verify_cqc_corpse=args.verify_cqc_corpse)
 
 
 if __name__ == "__main__":
@@ -1009,9 +1036,15 @@ if __name__ == "__main__":
     parser.add_argument("--stock-weapon-input", action="store_true", help="claim the stock dropped weapon through Interact")
     parser.add_argument("--restart-unclaimed-weapon", action="store_true", help="restart before the stock weapon pickup")
     parser.add_argument("--carry-weapon", action="store_true", help="throw the enemy's actual stock weapon before pickup")
+    parser.add_argument("--verify-cqc-corpse", action="store_true",
+                        help="verify the exact placed Dead Bridge CQC visible ragdoll before and after a short reconnect")
     parser.add_argument("--resident-game", type=Path, help="use a separate portable guest replica and collect through stock Nearby Items")
     parser.add_argument("--vanilla-saved", type=Path)
     args = parser.parse_args()
+    if args.verify_cqc_corpse and (
+            not args.dead_bridge_cqc or not args.automatic_cqc_loot or args.stock_shell_input != "host"
+            or not args.vanilla_saved or args.both_cqc or args.resident_game or args.restart_unclaimed_weapon):
+        parser.error("--verify-cqc-corpse requires a single staged Dead Bridge CQC, automatic loot, host stock shell input, and --vanilla-saved")
     if args.refinery_cqc and (args.dead_bridge_cqc or not args.both_cqc):
         parser.error("--refinery-cqc requires --both-cqc and its own encounter")
     placed_cqc = args.dead_bridge_cqc or args.refinery_cqc
