@@ -20,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
@@ -29,6 +30,7 @@
 #include <Unreal/FFrame.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/Hooks.hpp>
+#include <Unreal/Property/FTextProperty.hpp>
 #include <Unreal/UnrealInitializer.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/World.hpp>
@@ -283,6 +285,7 @@ namespace
         Guid shop_split{};
         int quantity{};
         std::array<Unreal::FWeakObjectPtr, 3> shop_backups;
+        std::optional<Guid> reorder_before;
     };
 
     struct GuestUseCursor
@@ -1001,8 +1004,19 @@ namespace
         lua.set_bool(stash_screen.deposit);
         lua.set_integer(stash_screen.value);
         lua.set_integer(stash_screen.quantity);
+        const auto before = std::exchange(stash_screen.reorder_before, std::nullopt);
         stash_screen.item = {};
         stash_screen.quantity = 0;
+        if (before)
+        {
+            if (*before == Guid{}) lua.set_string("-");
+            else
+            {
+                const auto anchor = format_guid(*before);
+                lua.set_string(std::string_view{anchor.data(), anchor.size()});
+            }
+            return 5;
+        }
         return 4;
     }
 
@@ -1792,6 +1806,54 @@ namespace
         stash_screen.quantity = 0;
     }
 
+    void queue_stash_reorder(const ItemView& held, Unreal::UObject* panel, Unreal::UFunction* function,
+                             const void* parameters)
+    {
+        auto* index = field<Unreal::FIntProperty>(function, STR("Index"));
+        auto* sort = field<Unreal::FBoolProperty>(panel, STR("AutoSort"));
+        auto* filter = field<Unreal::FTextProperty>(panel, STR("ItemFilter"));
+        auto* item_type = Unreal::Cast<Unreal::UClass>(object_value(
+            field<Unreal::FClassProperty>(held.structure, item_class_name), held.value));
+        auto* defaults = item_type ? item_type->GetClassDefaultObject().Get() : nullptr;
+        auto* stacks = field<Unreal::FBoolProperty>(defaults, STR("Stacks"));
+        if (!parameters || !index || index->GetOffset_Internal() != 0x50 || function->GetParmsSize() < 0x55 ||
+            !index->HasAnyPropertyFlags(Unreal::CPF_Parm) ||
+            index->HasAnyPropertyFlags(Unreal::CPF_OutParm | Unreal::CPF_ReturnParm) ||
+            !sort || sort->GetPropertyValueInContainer(panel) ||
+            !filter || !filter->ContainerPtrToValuePtr<const Unreal::FText>(panel)->ToString().empty() ||
+            !stacks || stacks->GetPropertyValueInContainer(defaults))
+            return;
+        const int preferred = index->GetPropertyValueInContainer(parameters);
+        if (preferred < 0) return; // The stock return action uses -1 rather than an explicit grid slot.
+
+        auto* actor = stash_screen.actor.Get();
+        auto* property = stash_rows(actor, STR("Inventory"));
+        if (!property || !item_struct(property->GetInner(), held.structure))
+            return;
+        Unreal::FScriptArrayHelper rows(property, property->ContainerPtrToValuePtr<void>(actor));
+        if (rows.Num() < 2 || rows.Num() > inventory_limit) return;
+        const GuidFields fields(held.structure);
+        int source = -1;
+        for (int row = 0; row < rows.Num(); ++row)
+        {
+            if (fields.read(rows.GetRawPtr(row)) != stash_screen.drag_item) continue;
+            if (source >= 0) return;
+            source = row;
+        }
+        // The projection keeps the held row in the stock placeholder's grid slot.
+        // The stock AddItem index counts rows after removing the held item.
+        const int destination = std::min(preferred, rows.Num() - 1);
+        if (source < 0 || source == destination) return;
+        Guid anchor{};
+        if (destination < rows.Num() - 1)
+        {
+            anchor = fields.read(rows.GetRawPtr(destination + (source < destination ? 1 : 0)));
+            if (anchor == Guid{}) return;
+        }
+        queue_stash_move(stash_screen.drag_item, panel, held);
+        if (stash_screen.item != Guid{}) stash_screen.reorder_before = anchor;
+    }
+
     bool qualified_stash_action(Unreal::UObject* screen, Unreal::UObject* object, Unreal::UFunction* function, int parameters)
     {
         return stash_screen.accepting && stash_seat() && stash_screen.generation == scope.generation &&
@@ -1840,7 +1902,8 @@ namespace
         }
     }
 
-    void finish_stash_cursor(Unreal::UObject* manager, Unreal::UObject* target)
+    void finish_stash_cursor(Unreal::UObject* manager, Unreal::UObject* target,
+                             Unreal::UFunction* function, const void* parameters)
     {
         const auto held = inventory_item(manager, STR("HeldItem"));
         const GuidFields fields(held.structure);
@@ -1850,6 +1913,8 @@ namespace
             !stash_panel(origin) || stash_screen.drag_item == Guid{} || !fields.valid() ||
             fields.read(held.value) != stash_screen.drag_item) return;
         if (target != origin) queue_stash_move(stash_screen.drag_item, origin, held);
+        else if (!stash_screen.merchant && target == stash_screen.storage.Get())
+            queue_stash_reorder(held, target, function, parameters);
         clear_stash_cursor(manager);
     }
 
@@ -1912,7 +1977,7 @@ namespace
             call.PreventOriginalFunctionCall();
             if (call.OriginalFunctionCallPrevented() && name == entries->insert_item && stash_panel(context) &&
                 manager && stash_screen.drag_item != Guid{} && qualified_stash_action(screen, context, function, 3))
-                finish_stash_cursor(manager, context);
+                finish_stash_cursor(manager, context, function, parameters);
             return true;
         }
 

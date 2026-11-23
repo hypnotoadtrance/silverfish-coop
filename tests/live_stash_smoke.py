@@ -19,7 +19,7 @@ from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY
 
 
-async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, drag: bool = False):
+async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, drag: bool = False, reorder: bool = False):
     name = "stash-screen-" + uuid.uuid4().hex[:8]
     run = work / "campaigns" / name / "run"
     guest_run = work / "clients" / name / "run"
@@ -134,6 +134,9 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
         await approach("guest", first)
         item = uuid.uuid4().hex.upper()
         await ask(run, "native-guest-weapon-seed", target="guest", item_guid=item, kind="light-pistol-suppressed")
+        second_item = uuid.uuid4().hex.upper() if reorder else None
+        if second_item:
+            await ask(run, "native-guest-weapon-seed", target="guest", item_guid=second_item, kind="light-pistol-suppressed")
         before_deposit = save_hashes()
         deposit = await move_by_screen(first, item, "backpack", "deposit")
         assert (deposit["owner"], deposit["combined"], deposit["guid"], deposit["quantity"]) == (
@@ -145,6 +148,19 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
             deposit_page = (await ask(guest_run, native_stash.LIST, target=first))[native_stash.RESULT]
             assert deposit_page["items"][0]["ammo"] == 7
             evidence["live_census"] = {"deposited": deposit_page["items"][0]}
+        order = [item]
+        if second_item:
+            assert state["game"].get(native_stash.LIVE_REORDER) is True
+            await move_by_screen(first, second_item, "backpack", "deposit")
+            assert await stash_items(guest_run, first) == [item, second_item]
+            opened = (await ask(guest_run, "native-stash-view-fixture", target=first))[native_stash.VIEW]["sequence"]
+            await render("stash", after=opened - 1)
+            await click(f"reorder-stash:{second_item}:0")
+            await render("stash", after=opened)
+            await click("close")
+            order = [second_item, item]
+            assert await stash_items(guest_run, first) == order
+            assert save_hashes() == before_deposit, "Rearranging a stash wrote a campaign save"
         backpack = (await ask(guest_run, "native-inventory-list"))["native_inventory"]
         assert item not in {row["guid"] for row in backpack["items"]}
         await approach("host", first)
@@ -167,7 +183,7 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
             assert await stash_items(guest_run, destination_site) == []
 
         await ask(run, "native-stash-setting-fixture", target="1")
-        assert await stash_items(guest_run, destination_site) == [item]
+        assert await stash_items(guest_run, destination_site) == order
         await approach("host", destination_site)
         assert await stash_items(run, destination_site) == []
         await ask(run, "checkpoint")
@@ -180,7 +196,7 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
                    and status["game"].get(native_stash.SETTING) is True)
         await join(await ask(run, "refresh-invite", target=invite["guest_id"]), "guest-restart")
         await approach("guest", destination_site)
-        assert await stash_items(guest_run, destination_site) == [item]
+        assert await stash_items(guest_run, destination_site) == order
         if live_census:
             restored_page = (await ask(guest_run, native_stash.LIST, target=destination_site))[native_stash.RESULT]
             assert restored_page["items"][0]["ammo"] == 7
@@ -190,7 +206,7 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
         assert (withdrawal["owner"], withdrawal["combined"], withdrawal["guid"], withdrawal["quantity"]) == (
             invite["character_id"], True, item, 1,
         )
-        assert await stash_items(guest_run, destination_site) == []
+        assert await stash_items(guest_run, destination_site) == ([second_item] if reorder else [])
         weapon = (await ask(guest_run, "native-guest-weapon-inspect", target=item))["native_guest_weapon"]
         assert weapon["stored_ammo"] == 7
         assert save_hashes() == before_withdrawal, "Withdrawing from a stash wrote a campaign save"
@@ -198,6 +214,8 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
                         deposit_map=DEAD_BRIDGE, withdrawal_map=destination, combined_host_empty=True,
                         host_withdraw_refused=denied["error"], per_site_other_empty=True, stock_drag=drag,
                         no_save_on_stash_interaction=True, verified=True)
+        if reorder:
+            evidence["stock_reorder_after_restart"] = order
     finally:
         for process, directory in reversed(jobs):
             if process.returncode is None:
@@ -218,6 +236,7 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--same-map", action="store_true", help="check two Dead Bridge stashes without zone travel")
     parser.add_argument("--drag", action="store_true", help="test the stock held-item cursor, cancel, and cross-panel insert")
+    parser.add_argument("--reorder", action="store_true", help="verify the stock same-panel drag order of two weapons")
     options = parser.parse_args()
     asyncio.run(verify(options.work.resolve(strict=True), options.vanilla_saved.resolve(strict=True),
-                       same_map=options.same_map, drag=options.drag))
+                       same_map=options.same_map or options.reorder, drag=options.drag, reorder=options.reorder))

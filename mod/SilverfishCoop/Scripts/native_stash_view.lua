@@ -84,9 +84,9 @@ function view.clear()
     if type(SilverfishClearNativeStashScreen) == "function" then SilverfishClearNativeStashScreen() end
 end
 
-local function queue(mode, item)
+local function queue(mode, item, before)
     sequence = sequence + 1
-    current.sequence, current.mode, current.item = sequence, mode, item
+    current.sequence, current.mode, current.item, current.before = sequence, mode, item, before
     current.state, current.expires = "pending", os.time() + 45
 end
 
@@ -108,8 +108,8 @@ function view.sync(state, phase)
         view.clear()
     end
     if current and current.state == "rendered" and visible(binding.controller, current.screen, true) then
-        local guid, deposit = SilverfishTakeNativeStashMove(current.screen:GetAddress())
-        if guid then queue(deposit and "backpack" or "stash", guid) end
+        local guid, deposit, _, _, before = SilverfishTakeNativeStashMove(current.screen:GetAddress())
+        if guid then queue(deposit and "backpack" or "stash", guid, before) end
     end
     if not binding or type(SilverfishTakeNativeStashPress) ~= "function" then return end
     local press, path = SilverfishTakeNativeStashPress(binding.pawn:GetAddress())
@@ -135,7 +135,7 @@ local function item_row(line, seen)
         [item_never_drop] = protected == "1", [item_guid] = {A = tonumber(guid:sub(1, 8), 16),
             B = tonumber(guid:sub(9, 16), 16), C = tonumber(guid:sub(17, 24), 16), D = tonumber(guid:sub(25), 16)}}
     seen[guid] = row
-    return row
+    return row, guid
 end
 
 local function render(fields, state, phase)
@@ -152,10 +152,13 @@ local function render(fields, state, phase)
     if not valid(api) or not valid(save_class) or not valid(save) then error("native_stash_view_save_unavailable", 0) end
     local preview = api:CreateSaveGameObject(save_class)
     local rows, seen, count = preview.PlayerBackpack, {}, 0
+    local projected_order = current.before and {}
     for line in raw:gmatch("([^\n]+)\n") do
         count = count + 1
         if count > expected then error("native_stash_view_invalid_page", 0) end
-        rows[count] = item_row(line, seen)
+        local value, guid = item_row(line, seen)
+        rows[count] = value
+        if projected_order then projected_order[count] = guid end
     end
     if count ~= expected then error("native_stash_view_invalid_page", 0) end
 
@@ -186,7 +189,8 @@ local function render(fields, state, phase)
         local item = valid(card) and card.Item
         local guid = item and identifier(item[item_guid])
         local expected_row = guid and seen[guid]
-        if not expected_row or not same(item[item_class], expected_row[item_class])
+        if not expected_row or (projected_order and projected_order[index] ~= guid)
+            or not same(item[item_class], expected_row[item_class])
             or item[item_ammo] ~= expected_row[item_ammo] then error("native_stash_view_stock_card_changed", 0) end
         seen[guid] = nil
     end
@@ -254,8 +258,10 @@ function view.command(fields, state, phase)
         local screen = current and current.screen
         if not valid(screen) or current.state ~= "rendered" then error("native_stash_view_fixture_click_unavailable", 0) end
         if target == "close" then view.clear(); return "stock stash closed" end
+        local to_move, stock_index = target:match("^reorder%-stash:([0-9A-F]+):(%d+)$")
         local action, source, wanted = target:match("^(%a+)%-(%a+):([0-9A-F]+)$")
-        if not action then source, wanted = target:match("^(%a+):([0-9A-F]+)$") end
+        if to_move then action, source, wanted = "reorder", "stash", to_move
+        elseif not action then source, wanted = target:match("^(%a+):([0-9A-F]+)$") end
         local panel = source == "backpack" and screen.BackpackPanel or source == "stash" and screen.StashPanel
         if not valid(panel) then error("native_stash_view_fixture_panel_unavailable", 0) end
         local manager = screen.ItemManager
@@ -285,18 +291,19 @@ function view.command(fields, state, phase)
                     if action == "cancel" then
                         manager:ReturnItem(manager.HeldItem, {})
                     else
-                        local destination = action == "return" and panel
+                        local destination = (action == "return" or action == "reorder") and panel
                             or source == "backpack" and screen.StashPanel or screen.BackpackPanel
-                        if action == "drag" and destination.IsInsertMode ~= true then
+                        if (action == "drag" or action == "reorder") and destination.IsInsertMode ~= true then
                             error("native_stash_view_fixture_stock_target_not_ready", 0)
                         end
-                        manager:InsertItem(destination, -1)
-                        manager:InsertItem(destination, -1)
+                        local index = stock_index and math.tointeger(tonumber(stock_index)) or -1
+                        manager:InsertItem(destination, index)
+                        manager:InsertItem(destination, index)
                     end
                     if manager.HoldingItem ~= false or identifier(manager.HeldItem[item_guid]) then
                         error("native_stash_view_fixture_stock_cursor_not_cleared", 0)
                     end
-                    if action ~= "drag" then
+                    if action ~= "drag" and action ~= "reorder" then
                         if SilverfishTakeNativeStashMove(screen:GetAddress())
                             or screen.StashPanel.Cards:GetArrayNum() ~= stash_count
                             or screen.BackpackPanel.Cards:GetArrayNum() ~= backpack_count then
@@ -318,12 +325,13 @@ function view.command(fields, state, phase)
                     manager:ActionQuickMove()
                     manager:ActionQuickMove()
                 end
-                local guid, deposit = SilverfishTakeNativeStashMove(screen:GetAddress())
+                local guid, deposit, _, _, before = SilverfishTakeNativeStashMove(screen:GetAddress())
                 if guid ~= wanted or deposit ~= (source == "backpack")
+                    or (before ~= nil) ~= (action == "reorder")
                     or screen.StashPanel.Cards:GetArrayNum() ~= stash_count
                     or screen.BackpackPanel.Cards:GetArrayNum() ~= backpack_count
                     or SilverfishTakeNativeStashMove(screen:GetAddress()) then error("native_stash_view_fixture_move_unverified", 0) end
-                queue(source, guid)
+                queue(source, guid, before)
                 return action and "stock stash drag captured" or "stock stash QuickMove captured"
             end
         end
@@ -347,8 +355,9 @@ end
 
 function view.rows(state, phase, row)
     if not current or phase ~= "connected" or current.binding.map ~= state.map then return {} end
-    return {row("native-stash-view", current.state, current.sequence, current.binding.map, current.binding.name,
-        current.id, current.mode, 0, current.item or "-")}
+    local fields = {current.state, current.sequence, current.binding.map, current.binding.name,
+        current.id, current.mode, 0, current.item or "-", current.before}
+    return {row("native-stash-view", table.unpack(fields))}
 end
 
 function view.start(bridge, is_downed)

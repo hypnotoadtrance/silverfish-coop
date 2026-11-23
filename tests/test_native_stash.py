@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish import native_host_save, native_stash, party
+from tools.silverfish import native_host_save, native_stash, party, runtime
 from tools.silverfish.travel import OBSERVATORY
 
 
@@ -14,6 +14,61 @@ GUEST = "guest-character"
 
 
 class NativeStashTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reorder_requires_live_retention_and_returns_exact_anchor(self):
+        state = party.new_party()
+        party.add_player(state, "host")
+        party.add_player(state, GUEST)
+        game = {"state": "hosting", "map": OBSERVATORY, native_stash.SETTING: False,
+                native_stash.SITES: {SITE: {"map": OBSERVATORY}}, native_stash.LIVE_MOVE: True,
+                native_stash.LIVE_REORDER: True}
+        host = SimpleNamespace(last_game=game, zone_epoch="zone", native_zones=True, native_profile=Mock(),
+                               stopping=False, transitioning=False, native_checkpoint_unsafe=False,
+                               party=state, smg_holds=None, native_recipients=lambda: {GUEST: {
+                                   "pawn": "guest-pawn", "connected": True}}, pending_guest_saves={},
+                               checkpoint_native=AsyncMock(), control=Mock())
+        item, before, operation = "D" * 32, "E" * 32, uuid.uuid4().hex
+        target = f"{SITE}|reorder|{item}|{before}"
+        bridge = SimpleNamespace(command=AsyncMock())
+        for invalid in (f"{SITE}|reorder|{item}|{item}", f"{SITE}|deposit|{item}|{before}", target.rsplit("|", 1)[0]):
+            with self.assertRaisesRegex(party.RuleError, "exact_site_and_item"):
+                await native_stash.move(host, bridge, GUEST, invalid, operation)
+        with self.assertRaisesRegex(party.RuleError, "native_guest_save_retention_unavailable"):
+            await native_stash.move(host, bridge, GUEST, target, operation)
+        bridge.command.assert_not_awaited()
+        host.checkpoint_native.assert_not_awaited()
+
+        game["native_guest_save_retention"] = True
+        host.pending_guest_saves[GUEST] = ("guest-pawn", {})
+        bridge.command.return_value = {**game, native_stash.MOVED: dict(map=OBSERVATORY, pawn="guest-pawn",
+            slot="-", site=SITE, guid=item, direction="reorder", combined=False, before=before,
+            class_path="/Game/Classes/Items/Test.Test_C", quantity=1)}
+        result = await native_stash.move(host, bridge, GUEST, target, operation)
+        self.assertEqual((result[native_stash.MOVED]["owner"], result[native_stash.MOVED]["before"]), (GUEST, before))
+        bridge.command.assert_awaited_once_with(native_stash.MOVE, "guest-pawn", "-", SITE, item,
+                                                "reorder", "0", before, timeout=6)
+        self.assertEqual(await native_stash.move(host, bridge, GUEST, target, operation), result)
+        self.assertEqual(bridge.command.await_count, 1)
+        host.checkpoint_native.assert_not_awaited()
+
+    async def test_reorder_status_requires_exact_anchor_and_preserves_legacy_transfer(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        item, before = "D" * 32, "E" * 32
+        base = f"schema\t1\nseq\t1\nack\t-\tok\t-\nsession\thost\thosting\t{OBSERVATORY}\t1\t0\n"
+        capability = "native-stash-live-move\t1\nnative-stash-live-reorder\t1\n"
+        move = f"native-stash-move\t{OBSERVATORY}\tguest-pawn\t-\t{SITE}\t{item}\t"
+        after = "\t0\t/Game/Classes/Items/Test.Test_C\t1"
+        snapshot = bridge._parse_status(base + capability + move + "reorder" + after + f"\t{before}\n")
+        self.assertEqual(snapshot[native_stash.MOVED]["before"], before)
+        snapshot = bridge._parse_status(base + capability + move + "deposit" + after + "\n")
+        self.assertNotIn("before", snapshot[native_stash.MOVED])
+        self.assertIsNone(bridge._parse_status(base + capability + move + "reorder" + after + f"\t{item}\n"))
+
+        fields = ["native-stash-view", "pending", "1", OBSERVATORY, "guest-pawn", SITE, "stash", "0", item]
+        self.assertEqual(native_stash.parse_view(fields + [before], OBSERVATORY, "connected")["before"], before)
+        self.assertNotIn("before", native_stash.parse_view(fields, OBSERVATORY, "connected"))
+        with self.assertRaisesRegex(ValueError, "reorder"):
+            native_stash.parse_view(fields + [item], OBSERVATORY, "connected")
+
     async def test_stock_screen_reads_every_page_for_the_same_character(self):
         stock = [dict(guid=f"{index + 1:032X}", source="stash", class_path="/Game/Classes/Weapons/Test.Test_C",
                       ammo=7, value=29, weight=0.25, never_drop=False) for index in range(17)]

@@ -439,12 +439,13 @@ namespace
         return count;
     }
 
-    template <bool Live>
+    template <bool Live, bool Reorder = false>
     int move_stash(const Lua& lua)
     {
-        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 6 ||
+        static_assert(!Reorder || Live);
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != (Reorder ? 7 : 6) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_bool(3) ||
-            !lua.is_string(4) || !lua.is_string(5) || !lua.is_bool(6))
+            !lua.is_string(4) || !lua.is_string(5) || !lua.is_bool(6) || (Reorder && !lua.is_string(7)))
             return result(lua, false, "native_stash_move_unavailable");
         const auto pawn = static_cast<Address>(lua.get_integer());
         const auto frame = static_cast<Address>(lua.get_integer());
@@ -454,7 +455,7 @@ namespace
         const bool deposit = lua.get_bool();
         auto* save = authoritative_save(pawn, combined);
         auto* snapshot = Live ? nullptr : isolated_snapshot(frame);
-        if (!save || (Live ? frame != 0 : !snapshot) || site == Guid{} || id == Guid{})
+        if (!save || (Live ? frame != 0 : !snapshot) || site == Guid{} || id == Guid{} || (Reorder && deposit))
             return result(lua, false, "native_stash_move_exact_save_and_site_required");
         Inventory inventory;
         StashStorage storage;
@@ -496,7 +497,7 @@ namespace
                 return result(lua, false, "native_stash_move_stored_identity");
             if (index == selected) stash_index = found;
         }
-        if ((!deposit && stash_index < 0) || (!deposit && backpack.Num() == max_array_rows))
+        if ((!deposit && stash_index < 0) || (!Reorder && !deposit && backpack.Num() == max_array_rows))
             return result(lua, false, "native_stash_move_source_or_capacity");
 
         const void* source_row = deposit ? backpack.GetRawPtr(pack_index) : nullptr;
@@ -514,6 +515,34 @@ namespace
             return result(lua, false, "native_stash_move_item_unqualified");
         const auto quantity = item.stackable ? inventory.ammo->GetPropertyValueInContainer(source_row) : 1;
         if (quantity < 1) return result(lua, false, "native_stash_move_quantity_unqualified");
+
+        if constexpr (Reorder)
+        {
+            if (item.stackable) return result(lua, false, "native_stash_move_reorder_stackable");
+            Unreal::FScriptArrayHelper rows(storage.contents,
+                storage.contents->ContainerPtrToValuePtr<void>(stashes.GetRawPtr(selected)));
+            int destination = rows.Num() - 1;
+            const auto before = lua.get_string();
+            if (before != "-")
+            {
+                const auto anchor = stash_identity(before);
+                if (anchor == Guid{} || anchor == id || locate(inventory, rows, anchor, destination) != 1)
+                    return result(lua, false, "native_stash_move_reorder_anchor_unavailable");
+                if (stash_index < destination) --destination;
+            }
+            for (int current = stash_index; current != destination;)
+            {
+                const int next = current + (current < destination ? 1 : -1);
+                rows.SwapValues(current, next);
+                current = next;
+            }
+            if (inventory.identity(rows.GetRawPtr(destination)) != id)
+                return result(lua, false, "mutation_unverified_native_stash_reorder");
+            result(lua, true, "moved");
+            lua.set_string(item.path);
+            lua.set_integer(1);
+            return 4;
+        }
 
         if (selected < 0)
         {
@@ -577,6 +606,7 @@ namespace silverfish::inventory_census
         lua.register_function("SilverfishReadLiveNativeStashCensus", read_live_stash);
         lua.register_function("SilverfishMoveNativeStashItem", move_stash<false>);
         lua.register_function("SilverfishMoveLiveNativeStashItem", move_stash<true>);
+        lua.register_function("SilverfishReorderLiveNativeStashItem", move_stash<true, true>);
         lua.register_function("SilverfishVerifyNativeStashSave", verify_stash_save);
     }
 }

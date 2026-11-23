@@ -95,11 +95,15 @@ end
 
 local function move(fields, state, phase)
     moved = nil
-    local name, slot, site, item, direction, expected = table.unpack(fields, 3)
+    local name, slot, site, item, direction, expected, before = table.unpack(fields, 3)
     local live = slot == "-"
-    local transfer = live and SilverfishMoveLiveNativeStashItem or SilverfishMoveNativeStashItem
-    if #fields ~= 8 or type(transfer) ~= "function"
-        or (direction ~= "deposit" and direction ~= "withdraw") or (expected ~= "0" and expected ~= "1") then
+    local reorder = direction == "reorder"
+    local transfer
+    if reorder then transfer = SilverfishReorderLiveNativeStashItem
+    else transfer = live and SilverfishMoveLiveNativeStashItem or SilverfishMoveNativeStashItem end
+    if type(transfer) ~= "function" or (expected ~= "0" and expected ~= "1")
+        or (reorder and (not live or #fields ~= 9))
+        or (not reorder and (#fields ~= 8 or (direction ~= "deposit" and direction ~= "withdraw"))) then
         error("native_stash_move_unavailable", 0)
     end
     local pawn, combined, snapshot, host
@@ -110,20 +114,23 @@ local function move(fields, state, phase)
     end
     if combined ~= (expected == "1") then error("native_stash_move_setting_changed", 0) end
     if same(pawn, host) then
+        if reorder then error("native_stash_move_unavailable", 0) end
         local controller = state.local_pawn and state.local_pawn.controller_object
         if not valid(controller) or controller.MenuStack:GetArrayNum() ~= 0 then
             error("native_stash_move_stock_menu_open", 0)
         end
     end
-    local ok, status, class, quantity = transfer(pawn:GetAddress(), live and 0 or snapshot:GetAddress(),
-        combined, site, item, direction == "deposit")
+    local ok, status, class, quantity
+    if reorder then ok, status, class, quantity = transfer(pawn:GetAddress(), 0, combined, site, item, false, before)
+    else ok, status, class, quantity = transfer(pawn:GetAddress(), live and 0 or snapshot:GetAddress(),
+        combined, site, item, direction == "deposit") end
     if ok ~= true then error(tostring(status), 0) end
     if status ~= "moved" or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$")
         or math.type(quantity) ~= "integer" or quantity < 1 then
         error("mutation_unverified_native_stash_receipt", 0)
     end
     moved = {map = state.map, pawn = name, slot = slot, site = site, item = item,
-        direction = direction, combined = combined, class = class, quantity = quantity}
+        direction = direction, combined = combined, class = class, quantity = quantity, before = before}
     return "stock stash item moved"
 end
 
@@ -221,6 +228,9 @@ function stash.rows(state, phase, row)
     if type(SilverfishMoveLiveNativeStashItem) == "function" then
         rows[#rows + 1] = row("native-stash-live-move", 1)
     end
+    if type(SilverfishReorderLiveNativeStashItem) == "function" then
+        rows[#rows + 1] = row("native-stash-live-reorder", 1)
+    end
     for id, site in pairs(available) do
         if site and site.position and valid(site.actor) and not site.actor:IsActorBeingDestroyed() then
             local position = site.position
@@ -235,8 +245,9 @@ function stash.rows(state, phase, row)
         end
     end
     if moved and moved.map == state.map then
-        rows[#rows + 1] = row("native-stash-move", moved.map, moved.pawn, moved.slot, moved.site, moved.item,
-            moved.direction, moved.combined and 1 or 0, moved.class, moved.quantity)
+        local fields = {moved.map, moved.pawn, moved.slot, moved.site, moved.item,
+            moved.direction, moved.combined and 1 or 0, moved.class, moved.quantity, moved.before}
+        rows[#rows + 1] = row("native-stash-move", table.unpack(fields))
     end
     return rows
 end
