@@ -324,9 +324,8 @@ class NativeGuestHealthViewTests(unittest.IsolatedAsyncioTestCase):
                               self.body["name"], 1.5))
             self.body.update(health=float(health), max_health=float(maximum))
             if vitals:
-                food, regen = vitals
                 view = self.game.setdefault(native_guest_ui.VITALS, {}).setdefault(name, {})
-                for field, value in (("food", food), ("regen", regen)):
+                for field, value in zip(("food", "regen", "stim"), vitals):
                     if value != "-":
                         view[field] = float(value)
             return self.game
@@ -353,14 +352,15 @@ class NativeGuestHealthViewTests(unittest.IsolatedAsyncioTestCase):
         character = str(self.token)
         player = {"character_id": character, "downed": True}
         game = {"state": "hosting", "map": self.area, "pawns": {"guest2": self.body},
-                native_guest_ui.VITALS: {self.pawn: {"food": 54.2, "regen": 112.8},
-                                        "Player_FP_C Unrelated": {"food": 196.1, "regen": 249.9}}}
+                native_guest_ui.VITALS: {self.pawn: {"food": 54.2, "regen": 112.8, "stim": 3},
+                                        "Player_FP_C Unrelated": {"food": 196.1, "regen": 249.9, "stim": 50}}}
         frame = native_guest_ui.health_frame(game, self.epoch, character, member, player)
-        self.assertEqual((frame["health"], frame["food"], frame["regen"]), (0, 54.2, 112.8))
+        self.assertEqual((frame["health"], frame["food"], frame["regen"], frame["stim"]), (0, 54.2, 112.8, 3))
         del game[native_guest_ui.VITALS][self.pawn]
         frame = native_guest_ui.health_frame(game, self.epoch, character, member, player)
         self.assertNotIn("food", frame)
         self.assertNotIn("regen", frame)
+        self.assertNotIn("stim", frame)
 
     async def test_food_and_regeneration_ceiling_update_with_unchanged_hp(self):
         self.frame.update(food=54.2, regen=112.8)
@@ -380,9 +380,14 @@ class NativeGuestHealthViewTests(unittest.IsolatedAsyncioTestCase):
         self.client.gameplay_seen = time.monotonic()
         await self.view.sync_health(self.client, True)
         self.assertEqual(self.bridge.command.await_count, 3)
+        for stim in (3, 0):
+            self.frame["stim"] = stim
+            self.client.gameplay_seen = time.monotonic()
+            await self.view.sync_health(self.client, True)
+            self.assertEqual(view["stim"], stim)
 
     async def test_unqualified_optional_values_leave_the_legacy_health_projection_usable(self):
-        self.frame.update(food=True, regen=251)
+        self.frame.update(food=True, regen=251, stim=float("inf"))
         await self.view.sync_health(self.client, True)
         self.assertEqual(self.body["health"], 74)
         self.assertNotIn(native_guest_ui.VITALS, self.game)

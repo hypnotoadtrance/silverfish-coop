@@ -1326,21 +1326,21 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         local seen = native_world_view.status(state, current_phase)
         if seen then rows[#rows + 1] = world_view_row("applied", seen) end
     end
-    local viewed_health, viewed_food, viewed_regen = native_save_scope.guest_vitals(state, current_phase)
+    local viewed_health, viewed_food, viewed_regen, viewed_stim = native_save_scope.guest_vitals(state, current_phase)
     for _, details in ipairs(state.pawns) do
         if finite(details.x) and finite(details.y) and finite(details.z) then
             local health = details == state.local_pawn and viewed_health or details.health
             rows[#rows + 1] = status_row("pawn", details.slot or details.kind, details.name, health or "-",
                 details.x, details.y, details.z, details.controller, details.max_health or "-")
-            local food, regen
+            local food, regen, stim
             if details == state.local_pawn then
-                food, regen = viewed_food, viewed_regen
+                food, regen, stim = viewed_food, viewed_regen, viewed_stim
             elseif current_phase == "hosting" and valid(details.save) and guest_save.matches(details.pawn) then
-                food, regen = details.save.PlayerFood, details.save.PlayerRegen
+                food, regen, stim = details.save.PlayerFood, details.save.PlayerRegen, details.save.PlayerStim
             end
-            if finite(food) or finite(regen) then
+            if finite(food) or finite(regen) or finite(stim) then
                 rows[#rows + 1] = status_row("native-guest-vitals", details.name, finite(food) and food or "-",
-                    finite(regen) and regen or "-")
+                    finite(regen) and regen or "-", finite(stim) and stim or "-")
             end
         end
     end

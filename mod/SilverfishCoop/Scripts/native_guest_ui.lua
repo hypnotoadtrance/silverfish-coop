@@ -378,11 +378,13 @@ end
 local function project_health(fields, state, phase)
     local area, session, epoch, token, name = fields[3], fields[4], fields[5], fields[6], fields[7]
     local health, maximum = tonumber(fields[8]), tonumber(fields[9])
-    local food, regen = tonumber(fields[10]), tonumber(fields[11])
-    if (#fields ~= 9 and #fields ~= 11) or phase ~= "connected" or state.map ~= area or scope.selected() ~= token
+    local food, regen, stim = tonumber(fields[10]), tonumber(fields[11]), tonumber(fields[12])
+    if (#fields ~= 9 and #fields ~= 11 and #fields ~= 12)
+        or phase ~= "connected" or state.map ~= area or scope.selected() ~= token
         or not health or not maximum or not (1 <= maximum and maximum <= 1000000 and 0 <= health and health <= maximum)
-        or #fields == 11 and ((fields[10] ~= "-" and not (food and 0 <= food and food <= 200))
+        or #fields >= 11 and ((fields[10] ~= "-" and not (food and 0 <= food and food <= 200))
             or (fields[11] ~= "-" and not (regen and 0 <= regen and regen <= maximum)))
+        or #fields == 12 and not (stim and 0 <= stim and stim <= 1000000)
         or type(SilverfishReadNativeClientDamageScope) ~= "function" then
         error("The authenticated stock health view is unavailable", 0)
     end
@@ -400,9 +402,11 @@ local function project_health(fields, state, phase)
     local food_changed = food ~= nil and not matches_health(save.PlayerFood, food)
     if food_changed then save.PlayerFood = food end
     if regen ~= nil and not matches_health(save.PlayerRegen, regen) then save.PlayerRegen = regen end
+    if stim ~= nil and not matches_health(save.PlayerStim, stim) then save.PlayerStim = stim end
     if not matches_health(pawn.MaxHealth, maximum) or not matches_health(save.PlayerHealth, health)
         or food ~= nil and not matches_health(save.PlayerFood, food)
-        or regen ~= nil and not matches_health(save.PlayerRegen, regen) then
+        or regen ~= nil and not matches_health(save.PlayerRegen, regen)
+        or stim ~= nil and not matches_health(save.PlayerStim, stim) then
         error("The stock health view failed readback", 0)
     end
     if food_changed then

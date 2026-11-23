@@ -28,11 +28,12 @@ def bounded_health(health, maximum):
 
 
 def _vital_values(frame, maximum):
-    food, regen = frame.get("food"), frame.get("regen")
-    return (
-        food if type(food) in (int, float) and 0 <= food <= 200 else None,
-        regen if type(regen) in (int, float) and 0 <= regen <= maximum else None,
-    )
+    values = {}
+    for field, limit in (("food", 200), ("regen", maximum), ("stim", 1_000_000)):
+        value = frame.get(field)
+        if type(value) in (int, float) and 0 <= value <= limit:
+            values[field] = value
+    return values
 
 
 def _matches_vital(current, expected):
@@ -50,11 +51,7 @@ def health_frame(game, epoch, owner, member, player):
     if not bounded_health(health, maximum) or health == 0 and not player.get("downed"):
         return None
     frame = {"map": game["map"], "epoch": epoch, "owner": owner, "health": health, "maximum": maximum}
-    food, regen = _vital_values(game.get(VITALS, {}).get(member["pawn"], {}), maximum)
-    if food is not None:
-        frame["food"] = food
-    if regen is not None:
-        frame["regen"] = regen
+    frame.update(_vital_values(game.get(VITALS, {}).get(member["pawn"], {}), maximum))
     return frame
 
 
@@ -161,26 +158,27 @@ class GuestView:
             return
         identity = (session, character, area, epoch, name)
         checked = (identity, client.gameplay_seen)
-        food, regen = _vital_values(frame, maximum)
-        receipt = (identity, health, maximum, food, regen)
+        vitals = _vital_values(frame, maximum)
+        receipt = (identity, health, maximum)
         if self.health_checked == checked:
             return
         self.health_checked = checked
         current, current_maximum = pawn.get("health"), pawn.get("max_health")
         current_vitals = game.get(VITALS, {}).get(name, {})
-        if (self.health_receipt is not None and self.health_receipt[:3] == receipt[:3]
+        if (self.health_receipt == receipt
                 and (current is None or _matches_vital(current, health)) and current_maximum == maximum
-                and _matches_vital(current_vitals.get("food"), food) and _matches_vital(current_vitals.get("regen"), regen)):
+                and all(_matches_vital(current_vitals.get(field), value) for field, value in vitals.items())):
             return
-        vitals = tuple("-" if value is None else str(value) for value in (food, regen)) if (food, regen) != (None, None) else ()
+        fields = ("food", "regen", "stim") if "stim" in vitals else ("food", "regen") if vitals else ()
         try:
             updated = await client.bridge.command(HEALTH_PROJECT, area, session, epoch, token, name,
-                                                  str(health), str(maximum), *vitals, timeout=1.5)
+                                                  str(health), str(maximum),
+                                                  *(str(vitals.get(field, "-")) for field in fields), timeout=1.5)
             projected = updated.get(VITALS, {}).get(name, {})
             if ((updated.get("state"), updated.get("map"), updated.get("save_scope")) != ("connected", area, token)
                     or updated.get("pawns", {}).get("local", {}).get("name") != name
                     or updated.get("ack", {}).get("message") != "stock co-op guest health projected"
-                    or not _matches_vital(projected.get("food"), food) or not _matches_vital(projected.get("regen"), regen)):
+                    or not all(_matches_vital(projected.get(field), value) for field, value in vitals.items())):
                 raise RuntimeError("The isolated stock health view did not verify")
         except (OSError, RuntimeError) as error:
             reason = str(error)
