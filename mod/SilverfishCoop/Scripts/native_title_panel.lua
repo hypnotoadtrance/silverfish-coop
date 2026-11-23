@@ -301,9 +301,9 @@ local function host_steam_access(form)
     end
     form.screen = "steam-access"
     present({title = "Steam lobby access", rows = {
-        {button("invite", steam_access_labels.invite)},
-        {button("friends", steam_access_labels.friends)},
-        {button("public", steam_access_labels.public)},
+        {button("invite", steam_access_labels.invite, "Join from a Steam invite")},
+        {button("friends", steam_access_labels.friends, "Friends can use Join Game")},
+        {button("public", steam_access_labels.public, "Listed in the lobby browser")},
         {button("back", "Back")},
     }})
 end

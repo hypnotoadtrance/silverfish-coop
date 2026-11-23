@@ -441,6 +441,9 @@ files["bridge/steam-coop-available"] = "1\n"
 click("steam")
 assert(display.title == "Steam lobby access" and display.buttons.invite.label == "Invite Only"
     and display.buttons.friends.label == "Friends Only" and display.buttons.public.label == "Public")
+assert(display.buttons.invite.detail == "Join from a Steam invite"
+    and display.buttons.friends.detail == "Friends can use Join Game"
+    and display.buttons.public.detail == "Listed in the lobby browser")
 click("public")
 assert(display.title == "New Game" and display.fields.port == nil and display.fields.bind == nil
     and display.buttons.network.label == "Steam · Public")
