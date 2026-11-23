@@ -126,16 +126,18 @@ async def verify(work, game, source, canary, manifest):
                                  *sorted((profile / "Saved" / "SaveGames").rglob("*.sav"))))
 
         before = persisted()
-        assert len(before) >= 2, before
+        storage = stock.SaveScope(profile, scope)
+        assert {str(stock.slot_path(storage, frame["slot"])) for frame in stock.references(saved)} <= before.keys(), before
         proof["solo_lease"] = await observe_lease(run, mailbox / dig.HEARTBEAT, hosted, scope)
         after = persisted()
         proof["save_files"] = {"at_readiness": before, "after_renewal": after}
         assert before == after, "The solo renewal changed a campaign or stock save file"
 
-        # The explicit checkpoint is after the no-write window.
+        # This copied field save has no stock Save and Quit option at its current location.
         await seat.bridge.wait_for(lambda frame: frame.get("stock_pause_exit", {}).get("state") == "armed")
         await stock_pause(seat.bridge, "open")
-        await stock_pause(seat.bridge, "save_and_quit")
+        await stock_pause(seat.bridge, "prompt")
+        await stock_pause(seat.bridge, "confirm")
         stopped = await wait_resident_status(run, lambda frame: frame.get("state") == "stopped")
         assert stopped["stop_reason"] == "host_session_ended"
         await offered(seat)
