@@ -43,15 +43,12 @@ local function finish_guest_loading(state, phase)
         or not same(driver.ServerConnection.Driver, driver) or not valid(instance) then return end
     if controller.Loading == false then return true end
     if controller.Loading ~= true then return end
-    local statics, class = StaticFindObject(gameplay_statics), StaticFindObject(level_class)
-    if not valid(statics) or not valid(class) then return end
-    local found = {}
-    statics:GetAllActorsOfClass(state.world, class, found)
-    for _, value in ipairs(found.OutActors or found) do
-        local level = value
-        if level and type(level.type) == "function" and level:type() == "RemoteUnrealParam" then level = level:get() end
-        if valid(level) and same(level["As Game Instance FP"], instance)
-            and same(level:GetOuter(), state.world.PersistentLevel) and not level:IsActorBeingDestroyed() then
+    local class = StaticFindObject(level_class)
+    if not valid(class) then return end
+    for _, level in ipairs(FindAllOf("LevelControler_BP_C") or {}) do
+        if valid(level) and not level:IsActorBeingDestroyed() and same(level:GetClass(), class)
+            and same(level:GetOuter(), state.world.PersistentLevel) and same(level:GetWorld(), state.world)
+            and same(level["As Game Instance FP"], instance) then
             -- The stock level controller clears this flag once. A remote
             -- player controller may arrive after that callback.
             controller.Loading = false
@@ -109,9 +106,9 @@ local function mount(cover, world, controller)
         remove(cover)
         return
     end
-    if cover.animated or cover.source ~= address then
-        -- Only the source gets the stock Construct fade. A replacement must
-        -- already be opaque when its viewport is first rendered.
+    if cover.opaque_start or cover.animated or cover.source ~= address then
+        -- Keep the stock fade in the playable source. An intermediate title
+        -- or other replacement must already be opaque on its first frame.
         widget:StopAllAnimations()
         widget:SetRenderOpacity(1)
         widget.Image_0:SetRenderOpacity(1)
@@ -171,6 +168,7 @@ function loading.begin(state, phase, destination)
     if not valid(state.world.OwningGameInstance) then return false end
     loading.clear()
     current = {destination = destination, seat = seat, expires = os.time() + 45,
+        opaque_start = seat == "guest" and (phase == "ready" or phase == "leaving"),
         source = state.world:GetAddress(), instance = state.world.OwningGameInstance:GetAddress()}
     last_cue = {destination = destination, seat = seat, dispatched = false}
     register_load_hook()

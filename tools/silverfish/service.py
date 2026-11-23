@@ -5779,17 +5779,22 @@ class Client:
             self.source_fade = source_visit, destination, time.monotonic()
 
     async def sync_zone_loading(self, destination: object) -> None:
+        state = self.last_game
         if (not self.host_session or not self.zone_epoch or self.needs_travel
-                or self.last_game.get("state") != "connected" or self.last_game.get("map") != self.expected_zone):
+                or state.get("map") != self.expected_zone
+                or (state.get("state") != "connected"
+                    and (state.get("mode"), state.get("state")) != ("client", "disconnected"))):
             return
         if not self.server_transitioning:
             await self.clear_zone_loading()
             return
-        if (self.last_game.get("native_zone_loading_support") is not True
+        if (state.get("native_zone_loading_support") is not True
                 or not isinstance(destination, str) or destination not in self.allowed_maps
-                or destination == self.expected_zone or destination == self.loading_zone):
+                or destination == self.expected_zone):
             return
-        await self.start_guest_zone_loading((self.host_session, self.zone_epoch, self.expected_zone), destination)
+        visit = self.host_session, self.zone_epoch, self.expected_zone
+        if not self.source_fade or self.source_fade[:2] != (visit, destination):
+            await self.start_guest_zone_loading(visit, destination)
 
     async def _request_gameplay_snapshot(self, request: dict) -> tuple[dict, float]:
         reply = await self.transport.request(request, timeout=2)
