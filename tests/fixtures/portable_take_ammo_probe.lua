@@ -1,3 +1,17 @@
+    if fields[2] == "fixture-stock-take-ammo-loadout" and headless
+        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        assert(phase == "connected" and state.map == "/Game/Classes/Maps/Maps_OverWorld/Observitory_P" and #fields == 5)
+        local pawn = state.local_pawn.pawn
+        local save, slot = pawn.Save, math.tointeger(tonumber(fields[3]))
+        assert(slot and slot >= 0 and slot < 8)
+        local row = save.PlayerEquipment[slot + 1]
+        if item_identity(row) ~= fields[4] then return "waiting" end
+        if fields[5] == "equip" then
+            pawn:Equip_NextItem(slot, false)
+        end
+        local guid = equipped_guid(pawn, save)
+        return ("%d,%s"):format(row[ammo_field], guid == fields[4] and tostring(pawn.EquipedItem.Ammo) or "stored")
+    end
     if fields[2] == "fixture-stock-take-ammo-seed" and headless
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
         assert(phase == "hosting" and state.map == "/Game/Classes/Maps/Maps_OverWorld/Observitory_P" and #fields == 4)

@@ -1619,6 +1619,7 @@ namespace
         if (!exact_class(card, card_path)) return;
         const auto candidate = card_item(card);
         const bool unequipping = action == "unequip";
+        const bool unload = action == "take-ammo";
         const auto equipped_index = unequipping ? unequip_source_slot(manager, screen, candidate.panel)
                                                : drop_equipment_index(manager, candidate.panel);
         auto* item_class = object_value(field<Unreal::FClassProperty>(candidate.structure, item_class_name), candidate.value);
@@ -1641,7 +1642,7 @@ namespace
         auto* underwater = using_item ? field<Unreal::FBoolProperty>(scope.pawn.Get(), STR("HeadUnderWater")) : nullptr;
         const auto held = inventory_item(manager, STR("HeldItem"));
         auto* held_class = field<Unreal::FClassProperty>(held.structure, item_class_name);
-        if (!bound || (!scope.host && equipped_index && !unequipping) ||
+        if (!bound || (!scope.host && equipped_index && !unequipping && !unload) ||
             (unequipping && (scope.host || !equipped_index)) ||
             (host_drop_request && now < host_drop_request->expires) || host_drop_sequence >= max_drop_sequence ||
             (action.empty() && (!allow || !allow->GetPropertyValueInContainer(manager))) ||
@@ -1659,14 +1660,13 @@ namespace
         if (!fields.valid() || !count_field) return;
         const Guid guid = fields.read(candidate.value);
         const auto saved_ammo = count_field->GetPropertyValueInContainer(candidate.value);
-        const bool unload = action == "take-ammo";
         if (guid == Guid{} || (stack && (saved_ammo < 1 || saved_ammo > max_drop_ammo)) ||
             (unload && !silverfish::native_guest_item::take_ammo_supported(item_class, saved_ammo)) ||
             !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class, equipped_index,
-                                      !using_item && action != "equip" && !unequipping)) return;
+                                      !using_item && action != "equip" && !unequipping && !unload)) return;
         Unreal::UObject* prior_held{};
         if (unequipping) prior_held = selected_unequip_actor(save, item_class, *equipped_index);
-        else if (!unequipping && equipped_index)
+        else if (!unload && equipped_index)
         {
             auto* hover = field<Unreal::FObjectProperty>(manager, STR("HoveredCard"));
             auto* begin = stock_no_args(manager, Unreal::FName(STR("InitiateItemTake")));
@@ -2887,14 +2887,14 @@ namespace
         auto* refresh = stock_no_args(panel, refresh_name);
         if (!refresh) return finish(false, "refresh_unavailable");
         panel->ProcessEvent(refresh, nullptr);
-        if (completed.entry == "equip" || completed.entry == "unequip")
+        if (completed.entry == "equip" || completed.entry == "unequip" || completed.entry == "take-ammo")
         {
             auto* slots = field<Unreal::FArrayProperty>(manager, STR("EquipSlots"));
             auto* slot_property = slots ? Unreal::CastField<Unreal::FObjectProperty>(slots->GetInner()) : nullptr;
             if (!slot_property) return finish(false, "refresh_unavailable");
             Unreal::FScriptArrayHelper widgets(slots, slots->ContainerPtrToValuePtr<void>(manager));
             if (widgets.Num() < 8 || widgets.Num() > 16) return finish(false, "refresh_unavailable");
-            const auto last = completed.expected > 8 ? 10 : 8;
+            const auto last = completed.entry != "take-ammo" && completed.expected > 8 ? 10 : 8;
             if (widgets.Num() < last) return finish(false, "refresh_unavailable");
             for (int index = 0; index < last; ++index)
             {

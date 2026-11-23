@@ -99,6 +99,27 @@ local function valid_rounds(weapon, amount)
         and 0 <= amount and amount <= weapon.MagSize and weapon.MagSize <= 4096
 end
 
+local function write_magazine(held, row, rounds)
+    if held.Ammo ~= rounds then
+        held.Ammo = rounds
+        held:Update_Mag()
+    end
+    if row[ammo_field] ~= rounds then row[ammo_field] = rounds end
+end
+
+function guest_weapon.project_unloaded(pawn, save, guid)
+    local row = selected_row(save)
+    if item_identity(row) ~= guid then return true end
+    local held = pawn.EquipedItem
+    if not held or not held:IsValid() then return true end
+    local selected, kind = equipped_guid(pawn, save)
+    if selected ~= guid or not weapon_profiles.paths[kind] or not same(held.User, pawn)
+        or not same(held.Player_Ref, pawn) or not same(held:GetWorld(), pawn:GetWorld())
+        or held:IsActorBeingDestroyed() or not valid_rounds(held, 0) then return false end
+    write_magazine(held, row, 0)
+    return held.Ammo == 0 and row[ammo_field] == 0
+end
+
 local function project_magazine(fields, state, phase)
     local area, name, guid, kind, rounds = fields[3], fields[4], fields[5], fields[6], tonumber(fields[7])
     local save, pawn = save_scope.bind_guest(state, phase)
@@ -112,11 +133,7 @@ local function project_magazine(fields, state, phase)
         or held:IsActorBeingDestroyed() or not valid_rounds(held, rounds) then
         error("The co-op magazine no longer matches the selected weapon", 0)
     end
-    if held.Ammo ~= rounds then
-        held.Ammo = rounds
-        held:Update_Mag()
-    end
-    if row[ammo_field] ~= rounds then row[ammo_field] = rounds end
+    write_magazine(held, row, rounds)
     return "stock co-op magazine projected"
 end
 

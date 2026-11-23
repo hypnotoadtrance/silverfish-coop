@@ -2909,7 +2909,7 @@ namespace
                 return hold.fenced && hold.pawn.Get() == context.pawn;
             })) return refuse("native_inventory_take_ammo_refused_busy");
         Inventory inventory;
-        if (!locate(context, inventory).empty() || inventory.backpack_index < 0 || !inventory.item)
+        if (!locate(context, inventory).empty() || !inventory.item)
             return refuse("native_inventory_take_ammo_refused_source");
         auto* weapon = Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item));
         const auto* profile = unload_profile(weapon, selection.expected);
@@ -2922,6 +2922,20 @@ namespace
             !mounted_payload_matches(defaults, inventory) || !ammo_item_row_matches(ammo_class, *profile->ammo)
             || !stock_ammo.read(ammo_class, inventory) || !stock_ammo.qualifies(selection.expected))
             return refuse("native_inventory_take_ammo_refused_loaded_state");
+
+        context.weapon = weapon;
+        const bool stored = inventory.equipment_index >= 0;
+        auto* held = stored && inventory.equipment_index == inventory.selected->GetPropertyValueInContainer(context.save)
+            ? object(context.pawn, STR("EquipedItem")) : nullptr;
+        auto* rounds = field<Unreal::FIntProperty>(held, STR("Ammo"));
+        auto* update = held ? find<Unreal::UFunction>(update_mag_path) : nullptr;
+        if (held && (held != equipped(context, inventory) || !rounds || !update ||
+                held->GetFunctionByNameInChain(Unreal::FName(STR("Update_Mag"))) != update ||
+                update->GetNumParms() != 0 || update->GetParmsSize() != 0 || update->GetReturnProperty() ||
+                rounds->GetPropertyValueInContainer(held) != selection.expected ||
+                !boolean(held, STR("Reloading"), false) || !boolean(held, STR("IsCycling"), false) ||
+                !boolean(held, STR("Holding_Primary"), false) || !ordinary_magazine_payload(profile, context, inventory, held)))
+            return refuse("native_inventory_take_ammo_refused_held_weapon");
 
         auto distinct = context;
         distinct.guid = selection.created;
@@ -2945,20 +2959,28 @@ namespace
         Value host_before(property->AllocateAndInitializeValue(), {property});
         Value flags_before(flags->AllocateAndInitializeValue(), {flags});
         Value expected_weapon(inventory.type->AllocateAndInitializeValue(), {inventory.type});
-        if (!original || !proposed || !host_before || !flags_before || !expected_weapon)
+        Value stored_before(stored ? inventory.type->AllocateAndInitializeValue() : nullptr, {inventory.type});
+        if (!original || !proposed || !host_before || !flags_before || !expected_weapon || (stored && !stored_before))
             return refuse("native_inventory_take_ammo_refused_storage");
         auto* host_flags = flags->ContainerPtrToValuePtr<void>(context.stock);
         property->CopyCompleteValue(original.get(), live_array);
         property->CopyCompleteValue(proposed.get(), live_array);
         property->CopyCompleteValue(host_before.get(), host_array);
         flags->CopyCompleteValue(flags_before.get(), host_flags);
+        if (stored) inventory.type->CopyCompleteValue(stored_before.get(), inventory.item);
+        const auto stored_row = [&] {
+            Unreal::FScriptArrayHelper loadout(inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(context.save));
+            if (!stored || inventory.equipment_index >= loadout.Num()) return static_cast<void*>(nullptr);
+            return static_cast<void*>(loadout.GetRawPtr(inventory.equipment_index));
+        };
         const auto host_unchanged = [&] {
             return ownership_current(context) && property->Identical(host_before.get(), host_array)
                 && flags->Identical(flags_before.get(), host_flags);
         };
 
         const auto did_split = split.run(context.pawn, inventory.item, 1);
-        if (!host_unchanged() || !property->Identical(original.get(), live_array))
+        if (!host_unchanged() || !property->Identical(original.get(), live_array) ||
+            (stored && (stored_row() != inventory.item || !inventory.type->Identical(stored_before.get(), inventory.item))))
             return refuse("mutation_unverified_native_inventory_take_ammo_stock_call");
         auto* extracted = split.moved();
         auto* unloaded = split.left();
@@ -2978,23 +3000,38 @@ namespace
 
         Unreal::FScriptArrayHelper staged(property, proposed.get());
         const auto inserted = staged.AddValue();
-        inventory.type->CopyCompleteValue(staged.GetRawPtr(inventory.backpack_index), unloaded);
+        if (!stored) inventory.type->CopyCompleteValue(staged.GetRawPtr(inventory.backpack_index), unloaded);
         inventory.set_identity(extracted, selection.created);
         inventory.type->CopyCompleteValue(staged.GetRawPtr(inserted), extracted);
-        if (!inventory.type->Identical(staged.GetRawPtr(inventory.backpack_index), unloaded)
+        if ((!stored && !inventory.type->Identical(staged.GetRawPtr(inventory.backpack_index), unloaded))
             || !inventory.type->Identical(staged.GetRawPtr(inserted), extracted))
             return refuse("native_inventory_take_ammo_refused_staging");
         property->CopyCompleteValue(live_array, proposed.get());
-        if (!host_unchanged() || !property->Identical(proposed.get(), live_array))
+        if (stored) inventory.type->CopyCompleteValue(inventory.item, unloaded);
+        if (!host_unchanged() || !property->Identical(proposed.get(), live_array) ||
+            (stored && (stored_row() != inventory.item || !inventory.type->Identical(expected_weapon.get(), inventory.item))))
         {
-            if (host_unchanged())
+            if (host_unchanged() && (!stored || stored_row() == inventory.item))
             {
                 property->CopyCompleteValue(live_array, original.get());
-                if (property->Identical(original.get(), live_array))
+                if (stored) inventory.type->CopyCompleteValue(inventory.item, stored_before.get());
+                if (property->Identical(original.get(), live_array) &&
+                    (!stored || inventory.type->Identical(stored_before.get(), inventory.item)))
                     return refuse("native_inventory_take_ammo_refused_rolled_back");
             }
             return refuse("mutation_unverified_native_inventory_take_ammo_commit");
         }
+        const Unreal::FWeakObjectPtr held_actor{held};
+        if (held)
+        {
+            rounds->SetPropertyValueInContainer(held, 0);
+            held->ProcessEvent(update, nullptr);
+        }
+        if (!host_unchanged() || !property->Identical(proposed.get(), live_array) ||
+            (stored && (!stored_row() || !inventory.type->Identical(expected_weapon.get(), stored_row()))) ||
+            (held && (held_actor.Get() != held || object(context.pawn, STR("EquipedItem")) != held ||
+                       rounds->GetPropertyValueInContainer(held) != 0)))
+            return refuse("mutation_unverified_native_inventory_take_ammo_commit");
         proof(lua, true, "unloaded", selection.expected, 0);
         lua.set_integer(selection.expected);
         lua.set_string(RC::to_utf8_string(ammo_class->GetPathName()));

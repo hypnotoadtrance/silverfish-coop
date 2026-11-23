@@ -1242,10 +1242,11 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
 async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_inventory = (await submit(host_run, "native-inventory-list"))["native_inventory"]
+    checkpoint = campaign_save_hashes(host.campaign)
     guest_frame = await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected")
     proofs = []
 
-    for kind in ("revolver-9mm", "break-action-50"):
+    for kind, source in (("revolver-9mm", "backpack"), ("break-action-50", "stored_equipment"), ("revolver-9mm", "equipped")):
         seed_started = time.time()
         seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, kind)
         guid = seeded["ack"]["message"]
@@ -1258,6 +1259,27 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str) -> dict:
             while not any(entry["event"] == "native_guest_ui_projected" and entry["items"] == len(inventory["items"])
                           and entry["time_unix"] >= seed_started for entry in await resident_events(guest_run, guest_frame)):
                 await asyncio.sleep(.1)
+        if source != "backpack":
+            moved = await submit(guest_run, native_inventory.STORE_EQUIPMENT, target=guid)
+            assert moved["ok"], moved
+            slot = moved[native_inventory.STORE_KEY]["slot"]
+
+            async def read_loadout(action="read"):
+                read = await guest.bridge.command("fixture-stock-take-ammo-loadout", str(slot), guid, action)
+                return read["ack"]["message"]
+
+            async with asyncio.timeout(8):
+                while await read_loadout() == "waiting":
+                    await asyncio.sleep(.15)
+            if source == "equipped":
+                assert await read_loadout("equip") == f"{before['stored_ammo']},{before['stored_ammo']}"
+                async with asyncio.timeout(8):
+                    while not any(entry["event"] == "native_guest_equipment_selected"
+                                  and entry.get("native_guest_weapon", {}).get("guid") == guid
+                                  for entry in await resident_events(guest_run, guest_frame)):
+                        await asyncio.sleep(.1)
+            else:
+                assert await read_loadout() == f"{before['stored_ammo']},stored"
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
         pressed = await submit(guest_run, "native-inventory-stock-use-click-fixture", target=f"{guid}|take-ammo")
@@ -1271,11 +1293,21 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str) -> dict:
                 await asyncio.sleep(.1)
         unloaded, = matches
         assert unloaded["remaining"] == 0 and unloaded["split"] == before["stored_ammo"], unloaded
+        inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+        ammo, = [row for row in inventory["items"] if row["guid"] == unloaded["new_guid"]]
+        assert (ammo["source"], ammo["class_path"], ammo["quantity"]) == ("backpack", unloaded["class_path"], unloaded["split"]), ammo
+        after = (await submit(guest_run, "native-guest-weapon-inspect", target=guid))["native_guest_weapon"]
+        assert (after["status"], after["stored_ammo"]) == (source, 0), after
+        if source == "equipped":
+            assert after["actor_ammo"] == 0 and await read_loadout() == "0,0", after
+        elif source == "stored_equipment":
+            assert await read_loadout() == "0,stored"
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
-        proofs.append(unloaded)
+        proofs.append({"source": source, **unloaded})
 
     assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_inventory
+    assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_take_ammo": proofs}
 
 
