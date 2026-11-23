@@ -15,6 +15,7 @@ local inventory_action_event = "InpActEvt_IA_Inventory_K2Node_EnhancedInputActio
 local inventory_path = "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"
 local card_path = "/Game/Classes/GUI/New/Components/ItemCard.ItemCard_C"
 local context_menu_path = "/Game/Classes/GUI/New/Components/ItemContextMenu.ItemContextMenu_C"
+local open_context_menu_path = "/Game/Classes/GUI/New/Components/ItemManager.ItemManager_C:OpenContextMenu"
 local split_popup_path = "/Game/Classes/GUI/New/Components/SplitStackPopup.SplitStackPopup_C"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
@@ -46,6 +47,7 @@ local input_keys, held = {}, {}
 local page_size, max_items = 16, 8194
 local event_path, equip_path, is_downed, binding, observation, display
 local binding_state, stock_drop, stock_session, sync_stock
+local stock_context_hook
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -472,7 +474,7 @@ local function stock_cards(screen, save, guid, remaining, ordered, raw_ammo)
     end
 end
 
-local function enable_take_ammo(screen)
+local function take_ammo_button(screen)
     local manager, panel = screen.ItemManager, screen.BackpackPanel
     local menu = manager.ItemContextMenu
     if not exact(menu, context_menu_path) or not menu:IsVisible() then return end
@@ -483,12 +485,21 @@ local function enable_take_ammo(screen)
     local count, maximum = card.Item[item_ammo], weapon_profiles.magazine_capacity[path]
     if not maximum or math.type(count) ~= "integer" or count < 1 or count > maximum then return end
     local button = menu.Button_SplitStack
-    if not exact(button, "/Game/Classes/GUI/SubWidgets/Button_Default_Widget.Button_Default_Widget_C") then return end
-    if not button:IsVisible() then
-        button:UpdateText(FText("TAKE AMMO"))
-        button:SetVisibility(0)
-    end
-    return button
+    if exact(button, "/Game/Classes/GUI/SubWidgets/Button_Default_Widget.Button_Default_Widget_C") then return button end
+end
+
+local function install_stock_context_hook()
+    if stock_context_hook or type(RegisterHook) ~= "function" or not valid(StaticFindObject(open_context_menu_path)) then return end
+    stock_context_hook = RegisterHook(open_context_menu_path, function(context)
+        local session = stock_session
+        if not session or not valid(session.screen) or not can_view(session.context)
+            or not same(context:get(), session.screen.ItemManager) then return end
+        local button = take_ammo_button(session.screen)
+        if button then
+            button:UpdateText(FText("TAKE AMMO"))
+            button:SetVisibility(0)
+        end
+    end)
 end
 
 local function stock_sort_fixture(screen, current, save, epoch, pawn)
@@ -654,6 +665,7 @@ local function open_stock_inventory(fields, current, state, phase)
         error(ok and "The stock inventory input could not be restored" or screen, 0)
     end
     stock_session = {context = current, screen = screen, save = save, epoch = epoch}
+    install_stock_context_hook()
     observation.state, observation.pending_offset = "stock", nil
     return ("opened stock guest inventory with %d backpack cards"):format(displayed)
 end
@@ -682,7 +694,6 @@ sync_stock = function(current, state, phase, allowed)
         return
     end
     if stock_drop or not exposed or not allowed then return end
-    enable_take_ammo(session.screen)
     local sequence, guid, quantity, entry, expected = SilverfishTakeNativeGuestDropRequest(pawn, session.epoch)
     if not sequence then return end
     stock_drop = {context = current, screen = session.screen, save = save, epoch = session.epoch, sequence = sequence,
@@ -908,8 +919,10 @@ function inventory_view.command(fields, state, phase)
                     manager:InsertItem(screen.PlayerCard, -1)
                 elseif fields[4] == "take-ammo" then
                     manager:OpenContextMenu(card)
-                    local button = enable_take_ammo(screen)
-                    if not valid(button) or not button:IsVisible() then error("The loaded stock weapon has no Take Ammo button", 0) end
+                    local button = take_ammo_button(screen)
+                    if not valid(button) or not button:IsVisible() or button.Button_Text:ToString() ~= "TAKE AMMO" then
+                        error("The loaded stock weapon has no Take Ammo button after opening the context menu", 0)
+                    end
                     manager.ItemContextMenu:BndEvt__ItemContextMenu_Button_SplitStack_K2Node_ComponentBoundEvent_7_Pressed__DelegateSignature()
                 else
                     manager:OpenContextMenu(card)

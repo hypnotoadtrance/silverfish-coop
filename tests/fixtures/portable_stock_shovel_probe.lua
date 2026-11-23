@@ -1,6 +1,72 @@
-    if (fields[2] == "fixture-spade-aim" or fields[2] == "fixture-spade-holes") and
+    if (fields[2] == "fixture-spade-aim" or fields[2] == "fixture-spade-holes" or fields[2] == "fixture-spade-loot"
+        or fields[2] == "fixture-spade-props" or fields[2] == "fixture-spade-sight") and
         os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
         assert(state.map == map and (phase == "hosting" or phase == "connected"), "Crossroads dig fixtures require a co-op session")
+        if fields[2] == "fixture-spade-sight" then
+            assert(phase == "connected" and #fields == 3)
+            local pawn = state.local_pawn.pawn
+            local actor = StaticFindObject(fields[3])
+            assert(valid(actor) and same(actor:GetWorld(), state.world))
+            local box = actor.Box
+            local eye, center = pawn.Camera:K2_GetComponentLocation(), box:K2_GetComponentLocation()
+            local x, y, z = center.X - eye.X, center.Y - eye.Y, center.Z - eye.Z
+            local distance = math.sqrt(x * x + y * y + z * z)
+            local scale = pawn.InteractionRange / distance
+            local ray_end = {X=eye.X+x*scale, Y=eye.Y+y*scale, Z=eye.Z+z*scale}
+            local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+            local color = {R=0, G=0, B=0, A=0}
+            local skip = valid(pawn.EquipedItem) and {pawn, pawn.EquipedItem} or {pawn}
+            local function scan(channel, complex)
+                local ray = {}
+                if not trace:LineTraceSingle(pawn, eye, ray_end, channel, complex, skip, 0, ray, true, color, color, 0) then
+                    return "none"
+                end
+                local hit = ray.OutHit or ray
+                local component = hit.Component and hit.Component:Get()
+                return valid(component) and (component:GetFullName() .. " at " .. tostring(hit.Distance)) or "none"
+            end
+            return ("%.2f/%.2f, interaction=%s, visibility=%s, box=%d, channel=%d"):format(distance,
+                pawn.InteractionRange, scan(4, false), scan(1, true), box:GetCollisionEnabled(),
+                box:GetCollisionResponseToChannel(16))
+        end
+        if fields[2] == "fixture-spade-props" then
+            local props = {}
+            for _, actor in ipairs(FindAllOf("Prop_TinCan_C") or {}) do
+                if valid(actor) and same(actor:GetWorld(), state.world) and not actor:IsActorBeingDestroyed()
+                    and not actor:HasAnyFlags(EObjectFlags.RF_WasLoaded) then
+                    local at = actor:K2_GetActorLocation()
+                    props[#props + 1] = string.format("%d,%s,%s,%.3f,%.3f,%.3f", actor:GetLocalRole(),
+                        actor:GetFName():ToString(), tostring(actor.bReplicateMovement), at.X, at.Y, at.Z)
+                end
+            end
+            return table.concat(props, ";")
+        end
+        if fields[2] == "fixture-spade-loot" then
+            assert(phase == "hosting" and #fields == 3)
+            local choices = {
+                item = "/Game/Classes/Items/Item_GoldNugget.Item_GoldNugget_C",
+                prop = "/Game/Assets/StaticMeshes/Mesh_Props/Prop_TinCan.Prop_TinCan_C",
+            }
+            local wanted = assert(choices[fields[3]])
+            local target = StaticFindObject(wanted)
+            if not valid(target) then LoadAsset(wanted) target = StaticFindObject(wanted) end
+            assert(valid(target), "The stock dig fixture class is unavailable")
+            local target_world = state.world
+            assert(SilverfishArmStockDigRollFixture(target_world:GetAddress()), "The stock dig roll fixture did not arm")
+            local armed = true
+            RegisterBeginPlayPreHook(function(context)
+                if not armed then return end
+                local actor = context:get()
+                if not valid(actor) or not same(actor:GetWorld(), target_world) or not actor:HasAuthority()
+                    or actor:GetClass():GetFName():ToString() ~= "DigHole_BP_C" then return end
+                armed = false
+                local weights = actor.UnearthedItems
+                assert(weights:Contains(target), "The fixture choice is absent from the stock roll")
+                weights:Empty()
+                weights:Add(target, 1)
+            end)
+            return "stock shovel weighted loot narrowed"
+        end
         if fields[2] == "fixture-spade-holes" then
             local holes = {}
             for _, hole in ipairs(FindAllOf("DigHole_BP_C") or {}) do
@@ -9,6 +75,7 @@
                     holes[#holes+1] = string.format("%d,%0.3f,%0.3f,%0.3f", hole:GetLocalRole(), at.X, at.Y, at.Z)
                 end
             end
+            table.sort(holes)
             return table.concat(holes, ";") ~= "" and table.concat(holes, ";") or "none"
         end
         local pawn = phase == "connected" and state.local_pawn.pawn or guest_save.exact_item_context(state, phase, fields[3])
@@ -29,8 +96,9 @@
         end
         local aim = {Pitch=-86,Yaw=0,Roll=0}
         if phase == "hosting" then
-            if fields[4] == "find" then
-                for _, radius in ipairs({150, 250, 400, 550, 800, 1100}) do
+            if fields[4] == "find" or fields[4] == "next" then
+                local radii = fields[4] == "find" and {150, 250, 400, 550, 800, 1100} or {400, 550, 800, 1100}
+                for _, radius in ipairs(radii) do
                     for bearing = 0, 315, 45 do
                         local dir = math.rad(bearing)
                         local x,y = origin.X+radius*math.cos(dir),origin.Y+radius*math.sin(dir)
