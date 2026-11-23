@@ -652,6 +652,81 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str) -> dic
                                      "no_cue_mailbox": True, "saves_unchanged_before_checkpoint": True,
                                      "previous_checkpoint_cloud_copies": backup_revisions,
                                      "stock_footsteps": footsteps, "stock_pistol": pistol}}
+
+
+async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    expected = native_guest_consumable.MEALS[native_guest_consumable.MRE]
+    grouped = (await submit(host_run, "native-inventory-list"))["native_inventory"]
+    checkpoint_hashes = campaign_save_hashes(host.campaign)
+
+    async def command(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-guest-food", action)
+
+    async def read_host():
+        return tuple(map(float, (await command(host, "host-read")).split(",")))
+
+    async def read_guest(minimum, *, tick=False):
+        async with asyncio.timeout(8):
+            while True:
+                food, regen, widget = (await command(guest, "guest-read")).split(",", 2)
+                if float(food) > minimum:
+                    if tick:
+                        food, regen, widget = (await command(guest, "guest-tick")).split(",", 2)
+                    match = re.search(r"\d+(?:[.,]\d+)?", widget)
+                    assert match and abs((amount := float(match[0].replace(",", "."))) - float(food)) <= .2, (food, regen, widget)
+                    return {"food": float(food), "regen": float(regen), "widget": widget, "displayed_food": amount}
+                await asyncio.sleep(.08)
+
+    guid = await command(host, "seed")
+    assert re.fullmatch(r"[0-9A-F]{32}", guid) and guid != "0" * 32, guid
+    host_before = await read_host()
+    assert 37 < host_before[2] <= 38 and host_before[3] == 230, host_before
+    guest_frame = await wait_resident_status(guest_run, lambda frame: frame.get("local_bridge") == "memory")
+    inv_before = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+    meal, = [row for row in inv_before["items"] if row["guid"] == guid and row["source"] == "backpack"]
+    assert meal["class_path"] == expected.class_path and meal["quantity"] == 1, meal
+    async with asyncio.timeout(8):
+        while not any(entry["event"] == "native_guest_ui_projected" and entry["items"] == len(inv_before["items"])
+                      for entry in await resident_events(guest_run, guest_frame)):
+            await asyncio.sleep(.08)
+    assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+    await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+    before = await read_guest(35)
+    assert before["food"] <= 38 and before["regen"] == 230, before
+
+    press = await submit(guest_run, "native-inventory-stock-use-click-fixture", target=guid)
+    assert press["ok"] and press["stock_action"]["guid"] == guid, press
+    key = native_guest_consumable.RESULT[native_guest_consumable.MRE]
+    async with asyncio.timeout(12):
+        while True:
+            rows = await resident_events(guest_run, guest_frame)
+            refused = [entry for entry in rows if entry["event"] == "native_stock_inventory_rejected"]
+            assert not refused, refused
+            results = [entry[key] for entry in rows if entry["event"] == "native_stock_inventory_action"
+                       and entry.get(key, {}).get("guid") == guid]
+            if results:
+                used, = results
+                break
+            await asyncio.sleep(.12)
+    assert (used["pawn"], used["quantity_before"], used["quantity_after"]) == (pawn, 1, 0), used
+    assert used["food_after"] > used["food_before"] + 20 and used["regen_after"] > used["regen_before"], used
+    after = await read_guest(used["food_after"] - 1, tick=True)
+    host_after = await read_host()
+    assert abs(after["food"] - host_after[2]) <= 1 and after["regen"] == host_after[3] == used["regen_after"], (after, host_after, used)
+    assert 0 <= host_before[0] - host_after[0] < 2 and host_before[1] == host_after[1], (host_before, host_after)
+    inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+    assert guid not in {row["guid"] for row in inventory["items"]}, inventory
+    assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == grouped
+    assert campaign_save_hashes(host.campaign) == checkpoint_hashes, "A stock meal caused an early campaign checkpoint"
+    assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+    await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
+    return {"resident_guest_food": {"receipt": used, "before": before, "after": after,
+                                    "host_food_before": host_before[0], "host_food_after": host_after[0],
+                                    "host_regen_unchanged": True, "campaign_checkpoint_unchanged": True,
+                                    "stock_widget_tick_invoked_in_muted_fixture": True}}
+
+
 def unequip_rows(raw):
     result = []
     for entry in raw.split("|"):
@@ -1879,7 +1954,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False,
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
-                 stock_use: bool = False, memory_status: bool = False, stock_prop_grip: bool = False,
+                 stock_use: bool = False, stock_food: bool = False, memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
@@ -1925,7 +2000,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     probes = ExitStack()
     seeded = None
 
-    single_scenario = (stock_prop_grip or stock_host_prop_observer or resident_weapon_cues or stock_crate_ring or guest_world_start
+    single_scenario = (stock_food or stock_prop_grip or stock_host_prop_observer or resident_weapon_cues or stock_crate_ring or guest_world_start
                        or guest_ui_memory or compact_crate_status or compact_world_view or guest_shop_lease
                        or guest_stash_memory or nonmirrored_startup or stock_unequip or resident_cabinet_archive is not None)
     try:
@@ -1941,6 +2016,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if guest_world_start_travel:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableRuinExitProbe",
                                                  fixture="portable_ruin_exit_probe.lua"))
+        if stock_food:
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableGuestFoodProbe",
+                                                     fixture="portable_guest_food_probe.lua"))
         if resident_weapon_cues:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableWeaponCueProbe",
                                                  fixture="avatar_presentation_probe.lua"))
@@ -2070,6 +2149,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 return await verify_stock_host_prop_observer(host, guest, pawn, lantern_evidence)
 
             proof["sessions"].append(await start_pair(first, second, "Lantern observer", on_join=observe_host_lantern))
+        elif stock_food:
+            proof["sessions"].append(await start_pair(first, second, "Guest food scout", on_join=verify_resident_guest_food,
+                                                      wait_status=wait_resident_status))
         elif resident_weapon_cues:
             proof["sessions"].append(await start_pair(first, second, "Bandage observer", on_join=verify_resident_weapon_cues,
                                                       wait_status=wait_resident_status))
@@ -2150,6 +2232,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["nonmirrored_startup_failure"] = str(error) or type(error).__name__
         if stock_host_prop_observer:
             proof["stock_host_prop_observer_failure"] = str(error) or type(error).__name__
+        if stock_food:
+            proof["stock_food_failure"] = str(error) or type(error).__name__
         if resident_weapon_cues:
             proof["resident_weapon_cue_failure"] = str(error) or type(error).__name__
         if compact_crate_status:
@@ -2198,6 +2282,7 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Sort, Drop, and Use actions")
     parser.add_argument("--stock-use", action="store_true", help="open a starter bag by stock drag and use a Bandage by stock click")
+    parser.add_argument("--stock-food", action="store_true", help="verify the guest's Food stat in the stock Backpack after a meal")
     parser.add_argument("--stock-split", action="store_true", help="test the stock guest stack-split popup with a Veteran loadout")
     parser.add_argument("--stock-equip", action="store_true", help="test the stock guest Equip action with a Veteran loadout")
     parser.add_argument("--stock-unequip", action="store_true",
@@ -2298,6 +2383,9 @@ if __name__ == "__main__":
             args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory, args.compact_crate_status,
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
+    if args.stock_food and (args.second_legacy_work or args.resident_cabinet_archive or any(
+            value is True for key, value in vars(args).items() if key != "stock_food")):
+        parser.error("Use --stock-food with two fresh private replicas and no other gameplay fixtures")
     if args.resident_weapon_cues and any((
             args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby, args.projected_nearby,
             args.container_nearby, args.stock_use, args.steam_cloud, args.stock_prop_grip, args.stock_host_prop_observer,
@@ -2332,7 +2420,7 @@ if __name__ == "__main__":
                        stock_unequip=args.stock_unequip,
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
-                       stock_use=args.stock_use, memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
+                       stock_use=args.stock_use, stock_food=args.stock_food, memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
