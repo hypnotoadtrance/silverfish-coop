@@ -21,7 +21,7 @@ class MosbyPrototypeTests(unittest.IsolatedAsyncioTestCase):
                                     control=SimpleNamespace(generation="generation", event=Mock()), zone_epoch="zone",
                                     last_game=self.game, last_seen=time.monotonic(), native_profile=True, native_guest=True,
                                     native_zones=True, transitioning=False, stopping=False, native_checkpoint_unsafe=False,
-                                    checkpoint_native=AsyncMock(side_effect=self.checkpoint))
+                                    pending_host_save=None, checkpoint_native=AsyncMock(side_effect=self.checkpoint))
         self.bridge = SimpleNamespace(command=AsyncMock(side_effect=self.stock))
         self.sessions = dialogue.DialogueSessions()
         self.writes, self.checkpoints = [], []
@@ -91,6 +91,9 @@ class MosbyPrototypeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(accepted["effect"], "prototype_drill_issued")
         self.assertEqual(await self.act("first", first_offer, 2, operation), accepted)
         self.assertEqual((await self.act("second", second_offer, 2))["effect"], "prototype_drill_already_present")
+        self.assertIs(self.host.pending_host_save, False)
+        self.host.checkpoint_native.assert_not_awaited()
+        self.assertEqual(await self.host.checkpoint_native(self.bridge), 1)
         progress, durable = self.checkpoints[-1]
         self.assertEqual(self.writes, [("Player_FP_C first", "readings_opened"), ("Player_FP_C first", "prototype_drill_issued")])
         self.assertEqual((progress["prototype_step"], progress["cash"], progress["xp"]), (1, 7500, 3))
@@ -99,7 +102,7 @@ class MosbyPrototypeTests(unittest.IsolatedAsyncioTestCase):
         self.sessions = dialogue.DialogueSessions()
         self.host.control.generation = "restarted"
         self.assertEqual((await self.act("first"))["row"], dialogue.GREET)
-        self.assertEqual(len(self.checkpoints), 4)
+        self.assertEqual(len(self.checkpoints), 1)
 
     async def test_source_earned_microdrill_topic_allows_stock_branch_without_stone_maze(self):
         self.progress.update(topic_micro_drill=1, quest_step=None)
@@ -127,5 +130,5 @@ class MosbyPrototypeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "mutation_unverified_native_dialogue"):
             await self.act("first")
         self.assertTrue(self.host.stopping and self.host.native_checkpoint_unsafe)
-        self.assertEqual(len(self.checkpoints), 1)
-        self.assertEqual(self.checkpoints[0][0]["stone_maze_readings"], 1)
+        self.host.checkpoint_native.assert_not_awaited()
+        self.assertIsNone(self.host.pending_host_save)
