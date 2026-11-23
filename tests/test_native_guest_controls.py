@@ -132,6 +132,124 @@ class NativeGuestUIOwnershipTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(list(directory.iterdir()), [])
 
 
+class ResidentGuestUIBridgeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+        self.character = uuid.uuid4()
+        self.target = f"Player_FP_C {self.area}.Observitory_P:PersistentLevel.Player_FP_C_1"
+        self.body = f"{self.area}\t{self.character}\ninventory-layout\t0\t0\t-1\ncash\t0\n".encode("ascii")
+        self.bridge = runtime.Bridge(Path("unused-resident-fixture"), None)
+        self.bridge.local_bridge = SimpleNamespace(command=AsyncMock())
+        self.prior = self.bridge._local_status
+
+    def reply(self, request, *, hosting=True, accepted=True, message=None, nonce=None):
+        nonce = nonce or request.partition(b"\t")[0].decode("ascii")
+        seat = "host\thosting" if hosting else "client\tconnected"
+        result = "accepted" if accepted else "error"
+        message = message or ("captured co-op guest view" if hosting else
+                              "stock co-op inventory and Journal projected 0 0 0 0 0")
+        return (f"schema\t1\nseq\t1\nack\t{nonce}\t{result}\t{message}\n"
+                f"session\t{seat}\t{self.area}\t0\t0\n"
+                f"native-save-scope\t{self.character.hex}\nnative-guest-ui-memory\t1\n")
+
+    async def test_exact_capture_body_does_not_enter_periodic_status(self):
+        async def command(request, timeout):
+            nonce, action, pawn = request.rstrip(b"\n").split(b"\t")
+            self.assertEqual((len(nonce), action.decode(), pawn.decode(), timeout),
+                             (32, "native-guest-ui-read-memory", self.target, 3))
+            return self.reply(request) + f"native-guest-ui-body\t{len(self.body)}\n" + self.body.decode()
+
+        self.bridge.local_bridge.command.side_effect = command
+        game, body = await self.bridge.guest_ui_command(self.target, timeout=3)
+        self.assertEqual(body, self.body)
+        self.assertTrue(game[runtime.GUEST_UI_MEMORY])
+        self.assertIs(self.bridge._local_status, game)
+        self.assertNotIn("inventory-layout", self.bridge._status_text)
+
+    async def test_exact_projection_body_and_ordinary_command_share_the_existing_bridge(self):
+        async def command(request, timeout):
+            header, _, body = request.partition(b"\n")
+            _, action, target = header.split(b"\t")
+            if action == b"native-guest-ui-project-memory":
+                self.assertEqual(target.decode(), str(self.character))
+                self.assertEqual(body, self.body)
+                self.assertEqual(timeout, 4)
+                return self.reply(request, hosting=False)
+            self.assertEqual((action, target, body), (b"native-test", b"ordinary", b""))
+            return self.reply(request, hosting=False, message="ordinary reply")
+
+        self.bridge.local_bridge.command.side_effect = command
+        game, body = await self.bridge.guest_ui_command(str(self.character), payload=self.body)
+        self.assertEqual(game["save_scope"], self.character.hex)
+        self.assertIsNone(body)
+        regular = await self.bridge.command("native-test", "ordinary")
+        self.assertEqual(regular["ack"]["message"], "ordinary reply")
+
+    async def test_wrong_ticket_missing_body_bad_length_and_oversize_are_refused(self):
+        for error in ("wrong-ticket", "missing", "wrong-size", "oversize", "reserved", "refused"):
+            with self.subTest(error=error):
+                async def command(request, _):
+                    if error == "wrong-ticket":
+                        return self.reply(request, nonce="wrong")
+                    if error == "refused":
+                        return self.reply(request, accepted=False, message="stock UI unavailable")
+                    status = self.reply(request)
+                    if error == "missing":
+                        return status
+                    if error == "wrong-size":
+                        return status + "native-guest-ui-body\t7\n" + self.body.decode()
+                    payload = ("x" * runtime.GUEST_UI_MAX_BYTES + "\n") if error == "oversize" else "bad\r\n"
+                    return status + f"native-guest-ui-body\t{len(payload)}\n" + payload
+
+                self.bridge.local_bridge.command.side_effect = command
+                with self.assertRaises((RuntimeError, ValueError)):
+                    await self.bridge.guest_ui_command(self.target)
+                self.assertIs(self.bridge._local_status, self.prior)
+
+        self.bridge.local_bridge.command.reset_mock()
+        for payload in (b"", b"x" * runtime.GUEST_UI_MAX_BYTES + b"\n", b"x\n" * 129, b"a\0\n"):
+            with self.assertRaises(ValueError):
+                await self.bridge.guest_ui_command(str(self.character), payload=payload)
+        self.bridge.local_bridge.command.assert_not_awaited()
+
+    async def test_prefix_in_target_and_unsolicited_project_reply_body_are_refused(self):
+        with self.assertRaises(ValueError):
+            await self.bridge.guest_ui_command(self.target + "\n" + self.body.decode())
+        self.bridge.local_bridge.command.assert_not_awaited()
+        self.bridge.local_bridge.command.side_effect = lambda request, timeout: (
+            self.reply(request, hosting=False) + "native-guest-ui-body\t1\n\n")
+        with self.assertRaisesRegex(RuntimeError, "unexpected body"):
+            await self.bridge.guest_ui_command(str(self.character), payload=self.body)
+        self.assertIs(self.bridge._local_status, self.prior)
+
+    async def test_host_and_guest_view_transfer_do_not_use_temporary_files(self):
+        zone = "d" * 32
+        owner = str(self.character)
+        host_state = {"state": "hosting", "map": self.area, runtime.GUEST_UI_MEMORY: True}
+        host = SimpleNamespace(last_game=host_state, zone_epoch=zone, transitioning=False, stopping=False,
+                               native_checkpoint_unsafe=False, native_recipients=lambda: {
+                                   owner: {"pawn": self.target, "connected": True}})
+        host_receipt = {**host_state, "ack": {"message": "captured co-op guest view"}}
+        host_bridge = SimpleNamespace(local_bridge=object(), command=AsyncMock(),
+                                      guest_ui_command=AsyncMock(return_value=(host_receipt, self.body)))
+        result = (await native_guest_ui.capture(host, host_bridge, owner, "-"))["native_guest_ui"]
+        host_bridge.guest_ui_command.assert_awaited_once_with(self.target, timeout=3)
+        host_bridge.command.assert_not_awaited()
+        self.assertEqual(result["digest"], hashlib.sha256(self.body).hexdigest())
+
+        guest_game = {"state": "connected", "map": self.area, "save_scope": self.character.hex,
+                      runtime.GUEST_UI_MEMORY: True}
+        guest_receipt = {**guest_game, "ack": {"message": "stock co-op inventory and Journal projected 0 0 0 0 0"}}
+        guest_bridge = SimpleNamespace(local_bridge=object(), command=AsyncMock(),
+                                       guest_ui_command=AsyncMock(return_value=(guest_receipt, None)))
+        client = SimpleNamespace(last_game=guest_game, zone_epoch=zone, bridge=guest_bridge, control=Mock())
+        with patch.object(runtime, "write_text", side_effect=AssertionError("unexpected disk write")):
+            await native_guest_ui.GuestView().receive(client, result, self.area, zone, owner)
+        guest_bridge.guest_ui_command.assert_awaited_once_with(owner, payload=self.body)
+        guest_bridge.command.assert_not_awaited()
+        self.assertIs(client.last_game, guest_receipt)
+
+
 class NativeGuestHealthViewTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"

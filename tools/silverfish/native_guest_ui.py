@@ -16,7 +16,7 @@ from . import party, runtime
 ACTION = "native-guest-ui-read"
 HEALTH = "native_guest_health"
 HEALTH_PROJECT = "native-guest-health-project"
-MAX_BYTES = 20_000
+MAX_BYTES = runtime.GUEST_UI_MAX_BYTES
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _READY = re.compile(r"stock co-op inventory and Journal projected (\d+) (\d+) (\d+) (\d+) (\d+)")
 
@@ -40,7 +40,8 @@ def health_frame(game, epoch, owner, member, player):
 
 
 def validate(contents: bytes, area: str, character: str) -> str:
-    if (not 0 < len(contents) <= MAX_BYTES or contents.count(b"\n") > 128 or not contents.endswith(b"\n")
+    if (not isinstance(contents, bytes) or not 0 < len(contents) <= MAX_BYTES
+            or contents.count(b"\n") > 128 or not contents.endswith(b"\n")
             or not contents.startswith(f"{area}\t{character}\n".encode("ascii"))):
         raise ValueError("The co-op view is stale or has invalid bounds")
     return contents.decode("ascii")
@@ -54,19 +55,25 @@ async def capture(host, bridge, character: str, known) -> dict:
     if (not owner or not owner["connected"] or host.transitioning or host.stopping
             or host.native_checkpoint_unsafe or game.get("state") != "hosting"):
         raise party.RuleError("native_guest_ui_unavailable")
-    nonce = uuid.uuid4().hex
-    path = bridge.directory / f"native-guest-ui-{nonce}.tsv"
+    path = None
     try:
-        snapshot = await bridge.command(ACTION, owner["pawn"], nonce, timeout=3)
+        if game.get(runtime.GUEST_UI_MEMORY) is True and bridge.local_bridge is not None:
+            snapshot, contents = await bridge.guest_ui_command(owner["pawn"], timeout=3)
+        else:
+            nonce = uuid.uuid4().hex
+            path = bridge.directory / f"native-guest-ui-{nonce}.tsv"
+            snapshot = await bridge.command(ACTION, owner["pawn"], nonce, timeout=3)
         if (snapshot.get("state"), snapshot.get("map"), snapshot.get("ack", {}).get("message")) != (
                 "hosting", game["map"], "captured co-op guest view"):
             raise RuntimeError("The host did not verify the co-op view")
-        with path.open("rb") as file:
-            contents = file.read(MAX_BYTES + 1)
+        if path is not None:
+            with path.open("rb") as file:
+                contents = file.read(MAX_BYTES + 1)
         validate(contents, game["map"], character)
     finally:
-        with contextlib.suppress(FileNotFoundError, PermissionError):
-            path.unlink()
+        if path is not None:
+            with contextlib.suppress(FileNotFoundError, PermissionError):
+                path.unlink()
     digest = sha256(contents).hexdigest()
     result = {"map": game["map"], "epoch": host.zone_epoch, "owner": character, "digest": digest}
     if digest != known:
@@ -206,11 +213,19 @@ class GuestView:
             client.control.event("native_stock_inventory_refresh_unavailable", reason=str(error))
 
     async def project(self, client, character, contents):
-        nonce = uuid.uuid4().hex
-        path = client.bridge.directory / f"native-guest-ui-{nonce}.tsv"
+        bridge, game = client.bridge, getattr(client, "last_game", {})
+        path = None
         try:
-            runtime.write_text(path, contents, newline="")
-            response = await client.bridge.command("native-guest-ui-project", character, nonce, timeout=4)
+            if game.get(runtime.GUEST_UI_MEMORY) is True and bridge.local_bridge is not None:
+                response, _ = await bridge.guest_ui_command(character, payload=contents.encode("ascii"))
+                if (response.get("state"), response.get("map"), response.get("save_scope")) != (
+                        "connected", game.get("map"), uuid.UUID(character).hex):
+                    raise RuntimeError("The resident stock view belongs to another guest or visit")
+            else:
+                nonce = uuid.uuid4().hex
+                path = bridge.directory / f"native-guest-ui-{nonce}.tsv"
+                runtime.write_text(path, contents, newline="")
+                response = await bridge.command("native-guest-ui-project", character, nonce, timeout=4)
             receipt = _READY.fullmatch(response.get("ack", {}).get("message", ""))
             if not receipt:
                 raise RuntimeError("The isolated guest inventory and Journal did not verify")
@@ -219,5 +234,6 @@ class GuestView:
             client.control.event("native_guest_ui_projected", items=items, notes=notes, quests=quests,
                                  completed=completed, attachments=attachments)
         finally:
-            with contextlib.suppress(FileNotFoundError, PermissionError):
-                path.unlink()
+            if path is not None:
+                with contextlib.suppress(FileNotFoundError, PermissionError):
+                    path.unlink()

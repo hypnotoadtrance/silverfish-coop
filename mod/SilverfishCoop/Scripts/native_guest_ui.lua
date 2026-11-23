@@ -105,7 +105,7 @@ local function tracked_step(save, entry)
     return step
 end
 
-local function capture(state, phase, pawn_name, path)
+local function capture(state, phase, pawn_name)
     local pawn, save, character = guest_save.exact_item_context(state, phase, pawn_name)
     local host = state.local_pawn and state.local_pawn.pawn
     local canonical = state.world.OwningGameInstance.SaveSlot_Ref
@@ -173,11 +173,7 @@ local function capture(state, phase, pawn_name, path)
     for _, row in ipairs(quests) do rows[#rows+1] = row end
     local contents = table.concat(rows, "\n") .. "\n"
     if #rows > max_rows or #contents > max_size then error("The co-op view exceeds its transfer bounds", 0) end
-    local file = io.open(path, "wb")
-    if not file then error("The co-op view mailbox is unavailable", 0) end
-    local written = file:write(contents)
-    if not file:close() or not written then error("The co-op view was not written", 0) end
-    return "captured co-op guest view"
+    return contents
 end
 
 local function item_row(columns)
@@ -196,13 +192,15 @@ local function item_row(columns)
         [item.no_drop] = integer(columns[8], 0, 1) == 1, [item.guid] = guid}
 end
 
-local function project(state, phase, character, path)
+local function project(state, phase, character, path, raw)
     local old, pawn, id = scope.bind_guest(state, phase)
     if not old or character:gsub("-", "") ~= id then error("The co-op view belongs to another guest", 0) end
-    local file = io.open(path, "rb")
-    if not file then error("The co-op view mailbox is unavailable", 0) end
-    local raw = file:read(max_size + 1)
-    file:close()
+    if path then
+        local file = io.open(path, "rb")
+        if not file then error("The co-op view mailbox is unavailable", 0) end
+        raw = file:read(max_size + 1)
+        file:close()
+    end
     if not raw or #raw > max_size or raw:sub(-1) ~= "\n" then error("Invalid co-op view payload", 0) end
     local api, class = StaticFindObject(statics), StaticFindObject(save_class)
     if not valid(api) or not valid(class) then error("The stock co-op view class is unavailable", 0) end
@@ -396,8 +394,33 @@ function guest_ui.command(fields, state, phase, bridge)
         error("Invalid co-op view request", 0)
     end
     local path = bridge .. "/native-guest-ui-" .. token .. ".tsv"
-    if op == "native-guest-ui-read" then return capture(state, phase, target, path) end
+    if op == "native-guest-ui-read" then
+        local contents = capture(state, phase, target)
+        local file = io.open(path, "wb")
+        if not file then error("The co-op view mailbox is unavailable", 0) end
+        local written = file:write(contents)
+        if not file:close() or not written then error("The co-op view was not written", 0) end
+        return "captured co-op guest view"
+    end
     return project(state, phase, target, path)
+end
+
+function guest_ui.is_memory_command(operation)
+    return operation == "native-guest-ui-read-memory" or operation == "native-guest-ui-project-memory"
+end
+
+function guest_ui.memory_command(fields, state, phase, payload)
+    if #fields ~= 3 or #fields[1] ~= 32 or not fields[1]:match("^[a-f0-9]+$") then
+        error("Invalid resident co-op view request", 0)
+    end
+    if fields[2] == "native-guest-ui-read-memory" and payload == "" then
+        return "captured co-op guest view", capture(state, phase, fields[3])
+    end
+    if fields[2] == "native-guest-ui-project-memory" and payload and #payload > 0 and #payload <= max_size
+        and payload:sub(-1) == "\n" and not payload:find("[^\t\n -~]") then
+        return project(state, phase, fields[3], nil, payload)
+    end
+    error("Invalid resident co-op view payload", 0)
 end
 
 return guest_ui

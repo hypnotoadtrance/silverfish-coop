@@ -1188,7 +1188,14 @@ local function read_command(periodic)
         file:close()
     end
     if not content or #content > 32768 then return end
-    local line = content:gsub("[\r\n]+$", "")
+    local line, guest_view
+    if ticket and native_guest_ui.is_memory_command(content:match("^[^\t\r\n]+\t([^\t\r\n]+)\t")) then
+        local boundary = content:find("\n", 1, true)
+        if boundary then
+            line, guest_view = content:sub(1, boundary - 1), content:sub(boundary + 1)
+        end
+    end
+    line = line or content:gsub("[\r\n]+$", "")
     if line == "" or line:find("[\r\n]") then return end
     local fields = {}
     for field in (line .. "\t"):gmatch("([^\t]*)\t") do
@@ -1199,7 +1206,7 @@ local function read_command(periodic)
         return
     end
     if ticket then
-        pending_local = {ticket = ticket, fields = fields, dispatched = false}
+        pending_local = {ticket = ticket, fields = fields, dispatched = false, guest_view = guest_view}
     end
     return fields, pending_local
 end
@@ -1225,6 +1232,9 @@ local function write_status(state, current_phase, failure, fields, pending)
         status_row("native-save-scope", native_save_scope.selected() or "-"),
         status_row("native-network-timeout", state.connection_timeout or "-"),
     }
+    if current_phase == "hosting" or current_phase == "connected" then
+        rows[#rows + 1] = status_row("native-guest-ui-memory", 1)
+    end
     for _, row in ipairs(native_stock_creator.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
     if role == "host" and party_travel_guard_available() then
         rows[#rows + 1] = status_row("native-zone-party-guard", 1)
@@ -1478,7 +1488,13 @@ local function write_status(state, current_phase, failure, fields, pending)
 
     local frame = table.concat(rows, "\n") .. "\n"
     if pending and pending.dispatched and acknowledged_id == pending.fields[1] then
-        SilverfishPublishLocalBridgeReply(pending.ticket, frame)
+        local view = pending.guest_view_reply
+        if view then
+            pending.guest_view_reply = nil
+            SilverfishPublishLocalBridgeReply(pending.ticket, frame .. "native-guest-ui-body\t" .. #view .. "\n" .. view)
+        else
+            SilverfishPublishLocalBridgeReply(pending.ticket, frame)
+        end
     end
 
     local now = os.clock()
@@ -1603,7 +1619,14 @@ local function tick(fields, pending)
             if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return end
             pending.dispatched = true
         end
-        local accepted, message = pcall(run_command, fields, state, current_phase)
+        local accepted, message
+        if pending and native_guest_ui.is_memory_command(fields[2]) then
+            accepted, message, pending.guest_view_reply = pcall(native_guest_ui.memory_command,
+                fields, state, current_phase, pending.guest_view)
+            pending.guest_view = nil
+        else
+            accepted, message = pcall(run_command, fields, state, current_phase)
+        end
         acknowledged_id = fields[1]
         acknowledged_result = accepted and "accepted" or "error"
         acknowledged_message = message

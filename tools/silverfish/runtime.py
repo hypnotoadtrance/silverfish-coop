@@ -92,6 +92,11 @@ MENU = "/Game/Classes/Maps/MainMenu_P"
 CPP_MOD_NAME = "SilverfishCoopNative"
 CPP_RUNTIME_DLL = Path("ue4ss/UE4SS.dll")
 CPP_ADDON_DLL = Path(f"ue4ss/Mods/{CPP_MOD_NAME}/dlls/main.dll")
+GUEST_UI_MEMORY = "native_guest_ui_memory"
+GUEST_UI_MAX_BYTES = 20_000
+_GUEST_UI_MAX_ROWS = 128
+_GUEST_UI_REPLY = "\nnative-guest-ui-body\t"
+_GUEST_UI_BYTES = re.compile(rb"[\t\n -~]+")
 MOD_SCRIPTS = Path("ue4ss/Mods/SilverfishCoop/Scripts")
 DEATH_PATCH = "zzzz_SilverfishCoop_Death_P"
 DEATH_PATCH_HASHES = {
@@ -1200,6 +1205,8 @@ class Bridge:
                 elif fields[0] == "session" and len(fields) == 6:
                     data.update({"mode": fields[1], "state": fields[2], "map": fields[3],
                                  "remote_clients": int(fields[4]), "server_connection": fields[5] == "1"})
+                elif fields == ["native-guest-ui-memory", "1"] and data.get("state") in ("hosting", "connected"):
+                    data[GUEST_UI_MEMORY] = True
                 elif fields[0] == "native-save-scope":
                     if len(fields) != 2 or "save_scope" in data or not re.fullmatch(r"-|[a-f0-9]{32}", fields[1]):
                         raise ValueError("Invalid co-op save scope status")
@@ -3174,6 +3181,46 @@ class Bridge:
         if ack["result"] != "accepted":
             raise RuntimeError(ack["message"] or f"The game declined the {action} command")
         return status
+
+    async def guest_ui_command(self, target: str, *, payload: bytes | None = None,
+                               timeout: float = 4) -> tuple[dict, bytes | None]:
+        """Exchange one scoped stock view on the resident command ticket."""
+        if self.local_bridge is None:
+            raise RuntimeError("The guest UI memory command requires the resident game bridge")
+        if not isinstance(target, str) or not 0 < len(target) <= 1024 or not re.fullmatch(r"[ -~]+", target):
+            raise ValueError("Invalid resident guest view target")
+
+        def checked_body(body: bytes) -> bytes:
+            if (not isinstance(body, bytes) or not 0 < len(body) <= GUEST_UI_MAX_BYTES or not body.endswith(b"\n")
+                    or body.count(b"\n") > _GUEST_UI_MAX_ROWS or not _GUEST_UI_BYTES.fullmatch(body)):
+                raise ValueError("The resident guest view payload exceeds its format or bounds")
+            return body
+
+        action = "native-guest-ui-read-memory" if payload is None else "native-guest-ui-project-memory"
+        nonce = uuid.uuid4().hex
+        request = f"{nonce}\t{action}\t{target}\n".encode("ascii")
+        if payload is not None:
+            request += checked_body(payload)
+
+        raw = await self.local_bridge.command(request, timeout)
+        frame, marker, remainder = raw.partition(_GUEST_UI_REPLY)
+        state = self._parse_status(frame + "\n" if marker else frame)
+        ack = state.get("ack", {}) if state else {}
+        if ack.get("id") != nonce:
+            raise RuntimeError("The resident guest view reply did not match the request")
+        if ack.get("result") != "accepted":
+            raise RuntimeError(ack.get("message") or "The resident guest view command was refused")
+        body = None
+        if payload is None:
+            length, separator, text = remainder.partition("\n")
+            if (not marker or not separator or len(length) > len(str(GUEST_UI_MAX_BYTES))
+                    or not length.isascii() or not length.isdecimal() or int(length) != len(text)):
+                raise RuntimeError("The resident guest view reply has no valid matched body")
+            body = checked_body(text.encode("ascii"))
+        elif marker:
+            raise RuntimeError("The resident guest view projection returned an unexpected body")
+        self._local_status = state
+        return state, body
 
     async def held_fire_command(self, operation: str, *arguments: str) -> dict:
         """Use the game-thread input lane without replacing campaign commands."""
