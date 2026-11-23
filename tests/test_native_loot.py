@@ -656,6 +656,55 @@ class NativeLootTests(unittest.IsolatedAsyncioTestCase):
                 host.checkpoint_native.assert_not_awaited()
                 self.assertNotIn("claimed_by", item)
 
+    async def test_exact_local_crate_diagnostic_stays_out_of_the_resident_snapshot_cache(self):
+        bridge = runtime.Bridge(self.root, None)
+        bridge.local_bridge = Mock(command=AsyncMock())
+        crate = OTHER_CRATE
+        for role, phase, server in (("host", "hosting", 0), ("client", "connected", 1)):
+            with self.subTest(phase=phase):
+                status = (f"session\t{role}\t{phase}\t{CROSSROADS}\t1\t{server}\n"
+                          f"pawn\tlocal\t{PAWN}\t250\t0\t0\t0\tcontroller\t250\n"
+                          f"native-loot-crate-input\t{CROSSROADS}\t{crate}\texhausted\n")
+                bridge.local_bridge.read_status.return_value = "schema\t1\nseq\t40\n" + status
+
+                async def reply(payload, timeout):
+                    request_id, action, area, pawn, actor = payload.decode().strip().split("\t")
+                    self.assertEqual((action, area, pawn, actor, timeout),
+                                     (native_loot.CRATE_DIAGNOSTIC, CROSSROADS, PAWN, crate, 2))
+                    return (f"schema\t1\nseq\t41\nack\t{request_id}\taccepted\tcrate\n" + status
+                            + f"{action}\t{area}\t{actor}\t{phase}\tactive\tlive\tlive\t1\t0\t-95\n")
+
+                bridge.local_bridge.command.side_effect = reply
+                result = await native_loot.crate_diagnostic(bridge, bridge.snapshot(), crate)
+                self.assertEqual(result, {"native_loot_crate_diagnostic": {
+                    "map": CROSSROADS, "crate": crate, "phase": phase, "scope": "active", "door": "live",
+                    "box": "live", "looted": True, "collision": 0, "roll": -95,
+                }})
+                ordinary = bridge.snapshot()
+                self.assertEqual(ordinary["sequence"], 40)
+                self.assertNotIn(native_loot.CRATE_DIAGNOSTICS, ordinary)
+                self.assertEqual(ordinary["native_loot_crates"][crate]["state"], "exhausted")
+                self.assertIsNone(bridge._local_status)
+
+    async def test_crate_diagnostic_rejects_absent_proofs_and_changed_local_scope(self):
+        game = self.game(CROSSROADS, state="connected")
+        bridge = Mock(command=AsyncMock())
+        for target in (None, BRIDGE_CRATE, "unknown crate"):
+            with self.subTest(target=target), self.assertRaisesRegex(ValueError, "exact authored crate"):
+                await native_loot.crate_diagnostic(bridge, game, target)
+        bridge.command.assert_not_awaited()
+
+        diagnostic = {"phase": "connected", "map": CROSSROADS, "crate": OTHER_CRATE}
+        scoped = dict(game, **{native_loot.CRATE_DIAGNOSTICS: {OTHER_CRATE: diagnostic}})
+        for wrong in (
+            game, dict(scoped, pawns={"local": {"name": "old pawn"}}), dict(scoped, map=DEAD_BRIDGE),
+            dict(scoped, state="hosting"),
+            dict(game, **{native_loot.CRATE_DIAGNOSTICS: {OTHER_CRATE: dict(diagnostic, crate=LEGACY_CRATE)}}),
+        ):
+            with self.subTest(wrong=wrong), self.assertRaisesRegex(RuntimeError, "verify its scope"):
+                bridge.command.return_value = wrong
+                await native_loot.crate_diagnostic(bridge, game, OTHER_CRATE)
+
     def test_cash_snapshot_requires_a_single_claim_row(self):
         lines = [
             ("schema", "1"), ("session", "host", "hosting", CROSSROADS, "0", "1"),

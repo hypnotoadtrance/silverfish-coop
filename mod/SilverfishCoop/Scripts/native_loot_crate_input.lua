@@ -636,7 +636,7 @@ function input.command(fields, state, phase)
     error("native_loot_crate_input_arguments", 0)
 end
 
-local function sample_profile(state, phase, status_row, profile)
+local function sample_profile(state, phase, status_row, profile, diagnostic_only)
     local rows = {}
     local current, scope = input.update(state, phase, profile)
     local active, powered, info = false, 0, {}
@@ -646,9 +646,10 @@ local function sample_profile(state, phase, status_row, profile)
         scope = active and "active" or "scope_inactive"
         if active then info = observe_scene(current, box_state, box_address) end
     end
-    rows[#rows + 1] = status_row("native-loot-crate-diagnostic", profile.map, profile.name, phase,
+    rows.diagnostic = status_row("native-loot-crate-diagnostic", profile.map, profile.name, phase,
         scope or "-", info.door_state or "-", info.box_state or "-",
         info.looted == nil and "-" or (info.looted and 1 or 0), info.collision or "-", info.roll or "-")
+    if diagnostic_only then return rows, current end
     if info.qualified then
         local angle = observe_angle(profile, info.door)
         local spent = exhausted(current.crate, info.door, info.box, info.second, open_poses(profile, info.second, angle),
@@ -682,7 +683,23 @@ local function sample_profile(state, phase, status_row, profile)
     if active and profile.electronic and current.host and type(powered) == "number" and powered > 0 then
         rows[#rows + 1] = status_row("native-loot-electronic-powered-open", profile.map, profile.name, current.name, powered)
     end
-    return rows
+    return rows, current
+end
+
+function input.diagnostic(fields, state, phase, status_row)
+    local detail = state.local_pawn
+    local profile = #fields == 5 and fields[3] == state.map and loot.profile(state.map, fields[5])
+    if not profile or not detail or not valid(detail.pawn) or detail.name ~= fields[4]
+        or detail.pawn:GetFullName() ~= fields[4] then
+        error("native_loot_crate_diagnostic_scope_unavailable", 0)
+    end
+    local rows, current = sample_profile(state, phase, status_row, profile, true)
+    if not current or current.crate:IsActorBeingDestroyed() then
+        error("native_loot_crate_diagnostic_scope_unavailable", 0)
+    end
+    return "exact local stock crate diagnostic", {
+        index = profile.index, row = rows.diagnostic, world = state.world, pawn = detail.pawn, phase = phase,
+    }
 end
 
 local function sample(state, phase, status_row, profiles)
@@ -759,7 +776,7 @@ function input.start()
     periodic_sampling = true
 end
 
-function input.rows(state, phase, status_row, fields)
+function input.rows(state, phase, status_row, fields, separate_details, requested)
     local profiles = loot.profiles(state.map)
     local detail = state.local_pawn
     if not enabled or #profiles == 0 or not state.listening or not detail or not valid(detail.pawn)
@@ -781,7 +798,7 @@ function input.rows(state, phase, status_row, fields)
             sampler.state = state
             readings = sampler.readings
             -- Command acknowledgements include immediate readback for affected containers.
-            if fields then
+            if fields and fields[2] ~= "native-loot-crate-diagnostic" then
                 for index = 3, #fields do
                     local profile = loot.profile(state.map, fields[index])
                     if profile then readings[profile.index] = sample_profile(state, phase, status_row, profile) end
@@ -791,11 +808,15 @@ function input.rows(state, phase, status_row, fields)
     else
         readings = sample(state, phase, status_row, profiles)
     end
-    local rows = {}
+    local rows, details = {}, separate_details and {} or nil
     if not receipt_frame then receipt_frame = {} end
     receipt_frame.state, receipt_frame.row = state, status_row
     for _, profile in ipairs(profiles) do
-        for _, row in ipairs(readings[profile.index] or {}) do rows[#rows + 1] = row end
+        local observed = readings[profile.index] or {}
+        local diagnostic = requested and requested.index == profile.index and requested.row or observed.diagnostic
+        local destination = details or rows
+        if diagnostic then destination[#destination + 1] = diagnostic end
+        for _, row in ipairs(observed) do rows[#rows + 1] = row end
     end
     if type(SilverfishReadNativeLootCrateReceipts) == "function" then append_receipts(rows, state, status_row) end
     if tool_report and phase == "hosting" and tool_report.map == state.map then
@@ -803,7 +824,7 @@ function input.rows(state, phase, status_row, fields)
         rows[#rows + 1] = status_row("native-loot-guest-" .. report.kind .. "-use", report.map, report.crate, report.pawn,
             report.guid, report.before, report.after)
     end
-    return rows
+    return rows, details
 end
 
 return input

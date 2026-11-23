@@ -13,6 +13,8 @@ from .native_gold import valid_guid
 
 CRATE = LEGACY_CRATE
 STATE_KEY = "native_loot_rolls"
+CRATE_DIAGNOSTIC = "native-loot-crate-diagnostic"
+CRATE_DIAGNOSTICS = "native_loot_crate_diagnostics"
 RETIRED = "native_loot_retired_rolls"
 REPLENISHED = "native_replenished_crates"
 VEHICLE_LOCKS = "native_loot_vehicle_locks"
@@ -256,6 +258,21 @@ def fixture_selection(target: str | None, area: str) -> tuple[str, str | None]:
     if target in CRATES:
         return "guest", target
     return target, default_crate(area)
+
+
+async def crate_diagnostic(bridge, game, crate) -> dict:
+    """Read one authored crate on the exact local pawn's current map."""
+    phase, area = game.get("state"), game.get("map")
+    pawn = game.get("pawns", {}).get("local", {}).get("name")
+    if (phase not in ("hosting", "connected") or not isinstance(pawn, str) or not pawn or not area
+            or not isinstance(crate, str) or CRATES.get(crate) != area):
+        raise ValueError("Select an exact authored crate in the active local map")
+    snapshot = await bridge.command(CRATE_DIAGNOSTIC, area, pawn, crate, timeout=2, update_status=False)
+    row = snapshot.get(CRATE_DIAGNOSTICS, {}).get(crate, {})
+    if ((snapshot.get("state"), snapshot.get("map"), snapshot.get("pawns", {}).get("local", {}).get("name")) !=
+            (phase, area, pawn) or (row.get("phase"), row.get("map"), row.get("crate")) != (phase, area, crate)):
+        raise RuntimeError("The exact local crate diagnostic did not verify its scope")
+    return {"native_loot_crate_diagnostic": row}
 
 
 def _opening_arguments(game, crate, lid, angle):

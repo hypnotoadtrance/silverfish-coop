@@ -148,8 +148,11 @@ local stock_save_probes = {
 local gameplay_statics_path = "/Script/Engine.Default__GameplayStatics"
 local command_path = bridge .. "/command.tsv"
 local status_path = bridge .. "/status.tsv"
-local next_status = 0
-local mirror_status = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local status_publication = {
+    next_frame = 0,
+    mirror = os.getenv("SILVERFISH_COOP_HEADLESS") == "1",
+    installed = os.getenv("SILVERFISH_COOP_INSTALLED_TITLE") == "1",
+}
 -- A quiet Direct IP link can take up to 12 seconds to declare a disconnect.
 local connection_timeout_seconds = 110
 local restore_position_tolerance = 0.25
@@ -1222,7 +1225,17 @@ local function world_view_row(mode, view)
         view.rain_verified and 1 or mode == "applied" and view.rain_skipped_nullrhi and "nullrhi" or 0)
 end
 
-local function write_status(state, current_phase, failure, fields, pending)
+local function write_status(state, current_phase, failure, fields, pending, crate_diagnostic)
+    local compact_crates = resident_title and status_publication.installed
+        and not status_publication.mirror and status_publication.memory_live
+    local crate_details
+    if crate_diagnostic and (failure or current_phase ~= crate_diagnostic.phase
+        or not same_object(state.world, crate_diagnostic.world)
+        or not state.local_pawn or not same_object(state.local_pawn.pawn, crate_diagnostic.pawn)) then
+        crate_diagnostic = nil
+        acknowledged_result = "error"
+        acknowledged_message = "native_loot_crate_diagnostic_scope_changed"
+    end
     sequence = sequence + 1
     local rows = {
         status_row("schema", 1),
@@ -1339,7 +1352,10 @@ local function write_status(state, current_phase, failure, fields, pending)
         for _, row in ipairs(native_guest_regen.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_guest_sickness.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_loot_actions.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
-        for _, row in ipairs(native_loot_crate_input.rows(state, current_phase, status_row, fields)) do rows[#rows + 1] = row end
+        local crate_rows
+        crate_rows, crate_details = native_loot_crate_input.rows(
+            state, current_phase, status_row, fields, compact_crates, crate_diagnostic)
+        for _, row in ipairs(crate_rows) do rows[#rows + 1] = row end
         for _, row in ipairs(native_loot_view.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_quest.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
         for _, row in ipairs(native_wire_quest_turn_in.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
@@ -1492,6 +1508,8 @@ local function write_status(state, current_phase, failure, fields, pending)
         if view then
             pending.guest_view_reply = nil
             SilverfishPublishLocalBridgeReply(pending.ticket, frame .. "native-guest-ui-body\t" .. #view .. "\n" .. view)
+        elseif compact_crates and crate_diagnostic then
+            SilverfishPublishLocalBridgeReply(pending.ticket, frame .. crate_diagnostic.row .. "\n")
         else
             SilverfishPublishLocalBridgeReply(pending.ticket, frame)
         end
@@ -1499,12 +1517,14 @@ local function write_status(state, current_phase, failure, fields, pending)
 
     local now = os.clock()
     local file_command = fields and not pending
-    if not file_command and now < next_status then return end
-    next_status = now + 0.25
+    if not file_command and now < status_publication.next_frame then return end
+    status_publication.next_frame = now + 0.25
     -- The embedded worker reads the latest frame directly. Isolated diagnostics and
     -- explicit filesystem commands can still observe their game-thread receipts.
-    if type(SilverfishPublishLocalBridgeStatus) == "function" and SilverfishPublishLocalBridgeStatus(frame)
-        and not mirror_status and not file_command then return end
+    status_publication.memory_live = type(SilverfishPublishLocalBridgeStatus) == "function"
+        and SilverfishPublishLocalBridgeStatus(frame)
+    if status_publication.memory_live and not status_publication.mirror and not file_command then return end
+    if crate_details and #crate_details > 0 then frame = frame .. table.concat(crate_details, "\n") .. "\n" end
     local temporary = status_path .. ".tmp"
     local file = io.open(temporary, "wb")
     if not file then return end
@@ -1599,7 +1619,20 @@ local function tick(fields, pending)
         state, current_phase = observe_session()
         if not state then return end
     end
-    if fields then
+    local crate_diagnostic
+    if fields and fields[2] == "native-loot-crate-diagnostic" then
+        if pending then
+            if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return end
+            pending.dispatched = true
+        else
+            seen_commands[fields[1]] = true
+        end
+        local accepted, message
+        accepted, message, crate_diagnostic = pcall(native_loot_crate_input.diagnostic, fields, state, current_phase, status_row)
+        acknowledged_id = fields[1]
+        acknowledged_result = accepted and "accepted" or "error"
+        acknowledged_message = message
+    elseif fields then
         if not pending then seen_commands[fields[1]] = true end
         last_quest_catalog = nil
         last_broker_quest = nil
@@ -1681,7 +1714,7 @@ local function tick(fields, pending)
     if not pause_checked then native_coop_pause.clear() end
     native_guest_smg_hold.cache_context(state, current_phase)
     write_status(state, current_phase, not projected and failure or not pause_checked and pause_failure or nil,
-        fields or pending and pending.fields, pending)
+        fields or pending and pending.fields, pending, crate_diagnostic)
 end
 
 players.start(bridge)
@@ -1734,7 +1767,7 @@ LoopInGameThreadWithDelay(25, function()
     if not leaving then pcall(native_player_avatar.animate_cycle, current_world) end
     if not leaving then pcall(native_player_avatar.animate_use, current_world) end
     local now = os.clock()
-    local periodic = now >= next_snapshot or now >= next_status
+    local periodic = now >= next_snapshot or now >= status_publication.next_frame
     local fields, pending = read_command(periodic)
     if not fields and not periodic then return end
     next_snapshot = now + 0.25

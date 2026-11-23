@@ -1,3 +1,4 @@
+package.path = "mod/SilverfishCoop/Scripts/?.lua;" .. package.path
 -- Run with Lua 5.4 from the repository root.
 local flags = {
     SILVERFISH_COOP_HEADLESS = "1",
@@ -126,3 +127,113 @@ package.loaded.native_loot.profiles = function() return {profile} end
 local rows = input.rows(state, "connected", function(...) return {...} end)
 assert(rows[2][1] == "native-loot-crate-input" and rows[2][4] == "exhausted" and rows[2][5] == 99)
 print("An authored random lid pose keeps the stock collision response and equivalent rotation")
+
+local function row(...)
+    return table.concat({...}, "\t")
+end
+
+local action = "native-loot-crate-diagnostic"
+local query = {"read", action, area, pawn:GetFullName(), profile.name}
+local _, diagnostic = input.diagnostic(query, state, "connected", row)
+assert(diagnostic.row:find(action .. "\t" .. area .. "\t" .. profile.name, 1, true) == 1)
+assert(diagnostic.row:find("\tconnected\tactive\tlive\tlive\t1\t0\t180", 1, true))
+assert(diagnostic.pawn == pawn and diagnostic.world == world and diagnostic.phase == "connected")
+assert(not pcall(input.diagnostic, {"id", action, "different map", query[4], query[5]}, state, "connected", row))
+assert(not pcall(input.diagnostic, {"id", action, area, "old pawn", query[5]}, state, "connected", row))
+assert(not pcall(input.diagnostic, {"id", action, area, query[4], "unregistered"}, state, "connected", row))
+assert(not pcall(input.diagnostic, {"id", action, area, query[4], query[5], "extra crate"}, state, "connected", row))
+assert(not pcall(input.diagnostic, query, state, "hosting", row))
+crate.IsActorBeingDestroyed = function() return true end
+assert(not pcall(input.diagnostic, query, state, "connected", row))
+crate.IsActorBeingDestroyed = function() return false end
+
+local function upvalue(callback, wanted, replacement)
+    for index = 1, 100 do
+        local name, value = debug.getupvalue(callback, index)
+        if name == wanted then
+            if replacement then debug.setupvalue(callback, index, replacement) end
+            return value
+        end
+    end
+    error(wanted .. " was not found")
+end
+
+local function status_case(installed, headless, resident)
+    local callback, memory, file, reply
+    local attached, time = true, 0
+    local modules = setmetatable({}, {__index = function(_, key)
+        if key == "rows" or key:sub(-5) == "_rows" then return function() return {} end end
+        return function() end
+    end})
+    local env = setmetatable({
+        require = function(name)
+            if name == "native_loot_crate_input" then return input end
+            if name == "native_cubes" then return {new = function() return modules end} end
+            return modules
+        end,
+        LoopInGameThreadWithDelay = function(_, fn) callback = fn end,
+        os = {
+            clock = function() return time end,
+            getenv = function(key)
+                if key == "SILVERFISH_COOP_BRIDGE" then return "mock" end
+                if key == "SILVERFISH_COOP_RESIDENT_TITLE" and resident then return "1" end
+                if key == "SILVERFISH_COOP_INSTALLED_TITLE" and installed then return "1" end
+                if key == "SILVERFISH_COOP_HEADLESS" and headless then return "1" end
+            end,
+            rename = function() return true end,
+        },
+        io = {open = function()
+            return {write = function(_, frame) file = frame; return true end, close = function() return true end}
+        end},
+        SilverfishPublishLocalBridgeStatus = function(frame) memory = attached and frame or nil; return attached end,
+        SilverfishPublishLocalBridgeReply = function(_, frame) reply = frame end,
+        SilverfishClaimLocalBridgeCommand = function(ticket) return ticket == 1 end,
+    }, {__index = _G})
+    assert(loadfile("mod/SilverfishCoop/Scripts/main.lua", "t", env))()
+    local tick = upvalue(callback, "tick")
+    upvalue(tick, "observe_session", function() return state, "connected" end)
+    local write = upvalue(tick, "write_status")
+    local function status(fields, pending, requested)
+        time = time + .3
+        write(state, "connected", nil, fields, pending, requested)
+        assert((memory or file):find("native-loot-crate-input", 1, true))
+    end
+    local function has_detail(frame)
+        return frame and frame:find(action .. "\t", 1, true)
+    end
+
+    state.pawns, state.clients = {}, 0
+    status()
+    assert(has_detail(memory))
+    status()
+    if installed and not headless and resident then
+        assert(not has_detail(memory) and not file)
+        local pending = {ticket = 1, fields = query}
+        time = time + .3
+        tick(query, pending)
+        assert(not has_detail(memory) and has_detail(reply))
+        assert(reply:find("ack\t" .. query[1] .. "\taccepted", 1, true))
+        local _, detail_end = reply:find(action .. "\t", 1, true)
+        assert(detail_end and not reply:find(action .. "\t", detail_end + 1, true))
+        local stale = {}
+        for key, value in pairs(diagnostic) do stale[key] = value end
+        stale.pawn = sibling
+        status(query, pending, stale)
+        assert(not has_detail(reply) and reply:find("native_loot_crate_diagnostic_scope_changed", 1, true))
+
+        status(query, nil, diagnostic)
+        assert(not has_detail(memory) and has_detail(file))
+        attached, file = false, nil
+        status()
+        assert(not memory and has_detail(file))
+    else
+        assert(has_detail(memory))
+        if headless then assert(has_detail(file)) end
+    end
+end
+
+status_case(true, false, true)
+status_case(true, true, true)
+status_case(false, false, true)
+status_case(true, false, false)
+print("Only healthy installed resident status omits full crate diagnostics, and one exact query replies locally")

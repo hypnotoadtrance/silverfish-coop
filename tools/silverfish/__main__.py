@@ -243,7 +243,7 @@ def parser() -> argparse.ArgumentParser:
         "native-rest-guest-interaction-fixture", "native-wipe-inventory-fixture", "native-wipe-items", "native-wipe-recover",
         "native-bag-projection-fixture",
         "native-loot-inspect", "native-loot-open", "native-loot-approach", "native-loot-seed",
-        "native-loot-claim", "native-loot-open-fixture", "native-loot-crate-fixture", "native-loot-view-fixture",
+        "native-loot-claim", "native-loot-crate-diagnostic", "native-loot-open-fixture", "native-loot-crate-fixture", "native-loot-view-fixture",
         "native-loot-replenishment-fixture", "native-loot-vehicle-pry-fixture", "native-guest-vehicle-blowtorch",
         "native-loot-electronic-power-fixture",
         "native-guest-vehicle-crowbar", "native-guest-door-blowtorch", "native-guest-door-crowbar",

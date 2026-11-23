@@ -3232,6 +3232,8 @@ class Host:
                     character = self.roles().get(role)
                     result = await native_loot.perform(self, bridge, character, "open", crate,
                                                        request.get("operation_id") or path.stem, fixture_nonempty=True)
+                elif action == native_loot.CRATE_DIAGNOSTIC and self.native_loot_input:
+                    result = await native_loot.crate_diagnostic(bridge, self.last_game, request.get("target"))
                 elif action == "native-loot-crate-fixture" and self.native_loot_input and self.fixtures:
                     area = self.last_game.get("map")
                     crate = request.get("target") or native_loot.default_crate(area)
@@ -6038,6 +6040,8 @@ class Client:
                     result = native_authored_pickup.fixture_proof(self.last_game, source, native_authored_pickup.FIXTURE_ENTRIES[action])
                 elif action in native_dust_cabinet.GUEST_FIXTURES:
                     result = await native_dust_cabinet.check_guest_veto(self, action)
+                elif action == native_loot.CRATE_DIAGNOSTIC and self.invite.get("native_loot_input"):
+                    result = await native_loot.crate_diagnostic(self.bridge, self.last_game, request.get("target"))
                 elif action == "native-loot-crate-fixture" and self.invite.get("native_loot_input"):
                     area = self.last_game.get("map")
                     crate = request.get("target") or native_loot.default_crate(area)

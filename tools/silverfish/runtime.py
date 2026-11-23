@@ -2120,13 +2120,13 @@ class Bridge:
                       and lockable_container(fields[2], fields[1]) and valid_guid(fields[4]) and fields[5:] == ["-1", "-1"]):
                     data[native_loot.CROWBAR_RESULT] = dict(map=fields[1], crate=fields[2], pawn=fields[3], guid=fields[4],
                                                            before=-1, after=-1)
-                elif (fields[0] == "native-loot-crate-diagnostic" and len(fields) == 10
+                elif (fields[0] == native_loot.CRATE_DIAGNOSTIC and len(fields) == 10
                       and AUTHORED_CRATES.get(fields[2]) == fields[1]):
                     row = {"map": fields[1], "crate": fields[2], "phase": fields[3],
                            "scope": fields[4], "door": fields[5], "box": fields[6],
                            "looted": None if fields[7] == "-" else fields[7] == "1",
                            "collision": _finite(fields[8]), "roll": _finite(fields[9])}
-                    data.setdefault("native_loot_crate_diagnostics", {})[fields[2]] = row
+                    data.setdefault(native_loot.CRATE_DIAGNOSTICS, {})[fields[2]] = row
                     if fields[2] == LEGACY_CRATE:
                         data["native_loot_crate_diagnostic"] = row
                 elif (fields[0] == "native-loot-crate-replenished" and len(fields) == 4
@@ -3166,7 +3166,7 @@ class Bridge:
             await asyncio.sleep(interval)
         raise TimeoutError("The game bridge did not reach the requested state")
 
-    async def command(self, action: str, *arguments: str, timeout: float = 8) -> dict:
+    async def command(self, action: str, *arguments: str, timeout: float = 8, update_status: bool = True) -> dict:
         fields = (uuid.uuid4().hex, action, *arguments)
         if any(len(value) > 1024 or "\t" in value or "\r" in value or "\n" in value for value in fields):
             raise ValueError("Invalid game bridge command value")
@@ -3179,7 +3179,8 @@ class Bridge:
             status = self._parse_status(await self.local_bridge.command(request.encode("utf-8"), timeout))
             if not status or status.get("ack", {}).get("id") != fields[0]:
                 raise RuntimeError("The local co-op command receipt did not match the request")
-            self._local_status = status
+            if update_status:
+                self._local_status = status
         ack = status["ack"]
         if ack["result"] != "accepted":
             raise RuntimeError(ack["message"] or f"The game declined the {action} command")
