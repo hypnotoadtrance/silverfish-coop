@@ -1,5 +1,6 @@
 local view = {}
 
+local npc_base = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local weapon_base = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
 local consumable_base = "/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C"
 local melee_base = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C"
@@ -144,9 +145,22 @@ local function capture_use(context)
     view.consumed(pawn, path, true)
 end
 
+local function npc_shooter(weapon)
+    if not current or not valid(weapon) or not weapon:HasAuthority() or not same(weapon:GetWorld(), current.world) then
+        return
+    end
+    local npc, base = weapon.Instigator, StaticFindObject(npc_base)
+    if valid(npc) and valid(base) and npc:IsA(base) and npc:HasAuthority() and npc.Alive == true
+        and same(npc:GetWorld(), current.world) and same(npc.Weapon_Ranged, weapon) then
+        return npc
+    end
+end
+
 local function capture(context)
-    local weapon, pawn = equipped_player(context:get())
-    if not weapon then return end
+    local weapon = context:get()
+    local _, player = equipped_player(weapon)
+    local shooter = player or npc_shooter(weapon)
+    if not shooter then return end
     local muzzle = weapon.Arrow_Muzzle
     if not valid(muzzle) or not same(muzzle:GetOwner(), weapon) then return end
     local path = weapon:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
@@ -155,10 +169,10 @@ local function capture(context)
     local scale, volume, pitch = weapon.MuzzleFlash_Scale, weapon.Fire_Volume, weapon.Fire_PitchShift
     if not bounded(scale, 0, 10) or not bounded(volume, 0, 10) or not bounded(pitch, -24, 24) then return end
     serial = serial + 1
-    local now = current.statics:GetRealTimeSeconds(pawn)
+    local now = current.statics:GetRealTimeSeconds(shooter)
     local row = {serial, path, position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw,
         rotation.Roll, scale, volume, pitch - 2, expires = now + .25}
-    last_round = {row = row, weapon = weapon, at = now}
+    if player then last_round = {row = row, weapon = weapon, at = now} end
     record(row)
 end
 

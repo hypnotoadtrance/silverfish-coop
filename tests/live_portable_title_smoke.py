@@ -593,6 +593,32 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
             "both_games_projected_reloaded_magazine": True, "host_magazine_and_reserve_unchanged": True}
 
 
+async def verify_resident_npc_shots(host: Seat, guest_run: Path, guest_frame: dict) -> list:
+    def shots(events):
+        return {row["serial"]: row for row in events
+                if row["event"] == "native_weapon_shot_played" and row["generation"] == guest_frame["generation"]}
+
+    evidence = []
+    for kind, faction, weapon_class in (("state", 4, "Wep_ScoutRifle_01"), ("bandit", 9, "Wep_Pistol")):
+        previous = shots(await resident_events(guest_run, guest_frame))
+        raw = await portable_probe_command(host.bridge, "portable-npc-override", f"fire-npc\t{kind}")
+        observed_faction, path, *position = raw.split(";")
+        assert int(observed_faction) == faction and path.endswith(f"/{weapon_class}.{weapon_class}_C"), raw
+        try:
+            async with asyncio.timeout(6):
+                while True:
+                    recent = shots(await resident_events(guest_run, guest_frame))
+                    matching = [row for serial, row in recent.items() if serial not in previous and row["weapon"] == path]
+                    if matching:
+                        break
+                    await asyncio.sleep(.05)
+        except TimeoutError as error:
+            raise AssertionError(f"No observer cue for stock {kind} faction shot from {raw}") from error
+        cue, = matching
+        assert cue["stock_sound"] and not cue["recoil"], cue
+        evidence.append({"faction": faction, "weapon": path, "host_muzzle": list(map(float, position)), "guest": cue})
+    return evidence
+
 async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_frame, guest_frame = await asyncio.gather(
@@ -646,6 +672,7 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
     assert visual["player_id"] == player_id, visual
     footsteps = await verify_resident_footsteps(host, guest)
     pistol = await verify_resident_pistol(host, guest, guest_combat=guest_combat)
+    npc_shots = await verify_resident_npc_shots(host, guest_run, guest_frame) if guest_combat else []
     assert not weapon_cue_files(host, guest), "Stock player cues wrote a legacy weapon cue mailbox"
     after = save_state()
     changed = [path for path in before.keys() | after.keys() if before.get(path) != after.get(path)]
@@ -662,7 +689,7 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
                                      "prop": prop, "local_bridge_both_peers": "memory",
                                      "no_cue_mailbox": True, "saves_unchanged_before_checkpoint": True,
                                      "previous_checkpoint_cloud_copies": backup_revisions,
-                                     "stock_footsteps": footsteps, "stock_pistol": pistol}}
+                                     "stock_footsteps": footsteps, "stock_pistol": pistol, "npc_shots": npc_shots}}
 
 
 async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict:

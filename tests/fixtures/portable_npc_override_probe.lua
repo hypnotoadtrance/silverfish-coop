@@ -42,6 +42,41 @@ local function gun_target(pawn, world)
     error("no clear test shot from the authoritative guest position")
 end
 
+local shooter_paths = {
+    state = "/Game/Classes/NPCs/NPC_State_Conscript.NPC_State_Conscript_C",
+    bandit = "/Game/Classes/NPCs/NPC_Bandit.NPC_Bandit_C",
+}
+
+local function fire_stock_npc(pawn, world, kind)
+    local path = assert(shooter_paths[kind], "unknown NPC firing fixture")
+    local class = StaticFindObject(path)
+    if not valid(class) then LoadAsset(path); class = StaticFindObject(path) end
+    assert(valid(class), "stock NPC class unavailable")
+    local origin = pawn:K2_GetActorLocation()
+    local transform = {Translation={X=origin.X+280,Y=origin.Y+180,Z=origin.Z+100},
+        Rotation={X=0,Y=0,Z=0,W=1}, Scale3D={X=1,Y=1,Z=1}}
+    local actor = statics:BeginDeferredActorSpawnFromClass(pawn, class, transform, 1, nil, 0)
+    assert(valid(actor) and same(actor:GetClass(), class) and same(actor:GetWorld(), world), "stock shooter spawn unavailable")
+    assert(same(actor, statics:FinishSpawningActor(actor, transform, 0)) and actor:HasAuthority() and actor.Alive,
+        "stock shooter did not start on the host")
+    actor:SetActorTickEnabled(false)
+    local controller = actor.Controller
+    if valid(controller) then controller:SetActorTickEnabled(false) end
+    if not valid(actor.Weapon_Ranged) then actor:Equip_RangedWeapon() end
+
+    local weapon = actor.Weapon_Ranged
+    assert(valid(weapon) and same(weapon.Instigator, actor) and weapon:HasAuthority() and weapon.Ammo > 0,
+        "NPC did not equip its stock ranged weapon")
+    local muzzle = weapon.Arrow_Muzzle
+    assert(valid(muzzle) and same(muzzle:GetOwner(), weapon), "stock NPC muzzle unavailable")
+    local before = weapon.Ammo
+    weapon:FireWeapon()
+    assert(weapon.Ammo == before - 1, ("stock NPC trigger did not spend one round: %s to %s"):format(before, weapon.Ammo))
+    local position = muzzle:K2_GetComponentLocation()
+    return ("%d;%s;%.3f;%.3f;%.3f"):format(actor.Faction, weapon:GetClass():GetFullName():match(" (%S+)$"),
+        position.X, position.Y, position.Z)
+end
+
 local function run(action, actor_path)
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
@@ -50,6 +85,10 @@ local function run(action, actor_path)
     local pawn = statics:GetPlayerPawn(world, 0)
     assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn:GetWorld(), world), "local stock pawn unavailable")
     local host = pawn:HasAuthority()
+    if action == "fire-npc" then
+        assert(host, "NPC shots must start on the host")
+        return fire_stock_npc(pawn, world, actor_path)
+    end
     local class = StaticFindObject(class_path)
     local drone
     local spawn = action == "spawn" or action == "spawn-guest-target"
