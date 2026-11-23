@@ -2,7 +2,7 @@
 
 import argparse
 import asyncio
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from itertools import combinations
@@ -47,6 +47,64 @@ class PortableRelease:
     title_directory: Path
     selection: dict
     activation: dict[Path, str | None]
+
+
+@contextmanager
+def compact_crate_status_overlay(game: Path):
+    """Exercise installed memory publication without disabling any portable isolation flags."""
+    if any(part.casefold() == "steamapps" for part in game.parts):
+        raise ValueError("Use only a private portable replica for the crate status overlay")
+    script = (game / runtime.SHIPPING).parent / runtime.MOD_SCRIPTS / "main.lua"
+    manifest = game / runtime.PORTABLE_STAGE_MANIFEST
+    for file in (script, manifest):
+        install_stage._ordinary(file)
+    original_script, original_manifest = script.read_bytes(), manifest.read_bytes()
+    inventory = json.loads(original_manifest)
+    normalized_before = sha256(original_script.replace(b"\r\n", b"\n")).hexdigest()
+    if inventory.get("lua_files", {}).get("main.lua") != normalized_before:
+        raise ValueError("The portable replica must start with its exact released main.lua")
+
+    newline = "\r\n" if b"\r\n" in original_script else "\n"
+    text = original_script.decode("utf-8")
+    original_gate = ("    local compact_crates = resident_title and status_publication.installed\n"
+                     "        and not status_publication.mirror and status_publication.memory_live").replace("\n", newline)
+    original_mirror = "if status_publication.memory_live and not status_publication.mirror and not file_command then return end"
+    if text.count(original_gate) != 1 or text.count(original_mirror) != 1:
+        raise ValueError("The replica lacks the exact installed crate diagnostic gate")
+    # Keep the real HEADLESS environment and the full title/exit mirror. Only active gameplay status takes the normal memory path.
+    override = ("    local mirror_crate_status = status_publication.mirror\n"
+                '        and current_phase ~= "hosting" and current_phase ~= "connected"').replace("\n", newline)
+    patched = text.replace(original_gate, override + newline + original_gate.replace("status_publication.mirror", "mirror_crate_status"))
+    patched = patched.replace(original_mirror, original_mirror.replace("status_publication.mirror", "mirror_crate_status"))
+    normalized_after = sha256(patched.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+    inventory["lua_files"]["main.lua"] = normalized_after
+    patched_manifest = json.dumps(inventory, ensure_ascii=True, allow_nan=False) + "\n"
+    provenance = {
+        "script_source_before": normalized_before,
+        "script_source_overlay": normalized_after,
+        "manifest_before_sha256": sha256(original_manifest).hexdigest(),
+        "manifest_overlay_sha256": sha256(patched_manifest.encode("utf-8")).hexdigest(),
+    }
+    def restore(path, original, overlay):
+        install_stage._ordinary(path)
+        current = path.read_bytes()
+        if current not in (original, overlay.encode("utf-8")):
+            raise RuntimeError(f"The private crate status overlay changed unexpectedly at {path}")
+        if current != original:
+            runtime.write_text(path, original.decode("utf-8"), newline="")
+
+    try:
+        # Atomic replacement avoids editing a shared hard link in place.
+        runtime.write_text(script, patched, newline="")
+        runtime.write_text(manifest, patched_manifest, newline="")
+        yield provenance
+    finally:
+        try:
+            restore(script, original_script, patched)
+        finally:
+            restore(manifest, original_manifest, patched_manifest)
+        provenance["original_bytes_restored"] = script.read_bytes() == original_script and manifest.read_bytes() == original_manifest
+        assert provenance["original_bytes_restored"], "The private crate status overlay failed to restore its release files"
 
 
 def launch_portable(game: Path, profile: Path) -> GameProcess:
@@ -215,7 +273,7 @@ async def verify_stock_prop_grip(host: Seat, guest: Seat, pawn: str) -> dict:
     }
 
 
-async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str) -> dict:
+async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str, *, memory_positions: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_state, guest_state = await asyncio.gather(
         wait(host_run, lambda state: state.get("local_bridge") == "memory"),
@@ -226,7 +284,12 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str) -> dict:
               and name.endswith(":PersistentLevel.LootCrate_Small_BP_C_1")]
     approached = await host.bridge.command("native-loot-approach", pawn, crate, timeout=5)
     position, = [row["location"] for row in approached["pawns"].values() if row["name"] == pawn]
-    await guest.bridge.wait_for(lambda state: math.dist(state["pawns"]["local"]["location"], position) < 50)
+    if memory_positions:
+        await wait(guest_run, lambda state: (point := state.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+                   and math.dist(point, position) < 50)
+    else:
+        await guest.bridge.wait_for(lambda state: math.dist(state["pawns"]["local"]["location"], position) < 50)
+
     def save_fingerprints():
         return campaign_save_hashes(host.campaign), saved_hashes(host.profile / "Saved/SaveGames")
 
@@ -259,6 +322,71 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str) -> dict:
         "probe_request_to_press_reply_ms": round(1000 * (pressed_at - request_at), 2),
         "probe_request_to_visible_roll_ms": round(1000 * (visible_at - request_at), 2),
     }
+
+
+async def verify_compact_crate_status(host: Seat, guest: Seat, pawn: str) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    before = await wait(host_run, lambda state: state.get("local_status_source") == "memory")
+    area = before["game"]["map"]
+    crate, = [name for name in GUARANTEED_CRATES if native_loot.CRATES[name] == area
+              and name.endswith(":PersistentLevel.LootCrate_Small_BP_C_1")]
+    details_key = native_loot.CRATE_DIAGNOSTICS
+    diagnostic_key = "native_loot_crate_diagnostic"
+
+    def ordinary(frame, phase, state, *, scope=None, after=0):
+        game = frame.get("game", {})
+        return (frame.get("state") == phase and frame.get("local_bridge") == "memory"
+                and frame.get("local_status_source") == "memory" and game.get("map") == area
+                and game.get("sequence", 0) > after and
+                game.get("native_loot_crates", {}).get(crate) == {"map": area, "crate": crate, "state": state}
+                and (scope is None or game.get("pawns", {}).get("local", {}).get("name") == scope)
+                and details_key not in game and diagnostic_key not in game)
+
+    async def seat_check(seat, run, phase):
+        initial = await wait(run, lambda frame: ordinary(frame, phase, "ready"))
+        local_pawn = initial["game"]["pawns"]["local"]["name"]
+        tsv = seat.bridge.directory / "status.tsv"
+        # Explicit file commands still refresh their real fallback status TSV.
+        file_frame = await seat.bridge.command(native_loot.CRATE_DIAGNOSTIC, area, local_pawn, crate, timeout=5)
+        raw = tsv.read_bytes()
+        raw_rows = [line for line in raw.splitlines() if line.startswith(b"native-loot-crate-diagnostic\t")]
+        file_row = file_frame[details_key][crate]
+        assert len(raw_rows) == len(file_frame[details_key]) > 0
+        assert file_frame["pawns"]["local"]["name"] == local_pawn
+        assert file_frame["native_loot_crates"][crate]["state"] == "ready"
+        assert (file_row["map"], file_row["crate"], file_row["phase"], file_row["scope"], file_row["looted"]) == (
+            area, crate, phase, "active", False), file_row
+
+        prior = await wait(run, lambda frame: ordinary(frame, phase, "ready", scope=local_pawn, after=file_frame["sequence"]))
+        result = await submit(run, native_loot.CRATE_DIAGNOSTIC, target=crate)
+        assert result["ok"] and result[diagnostic_key] == file_row, result
+        invalid_area = await submit(run, native_loot.CRATE_DIAGNOSTIC, target=native_loot.CRATE)
+        assert not invalid_area["ok"] and "exact authored crate" in invalid_area["error"], invalid_area
+        later = await wait(run, lambda frame: ordinary(frame, phase, "ready", scope=local_pawn,
+                                                      after=prior["game"]["sequence"]))
+        assert tsv.read_bytes() == raw, "A resident memory query unexpectedly refreshed its fallback TSV"
+        assert (prior["generation"], prior["zone_epoch"]) == (later["generation"], later["zone_epoch"])
+        return {"pawn": local_pawn, "phase": phase, "sequence_before": prior["game"]["sequence"],
+                "sequence_after": later["game"]["sequence"], "ready_before_and_after": True,
+                "generation": later["generation"], "zone_epoch": later["zone_epoch"],
+                "host_session": later.get("host_session"),
+                "fallback_tsv": {"sha256": sha256(raw).hexdigest(), "bytes": len(raw), "diagnostic_rows": len(raw_rows),
+                                 "sequence": file_frame["sequence"], "unchanged_across_memory_query": True},
+                "memory_detail_fields_absent_before_and_after": True, "result": result[diagnostic_key],
+                "different_map_target_refused": True}
+
+    inspections = await asyncio.gather(seat_check(host, host_run, "hosting"), seat_check(guest, guest_run, "connected"))
+    assert inspections[0]["generation"] == inspections[1]["host_session"]
+    assert inspections[0]["zone_epoch"] == inspections[1]["zone_epoch"]
+    stock_open = await verify_stock_crate_ring(host, guest, pawn, memory_positions=True)
+    assert stock_open["stock_crate"] == crate and stock_open["roll_count"] == 1
+    exhausted = await asyncio.gather(
+        wait(host_run, lambda frame: ordinary(frame, "hosting", "exhausted", scope=inspections[0]["pawn"])),
+        wait(guest_run, lambda frame: ordinary(frame, "connected", "exhausted", scope=inspections[1]["pawn"])),
+    )
+    for inspection, observed in zip(inspections, exhausted, strict=True):
+        inspection["exhausted_sequence"] = observed["game"]["sequence"]
+    return {"stock_crate": crate, "host": inspections[0], "guest": inspections[1], "stock_open": stock_open}
 
 
 async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: bool = False,
@@ -795,7 +923,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
                  stock_use: bool = False, memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
-                 guest_world_start_travel: bool = False, guest_ui_memory: bool = False) -> None:
+                 guest_world_start_travel: bool = False, guest_ui_memory: bool = False,
+                 compact_crate_status: bool = False) -> None:
     guest_world_start = guest_world_start or guest_world_start_travel
     container_nearby = container_nearby or guest_ui_memory
     roots = (work, first_game, second_game, original)
@@ -835,7 +964,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_prop_grip:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableLanternProbe",
                                                  fixture="portable_lantern_probe.lua"))
-        if stock_crate_ring:
+        if compact_crate_status:
+            proof["crate_status_overlay"] = {str(game): probes.enter_context(compact_crate_status_overlay(game)) for game in games}
+        if stock_crate_ring or compact_crate_status:
             probes.enter_context(installed_probe(second_game, mod="SilverfishPortableCrateProbe",
                                                  fixture="portable_crate_input_probe.lua"))
         if stock_use or stock_drop or stock_split or stock_equip or stock_nearby or container_nearby:
@@ -910,6 +1041,22 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                       wait_status=wait_resident_status, **exit_options))
         elif stock_prop_grip:
             proof["sessions"].append(await start_pair(first, second, "Lantern scout", on_join=verify_stock_prop_grip))
+        elif compact_crate_status:
+            async def refresh_host_pause(_guest, _started):
+                # The generic title helper reads Pause readiness over its file bridge.
+                armed = await wait(first.campaign / "run",
+                                   lambda frame: frame.get("game", {}).get("stock_pause_exit", {}).get("state") == "armed")
+                game = armed["game"]
+                crate = proof["crate_status_trial"]["stock_crate"]
+                await first.bridge.command(native_loot.CRATE_DIAGNOSTIC, game["map"], game["pawns"]["local"]["name"], crate)
+
+            async def check_crates(host, guest, pawn):
+                result = await verify_compact_crate_status(host, guest, pawn)
+                proof["crate_status_trial"] = result
+                return {"compact_crate_status": True}
+
+            proof["sessions"].append(await start_pair(first, second, "Crate diagnostics scout", on_join=check_crates,
+                                                      after_reconnect=refresh_host_pause))
         elif stock_crate_ring:
             proof["sessions"].append(await start_pair(first, second, "Crate scout", on_join=verify_stock_crate_ring))
         elif guest_ui_memory:
@@ -936,9 +1083,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             assert observed == hashes and await stock_profile(seat.bridge) == preferences
             assert seat.bridge.process.poll() is None
         proof.update(verified=True, solo_slots_and_settings_preserved=True,
-                     both_titles_reused=not (stock_prop_grip or stock_crate_ring or guest_world_start or guest_ui_memory),
+                     both_titles_reused=not (stock_prop_grip or stock_crate_ring or guest_world_start or guest_ui_memory or compact_crate_status),
                      launched_without_coop_environment=True)
     except Exception as error:
+        if compact_crate_status:
+            proof["crate_status_failure"] = str(error)
         if guest_world_start_travel:
             proof["stock_travel_failure"] = str(error)
         raise
@@ -947,7 +1096,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         for _, process in reversed(processes):
             if process.poll() is None:
                 await runtime.stop_game(process)
-        if stock_prop_grip or stock_crate_ring or guest_world_start:
+        if stock_prop_grip or stock_crate_ring or guest_world_start or compact_crate_status:
             proof["processes_closed"] = len(processes) == 2 and all(process.poll() is not None for _, process in processes)
             proof["verified"] &= proof["processes_closed"]
         probes.close()
@@ -983,6 +1132,8 @@ if __name__ == "__main__":
                         help="verify the resident guest UI refresh on one stock Nearby Items container pickup")
     parser.add_argument("--stock-prop-grip", action="store_true", help="verify default guest carry filtering in one portable lantern session")
     parser.add_argument("--stock-crate-ring", action="store_true", help="verify one guest stock F crate open through the in-process ring")
+    parser.add_argument("--compact-crate-status", action="store_true",
+                        help="test normal crate status routing with one private muted portable pair and a temporary Lua overlay")
     parser.add_argument("--guest-world-start", action="store_true",
                         help="verify first stock guest map startup and short reconnect in one portable session")
     parser.add_argument("--guest-world-start-travel", action="store_true",
@@ -990,6 +1141,11 @@ if __name__ == "__main__":
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
+    if args.compact_crate_status and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
+                                          args.projected_nearby, args.container_nearby, args.stock_use, args.stock_prop_grip,
+                                          args.stock_crate_ring, args.guest_world_start, args.guest_world_start_travel,
+                                          args.guest_ui_memory, args.steam_cloud, args.second_legacy_work)):
+        parser.error("Use --compact-crate-status with two fresh private replicas and no other gameplay fixtures")
     if args.guest_ui_memory and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
                                      args.projected_nearby, args.container_nearby, args.stock_use, args.stock_prop_grip,
                                      args.stock_crate_ring, args.guest_world_start, args.guest_world_start_travel,
@@ -1019,4 +1175,5 @@ if __name__ == "__main__":
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
                        stock_use=args.stock_use, memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
-                       guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory))
+                       guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
+                       compact_crate_status=args.compact_crate_status))
