@@ -88,6 +88,8 @@ namespace
                                     false, 0, 0, 0.0, false, nullptr, false};
     constexpr Equipment crowbar{"crowbar", STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C"),
                                    false, 0, 0, 0.0, false, nullptr, false};
+    constexpr Equipment spade{"spade", STR("/Game/Classes/Equipment/MeleeWep_Spade.MeleeWep_Spade_C"),
+                              false, 0, 0, 0.0, false, nullptr, false};
 
     template <typename T>
     T* find(const U::TCHAR* path)
@@ -382,7 +384,7 @@ namespace
         if (index < 0 || index >= items.Num() || items.Num() > 4096) return false;
         const auto* row = items.GetRawPtr(index);
         if (schema.row_class(row) != item) return false;
-        if (current.item == &old_pipe || current.item == &crowbar)
+        if (current.item == &old_pipe || current.item == &crowbar || current.item == &spade)
         {
             auto* amount = field<U::FIntProperty>(held, STR("Ammo"));
             auto* held_by_player = field<U::FBoolProperty>(held, STR("HeldByPlayer"));
@@ -655,7 +657,7 @@ namespace
         if (!next.started.function.Get()) return "stock_guest_primary_wrappers_unavailable";
         if (observed) return {};
         next.completed = bind_wrapper(pawn_type, action, completed_path, 16);
-        if (!next.seat.host && next.item != &old_pipe && next.item != &blowtorch && next.item != &camera)
+        if (!next.seat.host && next.item != &old_pipe && next.item != &blowtorch && next.item != &camera && next.item != &spade)
         {
             if (auto* aim = find<U::UObject>(aim_action_path); live(aim) && aim->GetClassPrivate() == action_type)
             {
@@ -893,6 +895,7 @@ namespace
         else if (kind == old_pipe.kind) next.item = &old_pipe;
         else if (kind == blowtorch.kind) next.item = &blowtorch;
         else if (!host && kind == crowbar.kind) next.item = &crowbar;
+        else if (!host && kind == spade.kind) next.item = &spade;
         else
             for (const auto& candidate : silverfish::guest_weapon_profiles::firearms)
                 if (candidate.kind == kind) next.item = &candidate;

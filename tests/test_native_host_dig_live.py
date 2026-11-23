@@ -31,6 +31,36 @@ def custody(state):
     return row
 
 
+class GuestDigTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.epoch = "d" * 32
+        self.operation = "e" * 32
+        self.target = f"{self.epoch}@{SPADE}"
+        party_state = party.new_party()
+        party_state["players"][GUEST_ID] = {"downed": False}
+        source = {"map": CROSSROADS, "state": "hosting", "native_guest_equipped_weapons": {
+            PAWN: {"kind": dig.GUEST_KIND, "guid": SPADE}}}
+        self.host = SimpleNamespace(zone_epoch=self.epoch, native_host_dig_live=True, native_guest_controls=True,
+                                    native_checkpoint_unsafe=False, stopping=False, transitioning=False,
+                                    last_seen=time.monotonic(), party=party_state, last_game=source,
+                                    native_recipients=lambda: {GUEST_ID: {"pawn": PAWN, "connected": True}})
+        self.bridge = SimpleNamespace(command=AsyncMock(return_value={**source, "ack": {
+            "message": "stock_guest_dig_dispatched"}}))
+
+    async def test_guest_dig_replays_the_same_dispatch_without_calling_stock_again(self):
+        result = await dig.guest_dig(self.host, self.bridge, GUEST_ID, self.target, self.operation)
+        self.assertEqual(result[dig.GUEST_RESULT], {"map": CROSSROADS, "pawn": PAWN, "guid": SPADE, "state": "dispatched"})
+        self.assertEqual(await dig.guest_dig(self.host, self.bridge, GUEST_ID, self.target, self.operation), result)
+        self.bridge.command.assert_awaited_once_with(dig.GUEST_ACTION, PAWN, SPADE, timeout=3)
+
+    async def test_stale_visit_and_unowned_spade_never_dispatch(self):
+        with self.assertRaisesRegex(party.RuleError, "native_guest_melee_exact_epoch_and_guid_required"):
+            await dig.guest_dig(self.host, self.bridge, GUEST_ID, f"{'f' * 32}@{SPADE}", self.operation)
+        with self.assertRaisesRegex(party.RuleError, "stock_guest_dig_equipment_changed"):
+            await dig.guest_dig(self.host, self.bridge, GUEST_ID, f"{self.epoch}@{PACKAGE}", self.operation)
+        self.bridge.command.assert_not_awaited()
+
+
 class DigReportTests(unittest.TestCase):
     def test_diagnostic_belongs_to_the_current_listen_host(self):
         fields = [dig.DIAGNOSTIC, CROSSROADS, PAWN, "qualified", "fresh", "inactive_interned", "armed", "ready"]

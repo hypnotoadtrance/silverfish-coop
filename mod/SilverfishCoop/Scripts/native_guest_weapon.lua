@@ -12,6 +12,7 @@ local spratt_fixture = fixtures and headless and require("native_spratt_fixture"
 local camera_path = "/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C"
 local blowtorch_path = "/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"
 local crowbar_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C"
+local spade_path = "/Game/Classes/Equipment/MeleeWep_Spade.MeleeWep_Spade_C"
 local pry_tool_paths = {blowtorch = blowtorch_path, crowbar = crowbar_path}
 local flare_fixture_paths = {
     ["stock-flare"] = "/Game/Classes/Equipment/Eqp_Flare.Eqp_Flare_C",
@@ -64,7 +65,7 @@ local function equipped_guid(pawn, save, world, area)
     if not guid then return end
     local class_name = held_class:GetFullName():match("^%S+ (%S+)$")
     if world and (class_name == blowtorch_path or class_name == crowbar_path or (class_name == camera_path and area == camera_map)
-        or class_name == old_pipe_path)
+        or class_name == old_pipe_path or class_name == spade_path)
         and held:HasAuthority() and not held:IsActorBeingDestroyed()
         and same(held:GetWorld(), world) and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
         and same(held.User, pawn) and held.HeldByPlayer == true and pawn.IsWeaponBlocked == false then
@@ -73,6 +74,9 @@ local function equipped_guid(pawn, save, world, area)
             and held.Ammo == row[ammo_field] then return guid, "blowtorch" end
         if (class_name == old_pipe_path or class_name == crowbar_path) and row[ammo_field] == -1 and held.Ammo == -1 then
             return guid, class_name == crowbar_path and "crowbar" or "old-pipe"
+        end
+        if class_name == spade_path and row[ammo_field] == -1 and held.Ammo == -1 and same(held.Player_Ref, pawn) then
+            return guid, "spade"
         end
     end
     return guid, weapon_profiles.kinds[class_name], row

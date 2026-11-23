@@ -419,6 +419,48 @@ namespace
     bool ordinary{};
     std::array ordinary_callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
 
+    int start_guest_dig(const Lua& lua)
+    {
+        if (!ready() || !ordinary || lua.get_stack_size() != 3 || !lua.is_string(1) || !lua.is_integer(2) || !lua.is_string(3))
+            return result(lua, false, "stock_guest_dig_arguments");
+        const std::string path{lua.get_string()};
+        const auto save_address = lua.get_integer();
+        const std::string expected{lua.get_string()};
+        if (!path.starts_with("/Game/Classes/Maps/") || path.size() > 512 || save_address <= 0 || expected.size() != 32)
+            return result(lua, false, "stock_guest_dig_arguments");
+
+        auto* pawn = find<U::AActor>(RC::to_wstring(path).c_str());
+        if (!exact(pawn, pawn_class) || !authority(pawn) || !boolean(pawn, STR("Dead"), false) ||
+            !boolean(pawn, STR("IsWeaponBlocked"), false) || !boolean(pawn, STR("UsingItem"), false) ||
+            object(pawn, STR("HeldObject"))) return result(lua, false, "stock_guest_dig_pawn_unavailable");
+        auto* world = pawn->GetWorld();
+        auto* instance = object(world, STR("OwningGameInstance"));
+        auto* driver = object(world, STR("NetDriver"));
+        auto* save = object(pawn, STR("Save"));
+        auto* canonical = object(instance, STR("SaveSlot_Ref"));
+        if (!live(world) || !live(driver) || object(driver, STR("World")) != world ||
+            !field<U::FObjectProperty>(driver, STR("ServerConnection")) || object(driver, STR("ServerConnection")) ||
+            address(save) != static_cast<Address>(save_address) ||
+            !silverfish::native_guest_regen::qualifies_detached_guest(pawn, save, canonical))
+            return result(lua, false, "stock_guest_dig_owner_unqualified");
+
+        auto* spade = object(pawn, STR("EquipedItem"));
+        std::string guid;
+        if (!exact(spade, spade_class) || !authority(spade) || static_cast<U::AActor*>(spade)->GetWorld() != world ||
+            object(spade, STR("Owner")) != pawn || object(spade, STR("Instigator")) != pawn ||
+            object(spade, STR("Player_Ref")) != pawn || object(spade, STR("User")) != pawn ||
+            !boolean(spade, STR("HeldByPlayer"), true) || !loot_escrow::stock_spade_guid(save, guid) || guid != expected)
+            return result(lua, false, "stock_guest_dig_equipment_changed");
+
+        auto* primary = find<U::UFunction>(spade_primary);
+        if (!primary || primary->GetOuterPrivate() != spade->GetClassPrivate() || primary->GetNumParms() != 0 ||
+            primary->GetParmsSize() != 0 || primary->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net))
+            return result(lua, false, "stock_guest_dig_primary_unavailable");
+        std::uint8_t args{};
+        spade->ProcessEvent(primary, &args);
+        return result(lua, true, "stock_guest_dig_dispatched");
+    }
+
     bool live_context(const Context& ctx)
     {
         return ctx.world && live_dig.world.Get() == ctx.world && live_dig.pawn.Get() == ctx.pawn &&
@@ -1355,6 +1397,7 @@ namespace silverfish::native_host_dig
         }
         if (ordinary)
         {
+            lua.register_function("SilverfishDispatchNativeGuestDig", start_guest_dig);
             lua.register_function("SilverfishRenewNativeHostDigScope", renew_live);
             lua.register_function("SilverfishReadNativeHostDigScope", read_live);
             lua.register_function("SilverfishCaptureNativeHostDigEscrow", capture_live_escrow);

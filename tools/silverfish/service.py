@@ -104,7 +104,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_prop_carry.ACTION, native_flare.ACTION,
                         native_lantern.EXTINGUISH,
                         *native_guest_weapon.GUEST_ACTIONS, native_guest_weapon.SELECT_EQUIPMENT,
-                        *native_guest_consumable.RESULT, native_guest_melee.SWING,
+                        *native_guest_consumable.RESULT, native_guest_melee.SWING, native_host_dig_live.GUEST_ACTION,
                         native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION)
 TRANSPORT_FIXTURES = ("stardust", "fruiting-stardust", "green", "blue", "red", "gold", "purple", "teleport-cube")
 CUBE_RESULTS = {"inspect": ("present", "absent"), "debit": ("removed", "absent"),
@@ -1997,6 +1997,9 @@ class Host:
                 gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=self.last_game["map"])
             if self.native_guest_controls and native_guest_melee.is_equipped(equipped, self.last_game["map"], equipped.get("guid")):
                 gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=self.last_game["map"])
+            if (self.native_guest_controls and self.native_host_dig_live and kind == native_host_dig_live.GUEST_KIND
+                    and native_gold.valid_guid(equipped.get("guid"))):
+                gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=self.last_game["map"])
             if (native_gold.valid_guid(equipped.get("guid")) and kind == "camera" and self.last_game["map"] == DEAD_BRIDGE
                     and self.party.get("native_quests", {}).get(native_turret_photo.QUEST_ID, {}).get("step") in (1, 2)):
                 gameplay["native_equipped_weapon"] = dict(equipped, pawn=pawn, map=DEAD_BRIDGE, quest=native_turret_photo.QUEST_ID)
@@ -2188,6 +2191,8 @@ class Host:
                 guid = native_guest_melee.current_guid(target, self.zone_epoch)
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                     result = await native_guest_melee.perform(self, bridge, action, character, guid, request["operation_id"])
+            elif action == native_host_dig_live.GUEST_ACTION:
+                result = await native_host_dig_live.guest_dig(self, bridge, character, target, request["operation_id"])
             elif action in (native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION):
                 result = await native_guest_armor.perform(self, bridge, character, request["operation_id"], action, target)
             elif action in native_guest_consumable.RESULT:
@@ -5391,7 +5396,7 @@ class Client:
         elif ((action == native_loose_pickup.CLAIM and native_loose_pickup.target_path(target))
               or (action == native_mushrooms.CLAIM and isinstance(target, str) and party.REQUEST_ID.fullmatch(target))):
             target = f"{target}@{self.zone_epoch}"
-        elif action == native_guest_melee.SWING:
+        elif action in (native_guest_melee.SWING, native_host_dig_live.GUEST_ACTION):
             target = native_guest_melee.request_target(target, self.zone_epoch)
         elif (action in native_loot.PRY_TOOL_ACTIONS.values() or action == native_stock_door.ACTION
               or action in native_stock_door.PRY_ACTIONS.values()):
@@ -5466,7 +5471,8 @@ class Client:
         eligible = (active and not self.stopping and self.host_session and self.zone_epoch and now - self.gameplay_seen < 2
                     and member.get("character_id") == self.invite["character_id"] and member.get("downed") is False
                     and self.gameplay.get("wipe") is None and area == self.last_game.get("map") and pawn and host_pawn
-                    and native_gold.valid_guid(guid) and (camera or melee or kind in native_loot.PRY_TOOL_ACTIONS
+                    and native_gold.valid_guid(guid) and (camera or melee or kind == native_host_dig_live.GUEST_KIND
+                                                        or kind in native_loot.PRY_TOOL_ACTIONS
                                                         or kind in native_guest_weapon.FIRE_CLASSES))
         scope = (area, pawn, guid, kind) if eligible else None
         if (scope and now >= self.next_primary_renewal) or (not scope and self.primary_scope):
@@ -5498,7 +5504,10 @@ class Client:
                         self.primary_magazine = magazine
                     except (OSError, RuntimeError) as error:
                         self.control.event("native_guest_magazine_projection_deferred", reason=str(error))
-        for sequence, event_area, event_pawn, event_guid, event_kind, *extra in self.bridge.native_primary_input_requests():
+        inputs = self.bridge.native_primary_input_requests()
+        if shovel := self.last_game.get(native_host_dig_live.GUEST_INTENT):
+            inputs.append(shovel)
+        for sequence, event_area, event_pawn, event_guid, event_kind, *extra in sorted(inputs, key=lambda edge: edge[0]):
             if sequence <= self.last_primary_intent:
                 continue
             self.last_primary_intent = sequence
@@ -5507,6 +5516,8 @@ class Client:
             operation = uuid.uuid5(self.bridge.input_namespace, f"{self.host_session}:{self.zone_epoch}:{event_pawn}:primary:{sequence}").hex
             if event_kind == native_guest_melee.KIND:
                 action, event = native_guest_melee.SWING, "native_guest_melee_input"
+            elif event_kind == native_host_dig_live.GUEST_KIND:
+                action, event = native_host_dig_live.GUEST_ACTION, "native_guest_dig_input"
             elif event_kind == "camera":
                 action, event = native_turret_photo.SHUTTER, "native_guest_camera_shutter"
             elif event_kind in native_loot.PRY_TOOL_ACTIONS:

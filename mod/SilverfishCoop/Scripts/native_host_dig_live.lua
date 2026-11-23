@@ -166,6 +166,19 @@ end
 
 function dig.command(fields, state, phase)
     if fields[2] == "native-missing-contact-handoff" then return handoff(fields, state, phase) end
+    if fields[2] == "native-guest-dig" then
+        local name, identity = fields[3], fields[4]
+        require_true(enabled and phase == "hosting" and #fields == 4 and guid(identity) and
+            type(SilverfishDispatchNativeGuestDig) == "function", "stock_guest_dig_unavailable")
+        local ok, pawn, save = pcall(guest_save.exact_item_context, state, phase, name)
+        require_true(ok and valid(pawn) and valid(save) and players.is_standing_guest(pawn, name),
+            "stock_guest_dig_owner_unqualified")
+        local path = pawn:GetFullName():match("^Player_FP_C (%S+)$")
+        require_true(path, "stock_guest_dig_owner_unqualified")
+        local accepted, status = SilverfishDispatchNativeGuestDig(path, save:GetAddress(), identity)
+        require_true(accepted == true, status or "stock_guest_dig_unavailable")
+        return status
+    end
     local operation = commands[fields[2]]
     if not operation then return end
     local ctx = require_true(scope(state, phase), "stock_live_dig_owner_unqualified")

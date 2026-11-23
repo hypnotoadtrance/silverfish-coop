@@ -1,4 +1,4 @@
-"""Commit exact stock Missing Contact package custody with the native host save."""
+"""Use the stock shovel and preserve the Missing Contact package in the host save."""
 
 import asyncio
 import math
@@ -17,6 +17,10 @@ DIAGNOSTIC = TAG + "-diagnostic"
 DIAGNOSTIC_KEY = KEY + "_diagnostic"
 CUSTODY = "native_host_dig_custody"
 HANDOFF = "native-missing-contact-handoff"
+GUEST_ACTION = "native-guest-dig"
+GUEST_KIND = "spade"
+GUEST_INTENT = "native_guest_spade_intent"
+GUEST_RESULT = "native_guest_dig"
 HEARTBEAT = TAG + "-heartbeat"
 WAITING = "stock_live_dig_checkpoint_pending"
 _HANDOFF_MAPS = {BLACK_MARKET, CROSSROADS}
@@ -27,6 +31,48 @@ _FRAME_SLOT = re.compile(r"SFCoop_[0-9a-f]{32}\Z")
 _FAULT = re.compile(r"stock_[a-z0-9_]{1,80}\Z")
 _STATUS = re.compile(r"[a-z][a-z0-9_]{0,80}|-")
 _CUSTODY_FIELDS = {"state", "map", "source", "flag", "flag_value", "spade_guid", "contact", "material", "package_guid"}
+
+
+async def guest_dig(host, bridge, character, target, operation):
+    from . import native_guest_melee
+
+    guid = native_guest_melee.current_guid(target, host.zone_epoch)
+    if not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
+        raise party.RuleError("stock_guest_dig_operation_unqualified")
+    game = host.last_game
+    area = game.get("map")
+    owner = host.native_recipients().get(character, {})
+    pawn = owner.get("pawn") if owner.get("connected") else None
+    player = host.party["players"].get(character, {})
+    if (not host.native_host_dig_live or not host.native_guest_controls or not native_guest_melee.ordinary_map(area)
+            or game.get("state") != "hosting" or host.stopping or host.transitioning or host.native_checkpoint_unsafe
+            or time.monotonic() - host.last_seen > 3 or not pawn or player.get("downed") is not False
+            or character in host.party["pending_spawns"] or host.party["wipe"] is not None):
+        raise party.RuleError("stock_guest_dig_unavailable")
+    fingerprint = [GUEST_ACTION, target, None]
+    receipts = host.party["receipts"].setdefault(character, [])
+    for receipt in receipts:
+        if receipt["id"] == operation:
+            if receipt["request"] != fingerprint:
+                raise party.RuleError("operation_id_conflict")
+            return receipt["result"]
+    equipped = game.get("native_guest_equipped_weapons", {}).get(pawn, {})
+    if (equipped.get("kind"), equipped.get("guid")) != (GUEST_KIND, guid):
+        raise party.RuleError("stock_guest_dig_equipment_changed")
+    try:
+        snapshot = await bridge.command(GUEST_ACTION, pawn, guid, timeout=3)
+    except RuntimeError as error:
+        if str(error).startswith("stock_guest_dig_"):
+            raise party.RuleError(str(error)) from error
+        raise
+    if (snapshot.get("map"), snapshot.get("state"), snapshot.get("ack", {}).get("message")) != (
+            area, "hosting", "stock_guest_dig_dispatched"):
+        raise RuntimeError("The stock guest shovel dispatch did not verify")
+    host.last_game, host.last_seen = snapshot, time.monotonic()
+    result = {GUEST_RESULT: {"map": area, "pawn": pawn, "guid": guid, "state": "dispatched"}}
+    receipts.append({"id": operation, "request": fingerprint, "result": result})
+    del receipts[:-party.RECENT_ACTIONS]
+    return result
 
 
 def _valid_contact(contact, material) -> bool:
