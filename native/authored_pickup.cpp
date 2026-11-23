@@ -1190,6 +1190,18 @@ namespace
         return result;
     }
 
+    U::UObject* local_pickup_pawn(Address pointer, bool host)
+    {
+        // Loose pickup discovery already qualified this local seat. Callers still check their live scope.
+        auto* type = find<U::UClass>(pawn_path);
+        auto* pawn = loose_pawn.Get();
+        auto* world = loose_world.Get();
+        if (loose_host == host && address(pawn) == pointer && live(pawn) && live(world) &&
+            pawn->GetClassPrivate() == type && static_cast<U::AActor*>(pawn)->GetWorld() == world)
+            return pawn;
+        return live_address(pointer, type);
+    }
+
     bool authorized(const Scope& scope, U::UObject* pawn, U::UObject* target)
     {
         if (!scope.host || !available(scope) || !exact(pawn, pawn_path) || role(pawn) != 3 ||
@@ -2189,7 +2201,7 @@ namespace
         // Stock permanent actors can be absent on revisits. Skip the pawn scan in that case.
         if (profile.stock_cash && !live(actor))
             return result(lua, false, "authored_pickup_stock_actor_identity_unqualified");
-        auto* pawn = live_address(ptr, find<U::UClass>(pawn_path));
+        auto* pawn = local_pickup_pawn(ptr, host);
         auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
         if (!live(world) || world->GetPathName() != profile.world)
             return result(lua, false, "authored_pickup_source_world_unavailable");
@@ -2261,7 +2273,7 @@ namespace
 
     Scope dead_drop_seat(Address address_value, bool host)
     {
-        auto* pawn = live_address(address_value, find<U::UClass>(pawn_path));
+        auto* pawn = local_pickup_pawn(address_value, host);
         auto* world = pawn ? static_cast<U::AActor*>(pawn)->GetWorld() : nullptr;
         auto* actor = find<U::AActor>(dead_drop_profile.actor);
         Scope candidate{world, pawn, actor, source_box(actor), object(pawn, STR("Controller")),
