@@ -47,8 +47,18 @@ namespace
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto smg_path = STR("/Game/Classes/Weapons/Wep_SMG_UBGL.Wep_SMG_UBGL_C");
     constexpr auto pistol_path = STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C");
-    constexpr auto nagant_path = STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C");
-    constexpr auto nagant_primary_path = STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C:Use_Item_Primary");
+    struct BoltProfile
+    {
+        const Unreal::TCHAR* path;
+        const Unreal::TCHAR* primary;
+        double fire_rate;
+    };
+    constexpr BoltProfile stock_bolts[]{
+        {STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C"),
+         STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C:Use_Item_Primary"), 1.0},
+        {STR("/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C"),
+         STR("/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C:Use_Item_Primary"), 1.5},
+    };
     constexpr auto rifle_fmj_path = STR("/Game/Classes/Items/Ammo_FullRifle_BP.Ammo_FullRifle_BP_C");
     constexpr auto rifle_incendiary_path = STR("/Game/Classes/Items/Ammo_30-06_Incendiary_BP.Ammo_30-06_Incendiary_BP_C");
     constexpr auto rifle_fmj_projectile = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Rifle_Heavy.Projectile_Rifle_Heavy_C");
@@ -56,7 +66,7 @@ namespace
         STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_30-06_Incendiary.Projectile_30-06_Incendiary_C");
     constexpr auto ammo_table_path = STR("/Game/Classes/Libraries/DataTables/AmmoTypes_DT.AmmoTypes_DT");
     constexpr auto change_ammo_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:ChangeAmmoType");
-    constexpr int nagant_magazine = 5;
+    constexpr int bolt_magazine = 5;
     constexpr int rifle_caliber = 3;
     constexpr auto camera_path = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C");
     constexpr auto blowtorch_path = STR("/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C");
@@ -463,16 +473,24 @@ namespace
             ? "" : "guest_weapon_guid_conflict";
     }
 
-    bool nagant_shape(Unreal::UObject* weapon)
+    const BoltProfile* stock_bolt(Unreal::UClass* weapon)
+    {
+        if (!weapon) return nullptr;
+        for (const auto& profile : stock_bolts)
+            if (weapon == find<Unreal::UClass>(profile.path)) return &profile;
+        return nullptr;
+    }
+
+    bool stock_bolt_shape(Unreal::UObject* weapon, const BoltProfile& profile)
     {
         auto* magazine = field<Unreal::FIntProperty>(weapon, STR("MagSize"));
         auto* caliber = field<Unreal::FByteProperty>(weapon, STR("Caliber"));
         auto* cost = field<Unreal::FIntProperty>(weapon, STR("AmmoCost_PerShot"));
         auto* cycle = field<Unreal::FDoubleProperty>(weapon, STR("FireRate"));
-        return magazine && magazine->GetPropertyValueInContainer(weapon) == nagant_magazine &&
+        return magazine && magazine->GetPropertyValueInContainer(weapon) == bolt_magazine &&
             caliber && caliber->GetPropertyValueInContainer(weapon) == rifle_caliber &&
             cost && cost->GetPropertyValueInContainer(weapon) == 1 &&
-            cycle && cycle->GetPropertyValueInContainer(weapon) == 1.0 &&
+            cycle && cycle->GetPropertyValueInContainer(weapon) == profile.fire_rate &&
             boolean(weapon, STR("Action_OnRelease"), true) && boolean(weapon, STR("SingleReload"), true) &&
             boolean(weapon, STR("UseEatherAsAmmo"), false);
     }
@@ -575,10 +593,10 @@ namespace
             return defaults && defaults->GetClassPrivate() == weapon && defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) &&
                 stock_magazine_shape(defaults, *profile) ? weapon : nullptr;
         }
-        if (weapon != find<Unreal::UClass>(nagant_path)) return nullptr;
-        auto* defaults = weapon->GetClassDefaultObject().Get();
+        const auto* bolt = stock_bolt(weapon);
+        auto* defaults = bolt ? weapon->GetClassDefaultObject().Get() : nullptr;
         return defaults && defaults->GetClassPrivate() == weapon && defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) &&
-            nagant_shape(defaults) ? weapon : nullptr;
+            stock_bolt_shape(defaults, *bolt) ? weapon : nullptr;
     }
 
     Unreal::UClass* qualified_camera(Unreal::UObject* item_class)
@@ -884,7 +902,7 @@ namespace
         {
             auto* defaults = context.weapon->GetClassDefaultObject().Get();
             auto* magazine = field<Unreal::FIntProperty>(defaults, STR("MagSize"));
-            const auto minimum = (context.weapon == find<Unreal::UClass>(nagant_path) || magazine_profile) ? 0 : 1;
+            const auto minimum = (stock_bolt(context.weapon) || magazine_profile) ? 0 : 1;
             if (!magazine || loaded < minimum || loaded > magazine->GetPropertyValueInContainer(defaults))
                 return result(lua, false, "guest_weapon_magazine_unqualified");
         }
@@ -1010,7 +1028,7 @@ namespace
             (profile == &profiles::nine_mm_ball || ammo_item_row_matches(ammo, *profile));
     }
 
-    bool nagant_round(Unreal::UObject* actor, Unreal::UClass* ammo, Unreal::UClass* projectile)
+    bool bolt_round(Unreal::UObject* actor, Unreal::UClass* ammo, Unreal::UClass* projectile)
     {
         if (!ammo || !projectile) return false;
         auto* data = field<Unreal::FStructProperty>(actor, STR("AmmoType"));
@@ -1078,9 +1096,9 @@ namespace
         if (!actor) return report(false, "guest_weapon_actor_not_equipped");
 
         const Unreal::FName use_name{STR("Use_Item_Primary")};
-        const bool nagant = context.weapon == find<Unreal::UClass>(nagant_path);
+        const auto* bolt = stock_bolt(context.weapon);
         const auto* stock_profile = stock_magazine(context.weapon);
-        auto* action = find<Unreal::UFunction>(nagant ? nagant_primary_path : primary_path);
+        auto* action = find<Unreal::UFunction>(bolt ? bolt->primary : primary_path);
         struct Parameters { bool held{}; double variance{}; } parameters;
         auto* held = input<Unreal::FBoolProperty>(action, STR("Held"), offsetof(Parameters, held));
         auto* variance = input<Unreal::FDoubleProperty>(action, STR("VarianceScaler"), offsetof(Parameters, variance));
@@ -1088,14 +1106,14 @@ namespace
         if (!held || !variance || !proxy || object(actor, STR("InputIntercept")) ||
             actor->GetFunctionByNameInChain(use_name) != action || action->GetNumParms() != 2 ||
             action->GetReturnProperty() || action->GetParmsSize() != sizeof(Parameters) ||
-            (nagant && (action->GetOuterPrivate() != context.weapon ||
+            (bolt && (action->GetOuterPrivate() != context.weapon ||
                 action->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net))))
             return report(false, "stock_guest_weapon_primary_schema_unavailable");
 
-        if (!boolean(actor, STR("Action_OnRelease"), nagant) || (nagant && (disarm || !nagant_shape(actor))) ||
+        if (!boolean(actor, STR("Action_OnRelease"), bolt != nullptr) || (bolt && (disarm || !stock_bolt_shape(actor, *bolt))) ||
             (stock_profile && !stock_magazine_shape(actor, *stock_profile)))
             return report(false, "guest_weapon_release_mode_unqualified");
-        if (nagant && (!field<Unreal::FObjectProperty>(context.pawn, STR("OffhandEquipment")) ||
+        if (bolt && (!field<Unreal::FObjectProperty>(context.pawn, STR("OffhandEquipment")) ||
             live(object(context.pawn, STR("OffhandEquipment"))) || !boolean(actor, STR("ReloadInput"), false) ||
             !boolean(actor, STR("IsSeerOpen"), false)))
             return report(false, "guest_weapon_primary_ineligible");
@@ -1115,10 +1133,10 @@ namespace
         const auto stored = inventory.ammo->GetPropertyValueInContainer(inventory.item);
         const auto expected_projectiles = stock_profile ? stock_profile->ammo->projectile_count : 1;
         auto* projectile = disarm ? nullptr : stock_projectile(actor, expected_projectiles);
-        const auto minimum = nagant || stock_profile ? 1 : 2;
+        const auto minimum = bolt || stock_profile ? 1 : 2;
         if (!disarm && (before != stored || before < minimum || before > magazine->GetPropertyValueInContainer(actor) ||
                         shot_cost->GetPropertyValueInContainer(actor) != 1 || !projectile ||
-                        (nagant && !nagant_round(actor, mounted_ammo(actor), projectile)) ||
+                        (bolt && !bolt_round(actor, mounted_ammo(actor), projectile)) ||
                         (stock_profile && !stock_round_matches(actor, mounted_ammo(actor), projectile, stock_profile->ammo))))
             return report(false, "guest_weapon_preloaded_magazine_required");
 
@@ -1141,7 +1159,7 @@ namespace
         if (!ownership_current(context) || !locate(context, after).empty() || equipped(context, after) != actor ||
             !boolean(actor, STR("Holding_Primary"), false) || !boolean(actor, STR("IsSeerOpen"), false) ||
             !ordinary_magazine_payload(stock_profile, context, after, actor) ||
-            (nagant && (!boolean(actor, STR("IsCycling"), true) || !boolean(actor, STR("ChamberReady"), false))))
+            (bolt && (!boolean(actor, STR("IsCycling"), true) || !boolean(actor, STR("ChamberReady"), false))))
             return report(false, "mutation_unverified_guest_weapon_release", before);
         const auto remaining = live_ammo->GetPropertyValueInContainer(actor);
         if (disarm) return report(true, "disarmed", before, remaining);
@@ -1234,16 +1252,16 @@ namespace
     {
         auto* actor = equipped(context, inventory);
         if (!actor) return reload_proof(lua, false, "guest_weapon_actor_not_equipped");
-        const bool nagant = context.weapon == find<Unreal::UClass>(nagant_path);
+        const auto* bolt = stock_bolt(context.weapon);
         const auto* stock_profile = stock_magazine(context.weapon);
         if (!ordinary_magazine_payload(stock_profile, context, inventory, actor))
             return reload_proof(lua, false, "guest_weapon_payload_unqualified");
         if (!ready_pawn(context) || !boolean(context.pawn, STR("Wep_HeldAside"), false) ||
             !boolean(actor, STR("Reloading"), false) || !boolean(actor, STR("IsCycling"), false) ||
             !boolean(actor, STR("Holding_Primary"), false) || !boolean(actor, STR("IsSeerOpen"), false) ||
-            !boolean(actor, STR("SingleReload"), nagant) || !boolean(actor, STR("UseEatherAsAmmo"), false) ||
+            !boolean(actor, STR("SingleReload"), bolt != nullptr) || !boolean(actor, STR("UseEatherAsAmmo"), false) ||
             (stock_profile && !stock_magazine_shape(actor, *stock_profile)) ||
-            (nagant && (!nagant_shape(actor) || !boolean(actor, STR("ReloadInput"), false) ||
+            (bolt && (!stock_bolt_shape(actor, *bolt) || !boolean(actor, STR("ReloadInput"), false) ||
                 !mounted_payload_matches(actor, inventory))))
             return reload_proof(lua, false, "guest_weapon_reload_ineligible");
 
@@ -1258,7 +1276,7 @@ namespace
         auto* ammo_class = mounted_ammo(actor);
         AmmoStackSchema stack_schema;
         if (!stack_schema.read(ammo_class, inventory) ||
-            (nagant && !nagant_round(actor, ammo_class, stock_projectile(actor))) ||
+            (bolt && !bolt_round(actor, ammo_class, stock_projectile(actor))) ||
             (stock_profile && !stock_round_matches(actor, ammo_class,
                 stock_projectile(actor, stock_profile->ammo->projectile_count), stock_profile->ammo)))
             return reload_proof(lua, false, "stock_guest_weapon_reserve_schema_unavailable");
@@ -1275,7 +1293,7 @@ namespace
         if (before == cap)
             return reload_proof(lua, false, "magazine_full", before, before, reserve_before, reserve_before);
         bool change_to_incendiary = false;
-        if (nagant && before == 0 && reserve_before == 0 && ammo_class == find<Unreal::UClass>(rifle_fmj_path))
+        if (bolt && before == 0 && reserve_before == 0 && ammo_class == find<Unreal::UClass>(rifle_fmj_path))
         {
             auto* incendiary_class = find<Unreal::UClass>(rifle_incendiary_path);
             if (incendiary_class && find<Unreal::UClass>(rifle_incendiary_projectile))
@@ -1297,7 +1315,7 @@ namespace
 
         // These stock magazine reloads exit after debiting the first matching Backpack stack.
         const auto available = stock_profile && stock_profile->reload_first_stack ? stacks.front().units : reserve_before;
-        const auto transferred = nagant ? 1 : std::min(cap - before, available);
+        const auto transferred = bolt ? 1 : std::min(cap - before, available);
         auto needed = transferred;
         for (auto& stack : stacks)
         {
@@ -1320,7 +1338,7 @@ namespace
             if (held_actor.Get() != actor || !ownership_current(context) || !locate(context, selected).empty() ||
                 equipped(context, selected) != actor || rounds->GetPropertyValueInContainer(actor) != before ||
                 selected.ammo->GetPropertyValueInContainer(selected.item) != before ||
-                mounted_ammo(actor) != ammo_class || !nagant_round(actor, ammo_class, stock_projectile(actor)) ||
+                mounted_ammo(actor) != ammo_class || !bolt_round(actor, ammo_class, stock_projectile(actor)) ||
                 !mounted_payload_matches(actor, selected) ||
                 !snapshot_reserve(context, selected, ammo_class, selected_stacks, selected_total) || selected_total != reserve_before ||
                 !std::ranges::equal(stacks, selected_stacks, [](const ReserveStack& first, const ReserveStack& second) {
@@ -1361,7 +1379,7 @@ namespace
         std::vector<ReserveStack> remaining_stacks;
         if (observed != refilled || after.ammo->GetPropertyValueInContainer(after.item) != observed ||
             !ordinary_magazine_payload(stock_profile, context, after, actor) ||
-            (nagant && (mounted_ammo(actor) != ammo_class || !mounted_payload_matches(actor, after))) ||
+            (bolt && (mounted_ammo(actor) != ammo_class || !mounted_payload_matches(actor, after))) ||
             !snapshot_reserve(context, after, ammo_class, remaining_stacks, reserve_after) ||
             reserve_after != reserve_before - transferred)
             return reload_proof(lua, false, "mutation_unverified_guest_weapon_reload_commit", before, observed, reserve_before);

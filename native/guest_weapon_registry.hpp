@@ -22,6 +22,8 @@ namespace silverfish::guest_weapon_profiles
         STR("/Game/Classes/Items/Ammo_Pistol_BP.Ammo_Pistol_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Pistol_Light.Projectile_Pistol_Light_C"), 9, 1};
     inline constexpr StockAmmo forty_five_ball{1, STR("45Cal_Ball"),
         STR("/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Pistol_Magnum.Projectile_Pistol_Magnum_C"), 10, 1};
+    inline constexpr StockAmmo forty_five_hollow_point{1, STR("45Cal_HollowPoint"),
+        STR("/Game/Classes/Items/Ammo_Magnum_HollowPoint_BP.Ammo_Magnum_HollowPoint_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_45_HollowPoint.Projectile_45_HollowPoint_C"), 18, 1};
     inline constexpr StockAmmo twelve_gauge_buck{4, STR("12Gauge_Buck"),
         STR("/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_ShotGun_Pellet.Projectile_ShotGun_Pellet_C"), 5, 9};
     inline constexpr StockAmmo five_seven_ap{11, STR("5-7_AP"),
@@ -48,6 +50,7 @@ namespace silverfish::guest_weapon_profiles
         Profile{"light-pistol", STR("/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"), true, 0, 0, 0.0, false, nullptr, false},
         Profile{"light-pistol-suppressed", STR("/Game/Classes/Weapons/Wep_LightPistol_Suppressed.Wep_LightPistol_Suppressed_C"), true, 14, 1, 0.05, false, &nine_mm_ball, false},
         Profile{"nagant-scoped", STR("/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C"), false, 0, 0, 0.0, false, nullptr, false},
+        Profile{"obrez", STR("/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C"), false, 0, 0, 0.0, false, nullptr, false},
         Profile{"break-action-50", STR("/Game/Classes/Weapons/Wep_50BMP_BreakAction.Wep_50BMP_BreakAction_C"), true, 1, 1, 0.1, false, &fifty_cal_fmj, true},
         Profile{"army-pistol", STR("/Game/Classes/Weapons/Wep_ArmyPistol.Wep_ArmyPistol_C"), true, 12, 1, 0.08, true, &nine_mm_ball, true},
         Profile{"pistol", STR("/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C"), true, 12, 1, 0.08, true, &nine_mm_ball, true},
@@ -56,6 +59,9 @@ namespace silverfish::guest_weapon_profiles
         Profile{"1911", STR("/Game/Classes/Weapons/Wep_1911.Wep_1911_C"), true, 8, 1, 0.1, true, &forty_five_ball, true},
         Profile{"1911-fancy", STR("/Game/Classes/Weapons/Wep_1911_Fancy.Wep_1911_Fancy_C"), true, 8, 1, 0.1, true, &forty_five_ball, true},
         Profile{"heavy-pistol", STR("/Game/Classes/Weapons/Wep_HeavyPistol.Wep_HeavyPistol_C"), true, 12, 1, 0.15, true, &forty_five_ball, true},
+        Profile{"revolver-01", STR("/Game/Classes/Weapons/Wep_Revolver_01.Wep_Revolver_01_C"), true, 6, 1, 0.5, true, &forty_five_ball, true},
+        Profile{"revolver-02", STR("/Game/Classes/Weapons/Wep_Revolver_02.Wep_Revolver_02_C"), true, 6, 1, 0.5, true, &forty_five_hollow_point, true},
+        Profile{"revolver-03", STR("/Game/Classes/Weapons/Wep_Revolver_03.Wep_Revolver_03_C"), true, 6, 1, 0.5, true, &forty_five_hollow_point, true},
         Profile{"sg-71-a", STR("/Game/Classes/Weapons/Wep_ShotGun_SemiAuto.Wep_ShotGun_SemiAuto_C"), true, 10, 1, 0.2, true, &twelve_gauge_buck, true},
         Profile{"sg-71-b", STR("/Game/Classes/Weapons/Wep_ShotGun_SemiAuto_02.Wep_ShotGun_SemiAuto_02_C"), true, 10, 1, 0.2, true, &twelve_gauge_buck, true},
         Profile{"sg-71-a-suppressed", STR("/Game/Classes/Weapons/Wep_ShotGun_SemiAuto_Suppressed.Wep_ShotGun_SemiAuto_Suppressed_C"), true, 5, 1, 0.2, true, &twelve_gauge_buck, true},

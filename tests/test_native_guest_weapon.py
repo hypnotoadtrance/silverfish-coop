@@ -39,7 +39,31 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
         self.assertEqual(firearms, {
             "1911": ("Wep_1911", 8, 1), "1911-fancy": ("Wep_1911_Fancy", 8, 1),
             "heavy-pistol": ("Wep_HeavyPistol", 12, 1),
+            "revolver-01": ("Wep_Revolver_01", 6, 1),
         })
+
+    def test_long_barrel_revolvers_keep_their_cooked_ammo_rows(self):
+        hollow = guest_weapon_profiles.FORTY_FIVE_HOLLOW_POINT
+        self.assertEqual((hollow.caliber, hollow.row, hollow.item, hollow.projectile, hollow.fixture_units),
+                         (1, "45Cal_HollowPoint", "Ammo_Magnum_HollowPoint_BP", "Projectile_45_HollowPoint", 18))
+        for index, ammo in enumerate((guest_weapon_profiles.FORTY_FIVE_BALL, hollow, hollow), start=1):
+            kind = f"revolver-0{index}"
+            path = f"/Game/Classes/Weapons/Wep_Revolver_0{index}.Wep_Revolver_0{index}_C"
+            with self.subTest(kind=kind):
+                self.assertEqual(native_guest_weapon.FIRE_CLASSES[kind], path)
+                self.assertIn(kind, native_guest_weapon.SEED_KINDS)
+                magazine = guest_weapon_profiles.TAKE_AMMO_MAGAZINES[path]
+                self.assertEqual((magazine.capacity, magazine.burst_length, magazine.fire_rate, magazine.ammo),
+                                 (6, 1, 0.5, ammo))
+                self.assertTrue(magazine.require_default_payload and magazine.reload_first_stack)
+        self.assertEqual({profile.kind for profile in guest_weapon_profiles.FIREARMS
+                          if profile.magazine and profile.magazine.ammo == hollow}, {"revolver-02", "revolver-03"})
+
+    def test_obrez_routes_primary_to_authority_without_an_ordinary_magazine_profile(self):
+        path = "/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C"
+        self.assertEqual(native_guest_weapon.FIRE_CLASSES["obrez"], path)
+        self.assertIn("obrez", native_guest_weapon.PRIMARY_KINDS)
+        self.assertNotIn(path, guest_weapon_profiles.TAKE_AMMO_MAGAZINES)
 
     def test_only_qualified_sg_71_variants_use_buckshot(self):
         ammo = guest_weapon_profiles.TWELVE_GAUGE_BUCK
@@ -70,6 +94,7 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
         self.assertEqual(same_stack, {
             "army-pistol", "pistol", "pistol-02", "tac-pistol", "1911", "1911-fancy", "heavy-pistol",
             "sg-71-a", "sg-71-b", "sg-71-a-suppressed", "model-1931", "fennec-57", "black-fox", "break-action-50",
+            "revolver-01", "revolver-02", "revolver-03",
         })
 
 

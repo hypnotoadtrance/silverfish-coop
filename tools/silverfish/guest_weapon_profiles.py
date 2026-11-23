@@ -24,12 +24,17 @@ class StockAmmo:
 
 NINE_MM_BALL = StockAmmo("nine_mm_ball", 0, "9mm_Ball", "Ammo_Pistol_BP", "Projectile_Pistol_Light", 9)
 FORTY_FIVE_BALL = StockAmmo("forty_five_ball", 1, "45Cal_Ball", "Ammo_Magnum_BP", "Projectile_Pistol_Magnum", 10)
+FORTY_FIVE_HOLLOW_POINT = StockAmmo(
+    "forty_five_hollow_point", 1, "45Cal_HollowPoint", "Ammo_Magnum_HollowPoint_BP", "Projectile_45_HollowPoint", 18,
+)
 TWELVE_GAUGE_BUCK = StockAmmo(
     "twelve_gauge_buck", 4, "12Gauge_Buck", "Ammo_ShotgunShells_BP", "Projectile_ShotGun_Pellet", 5, projectile_count=9,
 )
 FIVE_SEVEN_AP = StockAmmo("five_seven_ap", 11, "5-7_AP", "Ammo_5-7_AP_BP", "Projectile_5-7_AP", 7)
 FIFTY_CAL_FMJ = StockAmmo("fifty_cal_fmj", 6, "50Cal_FMJ", "Ammo_50Cal_BP", "Projectile_50Cal", 8)
-STOCK_AMMO = (NINE_MM_BALL, FORTY_FIVE_BALL, TWELVE_GAUGE_BUCK, FIVE_SEVEN_AP, FIFTY_CAL_FMJ)
+STOCK_AMMO = (
+    NINE_MM_BALL, FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT, TWELVE_GAUGE_BUCK, FIVE_SEVEN_AP, FIFTY_CAL_FMJ,
+)
 
 
 @dataclass(frozen=True)
@@ -60,6 +65,7 @@ FIREARMS = (
     Firearm("light-pistol", "Wep_LightPistol", True),
     Firearm("light-pistol-suppressed", "Wep_LightPistol_Suppressed", True, Magazine(14, 1, 0.05)),
     Firearm("nagant-scoped", "Wep_Nagant_Scoped"),
+    Firearm("obrez", "Wep_Obrez_01"),
     Firearm("break-action-50", "Wep_50BMP_BreakAction", True,
             Magazine(1, 1, 0.1, ammo=FIFTY_CAL_FMJ, reload_first_stack=True)),
     Firearm("army-pistol", "Wep_ArmyPistol", True, Magazine(12, 1, 0.08, True, reload_first_stack=True)),
@@ -71,6 +77,12 @@ FIREARMS = (
             Magazine(8, 1, 0.1, True, FORTY_FIVE_BALL, reload_first_stack=True)),
     Firearm("heavy-pistol", "Wep_HeavyPistol", True,
             Magazine(12, 1, 0.15, True, FORTY_FIVE_BALL, reload_first_stack=True)),
+    # The three long-barrel variants inherit the stock whole-magazine reload.
+    Firearm("revolver-01", "Wep_Revolver_01", True, Magazine(6, 1, 0.5, True, FORTY_FIVE_BALL, reload_first_stack=True)),
+    Firearm("revolver-02", "Wep_Revolver_02", True,
+            Magazine(6, 1, 0.5, True, FORTY_FIVE_HOLLOW_POINT, reload_first_stack=True)),
+    Firearm("revolver-03", "Wep_Revolver_03", True,
+            Magazine(6, 1, 0.5, True, FORTY_FIVE_HOLLOW_POINT, reload_first_stack=True)),
     Firearm("sg-71-a", "Wep_ShotGun_SemiAuto", True,
             Magazine(10, 1, 0.2, True, TWELVE_GAUGE_BUCK, reload_first_stack=True)),
     Firearm("sg-71-b", "Wep_ShotGun_SemiAuto_02", True,
