@@ -51,9 +51,14 @@ local function corpse_carry(action, world, pawn, actor, host)
     local index = (code <= 60 and code or code >= 196 and code - 135 or 0) - 1
     assert(number > 0 and index >= 0 and index < mesh:GetNumBones(), "the corpse marker has no skeletal anchor")
     local anchor = mesh:GetBoneName(index)
-    if action == "corpse-grab" then
-        assert(host and not valid(pawn.HeldObject), "only the empty-handed host may grab")
-        assert(pawn:K2_SetActorLocation(carry_approach, false, {}, true), "the host could not reach the carry lane")
+    if action == "corpse-grab" or action == "corpse-focus" then
+        assert((action == "corpse-grab") == host and not valid(pawn.HeldObject), "wrong seat for the stock grip check")
+        local target = carry_approach
+        if not host then
+            local point = mesh:GetSocketLocation(anchor)
+            target = {X=point.X+100, Y=point.Y, Z=point.Z+pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()-10}
+        end
+        assert(pawn:K2_SetActorLocation(target, false, {}, true), "could not reach the carry lane")
         local eye = pawn.Camera:K2_GetComponentLocation()
         for index = 0, mesh:GetNumBones() - 1 do
             local bone = mesh:GetBoneName(index)
@@ -64,6 +69,7 @@ local function corpse_carry(action, world, pawn, actor, host)
                 pawn.Camera:K2_SetWorldRotation(angle, false, {}, true)
                 pawn:LookTrace()
                 if same(pawn.ActorBeingLookedAt, actor) and mesh:IsSimulatingPhysics(pawn["Hit Bone Name"]) then
+                    if not host then return "focused" end
                     pawn:Grab_Release_Object(false, false, false)
                     if holds_corpse(pawn, actor) then return "grabbed" end
                     error("the stock grab function did not hold the traced humanoid corpse")
@@ -77,7 +83,7 @@ local function corpse_carry(action, world, pawn, actor, host)
         local watch = {actor=actor, marker=marker, clock=clock, start=clock:GetRealTimeSeconds(world), rows={}}
         corpse_trace = watch
         LoopInGameThreadWithDelay(25, function()
-            if corpse_trace ~= watch or #watch.rows >= 180 or not valid(actor) or actor:IsActorBeingDestroyed()
+            if corpse_trace ~= watch or #watch.rows >= 240 or not valid(actor) or actor:IsActorBeingDestroyed()
                 or not same(actor:GetWorld(), world) then return true end
             local now = clock:GetRealTimeSeconds(world)
             local point, target = mesh:GetSocketLocation(anchor), marker:K2_GetActorLocation()

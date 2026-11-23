@@ -1527,7 +1527,7 @@ async def verify_stock_host_corpse_carry(host: Seat, guest: Seat, _pawn: str) ->
     await asyncio.sleep(1.55)
     assert await asyncio.gather(carry(host, "mark"), carry(guest, "mark")) == ["marked", "marked"]
     assert await carry(host, "drop") == "dropped"
-    await asyncio.sleep(2)
+    await asyncio.sleep(3.4)
     views = {}
     for name, receipt in zip(("host", "guest"), await asyncio.gather(
             *(carry(seat, "read", read=True) for seat in (host, guest)))):
@@ -1555,10 +1555,12 @@ async def verify_stock_host_corpse_carry(host: Seat, guest: Seat, _pawn: str) ->
     settled_gap = math.dist(*(view["samples"][-1][1:4] for view in views.values()))
     assert settled_gap < 40, (settled_gap, [view["samples"][-1] for view in views.values()])
     assert await carry(guest, "ready") == "ready", "the guest corpse did not resume ragdoll physics after the drop"
+    assert await carry(guest, "focus") == "focused", "stock guest LookTrace could not select the released body"
     assert campaign_save_hashes(host.campaign) == checkpoint, "Carrying a corpse caused an early checkpoint"
     return {"stock_host_corpse_carry": {"host_displacement_cm": distance, "guest_displacement_cm": guest_distance,
                                       "guest_max_backstep_cm": reverse, "end_gap_cm": end_gap,
-                                      "settled_gap_cm": settled_gap, "campaign_checkpoint_unchanged": True, **views}}
+                                      "settled_gap_cm": settled_gap, "guest_stock_focus_restored": True,
+                                      "campaign_checkpoint_unchanged": True, **views}}
 
 
 async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:

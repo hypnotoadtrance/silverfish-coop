@@ -285,7 +285,8 @@ local function apply(marker, world)
     mesh:SetCollisionProfileName(FName("Ragdoll", EFindName.FNAME_Find), true)
     mesh:SetCollisionEnabled(3)
     -- Local physics presents the fall. The host retains death, loot, AI and saves.
-    mesh:SetCollisionResponseToChannel(2, 2) -- Stock LookTrace must be able to select the dead skeletal body.
+    -- Keep the stock ragdoll's Pawn response. The visibility trace still
+    -- selects a bone without the observer colliding with player capsules.
     mesh:SetCollisionResponseToChannel(3, 2)
     mesh:SetSimulatePhysics(true)
     mesh:SetAnimationMode(2, true)
