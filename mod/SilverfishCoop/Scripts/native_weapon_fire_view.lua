@@ -1,6 +1,7 @@
 local view = {}
 
 local npc_base = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
+local turret_base = "/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C"
 local weapon_base = "/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C"
 local consumable_base = "/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C"
 local melee_base = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Master_BP.MeleeWep_Master_BP_C"
@@ -11,6 +12,7 @@ local play_animation = "/Script/Engine.SkeletalMeshComponent:PlayAnimation"
 local attack_animation = "Animation_2_C8CAEADF40C9F2C76A885BA8E5E9AA27"
 local attack_rate = "SwingRate_17_17DEA9B2431C48BC143445BD3516142E"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
+local attached_sound = "/Script/Engine.GameplayStatics:SpawnSoundAttached"
 local sound_at_location = "/Script/Engine.GameplayStatics:PlaySoundAtLocation"
 local trigger_click = "/Game/Assets/Sounds/CUEs/Weapon_Cues/Reload_Cues/TriggerClick_Cue.TriggerClick_Cue"
 local math_path = "/Script/Engine.Default__KismetMathLibrary"
@@ -21,7 +23,7 @@ local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 local maximum, range = 36, 30000
 local current, hooked, melee_hooked, recoil_hooked, cycle_hooked, visit, last_played, last_round
 local serial, published, pending = 0, 0, {}
-local use_hooked, dry_hooked
+local use_hooked, dry_hooked, turret_hooked
 
 local function valid(object) return object and object:IsValid() end
 local function same(first, second)
@@ -40,6 +42,12 @@ end
 local function stock_weapon(path)
     if type(path) ~= "string" or #path > 160 then return false end
     local package, class = path:match("^(/Game/Classes/Weapons/[%w_/%-]+)%.([%w_%-]+)_C$")
+    return package and package:match("([%w_%-]+)$") == class
+end
+
+local function stock_turret(path)
+    if type(path) ~= "string" or #path > 160 then return false end
+    local package, class = path:match("^(/Game/Classes/NPCs/[%w_/%-]+)%.(Turret_[%w_%-]+)_C$")
     return package and package:match("([%w_%-]+)$") == class
 end
 
@@ -176,6 +184,23 @@ local function capture(context)
     record(row)
 end
 
+local function capture_turret(_, sound, attachment)
+    if not current then return end
+    local muzzle = attachment:get()
+    local turret = valid(muzzle) and muzzle:GetOwner()
+    local base = StaticFindObject(turret_base)
+    if not valid(turret) or not valid(base) or not turret:IsA(base) or not turret:HasAuthority()
+        or turret.Alive ~= true or not same(turret:GetWorld(), current.world)
+        or not same(turret.Arrow_Muzzle, muzzle) or not same(turret.FireSound, sound:get()) then return end
+    local path = turret:GetClass():GetFullName():match("^BlueprintGeneratedClass (.+)$")
+    local volume = turret.Fire_Volume
+    if not stock_turret(path) or not bounded(volume, 0, 10) then return end
+    local position, rotation = muzzle:K2_GetComponentLocation(), muzzle:K2_GetComponentRotation()
+    serial = serial + 1
+    record({serial, path, position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw,
+        rotation.Roll, 1, volume, 0, expires = current.statics:GetRealTimeSeconds(turret) + .25})
+end
+
 local function valid_recoil(player, values)
     return player and player >= 0 and player <= 2147483647
         and bounded(values[1], -30, 30) and bounded(values[2], -30, 30) and bounded(values[3], -30, 30)
@@ -309,6 +334,10 @@ function view.sync(state, phase, avatar)
         RegisterHook(play_animation, function(context, clip, looping) pcall(capture_cycle, context, clip, looping) end)
         cycle_hooked = true
     end
+    if not turret_hooked and valid(StaticFindObject(attached_sound)) then
+        RegisterHook(attached_sound, function(...) pcall(capture_turret, ...) end)
+        turret_hooked = true
+    end
     if not dry_hooked and valid(StaticFindObject(sound_at_location)) then
         RegisterHook(sound_at_location, function(...) pcall(capture_dry_fire, ...) end)
         dry_hooked = true
@@ -354,7 +383,7 @@ function view.flush(get_world)
 end
 
 local function play(pawn, path, point, rotation, scale, volume, pitch, distance)
-    local class, base = asset(path), asset(weapon_base)
+    local class, base = asset(path), asset(stock_turret(path) and turret_base or weapon_base)
     local defaults = valid(class) and class:GetCDO()
     if not valid(defaults) or not valid(base) or not defaults:IsA(base) then return end
     local attenuation, sound = asset(attenuation_path), defaults.FireSound
@@ -445,7 +474,8 @@ function view.command(args, state, phase, avatar)
         x, y, z = tonumber(x), tonumber(y), tonumber(z)
         pitch_angle, yaw, roll = tonumber(pitch_angle), tonumber(yaw), tonumber(roll)
         scale, volume, pitch = tonumber(scale), tonumber(volume), tonumber(pitch)
-        if (#values == 11 or #values == 19) and id and id > last_played and stock_weapon(path)
+        if id and id > last_played and ((#values == 11 and (stock_weapon(path) or stock_turret(path)))
+            or (#values == 19 and stock_weapon(path)))
             and bounded(x, -1e7, 1e7) and bounded(y, -1e7, 1e7) and bounded(z, -1e7, 1e7)
             and bounded(pitch_angle, -180, 180) and bounded(yaw, -180, 180) and bounded(roll, -180, 180)
             and bounded(scale, 0, 10) and bounded(volume, 0, 10) and bounded(pitch, -26, 24) then

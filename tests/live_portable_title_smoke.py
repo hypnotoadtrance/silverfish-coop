@@ -647,7 +647,7 @@ async def verify_resident_npc_kill(host: Seat, guest: Seat) -> dict:
         host_alive.split(";")[-1], guest_alive.split(";")[-1]), result
     return {"before": [host_alive, guest_alive], "after": result, "host_recorded_npc_shooter": True}
 
-async def verify_resident_turret_death(host: Seat, guest: Seat) -> dict:
+async def verify_resident_turret_combat(host: Seat, guest: Seat, guest_frame: dict) -> dict:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-npc-override", action)
 
@@ -659,6 +659,21 @@ async def verify_resident_turret_death(host: Seat, guest: Seat) -> dict:
             await asyncio.sleep(.05)
     before = [await command(host, "turret-state"), guest_before]
     assert before == ["true,false,false,false"] * 2, before
+    guest_fire = await command(guest, "turret-fire")
+    assert guest_fire == "0,1,true", guest_fire
+    host_fire = await command(host, "turret-retarget")
+    assert host_fire == "1,1,true", host_fire
+    async with asyncio.timeout(6):
+        while True:
+            events = await resident_events(guest.client / "run", guest_frame)
+            shots = [row for row in events if row["event"] == "native_weapon_shot_played"
+                     and row["generation"] == guest_frame["generation"]
+                     and row["weapon"].endswith("/Turret_MechGun_01_BP.Turret_MechGun_01_BP_C")]
+            if shots:
+                break
+            await asyncio.sleep(.05)
+    shot, = shots
+    assert shot["stock_sound"] and not shot["recoil"], shot
     await command(host, "turret-kill")
     after = None
     try:
@@ -670,7 +685,8 @@ async def verify_resident_turret_death(host: Seat, guest: Seat) -> dict:
                 await asyncio.sleep(.05)
     except TimeoutError as error:
         raise AssertionError(f"Expected both turrets to be dead and visibly burnt: {after}") from error
-    return {"stock_replication": replication == "true", "before": before, "after": after}
+    return {"stock_replication": replication == "true", "before": before, "after": after,
+            "replica_fire_denied": True, "host_skipped_downed_target": True, "guest_stock_fire_cue": shot}
 
 
 async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool = False) -> dict:
@@ -728,7 +744,7 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
     pistol = await verify_resident_pistol(host, guest, guest_combat=guest_combat)
     npc_shots = await verify_resident_npc_shots(host, guest_run, guest_frame) if guest_combat else []
     npc_kill = await verify_resident_npc_kill(host, guest) if guest_combat else {}
-    turret_death = await verify_resident_turret_death(host, guest) if guest_combat else {}
+    turret_death = await verify_resident_turret_combat(host, guest, guest_frame) if guest_combat else {}
     assert not weapon_cue_files(host, guest), "Stock player cues wrote a legacy weapon cue mailbox"
     after = save_state()
     changed = [path for path in before.keys() | after.keys() if before.get(path) != after.get(path)]

@@ -147,6 +147,64 @@ end
 
 local turret_class = "/Game/Classes/NPCs/Turret_MechGun_01_BP.Turret_MechGun_01_BP_C"
 
+local shot_turret, fired_count, fire_hook
+
+local function turret_fire(pawn, world, turret, host, with_downed_target)
+    assert(turret.Alive, "the test turret is already dead")
+    local muzzle = turret.Arrow_Muzzle
+    assert(valid(muzzle) and same(muzzle:GetOwner(), turret), "stock turret muzzle unavailable")
+    local start = muzzle:K2_GetComponentLocation()
+    local center = pawn:K2_GetActorLocation()
+    local lane
+    for index = 0, 7 do
+        local angle = index * math.pi / 4
+        local here = turret:K2_GetActorLocation()
+        local reserve = {X=center.X+430*math.cos(angle), Y=center.Y+430*math.sin(angle), Z=center.Z+95}
+        if turret:K2_SetActorLocation(reserve, false, {}, true) then
+            start = muzzle:K2_GetComponentLocation()
+            local found, results = {}, {}
+            local library = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C")
+            assert(valid(library), "stock turret LOS library unavailable")
+            library:CheckForLOS(pawn, start, 0, true, {turret, turret:GetParentActor()}, 0, 0, turret,
+                found, results, results, results, results)
+            lane = found.TargetSpotted
+            if lane then break end
+            turret:K2_SetActorLocation(here, false, {}, true)
+        end
+    end
+    assert(lane == true, "fixture could not verify the stock turret's line of sight")
+    -- Verify firing and selection independently of player damage.
+    muzzle:K2_SetWorldRotation({Pitch=70, Yaw=0, Roll=0}, false, {}, true)
+    if not fire_hook then
+        RegisterHook("/Script/Engine.GameplayStatics:SpawnSoundAttached", function(_, sound, attachment)
+            if valid(shot_turret) and same(attachment:get(), shot_turret.Arrow_Muzzle)
+                and same(sound:get(), shot_turret.FireSound) then fired_count = fired_count + 1 end
+        end)
+        fire_hook = true
+    end
+    local other
+    if with_downed_target then
+        assert(host, "only the host tracks downed targets")
+        for _, candidate in ipairs(FindAllOf("Player_FP_C") or {}) do
+            if valid(candidate) and other == nil and candidate:HasAuthority() and not candidate:IsLocallyControlled()
+                and same(candidate:GetWorld(), world) and not candidate:IsActorBeingDestroyed() then other = candidate end
+        end
+        assert(valid(other), "expected a guest to put at the head of the threat list")
+        SilverfishSetTurretInactiveTargets(world:GetAddress(), other:GetAddress())
+    end
+    turret.Targets = other and {other, pawn} or {pawn}
+    assert(turret.Targets:GetArrayNum() == (other and 2 or 1), "stock target list could not be prepared")
+    shot_turret, fired_count = turret, 0
+    local ok, issue = pcall(function() turret:FireRound() end)
+    if other then SilverfishSetTurretInactiveTargets() end
+    assert(ok, issue)
+    local remaining = turret.Targets:GetArrayNum()
+    local selected = remaining == 1 and same(turret.Targets[1], pawn)
+    turret.Targets = {}
+    shot_turret = nil
+    return ("%d,%d,%s"):format(fired_count, remaining, tostring(selected))
+end
+
 local function turret_state(pawn, world, host, action)
     local turret = host and authority_turret
     if action == "turret-spawn" then
@@ -178,7 +236,9 @@ local function turret_state(pawn, world, host, action)
     end
     if not valid(turret) then return "absent" end
     assert(turret.bReplicates and turret:GetLocalRole() == (host and 3 or 1), "test turret not bound to authoritative channel")
-    if action == "turret-kill" then
+    if action == "turret-fire" or action == "turret-retarget" then
+        return turret_fire(pawn, world, turret, host, action == "turret-retarget")
+    elseif action == "turret-kill" then
         assert(host and turret.Alive and turret.Health > 0, "only the host may destroy the live turret")
         local total, lethal = {}, {}
         turret:DealDamage({[damage_key]=2000}, {}, pawn, {X=0,Y=0,Z=0}, false, total, lethal)
@@ -210,7 +270,7 @@ local function run(action, actor_path)
         return npc_kill(pawn)
     elseif action == "npc-state" then
         return npc_combat_state(world, host)
-    elseif action == "turret-spawn" or action == "turret-state" or action == "turret-kill" then
+    elseif action:match("^turret%-") then
         return turret_state(pawn, world, host, action)
     end
     local class = StaticFindObject(class_path)

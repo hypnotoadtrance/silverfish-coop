@@ -8,6 +8,7 @@ local remembered_target = "CombatTarget_7_5EB8D2544EEE9E5E6FB88485135FB2B4"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local world, candidates, sampled_at
 local threat_session, threat_downed, threat_viewport, threat_hook
+local turret_mask = ""
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -88,10 +89,25 @@ local function npc_candidates(current)
     return candidates
 end
 
+local function sync_turret_targets(world, downed)
+    if type(SilverfishSetTurretInactiveTargets) ~= "function" then return end
+    local keys = {}
+    if world then
+        for address in pairs(downed) do keys[#keys + 1] = address end
+        table.sort(keys)
+        if #keys > 0 then table.insert(keys, 1, world:GetAddress()) end
+    end
+    local mask = table.concat(keys, ":")
+    if mask == turret_mask then return end
+    SilverfishSetTurretInactiveTargets(table.unpack(keys))
+    turret_mask = mask
+end
+
 function ai.sync(state, phase, desired)
     if phase ~= "hosting" or not state.listening or state.server or not valid(state.world) then
         world, candidates, sampled_at = nil, nil, nil
         threat_session, threat_downed, threat_viewport = nil, nil, nil
+        sync_turret_targets()
         return
     end
     if state.clients > 0 and state.local_pawn and #state.guests > 0 then
@@ -99,7 +115,10 @@ function ai.sync(state, phase, desired)
     else
         threat_session, threat_downed, threat_viewport = nil, nil, nil
     end
-    if next(desired) == nil then return end
+    if next(desired) == nil then
+        sync_turret_targets()
+        return
+    end
     local downed, standing = {}, 0
     for _, details in ipairs(state.pawns) do
         local pawn, record = details.pawn, desired[details.name]
@@ -111,6 +130,7 @@ function ai.sync(state, phase, desired)
             end
         end
     end
+    sync_turret_targets(state.world, downed)
     if standing == 0 or next(downed) == nil then return end
 
     for _, value in ipairs(npc_candidates(state.world)) do

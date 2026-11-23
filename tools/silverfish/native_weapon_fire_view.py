@@ -13,6 +13,7 @@ _MAILBOX = "native-weapon-shots"
 _MAX_MAILBOX = 16384
 _MAX_AGE = .25
 _STOCK_CLASS = re.compile(r"/Game/Classes/Weapons/(?:[\w-]+/)*([\w-]+)\.\1_C", re.ASCII)
+_STOCK_TURRET = re.compile(r"/Game/Classes/NPCs/(?:[\w-]+/)*(Turret_[\w-]+)\.\1_C", re.ASCII)
 _STOCK_CONSUMABLE = re.compile(r"/Game/Classes/Items/(?:[\w-]+/)*([\w-]+)\.\1_C", re.ASCII)
 _STOCK_CYCLE = re.compile(r"/Game/Classes/Weapons/Wep_Assets/Wep_Anim/([\w-]+)\.\1", re.ASCII)
 MELEE_CLIPS = {"slash": "Standing_Melee_Attack_Horizontal", "backhand": "Standing_Melee_Attack_Backhand",
@@ -21,6 +22,10 @@ MELEE_CLIPS = {"slash": "Standing_Melee_Attack_Horizontal", "backhand": "Standin
 
 def stock_weapon_class(path):
     return type(path) is str and len(path) <= 160 and _STOCK_CLASS.fullmatch(path)
+
+
+def stock_shot_class(path, *, recoil=False):
+    return stock_weapon_class(path) or (not recoil and type(path) is str and len(path) <= 160 and _STOCK_TURRET.fullmatch(path))
 
 
 def stock_cycle_clip(path):
@@ -39,7 +44,7 @@ def valid_shot(cue):
     serial, path = cue[:2]
     pose = cue[2:11]
     return (type(serial) is int and 0 < serial < 10**15
-            and stock_weapon_class(path)
+            and stock_shot_class(path, recoil=len(cue) == 19)
             and valid_position(pose[:3])
             and all(type(angle) in (int, float) and -180 <= angle <= 180 for angle in pose[3:6])
             and all(type(value) in (int, float) and low <= value <= high
@@ -246,7 +251,7 @@ class Playback:
                 control.event("native_avatar_melee_played", serial=int(hit[1]), player_id=source[1], clip=hit[2])
                 continue
             match = re.fullmatch(r"([0-9]{1,15}):([01]):([01]):([01]):([01])", receipt)
-            if match and (serial := int(match[1])) in selected and stock_weapon_class(selected[serial][0]):
+            if match and (serial := int(match[1])) in selected and stock_shot_class(selected[serial][0]):
                 control.event("native_weapon_shot_played", serial=serial, weapon=selected[serial][0],
                               muzzle_flash=match[2] == "1", audio_component=match[3] == "1", stock_sound=match[4] == "1",
                               recoil=match[5] == "1")
