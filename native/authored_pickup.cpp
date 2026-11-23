@@ -25,6 +25,7 @@
 #include <memory>
 #include <optional>
 #include <ranges>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -442,6 +443,8 @@ namespace
         Scope scope{};
     };
     std::map<std::string, LooseSource, std::less<>> loose_sources;
+    std::set<std::string, std::less<>> guest_loose_hidden;
+    std::uint64_t loose_generation{};
     U::FWeakObjectPtr loose_pawn{}, loose_world{};
     bool loose_host{};
     Clock::time_point loose_rescan{};
@@ -989,6 +992,7 @@ namespace
         for (auto& scope : scopes) clear(scope);
         for (auto& [_, loose] : loose_sources) clear(loose.scope);
         loose_sources.clear();
+        guest_loose_hidden.clear();
         loose_pawn.Reset();
         loose_world.Reset();
         loose_rescan = {};
@@ -2028,6 +2032,61 @@ namespace
         });
     }
 
+    void apply_guest_loose_view(std::string_view path, Scope& scope)
+    {
+        auto* actor = static_cast<U::AActor*>(scope.actor.Get());
+        if (scope.host || !live(actor)) return;
+
+        const bool hidden = guest_loose_hidden.contains(path);
+        if (scope.claimed != hidden ||
+            (hidden && (actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), true))))
+            set_visibility(scope, hidden);
+    }
+
+    int set_guest_loose_view(const Lua& lua)
+    {
+        const auto count = lua.get_stack_size();
+        if (!ready() || count < 3 || count > 66 || !lua.is_integer(1) || !lua.is_bool(2))
+            return result(lua, false, "loose_pickup_projection_arguments");
+        const auto generation = lua.get_integer();
+        const bool hidden = lua.get_bool();
+        auto* world = loose_world.Get();
+        auto* pawn = loose_pawn.Get();
+        if (loose_host || generation <= 0 || static_cast<std::uint64_t>(generation) != loose_generation ||
+            !live(world) || !live(pawn))
+            return result(lua, false, "loose_pickup_projection_scope_changed");
+        const auto world_path = world->GetPathName();
+        const Profile seat_profile{.world = world_path.c_str()};
+        const Scope seat{world, pawn, nullptr, nullptr, object(pawn, STR("Controller")),
+            object(world, STR("NetDriver")), &seat_profile, false};
+        if (!local_scope(seat)) return result(lua, false, "loose_pickup_projection_scope_changed");
+
+        const auto area = RC::to_utf8_string(world_path);
+        const auto prefix = area + ":PersistentLevel.";
+        std::vector<std::string> paths;
+        paths.reserve(count - 2);
+        for (int index = 3; index <= count; ++index)
+        {
+            if (!lua.is_string()) return result(lua, false, "loose_pickup_projection_arguments");
+            std::string path{lua.get_string()};
+            if (path.size() > 384 || path.size() <= prefix.size() || !path.starts_with(prefix) ||
+                !std::ranges::all_of(std::string_view(path).substr(prefix.size()), [](char ch) {
+                    return ch == '_' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+                }))
+                return result(lua, false, "loose_pickup_projection_source");
+            paths.push_back(std::move(path));
+        }
+
+        for (const auto& path : paths)
+        {
+            if (hidden) guest_loose_hidden.insert(path);
+            else guest_loose_hidden.erase(path);
+            if (auto found = loose_sources.find(path); found != loose_sources.end())
+                apply_guest_loose_view(path, found->second.scope);
+        }
+        return result(lua, true, "loose_pickup_projection_applied");
+    }
+
     int discover_loose(const Lua& lua)
     {
         if (!ready() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_bool(2)) return 0;
@@ -2046,6 +2105,8 @@ namespace
         {
             for (auto& [_, loose] : loose_sources) clear(loose.scope);
             loose_sources.clear();
+            guest_loose_hidden.clear();
+            ++loose_generation;
             loose_pawn = pawn;
             loose_world = world;
             loose_host = host;
@@ -2067,10 +2128,12 @@ namespace
                     !actor->HasAnyFlags(U::RF_WasLoaded) || !boolean(actor, STR("bActorIsBeingDestroyed"), false))
                     continue;
                 auto* box = source_box(actor);
-                if (!box || ((!actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false)) &&
-                             (host || !remotely_hidden_loose(actor))))
-                    continue;
+                if (!box) continue;
                 const auto path = actor->GetPathName();
+                const auto source = RC::to_utf8_string(path);
+                if ((!actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), false)) &&
+                    (host || (!guest_loose_hidden.contains(source) && !remotely_hidden_loose(actor))))
+                    continue;
                 const auto class_path = actor->GetClassPrivate()->GetPathName();
                 if (authored_path(path) || !class_path.starts_with(STR("/Game/Classes/")))
                     continue;
@@ -2081,7 +2144,7 @@ namespace
                     carry_paths += RC::to_utf8_string(path);
                     carry_paths += '\n';
                 }
-                auto [entry, inserted] = loose_sources.try_emplace(RC::to_utf8_string(path));
+                auto [entry, inserted] = loose_sources.try_emplace(source);
                 if (!inserted && entry->second.scope.actor.Get() == actor)
                     continue;
                 auto& loose = entry->second;
@@ -2092,25 +2155,24 @@ namespace
                     .item_class = loose.item_class.c_str(), .stock_cash = cash, .discovered = true};
                 loose.scope = {world, pawn, actor, box, seat.controller.Get(), seat.driver.Get(), &loose.profile,
                     host, false, true, false};
+                apply_guest_loose_view(source, loose.scope);
             }
         }
 
         lua.set_integer(static_cast<std::int64_t>(loose_sources.size()));
         lua.set_string(carry_paths);
-        return 2;
+        lua.set_integer(static_cast<std::int64_t>(loose_generation));
+        return 3;
     }
 
     int describe_loose(const Lua& lua)
     {
-        const auto arguments = lua.get_stack_size();
-        if (!ready() || (arguments != 1 && (arguments != 2 || !lua.is_bool(2)))) return 0;
-        const bool projecting_hidden = arguments == 2 && lua.get_bool(2);
+        if (!ready() || lua.get_stack_size() != 1) return 0;
         auto* scope = select_source(lua);
         if (!scope || !scope->profile || !scope->profile->discovered || !local_scope(*scope)) return 0;
         auto* actor = scope->actor.Get();
         auto* mode = loose_respawn_mode(actor);
-        if (!mode || (!scope->claimed && !available(*scope) &&
-                      (!projecting_hidden || scope->host || !remotely_hidden_loose(actor)))) return 0;
+        if (!mode || (!scope->claimed && !available(*scope))) return 0;
         lua.set_string(RC::to_utf8_string(scope->profile->item_class));
         lua.set_integer(mode->GetPropertyValueInContainer(actor));
         lua.set_bool(scope->claimed);
@@ -2152,15 +2214,13 @@ namespace
             U::FVector position;
         };
         std::vector<Nearby> nearby;
-        for (auto& [_, loose] : loose_sources)
+        for (auto& [path, loose] : loose_sources)
         {
             auto& scope = loose.scope;
             auto* actor = static_cast<U::AActor*>(scope.actor.Get());
             if (!live(actor)) continue;
-            // The stock guest respawn path can re-enable a level item after the
-            // host has hidden it. Retain the host's claim until a show arrives.
-            if (!scope.host && scope.claimed && (actor->GetActorEnableCollision() || !boolean(actor, STR("bHidden"), true)))
-                set_visibility(scope, true);
+            // The ledger stays active even when the source is outside the reported nearby list.
+            apply_guest_loose_view(path, scope);
             auto at = scope.hidden_at ? *scope.hidden_at : actor->K2_GetActorLocation();
             const auto dx = at.GetX() - center.GetX(), dy = at.GetY() - center.GetY(), dz = at.GetZ() - center.GetZ();
             const auto distance = dx * dx + dy * dy + dz * dz;
@@ -2698,6 +2758,7 @@ namespace silverfish::native_authored_pickup
     {
         lua.register_function("SilverfishSetNativeAuthoredPickupScope", set_scope);
         lua.register_function("SilverfishDiscoverLoosePickups", discover_loose);
+        lua.register_function("SilverfishSetGuestLoosePickupView", set_guest_loose_view);
         lua.register_function("SilverfishDescribeLoosePickup", describe_loose);
         lua.register_function("SilverfishNearbyLoosePickups", nearby_loose);
         lua.register_function("SilverfishTakeNativeAuthoredPickupPress", take_press);

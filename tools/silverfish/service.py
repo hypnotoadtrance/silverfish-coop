@@ -5066,6 +5066,7 @@ class Client:
         self.viewer_role = "guest"
         self.expected_zone = None
         self.loot_tracking = None
+        self.loose_pickup_view = native_loose_pickup.GuestView()
         self.pickup_playback = native_pickup_audio.Playback()
         self.voice_playback = native_voice.Playback()
         self.hurt_playback = native_damage_feedback.Playback()
@@ -5996,7 +5997,7 @@ class Client:
                     await native_authored_pickup.project(
                         self, self.bridge, self.gameplay.get(native_authored_pickup.STATE_KEY, {}),
                         gold_bag=self.gameplay.get(native_authored_pickup.GOLD_BAG_VIEW))
-                    await native_loose_pickup.project(self, self.bridge, self.gameplay.get(native_loose_pickup.STATE))
+                    await self.loose_pickup_view.project(self, self.bridge, self.gameplay.get(native_loose_pickup.STATE))
                     await native_dust_cabinet.project_client(self)
                     await native_savlo_locker.project_client(self)
                     await native_flood_jammer.project_client(self)

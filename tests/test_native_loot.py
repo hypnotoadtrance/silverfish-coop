@@ -149,22 +149,35 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.command.await_args_list, [call(loose.CHECK, temporary, timeout=4)] * 2)
 
 
-    async def test_projection_restores_the_loaded_actor_after_the_host_releases_its_suppression(self):
+    async def test_projection_does_not_depend_on_the_local_nearby_list(self):
         loose = native_loose_pickup
         path = f"{CROSSROADS}.CrossRoads_P:PersistentLevel.Item_Test_C_1"
-        game = {"state": "connected", "map": CROSSROADS, loose.CAPABILITY: 1}
-        shown = dict(game, **{loose.KEY: {path: {"state": "available"}}})
-        hidden = dict(game, **{loose.KEY: {path: {"state": "claimed"}}})
-        client = SimpleNamespace(last_game=shown)
-        bridge = SimpleNamespace(command=AsyncMock(side_effect=[hidden, shown]))
-        await loose.project(client, bridge, [path])
-        self.assertEqual(client.last_game, hidden)
-        await loose.project(client, bridge, None)
-        self.assertEqual(client.last_game, hidden)
-        await loose.project(client, bridge, [])
-        self.assertEqual(client.last_game, shown)
+        game = {"state": "connected", "map": CROSSROADS, loose.CAPABILITY: 1, loose.VIEW_SCOPE: 4}
+        client = SimpleNamespace(last_game=game)
+        bridge = SimpleNamespace(command=AsyncMock(return_value=game))
+        view = loose.GuestView()
+        await view.project(client, bridge, [path])
+        await view.project(client, bridge, [path])
+        await view.project(client, bridge, None)
+        await view.project(client, bridge, [])
         self.assertEqual(bridge.command.await_args_list,
-                         [call(loose.PROJECT, "hide", path, timeout=4), call(loose.PROJECT, "show", path, timeout=4)])
+                         [call(loose.PROJECT, "4", "hide", path, timeout=4),
+                          call(loose.PROJECT, "4", "show", path, timeout=4)])
+
+    async def test_claims_reapply_when_the_same_map_gets_a_new_native_scope(self):
+        loose = native_loose_pickup
+        path = f"{CROSSROADS}.CrossRoads_P:PersistentLevel.Item_Test_C_1"
+        prior = {"state": "connected", "map": CROSSROADS, loose.CAPABILITY: 1, loose.VIEW_SCOPE: 4}
+        reloaded = {**prior, loose.VIEW_SCOPE: 5}
+        client = SimpleNamespace(last_game=prior)
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[prior, reloaded]))
+        view = loose.GuestView()
+        await view.project(client, bridge, [path])
+        client.last_game = reloaded
+        await view.project(client, bridge, [path])
+        self.assertEqual(bridge.command.await_args_list,
+                         [call(loose.PROJECT, "4", "hide", path, timeout=4),
+                          call(loose.PROJECT, "5", "hide", path, timeout=4)])
 
 
 class NativeLootTests(unittest.IsolatedAsyncioTestCase):

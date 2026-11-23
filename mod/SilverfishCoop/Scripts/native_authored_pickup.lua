@@ -312,8 +312,8 @@ function pickup.update(state, phase)
         report, loose_check = nil, nil
     end
     if type(SilverfishDiscoverLoosePickups) == "function" then
-        local count, eligible = SilverfishDiscoverLoosePickups(pawn:GetAddress(), host)
-        binding.loose_count = count
+        local count, eligible, generation = SilverfishDiscoverLoosePickups(pawn:GetAddress(), host)
+        binding.loose_count, binding.loose_generation = count, generation
         if host and type(eligible) == "string" and eligible ~= "" then
             binding.carry_sources, binding.carry_cursor = {}, 1
             for path in eligible:gmatch("[^\n]+") do binding.carry_sources[#binding.carry_sources + 1] = path end
@@ -362,15 +362,10 @@ local function select_profile(requested)
     return profile
 end
 
-local function loose_profile(path, state, projecting_hidden)
+local function loose_profile(path, state)
     if not binding or not binding.loose_count or type(path) ~= "string" or #path > 384
         or type(SilverfishDescribeLoosePickup) ~= "function" then return end
-    local class, mode, claimed, cash
-    if projecting_hidden then
-        class, mode, claimed, cash = SilverfishDescribeLoosePickup(path, true)
-    else
-        class, mode, claimed, cash = SilverfishDescribeLoosePickup(path)
-    end
+    local class, mode, claimed, cash = SilverfishDescribeLoosePickup(path)
     local actor = class and StaticFindObject(path)
     local name = valid(actor) and actor:GetFullName():match("^(%S+) ")
     local leaf = path:match(":PersistentLevel%.([%w_]+)$")
@@ -698,22 +693,15 @@ function pickup.command(fields, state, phase)
     end
     if action == "native-loose-pickup-project" then
         pickup.update(state, phase)
-        local mode = fields[3]
-        if phase ~= "connected" or #fields < 4 or #fields > 67 or (mode ~= "hide" and mode ~= "show") then
+        local generation, mode = math.tointeger(tonumber(fields[3])), fields[4]
+        if phase ~= "connected" or not binding or not generation or generation ~= binding.loose_generation or
+            #fields < 5 or #fields > 68 or (mode ~= "hide" and mode ~= "show") or
+            type(SilverfishSetGuestLoosePickupView) ~= "function" then
             error("loose_pickup_projection_arguments", 0)
         end
-        local hidden = mode == "hide"
-        local changed = false
-        for index = 4, #fields do
-            local profile = loose_profile(fields[index], state, hidden)
-            if profile and profile.claimed ~= hidden then
-                if not SilverfishProjectNativeAuthoredPickup(hidden, profile.source) then
-                    error("loose_pickup_projection_unverified", 0)
-                end
-                changed = true
-            end
-        end
-        if changed then pcall(loot_projection.refresh_stock_inventory, state, false) end
+        local accepted, issue = SilverfishSetGuestLoosePickupView(generation, mode == "hide", table.unpack(fields, 5))
+        if not accepted then error(issue, 0) end
+        pcall(loot_projection.refresh_stock_inventory, state, false)
         return "shared level item visibility synchronized"
     end
     if action == "native-loose-pickup-nearby-fixture" then
@@ -882,6 +870,9 @@ function pickup.rows(state, phase, status_row)
     end
     if binding.loose_count then
         rows[#rows + 1] = status_row("native-loose-pickup-capability", 1, binding.loose_count)
+        if phase == "connected" and binding.loose_generation then
+            rows[#rows + 1] = status_row("native-loose-pickup-view-scope", binding.loose_generation)
+        end
         local list = SilverfishNearbyLoosePickups()
         if type(list) == "string" then
             for entry in list:gmatch("[^\n]+") do
