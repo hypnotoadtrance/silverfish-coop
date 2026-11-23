@@ -27,7 +27,7 @@ local latest, equipment, staged_aim
 
 local function qualified_host(state, phase, testing)
     return enabled and phase == "hosting" and state.listening and state.server == false
-        and (cqc[state.map] ~= nil or testing and state.map == crossroads)
+        and (not testing or cqc[state.map] ~= nil or state.map == crossroads)
         and (testing and fixtures and type(SilverfishStartNativeGuestMeleeCanary) == "function"
             and type(SilverfishEquipNativeGuestOldPipe) == "function"
             or not testing and type(SilverfishStartNativeGuestOldPipeSwing) == "function")
@@ -45,6 +45,15 @@ end
 
 local function finite(value)
     return type(value) == "number" and value == value and math.abs(value) < math.huge
+end
+
+local function ordinary_target(area, target)
+    if type(target) ~= "string" or #target > 512 then return false end
+    local path = target:match("^[%w_]+ (.+)$")
+    local level = area:match("([^/]+)$")
+    if not path or not level then return false end
+    local prefix = area .. "." .. level .. ":PersistentLevel."
+    return path:sub(1, #prefix) == prefix and path:sub(#prefix + 1):match("^[%w_]+$") ~= nil
 end
 
 local function observation(damage, ordinary, area, ok, status, serial, presses, releases, contacts, qualified, settled, passives,
@@ -65,15 +74,17 @@ local function observation(damage, ordinary, area, ok, status, serial, presses, 
             and not (damage and status == "stock_damage_aim_fenced") and not miss and not cancelled) then
         error("mutation_unverified_guest_melee_abi", 0)
     end
-    local profile = cqc[area]
-    local target_ok = ordinary and (target == "-" or profile and profile.paths[target] ~= nil)
+    local target_ok = ordinary and (target == "-" or ordinary_target(area, target))
         or not ordinary and target == npc_name
+    local numbers_ok = finite(before) and finite(after) and finite(total)
+    local valid_damage = numbers_ok and before > 0 and after < before and total > 0
+        and (math.abs(before - after - total) <= 1e-6 or ordinary and after == 0 and total >= before - 1e-6)
+        and (ordinary or before >= 100 and before <= 160 and after > 0 and total <= 90)
     if damage and (not target_ok or ((miss or cancelled) and target ~= "-") or (settled and not miss and target == "-")
         or (sweeps ~= 0 and sweeps ~= 1) or (calls ~= 0 and calls ~= 1) or calls > sweeps
-        or not finite(before) or not finite(after) or not finite(total)
+        or not numbers_ok
         or ((miss or cancelled) and (sweeps ~= 0 or calls ~= 0 or before ~= -1 or after ~= -1 or total ~= -1))
-        or (settled and not miss and (sweeps ~= 1 or calls ~= 1 or before < 100 or before > 160 or after <= 0 or total <= 0
-            or total > 90 or math.abs(before - after - total) > 1e-6))) then
+        or (settled and not miss and (sweeps ~= 1 or calls ~= 1 or not valid_damage))) then
         error("mutation_unverified_guest_melee_damage_abi", 0)
     end
     return {status = status, serial = serial, presses = presses, releases = releases,

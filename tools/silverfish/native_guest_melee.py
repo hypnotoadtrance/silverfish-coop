@@ -1,6 +1,7 @@
 """Scope an authenticated guest's stock Old Pipe tap and diagnostic fixtures."""
 
 import math
+import re
 import time
 
 from . import native_authored_pickup, native_inventory, party
@@ -33,16 +34,31 @@ def registered_target(area: str, target: str) -> bool:
     return profile is not None and profile.map == area
 
 
-def verified_damage(proof: dict) -> bool:
+def ordinary_map(area) -> bool:
+    return isinstance(area, str) and re.fullmatch(r"/Game/Classes/Maps/(?:[\w-]+/)*[\w-]+", area, re.ASCII) is not None
+
+
+def ordinary_target(area, target) -> bool:
+    if not ordinary_map(area) or not isinstance(target, str) or len(target) > 512:
+        return False
+    level = area.rsplit("/", 1)[1]
+    prefix = re.escape(f"{area}.{level}:PersistentLevel.")
+    return re.fullmatch(rf"\w+ {prefix}\w+", target, re.ASCII) is not None
+
+
+def verified_damage(proof: dict, *, fixture=False) -> bool:
     values = tuple(proof.get(key) for key in ("enemy_health_before", "enemy_health_after", "stock_damage"))
     if not all(type(value) in (int, float) and math.isfinite(value) for value in values):
         return False
     before, after, amount = values
     counters = proof.get("sweeps"), proof.get("damage_calls")
-    return (registered_target(proof.get("map"), proof.get("target"))
+    eligible = registered_target if fixture else ordinary_target
+    return (eligible(proof.get("map"), proof.get("target"))
             and all(type(counter) is int and counter == 1 for counter in counters)
-            and 100 <= before <= 160 and 0 < after < before and 0 < amount <= 90
-            and math.isclose(before - after, amount, abs_tol=1e-6))
+            and before > 0 and after < before and amount > 0
+            and (not fixture or 100 <= before <= 160 and after > 0 and amount <= 90)
+            and (math.isclose(before - after, amount, rel_tol=0, abs_tol=1e-6)
+                 or not fixture and after == 0 and amount >= before - 1e-6))
 
 
 def parse(fields: list[str]) -> tuple[str, dict] | None:
@@ -87,13 +103,15 @@ def parse(fields: list[str]) -> tuple[str, dict] | None:
             miss = ordinary and proof["status"] == "stock_miss_verified"
             cancelled = ordinary and proof["status"] == "stock_swing_cancelled"
             target = proof["target"]
-            eligible = (proof["map"] in BY_MAP and (target == "-" or registered_target(proof["map"], target))) if ordinary else (
-                (proof["map"], target) == (DEAD_BRIDGE, TARGET))
+            if ordinary:
+                eligible = ordinary_map(proof["map"]) and (target == "-" or ordinary_target(proof["map"], target))
+            else:
+                eligible = (proof["map"], target) == (DEAD_BRIDGE, TARGET)
             if (not eligible or proof["status"] == "surface_verified"
                     or proof["settled"] != (proof["status"] == "stock_damage_verified" or miss)
                     or not 0 <= proof["damage_calls"] <= proof["sweeps"] <= 1
                     or ((miss or cancelled) and not verified_miss(proof))
-                    or (proof["settled"] and not miss and not verified_damage(proof))):
+                    or (proof["settled"] and not miss and not verified_damage(proof, fixture=not ordinary))):
                 return None
         elif proof["map"] != CROSSROADS or proof["status"] == "stock_damage_verified":
             return None
@@ -102,13 +120,13 @@ def parse(fields: list[str]) -> tuple[str, dict] | None:
 
 
 def verified_miss(proof: dict) -> bool:
-    return (proof.get("map") in BY_MAP and proof.get("target") == "-"
+    return (ordinary_map(proof.get("map")) and proof.get("target") == "-"
             and tuple(proof.get(key) for key in ("sweeps", "damage_calls", "enemy_health_before", "enemy_health_after",
                                                 "stock_damage")) == (0, 0, -1, -1, -1))
 
 
 def is_equipped(equipment, area, guid):
-    return (area in BY_MAP and valid_guid(guid) and isinstance(equipment, dict)
+    return (ordinary_map(area) and valid_guid(guid) and isinstance(equipment, dict)
             and (equipment.get("kind"), equipment.get("guid")) == (KIND, guid))
 
 
@@ -128,12 +146,13 @@ def current_guid(target: str | None, epoch: str) -> str:
 async def perform(host, bridge, action: str, character: str, guid: str, operation_id: str, *, fixture_lane: int | None = None) -> dict:
     area = host.last_game.get("map")
     ordinary = action == SWING
-    allowed = {DAMAGE: (DEAD_BRIDGE,), CANARY: (CROSSROADS,), EQUIP: (CROSSROADS, DEAD_BRIDGE),
-               SWING: tuple(BY_MAP), AIM_FIXTURE: tuple(BY_MAP)}
+    fixtures = {DAMAGE: (DEAD_BRIDGE,), CANARY: (CROSSROADS,), EQUIP: (CROSSROADS, DEAD_BRIDGE),
+                AIM_FIXTURE: tuple(BY_MAP)}
+    map_ok = ordinary_map(area) if ordinary else area in fixtures.get(action, ())
     if (not host.native_guest or (not ordinary and not host.fixtures) or (ordinary and not host.native_guest_controls)
             or host.native_profile is None or host.stopping
             or host.transitioning or host.native_checkpoint_unsafe or host.last_game.get("state") != "hosting"
-            or area not in allowed.get(action, ()) or time.monotonic() - host.last_seen > 3):
+            or not map_ok or time.monotonic() - host.last_seen > 3):
         raise party.RuleError("native_guest_melee_swing_unavailable" if ordinary else "native_guest_melee_fixture_unavailable")
     if (not isinstance(character, str) or not valid_guid(guid) or not isinstance(operation_id, str)
             or not party.REQUEST_ID.fullmatch(operation_id)):
@@ -227,7 +246,7 @@ async def perform(host, bridge, action: str, character: str, guid: str, operatio
             if (proof.get("status"), proof.get("presses"), proof.get("releases"), proof.get("contacts"),
                     proof.get("qualified"), proof.get("settled"), proof.get("passive_free")) != (
                     expected, 1, 1, 1, 1, True, True) or (miss and not verified_miss(proof)) or (
-                    (ordinary or action == DAMAGE) and not miss and not verified_damage(proof)) or (
+                    (ordinary or action == DAMAGE) and not miss and not verified_damage(proof, fixture=not ordinary)) or (
                     action == DAMAGE and proof.get("target") != TARGET):
                 raise RuntimeError(proof.get("status") or "The fenced stock animation did not settle")
         host.last_game, host.last_seen = snapshot, time.monotonic()

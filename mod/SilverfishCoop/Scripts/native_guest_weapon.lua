@@ -2,7 +2,6 @@ local guest_weapon = {}
 local guest_save = require("guest_save")
 local save_scope = require("native_save_scope")
 local weapon_profiles = require("guest_weapon_registry")
-local cqc = require("native_enemy_loot_registry")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
@@ -65,7 +64,7 @@ local function equipped_guid(pawn, save, world, area)
     if not guid then return end
     local class_name = held_class:GetFullName():match("^%S+ (%S+)$")
     if world and (class_name == blowtorch_path or class_name == crowbar_path or (class_name == camera_path and area == camera_map)
-        or (class_name == old_pipe_path and cqc[area] ~= nil))
+        or class_name == old_pipe_path)
         and held:HasAuthority() and not held:IsActorBeingDestroyed()
         and same(held:GetWorld(), world) and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
         and same(held.User, pawn) and held.HeldByPlayer == true and pawn.IsWeaponBlocked == false then
