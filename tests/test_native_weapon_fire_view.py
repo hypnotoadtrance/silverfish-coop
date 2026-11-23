@@ -1,9 +1,14 @@
+import asyncio
+import ctypes
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
-from tools.silverfish.native_weapon_fire_view import Playback, _captured
+from tools.silverfish.local_bridge import LocalBridge, WEAPON_CUES_LIMIT
+from tools.silverfish.native_weapon_fire_view import Playback, _captured, relay
 
 
 class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
@@ -33,3 +38,80 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(control.event.call_count, 2)
         control.event.assert_any_call("native_avatar_use_sound_played", serial=1, item_class=self.item)
         control.event.assert_any_call("native_avatar_use_visual_played", serial=1, item_class=self.item, player_id=257)
+
+    async def test_resident_relay_reads_only_its_memory_queue_and_refuses_the_wrong_map(self):
+        host = self.host()
+        path = MagicMock(spec=Path)
+        mailbox = Mock(local_weapon_cues_available=True)
+        reads = iter((self.frame(1, self.area + "_Old"), self.frame(2), self.frame(2), self.frame(3), None))
+
+        def take():
+            data = next(reads)
+            if data is None:
+                host.stopping = True
+            return data
+
+        mailbox.take_local_weapon_cues.side_effect = take
+        transport = Mock()
+        await asyncio.wait_for(relay(host, SimpleNamespace(directory=path, local_bridge=mailbox), transport), 1)
+        path.__truediv__.return_value.stat.assert_not_called()
+        forwarded = [json.loads(call.args[0]) for call in transport.send_weapon_shot.call_args_list]
+        self.assertEqual(forwarded, [[self.area, self.epoch, [serial, "consume", self.item, 121, -59, 2.05, 257]]
+                                     for serial in (2, 3)])
+        allowed = transport.send_weapon_shot.call_args.args[1]
+        self.assertTrue(allowed("connected"))
+        self.assertFalse(allowed("offline"))
+
+    async def test_missing_memory_capability_uses_the_standalone_capture(self):
+        host = self.host()
+        directory = Path(self.enterContext(TemporaryDirectory()))
+        (directory / "native-weapon-shots").write_bytes(self.frame(1))
+        mailbox = Mock(local_weapon_cues_available=False)
+        transport = Mock()
+
+        def forward(*_):
+            host.stopping = True
+
+        transport.send_weapon_shot.side_effect = forward
+        await asyncio.wait_for(relay(host, SimpleNamespace(directory=directory, local_bridge=mailbox), transport), 1)
+        mailbox.take_local_weapon_cues.assert_not_called()
+        self.assertEqual(json.loads(transport.send_weapon_shot.call_args.args[0]),
+                         [self.area, self.epoch, [1, "consume", self.item, 121, -59, 2.05, 257]])
+
+    def test_memory_queue_requires_both_native_entry_points(self):
+        library = Mock()
+        del library.SilverfishBridgeEnableLocalWeaponCuesV1
+        bridge = LocalBridge(library)
+        bridge.enable_local_weapon_cues()
+        self.assertFalse(bridge.local_weapon_cues_available)
+        self.assertIsNone(bridge.take_local_weapon_cues())
+
+        library = Mock()
+        library.SilverfishBridgeEnableLocalWeaponCuesV1.return_value = 1
+        bridge = LocalBridge(library)
+        self.assertFalse(bridge.local_weapon_cues_available)
+        bridge.enable_local_weapon_cues()
+        self.assertTrue(bridge.local_weapon_cues_available)
+        frame = self.frame(1)
+
+        def copy(buffer, capacity):
+            self.assertEqual(capacity, WEAPON_CUES_LIMIT)
+            ctypes.memmove(buffer, frame, len(frame))
+            return len(frame)
+
+        library.SilverfishBridgeTakeLocalWeaponCuesV1.side_effect = copy
+        self.assertEqual(bridge.take_local_weapon_cues(), frame)
+        library.SilverfishBridgeTakeLocalWeaponCuesV1.side_effect = None
+        library.SilverfishBridgeTakeLocalWeaponCuesV1.return_value = WEAPON_CUES_LIMIT + 1
+        self.assertIsNone(bridge.take_local_weapon_cues())
+        bridge.close()
+        self.assertFalse(bridge.local_weapon_cues_available)
+
+    def frame(self, serial, area=None):
+        return f"{area or self.area}\n{serial}|consume|{self.item}|121|-59|2.05|257\n".encode("ascii")
+
+    def host(self):
+        return SimpleNamespace(stopping=False, transitioning=False, zone_epoch=self.epoch,
+                               last_game={"state": "hosting", "map": self.area},
+                               native_recipients=lambda: {"seat": {"connected": True}},
+                               authenticated_guest=lambda guest: ("guest", "seat") if guest == "connected" else None)

@@ -225,12 +225,18 @@ function view.reloaded(pawn, previous_ammo)
     record_cycle(weapon, pawn, animation)
 end
 
+local function clear_local_cues()
+    if current and type(SilverfishClearLocalWeaponCues) == "function" then SilverfishClearLocalWeaponCues() end
+end
+
 function view.sync(state, phase, avatar)
     if phase ~= "hosting" or not valid(state.world) then
+        clear_local_cues()
         current, pending, last_round = nil, {}, nil
         return
     end
     if not current or not same(current.world, state.world) then
+        clear_local_cues()
         current = {world = state.world, map = state.map, statics = StaticFindObject(statics_path), avatar = avatar}
         pending, last_round = {}, nil
     end
@@ -269,9 +275,24 @@ function view.flush(get_world)
     if not current or not bridge or published == serial or #pending == 0 then return end
     local world = get_world()
     if not same(world, current.world) then return end
-    local now, rows = current.statics:GetRealTimeSeconds(world), {current.map}
+    local now = current.statics:GetRealTimeSeconds(world)
     while pending[1] and pending[1].expires <= now do table.remove(pending, 1) end
     if #pending == 0 then return end
+    if type(SilverfishPublishLocalWeaponCue) == "function" then
+        for _, entry in ipairs(pending) do
+            if entry[1] > published then
+                local remaining = math.max(1, math.min(250, math.floor((entry.expires - now) * 1000)))
+                local offered = SilverfishPublishLocalWeaponCue(current.map, table.concat(entry, "|"), remaining)
+                if offered == false then break end
+                current.memory_cues = true
+            end
+        end
+        if current.memory_cues then
+            published, pending = serial, {}
+            return
+        end
+    end
+    local rows = {current.map}
     for _, entry in ipairs(pending) do rows[#rows + 1] = table.concat(entry, "|") end
     local target = bridge .. "/native-weapon-shots"
     local temporary = target .. ".tmp"

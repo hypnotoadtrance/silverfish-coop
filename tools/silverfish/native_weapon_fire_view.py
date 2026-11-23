@@ -118,20 +118,28 @@ def _captured(data):
 
 async def relay(host, bridge, transport):
     path = bridge.directory / _MAILBOX
+    mailbox = getattr(bridge, "local_bridge", None)
+    memory = getattr(mailbox, "local_weapon_cues_available", False)
     revision, last_sent = None, 0
     while not host.stopping:
         await asyncio.sleep(.025)
         try:
-            info = path.stat()
-            current = info.st_mtime_ns, info.st_size
-            if (current == revision or not 0 < info.st_size <= _MAX_MAILBOX
-                    or abs(time.time() - info.st_mtime) > _MAX_AGE):
-                continue
-            with path.open(encoding="ascii") as capture:
-                data = capture.read(_MAX_MAILBOX + 1)
+            if memory:
+                frame = mailbox.take_local_weapon_cues()
+                if not frame:
+                    continue
+                data = frame.decode("ascii")
+            else:
+                info = path.stat()
+                current = info.st_mtime_ns, info.st_size
+                if (current == revision or not 0 < info.st_size <= _MAX_MAILBOX
+                        or abs(time.time() - info.st_mtime) > _MAX_AGE):
+                    continue
+                with path.open(encoding="ascii") as capture:
+                    data = capture.read(_MAX_MAILBOX + 1)
+                revision = current
         except (OSError, UnicodeError):
             continue
-        revision = current
         area, cues = _captured(data)
         fresh = [cue for cue in cues if cue[0] > last_sent]
         if not fresh:
