@@ -72,13 +72,18 @@ end
 function redemption.command(fields, state, phase)
     if fields[2] == "native-wire-quest-capture" then
         last_reward = nil
-        if #fields ~= 4 then error("stock_wire_quest_capture_arguments", 0) end
-        last_reward = rewards.capture(state, phase, fields[3], fields[4])
+        if #fields ~= 4 and (#fields ~= 5 or fields[5] ~= "memory") then
+            error("stock_wire_quest_capture_arguments", 0)
+        end
+        last_reward = rewards.capture(state, phase, fields[3], fields[4], "wire", fields[5] == "memory")
         return "stock Copper Wire reward escrow verified"
     elseif fields[2] == "native-wire-quest-grant" then
         last_reward = nil
-        if #fields ~= 8 then error("stock_wire_quest_grant_arguments", 0) end
-        last_reward = rewards.grant(state, phase, table.unpack(fields, 3))
+        if #fields ~= 8 and (#fields ~= 9 or fields[9] ~= "memory") then
+            error("stock_wire_quest_grant_arguments", 0)
+        end
+        last_reward = rewards.grant(state, phase, fields[3], fields[4], fields[5], fields[6], fields[7], fields[8],
+            "wire", fields[9] == "memory")
         return "stock Copper Wire guest rewards verified"
     end
     if fields[2] ~= verb then return end

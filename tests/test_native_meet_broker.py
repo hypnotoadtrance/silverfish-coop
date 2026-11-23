@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish import native_broker, native_host_save, native_meet_broker as broker
-from tools.silverfish import native_quest, native_rewards, native_wire_quest, party
+from tools.silverfish import native_loot, native_quest, native_rewards, native_wire_quest, party
 from tools.silverfish.travel import BLACK_MARKET, CITY
 
 
@@ -25,7 +25,8 @@ class MeetBrokerTests(unittest.IsolatedAsyncioTestCase):
             "reserve": {"connected": False, "pawn": "exact reserve pawn"},
         }
         self.host = SimpleNamespace(
-            native_profile=self.profile, native_zones=True, native_guest=True, party=characters, control=Mock(),
+            native_profile=self.profile, native_zones=True, native_guest=True, native_loot_input=False,
+            party=characters, control=Mock(), pending_guest_saves={},
             stopping=False, transitioning=False, native_checkpoint_unsafe=False, pending_host_save=None,
             last_seen=time.monotonic(),
             allowed_maps={BLACK_MARKET, CITY}, roles=lambda: {"host": "host", "guest": "scout", "guest2": "reserve"},
@@ -38,9 +39,16 @@ class MeetBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.reputation = -6
         self.guest_xp = {"exact scout pawn": 2, "exact reserve pawn": 1}
         self.created = {}
+        self.pending_templates = set()
+        self.host.queue_guest_save = lambda character, pawn: self.host.pending_guest_saves.update({character: (pawn, {})})
         self.bridge = Mock(command=AsyncMock(side_effect=self.command))
 
-    async def command(self, verb, *arguments, timeout):
+    def write_template(self, slot):
+        path = native_host_save.slot_path(self.profile, slot)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"GVAS typed quest reward fixture")
+
+    async def command(self, verb, *arguments, timeout=None):
         snapshot = dict(self.host.last_game)
         area = snapshot["map"]
         if verb in (broker.PREFLIGHT, broker.START, broker.TURN_IN):
@@ -58,14 +66,22 @@ class MeetBrokerTests(unittest.IsolatedAsyncioTestCase):
                 "reputation_before": reputation, "reputation_after": self.reputation,
             }
         elif verb == "native-meet-broker-capture":
-            slot, weapon = arguments
+            slot, weapon, *mode = arguments
             self.assertEqual((area, weapon), (BLACK_MARKET, STOCK_WEAPON))
-            path = native_host_save.slot_path(self.profile, slot)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"GVAS typed quest reward fixture")
+            if mode == ["memory"]:
+                self.pending_templates.add(slot)
+            else:
+                self.assertFalse(mode)
+                self.write_template(slot)
             snapshot[broker.REWARDS.key] = self.reward_readback("captured", "exact host pawn", slot, weapon, TEMPLATE_AMMO)
+        elif verb == "native-guest-save-retain":
+            pawn, character = arguments
+            self.assertEqual(self.members[character], {"connected": True, "pawn": pawn})
         elif verb == "native-meet-broker-grant":
-            pawn, slot, weapon, ammo, personal_weapon, personal_ammo = arguments
+            pawn, slot, weapon, ammo, personal_weapon, personal_ammo, *mode = arguments
+            self.assertEqual(mode, ["memory"] if slot in self.pending_templates else [])
+            if self.host.native_loot_input:
+                self.assertIn(pawn, [pending[0] for pending in self.host.pending_guest_saves.values()])
             self.assertEqual((weapon, ammo), (STOCK_WEAPON, TEMPLATE_AMMO))
             self.assertNotIn(pawn, self.created)
             self.created[pawn] = personal_weapon, personal_ammo
@@ -75,6 +91,13 @@ class MeetBrokerTests(unittest.IsolatedAsyncioTestCase):
             before = self.guest_xp[pawn]
             self.guest_xp[pawn] += int(amount)
             snapshot["native_guest_xp"] = {"map": area, "pawn": pawn, "before": before, "after": self.guest_xp[pawn]}
+        elif verb == "native-loot-flush-escrows":
+            for slot in arguments:
+                self.assertIn(slot, self.pending_templates)
+                self.write_template(slot)
+        elif verb == "native-loot-release-escrows":
+            for slot in arguments:
+                self.pending_templates.remove(slot)
         else:
             self.fail(f"Unexpected bridge command {verb}")
         return snapshot
@@ -82,6 +105,62 @@ class MeetBrokerTests(unittest.IsolatedAsyncioTestCase):
     def reward_readback(self, state, pawn, slot, weapon, ammo):
         return {"state": state, "map": self.host.last_game["map"], "pawn": pawn, "slot": slot,
                 "weapon_guid": weapon, "ammo_guid": ammo, "weapon_mag": 6, "ammo_units": 9}
+
+    async def test_ready_and_reconnecting_recipients_receive_transient_rewards_without_writing(self):
+        self.host.native_loot_input = self.host.last_game["native_guest_save_retention"] = True
+        self.step = 1
+        receipt = await broker.commit(self.host, self.bridge, "scout", turning_in=True)
+        self.assertEqual(receipt["recipients"], ["host", "reserve", "scout"])
+        escrow = self.host.party[broker.REWARDS.key]
+        self.assertTrue(escrow["escrow"]["pending"])
+        slot = escrow["escrow"]["slot"]
+        assigned = escrow["pending"]["reserve"]
+        self.assertFalse(native_host_save.slot_path(self.profile, slot).exists())
+        self.members["reserve"]["connected"] = True
+
+        async def stale_guest(verb, *arguments, timeout=None):
+            if verb == "native-meet-broker-grant":
+                raise RuntimeError("wire_reward_exact_guest_required")
+            return await self.command(verb, *arguments, timeout=timeout)
+
+        self.bridge.command.side_effect = stale_guest
+        await native_wire_quest.settle(self.host, self.bridge, broker.REWARDS)
+        self.assertFalse(self.host.stopping or self.host.native_checkpoint_unsafe)
+        self.assertEqual(self.host.party[broker.REWARDS.key]["pending"]["reserve"], assigned)
+        self.assertEqual(self.guest_xp["exact reserve pawn"], 1)
+
+        self.bridge.command.side_effect = self.command
+        await native_wire_quest.settle(self.host, self.bridge, broker.REWARDS)
+        self.assertEqual(self.created["exact reserve pawn"], tuple(assigned))
+        self.assertEqual(self.guest_xp, {"exact scout pawn": 3, "exact reserve pawn": 2})
+        self.assertFalse(self.pending_templates)
+        self.assertNotIn(broker.REWARDS.key, self.host.party)
+        self.assertIs(self.host.pending_host_save, True)
+        self.host.checkpoint_native.assert_not_awaited()
+
+    async def test_explicit_promotion_keeps_the_existing_reward_schema_and_restart_delivery(self):
+        self.host.native_loot_input = self.host.last_game["native_guest_save_retention"] = True
+        self.step = 1
+        await broker.commit(self.host, self.bridge, "scout", turning_in=True)
+        updated, records = await native_loot.flush_pending_escrows(self.host, self.bridge, self.host.party)
+        pending = updated[broker.REWARDS.key]
+        slot = pending["escrow"]["slot"]
+        self.assertEqual(pending["escrow"], records[(broker.REWARDS.key, None)])
+        self.assertTrue(self.host.party[broker.REWARDS.key]["escrow"]["pending"])
+        checkpoint = {"world": {"party": updated}, "characters": {key: {"state": {}} for key in self.members}}
+        self.assertEqual(native_host_save.references(checkpoint), [pending["escrow"]])
+        native_host_save.verify_checkpoint(self.profile, checkpoint)
+
+        await self.bridge.command("native-loot-release-escrows", slot)
+        self.host.party = party.load_party(updated)
+        self.host.pending_guest_saves.clear()
+        self.members["reserve"]["connected"] = True
+        self.host.last_game["map"] = CITY
+        await native_wire_quest.settle(self.host, self.bridge, broker.REWARDS)
+        self.assertEqual(self.created["exact reserve pawn"], tuple(pending["pending"]["reserve"]))
+        self.assertEqual(self.guest_xp["exact reserve pawn"], 2)
+        self.assertNotIn(broker.REWARDS.key, self.host.party)
+        self.host.checkpoint_native.assert_not_awaited()
 
     async def test_starts_settles_once_and_keeps_the_reserved_guest_reward_for_reconnect(self):
         async def stock_action(verb):

@@ -30,12 +30,14 @@ local function remember_escrow(slot, pool)
     if #escrow_order > max_cached_escrows then escrow_cache[table.remove(escrow_order, 1)] = nil end
 end
 
-local function save_escrow(api, slot, pool, source)
+local function save_escrow(api, slot, pool, source, verify_roundtrip)
     if not api:SaveGameToSlot(pool, slot, 0) then error("native_loot_escrow_write_failed", 0) end
     local restored = api:LoadGameFromSlot(slot, 0)
     local verified
     if valid_object(restored) then
-        if source then
+        if verify_roundtrip then
+            verified = verify_roundtrip(pool, restored)
+        elseif source then
             verified = SilverfishVerifyNativeLootEscrow(pool:GetAddress(), restored:GetAddress(), table.unpack(source))
         else
             verified = SilverfishVerifyNativeStashSave(pool:GetAddress(), restored:GetAddress())
@@ -47,7 +49,7 @@ local function save_escrow(api, slot, pool, source)
     return restored
 end
 
-function actions.create_pending_escrow(stock, instance, world, slot)
+function actions.create_pending_escrow(stock, instance, world, slot, verify_roundtrip)
     local class = StaticFindObject(save)
     local transient = StaticFindObject("/Engine/Transient")
     if not valid_slot(slot) or pending_escrows[slot] or not valid_object(class)
@@ -59,7 +61,7 @@ function actions.create_pending_escrow(stock, instance, world, slot)
     if not valid_object(pool) then error("native_loot_escrow_could_not_create_save", 0) end
     local retained, reason = SilverfishReferenceNativeDetachedSave(stock:GetAddress(), pool:GetAddress(), true, true)
     if not retained then error("native_loot_escrow_memory_" .. tostring(reason), 0) end
-    pending_escrows[slot] = {pool = pool, owner = instance, world = world:GetAddress()}
+    pending_escrows[slot] = {pool = pool, owner = instance, world = world:GetAddress(), verify_roundtrip = verify_roundtrip}
     return pool
 end
 
@@ -153,7 +155,7 @@ function actions.command(fields, state, phase)
                 if not valid_object(state.world) or escrow.world ~= state.world:GetAddress() then
                     error("native_loot_escrow_save_world_changed", 0)
                 end
-                save_escrow(api, slot, escrow.pool)
+                save_escrow(api, slot, escrow.pool, nil, escrow.verify_roundtrip)
             end
         end
         return "native loot escrow save command complete"

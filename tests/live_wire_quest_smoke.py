@@ -32,6 +32,10 @@ def saved_party(state):
     return state.get("campaign", {}).get("world", {}).get("party", {})
 
 
+def stock_quest(state):
+    return state.get("gameplay", {}).get("native_quests", {}).get(QUEST, {})
+
+
 def guest_role(state, character):
     return next((role for role, player in state.get("gameplay", {}).get("players", {}).items()
                  if player.get("character_id") == character), None)
@@ -227,8 +231,8 @@ async def exercise(work: Path, vanilla_saved: Path | None, turn_in: bool, *, def
             offered = await board_press("loading", "offer")
             accepted = await board_press("starting", "ready")
             assert offered["sequence"] == accepted["open"] < accepted["sequence"], (offered, accepted)
-            committed = await wait(host_run, lambda state: saved_party(state).get("native_quests", {}).get(QUEST, {}).get("step") == 1)
-            started = saved_party(committed)["native_quests"][QUEST]
+            active = await wait(host_run, lambda state: stock_quest(state).get("step") == 1)
+            started = stock_quest(active)
         else:
             started = await action(profile, "native-quest-start", "--target", QUEST)
             assert started["effect"] == "native_quest_changed", started
@@ -275,8 +279,8 @@ async def exercise(work: Path, vanilla_saved: Path | None, turn_in: bool, *, def
                     ready = await board_press("loading", "ready")
                 completed = await board_press("redeeming", "completed")
                 assert ready["open"] == completed["open"] < completed["sequence"], completed
-                committed = await wait(host_run, lambda state: saved_party(state).get("native_quests", {}).get(QUEST, {}).get("step") == -10)
-                redeemed = saved_party(committed)["native_quests"][QUEST]
+                reported = await wait(host_run, lambda state: stock_quest(state).get("step") == -10)
+                redeemed = stock_quest(reported)
             else:
                 redeemed = await action(profile, "native-quest-turnin", "--target", QUEST)
                 assert redeemed["effect"] == "native_quest_changed", redeemed
@@ -288,18 +292,22 @@ async def exercise(work: Path, vanilla_saved: Path | None, turn_in: bool, *, def
             proof["stock_turn_in"] = redeemed
             if deferred:
                 assert sorted(redeemed["recipients"]) == sorted(("host", main_character, late_character)), redeemed
-                borough = await wait(host_run, lambda state: set(saved_party(state).get(REWARD_QUEUE, {}).get("pending", {}))
-                                     == {late_character})
-                queued = saved_party(borough)[REWARD_QUEUE]
-                expected_ids = queued["pending"][late_character]
-                assert queued["escrow"]["map"] == BOROUGH and len(set(expected_ids)) == 2, queued
-                proof["deferred"]["queued_in_borough"] = expected_ids
+                borough = await wait(host_run, lambda state: stock_quest(state).get("step") == -10)
+                early = saved_party(borough).get(REWARD_QUEUE)
+                if early is None:
+                    assert borough["native_inventory_checkpoint_pending"] is True, borough
+                proof["deferred"]["persisted_before_travel"] = early is not None
 
                 city = await cross_exit(CITY, ("guest",), (main_character,))
                 city_lease = lease(city, late_character)
                 assert city["zone_epoch"] != held["zone_epoch"] and city_lease["state"] == "reserved", city_lease
                 assert city_lease["grace_remaining"] > 0 and not guest_pawn(city, late_character), city
-                assert saved_party(city)[REWARD_QUEUE] == queued, city
+                queued = saved_party(city)[REWARD_QUEUE]
+                assert set(queued["pending"]) == {late_character}, queued
+                expected_ids = queued["pending"][late_character]
+                assert queued["escrow"]["map"] == BOROUGH and len(set(expected_ids)) == 2, queued
+                if early is not None:
+                    assert queued == early, city
                 proof["deferred"]["arrived_in_city"] = {"epoch": city["zone_epoch"], "reserved": city_lease,
                                                         "pending_ids": expected_ids}
 
@@ -310,14 +318,30 @@ async def exercise(work: Path, vanilla_saved: Path | None, turn_in: bool, *, def
                 late_pawn = guest_pawn(reunited, late_character)
                 lead = reunited["game"]["pawns"]["local"]["location"]
                 assert math.dist(late_pawn["location"], lead) <= 1500, late_pawn
+
+                def granted_in_city(state):
+                    if state.get("game", {}).get("map") != CITY:
+                        return False
+                    with (host_run / "events.jsonl").open(encoding="utf-8") as source:
+                        for line in source:
+                            if not line.endswith("\n"):
+                                continue
+                            event = json.loads(line)
+                            if (event["event"] == "native_wire_quest_pending_awards_committed"
+                                    and late_character in event["recipients"]):
+                                return True
+                    return False
+
+                await wait(host_run, granted_in_city)
+                late_rewards = await rewards_for(late_profile)
+                assert [late_rewards[item]["guid"] for item in ("rifle", "ammo")] == expected_ids, late_rewards
+                await action(campaign, "checkpoint")
                 settled = await wait(host_run, lambda state: state.get("game", {}).get("map") == CITY
                                      and REWARD_QUEUE not in saved_party(state))
                 assert saved_party(settled)["players"][late_character]["quest_xp"] == prior_xp + 1, settled
                 frame, = [row["state"]["native_guest_save"] for row in settled["campaign"]["characters"]
                           if row["character_id"] == late_character]
                 assert (frame["map"], frame["character_id"]) == (CITY, late_character), frame
-                late_rewards = await rewards_for(late_profile)
-                assert [late_rewards[item]["guid"] for item in ("rifle", "ammo")] == expected_ids, late_rewards
                 proof["deferred"].update(resumed=resumed["resumed"], city_pawn=late_pawn["name"],
                                          receipt_frame=frame, rewards=late_rewards)
 

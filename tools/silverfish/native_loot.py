@@ -45,13 +45,17 @@ def public_roll(roll: dict) -> dict:
 
 
 async def flush_pending_escrows(host, bridge, state):
-    from . import native_enemy_loot, native_guest_drop_record, native_stock_enemy_drops
+    from . import native_enemy_loot, native_guest_drop_record, native_meet_broker, native_stock_enemy_drops, native_wire_quest
 
     ledgers = STATE_KEY, native_stock_enemy_drops.STATE, native_enemy_loot.STATE_KEY, native_guest_drop_record.STATE
     pending = {(ledger, identity): roll["escrow"]
                for ledger in ledgers
                for identity, roll in state.get(ledger, {}).items()
                if (roll.get("escrow") or {}).get("pending") is True}
+    for profile in (native_wire_quest.COPPER_STOP_REWARDS, native_meet_broker.REWARDS):
+        escrow = state.get(profile.key, {}).get("escrow", {})
+        if escrow.get("pending") is True:
+            pending[(profile.key, None)] = escrow
     if not pending:
         return state, {}
     slots = [row["slot"] for row in pending.values()]
@@ -70,7 +74,10 @@ async def flush_pending_escrows(host, bridge, state):
     for ledger in {key[0] for key in records}:
         updated[ledger] = dict(state[ledger])
     for (ledger, identity), frame in records.items():
-        updated[ledger][identity] = dict(state[ledger][identity], escrow=frame)
+        if identity is None:
+            updated[ledger]["escrow"] = frame
+        else:
+            updated[ledger][identity] = dict(state[ledger][identity], escrow=frame)
     return updated, records
 
 

@@ -1,5 +1,6 @@
 """Commit MeetBroker at the Black Market board and distribute the stock starter kit."""
 
+import asyncio
 import time
 
 from . import native_loot, native_wire_quest, party
@@ -87,8 +88,8 @@ async def commit(host, bridge, actor: str, *, turning_in: bool) -> dict:
         recipients = sorted(set(host.roles().values()) & host.party["players"].keys()) if turning_in else []
         if turning_in and actor not in recipients:
             raise party.RuleError("native_meet_broker_interactor_unavailable")
-        if turning_in:
-            # This turn-in still banks a stock reward template for disconnected recipients.
+        defer_save = turning_in and native_wire_quest.defer_reward_save(host)
+        if turning_in and not defer_save:
             await host.checkpoint_native(bridge)
         host.native_checkpoint_unsafe = True
         proof = await _command(host, bridge, TURN_IN if turning_in else START, pawn)
@@ -105,7 +106,7 @@ async def commit(host, bridge, actor: str, *, turning_in: bool) -> dict:
         granted = []
         if turning_in:
             granted = await native_wire_quest.stage_party_rewards(host, bridge, candidate, REWARDS, recipients,
-                                                                  proof["weapon_guid"])
+                                                                  proof["weapon_guid"], defer_save=defer_save)
             for character in recipients:
                 player = candidate["players"][character]
                 player["quest_xp"] = player.get("quest_xp", 0) + 1
@@ -114,16 +115,16 @@ async def commit(host, bridge, actor: str, *, turning_in: bool) -> dict:
                           ammo_units=REWARDS.ammo_units, freelancer_rep=proof["reputation_after"])
         candidate.setdefault("native_quests", {})[QUEST_ID] = record
         revision = None
-        if turning_in:
+        if turning_in and not defer_save:
             revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset(granted))
         else:
-            host.pending_host_save = bool(host.pending_host_save)
+            host.pending_host_save = bool(host.pending_host_save or turning_in)
         host.party = candidate
         host.native_checkpoint_unsafe = False
         event = "native_meet_broker_completed" if turning_in else "native_meet_broker_started"
         host.control.event(event, revision=revision, **record)
         return {"effect": "native_quest_changed", **record, "native_meet_broker": proof}
-    except (OSError, RuntimeError, ValueError, KeyError):
+    except (OSError, RuntimeError, ValueError, KeyError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
         raise

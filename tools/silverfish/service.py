@@ -746,7 +746,8 @@ class Host:
         if escrow_records:
             slots = []
             for (ledger, identity), frame in escrow_records.items():
-                checkpoint_party[ledger][identity]["escrow"] = frame
+                escrow_owner = checkpoint_party[ledger] if identity is None else checkpoint_party[ledger][identity]
+                escrow_owner["escrow"] = frame
                 slots.append(frame["slot"])
             for start in range(0, len(slots), 16):
                 try:

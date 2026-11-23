@@ -209,11 +209,14 @@ function contract.command(fields, state, phase)
     local operation = fields[2]
     if operation == capture or operation == grant then
         last_reward = nil
-        if #fields ~= (operation == capture and 4 or 8) then refuse("reward_arguments") end
+        local count = operation == capture and 4 or 8
+        local memory = #fields == count + 1 and fields[count + 1] == "memory"
+        if #fields ~= count and not memory then refuse("reward_arguments") end
         if operation == capture then
-            last_reward = rewards.capture(state, phase, fields[3], fields[4], "meet_broker")
+            last_reward = rewards.capture(state, phase, fields[3], fields[4], "meet_broker", memory)
         else
-            last_reward = rewards.grant(state, phase, fields[3], fields[4], fields[5], fields[6], fields[7], fields[8], "meet_broker")
+            last_reward = rewards.grant(state, phase, fields[3], fields[4], fields[5], fields[6], fields[7], fields[8],
+                "meet_broker", memory)
         end
         return "stock MeetBroker reward verified"
     end

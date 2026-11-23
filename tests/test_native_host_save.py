@@ -4,10 +4,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from tools.silverfish import native_host_save
+from tools.silverfish import native_host_save, native_wire_quest
 from tools.silverfish.campaign import CampaignFormatError, CampaignStore
 from tools.silverfish.service import Host
-from tools.silverfish.travel import CROSSROADS, OBSERVATORY
+from tools.silverfish.travel import BOROUGH, CROSSROADS, OBSERVATORY
 
 
 class NativeHostSaveTests(unittest.TestCase):
@@ -138,6 +138,38 @@ class PairedCaptureTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(CampaignFormatError, "Cannot read the isolated Unreal save"):
             await self.host.checkpoint_native(self.bridge)
         self.host.commit_checkpoint.assert_not_awaited()
+
+    async def test_failed_checkpoint_does_not_release_an_uncommitted_quest_template(self):
+        key = native_wire_quest.REWARD_KEY
+        slot = native_host_save.new_slot()
+        pending = {"slot": slot, "map": BOROUGH, "pending": True}
+        self.host.party[key] = {"escrow": pending}
+        self.host.pending_host_save = True
+        released = []
+
+        async def command(action, *arguments, **options):
+            if action == "native-loot-flush-escrows":
+                self.assertEqual(arguments, (slot,))
+                native_host_save.slot_path(self.host.native_profile, slot).write_bytes(b"GVAS" + bytes(32))
+                return self.host.last_game
+            if action == "native-loot-release-escrows":
+                released.extend(arguments)
+                return self.host.last_game
+            return await self.capture(action, *arguments, **options)
+
+        self.bridge.command.side_effect = command
+        self.host.commit_checkpoint.side_effect = OSError("uncommitted reward checkpoint")
+        with self.assertRaisesRegex(OSError, "uncommitted reward checkpoint"):
+            await self.host.checkpoint_native(self.bridge)
+        self.assertIs(self.host.party[key]["escrow"], pending)
+        self.assertFalse(released)
+
+        self.host.commit_checkpoint.side_effect = None
+        self.assertEqual(await self.host.checkpoint_native(self.bridge), 19)
+        frame = self.host.party[key]["escrow"]
+        self.assertEqual(self.host.commit_checkpoint.await_args.args[0][key]["escrow"], frame)
+        native_host_save.verify_record(self.host.native_profile, frame)
+        self.assertEqual(released, [slot])
 
     async def test_explicit_save_captures_a_retained_inventory_after_its_lease_expires(self):
         guest = "departed-character"

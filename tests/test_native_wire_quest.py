@@ -2,7 +2,7 @@ import asyncio
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish import native_quest, native_wire_quest as wire, party
 from tools.silverfish.travel import BOROUGH
@@ -90,3 +90,38 @@ class CopperStopAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.host.native_checkpoint_unsafe and self.host.stopping)
         self.assertFalse(self.host.transitioning)
         self.host.checkpoint_native.assert_not_awaited()
+
+    async def test_turn_in_retains_the_guest_inventory_before_consuming_the_exact_wire(self):
+        host = self.host
+        host.native_loot_input = host.last_game["native_guest_save_retention"] = True
+        host.pending_guest_saves = {}
+        host.queue_guest_save = lambda character, pawn: host.pending_guest_saves.update({character: (pawn, {})})
+        host.roles = lambda: {"host": "host", "guest": "scout"}
+        self.step = 1
+        objective, weapon = "A1" * 16, "B2" * 16
+
+        async def turn_in_command(verb, pawn, *arguments, timeout):
+            if verb == wire.PREFLIGHT:
+                frame = await self.command(verb, pawn, timeout=timeout)
+                frame["native_wire_quest"].update(objective_guid=objective, objective_owner="guest")
+                return frame
+            if verb == "native-guest-save-retain":
+                self.assertEqual((pawn, arguments), ("guest pawn", ("scout",)))
+                return host.last_game
+            self.assertEqual((verb, pawn, arguments), (wire.TURN_IN, "guest pawn", (objective, "guest")))
+            self.assertEqual(host.pending_guest_saves["scout"][0], pawn)
+            return {**host.last_game, "native_wire_quest_redemption": {
+                "map": BOROUGH, "pawn": pawn, "board": wire.BOARD, "id": wire.QUEST_ID, "weapon_guid": weapon,
+                "ammo_units": 14, "native_cash": 30, "native_xp": self.xp + 1, "rep_before": -6, "rep_after": 14,
+                "objective_guid": objective, "objective_owner": "guest",
+            }}
+
+        self.bridge.command.side_effect = turn_in_command
+        with patch.object(wire, "stage_party_rewards", new=AsyncMock(return_value=[])) as stage:
+            receipt = await native_quest.action(host, self.bridge, "scout", "native-quest-turnin", wire.QUEST_ID)
+        self.assertEqual([call.args[0] for call in self.bridge.command.await_args_list],
+                         [wire.PREFLIGHT, "native-guest-save-retain", wire.TURN_IN])
+        self.assertTrue(stage.await_args.kwargs["defer_save"])
+        self.assertEqual((receipt["step"], receipt["consumed_wire"], receipt["objective_owner"]), (-10, objective, "scout"))
+        self.assertIs(host.pending_host_save, True)
+        host.checkpoint_native.assert_not_awaited()
