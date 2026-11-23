@@ -17,6 +17,7 @@ LIVE_CENSUS = "native_stash_live_census"
 LIVE_MOVE = "native_stash_live_move"
 LIVE_REORDER = "native_stash_live_reorder"
 LIVE_SPLIT = "native_stash_live_split"
+LIVE_SPLIT_MERGE = "native_stash_live_split_merge"
 MOVE = "native-stash-move"
 MOVED = "native_stash_move"
 RESULT = "native_stash"
@@ -64,6 +65,25 @@ def valid_reorder_anchor(item, before):
 
 def valid_split_amount(amount, expected):
     return type(amount) is int and type(expected) is int and 1 <= amount < expected < 2**31
+
+
+def valid_stack_merge(merge, source, amount):
+    if type(merge) is not dict or type(amount) is not int or amount < 1:
+        return False
+    guid, before, after = (merge.get(key) for key in ("guid", "before", "after"))
+    return (valid_guid(guid) and guid != source and type(before) is int and type(after) is int
+            and 1 <= before < after < 2**31 and after - before == amount)
+
+
+def valid_split_receipt(proof, source, amount, expected, requested_guid=None):
+    if ((proof.get("quantity"), proof.get("remaining")) != (amount, expected - amount)
+            or type(proof.get("quantity")) is not int or type(proof.get("remaining")) is not int):
+        return False
+    new = proof.get("created_guid")
+    merge = proof.get("stack_merge")
+    if "stack_merge" in proof:
+        return "created_guid" not in proof and valid_stack_merge(merge, source, amount) and merge["guid"] != requested_guid
+    return valid_guid(new) and new != source and (requested_guid is None or new == requested_guid)
 
 
 def _scope(host, character, site):
@@ -178,8 +198,8 @@ async def move(host, bridge, character, target, operation):
                 or proof.get("before") != before or not proof.get("class_path")
                 or type(proof.get("quantity")) is not int or proof["quantity"] < 1
                 or before is not None and proof["quantity"] != 1
-                or stack and (proof["quantity"], proof.get("remaining"), proof.get("created_guid")) !=
-                (amount, expected - amount, created)):
+                or stack and (not valid_split_receipt(proof, item, amount, expected, created)
+                              or "stack_merge" in proof and snapshot.get(LIVE_SPLIT_MERGE) is not True)):
             raise RuntimeError("The authoritative stash transfer did not verify")
         host.last_game, host.last_seen = snapshot, time.monotonic()
         response = {MOVED: dict(owner=character, site=site, combined=combined, direction=direction, guid=item,
@@ -187,7 +207,9 @@ async def move(host, bridge, character, target, operation):
         if before is not None:
             response[MOVED]["before"] = before
         if stack:
-            response[MOVED].update(remaining=proof["remaining"], created_guid=proof["created_guid"])
+            response[MOVED]["remaining"] = proof["remaining"]
+            outcome = "stack_merge" if "stack_merge" in proof else "created_guid"
+            response[MOVED][outcome] = proof[outcome]
         candidate = party.load_party(host.party)
         receipts = candidate["receipts"].setdefault(character, [])
         receipts.append({"id": operation, "request": request, "result": response})
@@ -293,9 +315,7 @@ async def service_view(client, active):
             result = (await client.gameplay_action(MOVE, operation.hex, target))[MOVED]
             if ((result.get("owner"), result.get("site"), result.get("direction"), result.get("guid"),
                  result.get("before")) != (client.invite["character_id"], view["site"], direction, item, before)
-                    or amount is not None and (result.get("quantity"), result.get("remaining")) !=
-                    (amount, view["expected"] - amount)
-                    or amount is not None and (not valid_guid(result.get("created_guid")) or result["created_guid"] == item)):
+                    or amount is not None and not valid_split_receipt(result, item, amount, view["expected"])):
                 raise RuntimeError("The stock stash transfer did not verify")
             client.control.event("native_stash_view_item_moved", operation_id=operation.hex, **result)
         rows = await _stock_rows(client, view["site"], operation)
