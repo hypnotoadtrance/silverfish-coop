@@ -26,9 +26,9 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
             self.assertEqual(native_guest_weapon.FIRE_CLASSES[kind], path)
             self.assertIn(path, native_guest_weapon.CLASS_PATHS)
             self.assertIn(kind, native_guest_weapon.SEED_KINDS)
-        self.assertNotIn("1911-02", native_guest_weapon.PRIMARY_KINDS)
+        self.assertNotIn("revolver-carbine-cult", native_guest_weapon.PRIMARY_KINDS)
 
-    def test_exact_45_ball_profiles_only(self):
+    def test_45_ball_ammo_keeps_the_audited_item_and_projectile(self):
         ammo = guest_weapon_profiles.FORTY_FIVE_BALL
         self.assertEqual((ammo.caliber, ammo.row, ammo.item, ammo.projectile, ammo.fixture_units),
                          (1, "45Cal_Ball", "Ammo_Magnum_BP", "Projectile_Pistol_Magnum", 10))
@@ -37,11 +37,10 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
             for profile in guest_weapon_profiles.FIREARMS
             if profile.magazine and profile.magazine.ammo == ammo
         }
-        self.assertEqual(firearms, {
-            "1911": ("Wep_1911", 8, 1), "1911-fancy": ("Wep_1911_Fancy", 8, 1),
-            "heavy-pistol": ("Wep_HeavyPistol", 12, 1),
-            "revolver-01": ("Wep_Revolver_01", 6, 1),
-        })
+        self.assertEqual(firearms["1911"], ("Wep_1911", 8, 1))
+        self.assertEqual(firearms["1911-02"], ("Wep_1911_02", 16, 4))
+        self.assertEqual(firearms["revolver-01"], ("Wep_Revolver_01", 6, 1))
+        self.assertEqual(firearms["revolver-snub"], ("Wep_Revolver_SnubNose", 6, 1))
 
     def test_9mm_revolver_uses_the_stock_seven_round_ball_magazine(self):
         path = "/Game/Classes/Weapons/Wep_Revolver_9mm.Wep_Revolver_9mm_C"
@@ -93,7 +92,10 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
         profiles = [p for p in guest_weapon_profiles.FIREARMS if p.magazine and p.magazine.ammo == ammo]
         self.assertEqual([(p.kind, p.blueprint, p.magazine.capacity, p.magazine.burst_length, p.magazine.fire_rate) for p in profiles],
                          [("fennec-57", "Wep_Pistol_Fennec_01", 17, 1, 0.06),
-                          ("black-fox", "Wep_Pistol_Fennec_02", 17, 1, 0.06)])
+                          ("black-fox", "Wep_Pistol_Fennec_02", 17, 1, 0.06),
+                          ("rifle-57-01", "Wep_5-7AR_01", 50, 4, 0.05),
+                          ("rifle-57-02", "Wep_5-7AR_02", 50, 4, 0.05),
+                          ("rifle-57-03", "Wep_5-7AR_03", 50, 4, 0.05)])
         self.assertTrue(all(p.magazine.require_default_payload and p.magazine.reload_first_stack for p in profiles))
 
     def test_only_audited_magazines_use_first_stack_reload(self):
@@ -104,7 +106,10 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
             "rusty-pistol",
             "sg-71-a", "sg-71-b", "sg-71-a-suppressed", "model-1931", "fennec-57", "black-fox", "break-action-50",
             "revolver-9mm", "revolver-01", "revolver-02", "revolver-03",
+            *(kind for kind, *_ in guest_weapon_profiles.ORDINARY_WEAPONS),
         })
+        self.assertEqual(guest_weapon_profiles.MAX_TAKE_AMMO_ROUNDS, 64)
+        self.assertEqual(len(native_guest_weapon.FIRE_CLASSES), len(guest_weapon_profiles.FIREARMS))
 
 
 class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):

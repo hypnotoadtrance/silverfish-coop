@@ -44,6 +44,7 @@ MEALS = {
         f"native-guest-{kind}": Meal(f"/Game/Classes/Items/Item_{asset}.Item_{asset}_C", food, 0, value, infection)
         for kind, asset, food, value, infection in (
             ("canned-beef", "CannedBeef", 16, 30, 8),
+            ("leftovers", "Leftovers", 18, 5, 0),
             ("canned-soup", "CannedSoup", 10, 12, 3),
             ("canned-tuna", "CannedTuna", 6, 9, 4),
             ("dead-beetle", "DeadBeetle", 3, 2, 3),

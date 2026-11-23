@@ -504,9 +504,11 @@ namespace
     const profiles::Profile* stock_magazine(Unreal::UClass* weapon)
     {
         if (!weapon) return nullptr;
-        for (const auto& profile : profiles::firearms)
-            if (profile.capacity > 0 && weapon == find<Unreal::UClass>(profile.path)) return &profile;
-        return nullptr;
+        const auto path = weapon->GetPathName();
+        const auto match = std::ranges::find_if(profiles::firearms, [&](const auto& profile) {
+            return profile.capacity > 0 && path == profile.path;
+        });
+        return match == profiles::firearms.end() ? nullptr : &*match;
     }
 
     bool stock_magazine_shape(Unreal::UObject* weapon, const profiles::Profile& profile)

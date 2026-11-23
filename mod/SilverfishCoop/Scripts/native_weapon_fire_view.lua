@@ -1,5 +1,6 @@
 local view = {}
 local npc_melee = require("native_npc_melee_view")
+local weapon_view = require("native_avatar_weapon_view")
 
 local npc_base = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local turret_base = "/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C"
@@ -223,7 +224,13 @@ local function capture(context)
     local now = current.statics:GetRealTimeSeconds(shooter)
     local row = {serial, path, position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw,
         rotation.Roll, scale, volume, pitch - 2, expires = now + .25}
-    if player then last_round = {row = row, weapon = weapon, at = now} end
+    if player then
+        local id = current.avatar.player_id({pawn = player, controller_object = player.Controller})
+        if id then
+            row[12] = id
+            last_round = {row = row, weapon = weapon, at = now}
+        end
+    end
     record(row)
 end
 
@@ -255,7 +262,7 @@ end
 
 local function capture_recoil(context, target, orientation)
     local weapon, pawn = equipped_player(context:get())
-    if not weapon or not last_round or not same(last_round.weapon, weapon) or #last_round.row ~= 11
+    if not weapon or not last_round or not same(last_round.weapon, weapon) or #last_round.row ~= 12
         or current.statics:GetRealTimeSeconds(pawn) - last_round.at > .06 then return end
     local offset, rotation = target:get(), orientation:get()
     local math_api = StaticFindObject(math_path)
@@ -428,6 +435,16 @@ function view.flush(get_world)
     end
 end
 
+local function local_muzzle(pawn, path)
+    local weapon = pawn.EquipedItem
+    if not valid(weapon) or not same(weapon:GetWorld(), pawn:GetWorld()) or not same(weapon.User, pawn)
+        or weapon:GetClass():GetFullName() ~= "BlueprintGeneratedClass " .. path then return end
+    local muzzle = weapon.Arrow_Muzzle
+    if valid(muzzle) and same(muzzle:GetOwner(), weapon) then
+        return muzzle:K2_GetComponentLocation(), muzzle:K2_GetComponentRotation()
+    end
+end
+
 local function play(pawn, path, point, rotation, scale, volume, pitch, distance)
     local turret = stock_turret(path)
     local class, base = asset(path), asset(turret and turret_base or weapon_base)
@@ -466,6 +483,7 @@ function view.command(args, state, phase, avatar)
     local scope = tostring(state.world:GetAddress()) .. epoch
     if scope ~= visit then visit, last_played = scope, 0 end
     local origin, receipts = pawn:K2_GetActorLocation(), {}
+    local local_id = avatar.player_id(state.local_pawn)
     for index = 5, #args do
         local values = {}
         for field in (args[index] .. "|"):gmatch("([^|]*)|") do values[#values + 1] = field end
@@ -522,7 +540,12 @@ function view.command(args, state, phase, avatar)
             local player = math.tointeger(tonumber(values[3]))
             if player and player >= 0 and player <= 2147483647 and stock_weapon(values[4]) and stock_cycle(values[5]) then
                 last_played = id
-                local ok, played = pcall(avatar.play_cycle, state.world, player, values[4], id, values[5])
+                local ok, played
+                if player == local_id then
+                    ok, played = pcall(weapon_view.local_reload, pawn, state.world, values[4], id, values[5])
+                else
+                    ok, played = pcall(avatar.play_cycle, state.world, player, values[4], id, values[5])
+                end
                 if ok and played then receipts[#receipts + 1] = ("%d:cycle"):format(id) end
             end
             goto next_cue
@@ -543,18 +566,30 @@ function view.command(args, state, phase, avatar)
         pitch_angle, yaw, roll = tonumber(pitch_angle), tonumber(yaw), tonumber(roll)
         scale, volume, pitch = tonumber(scale), tonumber(volume), tonumber(pitch)
         if id and id > last_played and ((#values == 11 and (stock_weapon(path) or stock_turret(path)))
-            or (#values == 19 and stock_weapon(path)))
+            or ((#values == 12 or #values == 19) and stock_weapon(path)
+                and math.tointeger(tonumber(values[12])) and tonumber(values[12]) >= 0
+                and tonumber(values[12]) <= 2147483647))
             and bounded(x, -1e7, 1e7) and bounded(y, -1e7, 1e7) and bounded(z, -1e7, 1e7)
             and bounded(pitch_angle, -180, 180) and bounded(yaw, -180, 180) and bounded(roll, -180, 180)
             and bounded(scale, 0, 10) and bounded(volume, 0, 10) and bounded(pitch, -26, 24) then
             last_played = id
-            local distance = math.sqrt((origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2)
+            local point, rotation = {X = x, Y = y, Z = z}, {Pitch = pitch_angle, Yaw = yaw, Roll = roll}
+            local source = tonumber(values[12])
+            if source ~= nil and source == local_id then
+                local muzzle, orientation = local_muzzle(pawn, path)
+                if muzzle then
+                    point, rotation = muzzle, orientation
+                else
+                    -- The shooter may already have holstered or switched weapons.
+                    point, scale = origin, 0
+                end
+            end
+            local distance = math.sqrt((origin.X - point.X)^2 + (origin.Y - point.Y)^2 + (origin.Z - point.Z)^2)
             if distance <= range then
-                local ok, particles, audio, stock_sound = pcall(play, pawn, path, {X = x, Y = y, Z = z},
-                    {Pitch = pitch_angle, Yaw = yaw, Roll = roll}, scale, volume, pitch, distance)
+                local ok, particles, audio, stock_sound = pcall(play, pawn, path, point, rotation,
+                    scale, volume, pitch, distance)
                 local recoil = false
-                if #values == 19 then
-                    local source = math.tointeger(tonumber(values[12]))
+                if #values == 19 and source ~= local_id then
                     local kick = {}
                     for index = 1, 7 do kick[index] = tonumber(values[12 + index]) end
                     if valid_recoil(source, kick) then

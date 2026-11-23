@@ -11,7 +11,7 @@ local marker_path = "/Script/Engine.TargetPoint"
 local npc_class, turret_class, marker_class, clock, death_hook, drone_death_hook, turret_death_hook, drone_seen
 local next_turret_lookup = 0
 local active_world, markers, numbered, mirrors, ended, anchors = nil, {}, {}, {}, {}, {}
-local pending = {}
+local pending, corrections = {}, {}
 local turret_timers = {}
 local extinguish_hook
 local next_sample, corpse_number = 0, 0
@@ -290,26 +290,56 @@ local function apply(marker, world)
     return true
 end
 
-local function mirror_positions(world, pawn)
+local function locally_carried(pawn, actor, mesh)
+    local grip = valid(pawn) and same(pawn.HeldObject, actor) and pawn.PhysicsHandle
+    return valid(grip) and same(grip:GetGrabbedComponent(), mesh)
+end
+
+local function mirror_positions(world, pawn, now)
     for address, mirror in pairs(mirrors) do
         local marker = mirror.marker
         local actor = valid(marker) and marker:GetOwner()
         if not valid(actor) or not same(marker:GetWorld(), world) or actor:IsActorBeingDestroyed() then
             retire_turret(mirror)
-            mirrors[address] = nil
+            mirrors[address], corrections[address] = nil, nil
         elseif mirror.turret then
             if actor:GetLocalRole() == 1 and present_turret(mirror, actor, pawn) then mirrors[address] = nil end
         elseif actor:GetLocalRole() == 1 and actor.Alive == false then
             local mesh = actor.Mesh
-            if valid(mesh) and mesh:IsAnySimulatingPhysics() then
-                local grip = valid(pawn) and same(pawn.HeldObject, actor) and pawn.PhysicsHandle
-                -- The local stock grip already presents this carrier's movement.
-                if not valid(grip) or not same(grip:GetGrabbedComponent(), mesh) then
-                    local target = marker:K2_GetActorLocation()
-                    local offset, error_squared = between(corpses.position(actor), target)
-                    if error_squared > 15^2 then mesh:K2_AddWorldOffset(offset, false, {}, true) end
+            if valid(mesh) and mesh:IsAnySimulatingPhysics() and not locally_carried(pawn, actor, mesh) then
+                local target = marker:K2_GetActorLocation()
+                local offset, error_squared = between(corpses.position(actor), target)
+                if error_squared > 450^2 then
+                    corrections[address] = nil
+                    mesh:K2_AddWorldOffset(offset, false, {}, true)
+                elseif error_squared > 15^2 then
+                    corrections[address] = {actor = actor, mesh = mesh, pawn = pawn, start = now, offset = offset, applied = 0}
                 end
+            else
+                corrections[address] = nil
             end
+        end
+    end
+end
+
+function corpses.animate(get_world)
+    if not next(corrections) then return end
+    local world = get_world()
+    if not same(world, active_world) then corrections = {}; return end
+    local now = clock:GetRealTimeSeconds(world)
+    for address, correction in pairs(corrections) do
+        local actor, mesh = correction.actor, correction.mesh
+        if not valid(actor) or actor:IsActorBeingDestroyed() or not valid(mesh)
+            or not mesh:IsAnySimulatingPhysics() or locally_carried(correction.pawn, actor, mesh) then
+            corrections[address] = nil
+        else
+            local progress = math.min(1, math.max(0, (now - correction.start) / sample_period))
+            local step, offset = progress - correction.applied, correction.offset
+            if step > 0 then
+                mesh:K2_AddWorldOffset({X = offset.X * step, Y = offset.Y * step, Z = offset.Z * step}, false, {}, true)
+                correction.applied = progress
+            end
+            if progress == 1 then corrections[address] = nil end
         end
     end
 end
@@ -394,7 +424,7 @@ function corpses.sync(state, phase)
     local world = (hosting or phase == "connected" and state.server) and state.world or nil
     if not same(world, active_world) then
         for _, mirror in pairs(mirrors) do retire_turret(mirror) end
-        turret_timers = {}
+        turret_timers, corrections = {}, {}
         active_world, markers, numbered, mirrors, ended, anchors, next_sample, corpse_number =
             world, {}, {}, {}, {}, {}, 0, 0
     end
@@ -434,7 +464,7 @@ function corpses.sync(state, phase)
                 for address, marker in pairs(pending) do
                     if apply(marker, world) then pending[address] = nil end
                 end
-                mirror_positions(world, state.local_pawn and state.local_pawn.pawn)
+                mirror_positions(world, state.local_pawn and state.local_pawn.pawn, now)
             end
         end
     end

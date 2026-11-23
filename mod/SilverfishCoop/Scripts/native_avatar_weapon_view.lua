@@ -505,6 +505,7 @@ function view.cycle(entry, world, weapon, serial, path)
     local previous = active_cycle[entry]
     local bone = previous and previous.bone or moving_bone(rig)
     local rest = previous and previous.rest or mechanism_position(rig, entry.weapon_slide, bone)
+    local previous_tick = previous and previous.previous_tick or rig.VisibilityBasedAnimTickOption
     rig.VisibilityBasedAnimTickOption = 0
     rig:SetAnimationMode(1, false)
     rig:SetAnimation(clip)
@@ -514,9 +515,32 @@ function view.cycle(entry, world, weapon, serial, path)
     local prior = entry.last_cycle
     local cycle = {world = world:GetAddress(), start = clock:GetRealTimeSeconds(world), duration = length,
         clip = path, weapon = weapon, serial = serial, count = prior and prior.count + 1 or 1, peak = 0,
-        bone = bone, rest = rest, sounds = read and sounds or {}, sound_index = 1}
+        bone = bone, rest = rest, sounds = read and sounds or {}, sound_index = 1, previous_tick = previous_tick}
     active_cycle[entry], entry.last_cycle = cycle, cycle
     return true
+end
+
+local local_reload
+
+local function clear_local_reload()
+    local current = local_reload and active_cycle[local_reload]
+    if current and valid(local_reload.weapon_rig) then
+        local_reload.weapon_rig.VisibilityBasedAnimTickOption = current.previous_tick
+    end
+    if local_reload then active_cycle[local_reload] = nil end
+    local_reload = nil
+end
+
+function view.local_reload(pawn, world, weapon, serial, path)
+    local held = pawn.EquipedItem
+    if not valid(held) or not same(held.User, pawn) or not same(held:GetWorld(), world)
+        or held:GetClass():GetFullName() ~= "BlueprintGeneratedClass " .. weapon then return false end
+    local rig, clip = held.Wep_Skeli, StaticFindObject(path)
+    if not valid(rig) or not same(rig:GetOwner(), held) or not valid(clip)
+        or not (same(clip, held.Reload_Wet_Anim) or same(clip, held.Reload_Dry_Anim)) then return false end
+    if local_reload and not same(local_reload.weapon_rig, rig) then clear_local_reload() end
+    local_reload = local_reload or {pawn = pawn, weapon_rig = rig, firearm_class = weapon}
+    return view.cycle(local_reload, world, weapon, serial, path)
 end
 
 function view.animate_cycle(get_world)
@@ -526,11 +550,14 @@ function view.animate_cycle(get_world)
     local now, scope = clock:GetRealTimeSeconds(world), world:GetAddress()
     for entry, cycle in pairs(active_cycle) do
         local rig = entry.weapon_rig
-        if not valid(rig) or scope ~= cycle.world then
-            active_cycle[entry] = nil
+        local local_view = entry == local_reload
+        if not valid(rig) or scope ~= cycle.world
+            or local_view and (not valid(entry.pawn) or not same(entry.pawn.EquipedItem, rig:GetOwner())) then
+            if local_view then clear_local_reload() else active_cycle[entry] = nil end
         elseif cycle.finished then
-            rig.VisibilityBasedAnimTickOption = 4
+            rig.VisibilityBasedAnimTickOption = cycle.previous_tick
             active_cycle[entry] = nil
+            if local_view then local_reload = nil end
         else
             if cycle.rest then
                 local point = mechanism_position(rig, entry.weapon_slide, cycle.bone)

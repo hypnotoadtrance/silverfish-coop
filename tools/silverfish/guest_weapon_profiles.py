@@ -59,6 +59,37 @@ class Firearm:
         return f"/Game/Classes/Weapons/{self.blueprint}.{self.blueprint}_C"
 
 
+# Direct Weapon_Master derivatives with the same stock input, ammo debit and
+# whole-magazine reload. Capacity and cadence come from cooked class defaults.
+ORDINARY_WEAPONS = (
+    ("revolver-snub", "Wep_Revolver_SnubNose", 6, 1, 0.2, FORTY_FIVE_BALL),
+    ("revolver-snub-02", "Wep_Revolver_SnubNose_02", 6, 1, 0.2, FORTY_FIVE_BALL),
+    ("revolver-carbine", "Wep_Revolver_Carbine_01", 6, 1, 0.5, FORTY_FIVE_BALL),
+    ("revolver-carbine-scoped", "Wep_Revolver_Carbine_Scoped", 6, 1, 0.5, FORTY_FIVE_BALL),
+    ("carbine-45", "Wep_45Carbine", 12, 1, 0.1, FORTY_FIVE_BALL),
+    ("carbine-45-scoped", "Wep_45Carbine_Scoped", 12, 1, 0.1, FORTY_FIVE_BALL),
+    ("carbine-45-silenced", "Wep_45Carbine_Silenced", 12, 1, 0.1, FORTY_FIVE_BALL),
+    ("ktr04", "Wep_KTR04", 16, 1, 0.2, FORTY_FIVE_BALL),
+    ("ktr04-scoped", "Wep_KTR04_Scoped", 16, 1, 0.2, FORTY_FIVE_BALL),
+    ("bizon-01", "Wep_Bizon_01", 64, 0, 0.085, NINE_MM_BALL),
+    ("bizon-02", "Wep_Bizon_02", 64, 0, 0.085, NINE_MM_BALL),
+    ("bizon-03", "Wep_Bizon_03", 64, 0, 0.085, NINE_MM_BALL),
+    ("pistol-auto", "Wep_Pistol_Auto", 20, 0, 0.06, NINE_MM_BALL),
+    ("smg-assault", "Wep_SMG_Assault", 40, 0, 0.075, NINE_MM_BALL),
+    ("smg-02", "Wep_SMG_02", 28, 0, 0.1, NINE_MM_BALL),
+    ("smg-02-guard", "Wep_SMG_02_Guard", 28, 0, 0.1, NINE_MM_BALL),
+    ("smg-03", "Wep_SMG_03", 30, 3, 0.08, NINE_MM_BALL),
+    ("smg-03-scoped", "Wep_SMG_03_Scoped", 30, 3, 0.08, NINE_MM_BALL),
+    ("smg-03-suppressed", "Wep_SMG_03_Suppressed", 30, 3, 0.08, NINE_MM_BALL),
+    ("grease-gun", "Wep_GreaseGun", 28, 0, 0.133333, FORTY_FIVE_BALL),
+    ("aek-01", "Wep_AEK_01", 30, 3, 0.04, FORTY_FIVE_BALL),
+    ("aek-02", "Wep_AEK_02", 30, 3, 0.04, FORTY_FIVE_BALL),
+    ("rifle-57-01", "Wep_5-7AR_01", 50, 4, 0.05, FIVE_SEVEN_AP),
+    ("rifle-57-02", "Wep_5-7AR_02", 50, 4, 0.05, FIVE_SEVEN_AP),
+    ("rifle-57-03", "Wep_5-7AR_03", 50, 4, 0.05, FIVE_SEVEN_AP),
+    ("1911-02", "Wep_1911_02", 16, 4, 0.1, FORTY_FIVE_BALL),
+)
+
 FIREARMS = (
     Firearm("smg", "Wep_SMG_UBGL"),
     Firearm("smg-standard", "Wep_SMG_01", True, Magazine(30, 0, 0.075)),
@@ -96,6 +127,8 @@ FIREARMS = (
             Magazine(17, 1, 0.06, True, FIVE_SEVEN_AP, reload_first_stack=True)),
     Firearm("black-fox", "Wep_Pistol_Fennec_02", True,
             Magazine(17, 1, 0.06, True, FIVE_SEVEN_AP, reload_first_stack=True)),
+    *(Firearm(kind, blueprint, True, Magazine(capacity, burst, rate, True, ammo, reload_first_stack=True))
+      for kind, blueprint, capacity, burst, rate, ammo in ORDINARY_WEAPONS),
 )
 
 # Registered ordinary magazines use the stock primary-ammunition transaction.

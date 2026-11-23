@@ -41,17 +41,18 @@ def valid_cycle(cue):
 
 
 def valid_shot(cue):
-    if type(cue) is not list or len(cue) not in (11, 19):
+    if type(cue) is not list or len(cue) not in (11, 12, 19):
         return False
     serial, path = cue[:2]
     pose = cue[2:11]
     return (type(serial) is int and 0 < serial < 10**15
-            and stock_shot_class(path, recoil=len(cue) == 19)
+            and stock_shot_class(path, recoil=len(cue) > 11)
             and valid_position(pose[:3])
             and all(type(angle) in (int, float) and -180 <= angle <= 180 for angle in pose[3:6])
             and all(type(value) in (int, float) and low <= value <= high
                     for value, (low, high) in zip(pose[6:], ((0, 10), (0, 10), (-26, 24)), strict=True))
-            and (len(cue) == 11 or valid_recoil(cue[11:])))
+            and (len(cue) == 11 or type(cue[11]) is int and 0 <= cue[11] <= 2147483647)
+            and (len(cue) != 19 or valid_recoil(cue[11:])))
 
 
 def valid_recoil(recoil):
@@ -138,11 +139,11 @@ def _captured(data):
             if valid_use(cue) or valid_npc_impact(cue):
                 cues.append(cue)
             continue
-        if len(fields) not in (11, 19):
+        if len(fields) not in (11, 12, 19):
             continue
         try:
             cue = [int(fields[0]), fields[1], *map(float, fields[2:11])]
-            if len(fields) == 19:
+            if len(fields) > 11:
                 cue.extend([int(fields[11]), *map(float, fields[12:])])
         except ValueError:
             continue

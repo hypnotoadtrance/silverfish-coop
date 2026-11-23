@@ -23,6 +23,14 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
                    f"4|consume|{self.item}|0|0|0|-1\n")
         self.assertEqual(_captured(mailbox), (self.area, [[1, "consume", self.item, 121.0, -59.0, 2.05, 257]]))
 
+    def test_shot_can_identify_the_shooter_without_a_recoil_clip(self):
+        weapon = "/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C"
+        shot = f"{weapon}|1|2|3|0|13|0|1|1|2"
+        _, cues = _captured(f"{self.area}\n1|{shot}|257\n2|{shot}|-1\n3|{shot}\n")
+        self.assertEqual([cue[0] for cue in cues], [1, 3])
+        self.assertEqual(cues[0][-1], 257)
+        self.assertEqual(len(cues[1]), 11)
+
     async def test_relayed_use_is_played_once_in_its_visit(self):
         game = {"map": self.area}
         bridge = SimpleNamespace(command=AsyncMock(return_value={"ack": {"message": "1:consume,1:consume_visual"}}))
