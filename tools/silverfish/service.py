@@ -5859,8 +5859,10 @@ class Client:
         rain_present = native_weather_view.valid_rain(rain)
         weather_args = tuple("-" if value is None else str(value) for value in weather) if weather_present or rain_present else ()
         rain_args = tuple(map(str, rain)) if rain_present else ()
+        action = (native_weather_view.LOCAL_APPLY if self.last_game.get(native_weather_view.LOCAL_CAPABILITY) is True
+                  else "native-world-view-apply")
         snapshot = await self.bridge.command(
-            "native-world-view-apply", self.zone_epoch, str(frame["sequence"]), area, expected_actor,
+            action, self.zone_epoch, str(frame["sequence"]), area, expected_actor,
             *(str(value) for value in numeric[:-1]), "1" if frame["sun_visible"] else "0", str(numeric[-1]),
             *("-" if value is None else str(value) for value in sky), *weather_args, *rain_args, timeout=3,
         )
@@ -5873,7 +5875,8 @@ class Client:
                 or weather_present and proof.get("weather_verified") is not True
                 or rain_present and not (proof.get("rain_verified") is True or rain_skipped)):
             raise RuntimeError("The connected guest did not verify the host's rendered world frame")
-        self.last_game = snapshot
+        self.last_game = (self.bridge.remember_local_world_view(self.last_game, snapshot)
+                          if "native_world_view_local_scope" in snapshot else snapshot)
 
     async def service_requests(self) -> None:
         for path, request in self.control.requests():

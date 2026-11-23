@@ -953,12 +953,12 @@ local function run_command(fields, state, current_phase)
         end
         return native_world_view.play_siren(state, current_phase, fields[3], tonumber(fields[4]),
             fields[5], tonumber(fields[6]), tonumber(fields[7]))
-    elseif command == "native-world-view-apply" then
+    elseif command == "native-world-view-apply" or command == "native-world-view-apply-local" then
         if not world_view_enabled or (#fields ~= 18 and #fields ~= 23 and #fields ~= 27)
             or current_phase ~= "connected" or role ~= "client" then
             error("Authoritative sun projection requires the current connected client", 0)
         end
-        native_world_view.apply(state, current_phase, {
+        local proof = native_world_view.apply(state, current_phase, {
             epoch = fields[3], sequence = tonumber(fields[4]), map = fields[5], actor = fields[6],
             game_seconds = tonumber(fields[7]), pitch = tonumber(fields[8]), yaw = tonumber(fields[9]),
             roll = tonumber(fields[10]), sun_x = tonumber(fields[11]), sun_y = tonumber(fields[12]),
@@ -970,7 +970,7 @@ local function run_command(fields, state, current_phase)
             rain_intensity = tonumber(fields[24]), rain_x = tonumber(fields[25]),
             rain_y = tonumber(fields[26]), rain_z = tonumber(fields[27]),
         })
-        return "authenticated host sun and sky projected"
+        return "authenticated host sun and sky projected", proof
     elseif command == "join" then
         if (#fields ~= 3 and #fields ~= 6 and #fields ~= 8) or not loopback_endpoint(argument) then
             error("Expected the local relay endpoint 127.0.0.1:port", 0)
@@ -1225,17 +1225,26 @@ local function world_view_row(mode, view)
         view.rain_verified and 1 or mode == "applied" and view.rain_skipped_nullrhi and "nullrhi" or 0)
 end
 
-local function write_status(state, current_phase, failure, fields, pending, crate_diagnostic)
-    local compact_crates = resident_title and status_publication.installed
+function status_publication.compact()
+    return resident_title and status_publication.installed
         and not status_publication.mirror and status_publication.memory_live
+end
+
+function status_publication.steady(state, current_phase)
     local published = status_publication.context
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    return published and (current_phase == "hosting" or current_phase == "connected")
+        and published.phase == current_phase and published.map == state.map and published.clients == state.clients
+        and same_object(published.world, state.world) and same_object(published.pawn, pawn)
+end
+
+local function write_status(state, current_phase, failure, fields, pending, crate_diagnostic)
+    local compact_crates = status_publication.compact()
     local pawn = state.local_pawn and state.local_pawn.pawn
     -- Autonomous sync can run before the next status publish. Keep exact command replies
     -- and scope changes on the full path, without building an idle frame to discard.
-    if compact_crates and not fields and not pending and not failure and not crate_diagnostic and published
-        and (current_phase == "hosting" or current_phase == "connected")
-        and published.phase == current_phase and published.map == state.map and published.clients == state.clients
-        and same_object(published.world, state.world) and same_object(published.pawn, pawn)
+    if compact_crates and not fields and not pending and not failure and not crate_diagnostic
+        and status_publication.steady(state, current_phase)
         and os.clock() < status_publication.next_frame then return end
     local crate_details
     if crate_diagnostic and (failure or current_phase ~= crate_diagnostic.phase
@@ -1256,6 +1265,9 @@ local function write_status(state, current_phase, failure, fields, pending, crat
     }
     if current_phase == "hosting" or current_phase == "connected" then
         rows[#rows + 1] = status_row("native-guest-ui-memory", 1)
+    end
+    if current_phase == "connected" and world_view_enabled and compact_crates then
+        rows[#rows + 1] = status_row("native-world-view-apply-local", 1)
     end
     for _, row in ipairs(native_stock_creator.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
     if role == "host" and party_travel_guard_available() then
@@ -1583,9 +1595,21 @@ local function observe_session()
     return state, current_phase
 end
 
-local function tick(fields, pending)
+local function tick(fields, pending, periodic)
     local state, current_phase = observe_session()
     if not state then return end
+    if fields and pending and fields[2] == "native-world-view-apply-local" and not periodic and current_phase == "connected"
+        and world_view_enabled and status_publication.compact() and status_publication.steady(state, current_phase)
+        and os.clock() < status_publication.next_frame then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        local accepted, message, proof = pcall(run_command, fields, state, current_phase)
+        local reply = status_row("native-world-view-reply", 1, sequence, state.local_pawn.name) .. "\n"
+            .. status_row("ack", fields[1], accepted and "accepted" or "error", message) .. "\n"
+        if accepted then reply = reply .. world_view_row("applied", proof) .. "\n" end
+        SilverfishPublishLocalBridgeReply(pending.ticket, reply)
+        return true
+    end
     native_mindcore_replication.sync(state, current_phase)
     native_datasilo_lift.sync(state, current_phase)
     native_datasilo_door.sync(state, current_phase)
@@ -1784,7 +1808,7 @@ LoopInGameThreadWithDelay(25, function()
     local periodic = now >= next_snapshot or now >= status_publication.next_frame
     local fields, pending = read_command(periodic)
     if not fields and not periodic then return end
-    next_snapshot = now + 0.25
-    local ok, failure = pcall(tick, fields, pending)
-    if not ok then print("[SilverfishCoop] " .. tostring(failure) .. "\n") end
+    local ok, result = pcall(tick, fields, pending, periodic)
+    if not ok or result ~= true then next_snapshot = now + 0.25 end
+    if not ok then print("[SilverfishCoop] " .. tostring(result) .. "\n") end
 end)

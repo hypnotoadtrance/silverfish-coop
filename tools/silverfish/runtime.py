@@ -677,6 +677,25 @@ def _finite(value: str) -> float | None:
     return number
 
 
+def _parse_world_view(fields: list[str], phase: str | None) -> dict:
+    row = {"mode": fields[1], "map": fields[2], "actor": fields[3], "epoch": fields[4],
+           "sequence": int(fields[5]), "sun_visible": fields[13] == "1", "sun_intensity": _finite(fields[14]),
+           "clock_text": fields[18], "save_unchanged": fields[19] == "1", "sky_verified": fields[20] == "1"}
+    row.update(zip(("game_seconds", "pitch", "yaw", "roll", "sun_x", "sun_y", "sun_z"), map(_finite, fields[6:13])))
+    row.update(zip(("sky_r", "sky_g", "sky_b"), map(_finite, fields[15:18])))
+    if len(fields) >= 27:
+        row.update(zip(WORLD_WEATHER_FIELDS, map(_finite, fields[21:26])))
+        row["weather_verified"] = fields[26] == "1"
+    if len(fields) == 32:
+        rain = list(map(_finite, fields[27:31]))
+        if native_weather_view.valid_rain(rain):
+            row.update(zip(native_weather_view.RAIN_FIELDS, rain))
+            row["rain_verified"] = fields[31] == "1"
+            if fields[31] == "nullrhi" and fields[1] == "applied" and rain[0] > 0 and phase == "connected":
+                row["rain_skipped_nullrhi"] = True
+    return row
+
+
 def _held_input_sequence(value: str) -> int:
     if 0 < len(value) <= 16 and value.isascii() and value.isdecimal() and 0 < (number := int(value)) < 2**53:
         return number
@@ -718,6 +737,7 @@ class Bridge:
         self.status_source = "file"
         self._local_status = None
         self._file_command_lock = asyncio.Lock()
+        self._local_world_view = None
 
     async def wait_for_interaction(self, timeout: float, *, wake_if=None, guest=False) -> None:
         """Wake for local input, a new game frame, or pending network work."""
@@ -1172,8 +1192,16 @@ class Bridge:
         frame = self._parse_status(text) if text is not None else None
         if self.local_bridge is not None and self._local_status is not None:
             if frame is None or frame.get("sequence", -1) < self._local_status["sequence"]:
-                return self._local_status
-            self._local_status = None
+                frame = self._local_status
+            else:
+                self._local_status = None
+        if self._local_world_view is not None and frame is not None:
+            at_sequence, pawn, proof = self._local_world_view
+            if (self.local_bridge is not None and frame.get("sequence", 0) <= at_sequence
+                    and (frame.get("state"), frame.get("map"), frame.get("pawns", {}).get("local", {}).get("name"))
+                    == ("connected", proof["map"], pawn)):
+                return {**frame, "native_world_view": proof}
+            self._local_world_view = None
         return frame
 
     def _parse_status(self, text: str) -> dict | None:
@@ -2429,24 +2457,10 @@ class Bridge:
                     cues = data.setdefault(native_weather_view.KEY, [])
                     if len(cues) < native_weather_view.MAX_SIRENS:
                         cues.append(native_weather_view.parse_siren(fields))
+                elif fields == [native_weather_view.LOCAL_APPLY, "1"] and data.get("state") == "connected":
+                    data[native_weather_view.LOCAL_CAPABILITY] = True
                 elif fields[0] == "native-world-view" and len(fields) in (21, 27, 32) and fields[1] in ("sample", "applied"):
-                    row = {"mode": fields[1], "map": fields[2], "actor": fields[3], "epoch": fields[4],
-                           "sequence": int(fields[5]), "sun_visible": fields[13] == "1", "sun_intensity": _finite(fields[14]),
-                           "clock_text": fields[18], "save_unchanged": fields[19] == "1", "sky_verified": fields[20] == "1"}
-                    row.update(zip(("game_seconds", "pitch", "yaw", "roll", "sun_x", "sun_y", "sun_z"),
-                                   map(_finite, fields[6:13])))
-                    row.update(zip(("sky_r", "sky_g", "sky_b"), map(_finite, fields[15:18])))
-                    if len(fields) >= 27:
-                        row.update(zip(WORLD_WEATHER_FIELDS, map(_finite, fields[21:26])))
-                        row["weather_verified"] = fields[26] == "1"
-                    if len(fields) == 32:
-                        rain = list(map(_finite, fields[27:31]))
-                        if native_weather_view.valid_rain(rain):
-                            row.update(zip(native_weather_view.RAIN_FIELDS, rain))
-                            row["rain_verified"] = fields[31] == "1"
-                            if fields[31] == "nullrhi" and fields[1] == "applied" and rain[0] > 0 and data.get("state") == "connected":
-                                row["rain_skipped_nullrhi"] = True
-                    data["native_world_view"] = row
+                    data["native_world_view"] = _parse_world_view(fields, data.get("state"))
                 elif fields == ["native-loot-special-memory", "1"] and data.get("state") == "hosting":
                     data[native_loot.SPECIAL_MEMORY_CAPABILITY] = True
                 elif fields[0] == "native-loot" and len(fields) in (14, 15, 16, 17):
@@ -3176,6 +3190,39 @@ class Bridge:
             await asyncio.sleep(interval)
         raise TimeoutError("The game bridge did not reach the requested state")
 
+    @staticmethod
+    def _local_world_view_reply(raw: str, fields: tuple[str, ...]) -> dict:
+        rows = [line.split("\t") for line in raw.splitlines()] if len(raw) <= 2048 and raw.endswith("\n") else []
+        if not 2 <= len(rows) <= 3 or len(rows[0]) != 4 or rows[0][:2] != ["native-world-view-reply", "1"]:
+            raise RuntimeError("The resident world view receipt was malformed")
+        _, _, sequence, pawn = rows[0]
+        ack = rows[1]
+        if len(ack) != 4 or ack[:2] != ["ack", fields[0]]:
+            raise RuntimeError("The resident world view receipt did not match the request")
+        if ack[2] != "accepted":
+            raise RuntimeError(ack[3] or "The resident world view was refused")
+        if len(rows) != 3 or len(fields) < 6 or not _held_input_sequence(sequence) or not pawn or len(pawn) > 512:
+            raise RuntimeError("The resident world view receipt had no qualified local scope")
+        epoch, frame, area, actor = fields[2:6]
+        proof = rows[2]
+        if len(proof) != 32 or proof[:6] != ["native-world-view", "applied", area, actor, epoch, frame]:
+            raise RuntimeError("The resident world view receipt did not verify the requested frame")
+        try:
+            observed = _parse_world_view(proof, "connected")
+        except ValueError as error:
+            raise RuntimeError("The resident world view receipt was malformed") from error
+        return {"native_world_view": observed, "native_world_view_local_scope": (int(sequence), pawn)}
+
+    def remember_local_world_view(self, game: dict, snapshot: dict) -> dict:
+        sequence, pawn = snapshot["native_world_view_local_scope"]
+        proof = snapshot["native_world_view"]
+        if (self.local_bridge is None or game.get("sequence", 0) > sequence
+                or (game.get("state"), game.get("map"), game.get("pawns", {}).get("local", {}).get("name"))
+                != ("connected", proof["map"], pawn)):
+            raise RuntimeError("The resident world view receipt did not match the current guest")
+        self._local_world_view = sequence, pawn, proof
+        return {**game, "native_world_view": proof}
+
     async def command(self, action: str, *arguments: str, timeout: float = 8, update_status: bool = True) -> dict:
         fields = (uuid.uuid4().hex, action, *arguments)
         if any(len(value) > 1024 or "\t" in value or "\r" in value or "\n" in value for value in fields):
@@ -3186,7 +3233,10 @@ class Bridge:
                 write_text(self.directory / "command.tsv", request)
                 status = await self.wait_for(lambda state: state.get("ack", {}).get("id") == fields[0], timeout, interval=.025)
         else:
-            status = self._parse_status(await self.local_bridge.command(request.encode("utf-8"), timeout))
+            raw = await self.local_bridge.command(request.encode("utf-8"), timeout)
+            if action == native_weather_view.LOCAL_APPLY and raw.startswith("native-world-view-reply\t"):
+                return self._local_world_view_reply(raw, fields)
+            status = self._parse_status(raw)
             if not status or status.get("ack", {}).get("id") != fields[0]:
                 raise RuntimeError("The local co-op command receipt did not match the request")
             if update_status:

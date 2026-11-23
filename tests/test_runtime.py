@@ -238,6 +238,82 @@ class WorldWeatherTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaisesRegex(RuntimeError, "did not verify"):
                         await service.Client.project_world_view(client)
 
+    async def test_resident_world_view_merges_exact_readback_without_replacing_status(self):
+        area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+        actor = service.WORLD_VIEW_ACTORS[area]
+        epoch = uuid.uuid4().hex
+        pawn = f"Player_FP_C {area}.CrossRoads_P:PersistentLevel.Player_FP_C_1"
+        world_view = (f"native-world-view\tapplied\t{area}\t{actor}\t{epoch}\t17\t27000\t20\t40\t0\t0\t0\t1\t1\t5\t"
+                      "0.3\t0.4\t0.5\t07:30\t1\t1\t1.2\t0.7\t2\t3\t0.1\t1\t0.55\t0\t0\t1\t1\n")
+
+        def full(sequence, *, readback="", who=pawn, ack="older"):
+            return (f"schema\t1\nseq\t{sequence}\nack\t{ack}\taccepted\tfull\n"
+                    f"session\tclient\tconnected\t{area}\t0\t1\npawn\tlocal\t{who}\t10\t1\t2\t3\tPC\n"
+                    f"native-world-view-apply-local\t1\n{readback}")
+
+        async def reply(request, timeout):
+            nonce, action, visit, sequence, dest, target, *_ = request.decode().rstrip("\n").split("\t")
+            self.assertEqual((action, visit, sequence, dest, target, timeout),
+                             ("native-world-view-apply-local", epoch, "17", area, actor, 3))
+            return f"native-world-view-reply\t1\t9\t{pawn}\nack\t{nonce}\taccepted\tapplied\n{world_view}"
+
+        bridge = runtime.Bridge(Path("unused"), None)
+        bridge.local_bridge = Mock(command=AsyncMock(side_effect=reply))
+        bridge.local_bridge.read_status.return_value = full(9)
+        initial = bridge.snapshot()
+        source = dict(runtime._parse_world_view(world_view.rstrip("\n").split("\t"), "hosting"), mode="sample")
+        client = SimpleNamespace(bridge=bridge, zone_epoch=epoch, last_game=initial,
+                                 gameplay_seen=service.time.monotonic(), gameplay={"host_world": {"native_world_view": source}})
+        await service.Client.project_world_view(client)
+        proof = client.last_game["native_world_view"]
+        self.assertTrue(proof["weather_verified"] and proof["rain_verified"] and proof["save_unchanged"])
+        self.assertEqual(client.last_game["ack"], initial["ack"])
+        self.assertEqual(client.last_game["pawns"], initial["pawns"])
+        self.assertNotIn("native_world_view", initial)
+        self.assertEqual(bridge.snapshot(), client.last_game)
+        await service.Client.project_world_view(client)
+        bridge.local_bridge.command.assert_awaited_once()
+
+        # A full successor or a different local pawn must supersede the transient receipt.
+        bridge.local_bridge.read_status.return_value = full(10, readback=world_view)
+        self.assertEqual(bridge.snapshot()["native_world_view"], proof)
+        self.assertIsNone(bridge._local_world_view)
+        bridge.remember_local_world_view(initial, {"native_world_view": proof, "native_world_view_local_scope": (9, pawn)})
+        bridge.local_bridge.read_status.return_value = full(9, who=pawn + "_replacement")
+        self.assertNotIn("native_world_view", bridge.snapshot())
+        with self.assertRaisesRegex(RuntimeError, "current guest"):
+            bridge.remember_local_world_view(initial, {"native_world_view": proof, "native_world_view_local_scope": (9, "other")})
+
+        # The same opt-in command accepts the full reply when ordinary publication is due.
+        async def full_reply(request, timeout):
+            nonce = request.decode().split("\t", 1)[0]
+            return full(11, readback=world_view, ack=nonce)
+
+        client.last_game = initial
+        bridge.local_bridge.command.side_effect = full_reply
+        await service.Client.project_world_view(client)
+        self.assertEqual(client.last_game["sequence"], 11)
+        self.assertEqual(client.last_game["native_world_view"], proof)
+
+        for replacement, error in (("nonce", "match the request"), ("wrong epoch", "verify the requested frame"),
+                                   ("refused", "weather restored"), ("bad rain", "did not verify")):
+            with self.subTest(replacement=replacement):
+                async def altered(request, timeout):
+                    message = await reply(request, timeout)
+                    if replacement == "nonce":
+                        return message.replace("ack\t", "ack\twrong-")
+                    if replacement == "wrong epoch":
+                        return message.replace(epoch, uuid.uuid4().hex)
+                    if replacement == "refused":
+                        return "\n".join(message.splitlines()[:2]).replace("accepted\tapplied", "error\tweather restored") + "\n"
+                    return message.removesuffix("1\n") + "0\n"
+
+                client.last_game = initial
+                bridge.local_bridge.command.side_effect = altered
+                with self.assertRaisesRegex(RuntimeError, error):
+                    await service.Client.project_world_view(client)
+                self.assertIsNone(bridge._local_world_view)
+
 
 class StageBackendTests(unittest.TestCase):
     def setUp(self):
