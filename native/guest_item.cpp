@@ -1120,8 +1120,6 @@ namespace
             live(object(context.pawn, STR("OffhandEquipment"))) || !boolean(actor, STR("ReloadInput"), false) ||
             !boolean(actor, STR("IsSeerOpen"), false)))
             return report(false, "guest_weapon_primary_ineligible");
-        if (!ordinary_magazine_payload(stock_profile, context, inventory, actor))
-            return report(false, "guest_weapon_payload_unqualified");
         if (!disarm &&
             (!ready_pawn(context) || !boolean(context.pawn, STR("Wep_HeldAside"), false) ||
              !boolean(actor, STR("Reloading"), false) || !boolean(actor, STR("IsCycling"), false) ||
@@ -1134,6 +1132,12 @@ namespace
         if (!live_ammo || !shot_cost || !magazine) return report(false, "stock_guest_weapon_ammo_unavailable");
         const auto before = live_ammo->GetPropertyValueInContainer(actor);
         const auto stored = inventory.ammo->GetPropertyValueInContainer(inventory.item);
+        // A factory-empty weapon can lack a resolved round payload. Its verified
+        // empty trigger pull dispatches a click without entering the firing path.
+        if (!disarm && before == 0 && stored == 0 && shot_cost->GetPropertyValueInContainer(actor) == 1)
+            return report(false, "guest_weapon_preloaded_magazine_required", 0, 0);
+        if (!ordinary_magazine_payload(stock_profile, context, inventory, actor))
+            return report(false, "guest_weapon_payload_unqualified");
         const auto expected_projectiles = stock_profile ? stock_profile->ammo->projectile_count : 1;
         auto* projectile = disarm ? nullptr : stock_projectile(actor, expected_projectiles);
         const auto minimum = bolt || stock_profile ? 1 : 2;

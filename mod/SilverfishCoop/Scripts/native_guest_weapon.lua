@@ -164,11 +164,9 @@ function guest_weapon.command(fields, state, phase)
         end
     end
     if ok and action == "reload" then pcall(require("native_weapon_fire_view").reloaded, pawn, before) end
-    if not ok and action == "fire" and status == "guest_weapon_preloaded_magazine_required" then
-        local verified, _, actor, stored = inspect(pawn_address, save_address, guid)
-        if verified and actor == 0 and stored == 0 then
-            pcall(require("native_weapon_fire_view").dry_fired, pawn)
-        end
+    if not ok and action == "fire" and status == "guest_weapon_preloaded_magazine_required"
+        and first == 0 and second == 0 and projectiles == 0 then
+        pcall(require("native_weapon_fire_view").dry_fired, pawn)
     end
     observation = { map = state.map, action = action, pawn = name, guid = guid,
         ok = ok == true, status = status, before = before, after = after,

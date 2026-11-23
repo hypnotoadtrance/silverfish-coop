@@ -527,11 +527,16 @@ async def verify_resident_dry_fire(host: Seat, guest: Seat) -> dict:
     assert await command(host, "ready") == host_guid and await command(guest, "ready") == guest_guid
     assert await command(host, "peer-ready") == guest_guid
 
-    events = [entry for entry in await resident_events(guest_run, guest_frame) if entry["event"] in tracked and entry not in before]
+    since = await resident_events(guest_run, guest_frame)
+    events = [entry for entry in since if entry["event"] in tracked and entry not in before]
     assert [entry["event"] for entry in events] == ["native_weapon_dry_fire_played"] * 2, events
     assert len({entry["serial"] for entry in events}) == 2, events
+    guest_input, = [entry for entry in since if entry["event"] == "native_guest_primary_input_rejected"
+                    and entry.get("sequence") == press["native_guest_primary_fixture"]["sequence"]]
+    assert guest_input["reason"] == "guest_weapon_preloaded_magazine_required", guest_input
     return {"host_stock_click": host_click, "guest_heard_host": guest_heard, "guest_primary_input": press,
             "host_heard_guest": host_heard, "guest_click": guest_click, "guest_cue_receipts": events,
+            "guest_empty_magazine_receipt": guest_input,
             "pistols_still_empty": True, "projectiles_spawned": 0, "observers_played_shot_effects": 0}
 
 
