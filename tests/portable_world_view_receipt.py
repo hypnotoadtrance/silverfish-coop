@@ -37,12 +37,15 @@ end
 
 '''
     scope = "        and world_view_enabled and status_publication.compact() and status_publication.steady(state, current_phase)"
+    published_scope = "    if resident_title and status_publication.installed and status_publication.memory_live and not status_publication.mirror then"
     capability = '    if current_phase == "connected" and world_view_enabled and compact_crates then'
     short_reply = "        SilverfishPublishLocalBridgeReply(pending.ticket, reply)\n        return true"
     full_reply = "            SilverfishPublishLocalBridgeReply(pending.ticket, frame)\n        end"
     dispatch = '    if fields and pending and fields[2] == "native-world-view-apply-local" and not periodic'
     replacements = {
         "function status_publication.steady(state, current_phase)": support + "function status_publication.steady(state, current_phase)",
+        published_scope: published_scope.replace("and not status_publication.mirror",
+                                                f"and (not status_publication.mirror or {tag}())"),
         capability: capability.replace("and compact_crates", f"and (compact_crates or {tag}())"),
         scope: scope.replace("status_publication.compact()", f"(status_publication.compact() or {tag}())"),
         short_reply: short_reply.replace("\n        return true", '\n        status_publication.trace_world_view("compact", state, fields, reply, "steady")\n        return true'),
@@ -82,7 +85,7 @@ def receipts(path: Path) -> list[dict]:
     return result
 
 
-async def verify_world_view_receipt(host, guest, pawn: str) -> dict:
+async def verify_world_view_receipt(host, guest, host_pawn: str) -> dict:
     area = OBSERVATORY
     actor = WORLD_VIEW_ACTORS[area]
     host_run, guest_run = host.campaign / "run", guest.client / "run"
@@ -92,11 +95,13 @@ async def verify_world_view_receipt(host, guest, pawn: str) -> dict:
         proof = game.get("native_world_view", {})
         return (row.get("local_bridge") == row.get("local_status_source") == "memory"
                 and row.get("state") == game.get("state") == "connected" and game.get(native_weather_view.LOCAL_CAPABILITY) is True
-                and game.get("pawns", {}).get("local", {}).get("name") == pawn
+                and game.get("pawns", {}).get("local", {}).get("name", "").startswith("Player_FP_C ")
                 and proof.get("actor") == actor and proof.get("mode") == "applied" and proof.get("save_unchanged") is True)
 
     initial = await wait_resident_status(guest_run, ready)
-    await wait_resident_status(host_run, lambda row: row.get("game", {}).get("native_world_view", {}).get("actor") == actor)
+    await wait_resident_status(host_run, lambda row: row.get("game", {}).get("native_world_view", {}).get("actor") == actor
+                               and row["game"].get("native_guest_save", {}).get("pawn") == host_pawn)
+    pawn = initial["game"]["pawns"]["local"]["name"]
     baseline = initial["game"]["native_world_view"]
     epoch = initial["zone_epoch"]
     trace = guest.bridge.directory / TRACE
@@ -109,7 +114,8 @@ async def verify_world_view_receipt(host, guest, pawn: str) -> dict:
                 except (OSError, RuntimeError):
                     await asyncio.sleep(.05)
                     continue
-                if not ready(status) or status["zone_epoch"] != epoch:
+                if (not ready(status) or status["zone_epoch"] != epoch
+                        or status["game"]["pawns"]["local"]["name"] != pawn):
                     continue
                 game = status["game"]
                 latest = game["sequence"]
