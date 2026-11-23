@@ -16,7 +16,11 @@ local detached_sickness = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SICKNESS") == 
     or os.getenv("SILVERFISH_COOP_NATIVE_CROSSROADS_ROSTER") == "1"
 local refresh_fixture = fixture and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH") == "1"
 local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
-local ambient_worlds = { ["/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"] = true }
+local dead_bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
+local ambient_worlds = {
+    [dead_bridge] = true,
+    ["/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"] = true,
+}
 local level = map .. ".CrossRoads_P:PersistentLevel."
 local types = {
     husk = { name = "NPC_Zomb_01_C", path = "/Game/Classes/NPCs/NPC_Zomb_01.NPC_Zomb_01_C", limit = 5,
@@ -490,7 +494,7 @@ function campaign_npc.command(fields, state, phase)
     if fields[2] ~= "native-campaign-npc-approach" then return end
     local projectile = #fields == 5 and fields[4] == "projectile"
     local returning = #fields == 4 and fields[4] == "return"
-    local ambient = production_roster and ambient_worlds[state.map] and headless_fixtures and (#fields == 3 or returning)
+    local ambient = production_roster and state.map == dead_bridge and headless_fixtures and (#fields == 3 or returning)
     if returning and not ambient then error("stock_husk_return_fixture_disabled", 0) end
     if (not ambient and (not fixture or (view == "notdeer" and not combat_fixture))) or (#fields ~= 3 and not projectile and not returning) or (projectile and (view ~= "flayer"
         or type(SilverfishReadCampaignFlayerProjectile) ~= "function")) then error("stock_husk_approach_fixture_disabled", 0) end

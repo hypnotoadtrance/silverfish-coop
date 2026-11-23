@@ -47,6 +47,7 @@ namespace
     constexpr auto living_count_path = STR("/Game/Classes/Actors/DynaimicSpawnControler_BP.DynaimicSpawnControler_BP_C:Calc_LivingNPCs");
     constexpr auto marker_check_path = STR("/Game/Classes/ScriptingActors/AI_Spawner_Squad_BP.AI_Spawner_Squad_BP_C:SpawnIsValid");
     constexpr auto pool_path = STR("/Game/Classes/Libraries/DataAssets/AmbientSpawnPools/CrossRoadsSquadPool.CrossRoadsSquadPool");
+    constexpr auto pool_class = STR("/Game/Classes/Libraries/DataAssets/AmbientSpawnPools/AmbientSquadPoolData.AmbientSquadPoolData_C");
     constexpr auto spawner_class = STR("/Game/Classes/ScriptingActors/AI_Spawner_Squad_BP.AI_Spawner_Squad_BP_C");
     constexpr auto spawn_path = STR("/Game/Classes/ScriptingActors/AI_Spawner_Squad_BP.AI_Spawner_Squad_BP_C:SpawnSquadFromData");
     constexpr auto data_class = STR("/Game/Classes/Libraries/DataAssets/Squads/SquadData.SquadData_C");
@@ -93,6 +94,12 @@ namespace
     constexpr std::array marker_numbers{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24,
         26, 27, 28, 30, 31, 32, 34, 35, 37, 38, 40, 41};
     constexpr std::array dead_bridge_markers{1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 15, 16, 17, 19, 20};
+    constexpr std::array squad_assets{
+        STR("/Game/Classes/Libraries/DataAssets/Squads/Monsters/Husks_Scattered.Husks_Scattered"),
+        STR("/Game/Classes/Libraries/DataAssets/Squads/Monsters/Husks_SwarmSmall.Husks_SwarmSmall"),
+        STR("/Game/Classes/Libraries/DataAssets/Squads/Monsters/Husks_SwarmLarge.Husks_SwarmLarge"),
+    };
+    constexpr std::array ruin_fields_squads{squad_assets[0], squad_assets[1], boar_squads[0]};
 
     struct DirectorProfile
     {
@@ -102,6 +109,8 @@ namespace
         const U::TCHAR* pool;
         const U::TCHAR* marker_prefix;
         std::span<const int> markers;
+        std::size_t director_marker_limit{};
+        std::span<const U::TCHAR* const> directed_squads{};
     };
 
     constexpr DirectorProfile crossroads{world_package, world_path, director_path, pool_path,
@@ -114,13 +123,14 @@ namespace
         STR("/Game/Classes/Libraries/DataAssets/AmbientSpawnPools/DeadBridgeSquadPool.DeadBridgeSquadPool"),
         STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P:PersistentLevel.AI_Spawner_Squad_BP_C_"),
         dead_bridge_markers};
-    constexpr std::array ambient_directors{&crossroads, &dead_bridge};
-
-    constexpr std::array squad_assets{
-        STR("/Game/Classes/Libraries/DataAssets/Squads/Monsters/Husks_Scattered.Husks_Scattered"),
-        STR("/Game/Classes/Libraries/DataAssets/Squads/Monsters/Husks_SwarmSmall.Husks_SwarmSmall"),
-        STR("/Game/Classes/Libraries/DataAssets/Squads/Monsters/Husks_SwarmLarge.Husks_SwarmLarge"),
-    };
+    constexpr DirectorProfile ruin_fields{
+        STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P:PersistentLevel.DynaimicSpawnControler_BP_C_0"),
+        STR("/Game/Classes/Libraries/DataAssets/AmbientSpawnPools/FloodPlainsSquadPool.FloodPlainsSquadPool"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P:PersistentLevel.AI_Spawner_Squad_BP_C_"),
+        {}, 29, ruin_fields_squads};
+    constexpr std::array ambient_directors{&crossroads, &dead_bridge, &ruin_fields};
     constexpr std::array maximum_squad_sizes{4, 3, 5};
     constexpr std::size_t max_scene_npcs = 128;
 
@@ -289,6 +299,7 @@ namespace
             !in_level(actor, active.world) || object(actor, STR("As Game Instance FP")) != active.instance) return false;
         if (active.director == &crossroads) return true;
         auto* pool = object(actor, STR("AmbientSquadPool"));
+        if (active.director->director_marker_limit && !exact(pool, pool_class)) return false;
         return live(pool) && pool->GetPathName() == active.director->pool;
     }
 
@@ -315,11 +326,16 @@ namespace
         return pawn;
     }
 
-    bool placed_spawner(U::UObject* actor, U::UWorld* world)
+    bool stock_spawner(U::UObject* actor, U::UWorld* world)
     {
         if (!squad_spawner(actor) || !in_level(actor, world)) return false;
         auto* arrow = object(actor, STR("Arrow_Leader"));
-        if (!exact(arrow, STR("/Script/Engine.ArrowComponent")) || arrow->GetOuterPrivate() != actor) return false;
+        return exact(arrow, STR("/Script/Engine.ArrowComponent")) && arrow->GetOuterPrivate() == actor;
+    }
+
+    bool placed_spawner(U::UObject* actor, U::UWorld* world)
+    {
+        if (!stock_spawner(actor, world)) return false;
         const auto* profile = director_for(world->GetPathName());
         if (!profile) return false;
         const std::wstring_view prefix{profile->marker_prefix};
@@ -327,6 +343,41 @@ namespace
         if (!std::wstring_view{path}.starts_with(prefix)) return false;
         const auto suffix = std::wstring_view{path}.substr(prefix.size());
         return std::ranges::any_of(profile->markers, [suffix](int number) { return suffix == std::to_wstring(number); });
+    }
+
+    bool director_marker(U::UObject* actor, U::UObject* director, const Network& active, bool initial)
+    {
+        const auto& profile = *active.director;
+        if (!profile.director_marker_limit) return placed_spawner(actor, active.world);
+        if (!stock_spawner(actor, active.world) || byte_field(actor, STR("Usage")) != (initial ? 0 : 3)) return false;
+        const std::wstring_view prefix{profile.marker_prefix};
+        const auto path = actor->GetPathName();
+        if (!std::wstring_view{path}.starts_with(prefix)) return false;
+        const auto suffix = std::wstring_view{path}.substr(prefix.size());
+        if (suffix.empty() || !std::ranges::all_of(suffix, [](auto character) { return character >= L'0' && character <= L'9'; }))
+            return false;
+
+        // ConfigureSpawns fills both arrays before the director calls its stock ambient spawner.
+        auto* array = field<U::FArrayProperty>(director, initial ? STR("Spawns_Initial") : STR("Spawns_Reinforcments"));
+        auto* entry = array ? U::CastField<U::FObjectProperty>(array->GetInner()) : nullptr;
+        if (!entry || entry->GetPropertyClass().Get() != actor->GetClassPrivate()) return false;
+        U::FScriptArrayHelper rows(array, array->ContainerPtrToValuePtr<void>(director));
+        if (rows.Num() <= 0 || static_cast<std::size_t>(rows.Num()) > profile.director_marker_limit) return false;
+        int matches = 0;
+        for (int index = 0; index < rows.Num(); ++index)
+        {
+            if (get_object(entry, rows.GetRawPtr(index)) == actor) ++matches;
+        }
+        return matches == 1;
+    }
+
+    bool directed_squad(U::UObject* data, const Network& active)
+    {
+        const auto allowed = active.director->directed_squads;
+        if (allowed.empty()) return true;
+        if (!exact(data, data_class)) return false;
+        const auto path = data->GetPathName();
+        return std::ranges::any_of(allowed, [&path](const auto asset) { return path == asset; });
     }
 
     int data_index(U::UObject* data)
@@ -1249,7 +1300,8 @@ namespace
 
     void prevent_client_spawn(Iteration& call, U::UObject* receiver, U::FFrame& frame, const Network& active)
     {
-        if (!placed_spawner(receiver, active.world)) return;
+        const bool uses_director_markers = active.director->director_marker_limit > 0;
+        if (!uses_director_markers && !placed_spawner(receiver, active.world)) return;
         update_scope(active);
         SpawnSchema schema;
         if (const auto error = schema.bind_base(frame.Node()); !error.empty())
@@ -1258,9 +1310,10 @@ namespace
             return;
         }
         auto* data = get_object(schema.data, frame.Locals());
+        if (!directed_squad(data, active)) return;
         const bool boar = boar_squad_size(data) > 0;
         if (!boar && (data_index(data) < 0 || !bool_field(data, STR("ForceWander"), true))) return;
-        if (production_roster)
+        if (production_roster || uses_director_markers)
         {
             auto* caller = frame.PreviousFrame();
             if (!caller || !exact_director(caller->Object(), active)) return;
@@ -1268,6 +1321,7 @@ namespace
             const bool initial = usage == 0 && caller->Node() == find<U::UFunction>(initial_path);
             const bool refresh = usage == 3 && caller->Node() == find<U::UFunction>(refresh_path);
             if (!initial && !refresh) return;
+            if (uses_director_markers && !director_marker(receiver, caller->Object(), active, initial)) return;
         }
         auto& calls = boar ? scope.boars.calls : scope.natural_calls;
         auto& latest = boar ? scope.boars.latest : scope.latest;
@@ -1356,7 +1410,7 @@ namespace
         const auto refresh = caller->Node() == find<U::UFunction>(refresh_path);
         if (!initial && !refresh) return;
         auto* director = caller->Object();
-        if (!exact_director(director, active) || !placed_spawner(receiver, active.world) ||
+        if (!exact_director(director, active) || !director_marker(receiver, director, active, initial) ||
             byte_field(receiver, STR("Role")) != 3 || byte_field(receiver, STR("Usage")) != (initial ? 0 : 3)) return;
         update_scope(active);
         SpawnSchema schema;
@@ -1367,6 +1421,7 @@ namespace
         }
         ++scope.natural_calls;
         auto* data = get_object(schema.data, frame.Locals());
+        if (!directed_squad(data, active)) return;
         if (refresh && scope.refresh.running)
         {
             ++scope.refresh.calls;
@@ -1435,7 +1490,8 @@ namespace
         const bool boar = observed.family == NpcFamily::Boar;
         auto& latest = boar ? scope.boars.latest : scope.latest;
         if (active.seat != Seat::Host || !exact_director(director, active) || !local_pawn(director, active) ||
-            !placed_spawner(receiver, active.world) || frame.Node() != find<U::UFunction>(spawn_path) ||
+            !director_marker(receiver, director, active, observed.initial) || frame.Node() != find<U::UFunction>(spawn_path) ||
+            !directed_squad(data, active) ||
             data != get_object(schema.data, frame.Locals()) ||
             (boar ? boar_squad_size(data) != observed.max_count : data_index(data) < 0)) return;
 
