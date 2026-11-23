@@ -30,6 +30,10 @@ namespace silverfish::guest_weapon_profiles
         STR("/Game/Classes/Items/Ammo_5-7_AP_BP.Ammo_5-7_AP_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_5-7_AP.Projectile_5-7_AP_C"), 7, 1};
     inline constexpr StockAmmo fifty_cal_fmj{6, STR("50Cal_FMJ"),
         STR("/Game/Classes/Items/Ammo_50Cal_BP.Ammo_50Cal_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_50Cal.Projectile_50Cal_C"), 8, 1};
+    inline constexpr StockAmmo thirty_06_fmj{3, STR("30-06_FMJ"),
+        STR("/Game/Classes/Items/Ammo_FullRifle_BP.Ammo_FullRifle_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Rifle_Heavy.Projectile_Rifle_Heavy_C"), 5, 1};
+    inline constexpr StockAmmo thirty_06_incendiary{3, STR("30-06_Incendiary"),
+        STR("/Game/Classes/Items/Ammo_30-06_Incendiary_BP.Ammo_30-06_Incendiary_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_30-06_Incendiary.Projectile_30-06_Incendiary_C"), 5, 1};
 
     struct Profile
     {
@@ -97,4 +101,5 @@ namespace silverfish::guest_weapon_profiles
         Profile{"rifle-57-03", STR("/Game/Classes/Weapons/Wep_5-7AR_03.Wep_5-7AR_03_C"), true, 50, 4, 0.05, true, &five_seven_ap, true},
         Profile{"1911-02", STR("/Game/Classes/Weapons/Wep_1911_02.Wep_1911_02_C"), true, 16, 4, 0.1, true, &forty_five_ball, true},
     };
+    inline constexpr int bolt_action_magazine = 5;
 }

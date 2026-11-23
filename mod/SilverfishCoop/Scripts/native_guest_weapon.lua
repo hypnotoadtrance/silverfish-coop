@@ -26,6 +26,7 @@ local observation
 local class_field = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local guid_field = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo_field = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
+local weight_field = "Weight_12_11AB9ED547504E78A849A692A36DC938"
 
 local function same(left, right)
     return left and right and left:IsValid() and right:IsValid() and left:GetAddress() == right:GetAddress()
@@ -142,6 +143,12 @@ function guest_weapon.preserve_magazine(pawn, save, projected, selected_slot)
     local guid, kind, row = equipped_guid(pawn, save)
     local item = guid and row and weapon_profiles.paths[kind] and projected[selected_slot + 1]
     if item and item_identity(item) == guid and same(item[class_field], row[class_field]) then
+        local held, weight = pawn.EquipedItem, item[weight_field]
+        if item[ammo_field] == 0 and row[ammo_field] == 0 and held.Ammo == 0 and same(held.User, pawn)
+            and type(weight) == "number" and weight >= 0 and weight < math.huge and held.Weight ~= weight then
+            held.Weight = weight
+            held:Update_Mag()
+        end
         item[ammo_field] = row[ammo_field]
     end
 end

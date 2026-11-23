@@ -5,7 +5,10 @@ from unittest.mock import AsyncMock, Mock
 import uuid
 
 from tools.silverfish import native_guest_armor, native_guest_drop as drop, native_guest_drop_record as record, native_inventory
-from tools.silverfish.guest_weapon_profiles import FIREARMS, MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL
+from tools.silverfish.guest_weapon_profiles import (
+    BOLT_ACTION_AMMO, BOLT_ACTION_UNLOAD_CAPACITY, BOLT_ACTION_UNLOADS,
+    FIREARMS, MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL,
+)
 
 
 MAP = record.OBSERVATORY
@@ -217,6 +220,12 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
         for weapon in FIREARMS:
             with self.subTest(weapon=weapon.kind):
                 magazine = weapon.magazine
+                if weapon.path in BOLT_ACTION_UNLOADS:
+                    for rifle_round in BOLT_ACTION_AMMO:
+                        self.assertTrue(native_inventory.valid_take_ammo_result(weapon.path, rifle_round, BOLT_ACTION_UNLOAD_CAPACITY))
+                        self.assertFalse(native_inventory.valid_take_ammo_result(weapon.path, rifle_round, BOLT_ACTION_UNLOAD_CAPACITY + 1))
+                    self.assertFalse(native_inventory.valid_take_ammo_result(weapon.path, NINE_MM_BALL.item_path, 1))
+                    continue
                 if magazine is None:
                     self.assertFalse(native_inventory.valid_take_ammo_result(weapon.path, NINE_MM_BALL.item_path, 1))
                     continue

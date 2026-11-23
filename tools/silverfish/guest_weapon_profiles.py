@@ -32,8 +32,13 @@ TWELVE_GAUGE_BUCK = StockAmmo(
 )
 FIVE_SEVEN_AP = StockAmmo("five_seven_ap", 11, "5-7_AP", "Ammo_5-7_AP_BP", "Projectile_5-7_AP", 7)
 FIFTY_CAL_FMJ = StockAmmo("fifty_cal_fmj", 6, "50Cal_FMJ", "Ammo_50Cal_BP", "Projectile_50Cal", 8)
+THIRTY_06_FMJ = StockAmmo("thirty_06_fmj", 3, "30-06_FMJ", "Ammo_FullRifle_BP", "Projectile_Rifle_Heavy", 5)
+THIRTY_06_INCENDIARY = StockAmmo(
+    "thirty_06_incendiary", 3, "30-06_Incendiary", "Ammo_30-06_Incendiary_BP", "Projectile_30-06_Incendiary", 5,
+)
 STOCK_AMMO = (
     NINE_MM_BALL, FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT, TWELVE_GAUGE_BUCK, FIVE_SEVEN_AP, FIFTY_CAL_FMJ,
+    THIRTY_06_FMJ, THIRTY_06_INCENDIARY,
 )
 
 
@@ -132,6 +137,8 @@ FIREARMS = (
 )
 
 # Registered ordinary magazines use the stock primary-ammunition transaction.
-# The underbarrel SMG and other specialized receivers have no magazine profile.
 TAKE_AMMO_MAGAZINES = {weapon.path: weapon.magazine for weapon in FIREARMS if weapon.magazine}
+BOLT_ACTION_UNLOAD_CAPACITY = 5
+BOLT_ACTION_UNLOADS = frozenset(weapon.path for weapon in FIREARMS if weapon.kind in {"nagant-scoped", "obrez"})
+BOLT_ACTION_AMMO = frozenset(ammo.item_path for ammo in (THIRTY_06_FMJ, THIRTY_06_INCENDIARY))
 MAX_TAKE_AMMO_ROUNDS = max(magazine.capacity for magazine in TAKE_AMMO_MAGAZINES.values())

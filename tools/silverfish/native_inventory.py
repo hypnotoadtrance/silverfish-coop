@@ -8,7 +8,8 @@ import uuid
 
 from . import native_host_save, party
 from .guest_weapon_profiles import (
-    FORTY_FIVE_BALL, MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL, TAKE_AMMO_MAGAZINES, TWELVE_GAUGE_BUCK,
+    BOLT_ACTION_AMMO, BOLT_ACTION_UNLOAD_CAPACITY, BOLT_ACTION_UNLOADS, FORTY_FIVE_BALL,
+    MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL, TAKE_AMMO_MAGAZINES, TWELVE_GAUGE_BUCK,
 )
 from .native_gold import valid_guid
 
@@ -115,9 +116,12 @@ def take_ammo_target(value):
 
 
 def valid_take_ammo_result(weapon, ammo, rounds):
-    magazine = TAKE_AMMO_MAGAZINES.get(weapon) if isinstance(weapon, str) else None
-    return (magazine is not None and ammo == magazine.ammo.item_path
-            and type(rounds) is int and 1 <= rounds <= magazine.capacity)
+    if not isinstance(weapon, str) or not isinstance(ammo, str) or type(rounds) is not int or rounds < 1:
+        return False
+    if weapon in BOLT_ACTION_UNLOADS:
+        return ammo in BOLT_ACTION_AMMO and rounds <= BOLT_ACTION_UNLOAD_CAPACITY
+    magazine = TAKE_AMMO_MAGAZINES.get(weapon)
+    return magazine is not None and ammo == magazine.ammo.item_path and rounds <= magazine.capacity
 
 
 async def retain_guest_save(host, bridge, character: str, pawn: str) -> bool:

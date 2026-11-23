@@ -3,7 +3,9 @@
 import argparse
 from pathlib import Path
 
-from .guest_weapon_profiles import FIREARMS, MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL, STOCK_AMMO
+from .guest_weapon_profiles import (
+    BOLT_ACTION_UNLOAD_CAPACITY, BOLT_ACTION_UNLOADS, FIREARMS, MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL, STOCK_AMMO,
+)
 
 
 def outputs() -> dict[str, str]:
@@ -58,7 +60,7 @@ def outputs() -> dict[str, str]:
         lua_magazine = f", {ammo}, {magazine.capacity}" if magazine else ""
         header.append(f'        Profile{{"{firearm.kind}", STR("{firearm.path}"), {headless}, {shape}}},')
         lua.append(f'    {{ "{firearm.kind}", "{firearm.path}", {headless}{lua_magazine} }},')
-    header.extend(("    };", "}", ""))
+    header.extend(("    };", f"    inline constexpr int bolt_action_magazine = {BOLT_ACTION_UNLOAD_CAPACITY};", "}", ""))
     lua.extend((
         "}) do",
         "    local kind, path, headless, ammo, capacity = table.unpack(row, 1, 5)",
@@ -68,9 +70,10 @@ def outputs() -> dict[str, str]:
         "    profiles.ammo[kind] = ammo",
         "    profiles.magazine_capacity[path] = capacity",
         "end",
-        "return profiles",
-        "",
     ))
+    for path in sorted(BOLT_ACTION_UNLOADS):
+        lua.append(f'profiles.magazine_capacity["{path}"] = {BOLT_ACTION_UNLOAD_CAPACITY}')
+    lua.extend(("return profiles", ""))
     return {
         "native/guest_weapon_registry.hpp": "\n".join(header),
         "mod/SilverfishCoop/Scripts/guest_weapon_registry.lua": "\n".join(lua),

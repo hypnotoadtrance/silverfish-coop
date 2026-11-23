@@ -62,14 +62,13 @@ namespace
         {STR("/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C"),
          STR("/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C:Use_Item_Primary"), 1.5},
     };
-    constexpr auto rifle_fmj_path = STR("/Game/Classes/Items/Ammo_FullRifle_BP.Ammo_FullRifle_BP_C");
-    constexpr auto rifle_incendiary_path = STR("/Game/Classes/Items/Ammo_30-06_Incendiary_BP.Ammo_30-06_Incendiary_BP_C");
-    constexpr auto rifle_fmj_projectile = STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Rifle_Heavy.Projectile_Rifle_Heavy_C");
-    constexpr auto rifle_incendiary_projectile =
-        STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_30-06_Incendiary.Projectile_30-06_Incendiary_C");
+    constexpr auto rifle_fmj_path = profiles::thirty_06_fmj.item;
+    constexpr auto rifle_incendiary_path = profiles::thirty_06_incendiary.item;
+    constexpr auto rifle_fmj_projectile = profiles::thirty_06_fmj.projectile;
+    constexpr auto rifle_incendiary_projectile = profiles::thirty_06_incendiary.projectile;
     constexpr auto ammo_table_path = STR("/Game/Classes/Libraries/DataTables/AmmoTypes_DT.AmmoTypes_DT");
     constexpr auto change_ammo_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:ChangeAmmoType");
-    constexpr int bolt_magazine = 5;
+    constexpr int bolt_magazine = profiles::bolt_action_magazine;
     constexpr int rifle_caliber = 3;
     constexpr auto camera_path = STR("/Game/Classes/Equipment/Eqp_Camera.Eqp_Camera_C");
     constexpr auto blowtorch_path = STR("/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C");
@@ -2823,11 +2822,13 @@ namespace
         return 6;
     }
 
-    const profiles::Profile* unload_profile(Unreal::UObject* item_class, int rounds)
+    const profiles::StockAmmo* unloaded_ammo(const profiles::Profile* profile, const BoltProfile* bolt, Unreal::UClass* ammo)
     {
-        const auto* profile = stock_magazine(Unreal::Cast<Unreal::UClass>(item_class));
-        return profile && profile->ammo
-            && rounds > 0 && rounds <= profile->capacity ? profile : nullptr;
+        if (profile) return ammo == find<Unreal::UClass>(profile->ammo->item) ? profile->ammo : nullptr;
+        if (!bolt) return nullptr;
+        if (ammo == find<Unreal::UClass>(rifle_fmj_path)) return &profiles::thirty_06_fmj;
+        if (ammo == find<Unreal::UClass>(rifle_incendiary_path)) return &profiles::thirty_06_incendiary;
+        return nullptr;
     }
 
     template <typename T>
@@ -2912,15 +2913,15 @@ namespace
         if (!locate(context, inventory).empty() || !inventory.item)
             return refuse("native_inventory_take_ammo_refused_source");
         auto* weapon = Unreal::Cast<Unreal::UClass>(inventory.row_class(inventory.item));
-        const auto* profile = unload_profile(weapon, selection.expected);
-        auto* defaults = profile ? weapon->GetClassDefaultObject().Get() : nullptr;
+        const auto* profile = stock_magazine(weapon);
+        const auto* bolt = stock_bolt(weapon);
+        auto* defaults = weapon ? weapon->GetClassDefaultObject().Get() : nullptr;
         const auto* row_type = inventory.type->GetStruct().Get();
         auto* weight = field<Unreal::FDoubleProperty>(inventory.type->GetStruct().Get(), weight_name);
-        auto* ammo_class = profile ? find<Unreal::UClass>(profile->ammo->item) : nullptr;
-        AmmoStackSchema stock_ammo;
-        if (!defaults || !row_type || !weight || inventory.ammo->GetPropertyValueInContainer(inventory.item) != selection.expected ||
-            !mounted_payload_matches(defaults, inventory) || !ammo_item_row_matches(ammo_class, *profile->ammo)
-            || !stock_ammo.read(ammo_class, inventory) || !stock_ammo.qualifies(selection.expected))
+        if (!defaults || !row_type || !weight ||
+            !silverfish::native_guest_item::take_ammo_supported(weapon, selection.expected) ||
+            inventory.ammo->GetPropertyValueInContainer(inventory.item) != selection.expected ||
+            (bolt ? !stock_bolt_shape(defaults, *bolt) : !mounted_payload_matches(defaults, inventory)))
             return refuse("native_inventory_take_ammo_refused_loaded_state");
 
         context.weapon = weapon;
@@ -2928,13 +2929,16 @@ namespace
         auto* held = stored && inventory.equipment_index == inventory.selected->GetPropertyValueInContainer(context.save)
             ? object(context.pawn, STR("EquipedItem")) : nullptr;
         auto* rounds = field<Unreal::FIntProperty>(held, STR("Ammo"));
+        auto* held_weight = field<Unreal::FDoubleProperty>(held, STR("Weight"));
         auto* update = held ? find<Unreal::UFunction>(update_mag_path) : nullptr;
-        if (held && (held != equipped(context, inventory) || !rounds || !update ||
+        if (held && (held != equipped(context, inventory) || !rounds || !held_weight || !update ||
                 held->GetFunctionByNameInChain(Unreal::FName(STR("Update_Mag"))) != update ||
                 update->GetNumParms() != 0 || update->GetParmsSize() != 0 || update->GetReturnProperty() ||
                 rounds->GetPropertyValueInContainer(held) != selection.expected ||
                 !boolean(held, STR("Reloading"), false) || !boolean(held, STR("IsCycling"), false) ||
-                !boolean(held, STR("Holding_Primary"), false) || !ordinary_magazine_payload(profile, context, inventory, held)))
+                !boolean(held, STR("Holding_Primary"), false) ||
+                (bolt ? !stock_bolt_shape(held, *bolt) || !mounted_payload_matches(held, inventory)
+                      : !ordinary_magazine_payload(profile, context, inventory, held))))
             return refuse("native_inventory_take_ammo_refused_held_weapon");
 
         auto distinct = context;
@@ -2985,9 +2989,15 @@ namespace
         auto* extracted = split.moved();
         auto* unloaded = split.left();
         const auto empty_weight = weight->GetPropertyValueInContainer(unloaded);
-        if (!did_split
+        auto* ammo_class = Unreal::Cast<Unreal::UClass>(inventory.row_class(extracted));
+        const auto* ammo = unloaded_ammo(profile, bolt, ammo_class);
+        AmmoStackSchema stock_ammo;
+        // The stock split reads the exact saved ammo row, including a bolt-action's alternate load.
+        if (!did_split || !ammo_class || !ammo || !ammo_item_row_matches(ammo_class, *ammo) ||
+            !stock_ammo.read(ammo_class, inventory) || !stock_ammo.qualifies(selection.expected) ||
+            (held && bolt && (mounted_ammo(held) != ammo_class || !bolt_round(held, ammo_class, stock_projectile(held))))
             || inventory.identity(extracted) == Guid{} || inventory.identity(extracted) == context.guid
-            || inventory.row_class(extracted) != ammo_class || inventory.row_class(unloaded) != weapon
+            || inventory.row_class(unloaded) != weapon
             || inventory.ammo->GetPropertyValueInContainer(extracted) != selection.expected
             || inventory.ammo->GetPropertyValueInContainer(unloaded) != 0 || !std::isfinite(empty_weight) || empty_weight < 0
             || !stock_ammo.totals_match(extracted, selection.expected))
@@ -3025,12 +3035,13 @@ namespace
         if (held)
         {
             rounds->SetPropertyValueInContainer(held, 0);
+            held_weight->SetPropertyValueInContainer(held, empty_weight);
             held->ProcessEvent(update, nullptr);
         }
         if (!host_unchanged() || !property->Identical(proposed.get(), live_array) ||
             (stored && (!stored_row() || !inventory.type->Identical(expected_weapon.get(), stored_row()))) ||
             (held && (held_actor.Get() != held || object(context.pawn, STR("EquipedItem")) != held ||
-                       rounds->GetPropertyValueInContainer(held) != 0)))
+                       rounds->GetPropertyValueInContainer(held) != 0 || held_weight->GetPropertyValueInContainer(held) != empty_weight)))
             return refuse("mutation_unverified_native_inventory_take_ammo_commit");
         proof(lua, true, "unloaded", selection.expected, 0);
         lua.set_integer(selection.expected);
@@ -3112,7 +3123,10 @@ namespace
 
 bool silverfish::native_guest_item::take_ammo_supported(Unreal::UObject* item_class, int rounds)
 {
-    return unload_profile(item_class, rounds) != nullptr;
+    if (rounds <= 0) return false;
+    auto* weapon = Unreal::Cast<Unreal::UClass>(item_class);
+    if (const auto* profile = stock_magazine(weapon)) return profile->ammo && rounds <= profile->capacity;
+    return stock_bolt(weapon) && rounds <= bolt_magazine;
 }
 
 std::string_view silverfish::native_guest_item::finish_local_unequip(Unreal::UObject* pawn, Unreal::UObject* save,
