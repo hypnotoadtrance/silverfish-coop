@@ -28,11 +28,11 @@ BOARD = native_wire_board.BOARDS[AREA]
 
 
 @contextlib.contextmanager
-def staged_probe(work):
-    scripts = work / "stage/SilverFish/Binaries/Win64/ue4ss/Mods/SilverfishCoop/Scripts"
+def staged_probe(game):
+    scripts = game / runtime.SHIPPING.parent / runtime.MOD_SCRIPTS
     main, fixture = scripts / "main.lua", scripts / "eye_board_probe.lua"
     original = main.read_bytes()
-    manifest = runtime.stage_manifest(work / "stage")
+    manifest = runtime.stage_manifest(game)
     original_manifest = manifest.read_bytes()
     source = Path(__file__).with_name("fixtures") / fixture.name
     with fixture.open("xb") as stream:
@@ -54,8 +54,7 @@ def staged_probe(work):
         fixture.unlink()
 
 
-async def probe(run, operation):
-    bridge, = (run / "game-bridge").iterdir()
+async def probe(bridge, operation):
     nonce = uuid.uuid4().hex
     (bridge / "eye-board-probe").write_bytes(f"{operation}|{nonce}\n".encode("ascii"))
     async with asyncio.timeout(8):
@@ -122,7 +121,7 @@ async def verify(work, vanilla_saved):
                                .get(QUEST, {}).get("step") == step)
         return authority["gameplay"]["native_quests"][QUEST]
 
-    with staged_probe(work):
+    with staged_probe(work / "stage"):
         try:
             await launch(host, "host", "host", *host, "--port", "0", "--start-zone", AREA,
                          "--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones",
@@ -140,7 +139,8 @@ async def verify(work, vanilla_saved):
             position = authority["game"]["pawns"]["guest"]["location"]
             await wait(remote, lambda frame: (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
                        and math.dist(point, position) <= 25)
-            assert await probe(run, "xp") == "5"
+            bridge, = (run / "game-bridge").iterdir()
+            assert await probe(bridge, "xp") == "5"
             before = campaign_save_hashes(root)
             offer = (await action(guest, dynamic.CATALOG))[dynamic.CATALOG_KEY]
             assert QUEST in offer["offers"] and QUEST not in offer["turnins"], offer
@@ -151,7 +151,7 @@ async def verify(work, vanilla_saved):
             without_item = (await action(guest, dynamic.CATALOG))[dynamic.CATALOG_KEY]
             assert QUEST not in without_item["offers"] and QUEST not in without_item["turnins"], without_item
 
-            guid = await probe(run, "eye")
+            guid = await probe(bridge, "eye")
             assert valid_guid(guid)
             item = (await inventory(guest))[guid]
             assert (item["class_path"], item["quantity"], item["source"], item["stackable"]) == (ITEM, 2, "backpack", True), item
