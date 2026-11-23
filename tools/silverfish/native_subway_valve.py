@@ -203,9 +203,6 @@ async def activate(host, bridge, character, epoch):
     scene = host.last_game.get(SCENE, {})
     if current.get("step") != 1 or scene.get("state") != "present":
         raise party.RuleError("stock_subway_valve_active_objective_required")
-    await host.checkpoint_native(bridge)
-    if _owner(host, character, SUBWAY) != pawn or host.zone_epoch != epoch:
-        raise party.RuleError("stock_subway_valve_owner_changed")
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -239,13 +236,14 @@ async def activate(host, bridge, character, epoch):
         candidate = party.load_party(host.party)
         record = {"quest_id": QUEST, "step": 2, "actor": character, "objective": objective}
         candidate["native_quests"][QUEST] = record
-        revision = await host.checkpoint_native(bridge, candidate)
-    except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
+        # The stock callback updates the active save. Persist its flag with the quest at the next save.
+        host.pending_host_save = bool(host.pending_host_save)
+    except (OSError, RuntimeError, ValueError, KeyError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
         raise
     host.party, host.native_checkpoint_unsafe = candidate, False
-    host.control.event("native_subway_valve_closed", revision=revision, **record)
+    host.control.event("native_subway_valve_closed", revision=None, **record)
     return {"effect": "native_quest_changed", **record}
 
 
@@ -294,9 +292,10 @@ async def board_action(host, bridge, character, action):
         raise party.RuleError("stock_subway_valve_quest_objective_not_complete")
     if action == XP_FIXTURE and (character != "host" or not host.fixtures):
         raise party.RuleError("stock_subway_valve_xp_fixture_unavailable")
-    await host.checkpoint_native(bridge)
-    if _owner(host, character, BOROUGH) != pawn:
-        raise party.RuleError("stock_subway_valve_actor_scope")
+    if action != START:
+        await host.checkpoint_native(bridge)
+        if _owner(host, character, BOROUGH) != pawn:
+            raise party.RuleError("stock_subway_valve_actor_scope")
     host.native_checkpoint_unsafe = True
     try:
         try:
@@ -332,8 +331,12 @@ async def board_action(host, bridge, character, action):
                           reputation=proof["reputation"])
         if action != XP_FIXTURE:
             candidate.setdefault("native_quests", {})[QUEST] = record
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=delivered)
-    except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
+        revision = None
+        if action == START:
+            host.pending_host_save = bool(host.pending_host_save)
+        else:
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=delivered)
+    except (OSError, RuntimeError, ValueError, KeyError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
             host.stopping = True
         raise

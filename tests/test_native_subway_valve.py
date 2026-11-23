@@ -6,7 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call, patch
 
-from tools.silverfish import native_host_save, native_subway_valve as valve, native_wire_board, party
+from tools.silverfish import native_host_save, native_quest, native_subway_valve as valve, native_wire_board, party
 from tools.silverfish.campaign import CampaignFormatError
 from tools.silverfish.runtime import Bridge
 from tools.silverfish.travel import BOROUGH
@@ -40,7 +40,8 @@ def authority():
     party.add_player(candidate, CHARACTER)
     candidate["native_quests"] = {valve.QUEST: {"quest_id": valve.QUEST, "step": 1}}
     return SimpleNamespace(native_guest=True, native_zones=True, native_profile=True, stopping=False, transitioning=False,
-                           native_checkpoint_unsafe=False, last_game=snapshot(), last_seen=time.monotonic(), zone_epoch=EPOCH,
+                           native_checkpoint_unsafe=False, pending_host_save=None, last_game=snapshot(),
+                           last_seen=time.monotonic(), zone_epoch=EPOCH,
                            party=candidate, control=Mock(), checkpoint_native=AsyncMock(return_value=3),
                            native_recipients=lambda: {CHARACTER: {"pawn": PAWN, "connected": True}})
 
@@ -85,6 +86,41 @@ class FloodControlTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             valve.parse_scene([*fields[:2], "closed", *fields[3:]], "hosting", valve.SUBWAY)
 
+    async def test_board_acceptance_defers_save_and_preserves_earlier_typed_changes(self):
+        host = authority()
+        del host.party["native_quests"][valve.QUEST]
+        host.last_game = {"state": "hosting", "map": BOROUGH, "pawns": {"local": {"name": BOROUGH_PAWN}}}
+        host.pending_host_save = True
+        proof = valve.parse_board(["native-subway-valve-board", "start", BOROUGH, BOROUGH_PAWN, valve.BOARD,
+                                  "-", "1", "0", "9", "9", "7", "7", "-", "-"], "hosting", BOROUGH)
+        proof["reputation"] = dict.fromkeys(valve.FACTIONS, 0)
+        bridge = SimpleNamespace(command=AsyncMock(return_value={**host.last_game, valve.BOARD_KEY: proof}))
+
+        receipt = await native_quest.action(host, bridge, "host", "native-quest-start", valve.QUEST)
+        record = {"quest_id": valve.QUEST, "step": 1, "actor": "host"}
+        self.assertEqual(receipt, {"effect": "native_quest_changed", **record})
+        self.assertEqual(host.party["native_quests"][valve.QUEST], record)
+        self.assertIs(host.pending_host_save, True)
+        self.assertFalse(host.native_checkpoint_unsafe)
+        host.control.event.assert_called_once_with("native_subway_valve_board_committed",
+                                                   operation=valve.START, revision=None, **record)
+        reply = await native_quest.action(host, bridge, "host", "native-quest-start", valve.QUEST)
+        self.assertEqual(reply, {"effect": "native_quest_present", **record})
+        bridge.command.assert_awaited_once_with(valve.START, BOROUGH_PAWN, timeout=8)
+        host.checkpoint_native.assert_not_awaited()
+
+    async def test_cancelled_board_acceptance_fences_the_current_save(self):
+        host = authority()
+        del host.party["native_quests"][valve.QUEST]
+        host.last_game = {"state": "hosting", "map": BOROUGH, "pawns": {"local": {"name": BOROUGH_PAWN}}}
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=asyncio.CancelledError))
+        with self.assertRaises(asyncio.CancelledError):
+            await native_quest.action(host, bridge, "host", "native-quest-start", valve.QUEST)
+        self.assertTrue(host.native_checkpoint_unsafe and host.stopping)
+        self.assertNotIn(valve.QUEST, host.party["native_quests"])
+        self.assertIsNone(host.pending_host_save)
+        host.checkpoint_native.assert_not_awaited()
+
     async def test_only_exact_current_visit_commits_the_stock_activation_once(self):
         host = authority()
         before = host.party
@@ -107,7 +143,9 @@ class FloodControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.command.await_args_list, [call(valve.ACTIVATE, PAWN, EPOCH, timeout=8),
                                                          call(valve.FINALIZE, PAWN, EPOCH, timeout=8)])
         self.assertTrue(bridge.wait_for.await_args.args[0](closed))
-        self.assertEqual(host.checkpoint_native.await_count, 2)
+        self.assertIs(host.pending_host_save, False)
+        self.assertFalse(host.native_checkpoint_unsafe)
+        host.checkpoint_native.assert_not_awaited()
         self.assertEqual((await valve.activate(host, bridge, CHARACTER, EPOCH))["effect"], "native_subway_valve_already_closed")
         self.assertEqual(bridge.command.await_count, 2)
 
@@ -120,7 +158,8 @@ class FloodControlTests(unittest.IsolatedAsyncioTestCase):
             await valve.activate(host, bridge, "host", EPOCH)
         self.assertTrue(host.native_checkpoint_unsafe and host.stopping)
         self.assertEqual(host.party["native_quests"][valve.QUEST]["step"], 1)
-        self.assertEqual(host.checkpoint_native.await_count, 1)
+        self.assertIsNone(host.pending_host_save)
+        host.checkpoint_native.assert_not_awaited()
 
     async def test_exact_stock_lock_mismatch_fences_scene_and_keeps_previous_gamerule_state(self):
         host = authority()
@@ -134,7 +173,8 @@ class FloodControlTests(unittest.IsolatedAsyncioTestCase):
             await valve.activate(host, bridge, "host", EPOCH)
         self.assertTrue(host.native_checkpoint_unsafe and host.stopping)
         self.assertIs(host.party, before)
-        host.checkpoint_native.assert_awaited_once()
+        self.assertIsNone(host.pending_host_save)
+        host.checkpoint_native.assert_not_awaited()
 
     async def test_client_renders_only_verified_stock_completion_in_its_current_visit(self):
         local = {"state": "connected", "map": valve.SUBWAY, valve.SCENE: {"state": "present", "pawn": PAWN, "epoch": None},
