@@ -1509,6 +1509,58 @@ async def verify_resident_npc_override(host: Seat, guest: Seat, _pawn=None, *, f
                                       "ragdoll_on_both": True, "campaign_checkpoint_unchanged": True}}
 
 
+async def verify_stock_host_corpse_carry(host: Seat, guest: Seat, _pawn: str) -> dict:
+    async def carry(seat, action, *, read=False):
+        return await portable_probe_command(seat.bridge, "portable-npc-override",
+                                            f"corpse-{action}", reply_end="|end" if read else None)
+
+    checkpoint = campaign_save_hashes(host.campaign)
+    assert await carry(host, "spawn") == "spawned"
+    async with asyncio.timeout(8):
+        while await asyncio.gather(carry(host, "ready"), carry(guest, "ready")) != ["ready", "ready"]:
+            await asyncio.sleep(.1)
+    await asyncio.sleep(.4)
+    assert await carry(host, "grab") == "grabbed"
+    await asyncio.sleep(.35)
+    assert await asyncio.gather(carry(host, "arm"), carry(guest, "arm")) == ["armed", "armed"]
+    assert await carry(host, "sweep") == "sweeping"
+    await asyncio.sleep(1.55)
+    assert await asyncio.gather(carry(host, "mark"), carry(guest, "mark")) == ["marked", "marked"]
+    assert await carry(host, "drop") == "dropped"
+    await asyncio.sleep(2)
+    views = {}
+    for name, receipt in zip(("host", "guest"), await asyncio.gather(
+            *(carry(seat, "read", read=True) for seat in (host, guest)))):
+        header, *samples, _ = receipt.split("|")
+        number, marked = map(int, header.split())
+        views[name] = {"number": number, "held_samples": marked,
+                       "samples": [tuple(map(float, row.split())) for row in samples]}
+    host_view, guest_view = views["host"], views["guest"]
+    assert host_view["number"] == guest_view["number"] > 0
+    host_held = host_view["samples"][:host_view["held_samples"]]
+    guest_held = guest_view["samples"][:guest_view["held_samples"]]
+    assert len(host_held) >= 12 and all(row[-3:] == (1, 3, 1) for row in host_held), host_held[::10]
+    assert len(guest_held) >= 12 and all(row[-3:] == (1, 1, 0) for row in guest_held), guest_held[::10]
+    assert guest_view["samples"][-1][-3:] == (0, 3, 0), guest_view["samples"][-1]
+    origin, end = host_held[0][1:4], host_held[-1][1:4]
+    distance = math.dist(origin, end)
+    guest_distance = math.dist(guest_held[0][1:4], guest_held[-1][1:4])
+    assert distance >= 170 and guest_distance >= distance * .65, (distance, guest_distance)
+    direction = [(b - a) / distance for a, b in zip(origin, end)]
+    travel = [sum((x - a) * axis for x, a, axis in zip(row[1:4], origin, direction)) for row in guest_held]
+    reverse = max(0, *(a - b for a, b in zip(travel, travel[1:])))
+    assert reverse < 18, reverse
+    end_gap = math.dist(host_held[-1][1:4], guest_held[-1][1:4])
+    assert end_gap < 75, end_gap
+    settled_gap = math.dist(*(view["samples"][-1][1:4] for view in views.values()))
+    assert settled_gap < 40, (settled_gap, [view["samples"][-1] for view in views.values()])
+    assert await carry(guest, "ready") == "ready", "the guest corpse did not resume ragdoll physics after the drop"
+    assert campaign_save_hashes(host.campaign) == checkpoint, "Carrying a corpse caused an early checkpoint"
+    return {"stock_host_corpse_carry": {"host_displacement_cm": distance, "guest_displacement_cm": guest_distance,
+                                      "guest_max_backstep_cm": reverse, "end_gap_cm": end_gap,
+                                      "settled_gap_cm": settled_gap, "campaign_checkpoint_unchanged": True, **views}}
+
+
 async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-campfire", action)
@@ -2843,6 +2895,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
                  stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False,
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
+                 stock_host_corpse_carry: bool = False,
                  stock_npc_rivalry: bool = False,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
@@ -2899,6 +2952,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_campfire, "stock_campfire", verify_resident_campfire),
         (stock_npc_override and not resident_weapon_cues, "stock_npc_override", verify_resident_npc_override),
         (stock_board_offers, "stock_board_offers", verify_resident_board_offers),
+        (stock_host_corpse_carry, "stock_host_corpse_carry", verify_stock_host_corpse_carry),
         (resident_weapon_cues, "resident_weapon_cues",
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override, rusty=rusty_pistol)),
         (stock_npc_rivalry, "stock_npc_rivalry", verify_stock_npc_rivalry),
@@ -2942,13 +2996,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
                                                      fixture="portable_board_offer_probe.lua"))
-        if stock_npc_override or stock_npc_rivalry:
-            if stock_npc_override and resident_weapon_cues:
-                proof["npc_combat_overlays"] = [probes.enter_context(host_npc_combat_overlay(game)) for game in games]
-            else:
-                for game in games:
-                    probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
-                                                         fixture="portable_npc_override_probe.lua"))
+        if stock_npc_override and resident_weapon_cues:
+            proof["npc_combat_overlays"] = [probes.enter_context(host_npc_combat_overlay(game)) for game in games]
+        elif stock_host_corpse_carry or stock_npc_rivalry or stock_npc_override:
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
+                                                     fixture="portable_npc_override_probe.lua"))
         if tutorial_dock_combat or stock_bandage_revisit or stock_shovel:
             proof["dock_zone_overlays"] = [probes.enter_context(tutorial_dock_zone_overlay(game)) for game in games]
         if stock_campfire:
@@ -3238,6 +3291,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-campfire", action="store_true", help="verify stock campfire damage and feedback, combinable with food and weapon cues")
     parser.add_argument("--stock-board-offers", action="store_true",
                         help="compare the stock Observatory board on both seats and accept a complex contract")
+    parser.add_argument("--stock-host-corpse-carry", action="store_true",
+                        help="Measure stock host ragdoll carry on the guest and verify physics returns on release")
     parser.add_argument("--stock-npc-override", action="store_true",
                         help="verify guest damage rejection and host death on a stock drone")
     parser.add_argument("--stock-split", action="store_true", help="test the stock guest stack-split popup with a Veteran loadout")
@@ -3358,7 +3413,8 @@ if __name__ == "__main__":
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "stock_board_offers", "resident_weapon_cues",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "stock_npc_rivalry",
-                              "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_take_ammo"}
+                              "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_take_ammo",
+                              "stock_host_corpse_carry"}
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
     if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
@@ -3370,7 +3426,8 @@ if __name__ == "__main__":
     if args.stock_shovel_loot and not args.stock_shovel:
         parser.error("Use --stock-shovel-loot with --stock-shovel")
     if any((args.stock_food, args.stock_campfire, args.stock_npc_override, args.stock_board_offers,
-            args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo)) and (
+            args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
+            args.stock_host_corpse_carry)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
         parser.error("Run the resident gameplay checks without other gameplay fixtures")
@@ -3411,6 +3468,7 @@ if __name__ == "__main__":
                        stock_use=args.stock_use, stock_food=args.stock_food, stock_campfire=args.stock_campfire,
                        stock_npc_override=args.stock_npc_override, stock_board_offers=args.stock_board_offers,
                        stock_npc_rivalry=args.stock_npc_rivalry,
+                       stock_host_corpse_carry=args.stock_host_corpse_carry,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,

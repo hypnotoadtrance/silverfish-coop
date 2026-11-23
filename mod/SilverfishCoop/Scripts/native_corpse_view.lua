@@ -11,13 +11,16 @@ local marker_path = "/Script/Engine.TargetPoint"
 local npc_class, turret_class, marker_class, clock, death_hook, drone_death_hook, turret_death_hook, drone_seen
 local next_turret_lookup = 0
 local active_world, markers, numbered, mirrors, ended, anchors = nil, {}, {}, {}, {}, {}
-local pending, corrections = {}, {}
+local pending, corrections, observed_grips = {}, {}, {}
 local turret_timers = {}
 local extinguish_hook
 local next_sample, corpse_number = 0, 0
+local host_pawn, grip_marker, next_grip_sample
 local sample_period = .1
+local grip_period = .05
 local byte_angle = 360 / 256
 local anchor_limit = 120
+local host_grip_bit = 0x8000
 local blast_phase, smoke_phase = 32, 16
 local fire_flag = 4
 
@@ -99,11 +102,16 @@ function corpses.position(actor)
     return mesh:K2_GetComponentLocation(), nil
 end
 
+local function marker_state(rotation)
+    -- Yaw and roll carry a world-local ID and the host's grip state.
+    -- The marker's Owner remains the replicated corpse.
+    local packed = rotation_byte(rotation.Roll) * 256 + rotation_byte(rotation.Yaw)
+    return packed & (host_grip_bit - 1), (packed & host_grip_bit) ~= 0
+end
+
 local function marker_number(marker)
-    -- This invisible marker's rotation carries a world-local ID in two
-    -- movement-quantized axes. Its Owner remains the replicated corpse.
-    local rotation = marker:K2_GetActorRotation()
-    return rotation_byte(rotation.Roll) * 256 + rotation_byte(rotation.Yaw)
+    local number = marker_state(marker:K2_GetActorRotation())
+    return number
 end
 
 function corpses.binding(actor, guest)
@@ -164,7 +172,7 @@ local function publish(actor)
         if not supported_corpse(actor) or not valid(actor.Mesh) then return end
         point, index = corpses.position(actor)
     end
-    if corpse_number == 65535 then return end
+    if corpse_number == host_grip_bit - 1 then return end
     corpse_number = corpse_number + 1
     local marker = world:SpawnActor(marker_class, point, {
         Pitch = turret and (blast_phase + (valid(fire) and fire_flag or 0)) * byte_angle or anchor_pitch(index),
@@ -266,7 +274,9 @@ local function apply(marker, world)
     local mesh, capsule, movement = actor.Mesh, actor.CapsuleComponent, actor.CharacterMovement
     if not valid(mesh) or not valid(capsule) or not valid(movement) then return end
     local key = actor:GetAddress()
-    if not mirrors[key] or not same(mirrors[key].marker, marker) then mirrors[key] = {marker = marker} end
+    local mirror = mirrors[key] or {}
+    mirror.marker = marker
+    mirrors[key] = mirror
     actor.Health = 0
     if actor.Alive == false and mesh:IsAnySimulatingPhysics() then return true end
     movement:SetMovementMode(0, 0)
@@ -295,45 +305,98 @@ local function locally_carried(pawn, actor, mesh)
     return valid(grip) and same(grip:GetGrabbedComponent(), mesh)
 end
 
+local function restore_corpse_physics(mirror)
+    local original = mirror.host_grip
+    if not original then return end
+    mirror.host_grip = nil
+    if valid(original.mesh) then
+        original.mesh:SetCollisionEnabled(original.collision)
+        original.mesh:SetEnableGravity(original.gravity)
+    end
+end
+
+local function project_host_grip(mirror, mesh)
+    if mirror.host_grip then return end
+    mirror.host_grip = {mesh = mesh, collision = mesh:GetCollisionEnabled(), gravity = mesh:IsGravityEnabled()}
+    -- The host already solves contact while holding this corpse. Collision
+    -- impulses and gravity on the observer fight the incoming grip position.
+    -- Keep queries available for the corpse interaction after release.
+    mesh:SetEnableGravity(false)
+    mesh:SetAllPhysicsLinearVelocity({X = 0, Y = 0, Z = 0}, false)
+    mesh:SetCollisionEnabled(1)
+end
+
+local function follow_corpse(address, mirror, actor, pawn, now)
+    local mesh = actor.Mesh
+    local _, host_grip = marker_state(mirror.marker:K2_GetActorRotation())
+    local local_grip = valid(mesh) and locally_carried(pawn, actor, mesh)
+    if not host_grip or local_grip then
+        if mirror.host_grip then
+            corrections[address] = nil
+            mirror.host_released = not local_grip
+        end
+        restore_corpse_physics(mirror)
+        observed_grips[address] = nil
+    end
+    if not valid(mesh) or not (mesh:IsAnySimulatingPhysics() or mirror.host_grip) or local_grip then
+        corrections[address] = nil
+        return
+    end
+    if host_grip then
+        project_host_grip(mirror, mesh)
+        mirror.host_released = nil
+        mirror.pawn = pawn
+        observed_grips[address] = mirror
+    end
+    local period = host_grip and grip_period or sample_period
+    if now < (mirror.next_pose or 0) then return end
+    mirror.next_pose = now + period
+    local target = mirror.marker:K2_GetActorLocation()
+    local offset, error_squared = between(corpses.position(actor), target)
+    if mirror.host_released and mirror.target_z == target.Z and math.abs(offset.Z) < 100 then
+        -- Once the host's height stops changing, let the locally simulated
+        -- body settle. Driving its pelvis into a floor can bounce the whole rig.
+        offset.Z = 0
+        error_squared = offset.X * offset.X + offset.Y * offset.Y
+    end
+    mirror.target_z = target.Z
+    if error_squared > 450^2 then
+        corrections[address] = nil
+        mesh:K2_AddWorldOffset(offset, false, {}, true)
+    elseif error_squared > (host_grip and 2 or 15)^2 then
+        corrections[address] = {actor = actor, mesh = mesh, pawn = pawn, start = now, offset = offset,
+            applied = 0, host_grip = host_grip, period = period}
+    end
+end
+
 local function mirror_positions(world, pawn, now)
     for address, mirror in pairs(mirrors) do
         local marker = mirror.marker
         local actor = valid(marker) and marker:GetOwner()
         if not valid(actor) or not same(marker:GetWorld(), world) or actor:IsActorBeingDestroyed() then
             retire_turret(mirror)
-            mirrors[address], corrections[address] = nil, nil
+            restore_corpse_physics(mirror)
+            mirrors[address], corrections[address], observed_grips[address] = nil, nil, nil
         elseif mirror.turret then
             if actor:GetLocalRole() == 1 and present_turret(mirror, actor, pawn) then mirrors[address] = nil end
         elseif actor:GetLocalRole() == 1 and actor.Alive == false then
-            local mesh = actor.Mesh
-            if valid(mesh) and mesh:IsAnySimulatingPhysics() and not locally_carried(pawn, actor, mesh) then
-                local target = marker:K2_GetActorLocation()
-                local offset, error_squared = between(corpses.position(actor), target)
-                if error_squared > 450^2 then
-                    corrections[address] = nil
-                    mesh:K2_AddWorldOffset(offset, false, {}, true)
-                elseif error_squared > 15^2 then
-                    corrections[address] = {actor = actor, mesh = mesh, pawn = pawn, start = now, offset = offset, applied = 0}
-                end
-            else
-                corrections[address] = nil
-            end
+            follow_corpse(address, mirror, actor, pawn, now)
         end
     end
 end
 
 function corpses.animate(get_world)
-    if not next(corrections) then return end
+    if not next(corrections) and not next(observed_grips) then return end
     local world = get_world()
     if not same(world, active_world) then corrections = {}; return end
     local now = clock:GetRealTimeSeconds(world)
     for address, correction in pairs(corrections) do
         local actor, mesh = correction.actor, correction.mesh
         if not valid(actor) or actor:IsActorBeingDestroyed() or not valid(mesh)
-            or not mesh:IsAnySimulatingPhysics() or locally_carried(correction.pawn, actor, mesh) then
+            or not (correction.host_grip or mesh:IsAnySimulatingPhysics()) or locally_carried(correction.pawn, actor, mesh) then
             corrections[address] = nil
         else
-            local progress = math.min(1, math.max(0, (now - correction.start) / sample_period))
+            local progress = math.min(1, math.max(0, (now - correction.start) / correction.period))
             local step, offset = progress - correction.applied, correction.offset
             if step > 0 then
                 mesh:K2_AddWorldOffset({X = offset.X * step, Y = offset.Y * step, Z = offset.Z * step}, false, {}, true)
@@ -342,6 +405,54 @@ function corpses.animate(get_world)
             if progress == 1 then corrections[address] = nil end
         end
     end
+    for address, mirror in pairs(observed_grips) do
+        local actor = valid(mirror.marker) and mirror.marker:GetOwner()
+        if valid(actor) and not actor:IsActorBeingDestroyed() and same(actor:GetWorld(), world) then
+            follow_corpse(address, mirror, actor, mirror.pawn, now)
+        else
+            restore_corpse_physics(mirror)
+            observed_grips[address] = nil
+        end
+    end
+end
+
+local function publish_corpse_position(actor, marker, host_grip)
+    if not valid(actor.Mesh) or actor.Alive ~= false or not actor.Mesh:IsAnySimulatingPhysics() then return end
+    local point, anchor = corpses.position(actor)
+    local rotation = marker:K2_GetActorRotation()
+    local number, last_grip = marker_state(rotation)
+    local _, distance_squared = between(marker:K2_GetActorLocation(), point)
+    if host_grip ~= last_grip then
+        rotation.Roll = ((number // 256) + (host_grip and 128 or 0)) * byte_angle
+        marker.NetUpdateFrequency = host_grip and 20 or 10
+    elseif distance_squared <= 3^2 and anchor_code(rotation.Pitch) == (anchor or -1) + 1 then
+        return
+    end
+    rotation.Pitch = anchor_pitch(anchor)
+    marker:K2_SetActorLocationAndRotation(point, rotation, false, {}, true)
+    marker:ForceNetUpdate()
+end
+
+function corpses.update_host_grip(get_world)
+    if not next(markers) or not valid(host_pawn) then return end
+    local held = host_pawn.HeldObject
+    if not valid(held) and not grip_marker then return end
+    local marker = valid(held) and markers[held:GetAddress()]
+    if not marker and not grip_marker then return end
+    local world = get_world()
+    if not same(world, active_world) then return end
+    if not valid(marker) or held:IsActorBeingDestroyed() or not same(marker:GetOwner(), held)
+        or not locally_carried(host_pawn, held, held.Mesh) then marker = nil end
+    if not same(marker, grip_marker) then
+        local previous = valid(grip_marker) and grip_marker:GetOwner()
+        if valid(previous) and not previous:IsActorBeingDestroyed() then publish_corpse_position(previous, grip_marker, false) end
+        grip_marker, next_grip_sample = marker, 0
+    end
+    if not marker then return end
+    local now = clock:GetRealTimeSeconds(world)
+    if now < next_grip_sample then return end
+    next_grip_sample = now + grip_period
+    publish_corpse_position(held, marker, true)
 end
 
 local function publish_positions(world, now)
@@ -368,18 +479,8 @@ local function publish_positions(world, now)
                 marker:ForceNetUpdate()
             end
             if phase == 0 then turret_timers[address] = nil end
-        elseif not supported_turret(actor) then
-            local mesh = actor.Mesh
-            if valid(mesh) and actor.Alive == false and mesh:IsAnySimulatingPhysics() then
-                local point, anchor = corpses.position(actor)
-                local rotation = marker:K2_GetActorRotation()
-                local _, distance_squared = between(marker:K2_GetActorLocation(), point)
-                if distance_squared > 3^2 or anchor_code(rotation.Pitch) ~= (anchor or -1) + 1 then
-                    rotation.Pitch = anchor_pitch(anchor)
-                    marker:K2_SetActorLocationAndRotation(point, rotation, false, {}, true)
-                    marker:ForceNetUpdate()
-                end
-            end
+        elseif not supported_turret(actor) and not same(marker, grip_marker) then
+            publish_corpse_position(actor, marker, false)
         end
     end
 end
@@ -410,6 +511,7 @@ function corpses.start(role)
         local address = actor:GetAddress()
         retire_turret(mirrors[address])
         mirrors[address], anchors[address], pending[address], turret_timers[address] = nil, nil, nil, nil
+        corrections[address], observed_grips[address] = nil, nil
         local marker = markers[address]
         if valid(marker) and same(marker:GetOwner(), actor) then
             numbered[marker_number(marker)] = nil
@@ -423,11 +525,17 @@ function corpses.sync(state, phase)
     local hosting = phase == "hosting" and state.listening and not state.server
     local world = (hosting or phase == "connected" and state.server) and state.world or nil
     if not same(world, active_world) then
-        for _, mirror in pairs(mirrors) do retire_turret(mirror) end
-        turret_timers, corrections = {}, {}
+        for _, mirror in pairs(mirrors) do
+            retire_turret(mirror)
+            restore_corpse_physics(mirror)
+        end
+        turret_timers, corrections, observed_grips = {}, {}, {}
+        grip_marker, next_grip_sample = nil, 0
         active_world, markers, numbered, mirrors, ended, anchors, next_sample, corpse_number =
             world, {}, {}, {}, {}, {}, 0, 0
     end
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    host_pawn = hosting and pawn or nil
     if not valid(world) then return end
     if not valid(npc_class) then npc_class = StaticFindObject(npc_path) end
     if hosting and not turret_death_hook then
@@ -464,7 +572,7 @@ function corpses.sync(state, phase)
                 for address, marker in pairs(pending) do
                     if apply(marker, world) then pending[address] = nil end
                 end
-                mirror_positions(world, state.local_pawn and state.local_pawn.pawn, now)
+                mirror_positions(world, pawn, now)
             end
         end
     end

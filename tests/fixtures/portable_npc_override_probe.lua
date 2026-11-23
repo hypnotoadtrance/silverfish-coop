@@ -26,6 +26,97 @@ local function heading(from, target)
     return {Pitch = math.deg(math.atan(z, math.sqrt(x*x + y*y))), Yaw = math.deg(math.atan(y, x)), Roll = 0}
 end
 
+local corpse_trace, carry_target, carry_approach, carry_retreat
+
+local function holds_corpse(pawn, actor)
+    return same(pawn.HeldObject, actor) and same(pawn.PhysicsHandle:GetGrabbedComponent(), actor.Mesh)
+end
+
+local function corpse_carry(action, world, pawn, actor, host)
+    local mesh = actor.Mesh
+    local marker = corpse_trace and corpse_trace.marker
+    if not valid(marker) then
+        for _, candidate in ipairs(FindAllOf("TargetPoint") or {}) do
+            if valid(candidate) and same(candidate:GetOwner(), actor) then
+                assert(not marker, "unexpected second corpse marker")
+                marker = candidate
+            end
+        end
+    end
+    assert(valid(marker) and not actor.Alive, "the test needs a bound stock corpse")
+    local function rotation_byte(angle) return math.floor(angle * 256 / 360 + .5) % 256 end
+    local rotation = marker:K2_GetActorRotation()
+    local number = (rotation_byte(rotation.Roll) % 128) * 256 + rotation_byte(rotation.Yaw)
+    local code = rotation_byte(rotation.Pitch)
+    local index = (code <= 60 and code or code >= 196 and code - 135 or 0) - 1
+    assert(number > 0 and index >= 0 and index < mesh:GetNumBones(), "the corpse marker has no skeletal anchor")
+    local anchor = mesh:GetBoneName(index)
+    if action == "corpse-grab" then
+        assert(host and not valid(pawn.HeldObject), "only the empty-handed host may grab")
+        assert(pawn:K2_SetActorLocation(carry_approach, false, {}, true), "the host could not reach the carry lane")
+        local eye = pawn.Camera:K2_GetComponentLocation()
+        for index = 0, mesh:GetNumBones() - 1 do
+            local bone = mesh:GetBoneName(index)
+            if mesh:IsSimulatingPhysics(bone) then
+                local angle = heading(eye, mesh:GetSocketLocation(bone))
+                pawn.Controller:SetControlRotation(angle)
+                pawn:K2_SetActorRotation({Pitch=0, Yaw=angle.Yaw, Roll=0}, true)
+                pawn.Camera:K2_SetWorldRotation(angle, false, {}, true)
+                pawn:LookTrace()
+                if same(pawn.ActorBeingLookedAt, actor) and mesh:IsSimulatingPhysics(pawn["Hit Bone Name"]) then
+                    pawn:Grab_Release_Object(false, false, false)
+                    if holds_corpse(pawn, actor) then return "grabbed" end
+                    error("the stock grab function did not hold the traced humanoid corpse")
+                end
+            end
+        end
+        error("the host stock LookTrace and PhysicsHandle did not grab the corpse")
+    elseif action == "corpse-arm" then
+        assert(not corpse_trace and (holds_corpse(pawn, actor) == true) == host, "wrong local grip at trace start")
+        local clock = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+        local watch = {actor=actor, marker=marker, clock=clock, start=clock:GetRealTimeSeconds(world), rows={}}
+        corpse_trace = watch
+        LoopInGameThreadWithDelay(25, function()
+            if corpse_trace ~= watch or #watch.rows >= 180 or not valid(actor) or actor:IsActorBeingDestroyed()
+                or not same(actor:GetWorld(), world) then return true end
+            local now = clock:GetRealTimeSeconds(world)
+            local point, target = mesh:GetSocketLocation(anchor), marker:K2_GetActorLocation()
+            local phase = rotation_byte(marker:K2_GetActorRotation().Roll) >= 128
+            watch.rows[#watch.rows + 1] = ("%.3f %.2f %.2f %.2f %.2f %.2f %.2f %d %d %d"):format(now-watch.start,
+                point.X, point.Y, point.Z, target.X, target.Y, target.Z, phase and 1 or 0,
+                mesh:GetCollisionEnabled(), holds_corpse(pawn, actor) and 1 or 0)
+            if watch.sweep then
+                local step = math.min(1, (now-watch.sweep.start)/1.2)
+                local start, finish = watch.sweep.origin, carry_retreat
+                pawn:K2_SetActorLocation({X=start.X+(finish.X-start.X)*step, Y=start.Y+(finish.Y-start.Y)*step,
+                    Z=start.Z+(finish.Z-start.Z)*step}, false, {}, true)
+                if step == 1 then watch.sweep = nil end
+            end
+        end)
+        return "armed"
+    end
+    local watch = corpse_trace
+    assert(watch and same(watch.actor, actor), "no matching corpse trace")
+    if action == "corpse-sweep" then
+        assert(host and holds_corpse(pawn, actor), "the host must still grip the corpse")
+        watch.sweep = {start=watch.clock:GetRealTimeSeconds(world), origin=pawn:K2_GetActorLocation()}
+        return "sweeping"
+    elseif action == "corpse-mark" then
+        if watch.sweep then return "sweeping" end
+        watch.mark = #watch.rows
+        return "marked"
+    elseif action == "corpse-drop" then
+        assert(host and holds_corpse(pawn, actor), "the host released the corpse before the stock drop")
+        pawn:Grab_Release_Object(false, true, false)
+        assert(not holds_corpse(pawn, actor), "the host's stock drop did not release the corpse")
+        return "dropped"
+    elseif action == "corpse-read" then
+        corpse_trace = nil
+        return ("%d %d|%s|end"):format(number, watch.mark, table.concat(watch.rows, "|"))
+    end
+    error("unknown corpse probe action")
+end
+
 local function authoritative_guest(world)
     local guest
     for _, candidate in ipairs(FindAllOf("Player_FP_C") or {}) do
@@ -187,6 +278,50 @@ local function create_stock_npc(pawn, world, kind, point, yaw)
     assert(same(actor, statics:FinishSpawningActor(actor, transform, 0)) and actor:HasAuthority() and actor.Alive,
         "stock shooter did not start on the host")
     return actor, path
+end
+
+local function spawn_carry_target(world, pawn)
+    assert(not valid(carry_target), "only one carry target is allowed")
+    local origin = pawn:K2_GetActorLocation()
+    local point, approach, retreat
+    local radius = pawn.CapsuleComponent:GetScaledCapsuleRadius()
+    local height = pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()
+    for bearing = 0, 315, 45 do
+        local angle = math.rad(bearing)
+        local function floor(distance)
+            local x, y = origin.X+distance*math.cos(angle), origin.Y+distance*math.sin(angle)
+            local hit = {}
+            if trace:LineTraceSingle(pawn, {X=x,Y=y,Z=origin.Z+200}, {X=x,Y=y,Z=origin.Z-320},
+                0, false, {pawn}, 0, hit, true, color, color, 0) then
+                hit = hit.OutHit or hit
+                local component = hit.Component and hit.Component:Get()
+                if hit.ImpactNormal.Z > .9 and valid(component) and component:GetCollisionObjectType() == 0 then
+                    return {X=x,Y=y,Z=hit.ImpactPoint.Z+height+5}
+                end
+            end
+        end
+        point, approach, retreat = floor(520), floor(420), floor(150)
+        if point and approach and retreat and math.abs(retreat.Z-point.Z)<30
+            and not trace:CapsuleTraceSingle(pawn, retreat, point, radius, height-10, 0, false,
+                {pawn}, 0, {}, true, color, color, 0) then break end
+        point = nil
+    end
+    assert(point, "no clear stock corpse test position")
+    carry_approach, carry_retreat = approach, retreat
+    local actor = create_stock_npc(pawn, world, "bandit", {X=origin.X+570, Y=origin.Y+180, Z=origin.Z+120}, 0)
+    assert(actor:K2_SetActorLocation(point, false, {}, true), "could not place the stock bandit on the carry lane")
+    actor:SetActorTickEnabled(false)
+    local controller = actor.Controller
+    if valid(controller) then controller:SetActorTickEnabled(false) end
+    actor.bAlwaysRelevant = true
+    actor:SetReplicates(true)
+    actor:SetReplicateMovement(true)
+    actor:ForceNetUpdate()
+    carry_target = actor
+    actor.Health = 0
+    actor:ResolveDeath()
+    assert(not actor.Alive and actor.Mesh:IsAnySimulatingPhysics(), "the bandit's stock death did not create a ragdoll")
+    return "spawned"
 end
 
 local function spawn_stock_npc(pawn, world, kind)
@@ -812,7 +947,29 @@ local function run(action, actor_path)
     local pawn = statics:GetPlayerPawn(world, 0)
     assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn:GetWorld(), world), "local stock pawn unavailable")
     local host = pawn:HasAuthority()
-    if action == "dock-equip" then
+    if action == "corpse-spawn" then
+        assert(host, "only the host can spawn the stock carry target")
+        return spawn_carry_target(world, pawn)
+    elseif action:match("^corpse%-") then
+        local actor = host and carry_target
+        if not host then
+            for _, candidate in ipairs(FindAllOf("NPC_Bandit_C") or {}) do
+                if valid(candidate) and same(candidate:GetWorld(), world) and not candidate:IsActorBeingDestroyed() then
+                    assert(not actor, "unexpected second isolated bandit")
+                    actor = candidate
+                end
+            end
+        end
+        if action == "corpse-ready" then
+            if not valid(actor) or actor.Alive or not actor.Mesh:IsAnySimulatingPhysics() then return "waiting" end
+            for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
+                if valid(marker) and same(marker:GetOwner(), actor) then return "ready" end
+            end
+            return "waiting"
+        end
+        assert(valid(actor) and actor.bReplicates and actor:GetLocalRole() == (host and 3 or 1), "missing replicated bandit")
+        return corpse_carry(action, world, pawn, actor, host)
+    elseif action == "dock-equip" then
         assert(not host, "the guest must select their stock equipment")
         return select_equipment(pawn, function(row)
             return row[item_class]:GetFName():ToString() == "Wep_RustyPistol_C"
