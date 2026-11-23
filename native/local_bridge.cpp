@@ -23,6 +23,7 @@ namespace
     constexpr std::uint32_t prop_poses_limit = 4 * 257;
     constexpr std::uint32_t avatar_poses_limit = 512;
     constexpr std::uint32_t local_prop_pose_limit = 768;
+    constexpr std::uint32_t remote_footsteps_limit = 2048;
     constexpr std::uint32_t weapon_cues_limit = 16 * 1024;
     constexpr std::size_t weapon_cue_capacity = 36;
     constexpr std::size_t weapon_cue_limit = 1024;
@@ -51,6 +52,8 @@ namespace
     std::string local_prop_pose;
     std::string local_avatar_pose;
     std::string remote_avatar_poses;
+    std::string remote_footsteps;
+    std::chrono::steady_clock::time_point remote_footsteps_expires;
     struct WeaponCue
     {
         std::string record;
@@ -294,6 +297,21 @@ namespace
         return take_presentation(lua, remote_avatar_poses);
     }
 
+    int take_remote_footsteps(const Lua& lua)
+    {
+        std::string frame;
+        {
+            std::lock_guard lock(mutex);
+            if (attached && std::chrono::steady_clock::now() < remote_footsteps_expires)
+                frame.swap(remote_footsteps);
+            else
+                remote_footsteps.clear();
+        }
+        if (frame.empty()) return 0;
+        lua.set_string(frame);
+        return 1;
+    }
+
     int publish_presentation(const Lua& lua, std::string& mailbox, std::uint32_t limit)
     {
         if (lua.get_stack_size() != 1 || !lua.is_string()) return 0;
@@ -396,6 +414,7 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
     local_prop_pose.clear();
     local_avatar_pose.clear();
     remote_avatar_poses.clear();
+    remote_footsteps.clear();
     weapon_cues_enabled = false;
     clear_weapon_cues();
     native_events_heartbeat = stock_board_heartbeat = host_dig_heartbeat = 0;
@@ -561,6 +580,16 @@ extern "C" __declspec(dllexport) int SilverfishBridgePublishAvatarPosesV1(const 
     return 1;
 }
 
+extern "C" __declspec(dllexport) int SilverfishBridgePublishFootstepsV1(const char* data, std::uint32_t size)
+{
+    if (!data || !size || size > remote_footsteps_limit) return 0;
+    std::lock_guard lock(mutex);
+    if (!attached) return 0;
+    remote_footsteps.assign(data, size);
+    remote_footsteps_expires = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
+    return 1;
+}
+
 extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeStashBodyLimitV1()
 {
     return silverfish::local_stash_ticket::body_limit;
@@ -625,6 +654,7 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishClearLocalWeaponCues", clear_local_weapon_cues);
         lua.register_function("SilverfishPublishLocalAvatarPose", publish_avatar_pose);
         lua.register_function("SilverfishTakeRemoteAvatarPoses", take_avatar_poses);
+        lua.register_function("SilverfishTakeRemoteFootsteps", take_remote_footsteps);
         lua.register_function("SilverfishReadLocalNativeEventsHeartbeat", read_native_events_heartbeat);
         lua.register_function("SilverfishReadLocalStockBoardHeartbeat", read_stock_board_heartbeat);
         lua.register_function("SilverfishReadLocalHostDigHeartbeat", read_host_dig_heartbeat);
@@ -645,6 +675,7 @@ namespace silverfish::local_bridge
         local_prop_pose.clear();
         local_avatar_pose.clear();
         remote_avatar_poses.clear();
+        remote_footsteps.clear();
         weapon_cues_enabled = false;
         clear_weapon_cues();
         native_events_heartbeat = stock_board_heartbeat = host_dig_heartbeat = 0;

@@ -116,13 +116,15 @@ def _captured(data):
     return area, cues
 
 
-async def relay(host, bridge, transport):
+async def relay(host, bridge, transport, *, footsteps=None):
     path = bridge.directory / _MAILBOX
     mailbox = getattr(bridge, "local_bridge", None)
     memory = getattr(mailbox, "local_weapon_cues_available", False)
     revision, last_sent = None, 0
     while not host.stopping:
         await asyncio.sleep(.025)
+        if footsteps is not None:
+            footsteps.flush()
         try:
             if memory:
                 frame = mailbox.take_local_weapon_cues()
@@ -140,6 +142,8 @@ async def relay(host, bridge, transport):
                 revision = current
         except (OSError, UnicodeError):
             continue
+        if memory and footsteps is not None:
+            footsteps.local(data)
         area, cues = _captured(data)
         fresh = [cue for cue in cues if cue[0] > last_sent]
         if not fresh:

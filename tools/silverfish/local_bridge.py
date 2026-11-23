@@ -72,6 +72,10 @@ class LocalBridge:
             self._take_local_prop_pose.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
             self._take_local_prop_pose.restype = ctypes.c_uint32
             self._local_prop_pose_buffer = ctypes.create_string_buffer(768)
+        self._publish_footsteps = getattr(library, "SilverfishBridgePublishFootstepsV1", None)
+        if self._publish_footsteps is not None:
+            self._publish_footsteps.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
+            self._publish_footsteps.restype = ctypes.c_int
         self._take_local_weapon_cues = getattr(library, "SilverfishBridgeTakeLocalWeaponCuesV1", None)
         self._enable_local_weapon_cues = getattr(library, "SilverfishBridgeEnableLocalWeaponCuesV1", None)
         self._local_weapon_cues_buffer = None
@@ -244,6 +248,13 @@ class LocalBridge:
             return None
         size = self._take_local_weapon_cues(buffer, len(buffer))
         return buffer[:size] if 0 < size <= len(buffer) else None
+
+    @property
+    def footsteps_available(self) -> bool:
+        return self.local_weapon_cues_available and self._publish_footsteps is not None
+
+    def publish_footsteps(self, frame: bytes) -> bool:
+        return self.footsteps_available and bool(self._publish_footsteps(frame, len(frame)))
 
     @property
     def avatar_pose_available(self) -> bool:

@@ -105,6 +105,9 @@ _WEAPON_SHOT_HEADER = _FRAGMENT_HEADER.pack(0, 0, 1)
 _LOOT_MOTION_HEADER = _FRAGMENT_HEADER.pack(0, 0, 2)
 _PROP_POSE_HEADER = _FRAGMENT_HEADER.pack(0, 0, 3)
 _AVATAR_POSE_HEADER = _FRAGMENT_HEADER.pack(0, 0, 4)
+_FOOTSTEP_HEADER = _FRAGMENT_HEADER.pack(0, 0, 5)
+_FOOTSTEP_MAX_AGE = .20
+_FOOTSTEP_MAX_SIZE = 48
 _WEAPON_SHOT_MAX_AGE = .25
 _AVATAR_POSE_MAX_AGE = .25
 _FRAGMENT_TTL = 1.0
@@ -748,6 +751,9 @@ class _HostProtocol(_LinkProtocol):
             if event.data.startswith(_AVATAR_POSE_HEADER):
                 self.host._receive_avatar_pose(self, event.data[_FRAGMENT_HEADER.size:])
                 return
+            if event.data.startswith(_FOOTSTEP_HEADER):
+                self.host._receive_footstep(self, event.data[_FRAGMENT_HEADER.size:])
+                return
             packet = self._game_payload(event)
             if packet is not None:
                 self.host._to_game(self, packet)
@@ -853,6 +859,7 @@ class HostLink:
         self._request_callback = on_request
         self._prop_pose_handler: OnPropPose | None = None
         self._avatar_pose_handler: OnAvatarPose | None = None
+        self._footstep_handler: Callable[[str, bytes], None] | None = None
         self._enroll = enroll
         self._guest_routes: dict[str, _GameRoute] = {}
         self._protocols: dict[str, _HostProtocol] = {}
@@ -1199,6 +1206,19 @@ class HostLink:
             self._send_presentation(_AVATAR_POSE_HEADER, data,
                                     lambda guest_id: guest_id in self._guest_routes and allowed(guest_id))
 
+    def set_footstep_handler(self, handler: Callable[[str, bytes], None] | None) -> None:
+        self._footstep_handler = handler
+
+    def _receive_footstep(self, protocol: _HostProtocol, data: bytes) -> None:
+        handler = self._footstep_handler
+        if handler is not None and len(data) <= _FOOTSTEP_MAX_SIZE and (guest_id := self._pose_source(protocol, data)) is not None:
+            handler(guest_id, data)
+
+    def send_footstep(self, data: bytes, allowed: Callable[[str], bool]) -> None:
+        if isinstance(data, bytes) and 0 < len(data) <= _FOOTSTEP_MAX_SIZE:
+            self._send_presentation(_FOOTSTEP_HEADER, data,
+                                    lambda guest_id: guest_id in self._guest_routes and allowed(guest_id))
+
     def send_weapon_shot(self, data: bytes, allowed: Callable[[str], bool]) -> None:
         self._send_presentation(_WEAPON_SHOT_HEADER, data, allowed)
 
@@ -1302,6 +1322,12 @@ class _ClientProtocol(_LinkProtocol):
                         and self.session_end is None and 0 < len(payload) <= _FRAGMENT_SIZE):
                     self.avatar_pose = (self._loop.time(), payload)
                     self._stats.avatar_pose_datagrams_received += 1
+                return
+            if header == _FOOTSTEP_HEADER:
+                payload = event.data[_FRAGMENT_HEADER.size:]
+                if (self.client._protocol is self and self.authorized and self.game_access and not self.terminated
+                        and self.session_end is None and 0 < len(payload) <= _FOOTSTEP_MAX_SIZE):
+                    self.client._footsteps.append((self._loop.time(), payload))
                 return
             if header in (_WEAPON_SHOT_HEADER, _LOOT_MOTION_HEADER):
                 if self.authorized and self.game_access and not self.terminated:
@@ -1469,6 +1495,7 @@ class ClientLink:
         self._keepalive: asyncio.Task[None] | None = None
         self._game_endpoint: Address | None = None
         self._weapon_shots: deque[tuple[float, bytes]] = deque(maxlen=36)
+        self._footsteps: deque[tuple[float, bytes]] = deque(maxlen=16)
         self._loot_motion: deque[tuple[float, bytes]] = deque(maxlen=32)
         self.game_local_datagrams = 0
         self.game_packets_sent = 0
@@ -1650,6 +1677,15 @@ class ClientLink:
         return bool(protocol is not None and not self._closed and protocol.session_end is None
                     and isinstance(data, bytes) and protocol._forward_presentation(header, data))
 
+    def send_footstep(self, data: bytes) -> bool:
+        return isinstance(data, bytes) and 0 < len(data) <= _FOOTSTEP_MAX_SIZE and self._send_pose(_FOOTSTEP_HEADER, data)
+
+    def take_footsteps(self) -> list[bytes]:
+        now = asyncio.get_running_loop().time()
+        pending = [data for received, data in self._footsteps if now - received <= _FOOTSTEP_MAX_AGE]
+        self._footsteps.clear()
+        return pending
+
     def send_prop_pose(self, data: bytes) -> bool:
         """Queue one transient prop pose on the current authenticated game link."""
         return self._send_pose(_PROP_POSE_HEADER, data)
@@ -1682,6 +1718,7 @@ class ClientLink:
 
     async def _disconnect_locked(self) -> None:
         self._weapon_shots.clear()
+        self._footsteps.clear()
         self._loot_motion.clear()
         if self._keepalive is not None:
             self._keepalive.cancel()

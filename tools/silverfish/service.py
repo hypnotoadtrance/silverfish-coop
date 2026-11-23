@@ -47,6 +47,7 @@ from . import native_player_avatar
 from . import native_pickup_audio
 from . import native_damage_feedback, native_weather_view
 from . import native_voice
+from . import native_footsteps
 from . import native_anomaly_effects
 from . import native_drum_fire
 from . import native_weapon_fire_view
@@ -4062,7 +4063,11 @@ class Host:
         pause_exit = (native_session_exit.PauseExit(bridge.directory, self.control, "host", engine=engine)
                       if engine is not None and self.native_zones else None)
         heartbeat = asyncio.create_task(self.renew_native_scope(bridge)) if self.native_events else None
-        weapon_shots = (asyncio.create_task(native_weapon_fire_view.relay(self, bridge, transport))
+        footstep_io = (native_footsteps.HostFootsteps(self, bridge, transport)
+                       if pose_link and self.native_guest and native_footsteps.enabled(bridge) else None)
+        if footstep_io is not None:
+            transport.set_footstep_handler(footstep_io.receive)
+        weapon_shots = (asyncio.create_task(native_weapon_fire_view.relay(self, bridge, transport, footsteps=footstep_io))
                         if self.native_guest else None)
         loot_motion = (asyncio.create_task(native_stock_enemy_drops.relay_motion(self, transport))
                        if self.native_events else None)
@@ -4076,6 +4081,8 @@ class Host:
             self.prop_carry_bridge = None
             if pose_link:
                 transport.set_prop_pose_handler(None)
+            if footstep_io is not None:
+                transport.set_footstep_handler(None)
             for task in (heartbeat, weapon_shots, loot_motion, lean):
                 if task:
                     task.cancel()
@@ -6310,6 +6317,7 @@ class Client:
         held = asyncio.create_task(self.guest_held_input.run()) if self.guest_held_input else None
         lean = (asyncio.create_task(native_avatar_lean.follow(self))
                 if native_avatar_lean.enabled(self.bridge) else None)
+        footstep_io = asyncio.create_task(native_footsteps.follow(self)) if native_footsteps.enabled(self.bridge) else None
         prop_poses = (asyncio.create_task(self.prop_carry.stream_local_poses())
                       if self.prop_carry.has_local_pose_stream else None)
         try:
@@ -6322,7 +6330,7 @@ class Client:
             if self.mindcore_carry:
                 self.mindcore_carry.close()
             self.prop_carry.close()
-            for task in (held, lean, prop_poses):
+            for task in (held, lean, prop_poses, footstep_io):
                 if task:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):

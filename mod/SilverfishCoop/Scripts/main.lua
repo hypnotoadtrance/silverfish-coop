@@ -9,6 +9,7 @@ local native_replication_budget = require("native_replication_budget")
 local native_zone_loading = require("native_zone_loading")
 local native_pickup_audio = require("native_pickup_audio")
 local native_voice = require("native_voice")
+native_voice.footsteps = require("native_footsteps")
 local native_weapon_fire_view = require("native_weapon_fire_view")
 local native_time_shift = require("native_time_shift")
 local native_avatar_capture_fixture = require("native_avatar_capture_fixture")
@@ -1649,6 +1650,7 @@ local function tick(fields, pending, periodic)
     pcall(native_voice.sync, state, current_phase)
     pcall(native_damage_feedback.sync, state, current_phase)
     pcall(native_weapon_fire_view.sync, state, current_phase, native_player_avatar)
+    pcall(native_voice.footsteps.sync, state, current_phase, native_player_avatar.player_id)
     pcall(native_time_shift.sync, state, current_phase)
     native_guest_armor.sync(state, current_phase)
     native_world_view.sync(state, current_phase)
@@ -1834,6 +1836,7 @@ LoopInGameThreadWithDelay(25, function()
     pcall(native_zone_loading.refresh, current_world)
     if not leaving then pcall(native_prop_carry.update) end
     if role == "host" and not leaving then pcall(native_weapon_fire_view.flush, current_world) end
+    if not leaving then pcall(native_voice.footsteps.update, current_world) end
     if native_avatar_lean_bridge.enabled then pcall(native_avatar_lean_bridge.update, current_world, role, leaving) end
     if not leaving then pcall(native_player_avatar.animate_head, current_world) end
     if not leaving then pcall(native_flashlight.animate, current_world) end
