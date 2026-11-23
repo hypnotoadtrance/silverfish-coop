@@ -850,6 +850,7 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
     try:
         baseline = await command(host, "dock-natural-sample")
         assert baseline.split(";")[4] == "-", baseline
+        expected_sound = await command(host, "dock-natural-impact")
         origin = tuple(map(float, center.split(",")))
         seat_origin = tuple(map(float, seat_point.split(",")))
         async with asyncio.timeout(6):
@@ -891,8 +892,17 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
                     await asyncio.sleep(.08)
         except (TimeoutError, RuntimeError) as error:
             raise AssertionError(f"Stock NPC did not retaliate against its guest attacker: {baseline} to {current}") from error
+        local_position = tuple(map(float, (await command(guest, "dock-natural-seat")).split(",")))
+        async with asyncio.timeout(4):
+            while True:
+                impacts = [row for row in await resident_events(guest_run, frame)
+                           if row["event"] == "native_npc_impact_played" and row["time_unix"] >= began
+                           and row["sound"] == expected_sound and math.dist(row["position"], local_position) < 350]
+                if impacts:
+                    break
+                await asyncio.sleep(.05)
         return {"temporary_weapon_block": {"scope": scope, "rejected": rejected},
-                "baseline": baseline, "shot": info, "stock_target_and_hit": current}
+                "baseline": baseline, "shot": info, "stock_target_and_hit": current, "guest_impact_sound": impacts[0]}
     finally:
         assert await command(host, "dock-natural-stop") == "stopped"
 

@@ -835,6 +835,9 @@ local function run(action, actor_path)
         return stage_live_worker(pawn, world)
     elseif action == "dock-natural-position" then
         return live_worker_position(world)
+    elseif action == "dock-natural-impact" then
+        assert(host and live_probe and valid(live_probe.actor.Melee_SFX), "the stock worker impact is unavailable")
+        return live_probe.actor.Melee_SFX:GetFullName():match(" (%S+)$")
     elseif action == "dock-natural-seat" then
         local point = pawn:K2_GetActorLocation()
         return ("%.7f,%.7f,%.7f"):format(point.X, point.Y, point.Z)

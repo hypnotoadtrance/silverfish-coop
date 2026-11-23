@@ -17,6 +17,7 @@ _STOCK_TURRET = re.compile(r"/Game/Classes/NPCs/(?:[\w-]+/)*(Turret_[\w-]+)\.\1_
 _STOCK_CONSUMABLE = re.compile(r"/Game/Classes/Items/(?:[\w-]+/)*([\w-]+)\.\1_C", re.ASCII)
 _STOCK_CYCLE = re.compile(r"/Game/Classes/Weapons/Wep_Assets/Wep_Anim/([\w-]+)\.\1", re.ASCII)
 _STOCK_ANIMATION = re.compile(r"/Game/(?:[\w-]+/)+([\w-]+)\.\1", re.ASCII)
+_STOCK_IMPACT = re.compile(r"/Game/Assets/Sounds/(?:[\w-]+/)*([\w-]+)\.\1", re.ASCII)
 MELEE_CLIPS = {"slash": "Standing_Melee_Attack_Horizontal", "backhand": "Standing_Melee_Attack_Backhand",
                "overhead": "Standing_Melee_Attack_Downward"}
 
@@ -77,6 +78,12 @@ def valid_npc_melee(cue):
             and all(type(value) in (int, float) and 0 <= value <= 1 for value in cue[5:]))
 
 
+def valid_npc_impact(cue):
+    return (type(cue) is list and len(cue) == 6 and type(cue[0]) is int and 0 < cue[0] < 10**15
+            and cue[1] == "npc-impact" and type(cue[2]) is str and len(cue[2]) <= 192
+            and _STOCK_IMPACT.fullmatch(cue[2]) and valid_position(cue[3:6]))
+
+
 def valid_use(cue):
     return (type(cue) is list and len(cue) in (6, 7) and type(cue[0]) is int and 0 < cue[0] < 10**15
             and cue[1] == "consume" and type(cue[2]) is str and len(cue[2]) <= 160
@@ -121,14 +128,14 @@ def _captured(data):
             if valid_melee(cue) or valid_npc_melee(cue):
                 cues.append(cue)
             continue
-        if len(fields) in (6, 7) and fields[1] == "consume":
+        if len(fields) in (6, 7) and fields[1] in ("consume", "npc-impact"):
             try:
-                cue = [int(fields[0]), "consume", fields[2], *map(float, fields[3:6])]
+                cue = [int(fields[0]), fields[1], fields[2], *map(float, fields[3:6])]
                 if len(fields) == 7:
                     cue.append(int(fields[6]))
             except ValueError:
                 continue
-            if valid_use(cue):
+            if valid_use(cue) or valid_npc_impact(cue):
                 cues.append(cue)
             continue
         if len(fields) not in (11, 19):
@@ -194,7 +201,7 @@ async def relay(host, bridge, transport, *, footsteps=None):
                 payload = cue
             elif cue[1] in ("melee", "npc-melee"):
                 payload = cue[:4] + [round(value, 3) for value in cue[4:]]
-            elif cue[1] == "consume":
+            elif cue[1] in ("consume", "npc-impact"):
                 payload = cue[:3] + [round(value, 2) for value in cue[3:6]] + cue[6:]
             else:
                 payload = cue[:2] + [round(axis, 2) for axis in cue[2:]]
@@ -222,14 +229,14 @@ class Playback:
                 continue
             if type(decoded) is list and len(decoded) == 3 and decoded[:2] == scope:
                 cue = decoded[2]
-                if (valid_cycle(cue) or valid_melee(cue) or valid_npc_melee(cue) or valid_use(cue) or valid_dry_fire(cue)
-                        or valid_shot(cue)) and cue[0] > self.last_played:
+                if (valid_cycle(cue) or valid_melee(cue) or valid_npc_melee(cue) or valid_npc_impact(cue)
+                        or valid_use(cue) or valid_dry_fire(cue) or valid_shot(cue)) and cue[0] > self.last_played:
                     selected[cue[0]] = cue[1:]
         if not selected:
             return game
         arguments = []
         for serial, (path, *parameters) in sorted(selected.items()):
-            values = (map(str, parameters) if path in ("melee", "npc-melee", "cycle", "consume")
+            values = (map(str, parameters) if path in ("melee", "npc-melee", "npc-impact", "cycle", "consume")
                       else (f"{value:.2f}" for value in parameters))
             arguments.append("|".join((str(serial), path, *values)))
         try:
@@ -260,6 +267,9 @@ class Playback:
             hit = re.fullmatch(r"([0-9]{1,15}):([A-Za-z_]+)", receipt)
             if hit and hit[2] == "npc_melee" and (source := selected.get(int(hit[1]))) and source[0] == "npc-melee":
                 control.event("native_npc_melee_received", serial=int(hit[1]), actor_id=source[1], clip=source[2])
+                continue
+            if hit and hit[2] == "npc_impact" and (source := selected.get(int(hit[1]))) and source[0] == "npc-impact":
+                control.event("native_npc_impact_played", serial=int(hit[1]), sound=source[1], position=source[2:])
                 continue
             if hit and (source := selected.get(int(hit[1]))) and source[0] == "melee" and MELEE_CLIPS[source[2]] == hit[2]:
                 control.event("native_avatar_melee_played", serial=int(hit[1]), player_id=source[1], clip=hit[2])

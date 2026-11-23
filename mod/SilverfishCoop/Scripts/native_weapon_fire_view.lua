@@ -21,11 +21,13 @@ local stock_rest_inverse = {Pitch = 0, Yaw = 90, Roll = 0}
 local turret_concurrency = "/Game/Assets/Sounds/SoundClasses/Weapons_SoundConcurrency.Weapons_SoundConcurrency"
 local attenuation_path = "/Game/Assets/Sounds/SoundClasses/Weapon_Attenuation.Weapon_Attenuation"
 local local_attenuation = "/Game/Assets/Sounds/SoundClasses/SmallSound_Attenuation.SmallSound_Attenuation"
+local npc_impact_attenuation = "/Game/Assets/Sounds/SoundClasses/Default_Attenuation.Default_Attenuation"
+local sound_types = {SoundCue = true, SoundWave = true, MetaSoundSource = true}
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 local maximum, range = 36, 30000
 local current, hooked, melee_hooked, recoil_hooked, cycle_hooked, visit, last_played, last_round
 local serial, published, pending = 0, 0, {}
-local use_hooked, dry_hooked, turret_hooked
+local use_hooked, location_sound_hooked, turret_hooked
 
 local function valid(object) return object and object:IsValid() end
 local function same(first, second)
@@ -55,6 +57,12 @@ end
 
 local function bounded(n, minimum, maximum)
     return type(n) == "number" and n >= minimum and n <= maximum
+end
+
+local function stock_npc_impact(path)
+    if type(path) ~= "string" or #path > 192 then return false end
+    local package, name = path:match("^(/Game/Assets/Sounds/[%w_/%-]+)%.([%w_%-]+)$")
+    return package and package:match("([%w_%-]+)$") == name
 end
 
 local function stock_consumable(path)
@@ -112,12 +120,40 @@ local function record_dry_fire(pawn, point)
     record({serial, "dry", point.X, point.Y, point.Z, expires = current.statics:GetRealTimeSeconds(pawn) + .25})
 end
 
-local function capture_dry_fire(_, source, sound, location)
+local function capture_location_sound(_, source, sound, location, _, volume, pitch, start, attenuation)
     if not current then return end
     local cue = sound:get()
-    if not valid(cue) or cue:GetFullName() ~= "SoundCue " .. trigger_click then return end
-    local weapon, pawn = equipped_player(source:get())
-    if weapon then record_dry_fire(pawn, location:get()) end
+    if not valid(cue) then return end
+    local sound_class, path = cue:GetFullName():match("^(%S+) (%S+)$")
+    local actor = source:get()
+    if sound_class == "SoundCue" and path == trigger_click then
+        local weapon, pawn = equipped_player(actor)
+        if weapon then record_dry_fire(pawn, location:get()) end
+        return
+    end
+    if not sound_types[sound_class] or not stock_npc_impact(path) or not valid(actor) then return end
+    if not valid(current.npc_class) then current.npc_class = StaticFindObject(npc_base) end
+    if not valid(current.npc_class) or not actor:IsA(current.npc_class) or not actor:HasAuthority()
+        or not same(actor:GetWorld(), current.world) or not same(actor.Melee_SFX, cue) then return end
+    local radius, point = attenuation:get(), location:get()
+    -- ResolveMelee plays the NPC's stock cue at the verified trace contact.
+    if not valid(radius) or radius:GetFullName() ~= "SoundAttenuation " .. npc_impact_attenuation
+        or volume:get() ~= 1 or pitch:get() ~= 1 or start:get() ~= 0 or not point
+        or not bounded(point.X, -1e7, 1e7) or not bounded(point.Y, -1e7, 1e7)
+        or not bounded(point.Z, -1e7, 1e7) then return end
+    serial = serial + 1
+    record({serial, "npc-impact", path, point.X, point.Y, point.Z,
+        expires = current.statics:GetRealTimeSeconds(actor) + .25})
+end
+
+local function play_npc_impact(pawn, path, point)
+    local sound, radius = asset(path), asset(npc_impact_attenuation)
+    local statics = StaticFindObject(statics_path)
+    if not valid(sound) or not sound_types[sound:GetFullName():match("^(%S+) ")]
+        or not valid(radius) or not valid(statics) then return false end
+    statics:PlaySoundAtLocation(pawn, sound, point, {Pitch = 0, Yaw = 0, Roll = 0},
+        1, 1, 0, radius, nil, nil, nil)
+    return true
 end
 
 function view.dry_fired(pawn)
@@ -348,9 +384,9 @@ function view.sync(state, phase, avatar)
         RegisterHook(attached_sound, function(...) pcall(capture_turret, ...) end)
         turret_hooked = true
     end
-    if not dry_hooked and valid(StaticFindObject(sound_at_location)) then
-        RegisterHook(sound_at_location, function(...) pcall(capture_dry_fire, ...) end)
-        dry_hooked = true
+    if not location_sound_hooked and valid(StaticFindObject(sound_at_location)) then
+        RegisterHook(sound_at_location, function(...) pcall(capture_location_sound, ...) end)
+        location_sound_hooked = true
     end
 end
 
@@ -434,6 +470,17 @@ function view.command(args, state, phase, avatar)
         local values = {}
         for field in (args[index] .. "|"):gmatch("([^|]*)|") do values[#values + 1] = field end
         local id, path = math.tointeger(tonumber(values[1])), values[2]
+        if #values == 6 and id and id > last_played and path == "npc-impact" and stock_npc_impact(values[3]) then
+            local x, y, z = tonumber(values[4]), tonumber(values[5]), tonumber(values[6])
+            if bounded(x, -1e7, 1e7) and bounded(y, -1e7, 1e7) and bounded(z, -1e7, 1e7) then
+                last_played = id
+                if (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= range^2 then
+                    local ok, heard = pcall(play_npc_impact, pawn, values[3], {X = x, Y = y, Z = z})
+                    if ok and heard then receipts[#receipts + 1] = ("%d:npc_impact"):format(id) end
+                end
+            end
+            goto next_cue
+        end
         if #values == 7 and id and id > last_played and path == "npc-melee" then
             local member = math.tointeger(tonumber(values[3]))
             last_played = id
