@@ -3,15 +3,23 @@
 import asyncio
 import math
 
+from live_multi_smoke import campaign_save_hashes
 from portable_guest_world_start import resident_events, wait_resident_status
-from tools.silverfish import native_guest_weapon, native_host_dig_live as dig, native_loose_pickup as loose
+from tools.silverfish import (
+    native_guest_weapon,
+    native_host_dig_live as dig,
+    native_loose_pickup as loose,
+    native_stock_enemy_drops,
+    native_world_loot,
+)
 from tools.silverfish.control import submit
 from tools.silverfish.travel import CROSSROADS
 
 SPADE = CROSSROADS + ".CrossRoads_P:PersistentLevel.MeleeWep_Spade_C_3"
+NUGGET = "/Game/Classes/Items/Item_GoldNugget.Item_GoldNugget_C"
 
 
-async def verify_stock_shovel(host, guest, pawn):
+async def verify_stock_shovel(host, guest, pawn, *, loot=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     await wait_resident_status(host_run, lambda f: f.get("game", {}).get("native_zone", {}).get("state") == "ready")
     for participant, placement in ((pawn, "near"), ("local", "near"), ("local", "inside")):
@@ -41,31 +49,100 @@ async def verify_stock_shovel(host, guest, pawn):
         report = await seat.bridge.command("fixture-spade-" + action, *args, update_status=False)
         return report["ack"]["message"]
 
-    assert await observe(host, "holes") == await observe(guest, "holes") == "none"
-    staged = tuple(map(float, (await observe(host, "aim", pawn, "find")).split(",")))
-    await wait_resident_status(guest_run, lambda f: f.get("game", {}).get("pawns", {}).get("local", {}).get("location")
-                                     and math.dist(f["game"]["pawns"]["local"]["location"], staged) <= 40, timeout=8)
-    contacts = await asyncio.gather(observe(host, "aim", pawn), observe(guest, "aim"))
-    tap = await submit(guest_run, "native-guest-primary-input-fixture")
-    assert tap["ok"], tap
-    sequence = tap["native_guest_primary_fixture"]["sequence"]
-    async with asyncio.timeout(8):
+    async def dig_once(stock_choice=None, *, advance=False):
+        previous = await asyncio.gather(observe(host, "holes"), observe(guest, "holes"))
+        previous = [set(text.split(";")) - {"none"} for text in previous]
+        staged = tuple(map(float, (await observe(host, "aim", pawn, "next" if advance else "find")).split(",")))
+        await wait_resident_status(guest_run, lambda f: f.get("game", {}).get("pawns", {}).get("local", {}).get("location")
+                                         and math.dist(f["game"]["pawns"]["local"]["location"], staged) <= 40, timeout=8)
+        contacts = await asyncio.gather(observe(host, "aim", pawn), observe(guest, "aim"))
+        if stock_choice:
+            await observe(host, "loot", stock_choice)
+        tap = await submit(guest_run, "native-guest-primary-input-fixture")
+        assert tap["ok"], tap
+        sequence = tap["native_guest_primary_fixture"]["sequence"]
+        async with asyncio.timeout(8):
+            while True:
+                events = [row for row in await resident_events(guest_run, current)
+                          if row.get("sequence") == sequence and row["event"].startswith("native_guest_dig_input")]
+                if events:
+                    break
+                await asyncio.sleep(.08)
+        dispatch, = events
+        assert dispatch["event"] == "native_guest_dig_input", dispatch
+        async with asyncio.timeout(10):
+            while True:
+                observed = await asyncio.gather(observe(host, "holes"), observe(guest, "holes"))
+                additions = [set(text.split(";")) - base - {"none"} for text, base in zip(observed, previous)]
+                if all(additions):
+                    break
+                await asyncio.sleep(.1)
+        (host_hole,), (guest_hole,) = additions
+        assert host_hole.startswith("3,") and guest_hole.startswith("1,"), additions
+        assert math.dist(tuple(map(float, host_hole.split(",")[1:])), tuple(map(float, guest_hole.split(",")[1:]))) < 5
+        return {"guid": item["guid"], "holes": [host_hole, guest_hole], "contact": contacts, "dispatch": dispatch[dig.GUEST_RESULT]}
+
+    if not loot:
+        return {"stock_shovel": await dig_once()}
+
+    checkpoint = campaign_save_hashes(host.campaign)
+    host_status = await wait_resident_status(host_run, lambda f: f.get("state") == "hosting")
+    assert host_status["game"][native_stock_enemy_drops.MEMORY_CAPABILITY]
+
+    def nuggets(frame):
+        return [entry for entry in frame.get("game", {}).get(native_stock_enemy_drops.KEY, {}).values()
+                if entry["source"].startswith("DigHole_BP_C ") and entry["class_path"] == NUGGET]
+
+    for attempt in range(18):
+        dig_result = await dig_once("item", advance=attempt > 0)
+        try:
+            found = await wait_resident_status(host_run, nuggets, timeout=.9)
+            break
+        except RuntimeError:
+            await asyncio.sleep(.35)
+    else:
+        raise AssertionError("No stock nugget was observed after digging")
+
+    nugget, = nuggets(found)
+    async with asyncio.timeout(12):
         while True:
-            events = [row for row in await resident_events(guest_run, current)
-                      if row.get("sequence") == sequence and row["event"].startswith("native_guest_dig_input")]
-            if events:
-                break
-            await asyncio.sleep(.08)
-    dispatch, = events
-    assert dispatch["event"] == "native_guest_dig_input", dispatch
-    async with asyncio.timeout(10):
-        while True:
-            holes = await asyncio.gather(observe(host, "holes"), observe(guest, "holes"))
-            if holes[0] != "none" and holes[1] != "none":
+            rewards = [row for row in await resident_events(host_run, found)
+                       if row["event"] == "native_stock_enemy_loot_banked" and row.get("actor") == nugget["actor"]]
+            if rewards:
                 break
             await asyncio.sleep(.1)
-    host_hole, guest_hole = (row.split(",") for row in holes)
-    assert host_hole[0] == "3" and guest_hole[0] == "1", holes
-    assert math.dist(tuple(map(float, host_hole[1:])), tuple(map(float, guest_hole[1:]))) < 5, holes
-    return {"stock_shovel": {"guid": item["guid"], "holes": holes, "contact": contacts,
-                             "dispatch": dispatch[dig.GUEST_RESULT]}}
+    reward, = rewards
+    assert reward["revision"] is None and checkpoint == campaign_save_hashes(host.campaign), reward
+    identity = native_world_loot.stock_enemy_identity(reward["guid"], reward.get("visual_id"))
+
+    def projected(status):
+        return status.get("game", {}).get(native_world_loot.KEY, {}).get(identity)
+
+    for run in (host_run, guest_run):
+        await wait_resident_status(run, projected, timeout=12)
+    await host.bridge.command(native_world_loot.APPROACH, identity, pawn, timeout=5)
+    await wait_resident_status(guest_run, lambda f: math.dist(f["game"]["pawns"]["local"]["location"],
+                                                             reward["transform"]["position"]) < 180, timeout=7)
+    press = await submit(guest_run, native_world_loot.FIXTURE, target=identity)
+    assert press["ok"], press
+    for run in (host_run, guest_run):
+        await wait_resident_status(run, lambda f: not projected(f), timeout=12)
+    after = await submit(guest_run, "native-inventory-list")
+    assert after["ok"] and any(entry["guid"] == reward["guid"] for entry in after["native_inventory"]["items"]), after
+    rival = await submit(host_run, native_stock_enemy_drops.CLAIM, target=reward["guid"])
+    assert rival.get("error") == "stock_enemy_loot_already_claimed", rival
+    assert checkpoint == campaign_save_hashes(host.campaign), "Dig or pickup wrote a campaign checkpoint"
+
+    for _ in range(18):
+        await dig_once("prop", advance=True)
+        host_props = await observe(host, "props")
+        if host_props:
+            break
+    else:
+        raise AssertionError("No stock tin can was observed after digging")
+    role, prop = host_props.split(",")
+    assert role == "3", host_props
+    async with asyncio.timeout(8):
+        while await observe(guest, "props") != f"1,{prop}":
+            await asyncio.sleep(.15)
+    return {"stock_shovel": {**dig_result, "unearthed_item": reward, "unearthed_prop": prop, "duplicate_claim": rival["error"]}}

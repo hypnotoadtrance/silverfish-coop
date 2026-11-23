@@ -1227,6 +1227,39 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
                                      "turret_death": turret_death, "guest_melee": guest_melee}}
 
 
+async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    host_inventory = (await submit(host_run, "native-inventory-list"))["native_inventory"]
+    guest_frame = await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected")
+    proofs = []
+
+    for kind in ("revolver-9mm", "break-action-50"):
+        guid = uuid.uuid4().hex.upper()
+        seeded = await submit(host_run, "native-guest-weapon-seed", target="guest", item_guid=guid, kind=kind)
+        assert seeded["ok"], seeded
+        before = (await submit(guest_run, "native-guest-weapon-inspect", target=guid))["native_guest_weapon"]
+        assert before["status"] == "backpack" and before["stored_ammo"] > 0, before
+        assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+        await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+        pressed = await submit(guest_run, "native-inventory-stock-use-click-fixture", target=f"{guid}|take-ammo")
+        assert pressed["ok"] and pressed["stock_action"]["guid"] == guid, pressed
+        async with asyncio.timeout(12):
+            while True:
+                matches = [entry[native_inventory.TAKE_AMMO_KEY] for entry in await resident_events(guest_run, guest_frame)
+                           if entry.get(native_inventory.TAKE_AMMO_KEY, {}).get("source_guid") == guid]
+                if matches:
+                    break
+                await asyncio.sleep(.1)
+        unloaded, = matches
+        assert unloaded["remaining"] == 0 and unloaded["split"] == before["stored_ammo"], unloaded
+        assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+        await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
+        proofs.append(unloaded)
+
+    assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_inventory
+    return {"stock_take_ammo": proofs}
+
+
 async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     expected = native_guest_consumable.MEALS[native_guest_consumable.MRE]
@@ -2734,7 +2767,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
                  rusty_pistol: bool = False, tutorial_dock_combat: bool = False, tutorial_dock_retaliation: bool = False,
-                 stock_bandage_revisit: bool = False, stock_shovel: bool = False,
+                 stock_bandage_revisit: bool = False, stock_shovel: bool = False, stock_shovel_loot: bool = False,
+                 stock_take_ammo: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
@@ -2789,8 +2823,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override, rusty=rusty_pistol)),
         (stock_npc_rivalry, "stock_npc_rivalry", verify_stock_npc_rivalry),
         (stock_food, "stock_food", verify_resident_guest_food),
+        (stock_take_ammo, "stock_take_ammo", verify_stock_take_ammo),
         (stock_bandage_revisit, "stock_bandage_revisit", verify_tutorial_bandage_revisit),
-        (stock_shovel, "stock_shovel", verify_stock_shovel),
+        (stock_shovel, "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(host, guest, pawn, loot=stock_shovel_loot)),
         (tutorial_dock_combat, "tutorial_dock_retaliation" if tutorial_dock_retaliation else "tutorial_dock_combat",
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, retaliation=tutorial_dock_retaliation)),
     ) if enabled)
@@ -3145,6 +3180,10 @@ if __name__ == "__main__":
                         help="collect the Tutorial Dock bandage and verify both views after revisiting the map")
     parser.add_argument("--stock-shovel", action="store_true",
                         help="collect a stock shovel as the guest and verify its dig on both peers")
+    parser.add_argument("--stock-shovel-loot", action="store_true",
+                        help="also verify stock unearthed loot and props during the shovel check")
+    parser.add_argument("--stock-take-ammo", action="store_true",
+                        help="unload guest firearms through the normal stock context menu")
     parser.add_argument("--stock-npc-rivalry", action="store_true",
                         help="observe stock perception, attacks, and death between two NPC factions")
     parser.add_argument("--guest-ui-memory", action="store_true",
@@ -3237,7 +3276,7 @@ if __name__ == "__main__":
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "stock_board_offers", "resident_weapon_cues",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "stock_npc_rivalry",
-                              "stock_bandage_revisit", "stock_shovel"}
+                              "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_take_ammo"}
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
     if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
@@ -3246,8 +3285,10 @@ if __name__ == "__main__":
         parser.error("Use --tutorial-dock-retaliation with --tutorial-dock-combat")
     if args.stock_shovel and (args.stock_bandage_revisit or args.tutorial_dock_combat):
         parser.error("Use separate sessions for the Crossroads shovel and Tutorial Dock checks")
+    if args.stock_shovel_loot and not args.stock_shovel:
+        parser.error("Use --stock-shovel-loot with --stock-shovel")
     if any((args.stock_food, args.stock_campfire, args.stock_npc_override, args.stock_board_offers,
-            args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel)) and (
+            args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
         parser.error("Run the resident gameplay checks without other gameplay fixtures")
@@ -3293,6 +3334,8 @@ if __name__ == "__main__":
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
                        tutorial_dock_retaliation=args.tutorial_dock_retaliation, stock_bandage_revisit=args.stock_bandage_revisit,
                        stock_shovel=args.stock_shovel,
+                       stock_shovel_loot=args.stock_shovel_loot,
+                       stock_take_ammo=args.stock_take_ammo,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
                        nonmirrored_startup=args.nonmirrored_startup,
