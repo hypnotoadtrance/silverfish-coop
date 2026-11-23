@@ -155,6 +155,8 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                     or not valid_guid(created := receipt.get("new_guid")) or created == guid):
                 raise RuntimeError("The host did not verify both resulting stock stacks")
             committed = (str(remaining), created)
+            if unloading:
+                client.last_game = await client.bridge.command("native-inventory-stock-project-unloaded", epoch, sequence, timeout=3)
         elif mode == "equip":
             if entry != "equip" or quantity != 1:
                 raise ValueError("The native action did not select one equipment item")

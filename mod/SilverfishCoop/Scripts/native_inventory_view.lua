@@ -1,5 +1,6 @@
 local inventory_view = {}
 local weapon_profiles = require("guest_weapon_registry")
+local guest_weapon = require("native_guest_weapon")
 local throwables = require("native_flare").equipment
 local drop_maps = require("native_guest_drop_maps")
 local drop_items = require("native_guest_drop_items")
@@ -436,6 +437,18 @@ local function stock_card_guid(card)
     return stock_item_guid(exact(card, card_path) and card.Item)
 end
 
+local function stock_equipped_card(screen, guid)
+    if not guid then return end
+    local slots = screen.ItemManager.EquipSlots
+    for index = 1, math.min(8, slots:GetArrayNum()) do
+        local slot = widget_at(slots, index)
+        if valid(slot) and slot.ItemIndex == index - 1 and slot.InventoryIndex == 0 then
+            local card = slot.ItemCard
+            if stock_card_guid(card) == guid then return card, index end
+        end
+    end
+end
+
 local function stock_cards(screen, save, guid, remaining, ordered, raw_ammo)
     local expected, displayed = 0, 0
     local saved_count, card_count
@@ -479,7 +492,8 @@ local function take_ammo_button(screen)
     local menu = manager.ItemContextMenu
     if not exact(menu, context_menu_path) or not menu:IsVisible() then return end
     local card = menu["Item Card"]
-    if not exact(card, card_path) or not same(card.InventoryWidget, panel) or not same(card.ItemManager, manager) then return end
+    if not exact(card, card_path) or not same(card.ItemManager, manager)
+        or (not same(card.InventoryWidget, panel) and not same(card, stock_equipped_card(screen, stock_card_guid(card)))) then return end
     local class = card.Item[item_class]
     local path = valid(class) and class:GetFullName():match("^BlueprintGeneratedClass (.+)$")
     local count, maximum = card.Item[item_ammo], weapon_profiles.magazine_capacity[path]
@@ -774,8 +788,19 @@ local function finish_stock_drop(fields, current, state, phase)
             end
             return ("verified stock equipment slot %d"):format(slot)
         end
-        local displayed = finished and status == "refreshed" and stock_cards(pending.screen, save,
-            remaining and pending.guid or nil, remaining, sorted, pending.unload)
+        local displayed
+        if finished and status == "refreshed" then
+            local card, index
+            if pending.unload then card, index = stock_equipped_card(pending.screen, pending.guid) end
+            if card then
+                local item = save.PlayerEquipment[index]
+                if stock_item_guid(item) == pending.guid and item[item_ammo] == remaining and card.Item[item_ammo] == remaining then
+                    displayed = stock_cards(pending.screen, save)
+                end
+            else
+                displayed = stock_cards(pending.screen, save, remaining and pending.guid or nil, remaining, sorted, pending.unload)
+            end
+        end
         if not displayed then error("The open stock backpack did not reflect the settled action", 0) end
         if split then
             local manager = pending.screen.ItemManager
@@ -835,6 +860,7 @@ function inventory_view.command(fields, state, phase)
     if operation ~= "native-inventory-view-render" and operation ~= "native-inventory-view-unavailable"
         and operation ~= "native-inventory-view-fixture" and operation ~= "native-inventory-view-key-fixture"
         and operation ~= "native-inventory-stock-drop-finish"
+        and operation ~= "native-inventory-stock-project-unloaded"
         and operation ~= "native-inventory-stock-open"
         and operation ~= "native-inventory-stock-refresh"
         and operation ~= "native-inventory-stock-nearby-fixture"
@@ -845,6 +871,15 @@ function inventory_view.command(fields, state, phase)
         and operation ~= "native-inventory-view-drop-result" then return end
     local current = context(state, phase)
     if current and operation == "native-inventory-stock-drop-finish" then return finish_stock_drop(fields, current, state, phase) end
+    if operation == "native-inventory-stock-project-unloaded" then
+        local pending = stock_drop
+        if #fields ~= 4 or not current or not pending or not pending.unload or not same_context(current, pending.context)
+            or pending.epoch ~= fields[3] or pending.sequence ~= tonumber(fields[4])
+            or not same(current.pawn.Save, pending.save) or not guest_weapon.project_unloaded(current.pawn, pending.save, pending.guid) then
+            error("The stock unloaded magazine could not be projected", 0)
+        end
+        return "stock unloaded magazine projected"
+    end
     if not current or not same_context(current, binding) or not can_view(current) then
         error("Stock inventory view requires the exact standing connected guest", 0)
     end
@@ -908,32 +943,33 @@ function inventory_view.command(fields, state, phase)
             and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1") then
         local screen = stock_session.screen
         local cards, manager = screen.BackpackPanel.Cards, screen.ItemManager
-        for index = 1, cards:GetArrayNum() do
-            local card = widget_at(cards, index)
-            if stock_card_guid(card) == fields[3] then
-                if fields[4] == "drag" then
-                    manager.HoveredCard = card
-                    manager:InitiateItemTake()
-                    manager:FinalTakeItem()
-                    if manager.HoldingItem ~= true then break end
-                    manager:InsertItem(screen.PlayerCard, -1)
-                elseif fields[4] == "take-ammo" then
-                    manager:OpenContextMenu(card)
-                    local button = take_ammo_button(screen)
-                    if not valid(button) or not button:IsVisible() or button.Button_Text:ToString() ~= "TAKE AMMO" then
-                        error("The loaded stock weapon has no Take Ammo button after opening the context menu", 0)
-                    end
-                    manager.ItemContextMenu:BndEvt__ItemContextMenu_Button_SplitStack_K2Node_ComponentBoundEvent_7_Pressed__DelegateSignature()
-                else
-                    manager:OpenContextMenu(card)
-                    manager:ActionUse()
-                end
-                sync_stock(current, state, phase, true)
-                if stock_drop and stock_drop.guid == fields[3] then return "verified stock use click" end
-                break
-            end
+        local card = fields[4] == "take-ammo" and stock_equipped_card(screen, fields[3]) or nil
+        for index = 1, not card and cards:GetArrayNum() or 0 do
+            local candidate = widget_at(cards, index)
+            if stock_card_guid(candidate) == fields[3] then card = candidate; break end
         end
-        error("The stock use click did not queue the chosen backpack item", 0)
+        if card then
+            if fields[4] == "drag" then
+                manager.HoveredCard = card
+                manager:InitiateItemTake()
+                manager:FinalTakeItem()
+                if manager.HoldingItem ~= true then error("The stock card did not enter the cursor", 0) end
+                manager:InsertItem(screen.PlayerCard, -1)
+            elseif fields[4] == "take-ammo" then
+                manager:OpenContextMenu(card)
+                local button = take_ammo_button(screen)
+                if not valid(button) or not button:IsVisible() or button.Button_Text:ToString() ~= "TAKE AMMO" then
+                    error("The loaded stock weapon has no Take Ammo button after opening the context menu", 0)
+                end
+                manager.ItemContextMenu:BndEvt__ItemContextMenu_Button_SplitStack_K2Node_ComponentBoundEvent_7_Pressed__DelegateSignature()
+            else
+                manager:OpenContextMenu(card)
+                manager:ActionUse()
+            end
+            sync_stock(current, state, phase, true)
+            if stock_drop and stock_drop.guid == fields[3] then return "verified stock use click" end
+        end
+        error("The stock use click did not queue the chosen inventory item", 0)
     end
     if operation == "native-inventory-view-fixture" and (#fields == 2 or #fields == 3 and fields[3] == "stock") then
         return fixture(current, state, phase, fields[3] == "stock")
