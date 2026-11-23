@@ -165,28 +165,29 @@ local function load(path)
     return value
 end
 
-local function local_context(state, phase)
+local function local_context(state, phase, candidate)
     if not enabled or phase ~= "connected" or state.server ~= true then return end
     local controller = state.controller
     local pawn = state.local_pawn and state.local_pawn.pawn
     if not valid(controller) or not valid(pawn) or controller:IsLocalController() ~= true or pawn.Dead ~= false
         or not same(controller.Pawn, pawn) or not same(pawn:GetWorld(), state.world) then return end
     local stack = controller.MenuStack
-    local opened = stack:GetArrayNum() == 1 and stack[1]
-    local actor = session and session.actor or exact(opened, barter_screen) and opened.Trader
+    local opened = candidate or stack:GetArrayNum() == 1 and stack[1]
+    local actor = not candidate and session and session.actor or exact(opened, barter_screen) and opened.Trader
     local identifier, npc = trader_identity(actor, state)
-    if not identifier or not (session or actor.Save == true) or not close_to(pawn, npc) or not close_to(pawn, actor) then return end
+    if not identifier or not (actor.Save == true or session and same(actor, session.actor))
+        or not close_to(pawn, npc) or not close_to(pawn, actor) then return end
     return {actor = actor, pawn = pawn, controller = controller, name = pawn:GetFullName(),
         identifier = identifier, map = state.map}
 end
 
 local function hide_provisional_screen(controller)
-    if session or not observed_state or not same(controller, observed_state.controller) then return end
-    local context = local_context(observed_state, observed_phase)
-    if not context or controller.Loading ~= false then return end
-    -- This stock menu only carries the interaction to the host. The projected menu
-    -- is constructed after host stock and the shared wallet have been applied.
-    local screen = controller.MenuStack[1]
+    if not observed_state or not same(controller, observed_state.controller) or controller.Loading ~= false then return end
+    local stack = controller.MenuStack
+    local screen = stack:GetArrayNum() == 1 and stack[1]
+    if not exact(screen, barter_screen) or session and same(screen, session.screen)
+        or not local_context(observed_state, observed_phase, screen) then return end
+    -- A replacement stock screen can open before the previous view has finished closing.
     screen:SetRenderOpacity(0)
     screen:SetIsEnabled(false)
 end
