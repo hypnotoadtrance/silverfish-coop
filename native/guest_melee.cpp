@@ -601,7 +601,7 @@ namespace
         std::optional<FixtureContact> fixture;
         struct Damage
         {
-            U::FWeakObjectPtr target{}, component{}, sweep{}, deal{}, library{}, graph{};
+            U::FWeakObjectPtr target{}, component{}, sweep{}, deal{}, library{}, graph{}, contact_candidate{};
             std::string target_name{"-"};
             std::string_view contact_status{"awaiting_contact"};
             U::FFrame *contact_frame{}, *sweep_frame{}, *deal_frame{};
@@ -677,17 +677,24 @@ namespace
         return true;
     }
 
-    bool combat_target(U::UObject* candidate, U::UWorld* world, bool ordinary)
+    bool combat_target(U::UObject* candidate, U::UWorld* world, bool ordinary, std::string_view* status = nullptr)
     {
         if (!ordinary) return qualified_enemy(candidate, world);
+        const auto reject = [&](std::string_view cause) {
+            if (status) *status = cause;
+            return false;
+        };
         const auto* base = find<U::UClass>(npc_class);
-        if (!live(world) || !live(candidate) || !base || !candidate->GetClassPrivate()->IsChildOf(base)) return false;
+        if (!live(world) || !live(candidate) || !base || !candidate->GetClassPrivate()->IsChildOf(base))
+            return reject("target_class_unqualified");
         auto* actor = static_cast<U::AActor*>(candidate);
         auto* role = field<U::FByteProperty>(actor, STR("Role"));
+        if (actor->GetWorld() != world || !role || role->GetPropertyValueInContainer(actor) != 3)
+            return reject("target_authority_unqualified");
+        if (!boolean(actor, STR("Alive"), true) || !boolean(actor, STR("bActorIsBeingDestroyed"), false))
+            return reject("target_life_unqualified");
         const double hp = enemy_health(actor);
-        return actor->GetWorld() == world && role && role->GetPropertyValueInContainer(actor) == 3 &&
-            boolean(actor, STR("Alive"), true) && boolean(actor, STR("bActorIsBeingDestroyed"), false) &&
-            std::isfinite(hp) && hp > 0.0;
+        return std::isfinite(hp) && hp > 0.0 ? true : reject("target_health_unqualified");
     }
 
     // Ordinary attacks can reach Blueprint children that override the stock damage graph.
@@ -890,17 +897,16 @@ namespace
         const bool ordinary = swing.mode == SwingMode::ordinary;
         auto* world = static_cast<U::UWorld*>(swing.world.Get());
         auto* enemy = swing.damage.target.Get();
-        const auto eligible = [world, ordinary](U::UObject* actor) {
-            return combat_target(actor, world, ordinary) && (ordinary || nonlethal_health(enemy_health(actor)));
-        };
-        if (!passives_unchanged(swing) || (!ordinary && (!eligible(enemy) ||
+        if (!passives_unchanged(swing) || (!ordinary && (!qualified_enemy(enemy, world) ||
+                !nonlethal_health(enemy_health(enemy)) ||
                 health(swing.canonical.Get()) != swing.host_health || health(swing.save.Get()) != swing.guest_health)))
             return refuse("mutation_unverified_guest_melee_damage_scope");
         TraceDiagnostic diagnostic;
         auto trace = stock_trace(receiver, swing.pawn.Get(), ordinary ? nullptr : enemy, &swing.damage.contact_status,
             swing.fixture ? &diagnostic : nullptr);
         if (ordinary && trace) enemy = trace->first->GetOuterPrivate();
-        bool allowed = trace && (!ordinary || eligible(enemy));
+        if (trace) swing.damage.contact_candidate = enemy;
+        bool allowed = trace && (!ordinary || combat_target(enemy, world, true, &swing.damage.contact_status));
         if (swing.fixture)
         {
             auto& staged = *swing.fixture;
@@ -954,7 +960,6 @@ namespace
         if (!allowed)
         {
             if (!ordinary) return refuse("stock_damage_aim_fenced");
-            if (trace) swing.damage.contact_status = "target_unqualified";
             call.PreventOriginalFunctionCall();
             ++swing.qualified;
             swing.damage.fenced_miss = true;
@@ -1408,7 +1413,10 @@ void silverfish::native_guest_melee::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishStartNativeGuestOldPipeSwing", start<SwingMode::ordinary>);
     if (env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_TITLE_FIXTURES"))
         lua.register_function("SilverfishReadNativeGuestMeleeContactStatus", [](const Lua& state) {
-            state.set_string(swing.damage.contact_status);
+            auto cause = std::string{swing.damage.contact_status};
+            auto* candidate = swing.damage.contact_candidate.Get();
+            if (live(candidate)) cause += " " + RC::to_utf8_string(candidate->GetFullName());
+            state.set_string(cause);
             return 1;
         });
     if (fixture_enabled())
