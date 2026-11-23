@@ -6,6 +6,7 @@ local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local display_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
+local stock_screen_path = "/Game/Classes/GUI/GameOver_RespawnPenalties_Widget.GameOver_RespawnPenalties_Widget_C"
 local black_stone = "/Game/Classes/Items/Artifacts/Art_BlackStone.Art_BlackStone_C"
 local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -222,6 +223,44 @@ local function render(current, row)
     show(row)
 end
 
+local function open_guarded_stock_screen(current)
+    if type(SilverfishArmNativeWipeScreen) ~= "function" or type(SilverfishTakeNativeWipeScreenActions) ~= "function" then
+        error("The stock wipe screen guard is unavailable", 0)
+    end
+    if not valid(StaticFindObject(stock_screen_path)) then LoadAsset(stock_screen_path) end
+    local class, widgets = StaticFindObject(stock_screen_path), StaticFindObject(widgets_path)
+    if not valid(class) or not valid(widgets) then error("The stock wipe screen class is unavailable", 0) end
+    local screen = widgets:Create(current.pawn, class, current.controller)
+    if not exact(screen, stock_screen_path) or not same(screen:GetOwningPlayer(), current.controller)
+        or not SilverfishArmNativeWipeScreen(screen:GetAddress()) then
+        error("The stock wipe screen could not be guarded", 0)
+    end
+    return screen
+end
+
+local function probe_stock_screen(current)
+    local screen = open_guarded_stock_screen(current)
+    local address = screen:GetAddress()
+    local ok, failure = pcall(function()
+        if screen:AddToPlayerScreen(36) ~= true or not screen:IsInViewport()
+            or SilverfishTakeNativeWipeScreenActions(address) & 2 ~= 2
+            or screen.PlayerInventory:GetArrayNum() ~= 0 or screen.KeptItemSlots:GetArrayNum() ~= 0 then
+            error("Stock wipe construction did not stay isolated", 0)
+        end
+        local phase = screen.Phase
+        screen:BndEvt__GameOver_RespawnPenalties_Widget_Button_Continue_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
+        screen["Compile Data and Respawn"](screen)
+        screen:ExitFade()
+        screen:BndEvt__GameOver_RespawnPenalties_Widget_Button_DebugCam_K2Node_ComponentBoundEvent_0_Pressed__DelegateSignature()
+        if SilverfishTakeNativeWipeScreenActions(address) ~= 29 or screen.Phase ~= phase or screen.FadingOut
+            or not authority_is_current(current) then
+            error("A stock wipe action escaped the co-op screen guard", 0)
+        end
+    end)
+    if valid(screen) then screen:RemoveFromParent() end
+    if not ok then error(failure, 0) end
+end
+
 local function emit(kind, row, values)
     local file = io.open(event_path, "ab")
     if not file then return false end
@@ -365,6 +404,11 @@ function wipe_view.command(fields, state, phase)
     if op == "native-wipe-view-key-fixture" and #fields == 7 and headless and keys[fields[7]]
         and choose(view, fields[7]) then
         return "verified headless wipe selection key"
+    end
+    if op == "native-wipe-view-key-fixture" and #fields == 7 and headless and fields[7] == "stock-guard"
+        and can_choose(view) then
+        probe_stock_screen(current)
+        return "verified guarded stock wipe screen"
     end
     if op == "native-wipe-view-result" and #fields == 7 then
         if fields[7] == "accepted" and view.state == "submitting" then

@@ -1578,6 +1578,7 @@ namespace
             silverfish::native_guest_npc::uninstall_hooks();
             silverfish::native_guest_reload_input::uninstall_hooks();
             silverfish::native_inventory_view::uninstall_hooks();
+            silverfish::inventory_wipe::uninstall_screen_hooks();
             silverfish::native_guest_stack_drop::uninstall_hooks();
             silverfish::native_guest_drop_projection::uninstall_hooks();
             silverfish::native_bag_projection::uninstall_hooks();
@@ -1635,6 +1636,7 @@ namespace
             silverfish::native_guest_npc::install_hooks();
             silverfish::native_guest_reload_input::install_hooks();
             silverfish::native_inventory_view::install_hooks();
+            silverfish::inventory_wipe::install_screen_hooks();
             silverfish::native_bag_projection::install_hooks();
             silverfish::native_interaction_input::install_hooks();
             silverfish::native_guest_drop_projection::install_hooks();

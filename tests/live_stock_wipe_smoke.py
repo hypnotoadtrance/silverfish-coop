@@ -22,7 +22,7 @@ LOOSE_PICKUP = "observatory-comp-board"
 
 async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, authored_pickup: bool, stock_rules: bool,
                    wipe_view: bool, difficulty: str | None = None, downed_aim: bool = False,
-                   drop_held: bool = False) -> None:
+                   drop_held: bool = False, stock_screen_guard: bool = False) -> None:
     name = "stock-wipe-" + uuid.uuid4().hex[:8]
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
@@ -133,6 +133,10 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
 
             for directory in (host, guest):
                 await wait(directory, lambda status: status.get("game", {}).get("native_wipe_view", {}).get("state") == "selecting")
+            if stock_screen_guard:
+                for owner in (primary, secondary):
+                    guarded = await key(owner, "stock-guard")
+                    assert guarded["state"] == "selecting", guarded
             current = (await command("status", *secondary))["game"]["native_wipe_view"]
             assert current["deadline"] == 0, current
             if current["guid"] != retained_item:
@@ -197,6 +201,8 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
                  "difficulty": difficulty, "keep_slots": keep_slots}
         if wipe_view:
             proof["native_inventory_selection_input"] = submitted
+        if stock_screen_guard:
+            proof["stock_wipe_screen_guard_verified"] = True
         if downed_aim:
             proof["guest_aim_released_on_down"] = {"before": aiming[0], "downed": lowered[0],
                                                   "movement": downed["game"]["player_effects"]["local"]}
@@ -264,6 +270,7 @@ if __name__ == "__main__":
     arguments.add_argument("--wipe-view", action="store_true")
     arguments.add_argument("--downed-aim", action="store_true")
     arguments.add_argument("--drop-held", action="store_true")
+    arguments.add_argument("--stock-screen-guard", action="store_true")
     options = arguments.parse_args()
     if options.difficulty and options.stock_rules:
         arguments.error("Choose a stock difficulty preset or custom stock extraction fields")
@@ -271,6 +278,8 @@ if __name__ == "__main__":
         arguments.error("Decimation has no retained item selector")
     if options.difficulty == "Decimation" and options.drop_held:
         arguments.error("The held weapon check retains a different item")
+    if options.stock_screen_guard and not options.wipe_view:
+        arguments.error("The stock screen guard uses an active wipe selection")
     work = options.work.resolve()
     weapon_probe = options.downed_aim or options.drop_held
     if weapon_probe:
@@ -278,4 +287,4 @@ if __name__ == "__main__":
     with installed_probe(work) if weapon_probe else nullcontext():
         asyncio.run(validate(work, options.vanilla_saved, options.visible_bag, options.authored_pickup,
                              options.stock_rules, options.wipe_view, options.difficulty, options.downed_aim,
-                             options.drop_held))
+                             options.drop_held, options.stock_screen_guard))

@@ -68,9 +68,12 @@ class WipeView:
         return snapshot
 
     async def fixture(self, action: str, key: str) -> dict:
-        if not self.scope or key not in ("up", "down", "toggle", "submit", "back"):
+        if not self.scope or key not in ("up", "down", "toggle", "submit", "back", "stock-guard"):
             raise ValueError("Select an input for the active staged wipe overlay")
-        return await self.bridge.command(action, *self.scope[:4], key, timeout=4)
+        snapshot = await self.bridge.command(action, *self.scope[:4], key, timeout=4)
+        if key == "stock-guard" and snapshot.get("ack", {}).get("message") != "verified guarded stock wipe screen":
+            raise RuntimeError("The guarded stock wipe screen did not verify")
+        return snapshot
 
     async def sync(self, game: dict, draft: dict | None, fetch, submit) -> dict:
         events = self.read_events()
