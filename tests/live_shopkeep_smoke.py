@@ -21,7 +21,7 @@ from tools.silverfish.control import submit
 from tools.silverfish.travel import NORTHEAST_RAIL, SHOPKEEP
 
 
-async def verify(work: Path, original: Path):
+async def verify(work: Path, original: Path, *, greeting_saves: bool = False):
     name = "shopkeep-" + uuid.uuid4().hex[:8]
     root = work / "campaigns" / name
     host_run, guest_run = root / "run", work / "clients" / name / "run"
@@ -110,6 +110,8 @@ async def verify(work: Path, original: Path):
             "before": before_open, "after": after_open,
         }
         assert after_open == before_open, f"{opened['effect']} changed a campaign save"
+        if ordinal is None:
+            return {"opened": opened}
         unrelated = await action(guest_run, dialogue.FIXTURE, target="4", expected=False)
         assert unrelated["ok"] is False, unrelated
         chosen = (await action(guest_run, dialogue.FIXTURE, target=ordinal))["native_dialogue_view"]
@@ -129,6 +131,17 @@ async def verify(work: Path, original: Path):
         view = (await action(directory, "native-inventory-list", **arguments))["native_inventory"]
         assert view["next_offset"] is None, view
         return {row["guid"]: row for row in view["items"]}
+
+    async def restart(entered, invitation, generation):
+        await launch(host_run, "restart-host", "host", *team, "--port", str(entered["endpoint"]["port"]), *host_flags)
+        restarted = await wait(host_run, lambda state: state.get("state") == "hosting"
+                               and state.get("generation") != entered["generation"] and state.get("game", {}).get("map") == SHOPKEEP)
+        renewed = await action(host_run, "refresh-invite", target=invitation["guest_id"])
+        assert restarted["endpoint"]["port"] == entered["endpoint"]["port"] and renewed["character_id"] == character, restarted
+        await launch(guest_run, "restart-guest", "join", *player, "--invite", renewed["invite_file"], *guest_flags)
+        await paired(SHOPKEEP, entered["zone_epoch"])
+        return (await wait(guest_run, lambda state: state.get("generation") != generation
+                           and state.get("state") == "connected"))["generation"]
 
     try:
         authority = await launch(host_run, "host", "host", *team, "--port", "0", "--start-zone", NORTHEAST_RAIL, *host_flags)
@@ -150,7 +163,7 @@ async def verify(work: Path, original: Path):
         frame_before_open = native_host_save.verify(root / "game-user", checkpoint_before_open["world"])
         save_dir = native_host_save.directory(root / "game-user")
         assert stock_flags(save_dir, frame_before_open, SHOPKEEP).get("Meet_ShopKeep", 0) == 0
-        opened = await reception("1", dialogue.SHOPKEEP_FIRST, generation)
+        opened = await reception(None if greeting_saves else "1", dialogue.SHOPKEEP_FIRST, generation)
         evidence["stock_reception"] = opened
         assert json.loads(save_file.read_text(encoding="utf-8"))["revision"] == checkpoint_before_open["revision"]
         saved_revision = (await action(host_run, "checkpoint"))["revision"]
@@ -160,6 +173,13 @@ async def verify(work: Path, original: Path):
         assert stock_flags(save_dir, frame, SHOPKEEP).get("Meet_ShopKeep") == 1
         evidence["explicit_save"] = {"prior_revision": checkpoint_before_open["revision"], "revision": saved_revision,
                                      "stock_meet_flag": 1}
+        if greeting_saves:
+            await stop(host_run, authority)
+            await stop(guest_run, guest)
+            new_generation = await restart(entered, invitation, generation)
+            repeated = await reception(None, dialogue.SHOPKEEP_ROOT, new_generation)
+            evidence.update(verified=True, restart={"stock_flag": 1, "greeting": repeated["opened"]})
+            return
         listing = (await action(guest_run, "native-finite-shop-list"))["native_finite_shop"]
         assert (listing["map"], listing["actor"], listing["wallet_before"], listing["wallet_after"]) == (
             SHOPKEEP, dialogue.SHOPKEEP_COUNTER, 100_000, 100_000), listing
@@ -189,15 +209,7 @@ async def verify(work: Path, original: Path):
         assert host_frame and host_frame["map"] == SHOPKEEP and guest_frame["slot"] != host_frame["slot"], (host_frame, guest_frame)
         stock = stock_flags(native_host_save.directory(root / "game-user"), host_frame, SHOPKEEP)
         assert (stock.get("Meet_ShopKeep"), stock.get("Player_Cash")) == (1, purchase["wallet_after"]), stock
-        await launch(host_run, "restart-host", "host", *team, "--port", str(entered["endpoint"]["port"]), *host_flags)
-        restarted = await wait(host_run, lambda state: state.get("state") == "hosting"
-                               and state.get("generation") != entered["generation"] and state.get("game", {}).get("map") == SHOPKEEP)
-        renewed = await action(host_run, "refresh-invite", target=invitation["guest_id"])
-        assert restarted["endpoint"]["port"] == entered["endpoint"]["port"] and renewed["character_id"] == character, restarted
-        await launch(guest_run, "restart-guest", "join", *player, "--invite", renewed["invite_file"], *guest_flags)
-        await paired(SHOPKEEP, entered["zone_epoch"])
-        new_generation = (await wait(guest_run, lambda state: state.get("generation") != generation
-                                     and state.get("state") == "connected"))["generation"]
+        new_generation = await restart(entered, invitation, generation)
         reopened = await reception("2", dialogue.SHOPKEEP_ROOT, new_generation)
         after = (await action(guest_run, "native-finite-shop-list"))["native_finite_shop"]
         assert after["wallet_before"] == purchase["wallet_after"] and after["merchant_cash_before"] == purchase["merchant_cash_after"], after
@@ -228,5 +240,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--vanilla-saved", type=Path, required=True)
+    parser.add_argument("--greeting-saves", action="store_true", help="check first and repeat stock greetings without buying")
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve()))
+    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), greeting_saves=args.greeting_saves))
