@@ -1196,12 +1196,16 @@ local function read_command(periodic)
         content = file:read(32769)
         file:close()
     end
-    if not content or #content > 32768 then return end
+    if not content then return end
     local line, body
     local action = ticket and content:match("^[^\t\r\n]+\t([^\t\r\n]+)\t")
-    if ticket and (native_guest_ui.is_memory_command(action) or action == native_stash_view.memory_render) then
+    local stash_memory = action == native_stash_view.memory_render
+    if #content > 32768 and (not stash_memory
+        or #content > native_stash_view.memory_body_limit() + native_stash_view.memory_header_limit) then return end
+    if ticket and (native_guest_ui.is_memory_command(action) or stash_memory) then
         local boundary = content:find("\n", 1, true)
         if boundary then
+            if stash_memory and boundary > native_stash_view.memory_header_limit then return end
             line, body = content:sub(1, boundary - 1), content:sub(boundary + 1)
         end
     end
@@ -1275,6 +1279,9 @@ local function write_status(state, current_phase, failure, fields, pending, crat
     end
     if current_phase == "connected" then
         rows[#rows + 1] = status_row("native-stash-view-memory", 1)
+        if native_stash_view.memory_body_limit() > 32768 then
+            rows[#rows + 1] = status_row("native-stash-view-memory-large", 1)
+        end
     end
     if current_phase == "connected" and world_view_enabled and compact_crates then
         rows[#rows + 1] = status_row("native-world-view-apply-local", 1)

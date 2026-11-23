@@ -25,9 +25,12 @@ SETTING = "native_stash_setting"
 SITES = "native_stash_sites"
 VIEW = "native_stash_view"
 MEMORY_VIEW = "native_stash_view_memory"
+LARGE_MEMORY_VIEW = "native_stash_view_memory_large"
 RENDER_MEMORY = "native-stash-view-render-memory"
 MEMORY_VIEW_ACK = "private stash view updated in memory"
 MEMORY_VIEW_MAX_BYTES = 20_000  # Leaves room for the scoped header in the 32 KiB local bridge ticket.
+LARGE_MEMORY_VIEW_MAX_BYTES = 2_500_000
+MEMORY_VIEW_HEADER_MAX_BYTES = 1_024
 VIEW_FIXTURES = {"native-stash-view-fixture", "native-stash-view-click-fixture"}
 _TARGET = re.compile(r"([0-9A-F]{32})(?:\|(0|[1-9][0-9]{0,3}))?\Z")
 _MOVE_TARGET = re.compile(r"([0-9A-F]{32})\|(deposit|withdraw|reorder)\|([0-9A-F]{32})(?:\|([0-9A-F]{32}|-))?\Z")
@@ -38,6 +41,12 @@ _VIEW_REORDER_CARD = re.compile(r"reorder-stash:([0-9A-F]{32}):(0|[1-9][0-9]{0,3
 _VIEW_SPLIT_CARD = re.compile(r"split-(?:stash|backpack):([0-9A-F]{32}):([1-9][0-9]{0,8}):(cancel|move)\Z")
 _PATH = re.compile(r"([A-Za-z0-9_-]+_C) (/Game/Classes/Maps/[A-Za-z0-9_/-]+)\.([A-Za-z0-9_-]+):PersistentLevel\.([A-Za-z0-9_-]+)\Z")
 _ITEM_CLASS = re.compile(r"/Game/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+_C\Z")
+
+
+def resident_ticket_body_limit(local_bridge):
+    if getattr(local_bridge, "stash_body_limit", 0) == LARGE_MEMORY_VIEW_MAX_BYTES:
+        return LARGE_MEMORY_VIEW_MAX_BYTES
+    return MEMORY_VIEW_MAX_BYTES
 
 
 def valid_site(area, name):
@@ -323,8 +332,12 @@ async def service_view(client, active):
         if scope != (client.host_session, client.zone_epoch):
             raise RuntimeError("The stock stash request left its native world")
         contents = "".join(rows)
-        if (client.last_game.get(MEMORY_VIEW) is True and client.bridge.local_bridge is not None
-                and len(contents) <= MEMORY_VIEW_MAX_BYTES):
+        if len(contents) > LARGE_MEMORY_VIEW_MAX_BYTES:
+            raise ValueError("The host's verified stash exceeds the stock preview limit")
+        local_bridge = client.bridge.local_bridge
+        limit = (resident_ticket_body_limit(local_bridge) if client.last_game.get(LARGE_MEMORY_VIEW) is True
+                 else MEMORY_VIEW_MAX_BYTES)
+        if client.last_game.get(MEMORY_VIEW) is True and local_bridge is not None and len(contents) <= limit:
             snapshot = await client.bridge.command(RENDER_MEMORY, *arguments, str(len(rows)),
                                                    stash_payload=contents.encode("ascii"), timeout=5)
             if snapshot.get("ack", {}).get("message") != MEMORY_VIEW_ACK:

@@ -19,7 +19,8 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
         bridge = runtime.Bridge(Path("unused"), None)
         bridge.local_bridge = SimpleNamespace(command=AsyncMock())
         body = f"{'D' * 32}\t/Game/Classes/Items/Test.Test_C\t3\t0.25\t15\t0\n".encode("ascii")
-        response = f"schema\t1\nseq\t1\nsession\tclient\tconnected\t{OBSERVATORY}\t1\t1\nnative-stash-view-memory\t1\n"
+        response = (f"schema\t1\nseq\t1\nsession\tclient\tconnected\t{OBSERVATORY}\t1\t1\n"
+                    "native-stash-view-memory\t1\nnative-stash-view-memory-large\t1\n")
 
         async def command(request, timeout):
             header, _, raw = request.partition(b"\n")
@@ -32,6 +33,7 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
         received = await bridge.command(native_stash.RENDER_MEMORY, "42", OBSERVATORY, SITE, "1",
                                         timeout=5, stash_payload=body)
         self.assertTrue(received[native_stash.MEMORY_VIEW])
+        self.assertTrue(received[native_stash.LARGE_MEMORY_VIEW])
         bridge.local_bridge.command.reset_mock()
         for invalid in (None, "text", b"truncated", b"\r\n", b"x" * native_stash.MEMORY_VIEW_MAX_BYTES + b"\n"):
             with self.assertRaisesRegex(ValueError, "Invalid resident stash view payload"):
@@ -51,12 +53,39 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
             await bridge.command(native_stash.RENDER_MEMORY, "42", OBSERVATORY, SITE, "0", stash_payload=b"")
         self.assertIs(bridge._local_status, received)
 
+    async def test_large_resident_ticket_binds_payload_and_prefix_only_with_native_support(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        limit = native_stash.LARGE_MEMORY_VIEW_MAX_BYTES
+        bridge.local_bridge = SimpleNamespace(command=AsyncMock(), stash_body_limit=limit)
+        body = b"x" * (limit - 1) + b"\n"
+
+        async def command(request, _timeout):
+            header, separator, raw = request.partition(b"\n")
+            self.assertEqual(raw, body)
+            self.assertTrue(separator)
+            nonce = header.split(b"\t", 1)[0].decode()
+            return (f"schema\t1\nseq\t1\nsession\tclient\tconnected\t{OBSERVATORY}\t1\t1\n"
+                    f"ack\t{nonce}\taccepted\t{native_stash.MEMORY_VIEW_ACK}\n")
+
+        bridge.local_bridge.command.side_effect = command
+        command_args = native_stash.RENDER_MEMORY, "1", OBSERVATORY, SITE, "1"
+        await bridge.command(*command_args, stash_payload=body)
+        for args, invalid in ((command_args, body + b"\n"),
+                              ((native_stash.RENDER_MEMORY, "1", "x" * 1024, SITE, "1"), body),
+                              (("ordinary-command",), body)):
+            with self.assertRaises(ValueError):
+                await bridge.command(*args, stash_payload=invalid)
+        bridge.local_bridge.stash_body_limit = 0
+        with self.assertRaisesRegex(ValueError, "Invalid resident stash view payload"):
+            await bridge.command(*command_args, stash_payload=body)
+        bridge.local_bridge.command.assert_awaited_once()
+
     async def test_stash_view_uses_memory_for_split_and_empty_pages_with_legacy_fallback(self):
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         item, created = "D" * 32, "E" * 32
         rows = [f"{created}\t/Game/Classes/Items/Test.Test_C\t3\t0.25\t15\t0\n"]
         large_page = [rows[0].replace(created, f"{index:032X}", 1) for index in range(1, 512)]
-        self.assertGreater(len("".join(large_page)), native_stash.MEMORY_VIEW_MAX_BYTES)
+        self.assertGreater(len("".join(large_page)), 32 * 1024)
         view = dict(state="pending", sequence=1, map=OBSERVATORY, pawn="guest-pawn", site=SITE,
                     mode="stash", offset=0, item=None)
         game = {"map": OBSERVATORY, "pawns": {"local": {"name": view["pawn"]}}}
@@ -67,15 +96,18 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
                                  host_session="session", zone_epoch="epoch",
                                  guest_ui=SimpleNamespace(refresh=AsyncMock()), control=Mock(),
                                  gameplay_action=AsyncMock())
-        for scenario in ("resident", "empty", "old-lua", "external", "oversize", "bad-receipt"):
+        for scenario in ("resident", "empty", "old-lua", "external", "large", "large-old-lua", "large-old-native",
+                         "bad-receipt"):
             with self.subTest(scenario=scenario):
-                page = [] if scenario == "empty" else large_page if scenario == "oversize" else rows
-                in_memory = scenario in {"resident", "empty", "bad-receipt"}
+                page = [] if scenario == "empty" else large_page if scenario.startswith("large") else rows
+                in_memory = scenario in {"resident", "empty", "large", "bad-receipt"}
                 pending = ({**view, "item": item, "split_amount": 3, "expected": 7}
                            if scenario == "resident" else view)
-                client.last_game = {**game, native_stash.VIEW: pending, native_stash.MEMORY_VIEW: scenario != "old-lua"}
+                client.last_game = {**game, native_stash.VIEW: pending, native_stash.MEMORY_VIEW: scenario != "old-lua",
+                                    native_stash.LARGE_MEMORY_VIEW: scenario in {"large", "large-old-native"}}
                 client.gameplay_seen = time.monotonic()
-                bridge.local_bridge = None if scenario == "external" else object()
+                body_limit = native_stash.LARGE_MEMORY_VIEW_MAX_BYTES if scenario in {"large", "large-old-lua"} else 0
+                bridge.local_bridge = None if scenario == "external" else SimpleNamespace(stash_body_limit=body_limit)
                 client.gameplay_action.reset_mock()
                 client.gameplay_action.return_value = {native_stash.MOVED: dict(owner=GUEST, site=SITE,
                     direction="split-withdraw", guid=item, quantity=3, remaining=4, created_guid=created)}

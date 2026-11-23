@@ -2,7 +2,8 @@ local view = {}
 local save_scope = require("native_save_scope")
 
 view.memory_render = "native-stash-view-render-memory"
-local memory_limit = 20000
+view.memory_header_limit = 1024
+local small_memory_limit, full_page_limit = 20000, 2500000
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
 local fixtures = headless and os.getenv("SILVERFISH_COOP_NATIVE_INTERACT_FIXTURES") == "1"
 local stash_path = "/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C"
@@ -19,6 +20,14 @@ local item_value = "Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9"
 local item_never_drop = "NeverDrop_21_57B44A714ED0B2B1776A5DA7627B4A8D"
 local current, downed, mailbox
 local sequence = 0
+
+function view.memory_body_limit()
+    if type(SilverfishLocalBridgeStashBodyLimit) == "function"
+        and SilverfishLocalBridgeStashBodyLimit() == full_page_limit then
+        return full_page_limit
+    end
+    return small_memory_limit
+end
 
 local function valid(object)
     return object and object:IsValid()
@@ -147,7 +156,7 @@ local function render(fields, state, phase, payload)
     if not expected or expected < 0 or expected > 4096 then error("native_stash_view_invalid_page", 0) end
     local raw
     if resident then
-        if #fields ~= 6 or type(payload) ~= "string" or #payload > memory_limit or payload:sub(1, 1) == "\n"
+        if #fields ~= 6 or type(payload) ~= "string" or #payload > view.memory_body_limit() or payload:sub(1, 1) == "\n"
             or payload:find("[^\t\n -~]") or payload:find("\n\n", 1, true) then
             error("native_stash_view_invalid_page", 0)
         end
@@ -159,10 +168,10 @@ local function render(fields, state, phase, payload)
         end
         local file = io.open(mailbox .. "/native-stash-screen-" .. nonce .. ".tsv", "rb")
         if not file then error("native_stash_view_missing_page", 0) end
-        raw = file:read(2500001) or ""
+        raw = file:read(full_page_limit + 1) or ""
         file:close()
     end
-    if #raw > 2500000 or (#raw > 0 and raw:sub(-1) ~= "\n") then error("native_stash_view_invalid_page", 0) end
+    if #raw > full_page_limit or (#raw > 0 and raw:sub(-1) ~= "\n") then error("native_stash_view_invalid_page", 0) end
     local api, save_class = StaticFindObject(statics_path), StaticFindObject(save_path)
     local save = save_scope.bind_guest(state, phase)
     if not valid(api) or not valid(save_class) or not valid(save) then error("native_stash_view_save_unavailable", 0) end

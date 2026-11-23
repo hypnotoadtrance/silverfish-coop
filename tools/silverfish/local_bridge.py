@@ -23,6 +23,11 @@ class LocalBridge:
         self._submit = library.SilverfishBridgeSubmitV1
         self._submit.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
         self._submit.restype = ctypes.c_int64
+        stash_body_limit = getattr(library, "SilverfishBridgeStashBodyLimitV1", None)
+        self.stash_body_limit = 0
+        if stash_body_limit is not None:
+            stash_body_limit.argtypes, stash_body_limit.restype = [], ctypes.c_uint32
+            self.stash_body_limit = stash_body_limit()
         self._wait = library.SilverfishBridgeWaitV1
         self._wait.argtypes = [ctypes.c_int64, ctypes.c_uint32]
         self._wait.restype = ctypes.c_int32

@@ -2229,6 +2229,8 @@ class Bridge:
                                                     "total": int(fields[6]), "count": int(fields[7])}
                 elif fields == ["native-stash-view-memory", "1"] and data.get("state") == "connected":
                     data[native_stash.MEMORY_VIEW] = True
+                elif fields == ["native-stash-view-memory-large", "1"] and data.get("state") == "connected":
+                    data[native_stash.LARGE_MEMORY_VIEW] = True
                 elif fields[0] == "native-stash-view" and len(fields) in (9, 10, 11):
                     data[native_stash.VIEW] = native_stash.parse_view(fields, data.get("map"), data.get("state"))
                 elif fields == ["native-inventory-sort-capability", "1"]:
@@ -3274,14 +3276,15 @@ class Bridge:
         fields = (uuid.uuid4().hex, action, *arguments)
         if any(len(value) > 1024 or "\t" in value or "\r" in value or "\n" in value for value in fields):
             raise ValueError("Invalid game bridge command value")
+        request = "\t".join(fields) + "\n"
         if action == native_stash.RENDER_MEMORY:
             if (self.local_bridge is None or not isinstance(stash_payload, bytes)
-                    or len(stash_payload) > native_stash.MEMORY_VIEW_MAX_BYTES
+                    or len(request.encode("utf-8")) > native_stash.MEMORY_VIEW_HEADER_MAX_BYTES
+                    or len(stash_payload) > native_stash.resident_ticket_body_limit(self.local_bridge)
                     or stash_payload and (not stash_payload.endswith(b"\n") or not _GUEST_UI_BYTES.fullmatch(stash_payload))):
                 raise ValueError("Invalid resident stash view payload")
         elif stash_payload is not None:
             raise ValueError("A stash payload requires the resident stash view command")
-        request = "\t".join(fields) + "\n"
         if self.local_bridge is None:
             async with self._file_command_lock:
                 write_text(self.directory / "command.tsv", request)

@@ -1,4 +1,5 @@
 #include "local_bridge.hpp"
+#include "local_stash_ticket.hpp"
 
 #include <chrono>
 #include <condition_variable>
@@ -102,6 +103,12 @@ namespace
             if (claimed) state = State::running;
         }
         lua.set_bool(claimed);
+        return 1;
+    }
+
+    int stash_body_limit(const Lua& lua)
+    {
+        lua.set_integer(silverfish::local_stash_ticket::body_limit);
         return 1;
     }
 
@@ -453,12 +460,24 @@ extern "C" __declspec(dllexport) int SilverfishBridgePublishAvatarPosesV1(const 
     return 1;
 }
 
+extern "C" __declspec(dllexport) std::uint32_t SilverfishBridgeStashBodyLimitV1()
+{
+    return silverfish::local_stash_ticket::body_limit;
+}
+
 extern "C" __declspec(dllexport) std::int64_t SilverfishBridgeSubmitV1(const char* data, std::uint32_t size)
 {
-    if (!data || !size || size > command_limit) return 0;
+    if (!data || !size) return 0;
+    std::string large_stash;
+    if (size > command_limit)
+    {
+        if (!silverfish::local_stash_ticket::accepts({data, size})) return 0;
+        large_stash.assign(data, size);
+    }
     std::lock_guard lock(mutex);
     if (!attached || state != State::idle || last_ticket == std::numeric_limits<std::int64_t>::max()) return 0;
-    command.assign(data, size);
+    if (large_stash.empty()) command.assign(data, size);
+    else command = std::move(large_stash);
     active_ticket = ++last_ticket;
     state = State::queued;
     return active_ticket;
@@ -495,6 +514,7 @@ namespace silverfish::local_bridge
     {
         lua.register_function("SilverfishTakeLocalBridgeCommand", take);
         lua.register_function("SilverfishClaimLocalBridgeCommand", claim_command);
+        lua.register_function("SilverfishLocalBridgeStashBodyLimit", stash_body_limit);
         lua.register_function("SilverfishPublishLocalBridgeReply", publish);
         lua.register_function("SilverfishPublishLocalBridgeStatus", publish_status);
         lua.register_function("SilverfishEnqueueLocalBridgeInput", enqueue_input);
