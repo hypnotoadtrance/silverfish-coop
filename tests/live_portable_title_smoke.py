@@ -473,7 +473,7 @@ async def verify_resident_footsteps(host: Seat, guest: Seat) -> list[dict]:
     return receipts
 
 
-async def verify_resident_dry_fire(host: Seat, guest: Seat) -> dict:
+async def verify_resident_pistol(host: Seat, guest: Seat) -> dict:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-dry-fire", action)
 
@@ -502,10 +502,10 @@ async def verify_resident_dry_fire(host: Seat, guest: Seat) -> dict:
     guest_guid = await command(host, "seed-peer")
     assert all(re.fullmatch(r"[0-9A-F]{32}", guid) for guid in (host_guid, guest_guid)) and host_guid != guest_guid
     await wait_for(guest, "projected", guest_guid)
-    for seat, guid in ((host, host_guid), (guest, guest_guid)):
+    for seat, guid, rounds in ((host, host_guid, 0), (guest, guest_guid, 1)):
         assert await command(seat, "equip") == "selected"
-        await wait_for(seat, "ready", guid)
-    await wait_for(host, "peer-ready", guest_guid)
+        await wait_for(seat, "ready", f"{guid},{rounds},{rounds}")
+    await wait_for(host, "peer-ready", f"{guest_guid},1,1")
 
     guest_run = guest.client / "run"
     guest_frame = await wait_resident_status(guest_run, lambda frame: (scope := frame.get("game", {}).get("native_guest_primary_scope", {}))
@@ -518,24 +518,48 @@ async def verify_resident_dry_fire(host: Seat, guest: Seat) -> dict:
     host_click, guest_heard = await asyncio.gather(read_single_click(host, "stock-weapon"), read_single_click(guest, "observer"))
     assert math.dist(host_click, guest_heard) <= .03, (host_click, guest_heard)
 
+    assert await command(guest, "face-away") == "turned"
+    for seat in (host, guest):
+        assert await command(seat, "clear") == "clear"
+    loaded_press = await submit(guest_run, "native-guest-primary-input-fixture")
+    assert loaded_press["ok"], loaded_press
+    loaded_sequence = loaded_press["native_guest_primary_fixture"]["sequence"]
+    async with asyncio.timeout(6):
+        while not (loaded_result := next((entry for entry in await resident_events(guest_run, guest_frame)
+                                          if entry.get("sequence") == loaded_sequence and entry["event"] in {
+                                              "native_guest_primary_input", "native_guest_primary_input_rejected"}), None)):
+            await asyncio.sleep(.08)
+    assert loaded_result["event"] == "native_guest_primary_input", loaded_result
+    shot = loaded_result["native_guest_weapon"]
+    assert (shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (guest_guid, 1, 0, 1), shot
+    await wait_for(host, "peer-ready", f"{guest_guid},0,0")
+    await wait_for(guest, "ready", f"{guest_guid},0,0")
+    host_shot = tuple(map(int, (await command(host, "shot-read")).split(",")))
+    assert host_shot == (1, 1, 1, 0), host_shot
+    after_round = [entry for entry in await resident_events(guest_run, guest_frame) if entry["event"] in tracked]
+
     for seat in (host, guest):
         assert await command(seat, "clear") == "clear"
     press = await submit(guest_run, "native-guest-primary-input-fixture")
     assert press["ok"] and press["native_guest_primary_fixture"]["sequence"] > 0, press
     host_heard, guest_click = await asyncio.gather(read_single_click(host, "observer"), read_single_click(guest, "observer"))
     assert math.dist(host_heard, guest_click) <= .03, (host_heard, guest_click)
-    assert await command(host, "ready") == host_guid and await command(guest, "ready") == guest_guid
-    assert await command(host, "peer-ready") == guest_guid
+    assert await command(host, "ready") == f"{host_guid},0,0" and await command(guest, "ready") == f"{guest_guid},0,0"
+    assert await command(host, "peer-ready") == f"{guest_guid},0,0"
 
     since = await resident_events(guest_run, guest_frame)
-    events = [entry for entry in since if entry["event"] in tracked and entry not in before]
-    assert [entry["event"] for entry in events] == ["native_weapon_dry_fire_played"] * 2, events
+    host_dry_events = [entry for entry in after_round if entry["event"] == "native_weapon_dry_fire_played" and entry not in before]
+    guest_dry_events = [entry for entry in since if entry["event"] in tracked and entry not in after_round]
+    assert len(host_dry_events) == 1 and [entry["event"] for entry in guest_dry_events] == ["native_weapon_dry_fire_played"], since
+    events = host_dry_events + guest_dry_events
     assert len({entry["serial"] for entry in events}) == 2, events
     guest_input, = [entry for entry in since if entry["event"] == "native_guest_primary_input_rejected"
                     and entry.get("sequence") == press["native_guest_primary_fixture"]["sequence"]]
     assert guest_input["reason"] == "guest_weapon_preloaded_magazine_required", guest_input
     return {"host_stock_click": host_click, "guest_heard_host": guest_heard, "guest_primary_input": press,
             "host_heard_guest": host_heard, "guest_click": guest_click, "guest_cue_receipts": events,
+            "guest_live_round": shot, "host_guest_shot_dispatch": {"projectile_calls": host_shot[0],
+                "shot_sounds": host_shot[1], "muzzle_flashes": host_shot[2]},
             "guest_empty_magazine_receipt": guest_input,
             "pistols_still_empty": True, "projectiles_spawned": 0, "observers_played_shot_effects": 0}
 
@@ -588,13 +612,13 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str) -> dic
     visual, = [entry for entry in cues if entry["event"] == event_names[1]]
     assert visual["player_id"] == player_id, visual
     footsteps = await verify_resident_footsteps(host, guest)
-    dry_fire = await verify_resident_dry_fire(host, guest)
+    pistol = await verify_resident_pistol(host, guest)
     assert not weapon_cue_files(host, guest), "Stock player cues wrote a legacy weapon cue mailbox"
     assert save_state() == before, "Stock use wrote a campaign save before the normal checkpoint"
     return {"resident_weapon_cues": {"stock_player_id": player_id, "source": class_name, "observer_cues": cues,
                                      "prop": prop, "local_bridge_both_peers": "memory",
                                      "no_cue_mailbox": True, "saves_unchanged_before_checkpoint": True,
-                                     "stock_footsteps": footsteps, "stock_dry_fire": dry_fire}}
+                                     "stock_footsteps": footsteps, "stock_pistol": pistol}}
 def unequip_rows(raw):
     result = []
     for entry in raw.split("|"):

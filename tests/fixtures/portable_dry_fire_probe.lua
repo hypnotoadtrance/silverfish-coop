@@ -12,7 +12,7 @@ local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local slot = 2
 local last, local_pawn, peer, failure
-local clicks, projectiles = {}, 0
+local clicks, projectiles, shot_sounds, muzzle_flashes = {}, 0, 0, 0
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -28,6 +28,11 @@ local function identify(row)
     if not same(row[item_class], asset(pistol_path)) then return "-" end
     local guid = row[item_guid]
     return ("%08X%08X%08X%08X"):format(guid.A & 0xffffffff, guid.B & 0xffffffff, guid.C & 0xffffffff, guid.D & 0xffffffff)
+end
+
+local function peer_muzzle(component)
+    local weapon = peer.EquipedItem
+    if valid(weapon) and same(component, weapon.Arrow_Muzzle) then return weapon end
 end
 
 local function arm()
@@ -59,18 +64,26 @@ local function arm()
         local weapon = context:get()
         if same(weapon, local_pawn.EquipedItem) or same(weapon, peer.EquipedItem) then projectiles = projectiles + 1 end
     end)
+    RegisterHook("/Script/Engine.GameplayStatics:SpawnSoundAttached", function(_, sound, attached)
+        local weapon = peer_muzzle(attached:get())
+        if weapon and same(sound:get(), weapon.FireSound) then shot_sounds = shot_sounds + 1 end
+    end)
+    RegisterHook("/Script/Niagara.NiagaraFunctionLibrary:SpawnSystemAttached", function(_, effect, attached)
+        local weapon = peer_muzzle(attached:get())
+        if weapon and same(effect:get(), weapon.MuzzleFlash) then muzzle_flashes = muzzle_flashes + 1 end
+    end)
     return "armed"
 end
 
-local function seed(pawn)
+local function seed(pawn, rounds)
     local save = pawn.Save
     assert(pawn:HasAuthority() and valid(save) and not valid(save.PlayerEquipment[slot][item_class]), "fixture requires an empty authoritative slot")
     assert(same(local_pawn.Save, local_pawn:GetWorld().OwningGameInstance.SaveSlot_Ref)
         and (same(pawn, local_pawn) or not same(save, local_pawn.Save)), "fixture must use the co-op save and detached peer")
     local output = {}
-    asset(factory):MakeDefaultItem(asset(pistol_path), pawn, output)
+    asset(factory):ItemActorToStruct(asset(pistol_path):GetCDO(), pawn, output)
     local row = output.Item or output
-    row[ammo] = 0
+    row[ammo] = rounds
     local guid = identify(row)
     assert(#guid == 32 and guid ~= string.rep("0", 32), "stock pistol did not receive a GUID")
     save.PlayerEquipment[slot] = row
@@ -81,15 +94,14 @@ local function ready(pawn)
     local row = pawn.Save.PlayerEquipment[slot]
     local weapon = pawn.EquipedItem
     if identify(row) == "-" or not valid(weapon) or not same(weapon:GetClass(), asset(pistol_path)) then return "waiting" end
-    assert(same(weapon.User, pawn) and pawn.Save.PlayerEquipIndex == slot - 1 and weapon.Ammo == 0
-        and row[ammo] == 0, "expected an empty stock pistol in the selected slot")
-    return identify(row)
+    assert(same(weapon.User, pawn) and pawn.Save.PlayerEquipIndex == slot - 1, "expected the stock pistol in the selected slot")
+    return ("%s,%d,%d"):format(identify(row), weapon.Ammo, row[ammo])
 end
 
 local function run(action)
     if action == "arm" then return arm() end
-    if action == "seed-local" then return seed(local_pawn) end
-    if action == "seed-peer" then return seed(peer) end
+    if action == "seed-local" then return seed(local_pawn, 0) end
+    if action == "seed-peer" then return seed(peer, 1) end
     if action == "projected" then return identify(local_pawn.Save.PlayerEquipment[slot]) end
     if action == "equip" then
         assert(identify(local_pawn.Save.PlayerEquipment[slot]) ~= "-", "stock pistol is not in the projected slot")
@@ -98,10 +110,16 @@ local function run(action)
     end
     if action == "ready" then return ready(local_pawn) end
     if action == "peer-ready" then return ready(peer) end
+    if action == "face-away" then
+        local from, other = local_pawn:K2_GetActorLocation(), peer:K2_GetActorLocation()
+        local_pawn.Controller:SetControlRotation({Pitch = 35, Yaw = math.deg(math.atan(from.Y - other.Y, from.X - other.X)), Roll = 0})
+        return "turned"
+    end
     if action == "clear" then
-        clicks, projectiles, failure = {}, 0, nil
+        clicks, projectiles, shot_sounds, muzzle_flashes, failure = {}, 0, 0, 0, nil
         return "clear"
     end
+    if action == "shot-read" then return ("%d,%d,%d,%d"):format(projectiles, shot_sounds, muzzle_flashes, #clicks) end
     if action == "read" then
         assert(not failure, failure)
         return ("%d;%s"):format(projectiles, table.concat(clicks, "|"))
