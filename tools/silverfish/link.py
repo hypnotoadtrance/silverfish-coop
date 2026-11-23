@@ -367,6 +367,9 @@ class _TransportStatistics:
     relay_queue_max_frames: int = 0
     relay_queue_evicted_frames: int = 0
     relay_queue_expired_frames: int = 0
+    relay_queue_departed_frames: int = 0
+    relay_queue_wait_total_ns: int = 0
+    relay_queue_wait_max_ns: int = 0
     weapon_cues_rejected_full_queue: int = 0
     prop_pose_datagrams_queued: int = 0
     prop_pose_datagrams_replaced: int = 0
@@ -646,17 +649,26 @@ class _LinkProtocol(QuicConnectionProtocol):
         self._next_game_expiry = min(self._game_enqueued) + _GAME_QUEUE_AGE if fresh else None
 
     def transmit(self) -> None:
-        self._expire_game_queue(self._loop.time())
+        now = self._loop.time()
+        self._expire_game_queue(now)
         try:
             super().transmit()
         finally:
             # aioquic consumes only the front of the pending datagram queue.
             pending = self._quic._datagrams_pending
-            if pending:
-                for _ in range(len(self._game_enqueued) - len(pending)):
-                    self._game_enqueued.popleft()
-            else:
-                self._game_enqueued.clear()
+            departed = len(self._game_enqueued) - len(pending)
+            if departed:
+                stats = self._stats
+                waited = 0.
+                oldest = now
+                for _ in range(departed):
+                    queued_at = self._game_enqueued.popleft()
+                    waited += now - queued_at
+                    oldest = min(oldest, queued_at)
+                stats.relay_queue_departed_frames += departed
+                stats.relay_queue_wait_total_ns += int(waited * 1_000_000_000)
+                stats.relay_queue_wait_max_ns = max(stats.relay_queue_wait_max_ns, int((now - oldest) * 1_000_000_000))
+            if not pending:
                 self._next_game_expiry = None
 
     def _admission_payload(self, event: events.StreamDataReceived) -> bytes | None:

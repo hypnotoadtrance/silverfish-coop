@@ -150,6 +150,8 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(stats["quic_datagrams_received"], 0)
             self.assertGreater(stats["quic_payload_bytes_sent"], sum(sizes))
             self.assertGreater(stats["quic_payload_bytes_received"], sum(sizes))
+            self.assertEqual(stats["relay_queue_departed_frames"], fragments)
+            self.assertGreaterEqual(stats["relay_queue_wait_total_ns"], stats["relay_queue_wait_max_ns"])
             self.assertEqual(stats["relay_queue_expired_frames"], 0)
             stats["game_packets_queued"] = 0
             self.assertEqual(relay.statistics()["game_packets_queued"], len(sizes))
@@ -217,6 +219,27 @@ class LinkTests(unittest.IsolatedAsyncioTestCase):
             protocol._expire_game_queue(clock.return_value + link._GAME_QUEUE_AGE + .001)
             self.assertFalse(pending)
             self.assertEqual(self.client.statistics()["relay_queue_expired_frames"], 4)
+
+    async def test_relay_wait_tracks_frames_that_depart_in_separate_batches(self):
+        self.assertTrue((await self.connect_guest())["accepted"])
+        protocol = self.client._protocol
+        pending = protocol._quic._datagrams_pending
+        now = protocol._loop.time()
+        with patch.object(protocol, "transmit"), patch.object(protocol._loop, "time", return_value=now):
+            protocol.forward_game_packet(b"old")
+            protocol.forward_game_packet(b"new")
+
+        with patch.object(link.QuicConnectionProtocol, "transmit", side_effect=pending.popleft), \
+                patch.object(protocol._loop, "time", side_effect=(now + .03, now + .07)):
+            protocol.transmit()
+            self.assertEqual(len(pending), 1)
+            protocol.transmit()
+
+        stats = self.client.statistics()
+        self.assertFalse(pending)
+        self.assertEqual(stats["relay_queue_departed_frames"], 2)
+        self.assertAlmostEqual(stats["relay_queue_wait_total_ns"], 100_000_000, delta=10)
+        self.assertAlmostEqual(stats["relay_queue_wait_max_ns"], 70_000_000, delta=10)
 
     async def test_avatar_poses_coalesce_independently_from_prop_and_unreal_frames(self):
         self.assertTrue((await self.connect_guest())["accepted"])
