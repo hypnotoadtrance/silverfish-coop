@@ -847,6 +847,18 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                     after, = await ruin_probe(host, f"health\t{member}")
                     assert before == after and attack.split("\t")[:2] == ["client", replica], (before, attack, after)
                     fixture["guest_damage_and_death_veto"] = {"host": before, "guest": attack}
+                    killed, = await ruin_probe(host, f"kill\t{member}")
+                    seat, actor, alive, visible_ragdoll, identifier = killed.split("\t")
+                    assert (seat, actor, alive, visible_ragdoll) == ("host", member, "false", "true"), killed
+                    assert int(identifier) > 0, killed
+                    fixture["host_corpse"] = killed
+                    async with asyncio.timeout(10):
+                        while True:
+                            mirrored, = await ruin_probe(guest, f"corpse\t{replica}")
+                            fixture["guest_corpse"] = mirrored
+                            if mirrored.split("\t") == ["client", replica, "false", "true", identifier]:
+                                break
+                            await asyncio.sleep(.2)
                     return
                 limitation = "No mixed stag/doe cohort and matching Worker veto both verified"
             elif denials:
