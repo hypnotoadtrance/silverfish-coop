@@ -5122,6 +5122,8 @@ class Client:
         self.world_loot = native_world_loot.Projection()
         self.primary_scope = None
         self.next_primary_renewal = 0.0
+        self.primary_magazine = None
+        self.primary_magazine_attempt = None
         self.bag_projection_key = None
         self.stack_drop_projection = native_guest_drop_projection.Projection()
         self.stopping = False
@@ -5477,6 +5479,20 @@ class Client:
                 self.primary_scope = None
                 self.next_primary_renewal = now + 0.8
                 self.control.event("native_guest_primary_scope_rejected", reason=str(error))
+        if not scope:
+            self.primary_magazine = None
+        elif scope == self.primary_scope and kind in native_guest_weapon.FIRE_CLASSES:
+            rounds = equipment.get("rounds")
+            if type(rounds) is int and 0 <= rounds <= 4096:
+                magazine = self.host_session, self.zone_epoch, scope, rounds
+                attempt = magazine, self.gameplay_seen
+                if self.primary_magazine != magazine and self.primary_magazine_attempt != attempt:
+                    self.primary_magazine_attempt = attempt
+                    try:
+                        self.last_game = await self.bridge.command("native-guest-weapon-magazine", *scope, str(rounds), timeout=2)
+                        self.primary_magazine = magazine
+                    except (OSError, RuntimeError) as error:
+                        self.control.event("native_guest_magazine_projection_deferred", reason=str(error))
         for sequence, event_area, event_pawn, event_guid, event_kind, *extra in self.bridge.native_primary_input_requests():
             if sequence <= self.last_primary_intent:
                 continue

@@ -561,20 +561,19 @@ namespace
             name->GetPropertyValueInContainer(row) == expected;
     }
 
-    std::string_view magazine_payload_issue(const profiles::Profile* profile, const Context& context,
-                                            const Inventory& inventory, Unreal::UObject* actor)
+    bool ordinary_magazine_payload(const profiles::Profile* profile, const Context& context, const Inventory& inventory,
+                               Unreal::UObject* actor = nullptr)
     {
-        if (!profile || !profile->require_default_payload) return {};
+        if (!profile || !profile->require_default_payload) return true;
         auto* defaults = context.weapon->GetClassDefaultObject().Get();
-        if (!mounted_payload_matches(defaults, inventory)) return "guest_weapon_saved_round_payload_unqualified";
-        if (!actor) return {};
+        if (!mounted_payload_matches(defaults, inventory)) return false;
+        if (!actor) return true;
         // The approved receiver's own WeaponData_Struct contains the exact row handle
         // without underbarrel data. SetAmmoType resolves it only after the actor is equipped.
         auto* ammo = field<Unreal::FStructProperty>(actor, STR("AmmoType"));
         auto* type = find<Unreal::UScriptStruct>(ammo_type_path);
-        if (!profile->ammo || !type || !ammo || ammo->GetStruct().Get() != type)
-            return "guest_weapon_round_schema_unqualified";
-        if (!mounted_payload_matches(actor, inventory)) return "guest_weapon_equipped_round_payload_unqualified";
+        if (!profile->ammo || !type || !ammo || ammo->GetStruct().Get() != type ||
+            !mounted_payload_matches(actor, inventory)) return false;
         const void* expected = ammo->ContainerPtrToValuePtr<void>(defaults);
         if (profile->ammo != &profiles::nine_mm_ball)
         {
@@ -582,14 +581,7 @@ namespace
             const Unreal::FName row{profile->ammo->row, Unreal::FNAME_Find};
             expected = table && !row.IsNone() ? table->FindRowUnchecked(row) : nullptr;
         }
-        return expected && ammo->Identical(ammo->ContainerPtrToValuePtr<void>(actor), expected)
-            ? std::string_view{} : "guest_weapon_resolved_round_unqualified";
-    }
-
-    bool ordinary_magazine_payload(const profiles::Profile* profile, const Context& context, const Inventory& inventory,
-                                   Unreal::UObject* actor = nullptr)
-    {
-        return magazine_payload_issue(profile, context, inventory, actor).empty();
+        return expected && ammo->Identical(ammo->ContainerPtrToValuePtr<void>(actor), expected);
     }
 
     Unreal::UClass* qualified_weapon(Unreal::UObject* item_class)
@@ -1144,8 +1136,8 @@ namespace
         // empty trigger pull dispatches a click without entering the firing path.
         if (!disarm && before == 0 && stored == 0 && shot_cost->GetPropertyValueInContainer(actor) == 1)
             return report(false, "guest_weapon_preloaded_magazine_required", 0, 0);
-        if (const auto issue = magazine_payload_issue(stock_profile, context, inventory, actor); !issue.empty())
-            return report(false, issue);
+        if (!ordinary_magazine_payload(stock_profile, context, inventory, actor))
+            return report(false, "guest_weapon_payload_unqualified");
         const auto expected_projectiles = stock_profile ? stock_profile->ammo->projectile_count : 1;
         auto* projectile = disarm ? nullptr : stock_projectile(actor, expected_projectiles);
         const auto minimum = bolt || stock_profile ? 1 : 2;

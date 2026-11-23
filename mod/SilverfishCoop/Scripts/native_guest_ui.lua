@@ -4,6 +4,7 @@ local scope = require("native_save_scope")
 local creator = require("native_guest_creator")
 local appearance = require("native_avatar_character_view")
 local native_world = require("native_world")
+local guest_weapon = require("native_guest_weapon")
 local statics = "/Script/Engine.Default__GameplayStatics"
 local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
 local item_class = "/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C"
@@ -307,6 +308,9 @@ local function project(state, phase, character, path, raw)
         for index = 1, layout[key] do array[index] = positions[index] or {} end
         if count(array) ~= layout[key] then error("The stock co-op inventory layout failed readback", 0) end
     end
+    -- Magazine updates use the live equipment snapshot. A slower inventory
+    -- response must leave that count in place for the same held item.
+    guest_weapon.preserve_magazine(pawn, old, view.PlayerEquipment, layout.selected)
     for _, name in pairs(slots) do old[name] = view[name] end
     old.PlayerEquipIndex = layout.selected
     if old.PlayerEquipIndex ~= layout.selected then error("The stock co-op equipped slot failed readback", 0) end

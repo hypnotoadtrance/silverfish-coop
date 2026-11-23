@@ -1,5 +1,6 @@
 local guest_weapon = {}
 local guest_save = require("guest_save")
+local save_scope = require("native_save_scope")
 local weapon_profiles = require("guest_weapon_registry")
 local cqc = require("native_enemy_loot_registry")
 
@@ -30,6 +31,19 @@ local function same(left, right)
     return left and right and left:IsValid() and right:IsValid() and left:GetAddress() == right:GetAddress()
 end
 
+local function item_identity(row)
+    local identity = row and row[guid_field]
+    if not identity then return end
+    local words = {}
+    for _, name in ipairs({"A", "B", "C", "D"}) do
+        local word = math.tointeger(identity[name])
+        if not word or word < -0x80000000 or word > 0xffffffff then return end
+        words[#words + 1] = word & 0xffffffff
+    end
+    local guid = string.format("%08X%08X%08X%08X", table.unpack(words))
+    return guid:find("[^0]") and guid or nil
+end
+
 local function equipped_guid(pawn, save, world, area)
     local held = pawn.EquipedItem
     if not held or not held:IsValid() then return nil end
@@ -41,32 +55,62 @@ local function equipped_guid(pawn, save, world, area)
     if not index or not count or index < 0 or index >= count or count > 4096 then return nil end
     local row = equipment[index + 1]
     local class = row and row[class_field]
-    local identity = row and row[guid_field]
-    if not class or not class:IsValid() or class:GetAddress() ~= held_class:GetAddress() or not identity then return nil end
-    local words = {}
-    for _, name in ipairs({"A", "B", "C", "D"}) do
-        local word = math.tointeger(identity[name])
-        if not word or word < -0x80000000 or word > 0xffffffff then return nil end
-        words[#words + 1] = word & 0xffffffff
-    end
-    local guid = string.format("%08X%08X%08X%08X", table.unpack(words))
+    if not same(class, held_class) then return end
+    local guid = item_identity(row)
+    if not guid then return end
     local class_name = held_class:GetFullName():match("^%S+ (%S+)$")
     if world and (class_name == blowtorch_path or class_name == crowbar_path or (class_name == camera_path and area == camera_map)
         or (class_name == old_pipe_path and cqc[area] ~= nil))
         and held:HasAuthority() and not held:IsActorBeingDestroyed()
         and same(held:GetWorld(), world) and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
         and same(held.User, pawn) and held.HeldByPlayer == true and pawn.IsWeaponBlocked == false then
-        if class_name == camera_path then return guid:find("[^0]") and guid or nil, "camera" end
+        if class_name == camera_path then return guid, "camera" end
         if class_name == blowtorch_path and math.type(held.Ammo) == "integer" and 0 <= held.Ammo and held.Ammo <= 3
-            and held.Ammo == row[ammo_field] then return guid:find("[^0]") and guid or nil, "blowtorch" end
+            and held.Ammo == row[ammo_field] then return guid, "blowtorch" end
         if (class_name == old_pipe_path or class_name == crowbar_path) and row[ammo_field] == -1 and held.Ammo == -1 then
-            return guid:find("[^0]") and guid or nil, class_name == crowbar_path and "crowbar" or "old-pipe"
+            return guid, class_name == crowbar_path and "crowbar" or "old-pipe"
         end
     end
-    return guid:find("[^0]") and guid or nil, weapon_profiles.kinds[class_name]
+    return guid, weapon_profiles.kinds[class_name], row
+end
+
+local function valid_rounds(weapon, amount)
+    return math.type(amount) == "integer" and math.type(weapon.MagSize) == "integer"
+        and 0 <= amount and amount <= weapon.MagSize and weapon.MagSize <= 4096
+end
+
+local function project_magazine(fields, state, phase)
+    local area, name, guid, kind, rounds = fields[3], fields[4], fields[5], fields[6], tonumber(fields[7])
+    local save, pawn = save_scope.bind_guest(state, phase)
+    if #fields ~= 7 or not save or state.map ~= area or pawn:GetFullName() ~= name then
+        error("The co-op magazine belongs to another guest or visit", 0)
+    end
+    local selected, actual_kind, row = equipped_guid(pawn, save)
+    local held = pawn.EquipedItem
+    if not weapon_profiles.paths[kind] or selected ~= guid or actual_kind ~= kind or not row
+        or not same(held:GetWorld(), state.world) or not same(held.User, pawn) or not same(held.Player_Ref, pawn)
+        or held:IsActorBeingDestroyed() or not valid_rounds(held, rounds) then
+        error("The co-op magazine no longer matches the selected weapon", 0)
+    end
+    if held.Ammo ~= rounds then
+        held.Ammo = rounds
+        held:Update_Mag()
+    end
+    if row[ammo_field] ~= rounds then row[ammo_field] = rounds end
+    return "stock co-op magazine projected"
+end
+
+function guest_weapon.preserve_magazine(pawn, save, projected, selected_slot)
+    if save.PlayerEquipIndex ~= selected_slot then return end
+    local guid, kind, row = equipped_guid(pawn, save)
+    local item = guid and row and weapon_profiles.paths[kind] and projected[selected_slot + 1]
+    if item and item_identity(item) == guid and same(item[class_field], row[class_field]) then
+        item[ammo_field] = row[ammo_field]
+    end
 end
 
 function guest_weapon.command(fields, state, phase)
+    if fields[2] == "native-guest-weapon-magazine" then return project_magazine(fields, state, phase) end
     local action = fields[2]:match("^native%-guest%-weapon%-([a-z%-]+)$")
     if not action then return end
     local operations = {
@@ -195,12 +239,19 @@ function guest_weapon.rows(state, phase, status_row)
     end
     if not enabled or phase ~= "hosting" then return rows end
     for _, detail in ipairs(state.guests) do
-        local ok, guid, kind = pcall(function()
+        local ok, guid, kind, rounds = pcall(function()
             local pawn, save = guest_save.exact_item_context(state, phase, detail.name)
-            if pawn and save then return equipped_guid(pawn, save, state.world, state.map) end
+            if not pawn or not save then return end
+            local id, profile, row = equipped_guid(pawn, save, state.world, state.map)
+            local held = row and pawn.EquipedItem
+            local amount = row and row[ammo_field]
+            if held and weapon_profiles.paths[profile] and amount == held.Ammo and valid_rounds(held, amount) then
+                return id, profile, amount
+            end
+            return id, profile
         end)
         if ok and guid and kind then
-            rows[#rows + 1] = status_row("native-guest-equipped-weapon", detail.name, guid, kind)
+            rows[#rows + 1] = status_row("native-guest-equipped-weapon", detail.name, guid, kind, rounds or "-")
         end
     end
     local row = observation

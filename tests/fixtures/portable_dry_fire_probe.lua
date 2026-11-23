@@ -10,6 +10,7 @@ local pistol_path = "/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
+local payload = "DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"
 local slot = 2
 local last, local_pawn, peer, failure
 local clicks, projectiles, shot_sounds, muzzle_flashes = {}, 0, 0, 0
@@ -81,12 +82,17 @@ local function seed(pawn, rounds)
     assert(same(local_pawn.Save, local_pawn:GetWorld().OwningGameInstance.SaveSlot_Ref)
         and (same(pawn, local_pawn) or not same(save, local_pawn.Save)), "fixture must use the co-op save and detached peer")
     local output = {}
-    asset(factory):ItemActorToStruct(asset(pistol_path):GetCDO(), pawn, output)
+    local defaults = asset(pistol_path):GetCDO()
+    asset(factory):ItemActorToStruct(defaults, pawn, output)
     local row = output.Item or output
     row[ammo] = rounds
     local guid = identify(row)
     assert(#guid == 32 and guid ~= string.rep("0", 32), "stock pistol did not receive a GUID")
     save.PlayerEquipment[slot] = row
+    -- A reflected out table omits native InstancedStruct storage. Give the real
+    -- inventory row the owning class's stock data through an Unreal struct copy.
+    assert(type(defaults.DataStruct) == "userdata", "stock weapon payload is not backed by Unreal storage")
+    save.PlayerEquipment[slot][payload] = defaults.DataStruct
     return guid
 end
 

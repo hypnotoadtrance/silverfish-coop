@@ -2042,8 +2042,11 @@ class Bridge:
                       and (selection := _held_input_sequence(fields[3]))):
                     data["native_guest_equipment_selection"] = {"map": fields[1], "pawn": fields[2],
                                                                   "sequence": selection, "guid": fields[4]}
-                elif fields[0] == "native-guest-equipped-weapon" and len(fields) == 4 and fields[3] in PRIMARY_KINDS:
-                    data.setdefault("native_guest_equipped_weapons", {})[fields[1]] = {"guid": fields[2], "kind": fields[3]}
+                elif fields[0] == "native-guest-equipped-weapon" and len(fields) in (4, 5) and fields[3] in PRIMARY_KINDS:
+                    equipped = {"guid": fields[2], "kind": fields[3]}
+                    if len(fields) == 5 and re.fullmatch(r"[0-9]{1,4}", fields[4]) and int(fields[4]) <= 4096:
+                        equipped["rounds"] = int(fields[4])
+                    data.setdefault("native_guest_equipped_weapons", {})[fields[1]] = equipped
                 elif fields[0] == "native-guest-primary-fixture" and len(fields) == 6:
                     data["native_guest_primary_fixture"] = {"map": fields[1], "pawn": fields[2], "guid": fields[3],
                                                             "sequence": int(fields[4]), "stock_wrappers": int(fields[5])}
