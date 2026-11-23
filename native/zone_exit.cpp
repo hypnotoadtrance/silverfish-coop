@@ -71,10 +71,7 @@ namespace
     constexpr int countdown_signal_return = 15;
     constexpr auto ttl = std::chrono::seconds(2);
     constexpr auto approach_ttl = std::chrono::milliseconds(850);
-    constexpr auto crossing_ttl = std::chrono::seconds(8);
     constexpr double approach_displacement_squared = 800.0 * 800.0;
-    constexpr double crossing_displacement_squared = 2400.0 * 2400.0;
-    constexpr double retreat_allowance = 60.0;
     constexpr double max_distance_squared = 1500.0 * 1500.0;
     constexpr double max_interaction_squared = 350.0 * 350.0;
     constexpr std::size_t max_remote_players = 4;
@@ -253,8 +250,6 @@ namespace
     {
         Unreal::FWeakObjectPtr actor;
         const Authored::Route* route{};
-        Point approach, crossed;
-        Clock::time_point expires{};
         std::int64_t ticket{};
     };
 
@@ -836,8 +831,7 @@ namespace
     {
         const auto delta = at - scope.approach.position;
         return scope.approach.actor.Get() == actor && Clock::now() < scope.approach.expires &&
-            delta.finite() && delta.dot(delta) <= approach_displacement_squared &&
-            allows_distance_from(scope, scope.approach.position);
+            delta.finite() && delta.dot(delta) <= approach_displacement_squared;
     }
 
     bool crossing_current(Unreal::UObject* local)
@@ -845,20 +839,12 @@ namespace
         const auto& crossing = scope.crossing;
         auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
         auto* exit = crossing.actor.Get();
-        // Source checkpointing can pause the wall heartbeat. The consumed stock overlap
-        // still has its own deadline and must keep the exact world, pawn, exit and live roster.
-        if (!scope.request_latched || !crossing.ticket || Clock::now() >= crossing.expires || !crossing.route ||
-            !world || !scope.host || !live_object(local) || actor_world(local) != world || !is_local_pawn(local) ||
-            scope.role->GetPropertyValueInContainer(local) != 3 || game_roster_failure(scope) ||
-            !is_expanded_exit(scope, exit, world, *crossing.route) || !matches_expanded_exit(exit, *crossing.route))
-            return false;
-        const auto through = crossing.crossed - crossing.approach;
-        const auto moved = actor_position(local) - crossing.crossed;
-        const auto through_squared = through.dot(through);
-        return through.finite() && through_squared >= 1.0 && moved.finite() &&
-            moved.dot(moved) <= crossing_displacement_squared &&
-            moved.dot(through) >= -retreat_allowance * std::sqrt(through_squared) &&
-            allows_distance_from(scope, crossing.approach);
+        // The exact stock overlap commits the route. Keep that decision while the
+        // source checkpoints, provided the world, pawn, exit and live roster still match.
+        return scope.request_latched && crossing.ticket && crossing.route && world && scope.host &&
+            live_object(local) && actor_world(local) == world && is_local_pawn(local) &&
+            scope.role->GetPropertyValueInContainer(local) == 3 && !game_roster_failure(scope) &&
+            is_expanded_exit(scope, exit, world, *crossing.route) && matches_expanded_exit(exit, *crossing.route);
     }
 
     int lua_exit_approach(const Lua& lua)
@@ -1150,14 +1136,11 @@ namespace
             scope.event = "destination_mismatch";
             return;
         }
-        if (crossed_open_wall)
+        if (authored)
         {
             if (crossing_sequence >= (std::int64_t{1} << 53) - 1) return;
             scope.crossing.actor = context;
             scope.crossing.route = authored;
-            scope.crossing.approach = scope.approach.position;
-            scope.crossing.crossed = crossed;
-            scope.crossing.expires = Clock::now() + crossing_ttl;
             scope.crossing.ticket = ++crossing_sequence;
         }
         scope.approach = {};
@@ -1258,21 +1241,6 @@ namespace
         const auto* route = scope.authored_request;
         scope.authored_request = nullptr;
         auto* local = scope.local.Get();
-        if (scope.crossing.ticket && live_object(local))
-        {
-            // A swept move can report overlap before updating the actor's transform.
-            const auto original = scope.crossing.crossed - scope.crossing.approach;
-            if (original.dot(original) < 1.0)
-            {
-                const auto at = actor_position(local);
-                const auto through = at - scope.crossing.approach;
-                const auto through_squared = through.dot(through);
-                if (through.finite() && through_squared >= 1.0 && through_squared <= approach_displacement_squared)
-                    scope.crossing.crossed = at;
-                else
-                    scope.crossing = {};
-            }
-        }
         if (scope.crossing.ticket ? !crossing_current(local) : !active_host(local) || !allows_distance(scope, local))
         {
             scope.request_latched = false;
