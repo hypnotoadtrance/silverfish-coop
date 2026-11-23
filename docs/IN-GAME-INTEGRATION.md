@@ -348,6 +348,8 @@ A second muted pair used the stock warehouse worker `NPC_Survivor_Worker_C_2` wi
 
 An extended headless fight recorded guest shots after taking damage and later rejected an attempt before sending it to the host. The stock muzzle obstruction trace can temporarily block the weapon. RC `bf42782` preserves the authenticated equipment binding across this block and drops pending taps during it. A headless fixture held the stock weapon block across a service renewal. The blocked trigger sent no shot, and the guest then fired one round from the same seven-round magazine with the same item ID. The worker retaliated against the guest. The same installed candidate also showed matching ragdolls after a staged State rifle shot killed a Bandit. Sustained two-PC fights remain open. [Guest weapon recovery test](../tests/live_portable_title_smoke.py)
 
+RC `cbd83b7` carries death presentation on the existing host-owned turret marker. It sends a brief explosion cue and then the remaining smoke phase. In an installed Direct IP trial with a staged lethal hit, each seat called the stock blast particle, its spatial sound, and the smoke attachment once. Both guns showed the burned material. The damaging fire actor stayed on the host. Foreground effects, the lingering flame and its audio, and hot-join during the smoke phase still need playtesting. [Turret death test](../tests/live_portable_title_smoke.py)
+
 ### Steam hosting options
 
 - The in-game Host flow offers a transport choice. Direct IP uses the configured port and address. Steam Networking opens a Steam lobby when the campaign is ready.
