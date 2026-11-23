@@ -71,21 +71,24 @@ local function exact_row(save, guid, quantity, class, single)
         or math.type(total) ~= "integer" or total < 1 or total > 8194 or (single and total ~= 1) then
         return
     end
-    local kept, found, seen = {}, nil, 0
+    local kept, found, worn, seen = {}, nil, nil, 0
     for line in rows:gmatch("[^\n]+") do
         local id, source, asset, count, important, droppable =
             line:match("^([0-9A-F]+)\t([a-z]+)\t%d+\t([^\t]+)\t(%d+)\t[01]\t([01])\t[01]\t([01])$")
         if not item_guid(id) then return end
         seen = seen + 1
         if id == guid then
-            if found or source ~= "backpack" or tonumber(count) ~= quantity or important ~= "0"
+            local slot = source == "helmet" and 8 or source == "armor" and 9 or nil
+            if found or (source ~= "backpack" and (single or not slot or quantity ~= 1
+                    or type(SilverfishDebitNativeGuestWornDrop) ~= "function"))
+                or tonumber(count) ~= quantity or important ~= "0"
                 or droppable ~= "1" or (class and class ~= asset) then return end
-            found = asset
+            found, worn = asset, slot
         else
             kept[#kept + 1] = id
         end
     end
-    if found and seen == total then return found, table.concat(kept, ","), total - 1 end
+    if found and seen == total then return found, table.concat(kept, ","), total - 1, worn end
 end
 
 local function clone_save(save)
@@ -95,7 +98,7 @@ local function clone_save(save)
     end
 end
 
-local function debit_pending(state, phase, pawn, save, frozen, slot, guid, count, class, kept, kept_count)
+local function debit_pending(state, phase, pawn, save, frozen, slot, guid, count, class, kept, kept_count, worn)
     local instance = host_save.canonical_host(state, phase)
     if not valid(instance) then error("native_guest_stack_drop_exact_host_unavailable", 0) end
     local projected = clone_save(save)
@@ -107,6 +110,18 @@ local function debit_pending(state, phase, pawn, save, frozen, slot, guid, count
         or dropped_total ~= 1 or discarded_total ~= 0 or not exact_row(pending, guid, count, class, true) then
         escrow.release_escrow(slot)
         error("native_guest_stack_drop_pending_payload_unavailable", 0)
+    end
+    if worn then
+        -- Use the same stock stats and disguise changes as Unequip while the
+        -- detached payload retains the exact item for the physical drop.
+        local applied, status, actual_slot, actual_class = SilverfishDebitNativeGuestWornDrop(
+            pawn:GetAddress(), save:GetAddress(), guid, worn)
+        if applied == true and status == "debited" and actual_slot == worn and actual_class == class then return end
+        if applied == false and type(status) == "string" and status:match("^native_guest_armor_") then
+            escrow.release_escrow(slot)
+            error(status, 0)
+        end
+        error("mutation_unverified_native_guest_stack_drop_worn_debit", 0)
     end
     local applied, status = SilverfishApplyPreparedNativeInventory(
         frozen:GetAddress(), projected:GetAddress(), save:GetAddress(), pawn:GetAddress())
@@ -208,13 +223,14 @@ function stack_drop.command(fields, state, phase)
     if memory then frozen = clone_save(save)
     elseif valid(statics) then frozen = statics:LoadGameFromSlot(slot, 0) end
     if not valid(frozen) then error("native_guest_stack_drop_frozen_frame_unavailable", 0) end
-    local expected_class, kept, kept_count
+    local expected_class, kept, kept_count, worn
     if memory then
-        expected_class, kept, kept_count = exact_row(frozen, guid, count, nil, false)
+        expected_class, kept, kept_count, worn = exact_row(frozen, guid, count, nil, false)
         if not expected_class then error("native_guest_stack_drop_stock_item_row_unqualified", 0) end
     end
+    local arguments = {pawn:GetAddress(), save:GetAddress(), frozen:GetAddress(), guid, count, worn}
     local called, ok, status, actor, new_guid, actual_count, x, y, z, class = pcall(SilverfishProbeNativeGuestStackDrop,
-        pawn:GetAddress(), save:GetAddress(), frozen:GetAddress(), guid, count)
+        table.unpack(arguments, 1, worn and 6 or 5))
     if not called or type(ok) ~= "boolean" or type(status) ~= "string" or not status:match("^[a-z0-9_]+$") then
         error("mutation_unverified_native_guest_stack_drop_receipt", 0)
     end
@@ -234,7 +250,7 @@ function stack_drop.command(fields, state, phase)
         end
         if memory then
             if class ~= expected_class then error("native_guest_stack_drop_stock_item_row_unqualified", 0) end
-            debit_pending(state, phase, pawn, save, frozen, slot, guid, count, class, kept, kept_count)
+            debit_pending(state, phase, pawn, save, frozen, slot, guid, count, class, kept, kept_count, worn)
         end
     end
     observation = {command = command, map = state.map, pawn = name, slot = slot, guid = guid, count = count, ok = ok, status = status,

@@ -16,7 +16,7 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 
 | Area | Known issue |
 | --- | --- |
-| Guest worn gear | Guests reported being unable to remove equipped gear. A muted Direct IP test on `rc-d571500` verified that **Unequip** on a helmet and dragging chest armor to the backpack both returned the exact item. Dropping worn gear directly into the world remains open for both slots. |
+| Guest worn gear | Guests reported being unable to remove or drop equipped gear. In a muted Direct IP test on `rc-87c577c`, a guest dropped a helmet through the stock **Drop** menu and dragged chest armor into **Nearby Items**. Both peers saw each drop, and the host picked up the exact items using stock Interact. Returning gear to the guest backpack also passed. Retest the two slots in a foreground session. |
 | Guest medical items | Some medical items still fail to apply, or fail before they are consumed. |
 | Guest weapon unloading | A guest reported that **Take Ammo** was missing from the context menu for a loaded gun. In a muted Direct IP test on `rc-d571500`, the stock menu showed **Take Ammo** for a 9mm Revolver in the backpack, a .50-cal Break Action in an inactive quick slot, and an Obrez Cut-Down Rifle in both the backpack and the active slot. Each gun stayed in place. The active Obrez returned an incendiary round to the guest's backpack, and R loaded it again. Two-PC playtesting and broader gun and ammo coverage are still pending. |
 | Downed controls | In published builds, a player downed while aiming can stay zoomed in. The development fix calls the game's aim-cancel routine. An isolated two-player test verified that the guest stopped aiming and crouched when downed. |

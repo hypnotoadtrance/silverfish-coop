@@ -194,20 +194,30 @@ namespace
             return result;
         }
 
-        const void* exact_row(U::UObject* save, const Guid& id) const
+        const void* exact_row(U::UObject* save, const Guid& id, int worn_slot) const
         {
             U::FScriptArrayHelper bag(pack, pack->ContainerPtrToValuePtr<void>(save));
             U::FScriptArrayHelper belt(equipment, equipment->ContainerPtrToValuePtr<void>(save));
-            if (bag.Num() < 1 || bag.Num() > max_items || belt.Num() < 0 || belt.Num() > max_items ||
-                identity(armor->ContainerPtrToValuePtr<void>(save)) == id ||
-                identity(helmet->ContainerPtrToValuePtr<void>(save)) == id) return nullptr;
+            if (bag.Num() < 0 || bag.Num() > max_items || belt.Num() < 0 || belt.Num() > max_items) return nullptr;
             for (int i = 0; i < belt.Num(); ++i)
                 if (identity(belt.GetRawPtr(i)) == id) return nullptr;
             const void* result{};
+            const auto* head = helmet->ContainerPtrToValuePtr<void>(save);
+            const auto* chest = armor->ContainerPtrToValuePtr<void>(save);
+            if (identity(head) == id)
+            {
+                if (worn_slot != 8) return nullptr;
+                result = head;
+            }
+            if (identity(chest) == id)
+            {
+                if (worn_slot != 9) return nullptr;
+                result = chest;
+            }
             for (int i = 0; i < bag.Num(); ++i)
                 if (const auto* entry = bag.GetRawPtr(i); identity(entry) == id)
                 {
-                    if (result) return nullptr;
+                    if (result || worn_slot >= 0) return nullptr;
                     result = entry;
                 }
             return result;
@@ -477,24 +487,29 @@ namespace
 
     int probe(const Lua& lua)
     {
-        if (!enabled() || !U::IsInGameThreadRaw() || scope.active || lua.get_stack_size() != 5 ||
+        const auto arguments = lua.get_stack_size();
+        if (!enabled() || !U::IsInGameThreadRaw() || scope.active ||
+            (arguments != 5 && (arguments != 6 || !lua.is_integer(6))) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3) || !lua.is_string(4) || !lua.is_integer(5))
             return reply(lua, false, "native_guest_stack_drop_scope_unavailable");
+        const auto worn_slot = arguments == 6 ? lua.get_integer(6) : -1;
         const auto pawn = lua.get_integer(), save = lua.get_integer(), frozen = lua.get_integer();
         const auto id = parse_guid(lua.get_string());
         const auto count = lua.get_integer();
         if (pawn <= 0 || save <= 0 || frozen <= 0 || frozen == save ||
-            id == Guid{} || count < 1 || count > max_rounds)
+            id == Guid{} || count < 1 || count > max_rounds ||
+            (arguments == 6 && ((worn_slot != 8 && worn_slot != 9) || count != 1)))
             return reply(lua, false, "native_guest_stack_drop_arguments_unqualified");
         Inventory inventory;
         if (!inventory.bound()) return reply(lua, false, "native_guest_stack_drop_inventory_schema");
         const auto owner = owners(pawn, save, frozen, inventory);
         if (!owner.pawn) return reply(lua, false, "native_guest_stack_drop_exact_owner_unavailable");
-        const auto* row = inventory.exact_row(owner.frozen, id);
+        const auto* row = inventory.exact_row(owner.frozen, id, static_cast<int>(worn_slot));
         namespace items = silverfish::native_guest_drop_items;
         auto* type = U::Cast<U::UClass>(object_value(inventory.klass, row));
         const auto stacks = silverfish::drop_item_class::stacks(type);
-        if (!stacks || !inventory.same_row(row, inventory.exact_row(owner.live_save, id)) ||
+        if (!stacks || (worn_slot >= 0 && *stacks) ||
+            !inventory.same_row(row, inventory.exact_row(owner.live_save, id, static_cast<int>(worn_slot))) ||
             inventory.never_drop->GetPropertyValueInContainer(row))
             return reply(lua, false, "native_guest_stack_drop_stock_item_row_unqualified");
         const bool stack = *stacks;

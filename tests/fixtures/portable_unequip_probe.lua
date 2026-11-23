@@ -147,13 +147,14 @@ local function unequip(pawn, index, guid, repeat_count)
     if menu:IsVisible() then manager:CloseContextMenu() end
 end
 
-local function drag(pawn, index, guid, cancel)
+local function drag(pawn, index, guid, cancel, to_floor)
     local screen, manager, card = equipped_card(pawn, index, guid)
     manager.HoveredCard = card
     manager:InitiateItemTake()
     manager:FinalTakeItem()
     assert(manager.HoldingItem == true and identity(manager.HeldItem) == guid, "stock cursor did not hold the exact item")
-    if cancel then manager:ReturnItem(manager.HeldItem, {}) else manager:InsertItem(screen.BackpackPanel, -1) end
+    if cancel then manager:ReturnItem(manager.HeldItem, {})
+    else manager:InsertItem(to_floor and screen.FloorPanel or screen.BackpackPanel, -1) end
     assert(manager.HoldingItem == false, "stock equipment drag retained the cursor item")
 end
 
@@ -344,6 +345,21 @@ local function run(action, argument)
         local prior = worn_state(pawn)
         if action == "guest-remove-helmet" then unequip(pawn, 9, argument, 2) else drag(pawn, 10, argument, false) end
         assert(worn_state(pawn) == prior, "the stock guest removed worn equipment before authority settled")
+        return prior
+    elseif action == "guest-drop-helmet" or action == "guest-drop-armor" then
+        assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
+        local prior = worn_state(pawn)
+        if action == "guest-drop-helmet" then
+            local _, manager, card = equipped_card(pawn, 9, argument)
+            manager:OpenContextMenu(card)
+            local menu = manager.ItemContextMenu
+            assert(same(menu["Item Card"], card) and valid(menu.Button_Drop) and menu.Button_Drop:IsVisible(),
+                "fixture stock Drop button is not available for worn gear")
+            menu:BndEvt__ItemContextMenu_Button_Drop_K2Node_ComponentBoundEvent_6_Pressed__DelegateSignature()
+        else
+            drag(pawn, 10, argument, false, true)
+        end
+        assert(worn_state(pawn) == prior, "the stock guest dropped worn equipment before authority settled")
         return prior
     elseif action == "guest-read" then
         assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")

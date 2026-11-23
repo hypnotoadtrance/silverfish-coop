@@ -830,7 +830,7 @@ namespace
     }
 
     int apply(const Lua& lua, const Scope& scope, const Inventory& inventory, const Guid& id,
-              bool restore_only, bool head, bool remove)
+              bool restore_only, bool head, bool remove, bool drop)
     {
         int index{};
         bool worn{};
@@ -872,7 +872,7 @@ namespace
         auto* rounds = remove ? field<U::FIntProperty>(inventory.item->GetStruct().Get(),
             STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788")) : nullptr;
         const auto returned_rounds = rounds ? rounds->GetPropertyValueInContainer(approved) : -2;
-        if (remove && (current.Num() >= max_items || returned_rounds < -1))
+        if (remove && !drop && (current.Num() >= max_items || returned_rounds < -1))
             return report(lua, false, "native_guest_armor_removed_item_unqualified");
         const ArmorProfile* previous{};
         Guid replaced{};
@@ -935,7 +935,7 @@ namespace
         proof.replaced = replaced;
         proof.torso = torso;
         U::FScriptArrayHelper prepared(inventory.backpack, next_bag.value);
-        if (remove)
+        if (remove && !drop)
         {
             auto* returned = prepared.GetRawPtr(prepared.AddValue());
             inventory.item->CopyCompleteValue(returned, active);
@@ -967,10 +967,14 @@ namespace
         const auto matches = [&] {
             int restored_index{};
             bool restored_worn{};
-            const bool destination_matches = remove
-                ? inventory.locate(scope.guest, id, restored_index, restored_worn, head) &&
-                  !restored_worn && restored_index == proof.before
-                : exact_worn(id, head);
+            bool destination_matches;
+            if (remove)
+            {
+                const auto destination_index = drop ? -1 : proof.before;
+                destination_matches = inventory.locate(scope.guest, id, restored_index, restored_worn, head) &&
+                    !restored_worn && restored_index == destination_index;
+            }
+            else destination_matches = exact_worn(id, head);
             return destination_matches &&
                 (!previous || (inventory.locate(scope.guest, replaced, restored_index, restored_worn, head) &&
                                !restored_worn && restored_index == index)) &&
@@ -983,7 +987,7 @@ namespace
             if (remove)
             {
                 lua.set_bool(true);
-                lua.set_string("unequipped");
+                lua.set_string(drop ? "debited" : "unequipped");
                 lua.set_integer(head ? 8 : 9);
                 lua.set_string(RC::to_utf8_string(selected->path));
                 lua.set_integer(returned_rounds);
@@ -1035,12 +1039,13 @@ namespace
         return report(lua, false, rolled_back ? "native_guest_armor_rolled_back" : "mutation_unverified_guest_armor_equip", proof);
     }
 
-    enum class Operation { Equip, Project, Seed, EquipHelmet, ProjectHelmet, Unequip };
+    enum class Operation { Equip, Project, Seed, EquipHelmet, ProjectHelmet, Unequip, Drop };
 
     template <Operation operation> int run(const Lua& lua)
     {
         constexpr bool seed_operation = operation == Operation::Seed;
-        constexpr bool remove = operation == Operation::Unequip;
+        constexpr bool drop = operation == Operation::Drop;
+        constexpr bool remove = operation == Operation::Unequip || drop;
         const auto arguments = lua.get_stack_size();
         const bool named_seed = seed_operation && arguments == 4 && lua.is_string(4);
         const bool removal_slot = remove && arguments == 4 && lua.is_integer(4);
@@ -1089,7 +1094,7 @@ namespace
             if (!defaults) return report(lua, false, "native_guest_armor_stock_schema_unqualified");
             return seed(lua, scope, inventory, *profile, defaults, guid);
         }
-        return apply(lua, scope, inventory, guid, project, head, remove);
+        return apply(lua, scope, inventory, guid, project, head, remove, drop);
     }
 }
 
@@ -1121,5 +1126,6 @@ void silverfish::native_guest_armor::register_lua(RC::LuaMadeSimple::Lua& lua)
     lua.register_function("SilverfishEquipNativeGuestHelmet", run<Operation::EquipHelmet>);
     lua.register_function("SilverfishProjectNativeGuestHelmet", run<Operation::ProjectHelmet>);
     lua.register_function("SilverfishUnequipNativeGuestArmor", run<Operation::Unequip>);
+    lua.register_function("SilverfishDebitNativeGuestWornDrop", run<Operation::Drop>);
     if (fixtures()) lua.register_function("SilverfishSeedNativeGuestArmor", run<Operation::Seed>);
 }
