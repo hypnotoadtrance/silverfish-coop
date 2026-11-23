@@ -4502,7 +4502,7 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
     save_directory = directory / "save"
     if resume_existing and save_directory.resolve(strict=True) != save_directory:
         raise ValueError("The selected campaign save directory has changed")
-    with Control(directory / "run") as control, CampaignStore(
+    with Control(directory / "run", buffer_events=resident_engine is not None and not headless) as control, CampaignStore(
         save_directory, verify_world=verify_travel_checkpoint,
         verify_checkpoint=lambda checkpoint: native_host_save.verify_checkpoint(profile, checkpoint),
         require_existing=resume_existing,
@@ -6430,7 +6430,7 @@ async def join_game(work: Path, directory: Path, invitation: Path | direct_ip.Co
         except ValueError:
             raise ValueError("Supply a character ID from the host catalog") from None
         invite["character_id"] = character_id
-    with Control(directory / "run") as control:
+    with Control(directory / "run", buffer_events=resident_engine is not None and not headless) as control:
         process = transport = embedded = client = None
         result = "stopped"
         try:

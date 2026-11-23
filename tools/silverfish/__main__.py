@@ -337,7 +337,18 @@ def _repository_run(opts) -> Path:
     return select_run(opts.work, "clients", opts.profile)
 
 
-def _events(directory: Path, limit: int) -> dict:
+async def _events(directory: Path, limit: int) -> dict:
+    try:
+        current = status(directory)
+    except FileNotFoundError:
+        current = {}
+    if current.get("event_source") == "memory":
+        if current.get("active") and not current["stale"] and current.get("state") in {"hosting", "connected"}:
+            result = await submit(directory, "events-recent", tail=limit)
+            if result.get("ok") is not True:
+                raise RuntimeError("The active controller could not return its recent events")
+            return {"schema": 1, "events": result["events"]}
+        return {"schema": 1, "events": current.get("recent_events", [])[-limit:]}
     with (directory / "events.jsonl").open(encoding="utf-8") as file:
         rows = deque(file, maxlen=limit)
     return {"schema": 1, "events": [json.loads(line) for line in rows if line.endswith("\n")]}
@@ -539,7 +550,7 @@ async def execute(opts):
                 "zone_epoch": current.get("zone_epoch") if live else None, "live": live,
                 "routes": [asdict(route) for route in AUTHORED_ROUTES if route.source == area]}
     if operation == "events":
-        return _events(directory, opts.tail)
+        return await _events(directory, opts.tail)
     if opts.kind is not None:
         valid_kinds = {"native-guest-weapon-seed": SEED_KINDS, "native-guest-armor-fixture": ARMOR_SEED_PROFILES}
         if opts.kind not in valid_kinds.get(opts.action, ()):

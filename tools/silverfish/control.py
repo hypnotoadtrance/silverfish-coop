@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import json
 import msvcrt
 import os
@@ -14,6 +15,8 @@ import uuid
 from .runtime import read_json, write_json
 
 NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
+_RECENT_EVENTS = 64
+_EVENT_BYTES = 8_192
 
 
 def select_run(work: Path, kind: str, name: str) -> Path:
@@ -27,12 +30,13 @@ def select_run(work: Path, kind: str, name: str) -> Path:
 
 
 class Control:
-    def __init__(self, run: Path):
+    def __init__(self, run: Path, *, buffer_events: bool = False):
         self.run = run
         self.generation = uuid.uuid4().hex
         self.started = time.time()
         self._gameplay_status_key = None
         self._next_gameplay_status = 0.0
+        self._recent_events: deque[str] | None = deque(maxlen=_RECENT_EVENTS) if buffer_events else None
         run.mkdir(parents=True, exist_ok=True)
         self._lock = (run / "control.lock").open("a+b")
         try:
@@ -62,6 +66,10 @@ class Control:
         return True
 
     def status(self, **fields) -> None:
+        if self._recent_events is not None:
+            fields["event_source"] = "memory"
+            if fields.get("active") is False:
+                fields["recent_events"] = self._event_tail(_RECENT_EVENTS)
         write_json(self.run / "status.json", {
             "schema": 1, "generation": self.generation,
             "pid": os.getpid(), "started_unix": self.started, "updated_unix": time.time(),
@@ -69,12 +77,22 @@ class Control:
         })
 
     def event(self, event: str, **fields) -> None:
-        encoded = json.dumps({
+        base = {
             "schema": 1, "time_unix": time.time(), "generation": self.generation,
-            "event": event, **fields,
-        }, ensure_ascii=True, allow_nan=False)
+            "event": event,
+        }
+        encoded = json.dumps({**base, **fields}, ensure_ascii=True, allow_nan=False)
+        if self._recent_events is not None:
+            if len(encoded) > _EVENT_BYTES:
+                encoded = json.dumps({**base, "details_omitted": True}, ensure_ascii=True)
+            self._recent_events.append(encoded)
+            return
         with (self.run / "events.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(encoded + "\n")
+
+    def _event_tail(self, limit: int) -> list[dict]:
+        assert self._recent_events is not None
+        return [json.loads(line) for line in list(self._recent_events)[-limit:]]
 
     def requests(self):
         pending = self.run / "requests"
@@ -90,6 +108,13 @@ class Control:
                 continue
             if data.get("generation") != self.generation:
                 self.respond(path, False, error="session_changed")
+                continue
+            if data.get("action") == "events-recent" and self._recent_events is not None:
+                limit = data.get("tail")
+                if type(limit) is int and limit > 0:
+                    self.respond(path, True, events=self._event_tail(limit))
+                else:
+                    self.respond(path, False, error="invalid_event_limit")
                 continue
             yield path, data
 
@@ -114,7 +139,7 @@ async def submit(run: Path, action: str, **arguments) -> dict:
         "generation": current["generation"], "action": action, **arguments,
     })
     output = run / "responses" / name
-    limit = {"native-quest-catalog": 1_048_576, "native-quest-list": 32768,
+    limit = {"events-recent": 1_048_576, "native-quest-catalog": 1_048_576, "native-quest-list": 32768,
              "native-dialogue-open": 32768, "native-dialogue-choose": 32768,
              "native-finite-shop-list": 131072, "native-inventory-list": 16384,
              "native-wipe-items": 16384}.get(action, 8192)
