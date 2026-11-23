@@ -28,7 +28,6 @@ local function add_light(turret, root, template, defaults, view)
     if not valid(light) then return end
     view.fire_light = light
     light:SetMobility(2)
-    light.LightColor = template.LightColor
     light:SetCastShadows(template.CastShadows)
     turret:FinishAddComponent(light, true, identity)
     if not light:K2_AttachToComponent(root, FName("None"), 2, 2, 0, false) then
@@ -38,6 +37,7 @@ local function add_light(turret, root, template, defaults, view)
     end
     light:K2_SetRelativeLocationAndRotation(template.RelativeLocation, template.RelativeRotation, false, {}, true)
     light:SetIntensity(defaults.LightIntensity)
+    light:SetLightColor(template:GetLightColor(), true)
     light:SetAttenuationRadius(template.AttenuationRadius)
     light:SetSourceRadius(template.SourceRadius)
     if valid(template.LightFunctionMaterial) then light:SetLightFunctionMaterial(template.LightFunctionMaterial) end
@@ -46,7 +46,8 @@ end
 function fire.attached(turret)
     local output = {}
     turret:GetAttachedActors(output, true, false)
-    for _, actor in ipairs(output.OutActors or output) do
+    for _, item in ipairs(output.OutActors or output) do
+        local actor = type(item.type) == "function" and item:type() == "RemoteUnrealParam" and item:get() or item
         if valid(actor) and actor:GetClass():GetFullName() == "BlueprintGeneratedClass " .. class_path
             and actor:HasAuthority() and not actor:IsActorBeingDestroyed() then return actor end
     end

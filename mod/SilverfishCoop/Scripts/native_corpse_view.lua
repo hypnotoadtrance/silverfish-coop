@@ -139,6 +139,14 @@ local function retire_host_fire(fire)
     if timer and same(timer.fire, fire) then timer.fire = nil end
 end
 
+local function find_stock_turret_fire(turret)
+    local fire = turret_fire.attached(turret)
+    if valid(fire) and not extinguish_hook then
+        extinguish_hook = turret_fire.hook_extinguish(retire_host_fire)
+    end
+    return fire
+end
+
 local function publish(actor)
     local world = world_driver(actor, false)
     if not same(world, active_world) or not actor:HasAuthority() or actor.bReplicates ~= true or actor.Alive ~= false
@@ -151,10 +159,7 @@ local function publish(actor)
     local turret = supported_turret(actor)
     if turret then
         point = actor:K2_GetActorLocation()
-        fire = turret_fire.attached(actor)
-        if valid(fire) and not extinguish_hook then
-            extinguish_hook = turret_fire.hook_extinguish(retire_host_fire)
-        end
+        fire = find_stock_turret_fire(actor)
     else
         if not supported_corpse(actor) or not valid(actor.Mesh) then return end
         point, index = corpses.position(actor)
@@ -176,7 +181,7 @@ local function publish(actor)
     markers[address], numbered[corpse_number] = marker, marker
     if turret then
         turret_timers[address] = {blast_until = clock:GetRealTimeSeconds(world) + 1,
-            smoke_until = clock:GetTimeSeconds(world) + 30, fire = fire}
+            smoke_until = clock:GetTimeSeconds(world) + 30, fire = fire, fire_pending = not valid(fire)}
     end
 end
 
@@ -317,6 +322,10 @@ local function publish_positions(world, now)
             markers[address] = nil
         elseif turret_timers[address] then
             local timer = turret_timers[address]
+            if timer.fire_pending then
+                if now < timer.blast_until then timer.fire = find_stock_turret_fire(actor) end
+                if valid(timer.fire) or now >= timer.blast_until then timer.fire_pending = nil end
+            end
             local rotation = marker:K2_GetActorRotation()
             -- Send the burst to nearby peers once. Peers arriving later in
             -- the same visit see the remaining smoke without a second blast.
