@@ -146,13 +146,18 @@ local function sync(state, phase)
         if operation == "host" or operation == "guest" or operation == "board" then return approach(state, phase, operation) end
         if operation == "read" then return read_menu(state.controller) end
         if operation == "closesimmi" then
-            local menu = top(state.controller)
-            if not valid(menu) then return "closed" end
             local board = StaticFindObject(level .. "BountyBoard_BP_C_0")
-            assert(exact(menu, log_class) and same(menu.BountyBoard_Ref, board))
-            state.controller:CloseMenu({})
-            assert(not valid(top(state.controller)))
-            return "closed"
+            for _ = 1, 4 do
+                local menu = top(state.controller)
+                if not valid(menu) then return "closed" end
+                local details = menu:GetClass():GetFullName():match("%.QuestDetails_Widget_C$")
+                local parent = details and menu.QuestLog_MenuRef or menu
+                assert(exact(menu, dialogue_class) or exact(parent, log_class) and same(parent.BountyBoard_Ref, board),
+                    "Unexpected menu after Simmi acceptance: " .. menu:GetFullName())
+                state.controller:CloseMenu({})
+                assert(not same(top(state.controller), menu), "Stock CloseMenu left the same widget on top")
+            end
+            error("Simmi's stock menu stack did not close", 0)
         end
         if operation == "close" then
             local board = StaticFindObject(level .. "BountyBoard_BP_C_2")
