@@ -1,7 +1,9 @@
 -- Read the exact stock Dead Bridge CQC body. This fixture never mutates actors.
 local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_NATIVE_NPC_TEST") ~= "1"
-    or not mailbox or not mailbox:match("[/\\]dead%-bridge%-cqc%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$") then return end
+    or not mailbox then return end
+local profile = mailbox:match("[/\\](dead%-bridge%-cqc%-%x+[^/\\]*)[/\\]run[/\\]game%-bridge[/\\]%x+$")
+if not profile or not (profile:match("^dead%-bridge%-cqc%-%x+$") or profile:match("^dead%-bridge%-cqc%-%x+%-late$")) then return end
 
 local world_path = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P"
 local actor_path = world_path .. ":PersistentLevel.NPC_State_Infantry_CQC_C_0"
@@ -29,13 +31,14 @@ end
 
 local function sample()
     local actor = StaticFindObject(actor_path)
-    local world = valid(actor) and actor:GetWorld()
+    if not valid(actor) then return "missing_actor" end
+    local world = actor:GetWorld()
     local driver = valid(world) and world.NetDriver
     local guest = valid(driver) and valid(driver.ServerConnection)
     assert(valid(world) and world:GetFullName() == "World " .. world_path and valid(driver) and same(driver.World, world)
         and actor:GetFullName() == "NPC_State_Infantry_CQC_C " .. actor_path
         and same(actor:GetClass(), StaticFindObject(npc_class)) and same(actor:GetOuter(), world.PersistentLevel)
-        and actor:GetLocalRole() == (guest and 1 or 3) and actor:HasAuthority() ~= (guest and true or false)
+        and (guest or actor:GetLocalRole() == 3 and actor:HasAuthority())
         and not actor:IsActorBeingDestroyed() and type(actor.Alive) == "boolean", "Unqualified stock CQC")
     local mesh, capsule = actor.Mesh, actor.CapsuleComponent
     assert(valid(mesh) and same(mesh:GetOwner(), actor) and valid(capsule) and same(capsule:GetOwner(), actor),

@@ -127,7 +127,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                    restart_unclaimed_shells: bool = False, refinery_cqc: bool = False, stock_drop_census: bool = False,
                    stock_weapon_input: bool = False, restart_unclaimed_weapon: bool = False,
                    resident_game: Path | None = None, verify_shell_stacking: bool = False, carry_weapon: bool = False,
-                   verify_cqc_corpse: bool = False) -> dict:
+                   verify_cqc_corpse: bool = False, verify_cqc_late_join: bool = False) -> dict:
     placed_cqc = dead_bridge_cqc or refinery_cqc
     area = REFINERY if refinery_cqc else DEAD_BRIDGE if dead_bridge_cqc else MAP
     first_target, second_target = (REFINERY_CQC, REFINERY_CQC_SECOND) if refinery_cqc else (CQC, CQC_SECOND)
@@ -151,7 +151,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
         from tools.silverfish.control import submit
     original = saved_hashes(original_save) if original_save else None
     processes = []
-    if verify_cqc_corpse:
+    if verify_cqc_corpse or verify_cqc_late_join:
         import cqc_corpse_probe
     resident = AsyncExitStack()
     guest_bridge = None
@@ -241,6 +241,8 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
         host_flags = ("--headless", "--fixtures", "--native-events", "--native-guest", "--native-zones", *route_options)
         if resident_game:
             host_flags += ("--direct",)
+        if verify_cqc_late_join:
+            host_flags += ("--max-guests", "2")
         await start("host.txt", host, "host", *host, "--port", "0", *host_flags, "--start-zone", area)
         await wait(run, lambda state: state.get("state") == "hosting"
                    and state.get("game", {}).get("map") == area
@@ -258,6 +260,12 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             guest_run = resident_work / "clients" / "local" / "run"
         else:
             invitation = await command("invite", *host, "--name", "Loopback enemy observer", "--character", "Enemy observer")
+            if verify_cqc_late_join:
+                # Roster writes must finish before the combat/late-join save canary.
+                late_invite = await command("invite", *host, "--name", "Late CQC observer", "--character", "Late observer")
+                late_name = profile + "-late"
+                late_profile = ("--profile", late_name)
+                late_run = work / "clients" / late_name / "run"
             client_flags = ("--invite", invitation["invite_file"], "--headless", "--native-zones")
             await start("client.txt", client, "join", *client, *client_flags)
         await wait(guest_run, lambda state: state.get("state") == "connected"
@@ -277,7 +285,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 evidence["client_cqc_before_combat"] = cqc_counterpart(guest_run, first_target, area)
             before = visible["game"]["native_enemy_loot_death_view"]
             assert (before["actor"], before["hidden"], before["collision"]) == (first_target, False, True), before
-            if verify_cqc_corpse:
+            if verify_cqc_corpse or verify_cqc_late_join:
                 living = await cqc_corpse_probe.observe_cqc_pair(run, guest_run, first_target)
                 cqc_corpse_probe.expect_live(living)
                 evidence["stock_cqc_body"] = {"living": living}
@@ -387,6 +395,82 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
             paths = list((campaign / "save").glob("campaign*.json"))
             paths.extend((campaign / "game-user").rglob("*.sav"))
             return {path.relative_to(campaign): sha256(path.read_bytes()).hexdigest() for path in paths}
+
+        def late_save_snapshot():
+            return {str(path): (digest, (run.parent / path).stat().st_mtime_ns)
+                    for path, digest in campaign_save_hashes().items()}
+
+        late_baseline = late_save_snapshot() if verify_cqc_late_join else None
+
+        async def late_join(target, roll, proof_log):
+            assert late_baseline and late_save_snapshot() == late_baseline
+            assert not late_run.exists(), "The late guest already opened this world"
+            body = proof_log["stock_cqc_body"]
+            late = body["fresh_late_join"] = {"unclaimed_stock_roll": roll, "save_file_count": len(late_baseline)}
+            host_before = status(run)
+            client_before = status(guest_run)
+            assert client_before["state"] == "connected" and client_before["link_connected"]
+            assert host_before["game"]["native_roster"]["count"] == 1
+            # The new stock pawn spawns near the host. Approach the real shell
+            # without taking it, so the corpse owner's replication is relevant.
+            accepted("place the host near the stock corpse", await combat_action(
+                run, "native-enemy-loot-approach", f"host|{roll['guid']}"))
+            existing = late["existing_pair_before_join"] = await cqc_corpse_probe.observe_cqc_death(
+                run, guest_run, target, body["living"])
+            assert existing["outcome"] == "physical", existing
+            host_near = status(run)["game"]["pawns"]["local"]["location"]
+            assert math.dist(host_near, existing["bodies"]["host"]["position"]) <= 1500, host_near
+
+            await start("client-late.txt", late_profile, "join", *late_profile, "--invite", late_invite["invite_file"],
+                        "--headless", "--native-zones")
+            connected = await wait(late_run, lambda frame: (frame.get("state"), frame.get("link_connected"),
+                                   frame.get("character_id"), frame.get("host_session"), frame.get("zone_epoch"))
+                                   == ("connected", True, late_invite["character_id"], host_before["generation"], roll["epoch"])
+                                   and frame.get("gameplay_fresh") and frame["game"]["map"] == area
+                                   and frame.get("gameplay", {}).get("native_enemy_loot_rolls", {}).get(roll["guid"]) == roll)
+            assert connected["pid"] not in {host_before["pid"], client_before["pid"]}
+            late["first_gameplay_body"] = await cqc_corpse_probe.observe_cqc_pair(run, late_run, target)
+
+            def ready(frame):
+                roster = frame.get("gameplay", {}).get("players", {})
+                pawns = frame.get("gameplay", {}).get("native_pawns", {})
+                return (frame.get("state") == "hosting" and frame.get("zone_epoch") == roll["epoch"]
+                        and frame["game"]["native_roster"]["count"] == 2
+                        and roster.get("guest", {}).get("character_id") == invitation["character_id"]
+                        and roster.get("guest2", {}).get("character_id") == late_invite["character_id"]
+                        and isinstance(pawns.get("guest2"), str) and pawns["guest2"] != exact_pawn
+                        and pawns.get("guest") == exact_pawn
+                        and frame["game"].get("native_guest_save_members", {}).get(pawns["guest2"], {}).get("state") == "bound")
+
+            paired_late = await wait(run, ready, timeout=40)
+            authenticated, = [row for line in (late_run / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                              if (row := json.loads(line))["event"] == "client_link_authenticated"]
+            assert authenticated["resumed"] is False and authenticated["character_id"] == late_invite["character_id"]
+            late["identity"] = {"authentication": authenticated, "pid": connected["pid"],
+                                "session": connected["host_session"], "visit": connected["zone_epoch"],
+                                "authority_pawn": paired_late["gameplay"]["native_pawns"]["guest2"],
+                                "local_pawn": connected["game"]["pawns"]["local"]["name"]}
+            late["late_body"] = await cqc_corpse_probe.observe_cqc_death(
+                run, late_run, target, {"host": body["living"]["host"]})
+            late["existing_pair_after_join"] = await cqc_corpse_probe.observe_cqc_death(
+                run, guest_run, target, body["living"])
+            latest = status(late_run)
+            late["shared_death_view"] = actor_proof(latest, "native_enemy_loot_death_view", target)
+            late["death_projection_events"] = [
+                row for line in (late_run / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                if (row := json.loads(line))["event"] == "native_enemy_loot_death_projected" and row.get("actor") == target
+            ]
+            still_connected = status(guest_run)
+            assert (still_connected["pid"], still_connected["link_connected"], still_connected["zone_epoch"],
+                    still_connected["game"]["pawns"]["local"]["name"]) == (
+                        client_before["pid"], True, roll["epoch"], client_before["game"]["pawns"]["local"]["name"])
+            assert status(run)["generation"] == host_before["generation"]
+            late["no_save_before_or_during_late_join"] = late_save_snapshot() == late_baseline
+            assert late["no_save_before_or_during_late_join"], late
+            cqc_corpse_probe.require_same_physical_corpse(existing, late["existing_pair_after_join"])
+            assert late["late_body"]["outcome"] == "physical", late
+            for key in ("marker", "anchor", "bone"):
+                assert late["late_body"]["bodies"]["guest"][key] == existing["bodies"]["host"][key], late
 
         async def fight(target, proof_log, remaining):
             before_fight = campaign_save_hashes() if automatic_cqc_loot else None
@@ -646,6 +730,9 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                 published = await wait(guest_run, lambda state: state.get("gameplay", {}).get(
                     "native_enemy_loot_rolls", {}).get(guid) == roll)
                 assert published["gameplay_fresh"], published
+                if verify_cqc_late_join:
+                    await late_join(target, roll, proof_log)
+                    return
                 if not automatic_cqc_loot:
                     repeated = accepted("repeat the bank request", await combat_action(
                         run, "native-enemy-loot-bank", target))["native_enemy_loot_roll"]
@@ -812,7 +899,7 @@ async def exercise(work: Path, subject: str, *, hostile: bool, require_combat: b
                     if verify_cqc_corpse:
                         body["after_reconnect"] = await cqc_corpse_probe.observe_cqc_death(
                             run, guest_run, target, body["living"])
-                        cqc_corpse_probe.verify_reconnect(body["before_reconnect"], body["after_reconnect"])
+                        cqc_corpse_probe.require_same_physical_corpse(body["before_reconnect"], body["after_reconnect"])
 
         async def pickup_stock_weapon(payload, stock_source):
             from tools.silverfish import native_host_save, native_stock_enemy_drops, native_world_loot
@@ -988,7 +1075,7 @@ async def main(args) -> None:
     with ExitStack() as probes:
         if args.carry_weapon:
             probes.enter_context(staged_carry_probe(work))
-        if args.verify_cqc_corpse:
+        if args.verify_cqc_corpse or args.verify_cqc_late_join:
             from live_stock_creator_smoke import installed_probe
             stage = (work / "stage").resolve(strict=True)
             original = args.vanilla_saved.resolve(strict=True)
@@ -1007,7 +1094,7 @@ async def main(args) -> None:
                        stock_weapon_input=args.stock_weapon_input, restart_unclaimed_weapon=args.restart_unclaimed_weapon,
                        resident_game=args.resident_game.resolve(strict=True) if args.resident_game else None,
                        verify_shell_stacking=args.verify_shell_stacking, carry_weapon=args.carry_weapon,
-                       verify_cqc_corpse=args.verify_cqc_corpse)
+                       verify_cqc_corpse=args.verify_cqc_corpse, verify_cqc_late_join=args.verify_cqc_late_join)
 
 
 if __name__ == "__main__":
@@ -1038,6 +1125,8 @@ if __name__ == "__main__":
     parser.add_argument("--carry-weapon", action="store_true", help="throw the enemy's actual stock weapon before pickup")
     parser.add_argument("--verify-cqc-corpse", action="store_true",
                         help="verify the exact placed Dead Bridge CQC visible ragdoll before and after a short reconnect")
+    parser.add_argument("--verify-cqc-late-join", action="store_true",
+                        help="admit a fresh second observer of one uncommitted stock Dead Bridge corpse")
     parser.add_argument("--resident-game", type=Path, help="use a separate portable guest replica and collect through stock Nearby Items")
     parser.add_argument("--vanilla-saved", type=Path)
     args = parser.parse_args()
@@ -1045,6 +1134,12 @@ if __name__ == "__main__":
             not args.dead_bridge_cqc or not args.automatic_cqc_loot or args.stock_shell_input != "host"
             or not args.vanilla_saved or args.both_cqc or args.resident_game or args.restart_unclaimed_weapon):
         parser.error("--verify-cqc-corpse requires a single staged Dead Bridge CQC, automatic loot, host stock shell input, and --vanilla-saved")
+    if args.verify_cqc_late_join and (
+            not args.dead_bridge_cqc or not args.automatic_cqc_loot or not args.vanilla_saved
+            or any((args.verify_cqc_corpse, args.both_cqc, args.resident_game, args.stock_shell_input,
+                    args.stock_drop_census, args.stock_weapon_input, args.restart_unclaimed_shells,
+                    args.restart_unclaimed_weapon, args.carry_weapon))):
+        parser.error("--verify-cqc-late-join requires a single staged Dead Bridge CQC and automatic unclaimed loot")
     if args.refinery_cqc and (args.dead_bridge_cqc or not args.both_cqc):
         parser.error("--refinery-cqc requires --both-cqc and its own encounter")
     placed_cqc = args.dead_bridge_cqc or args.refinery_cqc
