@@ -174,7 +174,7 @@ local shooter_paths = {
     bandit = "/Game/Classes/NPCs/NPC_Bandit.NPC_Bandit_C",
 }
 
-local function fire_stock_npc(pawn, world, kind)
+local function spawn_stock_npc(pawn, world, kind)
     local path = assert(shooter_paths[kind], "unknown NPC firing fixture")
     local class = StaticFindObject(path)
     if not valid(class) then LoadAsset(path); class = StaticFindObject(path) end
@@ -197,6 +197,11 @@ local function fire_stock_npc(pawn, world, kind)
     local weapon = actor.Weapon_Ranged
     assert(valid(weapon) and same(weapon.Instigator, actor) and weapon:HasAuthority() and weapon.Ammo > 0,
         "NPC did not equip its stock ranged weapon")
+    return actor, weapon, path
+end
+
+local function fire_stock_npc(pawn, world, kind)
+    local actor, weapon, path = spawn_stock_npc(pawn, world, kind)
     local muzzle = weapon.Arrow_Muzzle
     assert(valid(muzzle) and same(muzzle:GetOwner(), weapon), "stock NPC muzzle unavailable")
     local before = weapon.Ammo
@@ -406,6 +411,7 @@ local function run(action, actor_path)
         return npc_combat_state(world, host)
     elseif action == "seed-pipe" then
         assert(host, "only the host can grant the test Old Pipe")
+        spawn_stock_npc(pawn, world, "state")
         return seed_pipe(world)
     elseif action == "select-pipe" then
         assert(not host, "the guest must pick their test equipment")

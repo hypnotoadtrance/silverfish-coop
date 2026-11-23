@@ -723,6 +723,8 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat) -> dict:
     assert await command(guest, f"face-melee\t{center}") == "ready"
     await asyncio.sleep(.25)
     assert await command(host, f"align-melee\t{center}") == "true"
+    before = await command(host, f"melee-state\t{center}")
+    assert before == f"true;false;7.000;{name}", before
     tap = await submit(guest_run, "native-guest-primary-input-fixture")
     sequence = tap["native_guest_primary_fixture"]["sequence"]
     async with asyncio.timeout(8):
@@ -736,7 +738,9 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat) -> dict:
     assert event["event"] == "native_guest_melee_input", event
     proof = event[native_guest_melee.SWING_KEY]
     contact = await command(host, "melee-contact")
-    assert proof["target"] == name and proof["enemy_health_after"] <= 0 and native_guest_melee.verified_damage(proof), (proof, contact)
+    after = await command(host, f"melee-state\t{center}")
+    assert proof["target"] == name and proof["enemy_health_after"] <= 0 and native_guest_melee.verified_damage(proof), (
+        proof, contact, before, after)
     async with asyncio.timeout(8):
         while True:
             states = await asyncio.gather(*(command(seat, f"melee-state\t{center}") for seat in (host, guest)))
@@ -797,12 +801,12 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
     assert {entry["serial"] for entry in cues} == {prop["serial"]}, (cues, prop)
     visual, = [entry for entry in cues if entry["event"] == event_names[1]]
     assert visual["player_id"] == player_id, visual
+    guest_melee = await verify_resident_guest_melee(host, guest) if guest_combat else {}
     footsteps = await verify_resident_footsteps(host, guest)
     pistol = await verify_resident_pistol(host, guest, guest_combat=guest_combat)
     npc_shots = await verify_resident_npc_shots(host, guest_run, guest_frame) if guest_combat else []
     npc_kill = await verify_resident_npc_kill(host, guest) if guest_combat else {}
     turret_death = await verify_resident_turret_combat(host, guest, guest_frame) if guest_combat else {}
-    guest_melee = await verify_resident_guest_melee(host, guest) if guest_combat else {}
     assert not weapon_cue_files(host, guest), "Stock player cues wrote a legacy weapon cue mailbox"
     after = save_state()
     changed = [path for path in before.keys() | after.keys() if before.get(path) != after.get(path)]
