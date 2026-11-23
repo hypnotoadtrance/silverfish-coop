@@ -7,7 +7,7 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 | Area | Known issue |
 | --- | --- |
 | Guest weapons and combat | A guest can aim and fire locally while the host sees no shot and hears no report. Ammo can return after the shot, and manual reload can fail. Guest shots and melee were also reported to leave the Intro warehouse robots unharmed on the host. |
-| Party wipe and respawn | In published builds, the party can respawn before everyone confirms what to keep. An isolated two-player test of the development fix verified that the guest could confirm first and the party waited for the host. The base-game selection screen and a mismatch in held weapons after respawn are still open. |
+| Party wipe and respawn | Published builds can respawn the party early and show a dropped weapon still in hand. Isolated two-player tests of the development fixes verified that respawn waits for both confirmations and that both seats agree on the held weapon when the guest keeps or drops it. The base-game selection screen is still open. |
 | Quests and bounty boards | Some eligible offers disappear from Simmi's jobs and the physical board. The development build restored a missing Flood Plains offer in an isolated Observatory test and accepted it into both journals. Additional offers, objectives, and redemption still need verification. |
 | Crossroads weather | After traveling, a guest can see a storm while the host has clear skies. In another playtest, both players saw the storm and heard its siren during the same visit. |
 
