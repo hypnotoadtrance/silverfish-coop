@@ -57,6 +57,15 @@ The installed mod mirrors each hosted campaign as a complete backup under `%LOCA
 
 Use **Multiplayer → Host → Load Game** on the other PC. The mod restores missing campaigns and newer revisions. An equal or older revision leaves the local campaign in place. Live multiplayer saves keep their own storage and Singleplayer continues to use the original save slots. Guests keep their progress with the host’s campaign.
 
+### Reset co-op campaigns
+
+Follow these steps on the host PC when a release explicitly requires a fresh campaign. Moving these folders out of AppData clears the host's co-op campaign list. The old campaigns and their characters remain in the folders you moved.
+
+1. Close Project Silverfish. If Steam Cloud is enabled for the game, wait for the current sync to finish and turn it off in the game's Steam properties before moving the folders.
+2. In File Explorer, open `%LOCALAPPDATA%\SilverfishCoop\Resident`. Move the `campaigns` folder to a backup location outside AppData. If you configured a different co-op workspace, use that workspace's `campaigns` folder.
+3. If present, move only `%LOCALAPPDATA%\SilverFish\Saved\SaveGames\SilverfishCoopCloud` to the backup location. Leave the parent `SaveGames` folder and its singleplayer saves in place. Keep Steam Cloud off while you start fresh if your Steam account still has backups from incompatible builds, since those could be downloaded and imported again.
+4. Launch the updated game and choose **Multiplayer → Host → New Game**. Guests can create characters when they join the new campaign.
+
 ## Host and join from the development CLI
 
 On the host, bind to the host machine's LAN address and choose the UDP port the guest will use. Replace the example address with the address of your host.
