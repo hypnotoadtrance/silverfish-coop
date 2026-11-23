@@ -280,6 +280,46 @@ end
 local turret_class = "/Game/Classes/NPCs/Turret_MechGun_01_BP.Turret_MechGun_01_BP_C"
 
 local shot_turret, fired_count, fire_hook
+local turret_effects, turret_effect_hooks
+
+local function arm_turret_effects(turret)
+    local target = turret:K2_GetActorLocation()
+    turret_effects = {turret = turret, target = {X=target.X, Y=target.Y, Z=target.Z}, blasts = 0, sounds = 0}
+    if turret_effect_hooks then return "armed" end
+    local function at_turret(point)
+        local target = turret_effects and turret_effects.target
+        return target and (point.X-target.X)^2 + (point.Y-target.Y)^2 + (point.Z-target.Z)^2 < 10^2
+    end
+    RegisterHook("/Script/Niagara.NiagaraFunctionLibrary:SpawnSystemAtLocation", function(_, _, asset, position)
+        local particle = asset:get()
+        if valid(particle) and particle:GetFName():ToString() == "FX_Blast_FragGrenade_Converted"
+            and at_turret(position:get()) then turret_effects.blasts = turret_effects.blasts + 1 end
+    end)
+    RegisterHook("/Script/Engine.GameplayStatics:SpawnSoundAtLocation",
+        function(_, _, sound, position, _, _, _, _, attenuation)
+            local cue, radius = sound:get(), attenuation:get()
+            if valid(cue) and cue:GetFName():ToString() == "MS_Blast_Pop"
+                and valid(radius) and radius:GetFName():ToString() == "Blast_Attenuation"
+                and at_turret(position:get()) then turret_effects.sounds = turret_effects.sounds + 1 end
+        end)
+    turret_effect_hooks = true
+    return "armed"
+end
+
+local function read_turret_effects(world, turret)
+    local state = assert(turret_effects, "the turret effect probe is not armed")
+    assert(same(state.turret, turret), "the turret effect probe is bound to a different actor")
+    local smoke, field = 0, 0
+    for _, component in ipairs(FindAllOf("NiagaraComponent") or {}) do
+        if valid(component) and same(component:GetAttachParent(), turret.Turret_Gun)
+            and valid(component.Asset) and component.Asset:GetFName():ToString() == "NI_SmokeStack_Large"
+            and component:IsActive() then smoke = smoke + 1 end
+    end
+    for _, fire in ipairs(FindAllOf("Fire_Camp_BP_C") or {}) do
+        if valid(fire) and same(fire:GetWorld(), world) and same(fire:GetAttachParentActor(), turret) then field = field + 1 end
+    end
+    return ("%d,%d,%d,%d"):format(state.blasts, state.sounds, smoke, field)
+end
 
 local function turret_fire(pawn, world, turret, host, with_downed_target)
     assert(turret.Alive, "the test turret is already dead")
@@ -376,7 +416,11 @@ local function turret_state(pawn, world, host, action)
     end
     if not valid(turret) then return "absent" end
     assert(turret.bReplicates and turret:GetLocalRole() == (host and 3 or 1), "test turret not bound to authoritative channel")
-    if action == "turret-fire" or action == "turret-retarget" then
+    if action == "turret-arm-effects" then
+        return arm_turret_effects(turret)
+    elseif action == "turret-read-effects" then
+        return read_turret_effects(world, turret)
+    elseif action == "turret-fire" or action == "turret-retarget" then
         return turret_fire(pawn, world, turret, host, action == "turret-retarget")
     elseif action == "turret-kill" then
         assert(host and turret.Alive and turret.Health > 0, "only the host may destroy the live turret")

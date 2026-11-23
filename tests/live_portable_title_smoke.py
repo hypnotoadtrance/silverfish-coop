@@ -704,6 +704,7 @@ async def verify_resident_turret_combat(host: Seat, guest: Seat, guest_frame: di
             await asyncio.sleep(.05)
     shot, = shots
     assert shot["stock_sound"] and not shot["recoil"], shot
+    assert await asyncio.gather(*(command(seat, "turret-arm-effects") for seat in (host, guest))) == ["armed"] * 2
     await command(host, "turret-kill")
     after = None
     try:
@@ -715,8 +716,13 @@ async def verify_resident_turret_combat(host: Seat, guest: Seat, guest_frame: di
                 await asyncio.sleep(.05)
     except TimeoutError as error:
         raise AssertionError(f"Expected both turrets to be dead and visibly burnt: {after}") from error
+    await asyncio.sleep(1.2)
+    death_effects = await asyncio.gather(*(command(seat, "turret-read-effects") for seat in (host, guest)))
+    # Stock fire damage comes from a host-only gameplay actor. Guest smoke and blast are cosmetic.
+    assert death_effects == ["1,1,1,1", "1,1,1,0"], death_effects
     return {"stock_replication": replication == "true", "before": before, "after": after,
-            "replica_fire_denied": True, "host_skipped_downed_target": True, "guest_stock_fire_cue": shot}
+            "replica_fire_denied": True, "host_skipped_downed_target": True, "guest_stock_fire_cue": shot,
+            "death_blast_sound_smoke_and_fire_fields": death_effects}
 
 
 async def verify_resident_guest_melee(host: Seat, guest: Seat) -> dict:

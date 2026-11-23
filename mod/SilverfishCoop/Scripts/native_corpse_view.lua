@@ -1,18 +1,22 @@
 local corpses = {}
+local effects = require("native_anomaly_effects")
 
 local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local drone_path = "/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C"
 local turret_path = "/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C"
 local turret_burnt = "/Game/Assets/Materials/Mat_Trimsheets/Mat_PolygonMilitary_VehBurnt_01.Mat_PolygonMilitary_VehBurnt_01"
+local turret_smoke = "/Game/Assets/PFX/NI_SmokeStack_Large.NI_SmokeStack_Large"
 local marker_path = "/Script/Engine.TargetPoint"
 local npc_class, turret_class, marker_class, clock, death_hook, drone_death_hook, turret_death_hook, drone_seen
 local next_turret_lookup = 0
 local active_world, markers, numbered, mirrors, ended, anchors = nil, {}, {}, {}, {}, {}
 local pending = {}
+local turret_timers = {}
 local next_sample, corpse_number = 0, 0
 local sample_period = .1
 local byte_angle = 360 / 256
 local anchor_limit = 120
+local blast_phase, smoke_phase = 32, 16
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -134,7 +138,8 @@ local function publish(actor)
     -- The owner reference resolves to the same NPC over each connection even
     -- when Unreal assigns a different local name to the replicated actor.
     local point, index
-    if supported_turret(actor) then
+    local turret = supported_turret(actor)
+    if turret then
         point = actor:K2_GetActorLocation()
     else
         if not supported_corpse(actor) or not valid(actor.Mesh) then return end
@@ -143,7 +148,7 @@ local function publish(actor)
     if corpse_number == 65535 then return end
     corpse_number = corpse_number + 1
     local marker = world:SpawnActor(marker_class, point, {
-        Pitch = anchor_pitch(index),
+        Pitch = turret and blast_phase * byte_angle or anchor_pitch(index),
         Yaw = (corpse_number % 256) * byte_angle, Roll = (corpse_number // 256) * byte_angle,
     })
     if not valid(marker) then return end
@@ -155,6 +160,10 @@ local function publish(actor)
     marker:SetReplicateMovement(true)
     marker:ForceNetUpdate()
     markers[address], numbered[corpse_number] = marker, marker
+    if turret then
+        turret_timers[address] = {blast_until = clock:GetRealTimeSeconds(world) + 1,
+            smoke_until = clock:GetTimeSeconds(world) + 30}
+    end
 end
 
 local function apply_destroyed_turret(actor)
@@ -177,6 +186,29 @@ local function apply_destroyed_turret(actor)
     return true
 end
 
+local function retire_smoke(mirror)
+    if mirror and valid(mirror.smoke) then mirror.smoke:Deactivate() end
+end
+
+local function present_turret(mirror, actor, pawn)
+    local marker = mirror.marker
+    local phase = rotation_byte(marker:K2_GetActorRotation().Pitch)
+    if phase ~= blast_phase and phase ~= smoke_phase then
+        retire_smoke(mirror)
+        return true
+    end
+    if phase == blast_phase and not mirror.played_blast and valid(pawn) and pawn:IsLocallyControlled() then
+        mirror.played_blast = effects.play_turret_blast(pawn, marker:K2_GetActorLocation())
+    end
+    if valid(mirror.smoke) then return end
+    local gun = actor.Turret_Gun
+    local niagara = StaticFindObject("/Script/Niagara.Default__NiagaraFunctionLibrary")
+    local asset = StaticFindObject(turret_smoke)
+    if not valid(gun) or not same(gun:GetOwner(), actor) or not valid(niagara) or not valid(asset) then return end
+    mirror.smoke = niagara:SpawnSystemAttached(asset, gun, FName("None"),
+        {X = 0, Y = 0, Z = 0}, {Pitch = 0, Yaw = 0, Roll = 0}, 0, true, true, 0, true)
+end
+
 local function apply(marker, world)
     if not valid(marker) or not same(marker:GetWorld(), world) then return true end
     local actor = marker:GetOwner()
@@ -188,7 +220,15 @@ local function apply(marker, world)
     -- The owner, simulated role and first movement update can arrive in separate frames.
     if marker:GetLocalRole() ~= 1 or actor:GetLocalRole() ~= 1 or not same(world_driver(marker, true), world)
         or marker_number(marker) == 0 then return end
-    if turret then return apply_destroyed_turret(actor) end
+    if turret then
+        if not apply_destroyed_turret(actor) then return end
+        local key = actor:GetAddress()
+        if not mirrors[key] or not same(mirrors[key].marker, marker) then
+            retire_smoke(mirrors[key])
+            mirrors[key] = {marker = marker, turret = true}
+        end
+        return true
+    end
     local mesh, capsule, movement = actor.Mesh, actor.CapsuleComponent, actor.CharacterMovement
     if not valid(mesh) or not valid(capsule) or not valid(movement) then return end
     local key = actor:GetAddress()
@@ -221,7 +261,10 @@ local function mirror_positions(world, pawn)
         local marker = mirror.marker
         local actor = valid(marker) and marker:GetOwner()
         if not valid(actor) or not same(marker:GetWorld(), world) or actor:IsActorBeingDestroyed() then
+            retire_smoke(mirror)
             mirrors[address] = nil
+        elseif mirror.turret then
+            if actor:GetLocalRole() == 1 and present_turret(mirror, actor, pawn) then mirrors[address] = nil end
         elseif actor:GetLocalRole() == 1 and actor.Alive == false then
             local mesh = actor.Mesh
             if valid(mesh) and mesh:IsAnySimulatingPhysics() then
@@ -237,11 +280,25 @@ local function mirror_positions(world, pawn)
     end
 end
 
-local function publish_positions(world)
+local function publish_positions(world, now)
     for address, marker in pairs(markers) do
         local actor = valid(marker) and marker:GetOwner()
         if not valid(actor) or not same(marker:GetWorld(), world) or actor:IsActorBeingDestroyed() then
+            turret_timers[address] = nil
             markers[address] = nil
+        elseif turret_timers[address] then
+            local timer = turret_timers[address]
+            local rotation = marker:K2_GetActorRotation()
+            -- Send the burst to nearby peers once. Peers arriving later in
+            -- the same visit see the remaining smoke without a second blast.
+            local phase = now < timer.blast_until and blast_phase
+                or clock:GetTimeSeconds(world) < timer.smoke_until and smoke_phase or 0
+            if rotation_byte(rotation.Pitch) ~= phase then
+                rotation.Pitch = phase * byte_angle
+                marker:K2_SetActorRotation(rotation, true)
+                marker:ForceNetUpdate()
+            end
+            if phase == 0 then turret_timers[address] = nil end
         elseif not supported_turret(actor) then
             local mesh = actor.Mesh
             if valid(mesh) and actor.Alive == false and mesh:IsAnySimulatingPhysics() then
@@ -282,7 +339,8 @@ function corpses.start(role)
         local actor = context:get()
         if not valid(actor) then return end
         local address = actor:GetAddress()
-        mirrors[address], anchors[address], pending[address] = nil, nil, nil
+        retire_smoke(mirrors[address])
+        mirrors[address], anchors[address], pending[address], turret_timers[address] = nil, nil, nil, nil
         local marker = markers[address]
         if valid(marker) and same(marker:GetOwner(), actor) then
             numbered[marker_number(marker)] = nil
@@ -296,6 +354,8 @@ function corpses.sync(state, phase)
     local hosting = phase == "hosting" and state.listening and not state.server
     local world = (hosting or phase == "connected" and state.server) and state.world or nil
     if not same(world, active_world) then
+        for _, mirror in pairs(mirrors) do retire_smoke(mirror) end
+        turret_timers = {}
         active_world, markers, numbered, mirrors, ended, anchors, next_sample, corpse_number =
             world, {}, {}, {}, {}, {}, 0, 0
     end
@@ -330,7 +390,7 @@ function corpses.sync(state, phase)
         if now >= next_sample then
             next_sample = now + sample_period
             if hosting then
-                publish_positions(world)
+                publish_positions(world, now)
             else
                 for address, marker in pairs(pending) do
                     if apply(marker, world) then pending[address] = nil end

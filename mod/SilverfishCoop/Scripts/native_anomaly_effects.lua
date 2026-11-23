@@ -218,6 +218,17 @@ local function play(pawn, origin, kind, point, scale, volume)
     return true, valid(component) == true
 end
 
+function effects.play_turret_blast(pawn, point)
+    local explosion = StaticFindObject("/Game/Classes/Actors/ExplosionActor_BP.ExplosionActor_BP_C")
+    local defaults = valid(explosion) and explosion:GetCDO()
+    if not valid(defaults) then return false end
+    local scale, volume = defaults["PFX Scale"], defaults["SFX Vol"]
+    if not (type(scale) == "number" and scale > 0 and scale <= 10
+        and type(volume) == "number" and volume >= 0 and volume <= 10) then return false end
+    -- The stock turret explosion uses the same particles, sound and attenuation as the canister.
+    return play(pawn, pawn:K2_GetActorLocation(), "canister", point, scale, volume)
+end
+
 function effects.command(args, state, phase, animate_vortex)
     if args[2] ~= "native-anomaly-play-cues" then return end
     local pawn, epoch = state.local_pawn and state.local_pawn.pawn, args[4]
