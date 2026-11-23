@@ -587,10 +587,45 @@ namespace
         else if (Clock::now() >= live_dig.pickup_until) fail_live(problem);
     }
 
+    void sync_hole_begin_play(Iteration& call, U::UObject* receiver, U::UFunction* function)
+    {
+        static const U::FName begin_play{STR("ReceiveBeginPlay")};
+        static const U::FName hole_name{STR("DigHole_BP_C")};
+        if (function->GetFName() != begin_play) return;
+        auto* type = receiver->GetClassPrivate();
+        if (!type || type->GetFName() != hole_name || type != function->GetOuterPrivate() ||
+            !exact(receiver, hole_class) || function->GetNumParms() != 0) return;
+        auto* actor = static_cast<U::AActor*>(receiver);
+        auto* world = actor->GetWorld();
+        auto* driver = object(world, STR("NetDriver"));
+        if (!live(driver) || object(driver, STR("World")) != world || !field<U::FObjectProperty>(driver, STR("ServerConnection")))
+            return;
+        auto* connection = object(driver, STR("ServerConnection"));
+        if (connection)
+        {
+            auto* role = field<U::FByteProperty>(actor, STR("Role"));
+            // The stock begin event runs the weighted loot roll. A network replica only shows the hole.
+            if (live(connection) && object(connection, STR("Driver")) == driver &&
+                role && role->GetPropertyValueInContainer(actor) == 1)
+                call.PreventOriginalFunctionCall();
+            return;
+        }
+        if (!authority(actor) || boolean(actor, STR("bReplicates"), true)) return;
+        auto* set = find<U::UFunction>(STR("/Script/Engine.Actor:SetReplicates"));
+        auto* enabled = field<U::FBoolProperty>(set, STR("bInReplicates"));
+        if (!set || !enabled || set->GetNumParms() != 1 || set->GetParmsSize() != 1 ||
+            enabled->GetOffset_Internal() != 0 || !set->HasAnyFunctionFlags(U::FUNC_Native)) return;
+        std::uint8_t args{};
+        enabled->SetPropertyValueInContainer(&args, true);
+        actor->ProcessEvent(set, &args);
+    }
+
     void observe_live_event(Iteration& call, U::UObject* receiver, U::UFunction* function, const void* args)
     {
-        if (!ordinary || !U::IsInGameThreadRaw() || !function || !receiver || !args || watch.pressed ||
+        if (!ordinary || !U::IsInGameThreadRaw() || !function || !receiver ||
             call.OriginalFunctionCallPrevented()) return;
+        sync_hole_begin_play(call, receiver, function);
+        if (!args || watch.pressed || call.OriginalFunctionCallPrevented()) return;
         if (receiver == live_dig.pawn.Get() && live_dig.state == LiveState::Arming &&
             Clock::now() < live_dig.lease && Clock::now() >= live_dig.press_until &&
             native_guest_primary_input::matches_stock_spade_started(receiver, function, args))
