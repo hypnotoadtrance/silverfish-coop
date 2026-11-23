@@ -31,7 +31,7 @@ from tools.silverfish.win_job import GameProcess
 from live_installed_title_smoke import boot_states, native_mailbox
 from live_loose_pickup_smoke import DEFAULT_ACTOR
 from live_ai_smoke import wait
-from live_multi_smoke import saved_hashes
+from live_multi_smoke import campaign_save_hashes, saved_hashes
 from live_resident_host_smoke import stock_profile, stock_save_hashes
 from live_same_process_listener_smoke import choose_ports
 from live_stock_creator_smoke import creator_action, installed_probe
@@ -226,12 +226,17 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str) -> dict:
     approached = await host.bridge.command("native-loot-approach", pawn, crate, timeout=5)
     position, = [row["location"] for row in approached["pawns"].values() if row["name"] == pawn]
     await guest.bridge.wait_for(lambda state: math.dist(state["pawns"]["local"]["location"], position) < 50)
-    save_roots = (host.campaign / "save", host.profile / "Saved/SaveGames")
-    before = [saved_hashes(path) for path in save_roots]
+    def save_fingerprints():
+        return campaign_save_hashes(host.campaign), saved_hashes(host.profile / "Saved/SaveGames")
+
+    before = save_fingerprints()
     assert all(before)
     request_at = time.monotonic()
-    assert await portable_probe_command(guest.bridge, "portable-crate", "press") == crate
+    guest_actor = await portable_probe_command(guest.bridge, "portable-crate", "press")
     pressed_at = time.monotonic()
+    # The guest's stock actor can have a different Unreal instance suffix.
+    prefix = crate.rsplit("_", 1)[0] + "_"
+    assert guest_actor.startswith(prefix) and guest_actor[len(prefix):].isdigit(), guest_actor
     opened = await wait(guest_run, lambda state: crate in state.get("gameplay", {}).get(native_loot.STATE_KEY, {}))
     visible_at = time.monotonic()
     roll = opened["gameplay"][native_loot.STATE_KEY][crate]
@@ -244,10 +249,11 @@ async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str) -> dict:
     received, = events(guest_run, "native_stock_crate_interaction")
     applied, = events(host_run, "native_loot_roll_accepted")
     assert received["input_source"] == "memory_input" and received["operation_id"] == applied["id"] == roll["id"]
-    assert [saved_hashes(path) for path in save_roots] == before
+    assert save_fingerprints() == before
     return {
         "local_bridge": {"host": host_state["local_bridge"], "guest": guest_state["local_bridge"]},
-        "stock_crate": crate, "input_source": received["input_source"], "sequence": received["sequence"],
+        "stock_crate": crate, "guest_actor": guest_actor,
+        "input_source": received["input_source"], "sequence": received["sequence"],
         "roll_id": roll["id"], "roll_count": 1, "saves_unchanged_after_open": True,
         "probe_request_to_press_reply_ms": round(1000 * (pressed_at - request_at), 2),
         "probe_request_to_visible_roll_ms": round(1000 * (visible_at - request_at), 2),
