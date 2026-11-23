@@ -362,15 +362,27 @@ async def observe_guest_offhand_flashlight(host_run, guest_run):
                     (view := frame.get("game", {}).get(view_key, {}).get(player, {})).get("profile") == "offhand"
                     and view.get("visible") is True and (after_aim is None or math.dist(view["aim"], after_aim) > 4)
                 ), timeout=9)
-                await asyncio.sleep(.30)
             else:
                 await wait(host_run, lambda frame: player not in frame.get("game", {}).get(view_key, {}), timeout=8)
-            values = await avatar_probe(host_run, f"observe{player}")
-            table["host"] = census = flashlight_observer(values[:7])
-            table["beam"] = beam = offhand_beam(values[values.index("beam")+1:])
-            local = status(host_run)["game"]
+            async with asyncio.timeout(6):
+                while True:
+                    prior = status(host_run)["game"].get(view_key, {}).get(player)
+                    values = await avatar_probe(host_run, f"observe{player}")
+                    local = status(host_run)["game"]
+                    receipt = local.get(view_key, {}).get(player)
+                    beam = offhand_beam(values[values.index("beam")+1:])
+                    table["host"] = census = flashlight_observer(values[:7])
+                    table["beam"], table["receipt"] = beam, receipt
+                    record()
+                    if not owner["offhand"]:
+                        break
+                    if (beam and receipt and receipt == prior and receipt.get("visible") is True
+                            and (after_aim is None or math.dist(receipt["aim"], after_aim) > 4)
+                            and all(abs(math.remainder(a - b, 360)) <= 5 for a, b in zip(
+                                receipt["aim"], beam["pawn_relative"]["rotation"], strict=True))):
+                        break
+                    await asyncio.sleep(.15)
             table["host_primary_meshes"] = local["native_player_avatars"][authority_pawn]["weapon_meshes"]
-            table["receipt"] = receipt = local.get(view_key, {}).get(player)
             guest_status = guest_frame() or {}
             table["guest_source_at_observer_read"] = guest_status.get(source_key)
             record()
