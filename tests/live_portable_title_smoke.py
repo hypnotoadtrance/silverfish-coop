@@ -666,18 +666,19 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
     async def read_host():
         return tuple(map(float, (await command(host, "host-read")).split(",")))
 
-    async def read_guest(minimum, *, tick=False):
+    async def read_guest(minimum):
         async with asyncio.timeout(8):
             while True:
                 food, regen, widget = (await command(guest, "guest-read")).split(",", 2)
                 if float(food) > minimum:
-                    if tick:
-                        food, regen, widget = (await command(guest, "guest-tick")).split(",", 2)
+                    # NullRHI may leave the stock label on the preceding HUD sample.
+                    food, regen, widget = (await command(guest, "guest-tick")).split(",", 2)
                     match = re.search(r"\d+(?:[.,]\d+)?", widget)
                     assert match and abs((amount := float(match[0].replace(",", "."))) - float(food)) <= .2, (food, regen, widget)
                     return {"food": float(food), "regen": float(regen), "widget": widget, "displayed_food": amount}
                 await asyncio.sleep(.08)
 
+    seed_started = time.time()
     guid = await command(host, "seed")
     assert re.fullmatch(r"[0-9A-F]{32}", guid) and guid != "0" * 32, guid
     host_before = await read_host()
@@ -688,6 +689,7 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
     assert meal["class_path"] == expected.class_path and meal["quantity"] == 1, meal
     async with asyncio.timeout(8):
         while not any(entry["event"] == "native_guest_ui_projected" and entry["items"] == len(inv_before["items"])
+                      and entry["time_unix"] >= seed_started
                       for entry in await resident_events(guest_run, guest_frame)):
             await asyncio.sleep(.08)
     assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
@@ -711,7 +713,7 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
             await asyncio.sleep(.12)
     assert (used["pawn"], used["quantity_before"], used["quantity_after"]) == (pawn, 1, 0), used
     assert used["food_after"] > used["food_before"] + 20 and used["regen_after"] > used["regen_before"], used
-    after = await read_guest(used["food_after"] - 1, tick=True)
+    after = await read_guest(used["food_after"] - 1)
     host_after = await read_host()
     assert abs(after["food"] - host_after[2]) <= 1 and after["regen"] == host_after[3] == used["regen_after"], (after, host_after, used)
     assert 0 <= host_before[0] - host_after[0] < 2 and host_before[1] == host_after[1], (host_before, host_after)
@@ -2086,8 +2088,15 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     probes = ExitStack()
     seeded = None
 
-    single_scenario = (stock_food or stock_campfire or stock_prop_grip or stock_host_prop_observer
-                       or resident_weapon_cues or stock_crate_ring or guest_world_start
+    # Campfire measures a fresh regeneration ceiling. Food resets the guest's
+    # vitals for its own test and therefore runs after the other checks.
+    resident_checks = tuple((name, check) for enabled, name, check in (
+        (stock_campfire, "stock_campfire", verify_resident_campfire),
+        (resident_weapon_cues, "resident_weapon_cues", verify_resident_weapon_cues),
+        (stock_food, "stock_food", verify_resident_guest_food),
+    ) if enabled)
+    single_scenario = (bool(resident_checks) or stock_prop_grip or stock_host_prop_observer
+                       or stock_crate_ring or guest_world_start
                        or guest_ui_memory or compact_crate_status or compact_world_view or guest_shop_lease
                        or guest_stash_memory or nonmirrored_startup or stock_unequip or resident_cabinet_archive is not None)
     try:
@@ -2155,6 +2164,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 or guest_stash_memory or nonmirrored_startup):
             for game in games:
                 probes.enter_context(installed_probe(game))
+        boot_started = time.perf_counter()
         for game, workspace, release, port in zip(games, workspaces, qualified, choose_ports(), strict=True):
             title = workspace / release.title_directory
             profile, mailbox_root = title / "game-user", title / "run/game-bridge"
@@ -2192,6 +2202,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             baselines.append((hashes, await stock_profile(seat.bridge)))
 
         first, second = seats
+        proof["boot_seconds"] = round(time.perf_counter() - boot_started, 3)
+
         async def check_gameplay(host, guest, pawn):
             evidence = await verify_gameplay(host, guest, pawn, stock_drop=stock_drop, stock_split=stock_split,
                                              stock_equip=stock_equip, stock_nearby=stock_nearby, projected_nearby=projected_nearby)
@@ -2240,16 +2252,28 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 return await verify_stock_host_prop_observer(host, guest, pawn, lantern_evidence)
 
             proof["sessions"].append(await start_pair(first, second, "Lantern observer", on_join=observe_host_lantern))
-        elif stock_food:
-            proof["sessions"].append(await start_pair(first, second, "Guest food scout", on_join=verify_resident_guest_food,
+        elif resident_checks:
+            results = proof["resident_check_results"] = {}
+            campaign_started = time.perf_counter()
+
+            async def run_resident_checks(host, guest, pawn):
+                proof["join_seconds"] = round(time.perf_counter() - campaign_started, 3)
+                gameplay = {}
+                for name, check in resident_checks:
+                    started = time.perf_counter()
+                    try:
+                        gameplay.update(await check(host, guest, pawn))
+                    except Exception as error:
+                        results[name] = {"passed": False, "seconds": round(time.perf_counter() - started, 3),
+                                         "error": str(error) or type(error).__name__}
+                        raise
+                    results[name] = {"passed": True, "seconds": round(time.perf_counter() - started, 3)}
+                return gameplay
+
+            proof["sessions"].append(await start_pair(first, second, "Gameplay scout", on_join=run_resident_checks,
                                                       wait_status=wait_resident_status))
-        elif stock_campfire:
-            proof["sessions"].append(await start_pair(first, second, "Campfire scout", on_join=verify_resident_campfire,
-                                                      wait_status=wait_resident_status))
-        elif resident_weapon_cues:
-            proof["sessions"].append(await start_pair(first, second, "Bandage observer", on_join=verify_resident_weapon_cues,
-                                                      wait_status=wait_resident_status))
-            assert not weapon_cue_files(first, second), "A legacy weapon cue mailbox appeared before Save and Quit"
+            if resident_weapon_cues:
+                assert not weapon_cue_files(first, second), "A legacy weapon cue mailbox appeared before Save and Quit"
         elif compact_world_view:
             proof["sessions"].append(await start_pair(first, second, "Weather receipt scout", on_join=verify_world_view_receipt,
                                                       wait_status=wait_resident_status))
@@ -2326,12 +2350,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["nonmirrored_startup_failure"] = str(error) or type(error).__name__
         if stock_host_prop_observer:
             proof["stock_host_prop_observer_failure"] = str(error) or type(error).__name__
-        if stock_food:
-            proof["stock_food_failure"] = str(error) or type(error).__name__
-        if stock_campfire:
-            proof["stock_campfire_failure"] = str(error) or type(error).__name__
-        if resident_weapon_cues:
-            proof["resident_weapon_cue_failure"] = str(error) or type(error).__name__
+        if resident_checks and not any(not row["passed"] for row in proof.get("resident_check_results", {}).values()):
+            proof["resident_session_failure"] = str(error) or type(error).__name__
         if compact_crate_status:
             proof["crate_status_failure"] = str(error)
         if compact_world_view:
@@ -2378,8 +2398,8 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, required=True)
     parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Sort, Drop, and Use actions")
     parser.add_argument("--stock-use", action="store_true", help="open a starter bag by stock drag and use a Bandage by stock click")
-    parser.add_argument("--stock-food", action="store_true", help="verify the guest's Food stat in the stock Backpack after a meal")
-    parser.add_argument("--stock-campfire", action="store_true", help="verify damage and hurt feedback from the placed campfire on both seats")
+    parser.add_argument("--stock-food", action="store_true", help="verify the guest's Food stat after a meal, combinable with campfire and weapon cues")
+    parser.add_argument("--stock-campfire", action="store_true", help="verify stock campfire damage and feedback, combinable with food and weapon cues")
     parser.add_argument("--stock-split", action="store_true", help="test the stock guest stack-split popup with a Veteran loadout")
     parser.add_argument("--stock-equip", action="store_true", help="test the stock guest Equip action with a Veteran loadout")
     parser.add_argument("--stock-unequip", action="store_true",
@@ -2391,7 +2411,7 @@ if __name__ == "__main__":
     parser.add_argument("--memory-bridge", action="store_true", help="verify both embedded workers use the native bridge")
     parser.add_argument("--memory-status", action="store_true", help="verify both workers consume live frames through memory")
     parser.add_argument("--resident-weapon-cues", action="store_true",
-                        help="verify one stock Bandage use through the installed in-process weapon cue queue")
+                        help="verify Bandage, footsteps, firing and reload, combinable with campfire and food")
     parser.add_argument("--guest-ui-memory", action="store_true",
                         help="verify the resident guest UI refresh on one stock Nearby Items container pickup")
     parser.add_argument("--stock-prop-grip", action="store_true", help="verify default guest carry filtering in one portable lantern session")
@@ -2480,12 +2500,11 @@ if __name__ == "__main__":
             args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory, args.compact_crate_status,
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
-    if args.stock_food and (args.second_legacy_work or args.resident_cabinet_archive or any(
-            value is True for key, value in vars(args).items() if key != "stock_food")):
-        parser.error("Use --stock-food with two fresh private replicas and no other gameplay fixtures")
-    if args.stock_campfire and (args.second_legacy_work or args.resident_cabinet_archive or any(
-            value is True for key, value in vars(args).items() if key != "stock_campfire")):
-        parser.error("Use --stock-campfire with two fresh private replicas and no other gameplay fixtures")
+    resident_check_options = {"stock_food", "stock_campfire", "resident_weapon_cues"}
+    if (args.stock_food or args.stock_campfire) and (
+            args.second_legacy_work or args.resident_cabinet_archive or any(
+                value is True for key, value in vars(args).items() if key not in resident_check_options)):
+        parser.error("Combine --stock-food, --stock-campfire, and --resident-weapon-cues without other gameplay fixtures")
     if args.resident_weapon_cues and any((
             args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby, args.projected_nearby,
             args.container_nearby, args.stock_use, args.steam_cloud, args.stock_prop_grip, args.stock_host_prop_observer,

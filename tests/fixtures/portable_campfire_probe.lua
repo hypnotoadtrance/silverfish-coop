@@ -96,7 +96,10 @@ local function move(pawn, entering)
         assert(destination, "no position saved for the victim")
     end
     pawn.CharacterMovement:StopMovementImmediately()
-    assert(pawn:K2_SetActorLocation(destination, false, {}, true), "stock pawn move was refused")
+    pawn:K2_SetActorLocation(destination, false, {}, true)
+    local reached = pawn:K2_GetActorLocation()
+    local error_squared = (reached.X - destination.X)^2 + (reached.Y - destination.Y)^2 + (reached.Z - destination.Z)^2
+    assert(error_squared <= 1, "stock pawn move did not reach the requested location")
     if not entering then previous_position[address] = nil end
 end
 
