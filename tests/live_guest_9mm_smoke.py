@@ -221,7 +221,8 @@ async def verify(work, vanilla_saved, kinds=DEFAULT_WEAPONS):
         restart_keys = {FORTY_FIVE_BALL: "45_reserve_after_restart", TWELVE_GAUGE_BUCK: "buckshot_reserve_after_restart",
                         FIVE_SEVEN_AP: "57_ap_reserve_after_restart"}
         for ammo, expected in tracked.items():
-            evidence[restart_keys[ammo]] = await read_reserve(invitation["character_id"], ammo, expected)
+            key = restart_keys.get(ammo, f"{ammo.symbol}_reserve_after_restart")
+            evidence[key] = await read_reserve(invitation["character_id"], ammo, expected)
         evidence["verified"] = True
     except BaseException as error:
         evidence.update(verified=False, failure=str(error))
