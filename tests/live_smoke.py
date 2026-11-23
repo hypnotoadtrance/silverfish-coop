@@ -469,8 +469,8 @@ async def gold_action(operation, guid):
     return report
 
 
-async def wait_campaign_event(event_name, guid, *, after=None):
-    until = time.monotonic() + deadline
+async def wait_campaign_event(event_name, identifier, *, field="guid", after=None, timeout=None):
+    until = time.monotonic() + (deadline if timeout is None else timeout)
     while time.monotonic() < until:
         try:
             lines = (run / "events.jsonl").read_text(encoding="utf-8").splitlines()
@@ -481,11 +481,11 @@ async def wait_campaign_event(event_name, guid, *, after=None):
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if (event.get("event") == event_name and event.get("guid") == guid
+            if (event.get("event") == event_name and event.get(field) == identifier
                     and (after is None or event.get("sequence", 0) > after)):
                 return event
         await asyncio.sleep(0.2)
-    raise TimeoutError(f"No {event_name} outcome for {guid} after sequence {after}")
+    raise TimeoutError(f"No {event_name} outcome for {identifier} after sequence {after}")
 
 
 async def position_for_native_exit(target, where, *, entrance=None):
@@ -1158,13 +1158,11 @@ async def stardust_visit(character_id, host_session):
             assert power["native_dream_isolation"]["state"] == "ready", power
             assert power["native_dream_isolation"]["early_requested"] is True, power
 
-        def shortened(status):
-            visit = campaign_party(status).get("stardust_visit") or {}
-            return (status.get("game", {}).get("map") == visit_map and visit.get("id") == active["id"]
-                    and visit.get("deadline", original_deadline) < original_deadline)
-
-        accelerated = await wait(run, shortened, timeout=8)
-        return_deadline = campaign_party(accelerated)["stardust_visit"]["deadline"]
+        # A short return can finish before the next status read. The event records the committed deadline.
+        accelerated = await wait_campaign_event("stardust_early_return_requested", active["id"],
+                                                field="id", timeout=8)
+        return_deadline = accelerated["deadline"]
+        assert math.isfinite(return_deadline) and return_deadline < original_deadline, accelerated
         note("stock_dream_early_action_shortens_durable_countdown", {
             "visit_id": active["id"], "before": original_deadline, "after": return_deadline,
         })
