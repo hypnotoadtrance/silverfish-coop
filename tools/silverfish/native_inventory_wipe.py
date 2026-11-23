@@ -60,13 +60,21 @@ def _settings(keep_slots, drop_bone_pile, lose_slot_per_death) -> dict:
     return {"keep_slots": keep_slots, "drop_bone_pile": drop_bone_pile, "lose_slot_per_death": lose_slot_per_death}
 
 
-def _items(rows: object) -> list[dict]:
+def _items(rows: object, *, from_census: bool) -> list[dict]:
     if type(rows) is not list or len(rows) > MAX_ITEMS:
         raise InventoryWipeError("invalid_native_inventory")
     result = []
     positions, guids = set(), set()
     for item in rows:
-        if type(item) is not dict or set(item) != _ITEM_FIELDS:
+        if type(item) is not dict:
+            raise InventoryWipeError("invalid_native_item")
+        if from_census and "droppable" in item:
+            # This stock UI field governs a manual drop. Wipe retention and the
+            # versioned draft use their existing, separate policy fields.
+            if type(item["droppable"]) is not bool:
+                raise InventoryWipeError("invalid_native_item_policy")
+            item = {name: value for name, value in item.items() if name != "droppable"}
+        if set(item) != _ITEM_FIELDS:
             raise InventoryWipeError("invalid_native_item")
         guid, source, index, path = item["guid"], item["source"], item["index"], item["class_path"]
         if (
@@ -90,7 +98,7 @@ def _items(rows: object) -> list[dict]:
     return sorted(result, key=lambda item: (SOURCE_ORDER[item["source"]], item["index"]))
 
 
-def _qualify(profile, wipe_id, roster, frames, inventories, settings):
+def _qualify(profile, wipe_id, roster, frames, inventories, settings, *, from_census=False):
     if not isinstance(wipe_id, str) or not _WIPE_ID.fullmatch(wipe_id) or wipe_id == "0" * 32:
         raise InventoryWipeError("invalid_wipe_id")
     if (
@@ -118,7 +126,7 @@ def _qualify(profile, wipe_id, roster, frames, inventories, settings):
         ):
             raise InventoryWipeError("native_inventory_frame_mismatch")
         frozen_frames[actor] = dict(frame)
-        frozen_censuses[actor] = {**census, "items": _items(census["items"])}
+        frozen_censuses[actor] = {**census, "items": _items(census["items"], from_census=from_census)}
         try:
             if actor == "host":
                 native_host_save.verify_record(profile, frame)
@@ -153,7 +161,7 @@ def freeze(
     A None keep_slots setting turns inventory penalties off.
     """
     settings = _settings(keep_slots, drop_bone_pile, lose_slot_per_death)
-    body = _qualify(profile, wipe_id, roster, frames, inventories, settings)
+    body = _qualify(profile, wipe_id, roster, frames, inventories, settings, from_census=True)
     return {**body, "sha256": _digest(body)}
 
 

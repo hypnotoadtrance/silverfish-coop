@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from tools.silverfish import native_host_save, native_inventory_death, native_inventory_wipe as native_wipe, party
+from tools.silverfish import native_host_save, native_inventory_death, native_inventory_wipe as native_wipe, party, runtime
 from tools.silverfish.service import Host
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
@@ -141,6 +141,38 @@ class NativeInventoryWipeTests(unittest.IsolatedAsyncioTestCase):
                 census = self.censuses()
                 census[self.guest]["items"] = [*self.items[self.guest], item]
                 self.freeze(1, censuses=census)
+
+    def test_stock_drop_eligibility_does_not_change_the_legacy_wipe_draft(self):
+        self.frames["host"]["eather_remainder"] = .375
+        legacy = self.freeze(2, drop=True, lose=True)
+        bridge = runtime.Bridge(Path("unused"), None)
+        modern = self.censuses()
+        for actor, census in modern.items():
+            records = [f"schema\t1\nseq\t1\nsession\thost\thosting\t{CROSSROADS}\t0\t0",
+                       f"native-inventory-census\t{census['slot']}\t{CROSSROADS}\t{len(census['items'])}\t0\t{len(census['items'])}"]
+            for item in census["items"]:
+                records.append("\t".join(map(str, ("native-inventory-census-item", item["guid"], item["source"],
+                    item["index"], item["class_path"], item["quantity"], int(item["stackable"]), int(item["important"]),
+                    int(item["cannot_keep"]), int(item["source"] == "backpack")))))
+            parsed = bridge._parse_status("\n".join(records) + "\n")["native_inventory_census"]["items"]
+            self.assertTrue(all(type(row["droppable"]) is bool for row in parsed))
+            census["items"] = parsed
+
+        draft = self.freeze(2, drop=True, lose=True, censuses=modern)
+        self.assertEqual(draft, legacy)
+        self.assertTrue(all("droppable" in row for row in modern["host"]["items"]))
+        choices = {"host": [self.guid(1)], self.guest: [self.guid(6)]}
+        restored = json.loads(json.dumps(legacy))
+        current_plan = native_wipe.plan(self.profile, draft, choices)
+        self.assertEqual(current_plan, native_wipe.plan(self.profile, restored, choices))
+        self.assertEqual(current_plan["owners"]["host"]["source"]["eather_remainder"], .375)
+
+        modern["host"]["items"][0]["droppable"] = 1
+        with self.assertRaisesRegex(native_wipe.InventoryWipeError, "invalid_native_item_policy"):
+            self.freeze(2, censuses=modern)
+        restored["inventories"]["host"]["items"][0]["droppable"] = True
+        with self.assertRaisesRegex(native_wipe.InventoryWipeError, "invalid_native_item"):
+            native_wipe.plan(self.profile, restored, choices)
 
     def test_recovery_refuses_changed_census_or_missing_native_generation(self):
         draft = self.freeze(2)
