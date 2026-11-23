@@ -186,7 +186,7 @@ namespace
         return live(value) && value->GetClassPrivate() == find<U::UClass>(path);
     }
 
-    enum class NpcFamily { Unknown, Husk, Flayer, NotDeer, Boar };
+    enum class NpcFamily { Unknown, Husk, Flayer, NotDeer, Boar, Ambient };
 
     struct AntfarmProfile
     {
@@ -421,6 +421,114 @@ namespace
         return 1 + rows.Num();
     }
 
+    // The largest authored Flood Plains roster is one leader and five followers.
+    constexpr std::size_t ruin_squad_cap = 6;
+
+    struct RuinSquad
+    {
+        std::array<std::wstring, ruin_squad_cap> classes;
+        std::array<bool, ruin_squad_cap> matched{};
+        std::size_t size{};
+        bool all_classes_loaded{true};
+
+        bool match(std::wstring_view path, bool leader)
+        {
+            if (leader)
+            {
+                if (matched[0] || path != classes[0]) return false;
+                matched[0] = true;
+                return true;
+            }
+            for (std::size_t index = 1; index < size; ++index)
+            {
+                if (!matched[index] && path == classes[index])
+                {
+                    matched[index] = true;
+                    return true;
+                }
+            }
+            return false;
+        }
+    };
+
+    std::optional<bool> ruin_pool_contains(U::UObject* pool, U::UObject* data, const U::TCHAR* name)
+    {
+        auto* map = field<U::FMapProperty>(pool, name);
+        auto* key = map ? U::CastField<U::FObjectProperty>(map->GetKeyProp()) : nullptr;
+        auto* value = map ? U::CastField<U::FDoubleProperty>(map->GetValueProp()) : nullptr;
+        auto* value_float = map && !value ? U::CastField<U::FFloatProperty>(map->GetValueProp()) : nullptr;
+        if (!key || key->GetPropertyClass().Get() != find<U::UClass>(data_class) || (!value && !value_float))
+            return std::nullopt;
+        const auto* rows = map->ContainerPtrToValuePtr<U::FScriptMap>(pool);
+        const auto& layout = map->GetMapLayout();
+        constexpr int max_pool_slots = 32;
+        if (rows->Num() < 0 || rows->Num() > max_pool_slots || rows->GetMaxIndex() > max_pool_slots)
+            return std::nullopt;
+        for (int index = 0; index < rows->GetMaxIndex(); ++index)
+        {
+            if (!rows->IsValidIndex(index)) continue;
+            const auto* entry = static_cast<const std::uint8_t*>(rows->GetData(index, layout));
+            if (key->GetObjectPropertyValue(entry) != data) continue;
+            const auto* weight_property = entry + layout.ValueOffset;
+            const double weight = value ? value->GetPropertyValue(weight_property) : value_float->GetPropertyValue(weight_property);
+            return std::isfinite(weight) && weight > 0.0;
+        }
+        return false;
+    }
+
+    bool ruin_pool_asset(U::UObject* director, U::UObject* data)
+    {
+        auto* pool = object(director, STR("AmbientSquadPool"));
+        if (!exact(pool, pool_class) || pool->GetPathName() != ruin_fields.pool || !exact(data, data_class))
+            return false;
+        const auto day = ruin_pool_contains(pool, data, STR("DayTimeSpawns"));
+        const auto night = ruin_pool_contains(pool, data, STR("NightTimeSpawns"));
+        return day && night && (*day || *night);
+    }
+
+    std::string_view ruin_squad_shape(U::UObject* director, U::UObject* data, RuinSquad& squad)
+    {
+        if (!ruin_pool_asset(director, data)) return "stock_ruin_pool_asset_unqualified";
+        auto* base = find<U::UClass>(npc_base);
+        auto* leader = field<U::FSoftClassProperty>(data, STR("Leader"));
+        auto* followers = field<U::FArrayProperty>(data, STR("Followers"));
+        auto* follower = followers ? U::CastField<U::FSoftClassProperty>(followers->GetInner()) : nullptr;
+        if (!base || !leader || !follower || leader->GetMetaClass().Get() != base || follower->GetMetaClass().Get() != base)
+            return "stock_ruin_squad_class_schema_unqualified";
+        U::FScriptArrayHelper rows(followers, followers->ContainerPtrToValuePtr<void>(data));
+        if (rows.Num() < 0 || static_cast<std::size_t>(rows.Num()) >= ruin_squad_cap)
+            return "stock_ruin_squad_size_unqualified";
+
+        const auto add = [&](const U::FSoftObjectPtr& soft) {
+            const auto& reference = soft.ToSoftObjectPath();
+            const auto asset_path = reference.GetAssetPathString();
+            const std::wstring_view path{*asset_path};
+            if (!reference.GetSubPathString().IsEmpty() || !path.starts_with(STR("/Game/Classes/NPCs/")) ||
+                !path.ends_with(STR("_C")) || path.size() > 256)
+                return false;
+            if (auto* resolved = soft.Get())
+            {
+                auto* klass = U::Cast<U::UClass>(resolved);
+                if (!live(klass) || klass == base || !klass->IsChildOf(base) || klass->GetPathName() != path) return false;
+            }
+            else squad.all_classes_loaded = false;
+            squad.classes[squad.size++].assign(path);
+            return true;
+        };
+        if (!add(*leader->ContainerPtrToValuePtr<U::FSoftObjectPtr>(data))) return "stock_ruin_leader_class_unqualified";
+        for (int index = 0; index < rows.Num(); ++index)
+            if (!add(*follower->ContainerPtrToValuePtr<U::FSoftObjectPtr>(rows.GetRawPtr(index))))
+                return "stock_ruin_follower_class_unqualified";
+        return {};
+    }
+
+    NpcFamily directed_family(U::UObject* data, const Network& active)
+    {
+        if (boar_squad_size(data) > 0) return NpcFamily::Boar;
+        if (data_index(data) >= 0 && bool_field(data, STR("ForceWander"), true)) return NpcFamily::Husk;
+        return active.director == &ruin_fields ? NpcFamily::Ambient : NpcFamily::Unknown;
+    }
+
     struct SpawnSchema
     {
         U::FObjectProperty* data{};
@@ -636,7 +744,7 @@ namespace
         ClientBirths client_births;
         Flayers flayers;
         AntfarmCohort not_deer;
-        AntfarmCohort boars;
+        AntfarmCohort boars, ambient;
         std::vector<RosterMember> roster;
         SavedSquad not_deer_saved;
         U::FWeakObjectPtr not_deer_replica;
@@ -685,6 +793,7 @@ namespace
         bool initial{};
         std::string_view birth_failure{};
         RuinDraw* ruin_draw{};
+        std::optional<RuinSquad> ruin_squad;
     } attempt;
 
     struct AntfarmLoad
@@ -829,6 +938,7 @@ namespace
         if (family == NpcFamily::Flayer) return &scope.flayers;
         if (family == NpcFamily::NotDeer && operate_not_deer) return &scope.not_deer;
         if (family == NpcFamily::Boar && operate_boars) return &scope.boars;
+        if (family == NpcFamily::Ambient) return &scope.ambient;
         return nullptr;
     }
 
@@ -861,7 +971,12 @@ namespace
         auto* spawner = attempt.spawner.Get();
         auto* world = U::Cast<U::UWorld>(attempt.world.Get());
         if (!attempt.birth_failure.empty()) return;
-        if (!world || parent.Object() != spawner || npc_family(actor) != attempt.family ||
+        auto* actor_class = actor ? actor->GetClassPrivate() : nullptr;
+        auto* base = attempt.ruin_squad ? find<U::UClass>(npc_base) : nullptr;
+        const bool expected_class = attempt.ruin_squad
+            ? actor_class && base && actor_class != base && actor_class->IsChildOf(base)
+            : npc_family(actor) == attempt.family;
+        if (!world || parent.Object() != spawner || !expected_class ||
             !in_level(actor, world) || contains(attempt.before, actor) ||
             (attempt.family == NpcFamily::Husk && !bool_field(actor, STR("Wander"), true)))
         {
@@ -881,6 +996,11 @@ namespace
         if (contains(attempt.births, actor) || attempt.births.size() >= static_cast<std::size_t>(attempt.max_count))
         {
             attempt.birth_failure = "stock_husk_birth_count_unverified";
+            return;
+        }
+        if (attempt.ruin_squad && !attempt.ruin_squad->match(actor_class->GetPathName(), leader))
+        {
+            attempt.birth_failure = "stock_ruin_birth_class_unqualified";
             return;
         }
         attempt.births.emplace_back(actor);
@@ -1422,23 +1542,17 @@ namespace
         }
         auto* data = get_object(schema.data, frame.Locals());
         auto* draw = observe_ruin_draw(active, frame, receiver, data);
-        if (!directed_squad(data, active))
-        {
-            ruin_stage(draw, "unsupported_squad");
-            return;
-        }
-        const bool boar = boar_squad_size(data) > 0;
-        if (!boar && (data_index(data) < 0 || !bool_field(data, STR("ForceWander"), true)))
-        {
-            ruin_stage(draw, "husk_asset_or_force_wander_refused");
-            return;
-        }
+        const bool ruin = active.director == &ruin_fields;
+        if (!ruin && !directed_squad(data, active)) return;
+        const auto family = directed_family(data, active);
+        if (family == NpcFamily::Unknown) return;
+        auto* caller = frame.PreviousFrame();
+        bool initial{};
         if (production_roster || uses_director_markers)
         {
-            auto* caller = frame.PreviousFrame();
             if (!caller || !exact_director(caller->Object(), active)) return;
             const auto usage = byte_field(receiver, STR("Usage"));
-            const bool initial = usage == 0 && caller->Node() == find<U::UFunction>(initial_path);
+            initial = usage == 0 && caller->Node() == find<U::UFunction>(initial_path);
             const bool refresh = usage == 3 && caller->Node() == find<U::UFunction>(refresh_path);
             if (!initial && !refresh)
             {
@@ -1451,10 +1565,28 @@ namespace
                 return;
             }
         }
-        auto& calls = boar ? scope.boars.calls : scope.natural_calls;
-        auto& latest = boar ? scope.boars.latest : scope.latest;
-        ++calls;
-        latest = {receiver, data, {}, boar ? "stock_client_boar_spawn_observed" : "stock_client_husk_spawn_observed", 0};
+        auto* cohort = antfarm_cohort(family);
+        auto& latest = cohort ? cohort->latest : scope.latest;
+        if (ruin)
+        {
+            RuinSquad squad;
+            if (const auto error = ruin_squad_shape(caller->Object(), data, squad); !error.empty())
+            {
+                ruin_stage(draw, error);
+                return;
+            }
+            if (family == NpcFamily::Ambient && !squad.all_classes_loaded)
+            {
+                latest = {receiver, data, {}, "stock_ruin_guest_class_unloaded", 0};
+                ruin_stage(draw, latest.stage);
+                return;
+            }
+        }
+        const bool ambient = family == NpcFamily::Ambient;
+        const bool boar = family == NpcFamily::Boar;
+        ++(cohort ? cohort->calls : scope.natural_calls);
+        latest = {receiver, data, {}, ambient ? "stock_client_ambient_spawn_observed" :
+            boar ? "stock_client_boar_spawn_observed" : "stock_client_husk_spawn_observed", 0};
         if (!boar && !operate && !production_roster)
         {
             ruin_stage(draw, "suppression_disabled");
@@ -1463,7 +1595,8 @@ namespace
         auto* output = schema.output_address(frame);
         if (!output)
         {
-            latest.stage = boar ? "stock_client_boar_output_unverified" : "stock_client_husk_output_unverified";
+            latest.stage = ambient ? "stock_client_ambient_output_unverified" :
+                boar ? "stock_client_boar_output_unverified" : "stock_client_husk_output_unverified";
             ruin_stage(draw, "stock_count_output_unqualified");
             return;
         }
@@ -1472,10 +1605,11 @@ namespace
         if (call.OriginalFunctionCallPrevented())
         {
             schema.count->SetPropertyValue(output, 0);
-            ++(boar ? scope.boars.spawn_denials : scope.spawn_denials);
+            ++(cohort ? cohort->spawn_denials : scope.spawn_denials);
             if (network(active.world).seat != Seat::Client)
-                ++births_for(boar ? NpcFamily::Boar : NpcFamily::Husk).early_spawn_denials;
-            latest.stage = boar ? "stock_client_boar_spawn_denied" : "stock_client_husk_spawn_denied";
+                ++births_for(family).early_spawn_denials;
+            latest.stage = ambient ? (initial ? "stock_client_ambient_initial_spawn_denied" : "stock_client_ambient_refresh_spawn_denied") :
+                boar ? "stock_client_boar_spawn_denied" : "stock_client_husk_spawn_denied";
         }
     }
 
@@ -1572,26 +1706,28 @@ namespace
         ++scope.natural_calls;
         auto* data = get_object(schema.data, frame.Locals());
         auto* draw = observe_ruin_draw(active, frame, receiver, data);
-        if (!directed_squad(data, active))
+        std::optional<RuinSquad> ruin_squad;
+        if (active.director == &ruin_fields)
         {
-            ruin_stage(draw, "unsupported_squad");
-            return;
+            ruin_squad.emplace();
+            if (const auto error = ruin_squad_shape(director, data, *ruin_squad); !error.empty())
+            {
+                ruin_stage(draw, error);
+                return;
+            }
         }
+        else if (!directed_squad(data, active)) return;
         if (refresh && scope.refresh.running)
         {
             ++scope.refresh.calls;
             scope.refresh.marker = receiver;
             if (exact(data, data_class)) scope.refresh.data = data;
         }
-        const auto boar_count = boar_squad_size(data);
-        const auto source = data_index(data);
-        if (!boar_count && (source < 0 || !bool_field(data, STR("ForceWander"), true)))
-        {
-            ruin_stage(draw, "husk_asset_or_force_wander_refused");
-            return;
-        }
-        auto& latest = boar_count ? scope.boars.latest : scope.latest;
-        if (boar_count) ++scope.boars.calls;
+        const auto family = directed_family(data, active);
+        if (family == NpcFamily::Unknown) return;
+        auto* cohort = antfarm_cohort(family);
+        auto& latest = cohort ? cohort->latest : scope.latest;
+        if (cohort) ++cohort->calls;
         if (const auto error = schema.bind_birth(frame.Node()); !error.empty())
         {
             if (latest.cohort.empty()) latest = {receiver, data, {}, error, 0};
@@ -1603,18 +1739,23 @@ namespace
             ruin_stage(draw, "host_canonical_pawn_unqualified");
             return;
         }
-        Actors before;
-        if (!scene_npcs(active.world, boar_count ? boar_class : npc_class, before))
-        {
-            ruin_stage(draw, "pre_spawn_census_unavailable");
-            return;
-        }
+        const bool boar = family == NpcFamily::Boar;
         Handles baseline;
-        baseline.reserve(before.size());
-        for (auto* existing : before) baseline.emplace_back(existing);
+        if (!ruin_squad)
+        {
+            Actors before;
+            if (!scene_npcs(active.world, boar ? boar_class : npc_class, before))
+            {
+                ruin_stage(draw, "pre_spawn_census_unavailable");
+                return;
+            }
+            baseline.reserve(before.size());
+            for (auto* existing : before) baseline.emplace_back(existing);
+        }
+        const auto maximum = ruin_squad ? static_cast<int>(ruin_squad->size) :
+            boar ? boar_squad_size(data) : maximum_squad_sizes[static_cast<std::size_t>(data_index(data))];
         attempt = {&frame, active.world, director, receiver, data, std::move(baseline), {}, schema,
-            boar_count ? boar_count : maximum_squad_sizes[static_cast<std::size_t>(source)],
-            boar_count ? NpcFamily::Boar : NpcFamily::Husk, initial, {}, draw};
+            maximum, family, initial, {}, draw, std::move(ruin_squad)};
         ruin_stage(draw, "awaiting_stock_spawn_result");
     }
 
@@ -1665,12 +1806,14 @@ namespace
         auto* data = observed.data.Get();
         const auto& schema = observed.schema;
         const bool boar = observed.family == NpcFamily::Boar;
-        auto& latest = boar ? scope.boars.latest : scope.latest;
+        auto* cohort = antfarm_cohort(observed.family);
+        auto& latest = cohort ? cohort->latest : scope.latest;
         if (active.seat != Seat::Host || !exact_director(director, active) || !local_pawn(director, active) ||
             !director_marker(receiver, director, active, observed.initial) || frame.Node() != find<U::UFunction>(spawn_path) ||
-            !directed_squad(data, active) ||
             data != get_object(schema.data, frame.Locals()) ||
-            (boar ? boar_squad_size(data) != observed.max_count : data_index(data) < 0))
+            (observed.ruin_squad ? !ruin_pool_asset(director, data) : !directed_squad(data, active)) ||
+            directed_family(data, active) != observed.family ||
+            (!observed.ruin_squad && boar && boar_squad_size(data) != observed.max_count))
         {
             ruin_stage(draw, "post_spawn_scope_unqualified");
             return;
@@ -1683,6 +1826,12 @@ namespace
         if (count != observed.max_count)
         {
             if (output) next.stage = "stock_count_unexpected";
+        }
+        else if (observed.ruin_squad)
+        {
+            if (!observed.births.empty() && observed.birth_failure.empty())
+                for (const auto& unit : observed.births) after.push_back(unit.Get());
+            else next.stage = observed.birth_failure.empty() ? "stock_ruin_births_unverified" : observed.birth_failure;
         }
         else if (!scene_npcs(active.world, boar ? boar_class : npc_class, after))
         {
@@ -1708,6 +1857,8 @@ namespace
             return;
         }
         if (!std::ranges::all_of(after, [&](U::UObject* actor) {
+            if (observed.family == NpcFamily::Ambient)
+                return in_level(actor, active.world) && byte_field(actor, STR("Role")) == 3;
             return boar ? in_level(actor, active.world) && exact(actor, boar_class) && byte_field(actor, STR("Role")) == 3
                         : stock_npc_authority(actor, npc_class, active.world);
         }))
@@ -1722,7 +1873,7 @@ namespace
         }
         else
         {
-            ++(boar ? scope.boars.receipts : scope.receipts);
+            ++(cohort ? cohort->receipts : scope.receipts);
             for (auto* actor : after) next.cohort.emplace_back(actor);
             next.stage = observed.initial ? "stock_initial" : "stock_refresh";
             if ((boar || operate || production_roster) && Replication{}.apply(after))
@@ -1755,7 +1906,22 @@ namespace
         scope.flayers.counts = {};
         scope.not_deer.counts = {};
         scope.boars.counts = {};
+        scope.ambient.counts = {};
         scope.not_deer_replica.Reset();
+        if (active.director == &ruin_fields && active.seat == Seat::Host)
+        {
+            prune_roster(active.world);
+            for (const auto& member : scope.roster)
+            {
+                if (member.family != NpcFamily::Ambient) continue;
+                auto* actor = member.actor.Get();
+                if (byte_field(actor, STR("Role")) != 3) continue;
+                ++scope.ambient.counts.authority;
+                if (bool_field(actor, STR("bReplicates"), true) &&
+                    bool_field(actor, STR("bReplicateMovement"), true) && byte_field(actor, STR("RemoteRole")) == 1)
+                    ++scope.ambient.counts.authority_network_ready;
+            }
+        }
         auto* antfarm = find<U::UClass>(antfarm_class);
 
         if (auto* base = find<U::UClass>(npc_base))
@@ -1829,10 +1995,12 @@ namespace
         const std::string selection = arguments >= 3 ? std::string(lua.get_string()) : std::string{};
         const bool not_deer = selection == "notdeer" && operate_not_deer;
         const auto* family = antfarm_cohort(not_deer ? NpcFamily::NotDeer :
-            selection == "flayer" ? NpcFamily::Flayer : selection == "boar" ? NpcFamily::Boar : NpcFamily::Unknown);
+            selection == "flayer" ? NpcFamily::Flayer : selection == "boar" ? NpcFamily::Boar :
+            selection == "ambient" ? NpcFamily::Ambient : NpcFamily::Unknown);
         if (arguments >= 3 && selection != "husk" && !family) return 0;
         const auto* profile = arguments == 4 ? director_for(RC::ensure_str(lua.get_string())) : &crossroads;
-        if (!profile || (profile != &crossroads && selection != "husk" && selection != "boar")) return 0;
+        if (!profile || (selection == "ambient" && profile != &ruin_fields) ||
+            (profile != &crossroads && selection != "husk" && selection != "boar" && selection != "ambient")) return 0;
         const auto active = network(find<U::UWorld>(profile->world));
         auto* director = find<U::UObject>(profile->director);
         if (active.seat != (host ? Seat::Host : Seat::Client) || !exact_director(director, active) ||

@@ -321,6 +321,28 @@ def stock_cohort(report: dict | None, replicate: bool, family: str = "husk", are
                      and report.get("saved_squads", {}).get("data") == f"{SQUAD_PREFIX}NotDeer.NotDeer")))
 
 
+def ruin_ambient_receipt(report, *, denial=False):
+    if not report:
+        return False
+    marker = RUIN_SPAWNER.fullmatch(report["spawner"])
+    if not marker or int(marker.group(1)) not in RUIN_MARKERS or not re.fullmatch(
+            r"SquadData_C /Game/Classes/Libraries/DataAssets/Squads/(?:[A-Za-z0-9_-]+/)*([A-Za-z0-9_-]+)\.\1",
+            report["data"]):
+        return False
+    if denial:
+        return report["stage"] in ("stock_client_ambient_initial_spawn_denied",
+                                   "stock_client_ambient_refresh_spawn_denied") and report["spawn_denials"] > 0
+    members = report["members"]
+    return (report["stage"] in ("stock_initial", "stock_refresh")
+            and 0 < report["replicated"] == report["cohort"] <= 6
+            and len(set(members)) == len(members) == report["cohort"]
+            and all(re.fullmatch(r"(NPC_[A-Za-z0-9_]+_C) " + re.escape(RUIN_LEVEL) + r"\1_[0-9]+", name)
+                    for name in members)
+            and report["natural_calls"] >= report["receipts"] > 0
+            and report["authority"] >= report["network"]["authority_network_ready"] >= report["cohort"]
+            and report["simulated"] == report["other"] == report["spawn_denials"] == report["ai_denials"] == 0)
+
+
 def ruin_stock_receipt(report, family, *, denial=False):
     if not report:
         return False
@@ -406,7 +428,8 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                    flayer_veto: bool = False, join_only: bool = False, combat: bool = False,
                    stock_refresh: bool = False, antfarm_replay: Path | None = None,
                    projectile_tap: bool = False, flayer_defaults: bool = False, dead_bridge: bool = False,
-                   ruin_fields: bool = False, private_canaries: Path | None = None, ruin_diagnostic: bool = False) -> None:
+                   ruin_fields: bool = False, private_canaries: Path | None = None, ruin_diagnostic: bool = False,
+                   ruin_ambient: bool = False) -> None:
     if os.name != "nt":
         raise OSError("The live canary requires the staged Windows game")
     name = ("campaign-npc-ruin-" if ruin_fields else "campaign-npc-") + uuid.uuid4().hex[:8]
@@ -715,6 +738,8 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         latest = evidence["ruin_frames"] = {}
         deadline = time.monotonic() + min(timeout, 28)
         limitation = "No captured natural supported director receipt"
+        topics = (("ambient", "native-campaign-npc-ambient"),) if ruin_ambient else (
+            ("husk", "native-campaign-npc"), ("boar", "native-campaign-npc-boar"))
         while time.monotonic() < deadline:
             frames()  # Preserve the existing Husk birth/initialization diagnostic.
             if ruin_diagnostic:
@@ -723,11 +748,17 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                     if rows := read_director_trace(run, viewer):
                         trace[viewer] = rows
             qualified = {}
-            for family, topic in (("husk", "native-campaign-npc"), ("boar", "native-campaign-npc-boar")):
+            for family, topic in topics:
                 owner, observer = (read_npcs(run, viewer, RUIN, topic=topic)
                                    for run, viewer in ((host, "host"), (guest, "client")))
                 latest[family] = {"host": owner, "guest": observer}
                 if not owner or not observer:
+                    continue
+                if family == "ambient":
+                    if ruin_ambient_receipt(observer, denial=True):
+                        denials[family] = observer
+                    if ruin_ambient_receipt(owner):
+                        qualified[family] = set(owner["members"])
                     continue
                 network = observer["network"]
                 assert (observer["authority"], observer["other"], observer["simulated_controllers"],
@@ -741,8 +772,12 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                 continue
             owner, observer = await asyncio.gather(capture(host, "host"), capture(guest, "client"))
             evidence["ruin_actor_census"] = {"host": owner, "guest": observer}
+            required = set().union(*qualified.values())
             try:
-                matched = compare(owner, observer, set().union(*qualified.values()))
+                if ruin_ambient:
+                    matched = compare(owner, observer, required, classes={name.partition(" ")[0] for name in required})
+                else:
+                    matched = compare(owner, observer, required)
             except ValueError as mismatch:
                 limitation = str(mismatch)
                 await asyncio.sleep(.2)
@@ -956,6 +991,7 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, help="optional original Saved directory to hash")
     parser.add_argument("--cohort", choices=tuple(DATA), default="husk", help="stock encounter family to verify")
     parser.add_argument("--ruin-fields", action="store_true", help="observe the real daytime Ruin Fields stock director")
+    parser.add_argument("--ruin-ambient", action="store_true", help="verify a stock Ruin squad outside the legacy Husk and boar topics")
     parser.add_argument("--ruin-diagnostic", action="store_true", help="capture exact stock Ruin pool inputs and first draw outcomes")
     parser.add_argument("--private-canaries", type=Path, help="private SaveGames to hash before and after the Ruin proof")
     parser.add_argument("--dead-bridge", action="store_true", help="verify the stock Dead Bridge Husk director with production defaults")
@@ -983,8 +1019,8 @@ if __name__ == "__main__":
                         options.flayer_veto))):
             parser.error("--ruin-fields verifies Husk/boar stock cohorts and requires original and private canary paths")
         options.replicate = True
-    elif options.private_canaries or options.ruin_diagnostic:
-        parser.error("--private-canaries and --ruin-diagnostic require --ruin-fields")
+    elif options.private_canaries or options.ruin_diagnostic or options.ruin_ambient:
+        parser.error("--private-canaries, --ruin-diagnostic, and --ruin-ambient require --ruin-fields")
     if options.dead_bridge:
         if options.cohort != "husk" or any((options.approach, options.combat, options.stock_refresh, options.join_only,
                                             options.flayer_replay, options.notdeer_replay, options.projectile_tap)):
@@ -1036,7 +1072,8 @@ if __name__ == "__main__":
                    antfarm_replay=options.flayer_replay or options.notdeer_replay,
                    projectile_tap=options.projectile_tap, flayer_defaults=options.flayer_defaults,
                    dead_bridge=options.dead_bridge, ruin_fields=options.ruin_fields,
-                   private_canaries=options.private_canaries, ruin_diagnostic=options.ruin_diagnostic)
+                   private_canaries=options.private_canaries, ruin_diagnostic=options.ruin_diagnostic,
+                   ruin_ambient=options.ruin_ambient)
     if options.ruin_fields:
         with installed_probe(options.work.resolve()):
             asyncio.run(run)

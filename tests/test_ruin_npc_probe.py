@@ -29,6 +29,19 @@ class RuinNpcProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside the guest"):
             compare(host, {inactive_husk: guest[inactive_husk]}, {authority})
 
+    def test_matches_the_classes_declared_by_a_mixed_ambient_receipt(self):
+        stag, stag_row = stock_actor("NPC_MinorStag_C", 1, 3, (1000, -2000, 20))
+        doe, doe_row = stock_actor("NPC_Doe_C", 2, 3, (1010, -2000, 20))
+        proxy_stag, proxy_stag_row = stock_actor("NPC_MinorStag_C", 3, 1, (1004, -2000, 20))
+        proxy_doe, proxy_doe_row = stock_actor("NPC_Doe_C", 4, 1, (1013, -2000, 20))
+        worker, worker_row = stock_actor("NPC_Survivor_Worker_C", 5, 3, (0, 0, 250))
+        host = decode(["host", stag_row, doe_row], "host")
+        guest = decode(["client", proxy_stag_row, proxy_doe_row, worker_row], "client")
+        report = compare(host, guest, {stag, doe}, classes={host[stag]["class"], host[doe]["class"]})
+        self.assertEqual({owner: row["replica"] for owner, row in report["matched"].items()},
+                         {stag: proxy_stag, doe: proxy_doe})
+        self.assertEqual(report["unsupported"]["guest"], {worker: guest[worker]})
+
     def test_rejects_client_authority_and_out_of_range_roles(self):
         authority, owner_row = stock_actor("NPC_Zomb_01_C", 1, 3, (1000, -2000, 20))
         _, wrong_role = stock_actor("NPC_Zomb_01_C", 2, 3, (1004, -2000, 20))

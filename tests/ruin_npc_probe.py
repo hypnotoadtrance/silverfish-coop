@@ -107,17 +107,17 @@ async def capture(run: Path, viewer: str):
             await asyncio.sleep(.05)
 
 
-def compare(host, guest, required):
+def compare(host, guest, required, *, classes=SUPPORTED):
     """Match the received set uniquely, including every member of a qualified stock receipt."""
     seats = {"host": host, "guest": guest}
     inactive = {side: {name: row for name, row in actors.items() if row["role"] == 0} for side, actors in seats.items()}
     # ROLE_None can appear briefly at origin before a stock actor enters the active scene.
     authority = {name: row for name, row in host.items()
-                 if row["role"] != 0 and row["class"] in SUPPORTED and row["replicates"]}
-    observed = {name: row for name, row in guest.items() if row["role"] != 0 and row["class"] in SUPPORTED}
+                 if row["role"] != 0 and row["class"] in classes and row["replicates"]}
+    observed = {name: row for name, row in guest.items() if row["role"] != 0 and row["class"] in classes}
     assert all(row["role"] == 3 for row in authority.values()), authority
     assert all(row["role"] == 1 for row in observed.values()), observed
-    unsupported = {side: {name: row for name, row in actors.items() if row["role"] != 0 and row["class"] in UNSUPPORTED}
+    unsupported = {side: {name: row for name, row in actors.items() if row["role"] != 0 and row["class"] not in classes}
                    for side, actors in seats.items()}
 
     def distance(owner, observer):
