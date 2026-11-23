@@ -1,9 +1,12 @@
 -- Private source qualification for equipped stock handheld flashlights.
 local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
-if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_FLASHLIGHT_PROBE") ~= "1"
-    or not mailbox or not mailbox:match("[/\\]avatar%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$") then return end
+local portable = mailbox and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
+    and mailbox:match("[/\\]portable%-title%-%x+[/\\][%a]+[/\\]titles[/\\]local[/\\]run[/\\]game%-bridge[/\\]%x+$")
+local legacy = mailbox and os.getenv("SILVERFISH_COOP_FLASHLIGHT_PROBE") == "1"
+    and mailbox:match("[/\\]avatar%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
+if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not (portable or legacy) then return end
 
-local map = "World /Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
+local map = "World /Game/Classes/Maps/Maps_OverWorld/" .. (portable and "Observitory_P.Observitory_P" or "CrossRoads_P.CrossRoads_P")
 local guest_source = os.getenv("SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE") == "1"
 local guest_offhand = os.getenv("SILVERFISH_COOP_GUEST_OFFHAND_PROBE") == "1"
 local offhand_trace = guest_offhand and os.getenv("SILVERFISH_COOP_GUEST_OFFHAND_TRACE") == "1"
@@ -278,7 +281,7 @@ local function stock_c_edge(operation, pawn)
     local input = asset("/Script/EnhancedInput.Default__EnhancedInputLibrary")
     local action = asset("/Game/Classes/Player/Player_Inputs/IA_ModeToggle.IA_ModeToggle")
     assert(valid(controller) and controller:IsLocalController() and same(controller.Pawn, pawn)
-        and not pawn:HasAuthority(), "flashlight_probe_guest_offhand_c_scope_unavailable")
+        and (portable or not pawn:HasAuthority()), "flashlight_probe_offhand_c_scope_unavailable")
     local before = pawn.Save.PlayerOffhandingFlashlight
     if operation == "coffhandstart" then
         assert(not guest_hold, "flashlight_probe_guest_offhand_c_already_pressed")
@@ -330,9 +333,20 @@ local function offhand_operation(operation, pawn, world)
     for _, slot in ipairs(seeded_slots) do
         assert(item_identity(save.PlayerEquipment[slot.index]) == slot.guid, "flashlight_probe_offhand_slot_changed")
     end
+    if portable and (operation == "selectregular" or operation == "selectprimary") then
+        local index = seeded_slots[operation == "selectregular" and 1 or 2].index - 1
+        pawn:Equip_NextItem(index, false)
+        assert(save.PlayerEquipIndex == index, "the stock quick slot selection did not apply")
+        if operation == "selectprimary" then
+            primary = pawn.EquipedItem
+            assert(valid(primary) and same(primary:GetClass(), asset(pistol_path)) and same(primary.User, pawn),
+                "the stock pistol did not return after holstering the flashlight")
+        end
+        return "selected"
+    end
     assert(same(pawn.EquipedItem, primary) and save.PlayerEquipIndex == seeded_slots[2].index - 1,
         "flashlight_probe_offhand_primary_changed")
-    if guest_offhand and operation:match("^coffhand") then return stock_c_edge(operation, pawn) end
+    if (guest_offhand or portable) and operation:match("^coffhand") then return stock_c_edge(operation, pawn) end
     if operation == "offhandon" then
         local eligible = {}
         pawn:CanOffhandFlashlight(eligible)
@@ -546,7 +560,8 @@ local function observe(world, local_pawn, id)
                 if valid(parent) and parent:GetClass():GetFullName() == "BlueprintGeneratedClass " .. equipment_path then
                     held_sources = held_sources + 1
                     local torch = parent.SM_Prop_Torch_01
-                    if heavy_view and valid(actor.SpotLight) and actor.SpotLight:IsVisible()
+                    if (heavy_view or portable) and valid(actor.SpotLight) and actor.SpotLight:IsVisible()
+                        and not actor.SpotLight.bHiddenInGame and not actor.bHidden
                         and valid(torch) and same(torch:GetOwner(), parent) and valid(torch.StaticMesh)
                         and torch.StaticMesh:GetFullName() == mesh_name then
                         visible_stock, stock_torch = actor.SpotLight, torch
@@ -574,6 +589,18 @@ local function observe(world, local_pawn, id)
     end
     local census = string.format("%s\t%d\t%d\t%d\t%d\t%d\t%d", remote:GetFullName(), sources, powered, visible, components,
         held_sources, display_meshes)
+    if portable then
+        local spot = visible_component or visible_stock
+        if not valid(spot) then return census .. "\t-" end
+        local mount = spot:GetAttachParent()
+        local rotation = spot:K2_GetComponentRotation()
+        return table.concat({census, spot:GetFullName(), tostring(spot.bHiddenInGame), tostring(spot.bAffectsWorld),
+            spot.Intensity, spot.AttenuationRadius, spot.InnerConeAngle, spot.OuterConeAngle,
+            tostring(spot.IntensityUnits), tostring(spot.bUseInverseSquaredFalloff), spot.LightFalloffExponent,
+            spot.LightFunctionMaterial:GetFullName(), spot.LightFunctionFadeDistance,
+            valid(mount) and mount:GetAttachSocketName():ToString() or "-",
+            rotation.Pitch, rotation.Yaw, rotation.Roll}, "\t")
+    end
     if offhand then
         local row = census .. "\t" .. offhand_rig(remote)
         if not offhand_view then return row end
@@ -622,6 +649,15 @@ local function observe(world, local_pawn, id)
 end
 
 local function run(operation)
+    if portable then
+        local mode
+        mode, operation = operation:match("^([a-z]+)x([a-z0-9]+)$")
+        assert(mode == "regularhost" or mode == "regularguest" or mode == "offhandhost" or mode == "offhandguest",
+            "unknown portable beam fixture mode")
+        guest_source = mode == "regularguest"
+        offhand = mode:match("^offhand") ~= nil
+        offhand_view, guest_offhand = offhand, mode == "offhandguest"
+    end
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     local driver = valid(world) and world.NetDriver
@@ -635,7 +671,8 @@ local function run(operation)
     end
     assert(same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref), "flashlight_probe_local_save_unavailable")
     if not connected then
-        assert(pawn:HasAuthority() and #driver.ClientConnections == 1 and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1",
+        assert(pawn:HasAuthority() and #driver.ClientConnections == 1
+            and (portable or os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"),
             "flashlight_probe_host_scope_unavailable")
     end
     if guest_offhand then
@@ -726,6 +763,9 @@ local function run(operation)
         equipment:Use_Item_Primary(true, 0)
         equipment:Use_Item_Primary(false, 0)
         assert(actor.Powered == requested and spot:IsVisible() == requested, "flashlight_probe_stock_power_readback_failed")
+    elseif portable and operation == "turnlight" then
+        local rotation = pawn.Controller:GetControlRotation()
+        pawn.Controller:SetControlRotation({Pitch = rotation.Pitch < 0 and 24 or -24, Yaw = rotation.Yaw, Roll = 0})
     elseif operation == "clearlight" and (not connected or guest_source and selected_guid == slot_guid(pawn)) then
         if actor.Powered then equipment:Use_Item_Primary(true, 0) end
         local index = math.tointeger(pawn.Save.PlayerEquipIndex)
@@ -753,11 +793,11 @@ LoopInGameThreadWithDelay(100, function()
     if not file then return end
     local text = file:read(160) or ""
     file:close()
-    local ticket, operation = text:match("^(%x+)\t([a-z0-9]+)\n$")
+    local ticket, operation = text:match("^(%x+)\t([a-z0-9]+)\r?\n$")
     if not ticket or #ticket ~= 32 or ticket == last then return end
     last = ticket
     local ok, value = pcall(run, operation)
     local reply = assert(io.open(mailbox .. "/avatar-probe-reply.tsv", "wb"))
-    reply:write(ticket, "\t", ok and "ok\t" or "", value, "\n")
+    reply:write(ticket, "\t", ok and "ok\t" or portable and "error\t" or "", value, "\n")
     reply:close()
 end)
