@@ -197,6 +197,17 @@ local function run(action, argument)
         local result = exercise(pawn, seed.ids)
         control:CloseMenu({})
         return result
+    elseif action == "guest-projection" then
+        assert(guest and not seed, "fixture expected the first unmodified guest inventory")
+        local slots, observed = pawn.Save.PlayerEquipment, {}
+        assert(slots:GetArrayNum() >= 8, "fixture stock quick-slot layout unavailable")
+        for index, spec in ipairs(specs) do
+            local row = slots[spec.index]
+            local class = row[item_class]
+            observed[index] = valid(class) and class:GetFullName() == "BlueprintGeneratedClass " .. spec.class
+                and identity(row) or "-"
+        end
+        return table.concat(observed, ",")
     elseif action == "guest-ready" then
         assert(guest and not seed, "fixture guest check already applied")
         local ids = {}

@@ -581,6 +581,17 @@ async def verify_stock_unequip(first, second, evidence):
         assert len(ids) == len(set(ids)) == 3 and all(re.fullmatch(r"[0-9A-F]{32}", guid) for guid in ids)
         authority = unequip_seat(await portable_probe_command(host.bridge, probe, f"remote-read\t{pawn}"))["rows"]
         assert [row["guid"] for row in authority] == ids
+        # TAB can reuse the authenticated join view before the next ordinary inventory poll.
+        # Wait for the newly seeded exact slots before the screen builds its quick-slot cards.
+        projection = {"expected": ids}
+        evidence["guest_initial_projection"] = projection
+        async with asyncio.timeout(15):
+            while True:
+                seen = (await portable_probe_command(guest.bridge, probe, "guest-projection")).split(",")
+                projection["observed"] = seen
+                if seen == ids:
+                    break
+                await asyncio.sleep(.25)
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await leaves_stock_open()
         guest_before = unequip_seat(await portable_probe_command(guest.bridge, probe, "guest-ready\t" + ",".join(ids)))
