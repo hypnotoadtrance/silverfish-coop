@@ -1,13 +1,42 @@
     if (fields[2] == "fixture-spade-aim" or fields[2] == "fixture-spade-holes" or fields[2] == "fixture-spade-loot"
-        or fields[2] == "fixture-spade-props") and
+        or fields[2] == "fixture-spade-props" or fields[2] == "fixture-spade-sight") and
         os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
         assert(state.map == map and (phase == "hosting" or phase == "connected"), "Crossroads dig fixtures require a co-op session")
+        if fields[2] == "fixture-spade-sight" then
+            assert(phase == "connected" and #fields == 3)
+            local pawn = state.local_pawn.pawn
+            local actor = StaticFindObject(fields[3])
+            assert(valid(actor) and same(actor:GetWorld(), state.world))
+            local box = actor.Box
+            local eye, center = pawn.Camera:K2_GetComponentLocation(), box:K2_GetComponentLocation()
+            local x, y, z = center.X - eye.X, center.Y - eye.Y, center.Z - eye.Z
+            local distance = math.sqrt(x * x + y * y + z * z)
+            local scale = pawn.InteractionRange / distance
+            local ray_end = {X=eye.X+x*scale, Y=eye.Y+y*scale, Z=eye.Z+z*scale}
+            local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+            local color = {R=0, G=0, B=0, A=0}
+            local skip = valid(pawn.EquipedItem) and {pawn, pawn.EquipedItem} or {pawn}
+            local function scan(channel, complex)
+                local ray = {}
+                if not trace:LineTraceSingle(pawn, eye, ray_end, channel, complex, skip, 0, ray, true, color, color, 0) then
+                    return "none"
+                end
+                local hit = ray.OutHit or ray
+                local component = hit.Component and hit.Component:Get()
+                return valid(component) and (component:GetFullName() .. " at " .. tostring(hit.Distance)) or "none"
+            end
+            return ("%.2f/%.2f, interaction=%s, visibility=%s, box=%d, channel=%d"):format(distance,
+                pawn.InteractionRange, scan(4, false), scan(1, true), box:GetCollisionEnabled(),
+                box:GetCollisionResponseToChannel(16))
+        end
         if fields[2] == "fixture-spade-props" then
             local props = {}
             for _, actor in ipairs(FindAllOf("Prop_TinCan_C") or {}) do
                 if valid(actor) and same(actor:GetWorld(), state.world) and not actor:IsActorBeingDestroyed()
                     and not actor:HasAnyFlags(EObjectFlags.RF_WasLoaded) then
-                    props[#props + 1] = string.format("%d,%s", actor:GetLocalRole(), actor:GetFName():ToString())
+                    local at = actor:K2_GetActorLocation()
+                    props[#props + 1] = string.format("%d,%s,%s,%.3f,%.3f,%.3f", actor:GetLocalRole(),
+                        actor:GetFName():ToString(), tostring(actor.bReplicateMovement), at.X, at.Y, at.Z)
                 end
             end
             return table.concat(props, ";")

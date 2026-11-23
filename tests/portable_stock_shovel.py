@@ -93,16 +93,8 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False):
         return [entry for entry in frame.get("game", {}).get(native_stock_enemy_drops.KEY, {}).values()
                 if entry["source"].startswith("DigHole_BP_C ") and entry["class_path"] == NUGGET]
 
-    for attempt in range(18):
-        dig_result = await dig_once("item", advance=attempt > 0)
-        try:
-            found = await wait_resident_status(host_run, nuggets, timeout=.9)
-            break
-        except RuntimeError:
-            await asyncio.sleep(.35)
-    else:
-        raise AssertionError("No stock nugget was observed after digging")
-
+    dig_result = await dig_once("item")
+    found = await wait_resident_status(host_run, nuggets, timeout=8)
     nugget, = nuggets(found)
     async with asyncio.timeout(12):
         while True:
@@ -121,10 +113,13 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False):
     for run in (host_run, guest_run):
         await wait_resident_status(run, projected, timeout=12)
     await host.bridge.command(native_world_loot.APPROACH, identity, pawn, timeout=5)
-    await wait_resident_status(guest_run, lambda f: math.dist(f["game"]["pawns"]["local"]["location"],
-                                                             reward["transform"]["position"]) < 180, timeout=7)
+    arrived = await wait_resident_status(guest_run, lambda f: math.dist(f["game"]["pawns"]["local"]["location"],
+                                                                        reward["transform"]["position"]) < 180, timeout=7)
+    guest_actor = projected(arrived)["actor"].split(" ", 1)[1]
     press = await submit(guest_run, native_world_loot.FIXTURE, target=identity)
-    assert press["ok"], press
+    if not press["ok"]:
+        sight = await observe(guest, "sight", guest_actor)
+        raise AssertionError((press, sight))
     for run in (host_run, guest_run):
         await wait_resident_status(run, lambda f: not projected(f), timeout=12)
     after = await submit(guest_run, "native-inventory-list")
@@ -133,16 +128,33 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False):
     assert rival.get("error") == "stock_enemy_loot_already_claimed", rival
     assert checkpoint == campaign_save_hashes(host.campaign), "Dig or pickup wrote a campaign checkpoint"
 
-    for _ in range(18):
-        await dig_once("prop", advance=True)
-        host_props = await observe(host, "props")
-        if host_props:
-            break
-    else:
-        raise AssertionError("No stock tin can was observed after digging")
-    role, prop = host_props.split(",")
-    assert role == "3", host_props
+    def parse_props(sample):
+        entries = (entry.split(",") for entry in sample.split(";") if entry)
+        return [(role, name, moving, tuple(map(float, position))) for role, name, moving, *position in entries]
+
+    prior_props = {name for _, name, _, _ in parse_props(await observe(host, "props"))}
+    await dig_once("prop", advance=True)
     async with asyncio.timeout(8):
-        while await observe(guest, "props") != f"1,{prop}":
+        while True:
+            host_props = [row for row in parse_props(await observe(host, "props")) if row[1] not in prior_props]
+            if host_props:
+                break
             await asyncio.sleep(.15)
-    return {"stock_shovel": {**dig_result, "unearthed_item": reward, "unearthed_prop": prop, "duplicate_claim": rival["error"]}}
+    (role, prop, _, _), = host_props
+    assert role == "3", host_props
+    guest_props = []
+    try:
+        async with asyncio.timeout(8):
+            while True:
+                host_props = parse_props(await observe(host, "props"))
+                guest_props = parse_props(await observe(guest, "props"))
+                source, = [row for row in host_props if row[1] == prop]
+                replicas = [row for row in guest_props if row[0] == "1" and math.dist(row[3], source[3]) < 45]
+                if source[2] == "true" and replicas:
+                    break
+                await asyncio.sleep(.15)
+    except TimeoutError as error:
+        raise AssertionError(f"The stock can did not replicate its physics pose. Host {host_props}. Guest {guest_props}.") from error
+    replica, = replicas
+    return {"stock_shovel": {**dig_result, "unearthed_item": reward, "unearthed_prop": [source, replica],
+                             "duplicate_claim": rival["error"]}}
