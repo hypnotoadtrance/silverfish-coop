@@ -11,6 +11,8 @@ local psyche_class = "BlueprintGeneratedClass " .. psyche_path
 local dizzy_path = "/Game/Classes/Player/CS_Dizzy.CS_Dizzy_C"
 local whisper_path = "/Game/Assets/Sounds/WAVs/Anomaly_Wav/Misc_Whisper.Misc_Whisper"
 local psyche_mask = 16
+-- Stock DealDamage passes the difference between two world positions to the overlay.
+local hit_offset_limit = 1e9
 local shake_path = "/Game/Classes/Player/CS_Jumping.CS_Jumping_C"
 local shake_function = "/Script/Engine.PlayerController:ClientStartCameraShake"
 local damage_pulse = "/Game/Classes/Player/Player_FP.Player_FP_C:Pulse_Dmg_FX"
@@ -122,7 +124,8 @@ observed_hit = function(pawn, amount, direction, damage)
     local previous = health[pawn:GetAddress()]
     if not previous or not same(previous.save, pawn.Save) or not finite(previous.save.PlayerHealth, 1e6)
         or previous.save.PlayerHealth >= previous.value or not finite(amount, 1e6) or amount < 1
-        or not direction or not finite(direction.X, 1) or not finite(direction.Y, 1) or not finite(direction.Z, 1) then return end
+        or not direction or not finite(direction.X, hit_offset_limit) or not finite(direction.Y, hit_offset_limit)
+        or not finite(direction.Z, hit_offset_limit) then return end
     previous.value = previous.save.PlayerHealth
     record(pawn, amount, direction, mask_for(damage))
 end
@@ -278,7 +281,7 @@ function feedback.command(fields, state, phase)
     local id, amount, x, y, z, mask = table.unpack({tonumber(fields[6]), tonumber(fields[7]), tonumber(fields[8]),
         tonumber(fields[9]), tonumber(fields[10]), tonumber(fields[11])})
     if math.type(id) ~= "integer" or id < 1 or id >= 2^53 or not finite(amount, 1000) or amount < 1
-        or not finite(x, 1) or not finite(y, 1) or not finite(z, 1)
+        or not finite(x, hit_offset_limit) or not finite(y, hit_offset_limit) or not finite(z, hit_offset_limit)
         or math.type(mask) ~= "integer" or mask < 0 or mask > psyche_mask
         or (mask == psyche_mask and (amount > 10 or x ~= 0 or y ~= 0 or z ~= 0
             or state.map ~= "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P")) then

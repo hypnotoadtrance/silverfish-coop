@@ -6,6 +6,7 @@ KEY = "native_guest_hurt"
 COMMAND = "native-guest-hurt-play"
 LIMIT = 12
 PSYCHE = 16
+HIT_OFFSET_LIMIT = 1e9
 
 
 def valid_cue(cue):
@@ -14,7 +15,7 @@ def valid_cue(cue):
     serial, amount, x, y, z, mask = cue
     return (type(serial) is int and 0 < serial < 2**53
             and type(amount) in (int, float) and 1 <= amount <= 1000
-            and all(type(value) in (int, float) and abs(value) <= 1 for value in (x, y, z))
+            and all(type(value) in (int, float) and abs(value) <= HIT_OFFSET_LIMIT for value in (x, y, z))
             and type(mask) is int and (0 <= mask < PSYCHE
                                       or mask == PSYCHE and amount <= 10 and x == y == z == 0))
 

@@ -53,7 +53,8 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         game = {"state": "connected", "map": "Crossroads", "pawns": {"local": {"name": "GuestPawn"}}}
         frame = {"map": game["map"], "epoch": epoch, "cues": [
             [10, 6, 0, 0, 0, 16], [11, 7, 0, 0, 0, 16],
-            [12, 8, 1, 0, 0, 16], [13, 38, 0, 0, 0, 0],
+            [12, 8, 1, 0, 0, 16], [13, 38, 72.5, -24, 8, 4],
+            [14, 38, float("inf"), 0, 0, 4],
         ]}
         result = {**game, "ack": {"message": "guest hurt feedback played"}}
         bridge = Mock(command=AsyncMock(return_value=result))
@@ -61,8 +62,10 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(2):
             await playback.sync(bridge, control, game, frame, epoch)
         self.assertEqual([call.kwargs["serial"] for call in control.event.call_args_list], [11, 13])
-        self.assertEqual([call.kwargs["sound_mask"] for call in control.event.call_args_list], [16, 0])
+        self.assertEqual([call.kwargs["sound_mask"] for call in control.event.call_args_list], [16, 4])
         self.assertEqual(bridge.command.await_count, 2)
+        bridge.command.assert_awaited_with("native-guest-hurt-play", "Crossroads", epoch, "GuestPawn",
+                                           "13", "38", "72.5", "-24", "8", "4", timeout=1.5)
 
     async def test_spatial_cues_play_once_per_authenticated_visit(self):
         playback = Playback()

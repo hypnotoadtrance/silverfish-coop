@@ -727,6 +727,72 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
                                     "stock_widget_tick_invoked_in_muted_fixture": True}}
 
 
+async def verify_resident_campfire(host: Seat, guest: Seat, pawn: str) -> dict:
+    async def command(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-campfire", action)
+
+    async def sample(seat):
+        own, remote, overlay, audio, muted, fire, peer_fire, voices, offset, inside, peer_inside = (
+            await command(seat, "read")).split(",")
+        return {"local_health": float(own), "remote_health": float(remote), "overlays": int(overlay), "burn_hits": int(audio),
+                "muted_remote_burn_hits": int(muted), "local_fire_pulses": int(fire), "remote_fire_pulses": int(peer_fire),
+                "hurt_voices": int(voices), "remote_hit_offset": float(offset),
+                "local_overlap": inside == "true", "remote_overlap": peer_inside == "true"}
+
+    async def wait_for(seat, predicate):
+        result = None
+        try:
+            async with asyncio.timeout(7):
+                while True:
+                    result = await sample(seat)
+                    if predicate(result):
+                        return result
+                    await asyncio.sleep(.1)
+        except TimeoutError as error:
+            raise AssertionError(f"Campfire observation timed out after {result}") from error
+
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    checkpoint = campaign_save_hashes(host.campaign)
+    guest_frame = await wait_resident_status(guest_run, lambda frame: frame.get("local_bridge") == "memory")
+    assert all(result == "armed" for result in await asyncio.gather(*(command(seat, "arm") for seat in (host, guest))))
+    baseline = await sample(host)
+    assert not baseline["local_overlap"] and not baseline["remote_overlap"], baseline
+
+    assert all(result == "moved" for result in await asyncio.gather(command(host, "enter-peer"), command(guest, "enter")))
+    try:
+        remote_hit = await wait_for(host, lambda hit: hit["remote_fire_pulses"] > 0 and hit["remote_health"] < baseline["remote_health"])
+    finally:
+        await asyncio.gather(command(guest, "leave"), command(host, "leave-peer"))
+    host_observed = await sample(host)
+    assert remote_hit["remote_hit_offset"] > 1, remote_hit
+    guest_heard = await wait_for(guest, lambda hit: hit["overlays"] > 0 and hit["burn_hits"] > 0)
+    assert remote_hit["local_health"] == host_observed["local_health"] == baseline["local_health"], (baseline, host_observed)
+    assert host_observed["overlays"] == host_observed["burn_hits"] == 0 and host_observed["muted_remote_burn_hits"] > 0, host_observed
+    assert guest_heard["burn_hits"] > 0 and guest_heard["local_health"] < baseline["remote_health"], guest_heard
+    received = [entry for entry in await resident_events(guest_run, guest_frame)
+                if entry["event"] == "native_guest_hurt_played" and entry["sound_mask"] & 4]
+    assert received, guest_heard
+
+    await asyncio.sleep(1)
+    assert all(result == "cleared" for result in await asyncio.gather(*(command(seat, "clear") for seat in (host, guest))))
+    baseline = await sample(host)
+    assert not baseline["local_overlap"] and not baseline["remote_overlap"], baseline
+    assert await command(host, "enter") == "moved"
+    try:
+        local_hit = await wait_for(host, lambda hit: hit["local_fire_pulses"] > 0 and hit["local_health"] < baseline["local_health"])
+    finally:
+        await command(host, "leave")
+    assert local_hit["overlays"] > 0 and local_hit["burn_hits"] > 0, local_hit
+    assert local_hit["remote_health"] >= baseline["remote_health"], (baseline, local_hit)
+    guest_observed = await sample(guest)
+    assert guest_observed["overlays"] == guest_observed["burn_hits"] == 0, guest_observed
+    assert campaign_save_hashes(host.campaign) == checkpoint, "Campfire damage triggered an early save"
+    return {"resident_campfire": {"guest_authority_damage": remote_hit, "host_observer": host_observed,
+                                  "guest_feedback": guest_heard, "guest_feedback_events": received,
+                                  "host_feedback": local_hit, "guest_observer": guest_observed,
+                                  "campaign_checkpoint_unchanged": True}}
+
+
 def unequip_rows(raw):
     result = []
     for entry in raw.split("|"):
@@ -1954,7 +2020,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False,
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
-                 stock_use: bool = False, stock_food: bool = False, memory_status: bool = False, stock_prop_grip: bool = False,
+                 stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False,
+                 memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
@@ -2000,7 +2067,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     probes = ExitStack()
     seeded = None
 
-    single_scenario = (stock_food or stock_prop_grip or stock_host_prop_observer or resident_weapon_cues or stock_crate_ring or guest_world_start
+    single_scenario = (stock_food or stock_campfire or stock_prop_grip or stock_host_prop_observer
+                       or resident_weapon_cues or stock_crate_ring or guest_world_start
                        or guest_ui_memory or compact_crate_status or compact_world_view or guest_shop_lease
                        or guest_stash_memory or nonmirrored_startup or stock_unequip or resident_cabinet_archive is not None)
     try:
@@ -2020,6 +2088,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableGuestFoodProbe",
                                                      fixture="portable_guest_food_probe.lua"))
+        if stock_campfire:
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableCampfireProbe",
+                                                     fixture="portable_campfire_probe.lua"))
         if resident_weapon_cues:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableWeaponCueProbe",
                                                  fixture="avatar_presentation_probe.lua"))
@@ -2152,6 +2224,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         elif stock_food:
             proof["sessions"].append(await start_pair(first, second, "Guest food scout", on_join=verify_resident_guest_food,
                                                       wait_status=wait_resident_status))
+        elif stock_campfire:
+            proof["sessions"].append(await start_pair(first, second, "Campfire scout", on_join=verify_resident_campfire,
+                                                      wait_status=wait_resident_status))
         elif resident_weapon_cues:
             proof["sessions"].append(await start_pair(first, second, "Bandage observer", on_join=verify_resident_weapon_cues,
                                                       wait_status=wait_resident_status))
@@ -2234,6 +2309,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_host_prop_observer_failure"] = str(error) or type(error).__name__
         if stock_food:
             proof["stock_food_failure"] = str(error) or type(error).__name__
+        if stock_campfire:
+            proof["stock_campfire_failure"] = str(error) or type(error).__name__
         if resident_weapon_cues:
             proof["resident_weapon_cue_failure"] = str(error) or type(error).__name__
         if compact_crate_status:
@@ -2283,6 +2360,7 @@ if __name__ == "__main__":
     parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Sort, Drop, and Use actions")
     parser.add_argument("--stock-use", action="store_true", help="open a starter bag by stock drag and use a Bandage by stock click")
     parser.add_argument("--stock-food", action="store_true", help="verify the guest's Food stat in the stock Backpack after a meal")
+    parser.add_argument("--stock-campfire", action="store_true", help="verify damage and hurt feedback from the placed campfire on both seats")
     parser.add_argument("--stock-split", action="store_true", help="test the stock guest stack-split popup with a Veteran loadout")
     parser.add_argument("--stock-equip", action="store_true", help="test the stock guest Equip action with a Veteran loadout")
     parser.add_argument("--stock-unequip", action="store_true",
@@ -2386,6 +2464,9 @@ if __name__ == "__main__":
     if args.stock_food and (args.second_legacy_work or args.resident_cabinet_archive or any(
             value is True for key, value in vars(args).items() if key != "stock_food")):
         parser.error("Use --stock-food with two fresh private replicas and no other gameplay fixtures")
+    if args.stock_campfire and (args.second_legacy_work or args.resident_cabinet_archive or any(
+            value is True for key, value in vars(args).items() if key != "stock_campfire")):
+        parser.error("Use --stock-campfire with two fresh private replicas and no other gameplay fixtures")
     if args.resident_weapon_cues and any((
             args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby, args.projected_nearby,
             args.container_nearby, args.stock_use, args.steam_cloud, args.stock_prop_grip, args.stock_host_prop_observer,
@@ -2420,7 +2501,8 @@ if __name__ == "__main__":
                        stock_unequip=args.stock_unequip,
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
-                       stock_use=args.stock_use, stock_food=args.stock_food, memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
+                       stock_use=args.stock_use, stock_food=args.stock_food, stock_campfire=args.stock_campfire,
+                       memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,

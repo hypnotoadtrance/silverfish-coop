@@ -64,12 +64,14 @@ end
 assert(volume(guest, burn) == 0 and volume(host, burn) == 1 and volume(guest, other) == 1)
 
 local fire = param({Fire_12_2B415A724C533C075B6BB390B76BF247 = 10})
-local direction = param({X = 0, Y = 0, Z = 0})
+local direction = param({X = 72.5, Y = -24, Z = 8})
 save.PlayerHealth = 90
 pulse(param(guest), param(10), direction, nil, fire)
 pulse(param(guest), param(10), direction, nil, fire)
 local function rows() return feedback.rows(state, "hosting", function(...) return {...} end) end
 assert(#rows() == 1 and rows()[1][3] == guest:GetFullName() and rows()[1][8] == 4)
+local first = rows()[1]
+assert(first[5] == 72.5 and first[6] == -24 and first[7] == 8)
 assert(not effect.PostProcess_FX.bEnabled and not effect.PostProcessDirection.bEnabled)
 save.PlayerHealth = 80
 pulse(param(guest), param(10), direction, nil, fire)
