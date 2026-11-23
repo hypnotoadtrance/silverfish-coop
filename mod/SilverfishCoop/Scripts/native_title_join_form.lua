@@ -4,6 +4,7 @@ local display = require("native_title_display")
 local max_invite, max_reply, max_characters = 32768, 20480, 64
 local page_size = 5
 local endpoint_screens = {address = true, port = true, password = true}
+local password_errors = {direct_password_required = true, direct_wrong_password = true}
 local messages = {
     invalid_request = "The Join request was invalid.",
     invalid_invite = "This invitation is invalid for this build.",
@@ -178,7 +179,8 @@ local function render_surface(draft, screen, hint, initial)
         note = note or "Waiting for the host…"
         rows = {{back}}
     end
-    draft.view = draft.surface.mount(draft.context, {title = title, note = note, rows = rows}, draft.on_action)
+    local focus = screen == "password" and password_errors[draft.failure] and "password" or nil
+    draft.view = draft.surface.mount(draft.context, {title = title, note = note, rows = rows, focus = focus}, draft.on_action)
 end
 
 local fields = {
@@ -291,7 +293,7 @@ function form.poll(draft, state, phase)
     else
         draft.import, draft.characters, draft.retry = nil, nil, nil
         if draft.direct then
-            if draft.failure == "direct_password_required" or draft.failure == "direct_wrong_password" then
+            if password_errors[draft.failure] then
                 draft.use_password = true
             end
             local edit_endpoint = pending.kind ~= "direct" or draft.failure == "invalid_endpoint"

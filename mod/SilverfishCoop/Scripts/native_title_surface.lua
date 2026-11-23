@@ -180,7 +180,12 @@ function surface.mount(context, spec, on_action)
         for index, row in ipairs(spec.rows) do
             local y = first + (index - 1) * (control_height + gap)
             if row.field then
-                input_order[#input_order + 1] = prompt(view, row.field, y)
+                local input = prompt(view, row.field, y)
+                if row.field.key == spec.focus then
+                    table.insert(input_order, 1, input)
+                else
+                    input_order[#input_order + 1] = input
+                end
             elseif row.toggle then
                 checkbox(view, row.toggle, y)
             else

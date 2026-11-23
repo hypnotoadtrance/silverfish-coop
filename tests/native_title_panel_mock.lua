@@ -61,7 +61,7 @@ end
 local surface = {}
 function surface.mount(owner, spec, dispatch)
     assert(owner == context and not display)
-    local view = {title = spec.title, note = spec.note, fields = {}, buttons = {}, toggles = {}}
+    local view = {title = spec.title, note = spec.note, focus = spec.focus, fields = {}, buttons = {}, toggles = {}}
     for _, row in ipairs(spec.rows) do
         if row.field then
             local field = row.field
@@ -421,14 +421,32 @@ assert(files[join_request] == ("1\t%s\t%s\tdirect\t127.0.0.1\t28951\t\n")
 files[join_request] = nil
 files[join_response] = ("1\t%s\t%s\terror\tdirect_password_required\t0\n"):format(steam_generation, operation_id())
 tick()
-assert(display.title == "Join through Steam" and surface.checked(display, "use_password"))
+assert(display.title == "Join through Steam" and surface.checked(display, "use_password") and display.focus == "password")
 click("back")
 assert(display.title == "Multiplayer" and files[steam_cancel] == "1\t" .. steam_nonce .. "\tcancel\n")
 now = 103
 tick()
 assert(display.title == "Multiplayer" and not files[steam_opened], "Do not reopen the consumed Steam invite")
 click("join")
-assert(display.title == "Join co-op" and display.fields.port == defaults[3])
+assert(display.title == "Join co-op" and display.fields.port == defaults[3] and display.focus == nil)
+assert(join("address", "127.0.0.2") and join("port", "28952"))
+local function direct_retry(password, failure)
+    next_guid = next_guid + 1
+    click("connect")
+    assert(files[join_request] == ("1\t%s\t%s\tdirect\t127.0.0.2\t28952\t%s\n")
+        :format(steam_generation, operation_id(), password))
+    files[join_request] = nil
+    files[join_response] = ("1\t%s\t%s\terror\t%s\t0\n"):format(steam_generation, operation_id(), failure)
+    tick()
+    assert(display.title == "Join co-op" and display.focus == "password"
+        and display.fields.address == "127.0.0.2" and display.fields.port == "28952"
+        and surface.checked(display, "use_password") and surface.read(display, "password") == "")
+end
+direct_retry("", "direct_password_required")
+assert(surface.write(display, "password", "Wrong fixture"))
+direct_retry("Wrong fixture", "direct_wrong_password")
+click("back")
+assert(display.title == "Multiplayer" and files[steam_cancel] == "1\t" .. steam_nonce .. "\tcancel\n")
 
 offer("host,join", 110, generation("9"), defaults)
 click("multiplayer")
