@@ -345,6 +345,66 @@ class TitleSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.status()["state"], "offered")
         self.assertIsNone(self.status()["last_failure"])
 
+    async def test_resident_host_uses_its_live_bridge_while_the_title_file_stays_stale(self):
+        saved = self.directory.resolve() / "game-user" / "Saved"
+        saved.mkdir(parents=True)
+        old_title = self.bridge.snapshot
+        child = Child("host")
+        read_game = Mock(return_value=None)
+        reading_release = asyncio.Event()
+        released = asyncio.Event()
+        elapsed = 0.0
+        clock = Mock(wraps=time)
+        clock.monotonic.side_effect = lambda: elapsed
+
+        def file_snapshot():
+            # Non-headless resident sessions stop mirroring gameplay to the old title file.
+            data = old_title()
+            data["save_scope"] = None
+            if child.cleanup.is_set() and not released.is_set():
+                reading_release.set()
+                data["save_scope"] = "campaign"
+            data[native_title_entry.PANEL_KEY] = dict(state="ready", mounted=True, actions=["host"])
+            data[native_title_entry.STARTUP_KEY] = dict(map=data["map"], sequence=data["sequence"], saved_directory=str(saved))
+            return data
+
+        self.bridge.snapshot = file_snapshot
+        plan = SessionPlan(child.start, lambda: child.state, lambda _: True, read_game=read_game)
+        with patch.object(title_session, "time", clock):
+            session = TitleSession(self.bridge, {"host": plan}, resident=True, title_saved_directory=saved,
+                                   on_title_ready=Mock(), poll_interval=.005, startup_timeout=1, stall_timeout=.5)
+            task = asyncio.create_task(session.run())
+            self.addAsyncCleanup(self.stop, task)
+            offer = await self.wait(self.generation)
+            self.request("host", offer)
+            await child.started.wait()
+            self.bridge.frozen = True
+            child.ready()
+            await self.wait(lambda: self.status().get("progress") == "hosting")
+            live = child.state["game"]
+            for update in ({"sequence": 18}, {"map": "/Game/DifferentMap"}, {"mode": "client"}):
+                read_game.reset_mock()
+                read_game.return_value = {**live, **update}
+                await self.wait(lambda: read_game.called)
+                self.assertEqual(self.status()["state"], "starting")
+
+            read_game.return_value = {**live, "sequence": 20}
+            await self.wait(lambda: self.status().get("state") == "ready")
+            elapsed = 2.0
+            await asyncio.sleep(0)
+            self.assertFalse(child.cleanup.is_set())
+            self.assertFalse(task.done())
+            self.assertFalse(session.cancel_start())
+            self.assertEqual(self.bridge.snapshot()["map"], native_title_entry.MAP)
+
+            child.finish.set()
+            await asyncio.wait_for(reading_release.wait(), 1)
+            self.assertIsNone(self.generation())
+            released.set()
+            self.bridge.frozen = False
+            await self.wait(lambda: self.generation() and self.generation() != offer)
+            self.assertIsNone(self.status()["last_failure"])
+
     async def test_refuses_a_stock_title_that_reports_the_wrong_effective_save_directory(self):
         saved = self.directory.resolve() / "game-user" / "Saved"
         foreign = self.directory.resolve() / "another-profile" / "Saved"
