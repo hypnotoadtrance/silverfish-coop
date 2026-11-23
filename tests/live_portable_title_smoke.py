@@ -256,7 +256,7 @@ async def discover_mailbox(root: Path, process: GameProcess) -> Path:
         return await native_mailbox(root, process)
 
 
-async def portable_probe_command(bridge, prefix, request):
+async def portable_probe_command(bridge, prefix, request, *, reply_end=None):
     mailbox = bridge.directory
     ticket = uuid.uuid4().hex
     runtime.write_text(mailbox / f"{prefix}-command.tsv", f"{ticket}\t{request}")
@@ -269,7 +269,8 @@ async def portable_probe_command(bridge, prefix, request):
                 fields = ()
             if len(fields) == 3 and fields[0] == ticket:
                 assert fields[1] == "ok", fields[2]
-                return fields[2]
+                if reply_end is None or fields[2].endswith(reply_end):
+                    return fields[2]
             await asyncio.sleep(.05)
     raise RuntimeError(f"The {prefix} process exited before replying")
 
@@ -342,6 +343,91 @@ async def verify_stock_prop_grip(host: Seat, guest: Seat, pawn: str) -> dict:
                         "host_displacement_cm": math.dist(held_position, swept_position),
                         "swept_position": swept_position},
     }
+
+
+def lantern_angle_distance(before, after):
+    return max(abs((first - second + 180) % 360 - 180) for first, second in zip(before, after, strict=True))
+
+
+def lantern_observer_trace(receipt, role):
+    header, *lines, terminator = receipt.split("|")
+    assert terminator == "end", "Incomplete lantern observation receipt"
+    seen_role, sweep_end, frequency = header.split()
+    end, configured_hz = int(sweep_end), float(frequency)
+    samples = [tuple(map(float, line.split())) for line in lines]
+    assert int(seen_role) == role and math.isfinite(configured_hz)
+    assert 2 <= end < len(samples) <= 240
+    assert all(len(row) == 9 and all(map(math.isfinite, row)) for row in samples)
+    assert all(after[0] > before[0] for before, after in zip(samples, samples[1:]))
+    hidden_at = next((row[0] for row in samples if row[7] != 1), None)
+    assert hidden_at is None, ("The exact stock lantern became hidden during the trace", role, hidden_at)
+    sweep = samples[:end]
+    assert all(row[8] == (1 if role == 3 else 0) for row in sweep) and samples[-1][8] == 0
+    if role == 1:
+        assert all(row[8] == 0 for row in samples), "The guest must observe without grabbing the lantern"
+    steps = [math.dist(before[1:4], after[1:4]) for before, after in zip(sweep, sweep[1:])]
+    max_rotation_step = max(lantern_angle_distance(before[4:7], after[4:7]) for before, after in zip(sweep, sweep[1:]))
+    changes = [after[0] for after, step in zip(sweep[1:], steps, strict=True) if step >= .25]
+    intervals_ms = [1000 * (after - before) for before, after in zip(changes, changes[1:])]
+    displacement = max(math.dist(sweep[0][1:4], row[1:4]) for row in sweep)
+    assert displacement > 25, ("The stock lantern failed to move during the host's sweep", role, displacement)
+    end_pose = samples[-1]
+    tail = [row for row in samples[end:] if end_pose[0] - row[0] <= .25]
+    settled = (len(tail) >= 3 and end_pose[0] - tail[0][0] >= .15 and all(
+        math.dist(row[1:4], end_pose[1:4]) <= 2 and lantern_angle_distance(row[4:7], end_pose[4:7]) <= 5
+        for row in tail))
+    return {"role": role, "configured_net_update_hz": configured_hz, "sweep_end_sample": end,
+            "sweep_displacement_cm": displacement, "position_changes_over_quarter_cm": len(changes),
+            "longest_change_interval_ms": max(intervals_ms, default=None), "largest_sample_step_cm": max(steps),
+            "longest_sample_interval_ms": 1000 * max(after[0] - before[0] for before, after in zip(sweep, sweep[1:])),
+            "largest_sample_rotation_step_degrees": max_rotation_step, "settled": settled, "samples": samples}
+
+
+async def verify_stock_host_prop_observer(host: Seat, guest: Seat, pawn: str, evidence: dict) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    host_status, guest_status = await asyncio.gather(*(
+        wait(run, lambda state: state.get("local_bridge") == state.get("local_status_source") == "memory"
+             and state.get("game", {}).get("pawns", {}).get("local", {}).get("name"))
+        for run in (host_run, guest_run)
+    ))
+    host_pawn, guest_pawn = (state["game"]["pawns"]["local"]["name"] for state in (host_status, guest_status))
+    assert host_pawn != pawn and host_status["game"]["pawns"]["guest"]["name"] == pawn
+    evidence["local_bridge"] = {seat: state["local_bridge"]
+                                for seat, state in (("host", host_status), ("guest", guest_status))}
+
+    async def call(seat, action, *, reply_end=None):
+        owner = host_pawn if seat is host else guest_pawn
+        return await portable_probe_command(seat.bridge, "portable-lantern", f"{action}\t{owner}", reply_end=reply_end)
+
+    evidence["authored_prop"] = native_lantern.ACTOR
+    assert await call(host, "hostgrab") == "grabbed"
+    await asyncio.sleep(.35)
+    assert await asyncio.gather(call(host, "tracearm"), call(guest, "tracearm")) == ["armed", "armed"]
+    assert await call(host, "hostsweep") == "sweeping"
+    await asyncio.sleep(1.35)
+    async with asyncio.timeout(3):
+        while True:
+            marked = await call(host, "tracemark")
+            if marked == "marked":
+                break
+            assert marked == "sweeping", marked
+            await asyncio.sleep(.05)
+    assert await call(guest, "tracemark") == "marked"
+    assert await call(host, "hostdrop") == "dropped"
+    await asyncio.sleep(2)
+    authority, observer = await asyncio.gather(
+        call(host, "traceread", reply_end="|end"), call(guest, "traceread", reply_end="|end"))
+    evidence["raw_sample_receipts"] = {"host": authority, "guest": observer}
+    data = {name: lantern_observer_trace(receipt, role)
+            for name, receipt, role in (("host", authority, 3), ("guest", observer, 1))}
+    del evidence["raw_sample_receipts"]
+    gap = math.dist(*(row["samples"][-1][1:4] for row in data.values()))
+    evidence.update(stock_host_grab_and_drop=True,
+                    sample_columns=["elapsed_s", "x", "y", "z", "pitch", "yaw", "roll", "visible", "local_grip"],
+                    end_position_gap_cm=gap,
+                    settled_position_gap_cm=gap if all(row["settled"] for row in data.values()) else None,
+                    seats=data)
+    return {"stock_host_prop_observer": True}
 
 
 async def verify_guest_shop_lease(host: Seat, guest: Seat, pawn: str) -> dict:
@@ -1066,6 +1152,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
                  stock_use: bool = False, memory_status: bool = False, stock_prop_grip: bool = False,
+                 stock_host_prop_observer: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
@@ -1108,7 +1195,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     probes = ExitStack()
     seeded = None
 
-    single_scenario = (stock_prop_grip or stock_crate_ring or guest_world_start or guest_ui_memory
+    single_scenario = (stock_prop_grip or stock_host_prop_observer or stock_crate_ring or guest_world_start or guest_ui_memory
                        or compact_crate_status or compact_world_view or guest_shop_lease or resident_cabinet_archive is not None)
     try:
         if resident_cabinet_archive:
@@ -1123,7 +1210,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if guest_world_start_travel:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableRuinExitProbe",
                                                  fixture="portable_ruin_exit_probe.lua"))
-        if stock_prop_grip:
+        if stock_prop_grip or stock_host_prop_observer:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableLanternProbe",
                                                      fixture="portable_lantern_probe.lua"))
@@ -1217,6 +1304,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                       wait_status=wait_resident_status, **exit_options))
         elif stock_prop_grip:
             proof["sessions"].append(await start_pair(first, second, "Lantern scout", on_join=verify_stock_prop_grip))
+        elif stock_host_prop_observer:
+            lantern_evidence = proof["host_prop_observer"] = {}
+
+            async def observe_host_lantern(host, guest, pawn):
+                return await verify_stock_host_prop_observer(host, guest, pawn, lantern_evidence)
+
+            proof["sessions"].append(await start_pair(first, second, "Lantern observer", on_join=observe_host_lantern))
         elif compact_world_view:
             proof["sessions"].append(await start_pair(first, second, "Weather receipt scout", on_join=verify_world_view_receipt,
                                                       wait_status=wait_resident_status))
@@ -1282,6 +1376,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                      both_titles_reused=not single_scenario,
                      launched_without_coop_environment=True)
     except Exception as error:
+        if stock_host_prop_observer:
+            proof["stock_host_prop_observer_failure"] = str(error) or type(error).__name__
         if compact_crate_status:
             proof["crate_status_failure"] = str(error)
         if compact_world_view:
@@ -1337,6 +1433,8 @@ if __name__ == "__main__":
     parser.add_argument("--guest-ui-memory", action="store_true",
                         help="verify the resident guest UI refresh on one stock Nearby Items container pickup")
     parser.add_argument("--stock-prop-grip", action="store_true", help="verify default guest carry filtering in one portable lantern session")
+    parser.add_argument("--stock-host-prop-observer", action="store_true",
+                        help="sample the held stock lantern on the host and a passive guest during one sweep")
     parser.add_argument("--stock-crate-ring", action="store_true", help="verify one guest stock F crate open through the in-process ring")
     parser.add_argument("--compact-crate-status", action="store_true",
                         help="test normal crate status routing with one private muted portable pair and a temporary Lua overlay")
@@ -1391,6 +1489,12 @@ if __name__ == "__main__":
                                     args.projected_nearby, args.container_nearby, args.stock_use, args.steam_cloud,
                                     args.stock_crate_ring)):
         parser.error("Use --stock-prop-grip without other gameplay fixtures")
+    if args.stock_host_prop_observer and any((
+            args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby, args.projected_nearby,
+            args.container_nearby, args.stock_use, args.steam_cloud, args.stock_prop_grip, args.stock_crate_ring,
+            args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory, args.compact_crate_status,
+            args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
+        parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     if args.stock_crate_ring and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
                                      args.projected_nearby, args.container_nearby, args.stock_use, args.steam_cloud,
                                      args.second_legacy_work)):
@@ -1418,6 +1522,7 @@ if __name__ == "__main__":
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
                        stock_use=args.stock_use, memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
+                       stock_host_prop_observer=args.stock_host_prop_observer,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
                        compact_crate_status=args.compact_crate_status, compact_world_view=args.compact_world_view,
