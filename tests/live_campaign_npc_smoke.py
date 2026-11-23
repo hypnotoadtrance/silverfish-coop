@@ -13,7 +13,7 @@ import sys
 import time
 import uuid
 
-from live_multi_smoke import saved_hashes
+from live_multi_smoke import OBSERVATORY, saved_hashes
 from live_guest_held_fire_smoke import events
 
 
@@ -22,6 +22,7 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_host_save
 from tools.silverfish.campaign import CampaignStore
+from ruin_npc_probe import RUIN, RUIN_LEVEL, capture, compare, installed_probe
 
 
 MAP = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
@@ -31,6 +32,13 @@ DEAD_BRIDGE = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
 DEAD_BRIDGE_LEVEL = DEAD_BRIDGE + ".DeadBridge_P:PersistentLevel."
 DEAD_BRIDGE_SPAWNER = re.compile(r"AI_Spawner_Squad_BP_C " + re.escape(DEAD_BRIDGE_LEVEL) + r"AI_Spawner_Squad_BP_C_(\d+)\Z")
 DEAD_BRIDGE_MARKERS = frozenset((1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 15, 16, 17, 19, 20))
+RUIN_SPAWNER = re.compile(r"AI_Spawner_Squad_BP_C " + re.escape(RUIN_LEVEL) + r"AI_Spawner_Squad_BP_C_(\d+)\Z")
+RUIN_MARKERS = frozenset((*range(24), 25, 26, 28, 30, 34))
+WANDERER_SEED = 964155  # Existing stock authored-route seed, without a forced Ruin squad roll.
+RUIN_ROUTES = ((OBSERVATORY, MAP, "Obsv_Etr", "Level_Exit_BP_C_1", "LevelExit_Spawn_BP_C_2"),
+               (MAP, RUIN, "CR_RF", "Level_Exit_BP_C_273", "LevelExit_Spawn_BP_C_1"))
+RUIN_SQUADS = {"husk": ("NPC_Zomb_01_C", "Monsters", {"Husks_Scattered": 4, "Husks_SwarmSmall": 3}),
+               "boar": ("NPC_WildBoar_C", "WildLife", {"Boar_Single": 1})}
 DEAD_BRIDGE_HUSK_SEED = 982360
 MARKERS = frozenset((1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 22, 23, 24,
                      26, 27, 28, 30, 31, 32, 34, 35, 37, 38, 40, 41))
@@ -140,7 +148,7 @@ def status(run: Path) -> dict:
         return {}
 
 
-def read_npcs(run: Path, viewer: str, area: str = MAP) -> dict | None:
+def read_npcs(run: Path, viewer: str, area: str = MAP, *, topic="native-campaign-npc") -> dict | None:
     """Read the qualified native receipt and census from one game frame."""
     paths = tuple((run / "game-bridge").glob("*/status.tsv"))
     if len(paths) != 1:
@@ -153,11 +161,11 @@ def read_npcs(run: Path, viewer: str, area: str = MAP) -> dict | None:
         session, = [row for row in rows if row[0] == "session"]
         if schema != ["schema", "1"] or session[1:4] != [viewer, phase, area]:
             return None
-        receipt, = [row for row in rows if row[0] == "native-campaign-npc"]
-        census, = [row for row in rows if row[0] == "native-campaign-npc-census"]
+        receipt, = [row for row in rows if row[0] == topic]
+        census, = [row for row in rows if row[0] == topic + "-census"]
         if len(receipt) != 10 or len(census) != 10 or receipt[1:3] != [area, viewer] or census[1:3] != [area, viewer]:
             return None
-        members = [row[3] for row in rows if row[0] == "native-campaign-npc-member"
+        members = [row[3] for row in rows if row[0] == topic + "-member"
                    and len(row) == 4 and row[1:3] == [area, viewer]]
         result = {
             "sequence": int(sequence[1]),
@@ -180,7 +188,7 @@ def read_npcs(run: Path, viewer: str, area: str = MAP) -> dict | None:
                     (viewer != "client" or result["simulated"] != 1 or not NOT_DEER_REPLICA.fullmatch(family[3]))):
                 return None
             result.update(family="notdeer", replica=None if family[3] == "-" else family[3])
-        network = [row for row in rows if row[0] == "native-campaign-npc-network"]
+        network = [row for row in rows if row[0] == topic + "-network"]
         if network:
             net, = network
             if len(net) != 10 or net[1:3] != [area, viewer]:
@@ -313,6 +321,27 @@ def stock_cohort(report: dict | None, replicate: bool, family: str = "husk", are
                      and report.get("saved_squads", {}).get("data") == f"{SQUAD_PREFIX}NotDeer.NotDeer")))
 
 
+def ruin_stock_receipt(report, family, *, denial=False):
+    if not report:
+        return False
+    source = RUIN_SPAWNER.fullmatch(report["spawner"])
+    actor, directory, squads = RUIN_SQUADS[family]
+    maximum = next((size for name, size in squads.items() if report["data"] ==
+                    f"SquadData_C /Game/Classes/Libraries/DataAssets/Squads/{directory}/{name}.{name}"), 0)
+    if not source or int(source.group(1)) not in RUIN_MARKERS or not maximum:
+        return False
+    if denial:
+        return report["stage"] == f"stock_client_{family}_spawn_denied" and report["spawn_denials"] > 0
+    members = report["members"]
+    return (report["stage"] in ("stock_initial", "stock_refresh")
+            and 0 < report["replicated"] == report["cohort"] <= maximum
+            and len(set(members)) == len(members) == report["cohort"]
+            and all(re.fullmatch(re.escape(f"{actor} {RUIN_LEVEL}{actor}_") + r"[0-9]+", member) for member in members)
+            and report["natural_calls"] >= report["receipts"] > 0
+            and report["authority"] >= report["network"]["authority_network_ready"] >= report["cohort"]
+            and report["simulated"] == report["other"] == report["spawn_denials"] == report["ai_denials"] == 0)
+
+
 def client_replica(report: dict | None, cohort: int, require_denial: bool, family: str = "husk") -> bool:
     saved = report.get("saved_squads", {}) if report else {}
     not_deer_spawn_scope_ok = False
@@ -376,11 +405,12 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                    require_client_denial: bool, approach: bool = False, family: str = "husk",
                    flayer_veto: bool = False, join_only: bool = False, combat: bool = False,
                    stock_refresh: bool = False, antfarm_replay: Path | None = None,
-                   projectile_tap: bool = False, flayer_defaults: bool = False, dead_bridge: bool = False) -> None:
+                   projectile_tap: bool = False, flayer_defaults: bool = False, dead_bridge: bool = False,
+                   ruin_fields: bool = False, private_canaries: Path | None = None) -> None:
     if os.name != "nt":
         raise OSError("The live canary requires the staged Windows game")
-    name = "campaign-npc-" + uuid.uuid4().hex[:8]
-    area = DEAD_BRIDGE if dead_bridge else MAP
+    name = ("campaign-npc-ruin-" if ruin_fields else "campaign-npc-") + uuid.uuid4().hex[:8]
+    area = RUIN if ruin_fields else DEAD_BRIDGE if dead_bridge else MAP
     campaign_root = work / "campaigns" / name
     prepared = seed_antfarm_replay(antfarm_replay, campaign_root, family) if antfarm_replay else None
     if dead_bridge:
@@ -414,7 +444,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         if flayer_veto:
             environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_FLAYER_VETO"] = "1"
     default_not_deer = family == "notdeer" and not combat
-    if default_not_deer or flayer_defaults or dead_bridge:
+    if default_not_deer or flayer_defaults or dead_bridge or ruin_fields:
         environment.pop("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC")
         environment.pop("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REPLICATE", None)
         if dead_bridge:
@@ -424,7 +454,12 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
     elif family == "notdeer":
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_VIEW"] = family
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER"] = "1"
+    if ruin_fields:
+        environment["SILVERFISH_COOP_RUIN_NPC_PROBE"] = "1"
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
+    canaries = saved_hashes(private_canaries) if private_canaries else None
+    if ruin_fields and (not original or not canaries):
+        raise ValueError("The Ruin proof requires nonempty original and private canary save baselines")
     launched = []
     flayer_combat = combat and family == "flayer"
     sweep_combat = combat and family in ("flayer", "notdeer")
@@ -520,10 +555,10 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             await asyncio.sleep(0.2)
         raise RuntimeError(f"{label}: {json.dumps(snapshot)}")
 
-    def paired(server, client):
+    def paired(server, client, map_name=area):
         return (server.get("state") == "hosting" and client.get("state") == "connected"
                 and server.get("game", {}).get("remote_clients") == 1 and client.get("link_connected") is True
-                and server.get("game", {}).get("map") == client.get("game", {}).get("map") == area
+                and server.get("game", {}).get("map") == client.get("game", {}).get("map") == map_name
                 and server.get("generation") == client.get("host_session")
                 and bool(server.get("zone_epoch")) and server["zone_epoch"] == client.get("zone_epoch"))
 
@@ -643,14 +678,92 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             assert "shooting_pose" in attempt, attempt
         raise RuntimeError("No ordinary guest pistol tap verified the exact stock Flayer HP debit")
 
+    async def verify_ruin(invitation):
+        def pair_in(map_name, epoch=None):
+            return lambda server, client, _: (paired(server, client, map_name)
+                                              and server["zone_epoch"] != epoch and client.get("gameplay_fresh")
+                                              and client.get("character_id") == invitation["character_id"]
+                                              and server.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+
+        server, _, _ = await wait("No enrolled pair in the stock Wanderer start", pair_in(OBSERVATORY), 55)
+        route_evidence = evidence["authored_route"] = []
+        for source, destination, entrance, actor, arrival_actor in RUIN_ROUTES:
+            assert server["game"]["map"] == source, server["game"]
+            epoch = server["zone_epoch"]
+            endpoint = ("--entrance", entrance, "--exit-actor", actor)
+            for role in ("host", "guest"):
+                await command("action", *primary, "native-exit-position", "--target", role, "--exit-position", "near", *endpoint)
+            await command("action", *primary, "native-exit-position", "--target", "host", "--exit-position", "inside", *endpoint)
+            server, _, _ = await wait(f"The party did not enter {destination} through {actor}", pair_in(destination, epoch), 55)
+            generation = server["generation"]
+            travel, = (row for row in events(host, "native_authored_zone_request") if row.get("generation") == generation
+                       and (row["source"], row["destination"], row["actor"], row["entrance"], row["result"].get("ok"))
+                       == (source, destination, actor, entrance, True))
+            ready, = (row for row in events(host, "zone_travel_ready")
+                      if row.get("generation") == generation and row.get("epoch") == server["zone_epoch"])
+            assert ready["authored_arrival"]["actor"].endswith("." + arrival_actor), ready
+            route_evidence.append({"travel": travel, "arrival": ready["authored_arrival"], "epoch": server["zone_epoch"]})
+
+        scene = server["game"]["native_scene"]
+        seconds = scene["game_seconds"]
+        assert scene["instance_seed"] == WANDERER_SEED and 7 * 3600 <= seconds % 86400 < 17 * 3600, scene
+        evidence["stock_daytime"] = {"instance_seed": scene["instance_seed"], "game_seconds": seconds}
+        denials = evidence["observed_client_denials"] = {}
+        latest = evidence["ruin_frames"] = {}
+        deadline = time.monotonic() + min(timeout, 28)
+        limitation = "No captured natural supported director receipt"
+        while time.monotonic() < deadline:
+            frames()  # Preserve the existing Husk birth/initialization diagnostic.
+            qualified = {}
+            for family, topic in (("husk", "native-campaign-npc"), ("boar", "native-campaign-npc-boar")):
+                owner, observer = (read_npcs(run, viewer, RUIN, topic=topic)
+                                   for run, viewer in ((host, "host"), (guest, "client")))
+                latest[family] = {"host": owner, "guest": observer}
+                if not owner or not observer:
+                    continue
+                network = observer["network"]
+                assert (observer["authority"], observer["other"], observer["simulated_controllers"],
+                        network["local_authority_begins"], network["local_authority_initializes"]) == (0, 0, 0, 0, 0), observer
+                if ruin_stock_receipt(observer, family, denial=True):
+                    denials[family] = observer
+                if ruin_stock_receipt(owner, family) and client_replica(observer, owner["cohort"], False, family):
+                    qualified[family] = set(owner["members"])
+            if not qualified:
+                await asyncio.sleep(.2)
+                continue
+            owner, observer = await asyncio.gather(capture(host, "host"), capture(guest, "client"))
+            evidence["ruin_actor_census"] = {"host": owner, "guest": observer}
+            try:
+                matched = compare(owner, observer, set().union(*qualified.values()))
+            except ValueError as mismatch:
+                limitation = str(mismatch)
+                await asyncio.sleep(.2)
+                continue
+            evidence["ruin_roster"] = matched
+            evidence["ruin_cohorts"] = {family: sorted(members) for family, members in qualified.items()}
+            if denials:
+                evidence["client_spawn_ownership"] = "observed exact native stock veto"
+                return
+            limitation = "No supported client stock veto receipt observed in the bounded window"
+            await asyncio.sleep(.2)
+        if "ruin_roster" not in evidence:
+            raise RuntimeError(limitation)
+        evidence["client_spawn_ownership"] = limitation
+        if require_client_denial:
+            raise RuntimeError(limitation)
+
     try:
         fixture_flags = ("--fixtures",) if approach or projectile_tap else ()
         if flayer_combat and not flayer_defaults:
             fixture_flags += ("--native-guest-sickness",)
         if dead_bridge:
             fixture_flags += ("--native-authored-enemy-loot",)
+        start_flags = ("--start-zone", area)
+        if ruin_fields:
+            start_flags = ("--native-start-preset", "wanderer", "--native-world-seed", str(WANDERER_SEED),
+                           "--native-expanded-zones", "--native-zone-walls", "--fixtures")
         await start("host", host, primary, "--port", "0", "--headless", "--native-zones",
-                    "--native-events", "--native-guest", "--start-zone", area, *fixture_flags)
+                    "--native-events", "--native-guest", *start_flags, *fixture_flags)
         initial, _, _ = await wait(f"The host did not start {area}",
                                    lambda server, _, __: server.get("state") == "hosting", 45)
         if prepared:
@@ -658,6 +771,10 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         invitation = await command("invite", *primary, "--name", "Encounter canary guest", "--character", "Encounter observer")
         client_flags = ("--native-guest-primary-input",) if projectile_tap else ()
         await start("join", guest, secondary, "--headless", "--native-zones", "--invite", invitation["invite_file"], *client_flags)
+        if ruin_fields:
+            await verify_ruin(invitation)
+            evidence["verified"] = True
+            return
         if join_only:
             def initial_join(server, client, snapshot):
                 return (paired(server, client) and snapshot["guest"] is not None
@@ -813,10 +930,16 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
             evidence["original_saves_verified"] = unchanged
             if not unchanged:
                 evidence["verified"] = False
+        if private_canaries:
+            evidence["private_canaries_verified"] = saved_hashes(private_canaries) == canaries
+            if not evidence["private_canaries_verified"]:
+                evidence["verified"] = False
         (host / "live-campaign-npc-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(evidence), flush=True)
         if vanilla_saved and not evidence["original_saves_verified"]:
             raise AssertionError("Original singleplayer save files changed")
+        if private_canaries and not evidence["private_canaries_verified"]:
+            raise AssertionError("Private save canaries changed")
 
 
 if __name__ == "__main__":
@@ -824,6 +947,8 @@ if __name__ == "__main__":
     parser.add_argument("--work", type=Path, required=True, help="root of an already prepared stage")
     parser.add_argument("--vanilla-saved", type=Path, help="optional original Saved directory to hash")
     parser.add_argument("--cohort", choices=tuple(DATA), default="husk", help="stock encounter family to verify")
+    parser.add_argument("--ruin-fields", action="store_true", help="observe the real daytime Ruin Fields stock director")
+    parser.add_argument("--private-canaries", type=Path, help="private SaveGames to hash before and after the Ruin proof")
     parser.add_argument("--dead-bridge", action="store_true", help="verify the stock Dead Bridge Husk director with production defaults")
     parser.add_argument("--flayer-defaults", action="store_true", help="verify stock Flayer combat and reconnect under ordinary campaign defaults")
     parser.add_argument("--flayer-veto", action="store_true", help="also enable the experimental guest Flayer spawn veto")
@@ -841,6 +966,16 @@ if __name__ == "__main__":
     parser.add_argument("--require-client-denial", action="store_true", help="also require a naturally attempted client spawn veto")
     parser.add_argument("--timeout", type=float, default=125.0, help="observation window, including the stock 90-second refresh")
     options = parser.parse_args()
+    if options.ruin_fields:
+        if (options.cohort != "husk" or not options.vanilla_saved or not options.private_canaries
+                or not options.private_canaries.is_dir()
+                or any((options.dead_bridge, options.approach, options.combat, options.stock_refresh, options.join_only,
+                        options.flayer_replay, options.notdeer_replay, options.projectile_tap, options.flayer_defaults,
+                        options.flayer_veto))):
+            parser.error("--ruin-fields verifies Husk/boar stock cohorts and requires original and private canary paths")
+        options.replicate = True
+    elif options.private_canaries:
+        parser.error("--private-canaries requires --ruin-fields")
     if options.dead_bridge:
         if options.cohort != "husk" or any((options.approach, options.combat, options.stock_refresh, options.join_only,
                                             options.flayer_replay, options.notdeer_replay, options.projectile_tap)):
@@ -885,10 +1020,15 @@ if __name__ == "__main__":
         parser.error("--timeout must be between 15 and 360 seconds")
     if options.vanilla_saved and not options.vanilla_saved.is_dir():
         parser.error("--vanilla-saved must be an existing directory")
-    asyncio.run(validate(options.work.resolve(), options.vanilla_saved, replicate=options.replicate,
-                         timeout=options.timeout, require_client_denial=options.require_client_denial,
-                         approach=options.approach, family=options.cohort, flayer_veto=options.flayer_veto,
-                         join_only=options.join_only, combat=options.combat, stock_refresh=options.stock_refresh,
-                         antfarm_replay=options.flayer_replay or options.notdeer_replay,
-                         projectile_tap=options.projectile_tap, flayer_defaults=options.flayer_defaults,
-                         dead_bridge=options.dead_bridge))
+    run = validate(options.work.resolve(), options.vanilla_saved, replicate=options.replicate,
+                   timeout=options.timeout, require_client_denial=options.require_client_denial,
+                   approach=options.approach, family=options.cohort, flayer_veto=options.flayer_veto,
+                   join_only=options.join_only, combat=options.combat, stock_refresh=options.stock_refresh,
+                   antfarm_replay=options.flayer_replay or options.notdeer_replay,
+                   projectile_tap=options.projectile_tap, flayer_defaults=options.flayer_defaults,
+                   dead_bridge=options.dead_bridge, ruin_fields=options.ruin_fields, private_canaries=options.private_canaries)
+    if options.ruin_fields:
+        with installed_probe(options.work.resolve()):
+            asyncio.run(run)
+    else:
+        asyncio.run(run)
