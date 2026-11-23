@@ -478,8 +478,15 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
             if not isinstance(listener, dict) or listener.get("address") != bind:
                 return False
             actual_port = listener.get("port")
-            return (type(actual_port) is int and (actual_port == port if port else 0 < actual_port <= 65535)
-                    and (use_creator or frame["game"]["map"] == area))
+            if type(actual_port) is not int or not (actual_port == port if port else 0 < actual_port <= 65535):
+                return False
+            initial = engine.initial_host_world if engine is not None else None
+            if initial is None:
+                return use_creator or frame["game"]["map"] == area
+            game = frame["game"]
+            sequence = game.get("sequence")
+            return ((use_creator or initial.map == area) and game.get("save_scope") == initial.save_scope
+                    and type(sequence) is int and sequence >= initial.sequence)
 
         return SessionPlan(start, status, ready, read_game=lambda: engine.bridge.snapshot() if engine else None)
 

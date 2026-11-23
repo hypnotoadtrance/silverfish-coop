@@ -4762,6 +4762,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                     timeout=7,
                 )
                 control.event("native_seed_restored", **initial_game["native_seed"])
+            if resident_engine is not None:
+                # Pending stock travel may run before the title sees a live host frame.
+                resident_engine.record_initial_host_world(entry_map, initial_game)
             saved = old_world.get("host", {})
             if saved.get("map") == entry_map:
                 try:

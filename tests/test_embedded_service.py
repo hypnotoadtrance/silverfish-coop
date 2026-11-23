@@ -34,7 +34,9 @@ class StockBridge:
                 "map": TITLE_MAP, "sequence": self.sequence, "saved_directory": str(self.profile / "Saved"),
             }
             return frame
-        return {"state": self.state, "sequence": self.sequence, "map": OBSERVATORY, "pawns": {}}
+        return {"state": self.state, "sequence": self.sequence, "map": OBSERVATORY, "pawns": {},
+                "mode": "host" if self.state == "hosting" else "client", "save_scope": self.save_scope,
+                "server_connection": self.state == "connected"}
 
     async def wait_for(self, condition, timeout=30):
         for _ in range(6):
@@ -460,6 +462,35 @@ class EmbeddedServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.observe_udp.call_count, 2)
         self.launch.assert_not_called()
         self.kill.assert_not_called()
+
+    async def test_resident_host_records_its_verified_scoped_entry_before_starting_gameplay(self):
+        mailbox = self.simulate_boot(self.campaign, host=True)
+        engine = embedded.EmbeddedEngine(os.getpid(), mailbox, self.campaign / "game-user" / "Saved",
+                                         self.raw_port, session_directory=self.campaign)
+        await engine.observe_title()
+        self.assertIsNone(engine.initial_host_world)
+        transport = self.transport(self.quic_port)
+
+        def verify_socket(pid, port):
+            self.assertEqual((pid, port), (os.getpid(), self.raw_port))
+            self.assertIsNone(engine.initial_host_world)
+
+        async def run(controller, bridge, connection):
+            initial = engine.initial_host_world
+            self.assertEqual((initial.map, initial.save_scope), (OBSERVATORY, controller.native_profile.id))
+            self.assertGreaterEqual(controller.last_game["sequence"], initial.sequence)
+            with self.assertRaisesRegex(RuntimeError, "initial host world"):
+                engine.record_initial_host_world(OBSERVATORY, bridge.snapshot())
+            self.assertIs(engine.initial_host_world, initial)
+
+        with (patch.object(engine, "attach_local_bridge"),
+              patch.object(service, "verify_loopback_socket", side_effect=verify_socket),
+              patch.object(service.link, "start_host", return_value=transport),
+              patch.object(service.Host, "run", new=run)):
+            await service.host_game(self.work, self.campaign, "127.0.0.1", self.quic_port, True,
+                                    native_events=True, native_guest=True, native_zones=True,
+                                    start_zone=OBSERVATORY, resident_engine=engine)
+        self.assertIsNone(engine.initial_host_world)
 
     async def test_guest_uses_selected_character_and_stock_leave_without_relaunch(self):
         mailbox = self.simulate_boot(self.client, host=False)

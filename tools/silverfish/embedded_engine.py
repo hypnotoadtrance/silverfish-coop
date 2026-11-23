@@ -38,6 +38,13 @@ class _Startup:
     environment: Mapping[str, str | None]
 
 
+@dataclass(frozen=True)
+class InitialHostWorld:
+    map: str
+    save_scope: str
+    sequence: int
+
+
 def _current_startup(names: tuple[str, ...]) -> _Startup:
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     module_name = kernel.GetModuleFileNameW
@@ -233,6 +240,7 @@ class EmbeddedEngine:
         self.session_directory = session_directory
         self._saved_directory = saved_directory
         self._save_scope = None
+        self._initial_host_world: InitialHostWorld | None = None
         self._sequence = 0
         self._state = "acquiring"
 
@@ -298,6 +306,20 @@ class EmbeddedEngine:
             raise ValueError("The co-op save scope does not belong to the active engine lease")
         self._save_scope = scope.id
         await select_save_scope(self.bridge, scope)
+
+    @property
+    def initial_host_world(self) -> InitialHostWorld | None:
+        return self._initial_host_world if self._state == "active" else None
+
+    def record_initial_host_world(self, area: str, frame: dict) -> None:
+        sequence = frame.get("sequence")
+        if (self._state != "active" or self._initial_host_world is not None
+                or self._save_scope is None or frame.get("save_scope") != self._save_scope
+                or (frame.get("mode"), frame.get("state"), frame.get("map")) != ("host", "hosting", area)
+                or frame.get("server_connection") is not False or type(sequence) is not int
+                or sequence <= self._sequence):
+            raise RuntimeError("The initial host world did not match the current scoped launch")
+        self._initial_host_world = InitialHostWorld(area, self._save_scope, sequence)
 
     async def release(self, *, timeout: float = 12) -> dict:
         """Request stock leave on the game thread and verify a later isolated title."""
