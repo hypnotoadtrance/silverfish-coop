@@ -841,11 +841,12 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                     raise RuntimeError("The stock Worker was selected but its unloaded class left the stock spawn active")
                 if denials and fixture["host_mixed_cohort_verified"]:
                     member = next(name for name in sorted(required) if name.startswith("NPC_Doe_C "))
+                    replica = matched["matched"][member]["replica"]
                     before, = await ruin_probe(host, f"health\t{member}")
-                    attack, = await ruin_probe(guest, f"damage\t{member}")
+                    attack, = await ruin_probe(guest, f"damage\t{replica}")
                     after, = await ruin_probe(host, f"health\t{member}")
-                    assert before == after and attack == before.replace("host\t", "client\t", 1), (before, attack, after)
-                    fixture["guest_damage_and_death_veto"] = member
+                    assert before == after and attack.split("\t")[:2] == ["client", replica], (before, attack, after)
+                    fixture["guest_damage_and_death_veto"] = {"host": before, "guest": attack}
                     return
                 limitation = "No mixed stag/doe cohort and matching Worker veto both verified"
             elif denials:

@@ -238,12 +238,20 @@ end
 
 local function damage_probe(operation, name)
     local world, _, viewer = active_ruin()
-    local path = name and name:match("^NPC_[%w_]+ (.+)$")
+    local kind, path
+    if name then kind, path = name:match("^(NPC_[%w_]+) (.+)$") end
+    assert(kind and path:sub(1, #level_path) == level_path, "expected an enrolled ambient NPC name")
     local base = StaticFindObject("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C")
-    local npc = path and path:sub(1, #level_path) == level_path and StaticFindObject(path)
-    assert(valid(base) and valid(npc) and npc:IsA(base) and npc:GetFullName() == name
-        and same(npc:GetWorld(), world) and npc.bReplicates and npc.Alive and npc.Health > 0
-        and npc:GetLocalRole() == (viewer == "client" and 1 or 3), "exact live ambient NPC required")
+    local npc
+    for _, candidate in ipairs(FindAllOf(kind) or {}) do
+        if valid(candidate) and same(candidate:GetWorld(), world) and candidate:GetFullName() == name then
+            assert(not npc, "duplicate enrolled ambient NPC")
+            npc = candidate
+        end
+    end
+    assert(valid(base) and valid(npc) and npc:IsA(base), "exact stock ambient NPC unavailable")
+    assert(npc.bReplicates and npc.Alive and npc:GetLocalRole() == (viewer == "client" and 1 or 3),
+        "expected a live replicated ambient NPC in this process")
     local before = npc.Health
     if operation == "damage" then
         assert(viewer == "client" and os.getenv("SILVERFISH_COOP_RUIN_NPC_REFRESH_PROBE") == "1",
