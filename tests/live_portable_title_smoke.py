@@ -43,6 +43,7 @@ from live_stock_pause_exit_smoke import stock_pause
 from live_unified_title_smoke import Seat, offered, start_pair
 from portable_guest_world_start import GuestWorldStartProof, resident_events, wait_resident_status
 from portable_simmi_jammer import verify_stock_simmi_jammers
+from portable_weather_travel import verify_weather_travel
 from portable_stock_shovel import verify_stock_shovel
 from portable_world_view_receipt import patch_world_view_receipts, verify_world_view_receipt
 from tools.silverfish.title_session import STATUS_FILE as TITLE_STATUS_FILE
@@ -3036,6 +3037,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False,
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
+                 stock_weather_travel: bool = False,
                  stock_npc_rivalry: bool = False,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
@@ -3096,6 +3098,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_flashlights, "stock_flashlights", verify_stock_flashlights),
         (stock_simmi_jammers, "stock_simmi_jammers",
          lambda host, guest, pawn: verify_stock_simmi_jammers(host, guest, pawn, portable_probe_command)),
+        (stock_weather_travel, "stock_weather_travel",
+         lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command)),
         (resident_weapon_cues, "resident_weapon_cues",
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override, rusty=rusty_pistol)),
         (stock_npc_rivalry, "stock_npc_rivalry", verify_stock_npc_rivalry),
@@ -3111,6 +3115,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                        or guest_ui_memory or compact_crate_status or compact_world_view or guest_shop_lease
                        or guest_stash_memory or nonmirrored_startup or stock_unequip or resident_cabinet_archive is not None)
     try:
+        if stock_weather_travel:
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableWeatherTravelProbe",
+                                                     fixture="portable_weather_travel_probe.lua"))
         if stock_simmi_jammers:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableSimmiJobsProbe",
@@ -3153,8 +3161,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                      fixture="portable_npc_override_probe.lua"))
-        if tutorial_dock_combat or stock_bandage_revisit or stock_shovel or stock_simmi_jammers:
-            overlay_key = "jammer_zone_overlays" if stock_simmi_jammers else "dock_zone_overlays"
+        if tutorial_dock_combat or stock_bandage_revisit or stock_shovel or stock_simmi_jammers or stock_weather_travel:
+            overlay_key = ("weather_zone_overlays" if stock_weather_travel else
+                           "jammer_zone_overlays" if stock_simmi_jammers else "dock_zone_overlays")
             proof[overlay_key] = [probes.enter_context(tutorial_dock_zone_overlay(game)) for game in games]
         if stock_campfire:
             for game in games:
@@ -3295,7 +3304,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         elif resident_checks:
             results = proof["resident_check_results"] = {}
             campaign_started = time.perf_counter()
-            exit_actions = ("prompt", "confirm") if tutorial_dock_combat or stock_bandage_revisit or stock_shovel else ("save_and_quit",)
+            leave_in_field = tutorial_dock_combat or stock_bandage_revisit or stock_shovel or stock_weather_travel
+            exit_actions = ("prompt", "confirm") if leave_in_field else ("save_and_quit",)
 
             async def run_resident_checks(host, guest, pawn):
                 proof["join_seconds"] = round(time.perf_counter() - campaign_started, 3)
@@ -3496,6 +3506,8 @@ if __name__ == "__main__":
                             help="verify a stock Observatory stash larger than one ordinary resident command ticket")
     parser.add_argument("--compact-world-view", action="store_true",
                         help="verify one compact resident stock weather receipt in a private muted portable pair")
+    parser.add_argument("--stock-weather-travel", action="store_true",
+                        help="verify stock weather, rain, and sirens after opening Crossroads in one muted portable pair")
     parser.add_argument("--guest-world-start", action="store_true",
                         help="verify first stock guest map startup and short reconnect in one portable session")
     parser.add_argument("--nonmirrored-startup", action="store_true",
@@ -3570,7 +3582,7 @@ if __name__ == "__main__":
     resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "stock_board_offers", "resident_weapon_cues",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_take_ammo",
-                              "stock_host_corpse_carry", "stock_flashlights", "stock_simmi_jammers"}
+                              "stock_host_corpse_carry", "stock_flashlights", "stock_simmi_jammers", "stock_weather_travel"}
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
     if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
@@ -3583,7 +3595,7 @@ if __name__ == "__main__":
         parser.error("Use --stock-shovel-loot with --stock-shovel")
     if any((args.stock_food, args.stock_campfire, args.stock_npc_override, args.stock_board_offers,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
-            args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers)) and (
+            args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
         parser.error("Run the resident gameplay checks without other gameplay fixtures")
@@ -3627,6 +3639,7 @@ if __name__ == "__main__":
                        stock_host_corpse_carry=args.stock_host_corpse_carry,
                        stock_flashlights=args.stock_flashlights,
                        stock_simmi_jammers=args.stock_simmi_jammers,
+                       stock_weather_travel=args.stock_weather_travel,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,

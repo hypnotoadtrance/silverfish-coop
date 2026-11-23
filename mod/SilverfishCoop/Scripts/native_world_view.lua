@@ -373,6 +373,7 @@ function view.clear()
     if not previous then return true end
     local current = previous.context
     local rain_ok, rain_failure = pcall(weather_view.destroy_rain, previous.rain)
+    local stock_rain_ok, stock_rain_failure = pcall(weather_view.restore_local_rain, current, previous.local_rain)
     local weather_ok, weather_failure = pcall(restore_weather, previous)
     local ok, failure = pcall(function()
         if not day_current(current) then return end
@@ -387,6 +388,7 @@ function view.clear()
         end
     end)
     if not rain_ok then return false, rain_failure end
+    if not stock_rain_ok then return false, stock_rain_failure end
     if not weather_ok then return false, weather_failure end
     return ok, failure
 end
@@ -457,6 +459,8 @@ function view.apply(state, phase, frame)
     local ok, report = pcall(function()
         current.day.UpdateInRealTime = false
         project_visuals(current, frame)
+        lease.local_rain = weather_view.bind_local_rain(current, lease.local_rain)
+        weather_view.suppress_local_rain(lease.local_rain)
         if has_weather(frame) then
             lease.weather = lease.weather or weather
             lease.original_weather = lease.original_weather or original_weather
