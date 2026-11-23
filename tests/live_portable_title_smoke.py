@@ -838,12 +838,36 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str) -> dic
             await asyncio.sleep(.05)
     hurt, = injuries
     assert hurt["damage"] > 0 and math.isclose(float(before) - float(after), hurt["damage"], abs_tol=1e-5), hurt
+    for seat in (host, guest):
+        assert await command(seat, "dock-arm-swing") == "ready"
+    try:
+        swing_started = time.time()
+        clip = await command(host, "dock-play-swing")
+        source = await command(host, "dock-read-swing")
+        assert source == f"1;1.100;true;{clip}", source
+        async with asyncio.timeout(5):
+            while (observer := await command(guest, "dock-read-swing")).startswith("0;"):
+                await asyncio.sleep(.05)
+        assert observer == source, (source, observer)
+        async with asyncio.timeout(5):
+            while True:
+                receipts = [row for row in await resident_events(guest_run, frame)
+                            if row["event"] == "native_npc_melee_received" and row["time_unix"] >= swing_started
+                            and row["clip"] == clip.split(" ", 1)[1]]
+                if receipts:
+                    break
+                await asyncio.sleep(.05)
+        received, = receipts
+    finally:
+        for seat in (host, guest):
+            assert await command(seat, "dock-disarm-swing") == "disarmed"
     return {"tutorial_dock_combat": {"before": seen, "native_shot": shot, "both_peers_dead_and_ragdolled": result,
                                      "stock_melee": {"attacker": attacker, "host_health": float(host_hp),
                                                      "guest_before": float(before), "guest_after": float(after),
                                                      "guest_hurt_cue": hurt, "replica_strike_denied": True,
                                                      "retargeted_when_guest_downed": True,
-                                                     "downed_aggro_and_queued_strike_denied": True}}}
+                                                     "downed_aggro_and_queued_strike_denied": True},
+                                     "stock_swing": {"host": source, "guest": observer, "received": received}}}
 
 
 async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool = False, rusty: bool = False) -> dict:

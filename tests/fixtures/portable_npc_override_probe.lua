@@ -431,6 +431,45 @@ end
 local attack_probe
 local attack_probe_hooked = false
 local dock_attacker = "NPC_Survivor_Worker_C_0"
+local montage_probe, montage_probe_hooked
+
+local function dock_swing(world, host, action)
+    local actor = dock_worker(world, dock_attacker)
+    assert(valid(actor), "the swing probe requires the mapped worker")
+    assert(actor.Alive and actor.bReplicates and actor:GetLocalRole() == (host and 3 or 1),
+        ("the swing worker has Alive=%s, bReplicates=%s, role=%s"):format(
+            tostring(actor.Alive), tostring(actor.bReplicates), actor:GetLocalRole()))
+    local animator = actor.Mesh:GetAnimInstance()
+    assert(valid(animator), "the stock worker animator is unavailable")
+    if action == "dock-arm-swing" then
+        montage_probe = {animator=animator, count=0, clip="-", rate=0}
+        if not montage_probe_hooked then
+            RegisterHook("/Script/Engine.AnimInstance:PlaySlotAnimationAsDynamicMontage",
+                function(context, asset, slot, _fade_in, _fade_out, rate)
+                    if not montage_probe or not same(context:get(), montage_probe.animator)
+                        or slot:get():ToString() ~= "DefaultSlot" then return end
+                    local clip = asset:get()
+                    montage_probe.count = montage_probe.count + 1
+                    montage_probe.clip = clip:GetFullName()
+                    montage_probe.rate = rate:get()
+                end)
+            montage_probe_hooked = true
+        end
+        return "ready"
+    end
+    if action == "dock-play-swing" then
+        assert(host, "the original swing runs on the authoritative actor")
+        actor.CombatTarget = nil
+        local clip = actor.Anim_Melee[1]
+        assert(valid(clip), "the worker has no configured swing clip")
+        actor:Play_AnimInterupt(true, false, clip, 1.1, .2)
+        return clip:GetFullName()
+    end
+    assert(montage_probe and same(montage_probe.animator, animator), "the swing probe is unarmed")
+    local montage = animator:GetCurrentActiveMontage()
+    local playing = valid(montage) and animator:Montage_IsPlaying(montage) == true
+    return ("%d;%.3f;%s;%s"):format(montage_probe.count, montage_probe.rate, tostring(playing), montage_probe.clip)
+end
 
 local function observe_strike(actor)
     if not attack_probe_hooked then
@@ -534,6 +573,11 @@ local function run(action, actor_path)
         shooter.Controller:SetControlRotation(angle)
         if host then shooter.Camera:K2_SetWorldRotation(angle, false, {}, true) end
         return "ready"
+    elseif action == "dock-arm-swing" or action == "dock-play-swing" or action == "dock-read-swing" then
+        return dock_swing(world, host, action)
+    elseif action == "dock-disarm-swing" then
+        montage_probe = nil
+        return "disarmed"
     elseif action == "dock-strike" then
         return dock_strike(pawn, world, host)
     elseif action == "dock-stage" or action == "dock-worker" then

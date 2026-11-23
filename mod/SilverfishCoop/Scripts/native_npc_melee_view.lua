@@ -2,10 +2,9 @@ local melee = {}
 
 local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local strike_path = npc_path .. ":Slot_Anim"
-local target_point = "/Script/Engine.TargetPoint"
+local marker_path = "/Script/Engine.AmbientSound"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local byte_angle = 360 / 256
-local marker_pitch = 62
 local maximum, marker_lifetime, cue_lifetime = 128, 15, .6
 local current, hooked, npc_class, point_class, statics
 
@@ -19,10 +18,6 @@ end
 
 local function byte(angle)
     return math.floor(angle / byte_angle + .5) % 256
-end
-
-function melee.is_marker(rotation)
-    return byte(rotation.Pitch) == marker_pitch
 end
 
 local function stock_clip(path)
@@ -46,8 +41,10 @@ local function host_marker(actor, now)
     end
     if not valid(point_class) or current.count >= maximum or current.serial >= 65535 then return end
     local id = current.serial + 1
+    -- A native actor with no sound asset carries only the owner and ID. Keep
+    -- its class separate from the TargetPoint actors used for deaths.
     local marker = current.world:SpawnActor(point_class, actor:K2_GetActorLocation(), {
-        Pitch = marker_pitch * byte_angle, Yaw = (id % 256) * byte_angle, Roll = (id // 256) * byte_angle,
+        Pitch = 0, Yaw = (id % 256) * byte_angle, Roll = (id // 256) * byte_angle,
     })
     if not valid(marker) then return end
     marker:SetOwner(actor)
@@ -81,13 +78,13 @@ local function capture(context, animation, rate, blend_in, blend_out, duration)
 end
 
 local function remember_markers()
-    for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
-        if valid(marker) and same(marker:GetWorld(), current.world) and marker:GetLocalRole() == 1 then
+    for _, marker in ipairs(FindAllOf("AmbientSound") or {}) do
+        if valid(marker) and same(marker:GetClass(), point_class) and same(marker:GetWorld(), current.world)
+            and marker:GetLocalRole() == 1 and valid(marker.AudioComponent) and not valid(marker.AudioComponent.Sound)
+            and actor_ready(marker:GetOwner(), 1) then
             local rotation = marker:K2_GetActorRotation()
-            if melee.is_marker(rotation) and actor_ready(marker:GetOwner(), 1) then
-                local id = byte(rotation.Roll) * 256 + byte(rotation.Yaw)
-                current.markers[id] = marker
-            end
+            local id = byte(rotation.Roll) * 256 + byte(rotation.Yaw)
+            if id > 0 then current.markers[id] = marker end
         end
     end
 end
@@ -143,7 +140,7 @@ function melee.sync(state, phase, on_capture)
     end
     current.active = hosting and state.clients > 0 and type(SilverfishPublishLocalWeaponCue) == "function"
     if not valid(npc_class) then npc_class = StaticFindObject(npc_path) end
-    if not valid(point_class) then point_class = StaticFindObject(target_point) end
+    if not valid(point_class) then point_class = StaticFindObject(marker_path) end
     if not valid(statics) then statics = StaticFindObject(statics_path) end
     if not valid(npc_class) or not valid(statics) then return end
     if hosting and not hooked and valid(StaticFindObject(strike_path)) then
