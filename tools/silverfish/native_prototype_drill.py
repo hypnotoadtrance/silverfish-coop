@@ -5,7 +5,7 @@ import re
 import time
 import uuid
 
-from . import native_authored_pickup, native_host_save, native_mosby_tape, native_rewards, party
+from . import native_authored_pickup, native_host_save, native_mosby_tape, native_rewards, native_wire_quest, party
 from .authored_routes import MAPS as EXPANDED_MAPS
 from .campaign import CampaignFormatError
 from .native_gold import valid_guid
@@ -202,9 +202,11 @@ async def preflight(host, bridge, actor, action=PREFLIGHT, target=None):
     return {KEY: dict(proof, objective_qualified=qualified)}
 
 
-async def _reward(host, bridge, action, pawn, slot, template, assigned=None):
+async def _reward(host, bridge, action, pawn, slot, template, assigned=None, *, memory=False):
     area = host.last_game["map"]
     arguments = (pawn, assigned) if assigned else ()
+    if memory:
+        arguments += ("memory",)
     snapshot = await bridge.command(action, slot, template, *arguments, timeout=7)
     proof = snapshot.get(REWARD_KEY, {})
     allowed = ("granted", "already_granted") if assigned else ("captured",)
@@ -221,7 +223,7 @@ def _connected_pawn(host, character):
     return pawn if member.get("connected") and _pawn(pawn) else None
 
 
-async def _deliver(host, bridge, candidate):
+async def _deliver(host, bridge, candidate, *, defer_save):
     pending = candidate.get(REWARDS)
     if not pending or not host.last_game.get("native_guest_xp_ready"):
         return frozenset()
@@ -229,12 +231,16 @@ async def _deliver(host, bridge, candidate):
     if not recipients:
         return frozenset()
     frame, template = pending["escrow"], pending["template_guid"]
-    await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)
+    memory = frame.get("pending") is True
+    if not memory:
+        await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)
     delivered = {}
     for actor, pawn in recipients.items():
+        if defer_save and not await native_wire_quest._retain_reward_guest(host, bridge, actor, pawn):
+            continue
         if _connected_pawn(host, actor) != pawn:
             continue
-        await _reward(host, bridge, GRANT, pawn, frame["slot"], template, pending["pending"][actor])
+        await _reward(host, bridge, GRANT, pawn, frame["slot"], template, pending["pending"][actor], memory=memory)
         native_rewards.queue(candidate["players"][actor], XP)
         delivered[actor] = pawn
     if not delivered:
@@ -248,6 +254,12 @@ async def _deliver(host, bridge, candidate):
     for actor in applied:
         del pending["pending"][actor]
     if not pending["pending"]:
+        if memory:
+            area = host.last_game["map"]
+            snapshot = await bridge.command("native-loot-release-escrows", frame["slot"], timeout=3)
+            if (snapshot.get("state"), snapshot.get("map")) != ("hosting", area):
+                raise RuntimeError("The stock Prototype Drill armor template release changed campaign map")
+            host.last_game, host.last_seen = snapshot, time.monotonic()
         del candidate[REWARDS]
     return applied
 
@@ -287,7 +299,11 @@ async def turn_in(host, bridge, actor):
         if not _authored_objective(host.party, actor, before):
             raise party.RuleError("native_prototype_drill_exact_authored_objective_required")
         objective = before["objective_guid"]
-        await host.checkpoint_native(bridge)
+        defer_save = native_wire_quest.defer_reward_save(host)
+        if not defer_save:
+            await host.checkpoint_native(bridge)
+        elif actor != "host" and not await native_wire_quest._retain_reward_guest(host, bridge, actor, pawn):
+            raise party.RuleError("native_prototype_drill_stock_interactor_changed")
         recipients = sorted(set(host.roles().values()) & host.party["players"].keys())
         if (host.stopping or host.native_checkpoint_unsafe or host.party["wipe"]
                 or "host" not in recipients or actor not in recipients or actor in host.party["pending_spawns"]
@@ -322,11 +338,12 @@ async def turn_in(host, bridge, actor):
         if guests:
             slot = native_host_save.new_slot()
             host_pawn = host.last_game["pawns"]["local"]["name"]
-            await _reward(host, bridge, CAPTURE, host_pawn, slot, armor)
-            frame = await asyncio.to_thread(native_host_save.record, host.native_profile, slot, SCIENTIST_SHOP, flush=True)
+            await _reward(host, bridge, CAPTURE, host_pawn, slot, armor, memory=defer_save)
+            frame = ({"slot": slot, "map": SCIENTIST_SHOP, "pending": True} if defer_save else
+                     await asyncio.to_thread(native_host_save.record, host.native_profile, slot, SCIENTIST_SHOP, flush=True))
             candidate[REWARDS] = {"escrow": frame, "template_guid": armor, "pending": guests.copy()}
-            delivered = await _deliver(host, bridge, candidate)
-        await _commit(host, bridge, candidate, delivered | ({actor} - {"host"}), record)
+            delivered = await _deliver(host, bridge, candidate, defer_save=defer_save)
+        await _commit(host, bridge, candidate, delivered | ({actor} - {"host"}), defer_save=defer_save, record=record)
         return {"effect": "native_quest_changed", **record, KEY: after}
     except (OSError, RuntimeError, ValueError, KeyError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:
@@ -336,8 +353,12 @@ async def turn_in(host, bridge, actor):
         host.transitioning = False
 
 
-async def _commit(host, bridge, candidate, required, record=None):
-    revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset(required))
+async def _commit(host, bridge, candidate, required, *, defer_save, record=None):
+    revision = None
+    if not defer_save:
+        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=frozenset(required))
+    elif record is not None:
+        host.pending_host_save = True
     host.party, host.native_checkpoint_unsafe = candidate, False
     if record is not None:
         host.control.event("native_prototype_drill_completed", revision=revision, **record)
@@ -346,16 +367,21 @@ async def _commit(host, bridge, candidate, required, record=None):
 
 
 async def settle(host, bridge):
-    if (not host.party.get(REWARDS) or not host.native_guest or not host.native_profile or not host.native_zones
+    reward = host.party.get(REWARDS)
+    if (not reward or not host.native_guest or not host.native_profile or not host.native_zones
             or host.last_game.get("state") != "hosting" or host.last_game.get("map") not in host.allowed_maps
             or host.stopping or host.transitioning or host.native_checkpoint_unsafe or host.party["wipe"]):
+        return
+    defer_save = native_wire_quest.defer_reward_save(host)
+    if not defer_save and reward["escrow"].get("pending") is True:
+        # Wait for retention to return or for a normal checkpoint to materialize this template.
         return
     candidate = party.load_party(host.party)
     host.transitioning = host.native_checkpoint_unsafe = True
     try:
-        delivered = await _deliver(host, bridge, candidate)
+        delivered = await _deliver(host, bridge, candidate, defer_save=defer_save)
         if delivered:
-            await _commit(host, bridge, candidate, delivered)
+            await _commit(host, bridge, candidate, delivered, defer_save=defer_save)
         host.native_checkpoint_unsafe = False
     except (OSError, RuntimeError, ValueError, KeyError, asyncio.CancelledError):
         if host.native_checkpoint_unsafe:

@@ -2,6 +2,7 @@ local drill = {}
 local wire = require("native_wire_quest")
 local mosby = require("native_dialogue_mosby")
 local guest_save = require("guest_save")
+local loot_escrow = require("native_loot_actions")
 local zones = require("zone_maps")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -262,30 +263,43 @@ local function redeem(state, phase, name, operation, objective)
     return "exact stock Prototype Drill state verified"
 end
 
-local function escrow(state, phase, mode, name, template, pawn_name, assigned)
+local function escrow(state, phase, mode, name, template, pawn_name, assigned, memory)
     if not slot(name) or not guid(template) then refuse("reward_identity_unqualified") end
     local progress, canonical = scope(state, phase)
     local statics, class = StaticFindObject(statics_path), StaticFindObject(save_path)
     if progress.prototype ~= -10 or progress.Mosby_DrillTest < 1 or not valid(statics) or not valid(class)
         or type(SilverfishVerifyPrototypeDrillReward) ~= "function" then refuse("reward_scope_unavailable") end
-    local scratch
+    local function verify(loaded, source)
+        if not exact(loaded, save_path) or same(loaded, canonical.save) or same(loaded, source) then return false end
+        local args = {loaded:GetAddress(), template}
+        if source then args[3] = source:GetAddress() end
+        local ok, result = SilverfishVerifyPrototypeDrillReward(table.unpack(args))
+        return ok == true and result == "verified"
+    end
+    local scratch, loaded
     if mode == "capture" then
         if state.map ~= area or type(SilverfishCapturePrototypeDrillReward) ~= "function"
-            or statics:DoesSaveGameExist(name, 0) ~= false then refuse("reward_capture_unavailable") end
-        scratch = statics:CreateSaveGameObject(class)
+            or not memory and statics:DoesSaveGameExist(name, 0) ~= false then refuse("reward_capture_unavailable") end
+        if memory then
+            scratch = loot_escrow.create_pending_escrow(canonical.save, canonical.instance, state.world, name,
+                function(source, restored) return verify(restored, source) end)
+        else
+            scratch = statics:CreateSaveGameObject(class)
+        end
         if not exact(scratch, save_path) or same(scratch, canonical.save) then refuse("reward_scratch_unavailable") end
         local ok, result = SilverfishCapturePrototypeDrillReward(canonical.host:GetAddress(), canonical.save:GetAddress(),
             scratch:GetAddress(), template)
-        if ok ~= true or result ~= "captured" or statics:SaveGameToSlot(scratch, name, 0) ~= true then
+        if ok ~= true or result ~= "captured" or not memory and statics:SaveGameToSlot(scratch, name, 0) ~= true then
             refuse("reward_capture_unverified")
         end
     end
-    local loaded = statics:LoadGameFromSlot(name, 0)
-    if not exact(loaded, save_path) or same(loaded, canonical.save) or same(loaded, scratch) then refuse("reward_load_unverified") end
-    local args = {loaded:GetAddress(), template}
-    if scratch then args[3] = scratch:GetAddress() end
-    local ok, result = SilverfishVerifyPrototypeDrillReward(table.unpack(args))
-    if ok ~= true or result ~= "verified" then refuse("reward_payload_unverified") end
+    if memory then
+        loaded = loot_escrow.pending_escrow(state.world, name)
+        if not verify(loaded) then refuse("reward_payload_unverified") end
+    else
+        loaded = statics:LoadGameFromSlot(name, 0)
+        if not verify(loaded, scratch) then refuse("reward_payload_unverified") end
+    end
     local status, recipient, awarded = "captured", canonical.host:GetFullName(), template
     if mode == "grant" then
         if not guid(assigned) or assigned == template or type(SilverfishGrantPrototypeDrillReward) ~= "function" then
@@ -312,13 +326,13 @@ function drill.command(fields, state, phase)
         last = nil
         return redeem(state, phase, fields[3], action, fields[4])
     end
-    if action == "native-prototype-drill-reward-capture" and #fields == 4 then
+    if action == "native-prototype-drill-reward-capture" and (#fields == 4 or #fields == 5 and fields[5] == "memory") then
         last = nil
-        return escrow(state, phase, "capture", fields[3], fields[4])
+        return escrow(state, phase, "capture", fields[3], fields[4], nil, nil, fields[5] == "memory")
     end
-    if action == "native-prototype-drill-reward-grant" and #fields == 6 then
+    if action == "native-prototype-drill-reward-grant" and (#fields == 6 or #fields == 7 and fields[7] == "memory") then
         last = nil
-        return escrow(state, phase, "grant", fields[3], fields[4], fields[5], fields[6])
+        return escrow(state, phase, "grant", fields[3], fields[4], fields[5], fields[6], fields[7] == "memory")
     end
 end
 

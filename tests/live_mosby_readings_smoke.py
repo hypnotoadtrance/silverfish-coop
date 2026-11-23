@@ -302,7 +302,11 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         placed = (await action(authority, tape.APPROACH, "--target", "guest"))["native_mosby_tape_approach"]
         assert placed["target"] == drill.BOARD
         await action(authority, "checkpoint")
-        before = flags(saved())
+        baseline = saved()
+        before = flags(baseline)
+        before_turn_in = campaign_save_hashes(campaign)
+        assert str(Path("save/campaign.json")) in before_turn_in
+        assert any(path.endswith(".sav") for path in before_turn_in)
         assert before["host"].get("Mosby_DrillTest", 0) == 0
 
         def panel(status):
@@ -341,16 +345,14 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         assert matches(pending) and pending["state"] == "redeeming" and pending["open"] == offer["open"]
         assert pending["sequence"] > offer["sequence"]
         proof["stock_board"] = {"review": offer, "turn_in": await rendered("completed", pending), "stock_preflight": offered}
-        durable = saved()
-        gained = flags(durable)
-        proof["stock_flags"] = gained
-        record = durable["world"]["party"]["native_quests"][drill.QUEST_ID]
+        completed = await wait(run, lambda state: state.get("gameplay", {}).get("native_quests", {}).get(
+            drill.QUEST_ID, {}).get("step") == -10)
+        record = completed["gameplay"]["native_quests"][drill.QUEST_ID]
         assert (record["actor"], record["step"], record["cash"], record["xp"], record["consumed_drill_head"]) == (
             character, -10, 10000, 3, claimed["guid"]), record
         assert set(record["recipients"]) == {"host", character} == set(record["armor"])
         assert len(set(record["armor"].values())) == 2
         assert record["test_results"] == {"station": drill.STATION, "class_path": drill.TAPE_CLASS}
-        assert drill.REWARDS not in durable["world"]["party"]
         proof["receipt"] = record
 
         suit = (drill.ARMOR_CLASS, "backpack", 1)
@@ -359,6 +361,29 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         expected_guest[record["armor"][character]] = suit
         assert await inventory(authority, "host") == expected_host
         assert await inventory(client, character) == expected_guest
+        assert campaign_save_hashes(campaign) == before_turn_in, "Prototype Drill turn-in wrote campaign files"
+        await wait(client_run, lambda status: status.get("gameplay", {}).get("economy", {}).get("wallet") == record["wallet"])
+
+        async def replay():
+            receipt = await action(client, "native-quest-turnin", "--target", drill.QUEST_ID)
+            assert receipt == {"effect": "native_quest_already_settled", **record}, receipt
+            observed = (await wait(run, lambda status: ready_stock(status, -10, 1)))["game"][drill.KEY]
+            assert (observed["station"], observed["objective_guid"], observed["armor_guid"]) == (drill.STATION, None, None)
+            assert observed["tape_after"] is True and observed["drill_tested_after"] is True and observed["eligible"] is False
+            assert observed["cash_after"] == record["wallet"] and observed["xp_after"] == offered["xp_after"] + drill.XP
+            return observed
+
+        proof["replay"] = await replay()
+        assert campaign_save_hashes(campaign) == before_turn_in, "Prototype Drill replay wrote campaign files"
+        checkpoint = await action(authority, "checkpoint")
+        durable = saved()
+        assert durable["revision"] == checkpoint["revision"] > baseline["revision"]
+        assert campaign_save_hashes(campaign) != before_turn_in
+        assert durable["world"]["party"]["native_quests"][drill.QUEST_ID] == record
+        assert drill.REWARDS not in durable["world"]["party"]
+        proof["deferred_turn_in"] = {"unchanged_save_files": len(before_turn_in), "revision": checkpoint["revision"]}
+        gained = flags(durable)
+        proof["stock_flags"] = gained
         for role in ("host", "guest"):
             assert gained[role].get("Player_Xp", 0) == before[role].get("Player_Xp", 0) + drill.XP
             assert gained[role].get("Player_Cash", 0) == before[role].get("Player_Cash", 0) + (drill.CASH if role == "host" else 0)
@@ -369,18 +394,7 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
             assert gained["host"][rep] == reputation["after"]
             assert before["host"].get(advantage) == gained["host"].get(advantage)
         assert record["wallet"] == gained["host"]["Player_Cash"]
-        await wait(client_run, lambda status: status.get("gameplay", {}).get("economy", {}).get("wallet") == record["wallet"])
 
-        async def replay():
-            receipt = await action(client, "native-quest-turnin", "--target", drill.QUEST_ID)
-            assert receipt == {"effect": "native_quest_already_settled", **record}, receipt
-            observed = (await wait(run, lambda status: ready_stock(status, -10, 1)))["game"][drill.KEY]
-            assert (observed["station"], observed["objective_guid"], observed["armor_guid"]) == (drill.STATION, None, None)
-            assert observed["tape_after"] is True and observed["drill_tested_after"] is True and observed["eligible"] is False
-            assert observed["cash_after"] == gained["host"]["Player_Cash"] and observed["xp_after"] == gained["host"]["Player_Xp"]
-            return observed
-
-        proof["replay"] = await replay()
         _, _, restarted = await restart_pair(host_process, guest_process, current, SCIENTIST_SHOP, label="drill-redemption-restart")
         assert await inventory(authority, "host") == expected_host and await inventory(client, character) == expected_guest
         placed = (await action(authority, tape.APPROACH, "--target", "guest"))["native_mosby_tape_approach"]
@@ -389,6 +403,7 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         events = [json.loads(line) for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
         completions = [row for row in events if row["event"] == "native_prototype_drill_completed"]
         assert len(completions) == 1 and completions[0]["consumed_drill_head"] == claimed["guid"]
+        assert completions[0]["revision"] is None, completions
         proof["restart"] = {"port": port, "generation": restarted["generation"], "restored": restored}
 
     async def exercise_reward_armor(reward_guid, original_inventory):
