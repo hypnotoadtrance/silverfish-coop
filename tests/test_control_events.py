@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from tools.silverfish.__main__ import _events
-from tools.silverfish.control import Control, status
+from tools.silverfish.control import Control, current_status, status, submit
 from tools.silverfish.runtime import read_json, write_json
 
 
@@ -96,3 +96,14 @@ class ControlEventTests(unittest.IsolatedAsyncioTestCase):
 
             result = await _events(run, 1)
             self.assertEqual([entry["event"] for entry in result["events"]], ["latest_legacy"])
+
+    async def test_ended_worker_is_unavailable_even_with_recent_active_descriptor(self):
+        with tempfile.TemporaryDirectory() as folder:
+            run = Path(folder)
+            with Control(run, resident=True) as control:
+                control.status(active=True, role="host", state="hosting")
+
+            self.assertTrue((await current_status(run))["stale"])
+            with self.assertRaisesRegex(RuntimeError, "No active controller"):
+                await submit(run, "events-recent", tail=1)
+            self.assertFalse((run / "requests").exists())

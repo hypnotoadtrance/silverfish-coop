@@ -164,7 +164,10 @@ async def current_status(run: Path) -> dict:
     result = status(run)
     if (result.get("status_source") == "memory" and result.get("active") is True
             and result.get("state") in {"hosting", "connected", "waiting_for_host"}
-            and run.absolute() not in _resident_snapshots and _controller_lock_held(run)):
+            and run.absolute() not in _resident_snapshots):
+        if not _controller_lock_held(run):
+            result["stale"] = True
+            return result
         reply = await submit(run, "status-current")
         if reply.get("ok") is not True:
             raise RuntimeError("The active controller could not return its current status")
@@ -174,7 +177,9 @@ async def current_status(run: Path) -> dict:
 
 async def submit(run: Path, action: str, **arguments) -> dict:
     current = status(run)
-    stale = current["stale"] and not (current.get("status_source") == "memory" and _controller_lock_held(run))
+    stale = current["stale"]
+    if current.get("status_source") == "memory" and run.absolute() not in _resident_snapshots:
+        stale = not _controller_lock_held(run)
     if stale or not current.get("active"):
         raise RuntimeError("No active controller for the chosen profile or campaign")
     request_id = uuid.uuid4().hex
