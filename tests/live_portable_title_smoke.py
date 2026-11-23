@@ -42,6 +42,7 @@ from live_stock_pause_exit_smoke import stock_pause
 from live_unified_title_smoke import Seat, offered, start_pair
 from portable_guest_world_start import GuestWorldStartProof, wait_resident_status
 from portable_world_view_receipt import patch_world_view_receipts, verify_world_view_receipt
+from tools.silverfish.title_session import STATUS_FILE as TITLE_STATUS_FILE
 
 
 CABINET_RELEASE_SHA256 = "e35f410f7231f2c510b4ec43c34fb59ff7e9574187e2cd32fe66a61b3e87c14c"
@@ -135,6 +136,78 @@ def compact_crate_status_overlay(game: Path):
         return text.replace(original_mirror, original_mirror.replace("status_publication.mirror", "mirror_crate_status"))
 
     return portable_main_overlay(game, patch_script)
+
+
+def nonmirrored_startup_overlay(game: Path):
+    def patch_script(text):
+        gate = "if status_publication.memory_live and not status_publication.mirror and not file_command then return end"
+        if text.count(gate) != 1:
+            raise ValueError("The replica lacks the exact installed status publication guard")
+        guard = ("if status_publication.memory_live and not file_command\n"
+                 '        and (not status_publication.mirror or current_phase == "hosting" or current_phase == "connected")'
+                 " then return end")
+        return text.replace(gate, guard)
+
+    return portable_main_overlay(game, patch_script)
+
+
+async def verify_nonmirrored_startup(host, guest, proof):
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    roles = {host_run: (host, "host", "hosting"), guest_run: (guest, "join", "connected")}
+
+    async def prove_ready(run, seat, action, phase):
+        file = seat.bridge.snapshot()
+        assert file, "No original filesystem title receipt"
+
+        def memory_only(frame):
+            live = frame.get("game", {})
+            return (frame.get("local_bridge") == frame.get("local_status_source") == "memory"
+                    and frame.get("state") == phase and live.get("state") == phase
+                    and live.get("sequence", 0) > file["sequence"])
+
+        live = await wait_resident_status(run, memory_only)
+        assert (file["state"], file["map"]) != (phase, live["game"]["map"]), (
+            "The filesystem receipt is already eligible for gameplay readiness", file["state"], file["map"])
+        status = seat.bridge.directory / TITLE_STATUS_FILE
+        title = {}
+        async with asyncio.timeout(8):
+            while title.get("state") != "ready" or title.get("attempt", {}).get("action") != action:
+                try:
+                    title = runtime.read_json(status)
+                except (FileNotFoundError, PermissionError):
+                    pass
+                if title.get("state") in {"ready", "failed", "cleanup_unverified"}:
+                    break
+                await asyncio.sleep(.1)
+        assert (title["state"], title.get("progress"), title.get("attempt", {}).get("action")) == ("ready", phase, action), title
+        assert seat.bridge.snapshot() == file, "A file command refreshed the title frame before readiness"
+        return {"title_attempt": title["attempt"], "title_progress": title["progress"],
+                "file_sequence": file["sequence"], "file_phase": file["state"],
+                "memory_sequence": live["game"]["sequence"], "memory_generation": live["generation"],
+                "game_save_scope": live["game"]["save_scope"]}
+
+    async def wait_with_initial_readiness(run, predicate):
+        frame = await wait_resident_status(run, predicate)
+        seat, action, phase = roles[run]
+        if frame.get("state") == phase and action not in proof:
+            proof[action] = await prove_ready(run, seat, action, phase)
+        return frame
+
+    async def stock_character(guest_seat, join, name):
+        assert proof.get("host")
+        await create_stock_bag_character(guest_seat, join, name)
+        creator_host = await prove_ready(host_run, host, "host", "hosting")
+        assert creator_host["title_attempt"] == proof["host"]["title_attempt"]
+        assert creator_host["memory_generation"] == proof["host"]["memory_generation"]
+        assert creator_host["file_sequence"] == proof["host"]["file_sequence"]
+        proof["host_stayed_ready_during_guest_stock_creation"] = True
+
+    async def pause_from_memory(run):
+        return await wait_resident_status(run, lambda frame: frame.get("game", {}).get("stock_pause_exit", {}).get("state")
+                                          == "armed")
+
+    return await start_pair(host, guest, "Unmirrored title scout", wait_status=wait_with_initial_readiness,
+                            create_character=stock_character, wait_for_host_pause=pause_from_memory)
 
 
 def launch_portable(game: Path, profile: Path) -> GameProcess:
@@ -1154,7 +1227,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_use: bool = False, memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_host_prop_observer: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
-                 guest_world_start_travel: bool = False, guest_ui_memory: bool = False,
+                 guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
                  guest_shop_lease: bool = False, zone_lease_preflight: bool = False,
                  resident_cabinet_archive: Path | None = None,
@@ -1196,7 +1269,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     seeded = None
 
     single_scenario = (stock_prop_grip or stock_host_prop_observer or stock_crate_ring or guest_world_start or guest_ui_memory
-                       or compact_crate_status or compact_world_view or guest_shop_lease or resident_cabinet_archive is not None)
+                       or compact_crate_status or compact_world_view or guest_shop_lease or nonmirrored_startup
+                       or resident_cabinet_archive is not None)
     try:
         if resident_cabinet_archive:
             proof.update(cabinet_provenance(resident_cabinet_archive, games, qualified, resident_cabinet_candidate_sha256),
@@ -1216,6 +1290,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                      fixture="portable_lantern_probe.lua"))
         if compact_crate_status:
             proof["crate_status_overlay"] = {str(game): probes.enter_context(compact_crate_status_overlay(game)) for game in games}
+        if nonmirrored_startup:
+            proof["nonmirrored_startup_overlay"] = {
+                str(game): probes.enter_context(nonmirrored_startup_overlay(game)) for game in games
+            }
         if guest_shop_lease:
             overlays = [probes.enter_context(shop_lease_overlay(game)) for game in games]
             proof["shop_lease_overlay"] = dict(zip(map(str, games), overlays, strict=True))
@@ -1228,7 +1306,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_crate_ring or compact_crate_status:
             probes.enter_context(installed_probe(second_game, mod="SilverfishPortableCrateProbe",
                                                  fixture="portable_crate_input_probe.lua"))
-        if stock_use or stock_drop or stock_split or stock_equip or stock_nearby or container_nearby:
+        if stock_use or stock_drop or stock_split or stock_equip or stock_nearby or container_nearby or nonmirrored_startup:
             for game in games:
                 probes.enter_context(installed_probe(game))
         for game, workspace, release, port in zip(games, workspaces, qualified, choose_ports(), strict=True):
@@ -1286,7 +1364,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 evidence["guest_stock_nearby_container_pickup"] = await verify_container_pickup(
                     host, guest, pawn, memory_ui=guest_ui_memory)
             return evidence
-        if guest_world_start:
+        if nonmirrored_startup:
+            startup = proof["nonmirrored_startup"] = {}
+            proof["sessions"].append(await verify_nonmirrored_startup(first, second, startup))
+        elif guest_world_start:
             startup = GuestWorldStartProof(second)
             character_name = "Observatory startup scout"
 
@@ -1376,6 +1457,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                      both_titles_reused=not single_scenario,
                      launched_without_coop_environment=True)
     except Exception as error:
+        if nonmirrored_startup:
+            proof["nonmirrored_startup_failure"] = str(error) or type(error).__name__
         if stock_host_prop_observer:
             proof["stock_host_prop_observer_failure"] = str(error) or type(error).__name__
         if compact_crate_status:
@@ -1410,7 +1493,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         assert proof["original_saves_verified"], "The original player saves changed"
         assert proof.get("resident_source_preserved", True), "The source cabinet checkpoint changed"
         assert proof["portable_files_and_existing_activation_preserved"], "The portable marker or existing activation changed"
-        if guest_world_start or guest_shop_lease:
+        if guest_world_start or guest_shop_lease or nonmirrored_startup:
             assert all(process.poll() is not None for _, process in processes), "A portable test process is still running"
 
 
@@ -1444,6 +1527,8 @@ if __name__ == "__main__":
                         help="verify one compact resident stock weather receipt in a private muted portable pair")
     parser.add_argument("--guest-world-start", action="store_true",
                         help="verify first stock guest map startup and short reconnect in one portable session")
+    parser.add_argument("--nonmirrored-startup", action="store_true",
+                        help="verify installed host/guest title readiness without live game status file mirroring")
     parser.add_argument("--guest-world-start-travel", action="store_true",
                         help="also verify stock guest startup through Crossroads and Ruin Fields")
     parser.add_argument("--zone-lease-preflight", action="store_true",
@@ -1457,6 +1542,13 @@ if __name__ == "__main__":
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
+    if args.nonmirrored_startup and any((
+            args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby, args.projected_nearby,
+            args.container_nearby, args.stock_use, args.steam_cloud, args.stock_prop_grip, args.stock_host_prop_observer,
+            args.stock_crate_ring, args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory,
+            args.compact_crate_status, args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive,
+            args.second_legacy_work)):
+        parser.error("Use --nonmirrored-startup with two fresh private replicas and no other gameplay fixtures")
     if args.zone_lease_preflight and not args.guest_world_start_travel:
         parser.error("Use --zone-lease-preflight with --guest-world-start-travel")
     if args.guest_shop_lease and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
@@ -1525,6 +1617,7 @@ if __name__ == "__main__":
                        stock_host_prop_observer=args.stock_host_prop_observer,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
+                       nonmirrored_startup=args.nonmirrored_startup,
                        compact_crate_status=args.compact_crate_status, compact_world_view=args.compact_world_view,
                        guest_shop_lease=args.guest_shop_lease, zone_lease_preflight=args.zone_lease_preflight,
                        resident_cabinet_archive=cabinet_archive, resident_cabinet_checkpoint=cabinet_checkpoint,
