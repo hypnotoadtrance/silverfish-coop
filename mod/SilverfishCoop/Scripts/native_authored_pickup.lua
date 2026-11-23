@@ -685,8 +685,8 @@ function pickup.command(fields, state, phase)
         loose_check = {}
         for index = 3, #fields do
             local profile = loose_profile(fields[index], state)
-            local available = profile and profile.mode == 1 and not profile.claimed
-                and temporary_mark(StaticFindObject(profile.path)) == false
+            local available = profile and not profile.claimed and (profile.mode == 0
+                or profile.mode == 1 and temporary_mark(StaticFindObject(profile.path)) == false)
             loose_check[#loose_check + 1] = {fields[index], available and 1 or 0}
         end
         return "stock loose pickup availability verified"

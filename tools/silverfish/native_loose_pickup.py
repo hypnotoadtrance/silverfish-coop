@@ -128,11 +128,13 @@ class Visibility:
             return
         self.next_check = now + 2
         pending = [path for path, row in host.party.get(STATE, {}).items()
-                   if row["map"] == game.get("map") and row["mode"] == 1 and row["epoch"] != epoch
+                   if row["map"] == game.get("map") and row["mode"] in (0, 1) and row["epoch"] != epoch
                    and path not in self.replenished]
         for index in range(0, len(pending), 64):
             batch = pending[index:index + 64]
             snapshot = await bridge.command(CHECK, *batch, timeout=4)
+            if host.zone_epoch != epoch or host.transitioning:
+                return
             observed = snapshot.get(CHECK_KEY, {})
             if (snapshot.get("state"), snapshot.get("map")) != ("hosting", game.get("map")) or observed.keys() != set(batch):
                 raise RuntimeError("The placed stock replenishment reply did not match the requested map and sources")
@@ -143,8 +145,7 @@ class Visibility:
         area, epoch = host.last_game.get("map"), host.zone_epoch
         replenished = self.replenished if self.epoch == epoch else ()
         return [path for path, row in host.party.get(STATE, {}).items()
-                if row["map"] == area and (row["epoch"] == epoch or row["mode"] == 2
-                                          or row["mode"] == 1 and path not in replenished)]
+                if row["map"] == area and (row["epoch"] == epoch or row["mode"] == 2 or path not in replenished)]
 
 
 class GuestView:

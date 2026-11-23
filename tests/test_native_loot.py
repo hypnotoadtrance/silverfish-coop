@@ -123,7 +123,7 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(host.pending_host_save, True)
         saved.assert_not_called()
 
-    async def test_temporary_item_reappears_only_after_stock_item_returns(self):
+    async def test_revisit_waits_for_stock_availability_of_temporary_and_per_visit_items(self):
         loose = native_loose_pickup
         old_epoch, new_epoch = "a" * 32, "b" * 32
         temporary = f"{CROSSROADS}.CrossRoads_P:PersistentLevel.Item_Test_C_1"
@@ -137,16 +137,22 @@ class LoosePickupVisibilityTests(unittest.IsolatedAsyncioTestCase):
         view = loose.Visibility()
         self.assertEqual(set(view.hidden(host)), {temporary, permanent, per_visit})
         host.zone_epoch = new_epoch
+        self.assertEqual(set(view.hidden(host)), {temporary, permanent, per_visit})
         bridge = SimpleNamespace(command=AsyncMock(side_effect=[
-            dict(game, **{loose.CHECK_KEY: {temporary: False}}),
-            dict(game, **{loose.CHECK_KEY: {temporary: True}}),
+            dict(game, **{loose.CHECK_KEY: {temporary: False, per_visit: False}}),
+            dict(game, **{loose.CHECK_KEY: {temporary: True, per_visit: False}}),
+            dict(game, **{loose.CHECK_KEY: {per_visit: True}}),
         ]))
         await view.refresh(host, bridge)
-        self.assertEqual(set(view.hidden(host)), {temporary, permanent})
+        self.assertEqual(set(view.hidden(host)), {temporary, permanent, per_visit})
+        view.next_check = 0
+        await view.refresh(host, bridge)
+        self.assertEqual(set(view.hidden(host)), {permanent, per_visit})
         view.next_check = 0
         await view.refresh(host, bridge)
         self.assertEqual(view.hidden(host), [permanent])
-        self.assertEqual(bridge.command.await_args_list, [call(loose.CHECK, temporary, timeout=4)] * 2)
+        self.assertEqual(bridge.command.await_args_list,
+                         [call(loose.CHECK, per_visit, temporary, timeout=4)] * 2 + [call(loose.CHECK, per_visit, timeout=4)])
 
 
     async def test_projection_does_not_depend_on_the_local_nearby_list(self):
