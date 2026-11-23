@@ -119,6 +119,24 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GameplayStatusTests(unittest.TestCase):
+    def test_explosive_drum_status_accepts_authored_alias_and_keeps_old_blast_counts(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
+        prefix = f"{area}.CrossRoads_P:PersistentLevel."
+        actual, retired = prefix + "Prop_FeulDrum_C_33", prefix + "Prop_FuelDrum_C_34"
+        frame = f"schema\t1\nseq\t20\nsession\thost\thosting\t{area}\t1\t1\n"
+        rows = (f"native-explosive-canister\t{actual}\t1\t0\t1\t40\t100\t200\t300\n"
+                f"native-explosive-canister\t{retired}\t2\t0\t1\t-\t-\t-\t-\n"
+                f"native-explosive-canister\t{prefix}Prop_Wrong_C_33\t1\t0\t1\t40\t100\t200\t300\n")
+        status = bridge._parse_status(frame + rows + "native-anomaly-capture\t0\t0\t0\t0\t3\t1\n")
+        self.assertEqual(status["native_explosive_canisters"], {
+            actual: {"phase": 1, "particles_active": False, "changed": True, "health": 40, "location": [100, 200, 300]},
+            retired: {"phase": 2, "particles_active": False, "changed": True, "health": None},
+        })
+        self.assertEqual((status["native_canister_capture"], status["native_fuel_drum_capture"]), (3, 1))
+        legacy = bridge._parse_status(frame + "native-anomaly-capture\t0\t0\t0\t0\t3\n")
+        self.assertEqual((legacy["native_canister_capture"], legacy["native_fuel_drum_capture"]), (3, 0))
+
     def test_transition_cover_and_cue_are_independent_bridge_receipts(self):
         bridge = runtime.Bridge(Path("unused"), None)
         destination = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"

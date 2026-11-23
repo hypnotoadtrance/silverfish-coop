@@ -1,4 +1,4 @@
-"""Shoot stock propane canisters in a muted Direct IP pair."""
+"""Shoot stock propane canisters or a placed fuel drum in a muted Direct IP pair."""
 
 import argparse
 import asyncio
@@ -21,8 +21,9 @@ from tools.silverfish.native_anomaly_effects import CANISTERS
 from tools.silverfish.travel import CISTERN, CROSSROADS
 
 
-async def verify(work, vanilla, tall, standing=False):
-    name = f"{'standing-fuel-tank' if standing else 'explosive-canister'}-{uuid.uuid4().hex[:8]}"
+async def verify(work, vanilla, tall, standing=False, fuel_drum=False):
+    family = "fuel-drum" if fuel_drum else "standing-fuel-tank" if standing else "explosive-canister"
+    name = f"{family}-{uuid.uuid4().hex[:8]}"
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
     host.mkdir(parents=True)
@@ -32,12 +33,16 @@ async def verify(work, vanilla, tall, standing=False):
     cli = (sys.executable, "-B", "-m", "tools.silverfish", "--work", str(work))
     if standing:
         area, actor = "/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P", "Prop_Standing_FuelTank_C_1"
+    elif fuel_drum:
+        area, actor = CROSSROADS, "Prop_FeulDrum_C_33"
     else:
         area, actor = (CISTERN, "Prop_PropaneTank_Tall_C_3") if tall else (CROSSROADS, "Prop_PropaneTank_Small_C_12")
     target = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel.{actor}"
     if standing:
         target = "Prop_Standing_FuelTank_C " + target
     jobs, proof = [], {"target": target, "verified": False, "shots": 0}
+    cue_event = "native_fuel_drum_effect_played" if fuel_drum else "native_canister_effect_played"
+    capture_key = "native_fuel_drum_capture" if fuel_drum else "native_canister_capture"
 
     def canister(frame):
         key = "native_standing_fuel_tanks" if standing else CANISTERS
@@ -100,7 +105,7 @@ async def verify(work, vanilla, tall, standing=False):
         initial = await wait(host, lambda row: row.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
         guest_health = initial["game"]["pawns"]["guest"]["health"]
         await action(host, "native-canister-prepare-fixture", target=target)
-        if tall:
+        if tall or fuel_drum:
             ready = await wait(host, lambda row: canister(row).get("location"))
             host_origin = canister(ready)["location"]
             await action(host, "native-canister-shoot-fixture", target=target)
@@ -110,6 +115,9 @@ async def verify(work, vanilla, tall, standing=False):
         burning = await wait(guest, lambda row: canister(row).get("phase") == 1 and canister(row).get("particles_active"),
                              timeout=8)
         proof["guest_stock_fire"] = canister(burning)
+        if fuel_drum:
+            proof["host_stock_fire"] = canister(await wait(host, lambda row: canister(row).get("phase") == 1))
+            assert proof["host_stock_fire"]["health"] < proof["host_initial"]["health"]
         if tall:
             def synced_motion(row):
                 host_prop, guest_prop = canister(status(host)), canister(row)
@@ -122,7 +130,7 @@ async def verify(work, vanilla, tall, standing=False):
                 return False
 
             await wait(guest, synced_motion, timeout=6)
-        if not tall:
+        if not (tall or fuel_drum):
             for _ in range(5):
                 await action(host, "native-canister-shoot-fixture", target=target)
                 proof["shots"] += 1
@@ -130,18 +138,18 @@ async def verify(work, vanilla, tall, standing=False):
                 if canister(status(host)).get("phase") == 2:
                     break
         finished = await wait(host, lambda row: canister(row).get("phase") == 2, timeout=15)
-        assert finished["game"].get("native_canister_capture") == 1
+        assert finished["game"].get(capture_key) == 1
         assert finished["game"]["pawns"]["guest"]["health"] == guest_health and not finished["gameplay"]["wipe"]
         proof["host_explosions"] = 1
-        await wait(guest, lambda row: canister(row).get("phase") == 2 and events(guest, "native_canister_effect_played"))
-        cue, = events(guest, "native_canister_effect_played")
+        await wait(guest, lambda row: canister(row).get("phase") == 2 and events(guest, cue_event))
+        cue, = events(guest, cue_event)
         assert cue["particles"], cue
         proof["guest_stock_blast"] = cue
         await action(guest, "drop-link")
         await wait(guest, lambda row: row.get("reconnect_suspended") and not row.get("link_connected"))
         assert (await action(guest, "reconnect"))["resumed"]
         await wait(guest, lambda row: row.get("link_connected") and canister(row).get("phase") == 2)
-        assert len(events(guest, "native_canister_effect_played")) == 1
+        assert len(events(guest, cue_event)) == 1
         proof["reconnect_removed"] = True
         proof["guest_health_preserved"] = guest_health
         proof["verified"] = True
@@ -174,5 +182,7 @@ if __name__ == "__main__":
     kind = parser.add_mutually_exclusive_group()
     kind.add_argument("--tall", action="store_true")
     kind.add_argument("--standing", action="store_true", help="verify an authored standing fuel tank's rotation")
+    kind.add_argument("--fuel-drum", action="store_true", help="verify the authored Crossroads drum from one stock shot")
     args = parser.parse_args()
-    asyncio.run(verify(args.work.resolve(strict=True), args.vanilla_saved.resolve(strict=True), args.tall, args.standing))
+    asyncio.run(verify(args.work.resolve(strict=True), args.vanilla_saved.resolve(strict=True),
+                       args.tall, args.standing, args.fuel_drum))

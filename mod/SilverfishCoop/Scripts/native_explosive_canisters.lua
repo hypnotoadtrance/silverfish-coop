@@ -1,12 +1,14 @@
 local canisters = {}
 local fixture = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and require("native_canister_fixture")
 
-local props = "/Game/Assets/StaticMeshes/Mesh_Props/"
 local types = {}
-for _, name in ipairs({"Prop_PropaneTank_Small", "Prop_PropaneTank_Tall"}) do
-    types["BlueprintGeneratedClass " .. props .. name .. "." .. name .. "_C"] =
-        name == "Prop_PropaneTank_Small" and "OnFire" or "Fireing"
+local function register(name, source, cue, uses_placed_motion)
+    local class = "BlueprintGeneratedClass /Game/Assets/StaticMeshes/Mesh_Props/" .. name .. "." .. name .. "_C"
+    types[class] = {source = source, cue = cue, uses_placed_motion = uses_placed_motion}
 end
+register("Prop_PropaneTank_Small", "OnFire", "canister")
+register("Prop_PropaneTank_Tall", "Fireing", "canister")
+register("Prop_FuelDrum", "Burning_0", "fueldrum", true)
 local pending, active, removed = {}, {}, {}
 local world, area
 
@@ -47,13 +49,14 @@ local function fire_view(entry, enabled)
 end
 
 function canisters.created(actor, class, seat, is_replica)
-    local source = types[class]
-    if not source or type(SilverfishQualifyNativePlacedCanister) ~= "function" or not mesh(actor) then return end
+    local spec = types[class]
+    if not spec or type(SilverfishQualifyNativePlacedCanister) ~= "function" or not mesh(actor) then return end
     local path = actor:GetFullName():match("^%S+ (.+)$")
     if not path then return end
     local placed, guest = SilverfishQualifyNativePlacedCanister(path)
+    if spec.uses_placed_motion and (not placed or not same(actor:GetOuter(), actor:GetWorld().PersistentLevel)) then return end
     if seat == "client" and not guest and not is_replica(actor) or seat == "host" and not actor:HasAuthority() then return end
-    local entry = {actor = actor, path = placed and path or nil, source = source}
+    local entry = {actor = actor, path = placed and path or nil, spec = spec}
     if seat == "client" then fire_view(entry, false) end
     pending[actor:GetAddress()] = entry
 end
@@ -66,11 +69,13 @@ function canisters.ended(address, destroyed)
     active[address], pending[address] = nil, nil
 end
 
-function canisters.blast_source(position)
+function canisters.blast_source(position, cue)
     local matches = 0
     for _, entry in pairs(active) do
-        local actor = entry.actor
-        if valid(actor) and not actor:IsActorBeingDestroyed() and actor[entry.source] then
+        local actor, spec = entry.actor, entry.spec
+        -- The drum finishes spawning the stock explosion before its deferred destruction.
+        if spec.cue == cue and valid(actor) and not actor:IsActorBeingDestroyed()
+            and (actor[spec.source] == true or cue == "fueldrum" and actor.Health <= 0) then
             local component = mesh(actor)
             if component then
                 local center = component:GetCenterOfMass(FName("None"))
@@ -91,7 +96,7 @@ function canisters.rows(state, phase, row)
     for address, entry in pairs(pending) do
         local actor = entry.actor
         if valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed() then
-            if phase == "hosting" then
+            if phase == "hosting" and not entry.spec.uses_placed_motion then
                 actor.NetUpdateFrequency = math.min(actor.NetUpdateFrequency, 15)
                 if not actor.bReplicates then actor:SetReplicates(true) end
                 if not actor.bReplicateMovement then actor:SetReplicateMovement(true) end
@@ -110,7 +115,7 @@ function canisters.rows(state, phase, row)
                 -- A stale actor channel can arrive after the direct map state.
                 actor:K2_DestroyActor()
             elseif entry.path then
-                local burning = phase == "hosting" and actor[entry.source] == true or phase == "connected" and entry.lit == true
+                local burning = phase == "hosting" and actor[entry.spec.source] == true or phase == "connected" and entry.lit == true
                 entry.changed = entry.changed or burning
                 local particles = burning and phase == "connected" and fire_components(actor)
                 local location = (burning or entry.sample_position) and actor:K2_GetActorLocation()
@@ -136,7 +141,7 @@ function canisters.command(args, state, phase)
             local actor = path and #path <= 512 and StaticFindObject(path)
             local entry = valid(actor) and active[actor:GetAddress()]
             local target = entry and entry.path == path and same(actor:GetWorld(), state.world) and actor
-            local receipt = fixture.command(args, state, phase, target)
+            local receipt = fixture.command(args, state, phase, target, nil, nil, entry and entry.spec.cue)
             if target and args[2] == "native-canister-prepare-fixture" then entry.sample_position = true end
             return receipt
         end

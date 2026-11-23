@@ -185,6 +185,31 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_once_with(
             "native-canister-apply", "Crossroads", epoch, "Removed|2", "Igniting|1", timeout=1.5)
 
+    async def test_fuel_drum_cooling_and_blast_playback_are_independent(self):
+        epoch = "a" * 32
+        area = ANGLER_MAP
+        drum = f"{area}.CrossRoads_P:PersistentLevel.Prop_FeulDrum_C_33"
+        game = {"state": "connected", "map": area, "pawns": {"local": {"location": [0, 0, 0]}},
+                CANISTERS: {drum: {"phase": 1}}}
+        cooled = {**game, CANISTERS: {drum: {"phase": 0}}}
+        bridge = Mock(command=AsyncMock(return_value=cooled))
+        control = Mock()
+        frame = {"map": area, "epoch": epoch, "props": {drum: 0}}
+        self.assertIs(await project_canisters(bridge, game, frame, epoch), cooled)
+        self.assertIs(await project_canisters(bridge, cooled, frame, epoch), cooled)
+        bridge.command.assert_awaited_once_with("native-canister-apply", area, epoch, f"{drum}|0", timeout=1.5)
+        control.event.assert_not_called()
+
+        cue = {"map": area, "epoch": epoch, "cues": [[1, "fueldrum", [20, 0, 0], 1, 1]]}
+        bridge.command.return_value = {**cooled, "ack": {"message": "1:1:0"}}
+        playback = Playback()
+        for _ in range(2):
+            await playback.sync(bridge, control, cooled, cue, epoch, "host")
+        bridge.command.assert_awaited_with("native-anomaly-play-cues", area, epoch, "1|fueldrum|20|0|0|1|1", timeout=1.5)
+        control.event.assert_called_once_with(
+            "native_fuel_drum_effect_played", cue="fueldrum", serial=1, location=[20, 0, 0],
+            map=area, particles=True, animated=False, scale=1, volume=1)
+
     async def test_fixed_prop_projection_repairs_both_stock_flag_and_mesh(self):
         epoch = "c" * 32
         game = {"state": "connected", "map": "Dry Dock", FIXED_EXPLOSIVES: {

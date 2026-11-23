@@ -98,7 +98,7 @@ local function shoot(state, pawn, component, center, class)
     return "Fired one stock pistol round toward the canister"
 end
 
-function fixture.command(args, state, phase, canister, component, center)
+function fixture.command(args, state, phase, canister, component, center, cue)
     local action = args[2]
     if action ~= "native-canister-prepare-fixture" and action ~= "native-canister-shoot-fixture"
         and action ~= "native-canister-guest-guard-fixture" and action ~= "native-canister-ignite-fixture"
@@ -109,7 +109,11 @@ function fixture.command(args, state, phase, canister, component, center)
         error("The exact stock canister fixture is unavailable", 0)
     end
     if action == "native-canister-guest-guard-fixture" and phase == "connected" then
-        canister:SetOnFire(5, 1, pawn)
+        if cue == "fueldrum" then
+            canister:IgniteOnFire({Fire_12_2B415A724C533C075B6BB390B76BF247 = 35})
+        else
+            canister:SetOnFire(5, 1, pawn)
+        end
         canister:PropBroken(canister:K2_GetActorLocation(), pawn)
         return "Invoked the stock canister ignition and rupture calls on the guest"
     end
@@ -122,6 +126,7 @@ function fixture.command(args, state, phase, canister, component, center)
         error("The stock canister shot requires the isolated fixture host", 0)
     end
     if action == "native-canister-ignite-fixture" then
+        if cue == "fueldrum" then error("The isolated fuel drum must ignite from a stock shot", 0) end
         canister:SetOnFire(5, 1, pawn)
         return "Invoked the stock canister ignition on the host"
     end

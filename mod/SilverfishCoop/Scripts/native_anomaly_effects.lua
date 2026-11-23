@@ -18,11 +18,13 @@ local assets = {
     wandering = {"/Game/Assets/PFX/NI_Singularity_01.NI_Singularity_01",
         "/Game/Assets/Sounds/CUEs/Blast_Cues/Teleport_Cue.Teleport_Cue"},
 }
+assets.fueldrum = assets.blast
 assets.fixedtank = assets.blast
 assets.powerbox = {assets.electrode[1], assets.electrode[2], assets.blast[3]}
 assets.fixedfire = {assets.blast[1], "/Game/Assets/Sounds/MetaSounds/MS_Blast_Firey.MS_Blast_Firey", assets.blast[3]}
 local audio_range = {charge = 4000, blast = 500100, vortex = 500100, electrode = 8100, canister = 500100, wandering = 500100,
-    powerbox = 500100, fixedtank = 500100, fixedfire = 500100}
+    powerbox = 500100, fixedtank = 500100, fixedfire = 500100, fueldrum = 500100}
+local canister_sounds = {[assets.canister[2]] = "canister", [assets.fueldrum[2]] = "fueldrum"}
 local observer_blasts = {
     [0] = {kind = "observersparks", particle = "NI_Sparks"},
     {kind = "observerred", particle = "FX_Blast_Pulse_Red"},
@@ -121,12 +123,18 @@ end
 
 local function observe_canister(actor, registered_source)
     local sound = actor.SFX
-    if not valid(sound) or sound:GetFullName():match("^%S+ (.+)$") ~= assets.canister[2] then return end
+    local cue = valid(sound) and canister_sounds[sound:GetFullName():match("^%S+ (.+)$")]
+    if not cue then return end
+    if cue == "fueldrum" then
+        -- The drum leaves this stock array empty. Anomalies also use the default grenade assets.
+        local ignored = actor["Actors to Ignore"]
+        if ignored and ignored:GetArrayNum() > 0 then return end
+    end
     local attenuation = actor["Attenuation Settings"]
     local point = actor:K2_GetActorLocation()
-    if valid(attenuation) and attenuation:GetFullName() == "SoundAttenuation " .. assets.canister[3]
-        and registered_source(point) then
-        return stock_blast("canister", point, actor.PFX, sound, actor["PFX Scale"], actor["SFX Vol"])
+    if valid(attenuation) and attenuation:GetFullName() == "SoundAttenuation " .. assets[cue][3]
+        and registered_source(point, cue) then
+        return stock_blast(cue, point, actor.PFX, sound, actor["PFX Scale"], actor["SFX Vol"])
     end
 end
 
@@ -159,7 +167,8 @@ function effects.rows(row)
     local now = os.clock()
     while pending[1] and pending[1].expires <= now do table.remove(pending, 1) end
     local rows = {
-        row("native-anomaly-capture", captured.charge, captured.blast, captured.vortex, captured.electrode, captured.canister),
+        row("native-anomaly-capture", captured.charge, captured.blast, captured.vortex, captured.electrode, captured.canister,
+            captured.fueldrum or 0),
         row("native-fixed-explosive-capture", (captured.powerbox or 0) + (captured.fixedtank or 0) + (captured.fixedfire or 0)),
     }
     for _, entry in ipairs(pending) do

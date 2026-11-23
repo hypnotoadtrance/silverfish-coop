@@ -48,9 +48,10 @@ namespace
     constexpr auto roaming_teleport_class = STR("/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C");
     constexpr auto physics_prop = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
     constexpr auto fixed_prop = STR("/Game/Assets/StaticMeshes/Destructable/Explosive_Prop_Master_BP.Explosive_Prop_Master_BP_C");
-    constexpr std::array<std::wstring_view, 2> canister_classes{
+    constexpr std::array<std::wstring_view, 3> canister_classes{
         STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_PropaneTank_Small.Prop_PropaneTank_Small_C"),
         STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_PropaneTank_Tall.Prop_PropaneTank_Tall_C"),
+        STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_FuelDrum.Prop_FuelDrum_C"),
     };
     constexpr std::array<std::wstring_view, 5> replicated_classes{
         STR("/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C"),
@@ -79,8 +80,9 @@ namespace
     std::array<U::FName, 3> patch_events;
     std::array<U::FName, 6> electrode_events;
     std::array<U::FName, 7> roaming_events;
-    std::array<U::FName, 2> canister_names;
-    std::array<U::FName, 14> canister_events;
+    std::array<U::FName, canister_classes.size()> canister_names;
+    std::array<U::FName, 16> canister_events;
+    U::FName fuel_drum, receive_tick;
     std::array<U::FName, 5> fixed_prop_events;
     thread_local bool guest_session{};
     thread_local U::FWeakObjectPtr observed_world;
@@ -385,7 +387,7 @@ namespace
         const bool shadow_event = shadow_replication && name == shadow_graph;
         const bool angler_event = angler_replication && std::ranges::find(angler_events, name) != angler_events.end();
         const bool observer_event = observer_enabled && std::ranges::find(observer_events, name) != observer_events.end();
-        const bool prop_event = !field && std::find(canister_events.begin(), canister_events.end(), name) != canister_events.end();
+        const bool prop_event = name == receive_tick || std::ranges::find(canister_events, name) != canister_events.end();
         const bool fixed_event = !field && std::find(fixed_prop_events.begin(), fixed_prop_events.end(), name) != fixed_prop_events.end();
         const bool patch_event = std::ranges::find(patch_events, name) != patch_events.end();
         if ((!field && !trap && !roaming_event && !gravity_event && !pyrogeist_event && !fire_event &&
@@ -408,7 +410,9 @@ namespace
             call.PreventOriginalFunctionCall();
             return;
         }
-        const bool canister = prop_event && (class_name == canister_names[0] || class_name == canister_names[1]);
+        const bool drum = class_name == fuel_drum;
+        const bool canister = prop_event && (name != receive_tick || drum) &&
+            std::ranges::find(canister_names, class_name) != canister_names.end();
         const bool roaming = roaming_event && class_name == roaming_teleport && type->GetPathName() == roaming_teleport_class;
         const bool gravity_well = gravity_event && class_name == gravity && type->GetPathName() == gravity_class;
         auto* binding = function->GetOuterPrivate();
@@ -425,6 +429,8 @@ namespace
         if (canister)
         {
             if (!canister_class(type) || !binding || (binding != type && binding->GetPathName() != physics_prop)) return;
+            if (drum && (!actor->HasAnyFlags(U::RF_WasLoaded) || !world ||
+                object(world, STR("PersistentLevel")) != actor->GetOuterPrivate() || (name == receive_tick && binding != type))) return;
         }
         else if (!fixed && !pyrogeist_jet && binding != type) return;
         if (field)
@@ -581,9 +587,12 @@ namespace silverfish::native_anomaly_fields
             U::FName{STR("ExecuteUbergraph_Wandering_Teleport_BP"), U::FNAME_Add},
             U::FName{STR("BndEvt__Wandering_Teleport_BP_Capsule_K2Node_ComponentBoundEvent_1_ComponentBeginOverlapSignature__DelegateSignature"), U::FNAME_Add},
         };
+        fuel_drum = U::FName{STR("Prop_FuelDrum_C"), U::FNAME_Add};
+        receive_tick = U::FName{STR("ReceiveTick"), U::FNAME_Add};
         canister_names = {
             U::FName{STR("Prop_PropaneTank_Small_C"), U::FNAME_Add},
             U::FName{STR("Prop_PropaneTank_Tall_C"), U::FNAME_Add},
+            fuel_drum,
         };
         canister_events = {
             U::FName{STR("DealDamage"), U::FNAME_Add},
@@ -599,6 +608,8 @@ namespace silverfish::native_anomaly_fields
             U::FName{STR("AlightThruster"), U::FNAME_Add},
             U::FName{STR("ExecuteUbergraph_Prop_PropaneTank_Small"), U::FNAME_Add},
             U::FName{STR("ExecuteUbergraph_Prop_PropaneTank_Tall"), U::FNAME_Add},
+            U::FName{STR("IgniteOnFire"), U::FNAME_Add},
+            U::FName{STR("ExecuteUbergraph_Prop_FuelDrum"), U::FNAME_Add},
             U::FName{STR("BndEvt__PhysicsProp_Master_BP_PropMesh_K2Node_ComponentBoundEvent_0_ComponentHitSignature__DelegateSignature"), U::FNAME_Add},
         };
         fixed_prop_name = U::FName{STR("Explosive_Prop_Master_BP_C"), U::FNAME_Add};

@@ -2646,15 +2646,17 @@ class Bridge:
                             and None not in location and scale is not None and 0 < scale <= 10
                             and volume is not None and 0 <= volume <= 10):
                         cues.append([int(serial), kind, location, scale, volume])
-                elif fields[0] == "native-anomaly-capture" and len(fields) in {4, 5, 6} and data.get("state") == "hosting":
+                elif fields[0] == "native-anomaly-capture" and len(fields) in {4, 5, 6, 7} and data.get("state") == "hosting":
                     charge, blast, vortex = map(int, fields[1:4])
                     electrode = int(fields[4]) if len(fields) >= 5 else 0
-                    canister = int(fields[5]) if len(fields) == 6 else 0
-                    if min(charge, blast, vortex, electrode, canister) >= 0:
+                    canister = int(fields[5]) if len(fields) >= 6 else 0
+                    drum = int(fields[6]) if len(fields) == 7 else 0
+                    if min(charge, blast, vortex, electrode, canister, drum) >= 0:
                         data["native_starburst_capture"] = {"charge": charge, "blast": blast}
                         data["native_vortex_capture"] = vortex
                         data["native_electrode_capture"] = electrode
                         data["native_canister_capture"] = canister
+                        data["native_fuel_drum_capture"] = drum
                 elif fields[0] == "native-canister-blocked" and len(fields) == 2 and data.get("state") == "connected":
                     blocked = int(fields[1])
                     if blocked >= 0:
@@ -2685,7 +2687,8 @@ class Bridge:
                     if (area.startswith("/Game/Classes/Maps/") and path.startswith(prefix) and len(path) <= 512
                             and len(props) < native_anomaly_effects.MAX_SENSORS
                             and mode in {"0", "1", "2"} and lit in {"0", "1"} and changed in {"0", "1"}
-                            and re.fullmatch(r"Prop_PropaneTank_(Small|Tall)_C(?:_[0-9]+)?", path[len(prefix):])):
+                            and re.fullmatch(r"Prop_(?:PropaneTank_(?:Small|Tall)|FuelDrum|FeulDrum)_C(?:_[0-9]+)?",
+                                             path[len(prefix):])):
                         props[path] = {"phase": int(mode), "particles_active": lit == "1", "changed": changed == "1",
                                        "health": _finite(health)}
                         if mode != "2" and None not in (point := [_finite(axis) for axis in coordinates]):
