@@ -10,8 +10,8 @@ local guest_fixture = mailbox and mailbox:match("[/\\]clients[/\\]avatar%-%x+[/\
     and (pose_fixture or rifle_fixture or sprint_fixture or os.getenv("SILVERFISH_COOP_RENDER_CAPTURE_EQUIPMENT") == "1")
 local host_fixture = mailbox and mailbox:match("[/\\]campaigns[/\\]avatar%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
-local portable_fixture = mailbox and mailbox:match("[/\\]portable%-title%-%x+[/\\]first[/\\]")
-    and mailbox:match("[/\\]run[/\\]game%-bridge[/\\]%x+$")
+local portable_fixture = mailbox
+    and mailbox:match("[/\\]portable%-title%-%x+[/\\]first[/\\]titles[/\\]local[/\\]run[/\\]game%-bridge[/\\]%x+$")
     and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not (guest_fixture or host_fixture or portable_fixture) then return end
 
@@ -526,13 +526,13 @@ LoopInGameThreadWithDelay(sprint_fixture and 16 or pose_fixture and 40 or 250, f
     if not file then return false end
     local content = file:read(100) or ""
     file:close()
-    local id, operation = content:match("^(%x+)\t([a-z0-9]+)\n$")
+    local id, operation = content:match("^(%x+)\t([a-z0-9]+)\r?\n$")
     if not id or #id ~= 32 or id == last then return false end
     last = id
     local success, issue = pcall(run, operation)
     local output = io.open(reply, "wb")
     if output then
-        local result = success and (issue and "ok\t" .. issue or "ok") or tostring(issue)
+        local result = success and (issue and "ok\t" .. issue or "ok") or ("error\t" .. tostring(issue))
         output:write(id .. "\t" .. result .. "\n")
         output:close()
     end
