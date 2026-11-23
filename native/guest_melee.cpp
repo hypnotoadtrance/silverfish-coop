@@ -72,6 +72,7 @@ namespace
     constexpr std::size_t max_fenced_pipes = 32;
     constexpr double sweep_range = 230.0;
     constexpr float sweep_radius = 65.0f;
+    constexpr int max_stock_sweep_contacts = 128;
 
     bool env(const char* name)
     {
@@ -393,7 +394,8 @@ namespace
         sphere.library->ProcessEvent(sphere.fn, data);
         U::FScriptArrayHelper contacted(hits, hits->ContainerPtrToValuePtr<void>(data));
         if (contacted.Num() < 1) return reject("sphere_empty");
-        if (contacted.Num() > 16) return reject("sphere_bounds");
+        // Several hit components can belong to the same stock NPC, especially with armor and weapons equipped.
+        if (contacted.Num() > (enemy ? 16 : max_stock_sweep_contacts)) return reject("sphere_bounds");
         U::UObject* first{};
         for (int index = 0; index < contacted.Num(); ++index)
         {
