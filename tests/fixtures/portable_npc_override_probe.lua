@@ -285,7 +285,7 @@ local turret_effects, turret_effect_hooks
 local function arm_turret_effects(turret)
     local target = turret:K2_GetActorLocation()
     turret_effects = {turret = turret, target = {X=target.X, Y=target.Y, Z=target.Z},
-        blasts = 0, sounds = 0, smoke = 0}
+        blasts = 0, sounds = 0, smoke = 0, flames = 0, loops = 0}
     if turret_effect_hooks then return "armed" end
     local function at_turret(point)
         local target = turret_effects and turret_effects.target
@@ -297,12 +297,19 @@ local function arm_turret_effects(turret)
             and at_turret(position:get()) then turret_effects.blasts = turret_effects.blasts + 1 end
     end)
     RegisterHook("/Script/Niagara.NiagaraFunctionLibrary:SpawnSystemAttached", function(_, asset, parent)
-        local particle = asset:get()
-        if turret_effects and valid(turret_effects.turret) and valid(particle)
-            and particle:GetFName():ToString() == "NI_SmokeStack_Large"
-            and same(parent:get(), turret_effects.turret.Turret_Gun) then
+        local turret, particle, mount = turret_effects and turret_effects.turret, asset:get(), parent:get()
+        if not valid(turret) or not valid(particle) then return end
+        local name = particle:GetFName():ToString()
+        if name == "NI_SmokeStack_Large" and same(mount, turret.Turret_Gun) then
             turret_effects.smoke = turret_effects.smoke + 1
+        elseif name == "NI_CampFire" and same(mount, turret.RootComponent) then
+            turret_effects.flames = turret_effects.flames + 1
         end
+    end)
+    RegisterHook("/Script/Engine.GameplayStatics:SpawnSoundAttached", function(_, sound, parent)
+        local turret, cue = turret_effects and turret_effects.turret, sound:get()
+        if valid(turret) and valid(cue) and cue:GetFName():ToString() == "Fireplace_Low_02_Loop"
+            and same(parent:get(), turret.RootComponent) then turret_effects.loops = turret_effects.loops + 1 end
     end)
     RegisterHook("/Script/Engine.GameplayStatics:SpawnSoundAtLocation",
         function(_, _, sound, position, _, _, _, _, attenuation)
@@ -315,12 +322,21 @@ local function arm_turret_effects(turret)
     return "armed"
 end
 
+local function turret_fire_field(world, turret)
+    for _, fire in ipairs(FindAllOf("Fire_Camp_BP_C") or {}) do
+        if valid(fire) and same(fire:GetWorld(), world) and same(fire:GetAttachParentActor(), turret) then return fire end
+    end
+end
+
 local function read_turret_effects(world, turret)
     local state = assert(turret_effects, "the turret effect probe is not armed")
     assert(same(state.turret, turret), "the turret effect probe is bound to a different actor")
-    local field, pitch = 0, "-"
-    for _, fire in ipairs(FindAllOf("Fire_Camp_BP_C") or {}) do
-        if valid(fire) and same(fire:GetWorld(), world) and same(fire:GetAttachParentActor(), turret) then field = field + 1 end
+    local fire, lights, pitch = turret_fire_field(world, turret), 0, "-"
+    for _, light in ipairs(FindAllOf("PointLightComponent") or {}) do
+        if valid(light) and same(light:GetOwner(), turret) and same(light:GetAttachParent(), turret.RootComponent)
+            and light.Intensity == 5000 and light.AttenuationRadius == 2000 and light.SourceRadius == 30 then
+            lights = lights + 1
+        end
     end
     for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
         if valid(marker) and same(marker:GetOwner(), turret) then
@@ -329,8 +345,9 @@ local function read_turret_effects(world, turret)
     end
     local class = StaticFindObject("/Game/Classes/Actors/ExplosionActor_BP.ExplosionActor_BP_C")
     local defaults = valid(class) and class:GetCDO()
-    return ("%d,%d,%d,%d;%s;%s;%s"):format(state.blasts, state.sounds, state.smoke, field,
-        pitch, tostring(valid(defaults) and defaults["PFX Scale"]), tostring(valid(defaults) and defaults["SFX Vol"]))
+    return ("%d,%d,%d,%d;%s;%s;%s;%d,%d,%d"):format(state.blasts, state.sounds, state.smoke, valid(fire) and 1 or 0,
+        pitch, tostring(valid(defaults) and defaults["PFX Scale"]), tostring(valid(defaults) and defaults["SFX Vol"]),
+        state.flames, state.loops, lights)
 end
 
 local function turret_fire(pawn, world, turret, host, with_downed_target)
@@ -432,6 +449,11 @@ local function turret_state(pawn, world, host, action)
         return arm_turret_effects(turret)
     elseif action == "turret-read-effects" then
         return read_turret_effects(world, turret)
+    elseif action == "turret-extinguish" then
+        local fire = turret_fire_field(world, turret)
+        assert(host and valid(fire) and fire:HasAuthority(), "the stock turret fire is unavailable on the host")
+        fire:FizzleOut()
+        return "extinguished"
     elseif action == "turret-fire" or action == "turret-retarget" then
         return turret_fire(pawn, world, turret, host, action == "turret-retarget")
     elseif action == "turret-kill" then

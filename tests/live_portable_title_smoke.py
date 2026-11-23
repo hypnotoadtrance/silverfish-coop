@@ -720,9 +720,23 @@ async def verify_resident_turret_combat(host: Seat, guest: Seat, guest_frame: di
     death_effects = await asyncio.gather(*(command(seat, "turret-read-effects") for seat in (host, guest)))
     # Stock fire damage comes from a host-only gameplay actor. Guest smoke and blast are cosmetic.
     assert [row.split(";")[0] for row in death_effects] == ["1,1,1,1", "1,1,1,0"], death_effects
+    assert all(abs(float(row.split(";")[1])) > 25 for row in death_effects), death_effects
+    assert death_effects[1].split(";")[-1] == "1,1,1", death_effects
+    assert await command(host, "turret-extinguish") == "extinguished"
+    finished = None
+    try:
+        async with asyncio.timeout(5):
+            while True:
+                finished = (await command(guest, "turret-read-effects")).split(";")
+                if finished[1] == "22.50" and finished[-1] == "1,1,0":
+                    break
+                await asyncio.sleep(.1)
+    except TimeoutError as error:
+        raise AssertionError(f"The host extinguished its fire but the guest fire view stayed active: {finished}") from error
+    assert finished[0] == "1,1,1,0", finished
     return {"stock_replication": replication == "true", "before": before, "after": after,
             "replica_fire_denied": True, "host_skipped_downed_target": True, "guest_stock_fire_cue": shot,
-            "death_blast_sound_smoke_and_fire_fields": death_effects}
+            "death_blast_sound_smoke_and_fire_fields": death_effects, "guest_fire_extinguished": finished}
 
 
 async def verify_resident_guest_melee(host: Seat, guest: Seat) -> dict:

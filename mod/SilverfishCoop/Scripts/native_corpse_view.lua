@@ -1,5 +1,6 @@
 local corpses = {}
 local effects = require("native_anomaly_effects")
+local turret_fire = require("native_turret_fire_view")
 
 local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local drone_path = "/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C"
@@ -12,11 +13,13 @@ local next_turret_lookup = 0
 local active_world, markers, numbered, mirrors, ended, anchors = nil, {}, {}, {}, {}, {}
 local pending = {}
 local turret_timers = {}
+local extinguish_hook
 local next_sample, corpse_number = 0, 0
 local sample_period = .1
 local byte_angle = 360 / 256
 local anchor_limit = 120
 local blast_phase, smoke_phase = 32, 16
+local fire_flag = 4
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -129,6 +132,13 @@ local function between(point, target)
     return {X = x, Y = y, Z = z}, x * x + y * y + z * z
 end
 
+local function retire_host_fire(fire)
+    if not valid(fire) then return end
+    local turret = fire:GetAttachParentActor()
+    local timer = valid(turret) and turret_timers[turret:GetAddress()]
+    if timer and same(timer.fire, fire) then timer.fire = nil end
+end
+
 local function publish(actor)
     local world = world_driver(actor, false)
     if not same(world, active_world) or not actor:HasAuthority() or actor.bReplicates ~= true or actor.Alive ~= false
@@ -137,10 +147,14 @@ local function publish(actor)
     if valid(markers[address]) and same(markers[address]:GetOwner(), actor) then return end
     -- The owner reference resolves to the same NPC over each connection even
     -- when Unreal assigns a different local name to the replicated actor.
-    local point, index
+    local point, index, fire
     local turret = supported_turret(actor)
     if turret then
         point = actor:K2_GetActorLocation()
+        fire = turret_fire.attached(actor)
+        if valid(fire) and not extinguish_hook then
+            extinguish_hook = turret_fire.hook_extinguish(retire_host_fire)
+        end
     else
         if not supported_corpse(actor) or not valid(actor.Mesh) then return end
         point, index = corpses.position(actor)
@@ -148,7 +162,7 @@ local function publish(actor)
     if corpse_number == 65535 then return end
     corpse_number = corpse_number + 1
     local marker = world:SpawnActor(marker_class, point, {
-        Pitch = turret and blast_phase * byte_angle or anchor_pitch(index),
+        Pitch = turret and (blast_phase + (valid(fire) and fire_flag or 0)) * byte_angle or anchor_pitch(index),
         Yaw = (corpse_number % 256) * byte_angle, Roll = (corpse_number // 256) * byte_angle,
     })
     if not valid(marker) then return end
@@ -162,7 +176,7 @@ local function publish(actor)
     markers[address], numbered[corpse_number] = marker, marker
     if turret then
         turret_timers[address] = {blast_until = clock:GetRealTimeSeconds(world) + 1,
-            smoke_until = clock:GetTimeSeconds(world) + 30}
+            smoke_until = clock:GetTimeSeconds(world) + 30, fire = fire}
     end
 end
 
@@ -186,23 +200,35 @@ local function apply_destroyed_turret(actor)
     return true
 end
 
-local function retire_smoke(mirror)
-    if mirror and valid(mirror.smoke) then mirror.smoke:Deactivate() end
+local function retire_turret(mirror)
+    if not mirror or not mirror.turret then return end
+    if valid(mirror.smoke) then mirror.smoke:Deactivate() end
+    turret_fire.stop(mirror)
 end
 
 local function present_turret(mirror, actor, pawn)
     local marker = mirror.marker
     -- UE4SS SpawnActor and K2_SetActorRotation can deliver opposite pitch signs.
-    local phase = rotation_byte(math.abs(marker:K2_GetActorRotation().Pitch))
-    if phase ~= blast_phase and phase ~= smoke_phase then
-        retire_smoke(mirror)
+    local flags = rotation_byte(math.abs(marker:K2_GetActorRotation().Pitch))
+    if flags == 0 then
+        retire_turret(mirror)
         return true
+    end
+    local phase = flags & ~fire_flag
+    if (flags & fire_flag) ~= 0 then
+        if not mirror.fire_started then pcall(turret_fire.start, actor, mirror) end
+    else
+        turret_fire.stop(mirror)
     end
     if phase == blast_phase and not mirror.played_blast and valid(pawn) and pawn:IsLocallyControlled() then
         local ok, played = pcall(effects.play_turret_blast, pawn, marker:K2_GetActorLocation())
         mirror.played_blast = ok and played
     end
-    if mirror.smoke_started then return end
+    if phase == 0 and valid(mirror.smoke) then
+        mirror.smoke:Deactivate()
+        mirror.smoke = nil
+    end
+    if mirror.smoke_started or phase ~= blast_phase and phase ~= smoke_phase then return end
     local gun = actor.Turret_Gun
     local niagara = StaticFindObject("/Script/Niagara.Default__NiagaraFunctionLibrary")
     local asset = StaticFindObject(turret_smoke)
@@ -227,7 +253,7 @@ local function apply(marker, world)
         if not apply_destroyed_turret(actor) then return end
         local key = actor:GetAddress()
         if not mirrors[key] or not same(mirrors[key].marker, marker) then
-            retire_smoke(mirrors[key])
+            retire_turret(mirrors[key])
             mirrors[key] = {marker = marker, turret = true}
         end
         return true
@@ -264,7 +290,7 @@ local function mirror_positions(world, pawn)
         local marker = mirror.marker
         local actor = valid(marker) and marker:GetOwner()
         if not valid(actor) or not same(marker:GetWorld(), world) or actor:IsActorBeingDestroyed() then
-            retire_smoke(mirror)
+            retire_turret(mirror)
             mirrors[address] = nil
         elseif mirror.turret then
             if actor:GetLocalRole() == 1 and present_turret(mirror, actor, pawn) then mirrors[address] = nil end
@@ -296,6 +322,7 @@ local function publish_positions(world, now)
             -- the same visit see the remaining smoke without a second blast.
             local phase = now < timer.blast_until and blast_phase
                 or clock:GetTimeSeconds(world) < timer.smoke_until and smoke_phase or 0
+            if valid(timer.fire) and not timer.fire:IsActorBeingDestroyed() then phase = phase | fire_flag end
             if rotation_byte(math.abs(rotation.Pitch)) ~= phase then
                 rotation.Pitch = phase * byte_angle
                 marker:K2_SetActorRotation(rotation, true)
@@ -342,7 +369,7 @@ function corpses.start(role)
         local actor = context:get()
         if not valid(actor) then return end
         local address = actor:GetAddress()
-        retire_smoke(mirrors[address])
+        retire_turret(mirrors[address])
         mirrors[address], anchors[address], pending[address], turret_timers[address] = nil, nil, nil, nil
         local marker = markers[address]
         if valid(marker) and same(marker:GetOwner(), actor) then
@@ -357,7 +384,7 @@ function corpses.sync(state, phase)
     local hosting = phase == "hosting" and state.listening and not state.server
     local world = (hosting or phase == "connected" and state.server) and state.world or nil
     if not same(world, active_world) then
-        for _, mirror in pairs(mirrors) do retire_smoke(mirror) end
+        for _, mirror in pairs(mirrors) do retire_turret(mirror) end
         turret_timers = {}
         active_world, markers, numbered, mirrors, ended, anchors, next_sample, corpse_number =
             world, {}, {}, {}, {}, {}, 0, 0
