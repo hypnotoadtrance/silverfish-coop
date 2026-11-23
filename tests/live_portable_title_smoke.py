@@ -635,6 +635,10 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
     await wait_for(guest, "ready", f"{guest_guid},0,0")
     host_shot = tuple(map(int, (await command(host, "shot-read")).split(",")))
     assert host_shot == (1, 1, 1, 0), host_shot
+    async with asyncio.timeout(6):
+        while (attached_flash := int((await command(guest, "first-person-read")).split(";")[0])) != 1:
+            assert attached_flash == 0, "The guest played a duplicate first-person flash"
+            await asyncio.sleep(.05)
     after_round = [entry for entry in await resident_events(guest_run, guest_frame) if entry["event"] in tracked]
 
     for seat in (host, guest):
@@ -662,6 +666,15 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
     reloaded = await submit(guest_run, "native-guest-reload-input-fixture")
     assert reloaded["ok"] and reloaded["native_guest_reload_fixture"]["stock_wrappers"] == 2, reloaded
     reload = await input_result("native_guest_reload_input", reloaded["native_guest_reload_fixture"]["sequence"])
+    async with asyncio.timeout(6):
+        while True:
+            _, reload_clip, position = (await command(guest, "first-person-read")).split(";")
+            if reload_clip != "-" and float(position) > .03:
+                break
+            await asyncio.sleep(.05)
+    owner_reloads = [row for row in await resident_events(guest_run, guest_frame)
+                     if row["event"] == "native_guest_reload_view_played"]
+    assert [row["clip"] for row in owner_reloads] == [reload_clip], owner_reloads
     loaded = 8 if rusty else 9
     reserve_left = f"{reserve.split(',')[0]},1" if rusty else ""
     assert (reload["guid"], reload["before"], reload["after"], reload["reserve_before"], reload["reserve_after"]) == (
@@ -690,6 +703,8 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
             "guest_empty_magazine_receipt": guest_input,
             "pistols_still_empty_after_dry_fire": True, "projectiles_spawned": 0, "observers_played_shot_effects": 0,
             "guest_reload_input": reloaded, "guest_reload": reload, "reserve_before": reserve, "reserve_after": reserve_left,
+            "guest_muzzle_attachments": attached_flash,
+            "guest_first_person_reload": {"stock_clip": reload_clip, "playhead_seconds": float(position)},
             "both_games_projected_reloaded_magazine": True, "host_magazine_and_reserve_unchanged": True}
 
 

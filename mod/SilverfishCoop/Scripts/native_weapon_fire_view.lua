@@ -338,8 +338,7 @@ function view.reloaded(pawn, previous_ammo)
     if not current or not valid(pawn) then return end
     local weapon = equipped_player(pawn.EquipedItem)
     if not weapon then return end
-    local animation = previous_ammo == 0 and weapon.Reload_Dry_Anim or weapon.Reload_Wet_Anim
-    record_cycle(weapon, pawn, animation)
+    record_cycle(weapon, pawn, weapon_view.reload_clip(weapon, previous_ammo))
 end
 
 local function clear_local_cues()
@@ -441,22 +440,30 @@ local function local_muzzle(pawn, path)
         or weapon:GetClass():GetFullName() ~= "BlueprintGeneratedClass " .. path then return end
     local muzzle = weapon.Arrow_Muzzle
     if valid(muzzle) and same(muzzle:GetOwner(), weapon) then
-        return muzzle:K2_GetComponentLocation(), muzzle:K2_GetComponentRotation()
+        return muzzle, weapon
     end
 end
 
-local function play(pawn, path, point, rotation, scale, volume, pitch, distance)
+local function play(pawn, path, point, rotation, scale, volume, pitch, distance, muzzle, firing_weapon)
     local turret = stock_turret(path)
     local class, base = asset(path), asset(turret and turret_base or weapon_base)
     local defaults = valid(class) and class:GetCDO()
     if not valid(defaults) or not valid(base) or not defaults:IsA(base) then return end
-    local attenuation, sound = asset(attenuation_path), defaults.FireSound
+    local source = firing_weapon or defaults
+    local attenuation, sound = asset(attenuation_path), source.FireSound
     local niagara = StaticFindObject("/Script/Niagara.Default__NiagaraFunctionLibrary")
     local statics = StaticFindObject(statics_path)
     local particles, audio = false, false
-    if scale > 0 and valid(niagara) and valid(defaults.MuzzleFlash) then
-        local component = niagara:SpawnSystemAtLocation(pawn, defaults.MuzzleFlash, point, rotation,
-            {X = scale, Y = scale, Z = scale}, true, true, 0, true)
+    if scale > 0 and valid(niagara) and valid(source.MuzzleFlash) then
+        local size, component = {X = scale, Y = scale, Z = scale}
+        if muzzle then
+            -- Match the stock first-person effect in the held weapon's render space.
+            component = niagara:SpawnSystemAttached(source.MuzzleFlash, muzzle, FName("None"),
+                {X = 0, Y = 0, Z = 0}, {Pitch = 0, Yaw = 0, Roll = 0}, 0, true, true, 0, true)
+            if valid(component) then component:SetWorldScale3D(size) end
+        else
+            component = niagara:SpawnSystemAtLocation(pawn, source.MuzzleFlash, point, rotation, size, true, true, 0, true)
+        end
         particles = valid(component) == true
     end
     if volume > 0 and valid(statics) and valid(sound) and valid(attenuation) then
@@ -540,13 +547,11 @@ function view.command(args, state, phase, avatar)
             local player = math.tointeger(tonumber(values[3]))
             if player and player >= 0 and player <= 2147483647 and stock_weapon(values[4]) and stock_cycle(values[5]) then
                 last_played = id
-                local ok, played
-                if player == local_id then
-                    ok, played = pcall(weapon_view.local_reload, pawn, state.world, values[4], id, values[5])
-                else
-                    ok, played = pcall(avatar.play_cycle, state.world, player, values[4], id, values[5])
+                -- The owning guest plays the reload from its confirmed action reply.
+                if player ~= local_id then
+                    local ok, played = pcall(avatar.play_cycle, state.world, player, values[4], id, values[5])
+                    if ok and played then receipts[#receipts + 1] = ("%d:cycle"):format(id) end
                 end
-                if ok and played then receipts[#receipts + 1] = ("%d:cycle"):format(id) end
             end
             goto next_cue
         end
@@ -575,10 +580,11 @@ function view.command(args, state, phase, avatar)
             last_played = id
             local point, rotation = {X = x, Y = y, Z = z}, {Pitch = pitch_angle, Yaw = yaw, Roll = roll}
             local source = tonumber(values[12])
+            local muzzle, firing_weapon
             if source ~= nil and source == local_id then
-                local muzzle, orientation = local_muzzle(pawn, path)
+                muzzle, firing_weapon = local_muzzle(pawn, path)
                 if muzzle then
-                    point, rotation = muzzle, orientation
+                    point, rotation = muzzle:K2_GetComponentLocation(), muzzle:K2_GetComponentRotation()
                 else
                     -- The shooter may already have holstered or switched weapons.
                     point, scale = origin, 0
@@ -587,7 +593,7 @@ function view.command(args, state, phase, avatar)
             local distance = math.sqrt((origin.X - point.X)^2 + (origin.Y - point.Y)^2 + (origin.Z - point.Z)^2)
             if distance <= range then
                 local ok, particles, audio, stock_sound = pcall(play, pawn, path, point, rotation,
-                    scale, volume, pitch, distance)
+                    scale, volume, pitch, distance, muzzle, firing_weapon)
                 local recoil = false
                 if #values == 19 and source ~= local_id then
                     local kick = {}

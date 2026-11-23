@@ -16,6 +16,7 @@ local slot = 2
 local last, local_pawn, peer, failure
 local active = false
 local clicks, projectiles, shot_sounds, muzzle_flashes = {}, 0, 0, 0
+local local_flashes, local_reload = 0, nil
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -78,10 +79,24 @@ local function arm()
         local weapon = peer_muzzle(attached:get())
         if weapon and same(sound:get(), weapon.FireSound) then shot_sounds = shot_sounds + 1 end
     end)
-    RegisterHook("/Script/Niagara.NiagaraFunctionLibrary:SpawnSystemAttached", function(_, effect, attached)
+    RegisterHook("/Script/Niagara.NiagaraFunctionLibrary:SpawnSystemAttached", function(_, effect, attached, _, location)
         if not active then return end
         local weapon = peer_muzzle(attached:get())
         if weapon and same(effect:get(), weapon.MuzzleFlash) then muzzle_flashes = muzzle_flashes + 1 end
+        local held = local_pawn.EquipedItem
+        if not local_pawn:HasAuthority() and valid(held)
+            and same(attached:get(), held.Arrow_Muzzle) and same(effect:get(), held.MuzzleFlash) then
+            local offset = location:get()
+            if offset.X == 0 and offset.Y == 0 and offset.Z == 0 then local_flashes = local_flashes + 1 end
+        end
+    end)
+    RegisterHook("/Script/Engine.SkeletalMeshComponent:PlayAnimation", function(context, animation, looping)
+        if not active or local_pawn:HasAuthority() or looping:get() then return end
+        local held, clip = local_pawn.EquipedItem, animation:get()
+        if valid(held) and same(context:get(), held.Wep_Skeli)
+            and (same(clip, held.Reload_Dry_Anim) or same(clip, held.Reload_Wet_Anim)) then
+            local_reload = clip
+        end
     end)
     return "armed"
 end
@@ -165,9 +180,16 @@ local function run(action)
     end
     if action == "clear" then
         clicks, projectiles, shot_sounds, muzzle_flashes, failure = {}, 0, 0, 0, nil
+        local_flashes, local_reload = 0, nil
         return "clear"
     end
     if action == "shot-read" then return ("%d,%d,%d,%d"):format(projectiles, shot_sounds, muzzle_flashes, #clicks) end
+    if action == "first-person-read" then
+        local held = local_pawn.EquipedItem
+        local rig = valid(held) and held.Wep_Skeli
+        local path = valid(local_reload) and local_reload:GetFullName():match("^AnimSequence (.+)$")
+        return ("%d;%s;%.3f"):format(local_flashes, path or "-", valid(rig) and rig:GetPosition() or 0)
+    end
     if action == "read" then
         assert(not failure, failure)
         return ("%d;%s"):format(projectiles, table.concat(clicks, "|"))
