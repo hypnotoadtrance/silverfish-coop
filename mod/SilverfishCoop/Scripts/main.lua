@@ -1848,6 +1848,7 @@ LoopInGameThreadWithDelay(25, function()
     pcall(native_zone_loading.refresh, current_world)
     if not leaving then pcall(native_prop_carry.update) end
     if role == "client" and not leaving then pcall(native_corpse_view.animate, current_world) end
+    if role == "host" and not leaving then pcall(native_corpse_view.update_host_grip, current_world) end
     if role == "host" and not leaving then pcall(native_zone.update_exit, current_world) end
     if role == "host" and not leaving then pcall(native_weapon_fire_view.flush, current_world) end
     if not leaving then pcall(native_voice.footsteps.update, current_world) end
