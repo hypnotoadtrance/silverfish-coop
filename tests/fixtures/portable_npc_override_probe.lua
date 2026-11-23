@@ -352,7 +352,18 @@ local function spawn_stock_npc(pawn, world, kind)
     return actor, weapon, path
 end
 
-local rivalry, rivalry_hook
+local rivalry, rivalry_hook, rivalry_baseline
+local rivalry_classes = {state = "NPC_State_Conscript_C", bandit = "NPC_Bandit_C"}
+
+local function watch_rivalry(world)
+    rivalry_baseline = {}
+    for _, class in pairs(rivalry_classes) do
+        for _, actor in ipairs(FindAllOf(class) or {}) do
+            if valid(actor) and same(actor:GetWorld(), world) then rivalry_baseline[actor:GetAddress()] = true end
+        end
+    end
+    return "watching"
+end
 
 local function rivalry_lane(pawn, guest)
     local center = pawn:K2_GetActorLocation()
@@ -391,31 +402,47 @@ local function begin_rivalry(pawn, world)
     local bandit = create_stock_npc(pawn, world, "bandit", second, heading(second, first).Yaw)
     assert(state.Max_Health > 1 and bandit.Max_Health > 1 and state.Faction ~= bandit.Faction,
         "expected two stock opposing factions")
-    rivalry = {state = state, bandit = bandit, hits = {0, 0}}
+    rivalry = {state = state, bandit = bandit, hits = {0, 0}, deaths = {}, targets = {}}
     if not rivalry_hook then
         RegisterHook("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:DealDamage",
             function(context, _, _, instigator)
                 if not rivalry then return end
                 local victim, source = context:get(), instigator:get()
-                if same(victim, rivalry.state) and same(source, rivalry.bandit) then rivalry.hits[1] = rivalry.hits[1] + 1 end
-                if same(victim, rivalry.bandit) and same(source, rivalry.state) then rivalry.hits[2] = rivalry.hits[2] + 1 end
+                local index = same(victim, rivalry.state) and same(source, rivalry.bandit) and 1
+                    or same(victim, rivalry.bandit) and same(source, rivalry.state) and 2
+                if index then
+                    rivalry.hits[index] = rivalry.hits[index] + 1
+                    rivalry.targets[index] = rivalry.targets[index] or same(source.CombatTarget, victim)
+                    rivalry.deaths[index] = rivalry.deaths[index] or victim.Alive == false
+                end
             end)
         rivalry_hook = true
     end
-    -- The stock squad spawner calls InitializeAI after FinishSpawningActor.
-    -- That entry point primes each actor's own health, equipment and behavior tree.
     for _, actor in ipairs({state, bandit}) do
-        if not actor.Initialized then actor:InitializeAI() end
+        actor:ForceNetUpdate()
     end
     return ("%.2f,%.2f;%d,%d"):format(state.Max_Health, bandit.Max_Health, state.Faction, bandit.Faction)
+end
+
+local function start_rivalry_ai()
+    assert(rivalry, "the isolated stock rivalry was not spawned")
+    -- Preserve the actor's own initialization if its startup delay elapsed
+    -- while the guest waited for replication.
+    for _, actor in ipairs({rivalry.state, rivalry.bandit}) do
+        if not actor.Initialized then actor:InitializeAI() end
+        assert(actor.Initialized and (actor.Alive == false or valid(actor.Controller)), "stock rivalry AI did not initialize")
+    end
+    return "initialized"
 end
 
 local function rivalry_member(world, host, kind)
     if host then return rivalry and rivalry[kind] end
     local found
-    local class = kind == "state" and "NPC_State_Conscript_C" or "NPC_Bandit_C"
+    if not rivalry_baseline then return end
+    local class = rivalry_classes[kind]
     for _, actor in ipairs(FindAllOf(class) or {}) do
-        if valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed() then
+        if valid(actor) and same(actor:GetWorld(), world) and not rivalry_baseline[actor:GetAddress()]
+            and actor:GetLocalRole() == 1 and not actor:IsActorBeingDestroyed() then
             if found then return end
             found = actor
         end
@@ -439,8 +466,9 @@ local function observe_rivalry(world, host)
         local path = valid(weapon) and weapon:GetClass():GetFullName():match(" (%S+)$") or "-"
         return ("%s,%s,%d,%.2f,%s,%d,%s,%s,%s,%s"):format(tostring(actor.Alive),
             tostring(actor.Mesh:IsAnySimulatingPhysics()), markers, actor.Health,
-            tostring(same(actor.CombatTarget, target)), host and rivalry.hits[index] or 0,
-            tostring(same(actor.LastDamagedMe, target)), path, tostring(actor.Initialized), tostring(valid(actor.Controller) == true))
+            tostring(same(actor.CombatTarget, target) or (host and rivalry.targets[3-index] == true)),
+            host and rivalry.hits[index] or 0, tostring(host and rivalry.deaths[index] == true),
+            path, tostring(actor.Initialized), tostring(valid(actor.Controller) == true))
     end
     return sample(first, second, 1) .. ";" .. sample(second, first, 2)
 end
@@ -1061,6 +1089,12 @@ local function run(action, actor_path)
     elseif action == "rivalry-start" then
         assert(host, "only the host spawns the stock rivalry")
         return begin_rivalry(pawn, world)
+    elseif action == "rivalry-watch" then
+        assert(not host, "only the guest takes the replica baseline")
+        return watch_rivalry(world)
+    elseif action == "rivalry-initialize" then
+        assert(host, "only the host initializes the stock rivalry")
+        return start_rivalry_ai()
     elseif action == "rivalry-state" then
         return observe_rivalry(world, host)
     elseif action == "rivalry-cleanup" then
