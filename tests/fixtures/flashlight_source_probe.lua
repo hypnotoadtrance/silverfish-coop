@@ -100,8 +100,9 @@ local function trace_event(event, argument)
     if valid(equipment) then
         hand_class, item_type = named(equipment:GetClass()), tostring(equipment.ItemType)
         local ok, tagged = pcall(function()
-            for _, tag in ipairs(equipment.Tags) do
-                if tag:ToString() == "TwoHanded" then return true end
+            local tags = equipment.Tags
+            for index = 1, math.min(tags:GetArrayNum(), 64) do
+                if tags[index]:ToString() == "TwoHanded" then return true end
             end
             return false
         end)
