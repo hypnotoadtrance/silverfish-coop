@@ -39,9 +39,11 @@ local eye = "Clt_Eye_02"
 local kill = "Asn_EggHead"
 local item_path = "/Game/Classes/Items/Item_MonsterEye.Item_MonsterEye_C"
 local class = object({GetFullName = function() return "BlueprintGeneratedClass " .. item_path end})
-class.GetCDO = function() return object({Stacks = false, GetClass = function() return class end}) end
-local row_item = {[item_class] = class, [item_units] = 1, [item_guid] = {A = 1, B = 2, C = 3, D = 4}}
+class.GetCDO = function() return object({Stacks = true, GetClass = function() return class end}) end
+local row_item = {[item_class] = class, [item_units] = 2, [item_guid] = {A = 1, B = 2, C = 3, D = 4}}
+local portion = {[item_class] = class, [item_units] = 1, [item_guid] = {A = 9, B = 8, C = 7, D = 6}}
 local want_guid = "00000001000000020000000300000004"
+local split_guid = "00000009000000080000000700000006"
 
 local function quest(at, class_value, payout, flag_values, rep_values)
     return {
@@ -84,7 +86,7 @@ local function stock_finalize(_, key, instance, no_confirmation, host, out)
     assert(instance == game_instance and host == player and no_confirmation)
     local contract = assert(store.ActiveQuests[key])
     if contract[consumed] then
-        assert(store.PlayerBackpack[1] == row_item)
+        assert(store.PlayerBackpack[1] == portion)
         store.PlayerBackpack = array({})
     else
         assert(contract[step] >= contract[final])
@@ -110,20 +112,24 @@ function StaticFindObject(path)
 end
 EFindName = {FNAME_Find = 1}
 function FName(text) return text end
-function SilverfishStageBoardObjective(pawn, source, dest, guid, quest_id, path, limit, payout, experience)
+function SilverfishStageBoardObjective(pawn, source, dest, guid, quest_id, path, limit, payout, experience, units)
     assert(pawn == guest:GetAddress() and source == bag:GetAddress() and dest == store:GetAddress())
     assert(guid == want_guid and quest_id == eye and path == item_path and limit == 2 and payout == 801 and experience == 1)
-    store.PlayerBackpack[1] = table.remove(bag.PlayerBackpack, 1)
-    return true
+    assert(units == 2 and bag.PlayerBackpack[1] == row_item)
+    row_item[item_units] = 1
+    store.PlayerBackpack[1] = portion
+    return true, "staged", split_guid
 end
 
 local mod = require("native_board_contract")
 local state = {world = world, map = "ShopKeep"}
-local function action(verb, mode, id, guid)
-    return mod.command({"1", "native-board-contract", verb, mode, "Guest", "Board", id, guid}, state, "hosting")
+local function action(verb, mode, id, guid, units)
+    local arguments = {"1", "native-board-contract", verb, mode, "Guest", "Board", id}
+    if mode == "apply" then arguments[8], arguments[9] = guid, units or "-" end
+    return mod.command(arguments, state, "hosting")
 end
-local function denied(reason, verb, mode, id, guid)
-    local ok, failure = pcall(action, verb, mode, id, guid)
+local function denied(reason, verb, mode, id, guid, units)
+    local ok, failure = pcall(action, verb, mode, id, guid, units)
     assert(not ok and failure == "stock_board_contract_" .. reason, failure)
 end
 local function proof()
@@ -154,8 +160,11 @@ board.TurnIn_ID = 2
 action("turnin", "inspect", eye)
 assert(proof()[18] == want_guid and proof()[16] == 801 and proof()[9] == 1)
 denied("objective_changed", "turnin", "apply", eye, "-")
-action("turnin", "apply", eye, want_guid)
-assert(proof()[10] == -10 and proof()[13] == 818 and #bag.PlayerBackpack == 0 and #store.PlayerBackpack == 0)
+denied("objective_changed", "turnin", "apply", eye, want_guid, "1")
+action("turnin", "apply", eye, want_guid, "2")
+assert(proof()[10] == -10 and proof()[13] == 818 and #store.PlayerBackpack == 0)
+assert(proof()[18] == want_guid and proof()[19] == 2 and proof()[20] == 1 and proof()[21] == split_guid)
+assert(#bag.PlayerBackpack == 1 and bag.PlayerBackpack[1] == row_item and row_item[item_units] == 1)
 action("turnin", "inspect", eye)
 assert(proof()[8] == "already" and host_flags.Player_Cash == 818)
 

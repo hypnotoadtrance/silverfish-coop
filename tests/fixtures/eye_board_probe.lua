@@ -44,12 +44,15 @@ local function prepare(state, host, operation)
     if not valid(item) then LoadAsset(class_path); item = StaticFindObject(class_path) end
     local factory = StaticFindObject(factory_path)
     assert(valid(factory) and valid(item))
+    local defaults = item:GetCDO()
+    local count = defaults.Ammo
+    assert(defaults.Stacks == true and count == 2, "The native Eye stack recipe changed")
     local rows, out = save.PlayerBackpack, {}
     for index = 1, rows:GetArrayNum() do assert(not same(rows[index][class_field], item)) end
-    factory:MakeItemStack(item, 1, remote, out)
+    factory:MakeItemStack(item, count, remote, out)
     local stock = out.Item or out
     local guid = identity(stock)
-    assert(same(stock[class_field], item) and stock[amount_field] == 1 and guid:find("[^0]"))
+    assert(same(stock[class_field], item) and stock[amount_field] == count and guid:find("[^0]"))
     local index = rows:GetArrayNum() + 1
     rows[index] = stock
     assert(rows:GetArrayNum() == index and identity(rows[index]) == guid and same(rows[index][class_field], item))

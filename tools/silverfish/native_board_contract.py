@@ -20,19 +20,30 @@ def quest_id(value):
 
 
 def parse(fields):
-    if len(fields) != 18:
+    if len(fields) != 21:
         raise ValueError("Invalid native board result")
     proof = dict(zip(("verb", "mode", "map", "pawn", "board", "quest", "state"), fields[1:8], strict=True))
     proof.update(zip(("step_before", "step_after", "expected_step"),
                      (None if field == "-" else int(field) for field in fields[8:11]), strict=True))
     proof.update(zip(("cash_before", "cash_after", "xp_before", "xp_after", "cash", "xp"),
                      map(int, fields[11:17]), strict=True))
-    proof["guid"] = fields[17]
+    proof["guid"], units, remaining, proof["consumed"] = fields[17:]
+    proof["units"] = None if units == "-" else int(units)
+    proof["remaining"] = None if remaining == "-" else int(remaining)
     if (not quest_id(proof["quest"]) or proof["verb"] not in {"start", "turnin"}
             or proof["mode"] not in {"inspect", "apply"} or proof["state"] not in {"qualified", "already", "applied"}
-            or (proof["guid"] != "-" and not valid_guid(proof["guid"]))
             or min(proof["cash"], proof["xp"]) < 0):
         raise ValueError("Unqualified native board result")
+    if proof["guid"] == "-":
+        if proof["units"] is not None or proof["remaining"] is not None or proof["consumed"] != "-":
+            raise ValueError("Unexpected board deposit result")
+    elif (not valid_guid(proof["guid"]) or proof["verb"] != "turnin"
+            or proof["units"] is None or proof["remaining"] is None
+            or not 0 <= proof["units"] <= 2_147_483_647
+            or proof["remaining"] not in {0, max(0, proof["units"] - 1)}
+            or (proof["state"] != "applied" and proof["consumed"] != "-")
+            or (proof["consumed"] != "-" and not valid_guid(proof["consumed"]))):
+        raise ValueError("Unqualified board deposit result")
     return proof
 
 
@@ -90,7 +101,7 @@ def _receipt(actor, before, result):
     step = before["expected_step"]
     if (result["state"], result["step_after"]) != ("applied", step):
         raise RuntimeError("The stock board action did not reach the qualified quest step")
-    for key in ("step_before", "expected_step", "guid", "cash_before", "xp_before", "cash", "xp"):
+    for key in ("step_before", "expected_step", "guid", "units", "remaining", "cash_before", "xp_before", "cash", "xp"):
         if result[key] != before[key]:
             raise RuntimeError("The stock board action differs from its inspected recipe")
     cash, xp = result["cash"], result["xp"]
@@ -100,7 +111,15 @@ def _receipt(actor, before, result):
     if step == COMPLETE:
         record.update(cash=cash, xp=xp, wallet=result["cash_after"])
         if result["guid"] != "-":
-            record.update(consumed_guid=result["guid"], objective_owner=actor)
+            guid, left, consumed = result["guid"], result["remaining"], result["consumed"]
+            if ((left == 0 and consumed != guid)
+                    or (left > 0 and actor == "host" and consumed != "-")
+                    or (left > 0 and actor != "host" and consumed in {"-", guid})):
+                raise RuntimeError("The stock board action reported the wrong consumed or remaining item")
+            record.update(objective_guid=guid, objective_owner=actor, objective_units_before=left + 1,
+                          objective_units_consumed=1, objective_units_remaining=left)
+            if consumed != "-":
+                record["consumed_guid"] = consumed
     return record
 
 
@@ -150,7 +169,8 @@ async def perform(host, bridge, actor, verb, quest, *, board=None):
                 raise party.RuleError("native_board_objective_retention_unavailable")
 
         host.native_checkpoint_unsafe = True
-        result = await _command(host, bridge, verb, "apply", area, pawn, board, quest, before["guid"])
+        units = "-" if before["units"] is None else str(before["units"])
+        result = await _command(host, bridge, verb, "apply", area, pawn, board, quest, before["guid"], units)
         record = _receipt(actor, before, result)
         if turning_in:
             record["recipients"] = recipients
@@ -162,7 +182,7 @@ async def perform(host, bridge, actor, verb, quest, *, board=None):
             candidate["economy"].update(wallet=record["wallet"], native_wallet_active=True)
         candidate.setdefault("native_quests", {})[quest] = record
         host.party = candidate
-        host.pending_host_save = bool(host.pending_host_save or (actor == "host" and "consumed_guid" in record))
+        host.pending_host_save = bool(host.pending_host_save or (actor == "host" and "objective_guid" in record))
         host.native_checkpoint_unsafe = False
         host.control.event("native_board_contract_applied", board=board, **record)
         return {"effect": "native_quest_changed", **record}

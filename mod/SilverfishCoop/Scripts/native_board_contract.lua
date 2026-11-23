@@ -76,7 +76,7 @@ local function shape(row)
 end
 
 local function backpack_objective(save, contract)
-    local result
+    local result, quantity
     for slot, rows in ipairs({save.PlayerBackpack, save.PlayerEquipment}) do
         local size = len(rows)
         if not int(size) or size < 0 or size > 4096 then refuse("inventory_unqualified") end
@@ -84,16 +84,17 @@ local function backpack_objective(save, contract)
             local row = rows[index]
             if row and same(row[class_key], contract.objective) then
                 local units, id = row[units_key], row[guid_key]
-                if slot ~= 1 or result or not int(units) or units < (contract.stacks and 1 or 0) or units > 1
+                if slot ~= 1 or result or not int(units) or units < (contract.stacks and 1 or 0)
                     or not id or not int(id.A) or not int(id.B) or not int(id.C) or not int(id.D) then
-                    refuse("objective_requires_one_unambiguous_backpack_unit")
+                    refuse("objective_requires_one_unambiguous_backpack_stack")
                 end
                 result = ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
                 if not result:find("[^0]") then refuse("objective_guid_unqualified") end
+                quantity = units
             end
         end
     end
-    return result
+    return result, quantity
 end
 
 local function balances(context)
@@ -237,7 +238,7 @@ function board_contract.command(fields, state, phase)
     local verb, mode, pawn, board, quest = fields[3], fields[4], fields[5], fields[6], fields[7]
     if (verb ~= "start" and verb ~= "turnin") or (mode ~= "inspect" and mode ~= "apply")
         or type(quest) ~= "string" or #quest > 96 or not quest:match("^[A-Za-z0-9_]+$")
-        or type(board) ~= "string" or #board > 512 or #fields ~= (mode == "apply" and 8 or 7) then
+        or type(board) ~= "string" or #board > 512 or #fields ~= (mode == "apply" and 9 or 7) then
         refuse("arguments")
     end
 
@@ -249,7 +250,7 @@ function board_contract.command(fields, state, phase)
     local outcome = {
         verb = verb, mode = mode, pawn = pawn, board = board, quest = quest, context = context,
         before = step or "-", after = step or "-", cash_before = cash_before, cash_after = cash_before,
-        xp_before = xp_before, xp_after = xp_before, cash = 0, xp = 0, guid = "-", state = "already",
+        xp_before = xp_before, xp_after = xp_before, cash = 0, xp = 0, guid = "-", consumed = "-", state = "already",
     }
     if (verb == "start" and active) or (verb == "turnin" and step == completed_step) then
         last = outcome
@@ -268,8 +269,9 @@ function board_contract.command(fields, state, phase)
         contract = shape(active)
         outcome.cash, outcome.xp = contract.cash, contract.xp
         if contract.objective then
-            outcome.guid = backpack_objective(context.receiving_save, contract)
+            outcome.guid, outcome.units = backpack_objective(context.receiving_save, contract)
             if not outcome.guid then refuse("missing_objective") end
+            outcome.remaining = contract.stacks and outcome.units - 1 or 0
             if not same(context.save, context.receiving_save) and backpack_objective(context.save, contract) then
                 refuse("canonical_objective_conflict")
             end
@@ -289,17 +291,26 @@ function board_contract.command(fields, state, phase)
         last = outcome
         return "Qualified current stock board contract"
     end
-    if fields[8] ~= outcome.guid then refuse("objective_changed") end
+    if fields[8] ~= outcome.guid or fields[9] ~= tostring(outcome.units or "-") then refuse("objective_changed") end
 
-    if verb == "turnin" and outcome.guid ~= "-" and not same(context.save, context.receiving_save) then
+    local has_deposit = outcome.guid ~= "-"
+    local guest_deposit = has_deposit and not same(context.save, context.receiving_save)
+    if guest_deposit then
         if type(SilverfishStageBoardObjective) ~= "function" then refuse("native_objective_transfer_unavailable") end
-        local staged, reason = SilverfishStageBoardObjective(context.interactor:GetAddress(),
+        local staged, reason, moved = SilverfishStageBoardObjective(context.interactor:GetAddress(),
             context.receiving_save:GetAddress(), context.save:GetAddress(), outcome.guid, quest, contract.path,
-            contract.final, contract.cash, contract.xp)
+            contract.final, contract.cash, contract.xp, outcome.units)
         if staged ~= true then
             if type(reason) == "string" and reason:match("^mutation_unverified_") then error(reason, 0) end
             refuse("objective_transfer_rejected")
         end
+        if type(moved) ~= "string" or #moved ~= 32 or moved:find("[^0-9A-F]") or not moved:find("[^0]")
+            or (moved == outcome.guid) ~= (outcome.remaining == 0) then
+            error("mutation_unverified_stock_board_objective_guid", 0)
+        end
+        outcome.consumed = moved
+    elseif has_deposit and outcome.remaining == 0 then
+        outcome.consumed = outcome.guid
     end
 
     local applied = pcall(function()
@@ -310,8 +321,15 @@ function board_contract.command(fields, state, phase)
             local out = {}
             library:TurnIn_Quest(context.key, context.instance, true, context.host, out, out)
             if out.Success ~= true or valid(out.ConfirmationPopup) then return end
-            if contract.objective and (backpack_objective(context.save, contract)
-                or backpack_objective(context.receiving_save, contract)) then return end
+            if has_deposit then
+                if guest_deposit and backpack_objective(context.save, contract) then return end
+                local remaining_guid, remaining_units = backpack_objective(context.receiving_save, contract)
+                if outcome.remaining > 0 then
+                    if remaining_guid ~= outcome.guid or remaining_units ~= outcome.remaining then return end
+                elseif remaining_guid then
+                    return
+                end
+            end
             for _, effect in ipairs(effects) do
                 local observed, found = wire.stock_flag(context.instance, effect.key)
                 if not found or observed ~= effect.value then return end
@@ -344,7 +362,8 @@ function board_contract.rows(state, phase, status_row)
     end
     return {status_row(operation, last.verb, last.mode, state.map, last.pawn, last.board, last.quest,
         last.state, last.before, last.after, last.expected_step or "-", last.cash_before, last.cash_after,
-        last.xp_before, last.xp_after, last.cash, last.xp, last.guid)}
+        last.xp_before, last.xp_after, last.cash, last.xp, last.guid,
+        last.units or "-", last.remaining or "-", last.consumed)}
 end
 
 return board_contract

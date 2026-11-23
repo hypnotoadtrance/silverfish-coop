@@ -16,13 +16,17 @@ PAWN = "Player_FP_C ExactGuest"
 BOARD = native_computer_board.BOARDS[SHOPKEEP]
 
 
-def result(quest, verb, mode, before, expected, *, cash=0, xp=0, guid="-", board_name=BOARD):
+def result(quest, verb, mode, before, expected, *, cash=0, xp=0, guid="-", board_name=BOARD,
+           raw_units=1, remaining=0, consumed=None):
     applied = mode == "apply"
+    if consumed is None:
+        consumed = guid if applied else "-"
     fields = (board.COMMAND, verb, mode, SHOPKEEP, PAWN, board_name, quest,
               "applied" if applied else "qualified", "-" if before is None else str(before),
               str(expected) if applied else "-" if before is None else str(before),
               str(expected), "17", str(17 + cash if applied else 17), "3", str(3 + xp if applied else 3),
-              str(cash), str(xp), guid)
+              str(cash), str(xp), guid, str(raw_units) if guid != "-" else "-",
+              str(remaining) if guid != "-" else "-", consumed)
     return {"state": "hosting", "map": SHOPKEEP, board.KEY: board.parse(fields)}
 
 
@@ -88,6 +92,56 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(host.pending_host_save, False)
         host.checkpoint_native.assert_not_awaited()
 
+    async def test_guest_deposit_preserves_the_original_stack_and_counts_one_unit(self):
+        host = self.host()
+        split_guid = "37" * 16
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            result(EYE, "turnin", "inspect", 1, -10, cash=801, xp=1, guid=GUID, raw_units=2, remaining=1),
+            result(EYE, "turnin", "apply", 1, -10, cash=801, xp=1, guid=GUID, raw_units=2,
+                   remaining=1, consumed=split_guid),
+        ]))
+        with patch.object(board.native_inventory, "retain_guest_save", new_callable=AsyncMock) as retain:
+            retain.return_value = True
+            paid = await board.perform(host, bridge, "guest", "turnin", EYE)
+        self.assertEqual((paid["objective_guid"], paid["consumed_guid"]), (GUID, split_guid))
+        self.assertEqual((paid["objective_units_before"], paid["objective_units_consumed"],
+                          paid["objective_units_remaining"]), (2, 1, 1))
+        self.assertEqual(bridge.command.await_args.args[-2:], (GUID, "2"))
+        bridge.command.reset_mock()
+        replay = await board.perform(host, bridge, "guest", "turnin", EYE)
+        self.assertEqual(replay["objective_units_remaining"], 1)
+        bridge.command.assert_not_awaited()
+        host.checkpoint_native.assert_not_awaited()
+
+    async def test_split_receipt_cannot_consume_the_original_remainder_guid(self):
+        host = self.host()
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            result(EYE, "turnin", "inspect", 1, -10, cash=801, xp=1, guid=GUID, raw_units=2, remaining=1),
+            result(EYE, "turnin", "apply", 1, -10, cash=801, xp=1, guid=GUID, raw_units=2,
+                   remaining=1, consumed=GUID),
+        ]))
+        with patch.object(board.native_inventory, "retain_guest_save", new_callable=AsyncMock) as retain:
+            retain.return_value = True
+            with self.assertRaisesRegex(RuntimeError, "wrong consumed or remaining item"):
+                await board.perform(host, bridge, "guest", "turnin", EYE)
+        self.assertEqual(host.party.get("native_quests", {}), {})
+        self.assertTrue(host.native_checkpoint_unsafe and host.stopping)
+        host.checkpoint_native.assert_not_awaited()
+
+    async def test_partial_host_deposit_keeps_guid_for_typed_checkpoint(self):
+        host = self.host()
+        host.last_game["pawns"] = {"local": {"name": PAWN}}
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[
+            result(EYE, "turnin", "inspect", 1, -10, cash=801, xp=1, guid=GUID, raw_units=3, remaining=2),
+            result(EYE, "turnin", "apply", 1, -10, cash=801, xp=1, guid=GUID, raw_units=3,
+                   remaining=2, consumed="-"),
+        ]))
+        paid = await board.perform(host, bridge, "host", "turnin", EYE)
+        self.assertEqual((paid["objective_guid"], paid["objective_units_remaining"]), (GUID, 2))
+        self.assertNotIn("consumed_guid", paid)
+        self.assertIs(host.pending_host_save, True)
+        host.checkpoint_native.assert_not_awaited()
+
     async def test_refuses_wrong_board_and_missing_retention_without_mutation(self):
         host = self.host()
         bridge = SimpleNamespace(command=AsyncMock(return_value=
@@ -147,7 +201,7 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
     def test_repeated_proof_rows_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             bridge = runtime.Bridge(Path(directory), None)
-            valid = f"{board.COMMAND}\tstart\tinspect\t{SHOPKEEP}\t{PAWN}\t{BOARD}\t{EYE}\tqualified\t-\t-\t1\t17\t17\t3\t3\t0\t0\t-"
+            valid = f"{board.COMMAND}\tstart\tinspect\t{SHOPKEEP}\t{PAWN}\t{BOARD}\t{EYE}\tqualified\t-\t-\t1\t17\t17\t3\t3\t0\t0\t-\t-\t-\t-"
             prefix = f"schema\t1\nsession\thost\thosting\t{SHOPKEEP}\t1\t0\n"
             self.assertEqual(bridge._parse_status(prefix + valid + "\n")[board.KEY]["quest"], EYE)
             self.assertIsNone(bridge._parse_status(prefix + valid + "\n" + valid + "\n"))
