@@ -2101,7 +2101,8 @@ namespace
             !lua.is_integer(1) || !lua.is_bool(2) || !lua.is_string(3)) return 0;
         const auto expected = static_cast<std::uintptr_t>(lua.get_integer());
         const bool host = lua.get_bool();
-        const auto* profile = director_for(RC::ensure_str(lua.get_string(3)));
+        const auto map = lua.get_string();
+        const auto* profile = director_for(RC::ensure_str(map));
         if (!profile || !profile->typed) return 0;
         const auto active = network(find<U::UWorld>(profile->world));
         auto* director = find<U::UObject>(profile->director);
