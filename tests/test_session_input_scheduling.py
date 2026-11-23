@@ -40,6 +40,21 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.zone_epoch, "new")
         self.assertIsNone(client.snapshot_request)
 
+    async def test_snapshot_age_includes_time_waiting_for_the_gameplay_loop(self):
+        client = self.guest(AsyncMock(return_value={
+            "ok": True, "gameplay": {"players": {}}, "zone_epoch": "epoch", "zone": "CrossRoads",
+        }))
+        clock = Mock(return_value=100.0)
+        with patch.object(service, "time", SimpleNamespace(monotonic=clock)):
+            await client.refresh_gameplay(project=False, wait=False)
+            await asyncio.sleep(0)
+            self.assertTrue(client.gameplay_snapshot_ready())
+            clock.return_value = 102.5
+            await client.refresh_gameplay(project=False, wait=False)
+
+        self.assertEqual(client.gameplay, {"players": {}})
+        self.assertEqual(client.gameplay_seen, 100.0)
+
     async def test_lid_restoration_keeps_its_turn_during_other_projection_backoff(self):
         client = self.guest(AsyncMock())
         client.invite["native_loot_input"] = True

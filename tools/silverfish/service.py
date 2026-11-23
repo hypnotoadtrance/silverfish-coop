@@ -5032,7 +5032,7 @@ class Client:
         self.anomaly_playback = native_anomaly_effects.Playback()
         self.weapon_shot_playback = native_weapon_fire_view.Playback()
         self.loot_motion_playback = native_stock_enemy_drops.MotionPlayback()
-        self.snapshot_request: asyncio.Task | None = None
+        self.snapshot_request: asyncio.Task[tuple[dict, float]] | None = None
         self.next_snapshot = 0.0
         self.last_sprint_sent = None
         self.last_aim_sent = None
@@ -5788,6 +5788,11 @@ class Client:
             return
         await self.start_guest_zone_loading((self.host_session, self.zone_epoch, self.expected_zone), destination)
 
+    async def _request_gameplay_snapshot(self, request: dict) -> tuple[dict, float]:
+        reply = await self.transport.request(request, timeout=2)
+        # Projection and native input work can delay consuming the completed request.
+        return reply, time.monotonic()
+
     def _schedule_gameplay_snapshot(self, *, edges_only: bool = False) -> None:
         if self.snapshot_request is not None or self.stopping:
             return
@@ -5819,7 +5824,7 @@ class Client:
                                 "zone_epoch": self.zone_epoch})
         self.last_sprint_sent, self.last_aim_sent = sprint_update, aim_update
         self.last_flashlight_sent = flashlight_update
-        self.snapshot_request = asyncio.create_task(self.transport.request(request, timeout=2))
+        self.snapshot_request = asyncio.create_task(self._request_gameplay_snapshot(request))
 
     async def refresh_gameplay(self, *, project: bool = True, wait: bool = True) -> None:
         if self.check_host_end():
@@ -5829,7 +5834,7 @@ class Client:
         if pending is not None and (wait or pending.done()):
             try:
                 try:
-                    reply = await pending
+                    reply, received_at = await pending
                 except asyncio.CancelledError:
                     if self.snapshot_request is not pending:
                         return
@@ -5842,7 +5847,7 @@ class Client:
                     viewer = reply.get("viewer_role")
                     if viewer in ("guest", "guest2", "guest3", "guest4"):
                         self.viewer_role = viewer
-                    self.gameplay_seen = time.monotonic()
+                    self.gameplay_seen = received_at
                     self.server_transitioning = bool(reply.get("travel_in_progress"))
                     reservation = reply.get("native_return_reservation")
                     self.native_return_reservation = reservation if type(reservation) is int else None
