@@ -832,10 +832,14 @@ avatar.player_id = player_id
 
 function avatar.equipment_mesh(pawn, path)
     local entry = valid(pawn) and avatars[pawn:GetAddress()]
-    for _, component in ipairs(entry and entry.weapon_parts or {}) do
-        local mesh = valid(component) and component:IsA(StaticFindObject("/Script/Engine.StaticMeshComponent"))
-            and component.StaticMesh
-        if valid(mesh) and mesh:GetFullName() == "StaticMesh " .. path then return component end
+    if not entry then return end
+    local class = StaticFindObject("/Script/Engine.StaticMeshComponent")
+    if not valid(class) then return end
+    for _, component in ipairs(entry.weapon_parts or {}) do
+        if valid(component) and component:IsA(class) then
+            local mesh = component.StaticMesh
+            if valid(mesh) and mesh:GetFullName() == "StaticMesh " .. path then return component end
+        end
     end
 end
 
