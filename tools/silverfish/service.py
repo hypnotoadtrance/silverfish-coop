@@ -1101,7 +1101,7 @@ class Host:
                 self.guest["restore"]["native_guest_save"] = frame
 
     def travel_refusal(self, destination: str, roles: dict[str, str], *, respawning: bool = False,
-                       staying: bool = False) -> dict | None:
+                       staying: bool = False, exit_crossing: int | None = None) -> dict | None:
         if native_kill_volume.pending(self.last_game):
             return {"ok": False, "error": native_kill_volume.PENDING}
         if self.party["wipe"] and not respawning:
@@ -1111,8 +1111,10 @@ class Host:
         current = self.last_game.get("map", "")
         gate = travel_decision("host", current, destination, ("host",) if respawning else tuple(roles.values()),
                                self.authoritative_pawns(roles), allowed_maps=self.allowed_maps, allow_same_zone=staying)
-        if not gate["allowed"]:
-            return {"ok": False, "error": "travel_blocked", "blockers": gate["blockers"]}
+        # A stock crossing is rechecked against its original regroup point in the game thread.
+        blockers = [blocker for blocker in gate["blockers"] if exit_crossing is None or blocker["reason"] != "too_far"]
+        if blockers:
+            return {"ok": False, "error": "travel_blocked", "blockers": blockers}
         return None
 
     def travel_party_proof(self, roles: dict[str, str]) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
@@ -1158,7 +1160,7 @@ class Host:
                           dream_plan: dict | None = None, random_plan: tuple[str, dict] | None = None,
                           matrix_plan: dict | None = None, authored_plan: AuthoredRoute | None = None,
                           respawn_plan: dict | None = None, source_flushed: bool = False,
-                          recheck_party: bool = False) -> dict:
+                          recheck_party: bool = False, exit_crossing: int | None = None) -> dict:
         if holds := getattr(self, "smg_holds", None):
             await holds.settle(bridge, stop_all=True)
         source_frame = self.last_game
@@ -1197,8 +1199,11 @@ class Host:
                         and (observed_roster.get("state"), observed_roster.get("driver"))
                         != ("qualified", expected_roster.get("driver")))):
                 return {"ok": False, "error": "travel_source_changed"}
-            roles = self.roles()
-            if refusal := self.travel_refusal(destination, roles):
+            live_roles = self.roles()
+            if exit_crossing is not None and live_roles != roles:
+                return {"ok": False, "error": "travel_source_changed"}
+            roles = live_roles
+            if refusal := self.travel_refusal(destination, roles, exit_crossing=exit_crossing):
                 return refusal
             guests = self.travelling_guests()
             if source_frame.get("native_zone_party_guard") or snapshot.get("native_zone_party_guard"):
@@ -1207,7 +1212,11 @@ class Host:
                 except (KeyError, ValueError):
                     return {"ok": False, "error": "native_roster_unavailable"}
                 step = str(authored_plan.travel_time_step or 0) if authored_plan else "-"
+                if exit_crossing is not None:
+                    step = f"{step}:{exit_crossing}"
                 departure_proof = (current, step, driver, observed_host["name"], observed_host["controller"], *exact_guests)
+            if exit_crossing is not None and not departure_proof:
+                return {"ok": False, "error": "exit_crossing_unavailable"}
         stock_loading = (departure_proof is not None and (authored_plan is not None or entrance is not None)
                          and source_frame.get("native_zone_loading_support") is True
                          and not (gold_guid or blue_plan or dream_plan or random_plan or matrix_plan or respawn_plan))
@@ -1248,7 +1257,8 @@ class Host:
                             self.begin_zone_guests(transport)
                             raise
                         message = departure.get("ack", {}).get("message")
-                        if message in ("travel_source_changed", "native_roster_unavailable", "game_snapshot_unavailable", native_kill_volume.PENDING):
+                        if message in ("travel_source_changed", "native_roster_unavailable", "game_snapshot_unavailable",
+                                       "exit_crossing_unavailable", native_kill_volume.PENDING):
                             return {"ok": False, "error": message}
                         if departure_proof:
                             moving = {f"travel_blocked:{index}": character for index, character in enumerate(characters, 1)}
@@ -1347,17 +1357,20 @@ class Host:
             raise RuntimeError("The stock authored arrival could not be verified")
         return snapshot
 
-    async def travel_authored(self, bridge: Bridge, transport, route: AuthoredRoute) -> dict:
+    async def travel_authored(self, bridge: Bridge, transport, route: AuthoredRoute,
+                              *, exit_crossing: int | None = None) -> dict:
         if (not self.expanded_zones or self.stopping or self.transitioning or self.item_travel_pending()
                 or self.last_game.get("state") != "hosting" or self.last_game.get("map") != route.source):
             return {"ok": False, "error": "authored_route_unavailable"}
+        if exit_crossing is not None and (route.kind != "overlap" or not self.last_game.get("native_zone_party_guard")):
+            return {"ok": False, "error": "exit_crossing_unavailable"}
         roles = self.roles()
-        if refusal := self.travel_refusal(route.destination, roles):
+        if refusal := self.travel_refusal(route.destination, roles, exit_crossing=exit_crossing):
             return refusal
         self.transitioning = True
         try:
             return await self.switch_zone(bridge, transport, route.destination, route.entrance,
-                                          roles, authored_plan=route, recheck_party=True)
+                                          roles, authored_plan=route, recheck_party=True, exit_crossing=exit_crossing)
         finally:
             self.transitioning = False
 
@@ -3961,11 +3974,12 @@ class Host:
                 if self.stopping:
                     return
         if self.expanded_zones:
-            for sequence, route in bridge.authored_zone_requests():
-                result = await self.travel_authored(bridge, transport, route)
+            for sequence, route, crossing in bridge.authored_zone_requests():
+                result = await self.travel_authored(bridge, transport, route, exit_crossing=crossing)
                 self.control.event("native_authored_zone_request", sequence=sequence, source=route.source,
                                    destination=route.destination, actor=route.actor, entrance=route.entrance,
-                                   kind=route.kind, travel_time_step=route.travel_time_step, result=result)
+                                   kind=route.kind, travel_time_step=route.travel_time_step,
+                                   exit_crossing=crossing, result=result)
                 if not result["ok"]:
                     await self.release_native_exit(bridge, route.source)
         if self.matrix_supported:

@@ -70,6 +70,11 @@ namespace
     constexpr int countdown_timed_return = 588;
     constexpr int countdown_signal_return = 15;
     constexpr auto ttl = std::chrono::seconds(2);
+    constexpr auto approach_ttl = std::chrono::milliseconds(850);
+    constexpr auto crossing_ttl = std::chrono::seconds(8);
+    constexpr double approach_displacement_squared = 800.0 * 800.0;
+    constexpr double crossing_displacement_squared = 2400.0 * 2400.0;
+    constexpr double retreat_allowance = 60.0;
     constexpr double max_distance_squared = 1500.0 * 1500.0;
     constexpr double max_interaction_squared = 350.0 * 350.0;
     constexpr std::size_t max_remote_players = 4;
@@ -228,6 +233,31 @@ namespace
         [[nodiscard]] std::span<const RemotePlayer> players() const { return {remotes.data(), count}; }
     };
 
+    struct Point
+    {
+        double x{}, y{}, z{};
+
+        [[nodiscard]] bool finite() const { return std::isfinite(x) && std::isfinite(y) && std::isfinite(z); }
+        [[nodiscard]] Point operator-(const Point& other) const { return {x - other.x, y - other.y, z - other.z}; }
+        [[nodiscard]] double dot(const Point& other) const { return x * other.x + y * other.y + z * other.z; }
+    };
+
+    struct ExitApproach
+    {
+        Unreal::FWeakObjectPtr actor;
+        Point position;
+        Clock::time_point expires{};
+    };
+
+    struct ExitCrossing
+    {
+        Unreal::FWeakObjectPtr actor;
+        const Authored::Route* route{};
+        Point approach, crossed;
+        Clock::time_point expires{};
+        std::int64_t ticket{};
+    };
+
     struct Scope
     {
         std::uint64_t generation{};
@@ -275,6 +305,8 @@ namespace
         const Route* route{};
         RC::StringViewType authored_world;
         const Authored::Route* authored_request{};
+        ExitApproach approach;
+        ExitCrossing crossing;
         const CountdownRoute* countdown{};
         const ScriptedDreamRoute* scripted_dream{};
         std::string_view event;
@@ -287,6 +319,7 @@ namespace
     };
 
     thread_local Scope scope;
+    thread_local std::int64_t crossing_sequence{};
 
     bool env_flag(const char* name)
     {
@@ -443,8 +476,15 @@ namespace
         return dx * dx + dy * dy + dz * dz;
     }
 
-    bool allows_distance(const Scope& current, Unreal::UObject* local)
+    Point actor_position(Unreal::UObject* actor)
     {
+        auto at = static_cast<Unreal::AActor*>(actor)->K2_GetActorLocation();
+        return {at.GetX(), at.GetY(), at.GetZ()};
+    }
+
+    bool allows_distance_from(const Scope& current, const Point& at)
+    {
+        if (!at.finite()) return false;
         for (const auto& player : current.roster.players())
         {
             auto* remote = player.pawn.Get();
@@ -452,10 +492,16 @@ namespace
             {
                 return false;
             }
-            const auto squared = distance_squared(local, remote);
+            const auto delta = actor_position(remote) - at;
+            const auto squared = delta.dot(delta);
             if (!std::isfinite(squared) || squared > max_distance_squared) return false;
         }
         return true;
+    }
+
+    bool allows_distance(const Scope& current, Unreal::UObject* local)
+    {
+        return allows_distance_from(current, actor_position(local));
     }
 
     bool matches_target(Unreal::UObject* exit, Unreal::FSoftObjectProperty* level, Unreal::FStrProperty* entrance_tag,
@@ -593,6 +639,15 @@ namespace
         return true;
     }
 
+    void revoke_crossing()
+    {
+        if (!scope.crossing.ticket) return;
+        scope.crossing = {};
+        scope.authored_request = nullptr;
+        scope.request_latched = false;
+        scope.event = "request_unavailable";
+    }
+
     const char* configure(Address local_address, Address exit_address, bool host, bool accepting, std::span<const Address> remote_addresses)
     {
         if (!local_address || remote_addresses.size() > max_remote_players || (!host && !remote_addresses.empty()))
@@ -614,11 +669,15 @@ namespace
             if (const auto* failure = game_roster_failure(scope))
             {
                 scope.accepting = false;
+                scope.approach = {};
+                revoke_crossing();
                 return failure;
             }
             if (!is_local_pawn(scope.local.Get()))
             {
                 scope.accepting = false;
+                scope.approach = {};
+                revoke_crossing();
                 return "Waiting for the local player to possess the zone pawn";
             }
             scope.expires = Clock::now() + ttl;
@@ -626,6 +685,10 @@ namespace
             return nullptr;
         }
 
+        // Rebinding a visit or roster must not preserve permission from the old scope,
+        // even while the new one waits for its pawns.
+        scope.approach = {};
+        revoke_crossing();
         Scope next;
         next.pawn_class = find<Unreal::UClass>(pawn_path);
         next.exit_class = find<Unreal::UClass>(exit_path);
@@ -767,6 +830,107 @@ namespace
             !matches_target(child, field<Unreal::FSoftObjectProperty>(child, STR("NextLevel")),
                             field<Unreal::FStrProperty>(child, STR("Entrance Tag")), route.destination, route.entrance)) return nullptr;
         return child;
+    }
+
+    bool approaching(Unreal::UObject* actor, const Point& at)
+    {
+        const auto delta = at - scope.approach.position;
+        return scope.approach.actor.Get() == actor && Clock::now() < scope.approach.expires &&
+            delta.finite() && delta.dot(delta) <= approach_displacement_squared &&
+            allows_distance_from(scope, scope.approach.position);
+    }
+
+    bool crossing_current(Unreal::UObject* local)
+    {
+        const auto& crossing = scope.crossing;
+        auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
+        auto* exit = crossing.actor.Get();
+        // Source checkpointing can pause the wall heartbeat. The consumed stock overlap
+        // still has its own deadline and must keep the exact world, pawn, exit and live roster.
+        if (!scope.request_latched || !crossing.ticket || Clock::now() >= crossing.expires || !crossing.route ||
+            !world || !scope.host || !live_object(local) || actor_world(local) != world || !is_local_pawn(local) ||
+            scope.role->GetPropertyValueInContainer(local) != 3 || game_roster_failure(scope) ||
+            !is_expanded_exit(scope, exit, world, *crossing.route) || !matches_expanded_exit(exit, *crossing.route))
+            return false;
+        const auto through = crossing.crossed - crossing.approach;
+        const auto moved = actor_position(local) - crossing.crossed;
+        const auto through_squared = through.dot(through);
+        return through.finite() && through_squared >= 1.0 && moved.finite() &&
+            moved.dot(moved) <= crossing_displacement_squared &&
+            moved.dot(through) >= -retreat_allowance * std::sqrt(through_squared) &&
+            allows_distance_from(scope, crossing.approach);
+    }
+
+    int lua_exit_approach(const Lua& lua)
+    {
+        bool allowed{};
+        if (Unreal::IsInGameThreadRaw() && scope.generation == generation.load(std::memory_order_acquire) &&
+            lua.get_stack_size() == 1 && lua.is_string(1))
+        {
+            const auto name = lua.get_string();
+            auto* local = scope.local.Get();
+            if (scope.crossing.ticket && !scope.authored_request && !crossing_current(local)) revoke_crossing();
+            if (!name.empty() && name.size() <= 80 && !scope.authored_world.empty())
+            {
+                const auto* route = Authored::find(scope.authored_world, RC::to_wstring(name));
+                if (scope.crossing.route && scope.crossing.route == route)
+                {
+                    allowed = scope.authored_request || crossing_current(local);
+                }
+                else if (route && route->mode == Authored::Mode::overlap && host_is_ready(local))
+                {
+                    const auto position = actor_position(local);
+                    auto* exit = scope.approach.actor.Get();
+                    if (!allows_distance_from(scope, position))
+                    {
+                        allowed = exit && exit->GetName() == route->source_actor && approaching(exit, position);
+                    }
+                    else
+                    {
+                        auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
+                        if (!exit || exit->GetName() != route->source_actor)
+                        {
+                            auto path = RC::StringType(route->source_world);
+                            path += STR(":PersistentLevel.");
+                            path += route->source_actor;
+                            exit = find<Unreal::UObject>(path.c_str());
+                        }
+                        if (is_expanded_exit(scope, exit, world, *route) && matches_expanded_exit(exit, *route))
+                        {
+                            scope.approach.actor = exit;
+                            scope.approach.position = position;
+                            scope.approach.expires = Clock::now() + approach_ttl;
+                            allowed = true;
+                        }
+                    }
+                }
+            }
+            if (!allowed) scope.approach = {};
+        }
+        lua.set_bool(allowed);
+        return 1;
+    }
+
+    int lua_exit_crossing(const Lua& lua)
+    {
+        bool accepted{};
+        if (Unreal::IsInGameThreadRaw() && scope.generation == generation.load(std::memory_order_acquire) &&
+            lua.get_stack_size() == 3 && lua.is_integer(1) && lua.is_string(2) && lua.is_integer(3))
+        {
+            const auto ticket = lua.get_integer();
+            const auto destination = lua.get_string();
+            const auto step = lua.get_integer();
+            const bool matching = ticket > 0 && ticket == scope.crossing.ticket && scope.crossing.route &&
+                destination == RC::to_utf8_string(scope.crossing.route->destination_package) &&
+                step == scope.crossing.route->travel_time_step.value_or(0);
+            if (matching && !scope.authored_request)
+            {
+                accepted = crossing_current(scope.local.Get());
+                if (!accepted) revoke_crossing();
+            }
+        }
+        lua.set_bool(accepted);
+        return 1;
     }
 
     void queue_request(const Authored::Route* authored, std::string_view legacy_event)
@@ -973,7 +1137,9 @@ namespace
             scope.event = "host_not_ready";
             return;
         }
-        if (!allows_distance(scope, local))
+        const auto crossed = actor_position(local);
+        const bool crossed_open_wall = authored && approaching(context, crossed);
+        if (!crossed_open_wall && !allows_distance(scope, local))
         {
             scope.event = "too_far";
             return;
@@ -984,6 +1150,17 @@ namespace
             scope.event = "destination_mismatch";
             return;
         }
+        if (crossed_open_wall)
+        {
+            if (crossing_sequence >= (std::int64_t{1} << 53) - 1) return;
+            scope.crossing.actor = context;
+            scope.crossing.route = authored;
+            scope.crossing.approach = scope.approach.position;
+            scope.crossing.crossed = crossed;
+            scope.crossing.expires = Clock::now() + crossing_ttl;
+            scope.crossing.ticket = ++crossing_sequence;
+        }
+        scope.approach = {};
         queue_request(authored, secondary ? "secondary_request" : "request");
     }
 
@@ -1057,6 +1234,7 @@ namespace
         if (Unreal::IsInGameThreadRaw() && scope.generation == generation.load(std::memory_order_acquire))
         {
             scope.accepting = false;
+            scope.approach = {};
         }
         return 0;
     }
@@ -1080,9 +1258,25 @@ namespace
         const auto* route = scope.authored_request;
         scope.authored_request = nullptr;
         auto* local = scope.local.Get();
-        if (!active_host(local) || !allows_distance(scope, local))
+        if (scope.crossing.ticket && live_object(local))
+        {
+            // A swept move can report overlap before updating the actor's transform.
+            const auto original = scope.crossing.crossed - scope.crossing.approach;
+            if (original.dot(original) < 1.0)
+            {
+                const auto at = actor_position(local);
+                const auto through = at - scope.crossing.approach;
+                const auto through_squared = through.dot(through);
+                if (through.finite() && through_squared >= 1.0 && through_squared <= approach_displacement_squared)
+                    scope.crossing.crossed = at;
+                else
+                    scope.crossing = {};
+            }
+        }
+        if (scope.crossing.ticket ? !crossing_current(local) : !active_host(local) || !allows_distance(scope, local))
         {
             scope.request_latched = false;
+            scope.crossing = {};
             scope.event = "request_unavailable";
             return 0;
         }
@@ -1094,7 +1288,9 @@ namespace
         lua.set_string(route->mode == Authored::Mode::door ? "door" : "overlap");
         if (route->travel_time_step) lua.set_integer(*route->travel_time_step);
         else lua.set_nil();
-        return 6;
+        if (scope.crossing.ticket) lua.set_integer(scope.crossing.ticket);
+        else lua.set_nil();
+        return 7;
     }
 
     int lua_take_door_event(const Lua& lua)
@@ -1118,6 +1314,8 @@ namespace
         {
             scope.request_latched = false;
             scope.authored_request = nullptr;
+            scope.approach = {};
+            scope.crossing = {};
         }
         return 0;
     }
@@ -1181,6 +1379,8 @@ namespace silverfish::native_zone
         lua.register_function("SilverfishSetNativeZoneRoster", lua_set_roster);
         lua.register_function("SilverfishClearNativeZoneScope", lua_clear);
         lua.register_function("SilverfishPauseNativeZoneScope", lua_pause);
+        lua.register_function("SilverfishSetNativeExitApproach", lua_exit_approach);
+        lua.register_function("SilverfishCheckNativeExitCrossing", lua_exit_crossing);
         lua.register_function("SilverfishTakeNativeZoneEvent", lua_take_event);
         lua.register_function("SilverfishTakeNativeAuthoredRoute", lua_take_authored_route);
         lua.register_function("SilverfishTakeNativeDoorEvent", lua_take_door_event);

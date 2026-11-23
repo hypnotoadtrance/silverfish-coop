@@ -150,7 +150,7 @@ local function finite(value)
     return type(value) == "number" and value == value and math.abs(value) < math.huge
 end
 
-function native_roster.verify_party_departure(state, phase, fields)
+function native_roster.verify_party_departure(state, phase, fields, stock_crossing)
     if #fields < 8 or #fields > 24 or (#fields - 8) % 4 ~= 0 then return "native_roster_unavailable" end
     if phase ~= "hosting" or state.map ~= fields[4] or not last_scope or last_scope.id ~= fields[6] then
         return "travel_source_changed"
@@ -187,7 +187,7 @@ function native_roster.verify_party_departure(state, phase, fields)
         local dx, dy, dz = other.X - location.X, other.Y - location.Y, other.Z - location.Z
         local squared_distance = dx * dx + dy * dy + dz * dz
         if not finite(squared_distance) then return "game_snapshot_unavailable" end
-        if squared_distance > 1500 * 1500 then return "travel_blocked:" .. ((index - 9) // 4 + 1) end
+        if not stock_crossing and squared_distance > 1500 * 1500 then return "travel_blocked:" .. ((index - 9) // 4 + 1) end
     end
 end
 

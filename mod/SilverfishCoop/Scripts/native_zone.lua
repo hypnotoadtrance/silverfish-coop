@@ -136,15 +136,17 @@ end
 
 local function handle_expanded_event(map, host)
     if not expanded or type(SilverfishTakeNativeAuthoredRoute) ~= "function" then return true end
-    local source, destination, tag, actor, kind, travel_time = SilverfishTakeNativeAuthoredRoute()
+    local source, destination, tag, actor, kind, travel_time, crossing = SilverfishTakeNativeAuthoredRoute()
     if not source then return true end
     if host and source == map and heartbeat_fresh() and destination and tag and actor
         and (kind == "overlap" or kind == "door") then
         local next_sequence = sequence + 1
         local file = io.open(expanded_event_path, "ab")
         if file then
-            local written = file:write(table.concat({ "authored-request", tostring(next_sequence), source,
-                destination, tag, actor, kind, travel_time and tostring(travel_time) or "-" }, "\t"), "\n")
+            local fields = { "authored-request", tostring(next_sequence), source,
+                destination, tag, actor, kind, travel_time and tostring(travel_time) or "-" }
+            if crossing then fields[#fields + 1] = tostring(crossing) end
+            local written = file:write(table.concat(fields, "\t"), "\n")
             local closed = file:close()
             if written and closed then
                 sequence = next_sequence
@@ -1090,6 +1092,10 @@ function zone.rows(state, phase, status_row)
             proof.key, proof.locked and 1 or 0, proof.unlocked and 1 or 0)
     end
     return rows
+end
+
+function zone.update_exit(get_world)
+    wall.update(get_world)
 end
 
 return zone

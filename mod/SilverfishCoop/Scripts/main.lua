@@ -532,10 +532,22 @@ local function run_command(fields, state, current_phase)
     if command == "travel-party" then
         if not party_travel_guard_available() then return "native_roster_unavailable" end
         if native_kill_volume.capture_blocked(state, current_phase) then return "stock_kill_volume_recovery_in_progress" end
-        local checked, refusal = pcall(native_roster.verify_party_departure, state, current_phase, fields)
+        local step = fields[5]
+        local crossing
+        if step then
+            local authored_step, ticket = step:match("^(%d+):([1-9]%d*)$")
+            if ticket then
+                crossing = math.tointeger(ticket)
+                if not crossing or not expanded_routes or type(SilverfishCheckNativeExitCrossing) ~= "function"
+                    or not SilverfishCheckNativeExitCrossing(crossing, argument, tonumber(authored_step)) then
+                    return "exit_crossing_unavailable"
+                end
+                step = authored_step
+            end
+        end
+        local checked, refusal = pcall(native_roster.verify_party_departure, state, current_phase, fields, crossing)
         if not checked then return "native_roster_unavailable" end
         if refusal then return refusal end
-        local step = fields[5]
         if step ~= "-" and (not expanded_routes or not math.tointeger(tonumber(step))) then
             error("Expected the stock authored travel time step", 0)
         end
@@ -1835,6 +1847,7 @@ local next_snapshot = 0
 LoopInGameThreadWithDelay(25, function()
     pcall(native_zone_loading.refresh, current_world)
     if not leaving then pcall(native_prop_carry.update) end
+    if role == "host" and not leaving then pcall(native_zone.update_exit, current_world) end
     if role == "host" and not leaving then pcall(native_weapon_fire_view.flush, current_world) end
     if not leaving then pcall(native_voice.footsteps.update, current_world) end
     if native_avatar_lean_bridge.enabled then pcall(native_avatar_lean_bridge.update, current_world, role, leaving) end

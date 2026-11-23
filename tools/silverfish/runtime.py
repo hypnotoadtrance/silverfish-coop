@@ -1155,7 +1155,7 @@ class Bridge:
         return [request for line in batch[:end].splitlines()
                 if (request := parse_matrix_request(line.decode("utf-8", errors="replace").split("\t")))]
 
-    def authored_zone_requests(self) -> list[tuple[int, AuthoredRoute]]:
+    def authored_zone_requests(self) -> list[tuple[int, AuthoredRoute, int | None]]:
         try:
             with (self.directory / "native-authored-exit-events").open("rb") as stream:
                 stream.seek(self.authored_zone_offset)
@@ -1167,15 +1167,22 @@ class Bridge:
         requests = []
         for raw in batch[:end].splitlines():
             fields = raw.decode("utf-8", errors="replace").split("\t")
-            if len(fields) != 8 or fields[0] != "authored-request" or not fields[1].isascii() \
+            if len(fields) not in (8, 9) or fields[0] != "authored-request" or not fields[1].isascii() \
                     or not fields[1].isdigit() or len(fields[1]) > 12:
                 continue
-            source, destination, entrance, actor, kind, step = fields[2:]
+            source, destination, entrance, actor, kind, step = fields[2:8]
+            crossing = None
+            if len(fields) == 9:
+                token = fields[8]
+                if (kind != "overlap" or not token.isascii() or not token.isdigit() or len(token) > 16
+                        or not 0 < int(token) < 2**53):
+                    continue
+                crossing = int(token)
             match = next((route for route in AUTHORED_ROUTES if route.source == source and route.actor == actor), None)
             if match and (match.destination, match.entrance, match.kind,
                           "-" if match.travel_time_step is None else str(match.travel_time_step)) == (
                           destination, entrance, kind, step):
-                requests.append((int(fields[1]), match))
+                requests.append((int(fields[1]), match, crossing))
         return requests
 
     def snapshot(self) -> dict | None:
