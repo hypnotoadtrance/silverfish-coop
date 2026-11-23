@@ -23,14 +23,14 @@ PROBE = "SilverfishAvatarProbe"
 
 
 @contextmanager
-def installed_probe(work):
+def installed_probe(work, fixture="avatar_presentation_probe.lua"):
     mod = work / "stage/SilverFish/Binaries/Win64/ue4ss/Mods" / PROBE
     mod.mkdir()
     scripts = mod / "Scripts"
     script, activation = scripts / "main.lua", mod / "enabled.txt"
     try:
         scripts.mkdir()
-        shutil.copyfile(Path(__file__).with_name("fixtures") / "avatar_presentation_probe.lua", script)
+        shutil.copyfile(Path(__file__).with_name("fixtures") / fixture, script)
         activation.touch()
         yield
     finally:
@@ -66,6 +66,50 @@ async def avatar_probe(run, operation, *, allow_pending=False):
             except (FileNotFoundError, PermissionError):
                 pass
             await asyncio.sleep(.025 if operation == "rig" else .1)
+
+
+async def observe_stock_flashlight(host_run, guest_run):
+    async def owner(operation):
+        values = await avatar_probe(host_run, operation)
+        player, source, role, replicated, powered, visible, *data = values
+        x, y, z, pitch, yaw, roll, intensity, radius, inner, outer, cookie, calls, clicks = data
+        return dict(player=int(player), source=source, role=role, replicated=replicated == "true",
+                    powered=powered == "true", visible=visible == "true", location=list(map(float, (x, y, z))),
+                    rotation=list(map(float, (pitch, yaw, roll))), intensity=float(intensity), radius=float(radius),
+                    inner=float(inner), outer=float(outer), light_cookie=cookie, power_calls=int(calls), click_calls=int(clicks))
+
+    async def observer(player):
+        remote, sources, powered, spotlights, pawn_lights = await avatar_probe(guest_run, f"observe{player}")
+        return dict(remote=remote, sources=int(sources), powered_sources=int(powered), visible_source_spotlights=int(spotlights),
+                    visible_pawn_spotlights=int(pawn_lights))
+
+    seeded = await owner("seedlight")
+    try:
+        equipped_mesh = "SM_Prop_Flashlight_01.SM_Prop_Flashlight_01"
+
+        def shows_flashlight(state):
+            avatars = state.get("game", {}).get("native_player_avatars", {}).values()
+            return any(row.get("player_id") == seeded["player"] and any(mesh.endswith(equipped_mesh)
+                       for mesh in row.get("weapon_meshes", ())) for row in avatars)
+
+        mounted = await wait(guest_run, shows_flashlight)
+        baseline = await owner("lightoff") if seeded["powered"] else seeded
+        before = await observer(seeded["player"])
+        lit = await owner("lighton")
+        seen_lit = await observer(seeded["player"])
+        unlit = await owner("lightoff")
+        seen_unlit = await observer(seeded["player"])
+        assert seeded["source"] == lit["source"] == unlit["source"], (seeded, lit, unlit)
+        assert not baseline["visible"] and lit["powered"] and lit["visible"] and not (unlit["powered"] or unlit["visible"])
+        assert lit["intensity"] > 0 and lit["radius"] > 0 and 0 <= lit["inner"] <= lit["outer"] <= 90, lit
+        assert before["remote"] == seen_lit["remote"] == seen_unlit["remote"]
+        evidence = {"equipped_mesh": equipped_mesh, "observer_display": mounted["game"]["native_player_avatars"][before["remote"]],
+                    "owner": {"off": baseline, "on": lit, "off_again": unlit},
+                    "observer": {"off": before, "on": seen_lit, "off_again": seen_unlit},
+                    "stock_switch_cue_observed": unlit["click_calls"] - baseline["click_calls"]}
+    finally:
+        assert await avatar_probe(host_run, "clearlight") == ["restored"]
+    return evidence
 
 
 async def verify_pose(host_run, guest_run):
@@ -276,13 +320,15 @@ async def verify_aim_movement(host_run, guest_run, command, host, guest, project
 async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: bool = False,
                   melee: bool = False, pose: bool = False, rifle: bool = False,
                   consumable: bool = False, movement: bool = False, movement_traits: bool = False,
-                  aim_movement: bool = False, stock_shotgun_aim: bool = False) -> None:
+                  aim_movement: bool = False, stock_shotgun_aim: bool = False, flashlight_source: bool = False) -> None:
     profile = "avatar-" + uuid.uuid4().hex[:8]
     host_dir = work / "campaigns" / profile
     guest_dir = work / "clients" / profile
     host_run, guest_run = host_dir / "run", guest_dir / "run"
     host_run.mkdir(parents=True)
     env = dict(os.environ, SILVERFISH_COOP_RENDER_CAPTURE="guest")
+    if flashlight_source:
+        env["SILVERFISH_COOP_FLASHLIGHT_PROBE"] = "1"
     if pose:
         env["SILVERFISH_COOP_RENDER_CAPTURE_POSE"] = "1"
     if rifle or aim_movement:
@@ -344,6 +390,11 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             state = await wait(run, projections)
             evidence[role] = projections(state)
             assert all(row["state"] == "default_body" for row in evidence[role].values()), evidence
+        if flashlight_source:
+            await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+            evidence["stock_flashlight_source_observation"] = await observe_stock_flashlight(host_run, guest_run)
+            (host_run / "live-avatar-verification.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+            return
         if lifecycle:
             identity = invitation["character_id"]
         if movement and not (equipment or rifle or aim_movement):
@@ -619,7 +670,13 @@ if __name__ == "__main__":
                         help="verify pistol and break-action ADS while strafing, crouching, and crouch-walking")
     parser.add_argument("--stock-shotgun-aim", action="store_true",
                         help="exercise the suppressed shotgun's native ADS without a primary-fire scope")
+    parser.add_argument("--flashlight-source", action="store_true",
+                        help="observe a stock flashlight switch, beam source, and remote visibility in a private pair")
     options = parser.parse_args()
+    if options.flashlight_source and any((options.lifecycle, options.equipment, options.melee, options.pose, options.rifle,
+                                         options.consumable, options.movement, options.movement_traits, options.aim_movement,
+                                         options.stock_shotgun_aim)):
+        parser.error("Use --flashlight-source without other avatar fixtures")
     if options.melee and (not options.equipment or options.lifecycle):
         parser.error("--melee requires --equipment and runs independently of --lifecycle")
     if options.movement_traits:
@@ -634,10 +691,15 @@ if __name__ == "__main__":
     if options.stock_shotgun_aim and (not options.aim_movement or options.rifle):
         parser.error("--stock-shotgun-aim requires --aim-movement and replaces the break-action rifle")
     work = options.work.resolve(strict=True)
-    with installed_probe(work) if any(
+    original = options.vanilla_saved.resolve(strict=True)
+    if options.flashlight_source and (any(part.casefold() == "steamapps" for part in work.parts)
+                                     or work.is_relative_to(original) or original.is_relative_to(work)):
+        parser.error("Use a private flashlight replica separate from the comparison saves")
+    fixture = "flashlight_source_probe.lua" if options.flashlight_source else "avatar_presentation_probe.lua"
+    with installed_probe(work, fixture) if any(
         (options.equipment, options.pose, options.rifle, options.consumable, options.movement, options.aim_movement)
-    ) else nullcontext():
-        asyncio.run(capture(work, options.vanilla_saved.resolve(strict=True),
+    ) or options.flashlight_source else nullcontext():
+        asyncio.run(capture(work, original,
                             options.lifecycle, options.equipment, options.melee, options.pose,
                             options.rifle, options.consumable, options.movement, options.movement_traits,
-                            options.aim_movement, options.stock_shotgun_aim))
+                            options.aim_movement, options.stock_shotgun_aim, options.flashlight_source))
