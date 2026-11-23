@@ -976,7 +976,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if compact_crate_status:
             proof["crate_status_overlay"] = {str(game): probes.enter_context(compact_crate_status_overlay(game)) for game in games}
         if compact_world_view:
-            proof["world_view_overlay"] = probes.enter_context(portable_main_overlay(second_game, patch_world_view_receipts))
+            proof["world_view_overlay"] = {
+                str(game): probes.enter_context(portable_main_overlay(game, patch_world_view_receipts)) for game in games
+            }
         if stock_crate_ring or compact_crate_status:
             probes.enter_context(installed_probe(second_game, mod="SilverfishPortableCrateProbe",
                                                  fixture="portable_crate_input_probe.lua"))
