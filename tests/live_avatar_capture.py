@@ -61,9 +61,9 @@ async def avatar_probe(run, operation, *, allow_pending=False):
             try:
                 fields = response.read_text(encoding="utf-8").rstrip().split("\t")
                 if fields[0] == ticket and len(fields) >= 2:
-                    if allow_pending and fields[1].endswith("avatar_probe_rig_pending"):
+                    if allow_pending and fields[1] == "error" and fields[-1].endswith("avatar_probe_rig_pending"):
                         return
-                    assert fields[1] == "ok", fields[1]
+                    assert fields[1] == "ok", fields[-1]
                     return fields[2:]
             except (FileNotFoundError, PermissionError):
                 pass

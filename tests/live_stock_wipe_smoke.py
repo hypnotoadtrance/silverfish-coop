@@ -2,13 +2,16 @@
 
 import argparse
 import asyncio
+from contextlib import nullcontext
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import time
 import uuid
 
+from live_avatar_capture import avatar_probe, installed_probe
 from live_multi_smoke import saved_hashes
 from live_wanderer_preset_smoke import DIFFICULTY_RULES, SEED
 
@@ -18,7 +21,7 @@ LOOSE_PICKUP = "observatory-comp-board"
 
 
 async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, authored_pickup: bool, stock_rules: bool,
-                   wipe_view: bool, difficulty: str | None = None) -> None:
+                   wipe_view: bool, difficulty: str | None = None, downed_aim: bool = False) -> None:
     name = "stock-wipe-" + uuid.uuid4().hex[:8]
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
@@ -94,7 +97,21 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
         await action(primary, "native-guest-weapon-seed", "--item-guid", gun)
         await action(secondary, "native-guest-weapon-equip", "--target", gun)
         await action(primary, "native-guest-weapon-seed-ammo", "--item-guid", reserve)
+        if downed_aim:
+            async with asyncio.timeout(10):
+                while not (aiming := await avatar_probe(guest, "aim", allow_pending=True)):
+                    await asyncio.sleep(.15)
+            assert aiming == ["aiming"], aiming
         await action(primary, "native-guest-damage", "--target", "guest")
+        if downed_aim:
+            def guest_is_crouched_and_downed(status):
+                game = status.get("game", {})
+                effects = game.get("player_effects", {}).get("local", {})
+                return effects.get("state") == "downed" and effects.get("crouched")
+
+            downed = await wait(guest, guest_is_crouched_and_downed)
+            lowered = await avatar_probe(guest, "aimstate")
+            assert lowered == ["lowered"], lowered
         await action(primary, "native-host-damage", "--target", "host")
         if keep_slots:
             await wait(host, lambda status: (status.get("gameplay", {}).get("wipe") or {}).get("keep_slots") == keep_slots)
@@ -169,6 +186,9 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
                  "difficulty": difficulty, "keep_slots": keep_slots}
         if wipe_view:
             proof["native_inventory_selection_input"] = submitted
+        if downed_aim:
+            proof["guest_aim_released_on_down"] = {"before": aiming[0], "downed": lowered[0],
+                                                  "movement": downed["game"]["player_effects"]["local"]}
         if visible_bag:
             await wait(guest, lambda status: status.get("game", {}).get("state") == "connected"
                        and not status["game"].get("native_bag_projection", {}).get("count")
@@ -229,10 +249,15 @@ if __name__ == "__main__":
     arguments.add_argument("--stock-rules", action="store_true")
     arguments.add_argument("--difficulty", choices=("Respawn_WtPenalty", "Decimation"))
     arguments.add_argument("--wipe-view", action="store_true")
+    arguments.add_argument("--downed-aim", action="store_true")
     options = arguments.parse_args()
     if options.difficulty and options.stock_rules:
         arguments.error("Choose a stock difficulty preset or custom stock extraction fields")
     if options.difficulty == "Decimation" and options.wipe_view:
         arguments.error("Decimation has no retained item selector")
-    asyncio.run(validate(options.work.resolve(), options.vanilla_saved, options.visible_bag, options.authored_pickup,
-                         options.stock_rules, options.wipe_view, options.difficulty))
+    work = options.work.resolve()
+    if options.downed_aim:
+        os.environ["SILVERFISH_COOP_WIPE_AIM_PROBE"] = "1"
+    with installed_probe(work) if options.downed_aim else nullcontext():
+        asyncio.run(validate(work, options.vanilla_saved, options.visible_bag, options.authored_pickup,
+                             options.stock_rules, options.wipe_view, options.difficulty, options.downed_aim))

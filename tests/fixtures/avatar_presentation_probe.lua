@@ -13,7 +13,10 @@ local host_fixture = mailbox and mailbox:match("[/\\]campaigns[/\\]avatar%-%x+[/
 local portable_fixture = mailbox
     and mailbox:match("[/\\]portable%-title%-%x+[/\\]first[/\\]titles[/\\]local[/\\]run[/\\]game%-bridge[/\\]%x+$")
     and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
-if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not (guest_fixture or host_fixture or portable_fixture) then return end
+local wipe_fixture = mailbox and mailbox:match("[/\\]clients[/\\]stock%-wipe%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
+    and os.getenv("SILVERFISH_COOP_WIPE_AIM_PROBE") == "1"
+if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1"
+    or not (guest_fixture or host_fixture or portable_fixture or wipe_fixture) then return end
 
 local command, reply = mailbox .. "/avatar-probe-command.tsv", mailbox .. "/avatar-probe-reply.tsv"
 local map = portable_fixture and "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
@@ -353,6 +356,39 @@ local function movement_probe(operation, local_pawn, remote_pawn)
 end
 
 local function run(operation)
+    if wipe_fixture then
+        local viewport = FindFirstOf("GameViewportClient")
+        local world = valid(viewport) and viewport.World
+        local driver = valid(world) and world.NetDriver
+        assert(valid(driver) and valid(driver.ServerConnection)
+            and world:GetFullName() == "World /Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P",
+            "avatar_probe_wipe_connection_unavailable")
+        local pawn
+        for _, candidate in ipairs(FindAllOf("Player_FP_C") or {}) do
+            if valid(candidate) and same(candidate:GetWorld(), world) and candidate:IsLocallyControlled()
+                and not candidate:HasAuthority() and not candidate:IsActorBeingDestroyed() then
+                assert(not pawn, "avatar_probe_duplicate_local_guest")
+                pawn = candidate
+            end
+        end
+        assert(pawn, "avatar_probe_rig_pending")
+        if operation == "aim" then
+            assert(not pawn.IsWeaponBlocked and valid(pawn.Save), "avatar_probe_wipe_aim_unavailable")
+            local held = pawn.EquipedItem
+            if not valid(held) then
+                local slots = pawn.Save.PlayerEquipment
+                assert(slots:GetArrayNum() > 1 and valid(slots[2][item_class]), "avatar_probe_rig_pending")
+                pawn:Equip_NextItem(1, false)
+                held = pawn.EquipedItem
+            end
+            assert(valid(held) and same(held.User, pawn), "avatar_probe_rig_pending")
+            held:Use_Item_Secondary(true)
+            assert(pawn.Aiming, "avatar_probe_stock_aim_failed")
+        else
+            assert(operation == "aimstate", "avatar_probe_unknown_wipe_operation")
+        end
+        return pawn.Aiming and "aiming" or "lowered"
+    end
     assert(not portable_fixture or operation == "consume", "avatar_probe_unknown_portable_operation")
     local movement_operation = sprint_fixture and movement_operations[operation]
         or aim_movement_fixture and aim_movement_operations[operation]
