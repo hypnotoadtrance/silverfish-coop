@@ -1313,12 +1313,22 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         local seen = native_world_view.status(state, current_phase)
         if seen then rows[#rows + 1] = world_view_row("applied", seen) end
     end
-    local viewed_health = native_save_scope.guest_health(state, current_phase)
+    local viewed_health, viewed_food, viewed_regen = native_save_scope.guest_vitals(state, current_phase)
     for _, details in ipairs(state.pawns) do
         if finite(details.x) and finite(details.y) and finite(details.z) then
             local health = details == state.local_pawn and viewed_health or details.health
             rows[#rows + 1] = status_row("pawn", details.slot or details.kind, details.name, health or "-",
                 details.x, details.y, details.z, details.controller, details.max_health or "-")
+            local food, regen
+            if details == state.local_pawn then
+                food, regen = viewed_food, viewed_regen
+            elseif current_phase == "hosting" and valid(details.save) and guest_save.matches(details.pawn) then
+                food, regen = details.save.PlayerFood, details.save.PlayerRegen
+            end
+            if finite(food) or finite(regen) then
+                rows[#rows + 1] = status_row("native-guest-vitals", details.name, finite(food) and food or "-",
+                    finite(regen) and regen or "-")
+            end
         end
     end
     for _, row in ipairs(native_player_avatar.rows(status_row)) do rows[#rows + 1] = row end

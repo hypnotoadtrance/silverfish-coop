@@ -119,6 +119,17 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GameplayStatusTests(unittest.TestCase):
+    def test_guest_vitals_are_separate_from_pawn_identity_and_ignored_at_title(self):
+        bridge = runtime.Bridge(Path("unused"), None)
+        pawn = "Player_FP_C OwnedGuest"
+        header = "schema\t1\nseq\t42\nsession\tclient\t{}\tObservatory\t1\t0\n"
+        rows = f"pawn\tlocal\t{pawn}\t120\t1\t2\t3\tController\t250\n"
+        rows += f"native-guest-vitals\t{pawn}\t54.2\t210.75\n"
+        parsed = bridge._parse_status(header.format("connected") + rows)
+        self.assertEqual(parsed["native_guest_vitals"], {pawn: {"food": 54.2, "regen": 210.75}})
+        self.assertEqual(parsed["pawns"]["local"]["health"], 120)
+        self.assertNotIn("native_guest_vitals", bridge._parse_status(header.format("ready") + rows))
+
     def test_explosive_drum_status_accepts_authored_alias_and_keeps_old_blast_counts(self):
         bridge = runtime.Bridge(Path("unused"), None)
         area = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"

@@ -318,11 +318,17 @@ class NativeGuestHealthViewTests(unittest.IsolatedAsyncioTestCase):
                      "pawns": {"local": self.body}, "native_client_damage": {"pawn": self.pawn, "dead": False},
                      "ack": {"message": "stock co-op guest health projected"}}
 
-        async def command(operation, area, session, epoch, token, name, health, maximum, *, timeout):
+        async def command(operation, area, session, epoch, token, name, health, maximum, *vitals, timeout):
             self.assertEqual((operation, area, session, epoch, token, name, timeout),
                              (native_guest_ui.HEALTH_PROJECT, self.area, self.session, self.epoch, self.token.hex,
                               self.body["name"], 1.5))
             self.body.update(health=float(health), max_health=float(maximum))
+            if vitals:
+                food, regen = vitals
+                view = self.game.setdefault(native_guest_ui.VITALS, {}).setdefault(name, {})
+                for field, value in (("food", food), ("regen", regen)):
+                    if value != "-":
+                        view[field] = float(value)
             return self.game
 
         self.bridge = SimpleNamespace(command=AsyncMock(side_effect=command))
@@ -341,6 +347,49 @@ class NativeGuestHealthViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(native_guest_ui.health_frame(game, self.epoch, str(self.token), {**member, "pawn": "stale"}, player))
         player["downed"] = True
         self.assertEqual(native_guest_ui.health_frame(game, self.epoch, str(self.token), member, player)["health"], 0)
+
+    def test_vitals_are_from_the_exact_bound_pawn_and_independent_of_downed_hp(self):
+        member = {"connected": True, "alias": "guest2", "pawn": self.pawn}
+        character = str(self.token)
+        player = {"character_id": character, "downed": True}
+        game = {"state": "hosting", "map": self.area, "pawns": {"guest2": self.body},
+                native_guest_ui.VITALS: {self.pawn: {"food": 54.2, "regen": 112.8},
+                                        "Player_FP_C Unrelated": {"food": 196.1, "regen": 249.9}}}
+        frame = native_guest_ui.health_frame(game, self.epoch, character, member, player)
+        self.assertEqual((frame["health"], frame["food"], frame["regen"]), (0, 54.2, 112.8))
+        del game[native_guest_ui.VITALS][self.pawn]
+        frame = native_guest_ui.health_frame(game, self.epoch, character, member, player)
+        self.assertNotIn("food", frame)
+        self.assertNotIn("regen", frame)
+
+    async def test_food_and_regeneration_ceiling_update_with_unchanged_hp(self):
+        self.frame.update(food=54.2, regen=112.8)
+        await self.view.sync_health(self.client, True)
+        view = self.game[native_guest_ui.VITALS][self.pawn]
+        self.assertEqual(view, {"food": 54.2, "regen": 112.8})
+        self.frame["food"] = 84.2
+        self.client.gameplay_seen = time.monotonic()
+        await self.view.sync_health(self.client, True)
+        self.assertEqual(view, {"food": 84.2, "regen": 112.8})
+        self.frame["regen"] = 79.1
+        self.client.gameplay_seen = time.monotonic()
+        await self.view.sync_health(self.client, True)
+        self.assertEqual(view, {"food": 84.2, "regen": 79.1})
+        self.assertEqual((self.body["health"], self.body["max_health"]), (74, 250))
+        self.frame["food"] = 84.195
+        self.client.gameplay_seen = time.monotonic()
+        await self.view.sync_health(self.client, True)
+        self.assertEqual(self.bridge.command.await_count, 3)
+
+    async def test_unqualified_optional_values_leave_the_legacy_health_projection_usable(self):
+        self.frame.update(food=True, regen=251)
+        await self.view.sync_health(self.client, True)
+        self.assertEqual(self.body["health"], 74)
+        self.assertNotIn(native_guest_ui.VITALS, self.game)
+        self.frame["food"] = 0
+        self.client.gameplay_seen = time.monotonic()
+        await self.view.sync_health(self.client, True)
+        self.assertEqual(self.game[native_guest_ui.VITALS][self.pawn], {"food": 0})
 
     async def test_live_health_coalesces_and_updates_through_heal_and_rejoin(self):
         await self.view.sync_health(self.client, True)
