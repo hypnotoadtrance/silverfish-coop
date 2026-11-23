@@ -340,6 +340,8 @@ The cooked Tutorial Dock level contains four placed `NPC_Survivor_Worker_Light_C
 
 The same build also crossed the stock Observatory exit into Tutorial Dock in a second muted pair. The guest reselected the Rusty Pistol through the stock hotbar after loading and kept seven rounds in the magazine. One shot at the map-placed worker `NPC_Survivor_Worker_C_1` reduced the magazine to six. Both peers showed the worker dead, a simulating ragdoll, and one corpse marker. The test staged that worker at one health and moved it into a clear firing lane. It verifies authoritative firing and death in the destination map. Natural targeting and a full fight still need playtesting. [Tutorial Dock combat test](../tests/live_portable_title_smoke.py)
 
+RC `cb28747` shares the host's downed-player list with stock NPC and turret combat. Replicated NPCs leave strike execution to the host. A staged Tutorial Dock trial used the worker `NPC_Survivor_Worker_C_0` and the stock threat selector. Its melee strike took 30 health from the guest, played the guest's hurt cue, and left the host at 250 health. The worker switched to the standing host after the guest went down. The host blocked the stock aggro event for the downed guest and canceled a queued strike targeting them. The guest replica's own strike also stopped before the stock cooldown call. Roaming target acquisition and remote swing animation remain open. [Tutorial Dock strike test](../tests/live_portable_title_smoke.py)
+
 ### Steam hosting options
 
 - The in-game Host flow offers a transport choice. Direct IP uses the configured port and address. Steam Networking opens a Steam lobby when the campaign is ready.

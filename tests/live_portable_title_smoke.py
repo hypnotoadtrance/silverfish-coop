@@ -826,7 +826,24 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str) -> dic
             if all(row.startswith("false;true;1;") for row in result):
                 break
             await asyncio.sleep(.05)
-    return {"tutorial_dock_combat": {"before": seen, "native_shot": shot, "both_peers_dead_and_ragdolled": result}}
+    assert await command(guest, "dock-strike") == "0", "the simulated worker executed its own strike"
+    started = time.time()
+    host_hp, before, after, attacker = (await command(host, "dock-strike")).split(";")
+    async with asyncio.timeout(8):
+        while True:
+            injuries = [row for row in await resident_events(guest_run, frame)
+                        if row["event"] == "native_guest_hurt_played" and row["time_unix"] >= started]
+            if injuries:
+                break
+            await asyncio.sleep(.05)
+    hurt, = injuries
+    assert hurt["damage"] > 0 and math.isclose(float(before) - float(after), hurt["damage"], abs_tol=1e-5), hurt
+    return {"tutorial_dock_combat": {"before": seen, "native_shot": shot, "both_peers_dead_and_ragdolled": result,
+                                     "stock_melee": {"attacker": attacker, "host_health": float(host_hp),
+                                                     "guest_before": float(before), "guest_after": float(after),
+                                                     "guest_hurt_cue": hurt, "replica_strike_denied": True,
+                                                     "retargeted_when_guest_downed": True,
+                                                     "downed_aggro_and_queued_strike_denied": True}}}
 
 
 async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool = False, rusty: bool = False) -> dict:

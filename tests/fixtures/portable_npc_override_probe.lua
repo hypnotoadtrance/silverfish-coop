@@ -394,15 +394,15 @@ local function turret_state(pawn, world, host, action)
         tostring(turret:ActorHasTag(FName("Dead", EFindName.FNAME_Find))))
 end
 
-local function dock_worker(world)
+local function dock_worker(world, name)
     for _, actor in ipairs(FindAllOf("NPC_Survivor_Worker_Light_C") or {}) do
         if valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
-            and actor:GetFName():ToString() == "NPC_Survivor_Worker_C_1" then return actor end
+            and actor:GetFName():ToString() == name then return actor end
     end
 end
 
 local function dock_combat(pawn, world, host, action)
-    local actor = dock_worker(world)
+    local actor = dock_worker(world, "NPC_Survivor_Worker_C_1")
     if not valid(actor) then return "absent" end
     assert(actor.bReplicates and actor:GetLocalRole() == (host and 3 or 1), "the stock Dock worker needs one authority")
     if action == "dock-stage" then
@@ -428,6 +428,92 @@ local function dock_combat(pawn, world, host, action)
         eyes, actor:GetFullName())
 end
 
+local attack_probe
+local attack_probe_hooked = false
+local dock_attacker = "NPC_Survivor_Worker_C_0"
+
+local function observe_strike(actor)
+    if not attack_probe_hooked then
+        RegisterHook("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:Lunge_CoolDown", function(context)
+            if attack_probe and same(context:get(), attack_probe.actor) then
+                attack_probe.calls = attack_probe.calls + 1
+            end
+        end)
+        attack_probe_hooked = true
+    end
+    local sample = {actor=actor, calls=0}
+    attack_probe = sample
+    actor:ResolveMelee()
+    attack_probe = nil
+    return sample.calls
+end
+
+local function place_striker(actor, guest)
+    local center = guest:K2_GetActorLocation()
+    local radius = math.min(actor.Melee_SweepRange - 12, 135)
+    assert(radius > 75, "stock worker melee range is too short for the test lane")
+    actor.CharacterMovement:DisableMovement()
+    actor:SetActorTickEnabled(false)
+    if valid(actor.Controller) then actor.Controller:SetActorTickEnabled(false) end
+    for step = 0, 7 do
+        local angle = step * math.pi / 4
+        local point = {X=center.X+radius*math.cos(angle), Y=center.Y+radius*math.sin(angle), Z=center.Z}
+        if actor:K2_SetActorLocation(point, false, {}, true) then
+            actor:K2_SetActorRotation(heading(point, center), true)
+            local hit = {}
+            local found = trace:LineTraceSingle(actor, point, center, 0, false, {}, 0, hit, true, color, color, 0)
+            hit = hit.OutHit or hit
+            local component = hit.Component and hit.Component:Get()
+            if found and valid(component) and same(component:GetOwner(), guest) then
+                actor:ForceNetUpdate()
+                return
+            end
+        end
+    end
+    error("no clear strike lane to the authoritative guest")
+end
+
+local function dock_strike(pawn, world, host)
+    local actor = dock_worker(world, dock_attacker)
+    if not valid(actor) then return "absent" end
+    assert(actor.bReplicates and actor:GetLocalRole() == (host and 3 or 1) and actor.Alive,
+        "the test requires the living placed worker")
+    if not host then
+        local prior = actor.CombatTarget
+        actor.CombatTarget = pawn
+        local calls = observe_strike(actor)
+        actor.CombatTarget = valid(prior) and prior or nil
+        return tostring(calls)
+    end
+    local guest = authoritative_guest(world)
+    place_striker(actor, guest)
+    actor.TargetList = {}
+    actor.CombatTarget = nil
+    actor:AddTargetToList(guest, {})
+    local selection = {}
+    actor:GetNewCombatTarget(selection)
+    assert(selection.NewTargetFound == true and same(actor.CombatTarget, guest),
+        "the stock threat selector did not pick the standing guest")
+    local host_before, before = pawn.Save.PlayerHealth, guest.Save.PlayerHealth
+    assert(observe_strike(actor) == 1, "the host stock melee did not run once")
+    local after = guest.Save.PlayerHealth
+    assert(after > 0 and after < before and pawn.Save.PlayerHealth == host_before,
+        ("the stock strike did not damage the guest alone: %s to %s"):format(before, after))
+
+    actor:AddTargetToList(pawn, {})
+    project_downed(guest, "downed")
+    local retargeted = same(actor.CombatTarget, pawn)
+    actor:Agro_Buffer(guest, true, true, true, true)
+    local stayed_on_host = same(actor.CombatTarget, pawn)
+    actor.CombatTarget = guest
+    local queued = observe_strike(actor)
+    actor.CombatTarget = pawn
+    project_downed(guest, "standing")
+    assert(retargeted and stayed_on_host and queued == 0 and guest.Save.PlayerHealth == after,
+        ("downed checks failed: retarget=%s ignore=%s strike=%s"):format(tostring(retargeted), tostring(stayed_on_host), queued))
+    return ("%.6f;%.6f;%.6f;%s"):format(host_before, before, after, actor:GetFullName())
+end
+
 local function run(action, actor_path)
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
@@ -448,6 +534,8 @@ local function run(action, actor_path)
         shooter.Controller:SetControlRotation(angle)
         if host then shooter.Camera:K2_SetWorldRotation(angle, false, {}, true) end
         return "ready"
+    elseif action == "dock-strike" then
+        return dock_strike(pawn, world, host)
     elseif action == "dock-stage" or action == "dock-worker" then
         return dock_combat(pawn, world, host, action)
     end
