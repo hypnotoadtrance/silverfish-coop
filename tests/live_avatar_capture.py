@@ -84,18 +84,30 @@ def flashlight_observer(values):
                 displayed_flashlight_mesh_count=int(display_meshes))
 
 
-async def observe_guest_stock_flashlight(host_run, guest_run, *, verify_view=False):
-    proof_path = host_run / "live-guest-flashlight-source-probe.json"
+async def observe_guest_stock_flashlight(host_run, guest_run, *, verify_view=False, heavy=False):
+    proof_path = host_run / ("live-guest-heavy-flashlight-source-probe.json" if heavy
+                             else "live-guest-flashlight-source-probe.json")
     proof = {"verified": False, "phases": {}}
     selection_events = ("native_guest_equipment_selected", "native_guest_equipment_selection_rejected")
+    heavy_asset = "/Game/Classes/Equipment/Eqp_Heavy_Flashlight.Eqp_Heavy_Flashlight_C"
+    heavy_mesh = ("/Game/Assets/StaticMeshes/Mesh_Props/PropActor_Meshes/"
+                  "SM_Prop_Flashlight_02.SM_Prop_Flashlight_02")
 
     def record():
         proof["selection_events"] = {key: events(guest_run, key)[-4:] for key in selection_events}
         proof_path.write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
 
     def owner(values):
+        if heavy:
+            values, geometry = values[:-14], values[-14:]
         guid, stacks, mode = values[-3:]
-        return dict(flashlight_owner(values[:-3]), slot_guid=guid, stacks=stacks, stock_mode=mode)
+        row = dict(flashlight_owner(values[:-3]), slot_guid=guid, stacks=stacks, stock_mode=mode)
+        if heavy:
+            mesh, profile, *axes = geometry
+            x, y, z, pitch, yaw, roll, sx, sy, sz, r, g, b = map(float, axes)
+            row.update(mesh=mesh, stock_profile=profile, relative_position=[x, y, z], relative_rotation=[pitch, yaw, roll],
+                       relative_scale=[sx, sy, sz], color=[r, g, b])
+        return row
 
     async def phase(name, row, *, switch=None):
         table = proof["phases"][name] = {"owner": row}
@@ -121,16 +133,26 @@ async def observe_guest_stock_flashlight(host_run, guest_run, *, verify_view=Fal
                 table["last_host_view"] = host_game.get("native_guest_flashlight_view")
                 table["last_guest_source"] = guest_game.get("native_guest_flashlight_source")
                 record()
-        values = await avatar_probe(host_run, f"observe{row['player']}")
-        guid, held_class, mode, power = values[-4:]
-        table["host"] = dict(flashlight_observer(values[:-4]), slot_guid=guid, authoritative_equipment=held_class,
-                             authoritative_mode=mode, authoritative_power=power)
+        async with asyncio.timeout(6):
+            while True:
+                values = await avatar_probe(host_run, f"observe{row['player']}")
+                guid, held_class, mode, power = values[-4:]
+                mirrored = table["host"] = dict(flashlight_observer(values[:-4]), slot_guid=guid,
+                                                authoritative_equipment=held_class, authoritative_mode=mode,
+                                                authoritative_power=power)
+                if not heavy or name != "off" or mirrored["displayed_flashlight_mesh_count"] == 1:
+                    break
+                await asyncio.sleep(.2)
         record()
         host_guest = status(host_run)["game"]["pawns"]["guest"]["name"]
         assert table["host"]["remote"] == host_guest, (table["host"], host_guest)
 
     guid, = await avatar_probe(host_run, "seedguest")
     proof["seeded_guid"] = guid
+    if heavy:
+        proof["stock_item"] = {"class": heavy_asset, "stock_factory": "FL_Inventory.MakeDefaultItem", "slot_index": 0,
+                               "storage": "private host detached guest Save.PlayerEquipment", "guid": guid,
+                               "observer_mesh": heavy_mesh}
     record()
     try:
         async with asyncio.timeout(15):
@@ -160,6 +182,24 @@ async def observe_guest_stock_flashlight(host_run, guest_run, *, verify_view=Fal
             (False, False), (True, True), (False, False),
         ], proof
         assert (lit["click_calls"] - baseline["click_calls"], unlit["click_calls"] - lit["click_calls"]) == (1, 1), proof
+        if heavy:
+            owners = (baseline, lit, unlit)
+            cookie = "Material /Game/Assets/Materials/Mat_Misc/M_LightCookie.M_LightCookie"
+            assert all((row["mesh"], row["role"], row["replicated"], row["light_cookie"]) ==
+                       ("StaticMesh " + heavy_mesh, "3", False, cookie) for row in owners), proof
+            assert all((row["inner"], row["outer"], row["intensity"], row["radius"], row["color"])
+                       == (30, 60, 20, 6000, [1, 1, 1]) for row in owners), proof
+            assert all(math.isclose(a, b, abs_tol=.05) for row in owners for field in
+                       ("relative_position", "relative_rotation", "relative_scale")
+                       for a, b in zip(row[field], lit[field], strict=True)), proof
+            assert (lit["power_calls"] - baseline["power_calls"], unlit["power_calls"] - lit["power_calls"]) == (1, 1), proof
+            assert all((row["authoritative_equipment"], row["authoritative_power"], row["authoritative_mode"],
+                        row["stock_held_source_count"], row["displayed_flashlight_mesh_count"])
+                       == ("BlueprintGeneratedClass " + heavy_asset, "false", "false", 1, 1) for row in host_rows), proof
+            selected_receipts = [row["native_guest_weapon"] for row in events(guest_run, selection_events[0])
+                                 if row.get("native_guest_weapon", {}).get("guid", "").lower() == guid]
+            assert len(selected_receipts) == 1 and selected_receipts[0]["pawn"] == host_rows[0]["remote"], proof
+            assert selected_receipts[0]["actor_ammo"] == selected_receipts[0]["stored_ammo"] == -1, selected_receipts
         if verify_view:
             assert [row["visible_pawn_spotlights"] for row in host_rows] == [0, 1, 0], proof
             assert all(row["powered_sources"] == row["visible_source_spotlights"] == 0
@@ -507,7 +547,7 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
                   consumable: bool = False, movement: bool = False, movement_traits: bool = False,
                   aim_movement: bool = False, stock_shotgun_aim: bool = False, flashlight_source: bool = False,
                   flashlight_view: bool = False, guest_flashlight_source: bool = False,
-                  guest_flashlight_view: bool = False) -> None:
+                  guest_flashlight_view: bool = False, guest_heavy_flashlight_source: bool = False) -> None:
     profile = "avatar-" + uuid.uuid4().hex[:8]
     host_dir = work / "campaigns" / profile
     guest_dir = work / "clients" / profile
@@ -518,6 +558,10 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
         env["SILVERFISH_COOP_FLASHLIGHT_PROBE"] = "1"
     if guest_flashlight_source:
         env["SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE"] = "1"
+    if guest_heavy_flashlight_source:
+        env["SILVERFISH_COOP_HEAVY_FLASHLIGHT_PROBE"] = "1"
+    else:
+        env.pop("SILVERFISH_COOP_HEAVY_FLASHLIGHT_PROBE", None)
     if pose:
         env["SILVERFISH_COOP_RENDER_CAPTURE_POSE"] = "1"
     if rifle or aim_movement:
@@ -582,7 +626,8 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
         if flashlight_source or guest_flashlight_source:
             await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
             if guest_flashlight_source:
-                receipt = await observe_guest_stock_flashlight(host_run, guest_run, verify_view=guest_flashlight_view)
+                receipt = await observe_guest_stock_flashlight(host_run, guest_run, verify_view=guest_flashlight_view,
+                                                              heavy=guest_heavy_flashlight_source)
                 if guest_flashlight_view:
                     await command("action", *guest, "stop")
                     await wait(host_run, lambda state: "native_guest_flashlight_view" not in state.get("game", {}), timeout=8)
@@ -876,9 +921,11 @@ if __name__ == "__main__":
                        help="compare an equipped guest's stock beam with its host authority pawn")
     light.add_argument("--guest-flashlight-view", action="store_true",
                        help="also verify host projection of the guest's beam and switch receipts")
+    light.add_argument("--guest-heavy-flashlight-source", action="store_true",
+                       help="measure the stock heavy flashlight beam relative to the guest's actual torch mesh")
     options = parser.parse_args()
     options.flashlight_source |= options.flashlight_view
-    options.guest_flashlight_source |= options.guest_flashlight_view
+    options.guest_flashlight_source |= options.guest_flashlight_view or options.guest_heavy_flashlight_source
     use_flashlight_fixture = options.flashlight_source or options.guest_flashlight_source
     if use_flashlight_fixture and any((options.lifecycle, options.equipment, options.melee, options.pose, options.rifle,
                                          options.consumable, options.movement, options.movement_traits, options.aim_movement,
@@ -910,4 +957,5 @@ if __name__ == "__main__":
                             options.lifecycle, options.equipment, options.melee, options.pose,
                             options.rifle, options.consumable, options.movement, options.movement_traits,
                             options.aim_movement, options.stock_shotgun_aim, options.flashlight_source, options.flashlight_view,
-                            options.guest_flashlight_source, options.guest_flashlight_view))
+                            options.guest_flashlight_source, options.guest_flashlight_view,
+                            options.guest_heavy_flashlight_source))

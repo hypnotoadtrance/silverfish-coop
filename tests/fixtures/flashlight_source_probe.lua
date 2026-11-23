@@ -1,17 +1,20 @@
--- Private source qualification for an equipped stock Eqp_Flashlight.
+-- Private source qualification for equipped stock handheld flashlights.
 local mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_FLASHLIGHT_PROBE") ~= "1"
     or not mailbox or not mailbox:match("[/\\]avatar%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$") then return end
 
 local map = "World /Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
-local equipment_path = "/Game/Classes/Equipment/Eqp_Flashlight.Eqp_Flashlight_C"
-local mesh_name = "StaticMesh /Game/Assets/StaticMeshes/Mesh_Props/PropActor_Meshes/SM_Prop_Flashlight_01.SM_Prop_Flashlight_01"
+local guest_source = os.getenv("SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE") == "1"
+local heavy = guest_source and os.getenv("SILVERFISH_COOP_HEAVY_FLASHLIGHT_PROBE") == "1"
+local equipment_asset = heavy and "Eqp_Heavy_Flashlight" or "Eqp_Flashlight"
+local mesh_asset = heavy and "SM_Prop_Flashlight_02" or "SM_Prop_Flashlight_01"
+local equipment_path = "/Game/Classes/Equipment/" .. equipment_asset .. "." .. equipment_asset .. "_C"
+local mesh_name = "StaticMesh /Game/Assets/StaticMeshes/Mesh_Props/PropActor_Meshes/" .. mesh_asset .. "." .. mesh_asset
 local source_path = "/Game/Classes/Equipment/Equipment_Assets/FlashLight_Source_BP.FlashLight_Source_BP_C"
 local click_path = "SoundCue /Game/Assets/Sounds/CUEs/Mechanical_Cues/Switch_Reset_Cue.Switch_Reset_Cue"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local equip_factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
-local guest_source = os.getenv("SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE") == "1"
 local source, cue_calls, power_calls, hooked, selected_guid = nil, 0, 0, false, nil
 
 local function valid(value) return value and value:IsValid() end
@@ -77,6 +80,18 @@ local function owner_row(pawn, actor, spot)
         tostring(actor.Powered), tostring(spot:IsVisible()), point.X, point.Y, point.Z, aim.Pitch, aim.Yaw, aim.Roll,
         spot.Intensity, spot.AttenuationRadius, spot.InnerConeAngle, spot.OuterConeAngle,
         valid(cookie) and cookie:GetFullName() or "-", power_calls, cue_calls)
+end
+
+local function heavy_measurement(equipment, actor, spot)
+    local mesh = equipment.SM_Prop_Torch_01
+    assert(valid(mesh) and same(mesh:GetOwner(), equipment) and valid(mesh.StaticMesh)
+        and mesh.StaticMesh:GetFullName() == mesh_name, "flashlight_probe_heavy_torch_unavailable")
+    local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
+    local relative = math_api:MakeRelativeTransform(spot:K2_GetComponentToWorld(), mesh:K2_GetComponentToWorld())
+    local point, aim, scale, color = relative.Translation, math_api:Quat_Rotator(relative.Rotation), relative.Scale3D, actor.Color
+    return string.format("%s\t%s\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f",
+        mesh.StaticMesh:GetFullName(), tostring(actor.Type), point.X, point.Y, point.Z, aim.Pitch, aim.Yaw, aim.Roll,
+        scale.X, scale.Y, scale.Z, color.R, color.G, color.B)
 end
 
 local function observe(world, local_pawn, id)
@@ -223,7 +238,8 @@ local function run(operation)
     end
     local row = owner_row(pawn, actor, spot)
     if guest_source then
-        return table.concat({row, slot_guid(pawn), tostring(equipment.Stacks), tostring(equipment.Tertiary_Mode)}, "\t")
+        row = table.concat({row, slot_guid(pawn), tostring(equipment.Stacks), tostring(equipment.Tertiary_Mode)}, "\t")
+        if heavy then row = row .. "\t" .. heavy_measurement(equipment, actor, spot) end
     end
     return row
 end
