@@ -503,9 +503,20 @@ namespace
             const auto& reference = soft.ToSoftObjectPath();
             const auto asset_path = reference.GetAssetPathString();
             const std::wstring_view path{*asset_path};
-            if (!reference.GetSubPathString().IsEmpty() || !path.starts_with(STR("/Game/Classes/NPCs/")) ||
-                !path.ends_with(STR("_C")) || path.size() > 256)
+            constexpr std::wstring_view root{STR("/Game/Classes/NPCs/")};
+            if (!reference.GetSubPathString().IsEmpty() || !path.starts_with(root) || path.size() > 256)
                 return false;
+            const auto separator = path.find_last_of(L'/');
+            const auto dot = path.find(L'.', separator + 1);
+            if (dot == std::wstring_view::npos || dot == separator + 1) return false;
+            const auto asset = path.substr(separator + 1, dot - separator - 1);
+            const auto generated_class = path.substr(dot + 1);
+            if (generated_class.size() != asset.size() + 2 || !generated_class.starts_with(asset) ||
+                !generated_class.ends_with(STR("_C")) ||
+                !std::ranges::all_of(path.substr(root.size(), dot - root.size()), [](auto character) {
+                    return (character >= L'a' && character <= L'z') || (character >= L'A' && character <= L'Z') ||
+                        (character >= L'0' && character <= L'9') || character == L'_' || character == L'/';
+                })) return false;
             if (auto* resolved = soft.Get())
             {
                 auto* klass = U::Cast<U::UClass>(resolved);
@@ -1567,6 +1578,7 @@ namespace
         }
         auto* cohort = antfarm_cohort(family);
         auto& latest = cohort ? cohort->latest : scope.latest;
+        bool declared_unloaded{};
         if (ruin)
         {
             RuinSquad squad;
@@ -1575,12 +1587,9 @@ namespace
                 ruin_stage(draw, error);
                 return;
             }
-            if (family == NpcFamily::Ambient && !squad.all_classes_loaded)
-            {
-                latest = {receiver, data, {}, "stock_ruin_guest_class_unloaded", 0};
-                ruin_stage(draw, latest.stage);
-                return;
-            }
+            // This exact cooked director and pool provide a typed NPC declaration. Vetoing its local
+            // guest spawn requires no loaded class; publishing still requires a verified stock birth.
+            declared_unloaded = !squad.all_classes_loaded;
         }
         const bool ambient = family == NpcFamily::Ambient;
         const bool boar = family == NpcFamily::Boar;
@@ -1601,16 +1610,17 @@ namespace
             return;
         }
         call.PreventOriginalFunctionCall();
-        ruin_stage(draw, call.OriginalFunctionCallPrevented() ? "client_spawn_denied" : "client_spawn_not_denied");
         if (call.OriginalFunctionCallPrevented())
         {
             schema.count->SetPropertyValue(output, 0);
+            ruin_stage(draw, declared_unloaded ? "client_spawn_denied_declared_unloaded" : "client_spawn_denied");
             ++(cohort ? cohort->spawn_denials : scope.spawn_denials);
             if (network(active.world).seat != Seat::Client)
                 ++births_for(family).early_spawn_denials;
             latest.stage = ambient ? (initial ? "stock_client_ambient_initial_spawn_denied" : "stock_client_ambient_refresh_spawn_denied") :
                 boar ? "stock_client_boar_spawn_denied" : "stock_client_husk_spawn_denied";
         }
+        else ruin_stage(draw, "client_spawn_not_denied");
     }
 
     void on_pre(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
