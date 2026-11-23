@@ -122,8 +122,12 @@ async def move(host, bridge, character, target, operation):
     site, direction, item = selected.groups()
     scope = _scope(host, character, site)
     area, _, combined, pawn = scope
-    live = host.last_game.get(LIVE_MOVE) is True and (
-        character == "host" or await native_inventory.retain_guest_save(host, bridge, character, pawn))
+    live = host.last_game.get(LIVE_MOVE) is True
+    if live and character != "host":
+        if not await native_inventory.retain_guest_save(host, bridge, character, pawn):
+            raise party.RuleError("native_guest_save_retention_unavailable")
+        if _scope(host, character, site) != scope:
+            raise party.RuleError("native_stash_scope_changed")
     slot = "-" if live else (await _frame(host, bridge, character, site, scope))["slot"]
     host.native_checkpoint_unsafe = True
     try:

@@ -102,3 +102,55 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "exact character"):
             await native_stash.inspect(host, bridge, GUEST, SITE)
         host.checkpoint_native.assert_not_awaited()
+
+    async def test_live_guest_transfer_requires_retention_and_current_scope(self):
+        state = party.new_party()
+        party.add_player(state, "host")
+        party.add_player(state, GUEST)
+        game = {"state": "hosting", "map": OBSERVATORY, native_stash.SETTING: True,
+                native_stash.SITES: {SITE: {"map": OBSERVATORY}}, native_stash.LIVE_MOVE: True}
+        recipient = {"pawn": "guest-pawn", "connected": True}
+        host = SimpleNamespace(last_game=game, zone_epoch="zone", native_zones=True, native_profile=Mock(),
+                               stopping=False, transitioning=False, native_checkpoint_unsafe=False,
+                               party=state, smg_holds=None, native_recipients=lambda: {GUEST: recipient},
+                               pending_guest_saves={}, queue_guest_save=Mock(),
+                               checkpoint_native=AsyncMock(), control=Mock())
+        bridge = SimpleNamespace(command=AsyncMock())
+        item, operation = "D" * 32, uuid.uuid4().hex
+        target = f"{SITE}|deposit|{item}"
+
+        with self.assertRaisesRegex(party.RuleError, "native_guest_save_retention_unavailable"):
+            await native_stash.move(host, bridge, GUEST, target, operation)
+        bridge.command.assert_not_awaited()
+        host.checkpoint_native.assert_not_awaited()
+
+        game["native_guest_save_retention"] = True
+
+        async def retain_during_reconnect(action, pawn, character, *, timeout):
+            self.assertEqual((action, pawn, character), ("native-guest-save-retain", "guest-pawn", GUEST))
+            recipient["pawn"] = "rejoined-pawn"
+            return game.copy()
+
+        bridge.command.side_effect = retain_during_reconnect
+        with self.assertRaisesRegex(party.RuleError, "native_stash_scope_changed"):
+            await native_stash.move(host, bridge, GUEST, target, operation)
+        self.assertEqual(bridge.command.await_count, 1)
+        host.checkpoint_native.assert_not_awaited()
+        host.control.event.assert_not_called()
+        self.assertEqual(host.party["receipts"], {})
+        self.assertFalse(host.stopping)
+        self.assertFalse(host.native_checkpoint_unsafe)
+
+        bridge.command.reset_mock()
+        bridge.command.side_effect = [
+            game.copy(),
+            {**game, native_stash.MOVED: dict(map=OBSERVATORY, pawn="rejoined-pawn", slot="-", site=SITE,
+                guid=item, direction="deposit", combined=True, class_path="/Game/Classes/Items/Test.Test_C", quantity=1)},
+        ]
+        moved = await native_stash.move(host, bridge, GUEST, target, operation)
+        self.assertEqual((moved[native_stash.MOVED]["owner"], moved[native_stash.MOVED]["guid"]), (GUEST, item))
+        self.assertEqual(bridge.command.await_count, 2)
+        bridge.command.assert_awaited_with(native_stash.MOVE, "rejoined-pawn", "-", SITE, item, "deposit", "1", timeout=6)
+        self.assertEqual(await native_stash.move(host, bridge, GUEST, target, operation), moved)
+        self.assertEqual(bridge.command.await_count, 2)
+        host.checkpoint_native.assert_not_awaited()
