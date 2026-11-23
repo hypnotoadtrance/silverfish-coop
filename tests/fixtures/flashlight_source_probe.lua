@@ -295,6 +295,120 @@ local function offhand_operation(operation, pawn, world)
         owner_row(pawn, actor, spot), torch_measurement(item, actor, spot)}, "\t")
 end
 
+-- Read-only test mirror of the released guest offhand capture checks.
+-- Mirror the released stock capture checks in the probe VM. The live
+-- SilverfishCoop Lua scope and its downed registry belong to a different VM.
+local function diagnose_offhand(world, pawn, driver)
+    local function exact(object, path)
+        return valid(object) and same(object:GetClass(), StaticFindObject(path))
+    end
+    local scope, values = "none", {}
+    local function metric(name, value)
+        values[#values + 1] = name
+        values[#values + 1] = tostring(value)
+    end
+    local function require_gate(name, condition)
+        if not condition then scope = name; error(name, 0) end
+    end
+    local ok, detail = pcall(function()
+        local connection, controller = driver.ServerConnection, pawn.Controller
+        require_gate("scope.driver_world", same(driver.World, world))
+        require_gate("scope.server_connection", valid(connection) and same(connection.Driver, driver))
+        require_gate("scope.controller", valid(controller) and controller:IsLocalController() and same(controller.Pawn, pawn))
+        require_gate("scope.local_pawn", not pawn:IsActorBeingDestroyed() and pawn:IsLocallyControlled()
+            and same(pawn:GetWorld(), world) and pawn:HasAuthority() == false)
+        metric("stock_dead", pawn.Dead)
+        local instance, save = world.OwningGameInstance, pawn.Save
+        require_gate("capture.guest_save_slot", valid(instance) and same(save, instance.SaveSlot_Ref))
+        metric("stock_offhand_flag", save.PlayerOffhandingFlashlight)
+        require_gate("stock_offhand.flag", save.PlayerOffhandingFlashlight == true)
+
+        local pistol, slots = pawn.EquipedItem, save.PlayerEquipment
+        require_gate("loadout.pistol_class", exact(pistol, pistol_path))
+        require_gate("loadout.pistol_authority", pistol:HasAuthority())
+        require_gate("loadout.pistol_user", same(pistol.User, pawn))
+        local index = math.tointeger(save.PlayerEquipIndex)
+        metric("selected_slot", index)
+        require_gate("loadout.selected_stock", index and slots and index >= 0 and index < slots:GetArrayNum()
+            and same(slots[index + 1][item_class], pistol:GetClass()))
+        local torch_class = StaticFindObject(equipment_path)
+        require_gate("loadout.torch_class_available", valid(torch_class))
+        local torch_index
+        for n = 1, math.min(slots:GetArrayNum(), 8) do
+            if same(slots[n][item_class], torch_class) then torch_index = n - 1; break end
+        end
+        metric("stock_torch_slot", torch_index)
+        require_gate("loadout.owned_stock_torch", torch_index ~= nil)
+
+        local item, camera = pawn.OffhandEquipment, pawn.Camera
+        require_gate("stock_offhand.item_class", exact(item, equipment_path))
+        metric("stock_offhand_item", item:GetFullName())
+        require_gate("stock_offhand.item_lifetime", not item:IsActorBeingDestroyed())
+        require_gate("stock_offhand.item_replication", item.bReplicates == false)
+        require_gate("stock_offhand.item_user", same(item.User, pawn))
+        require_gate("stock_offhand.item_world", same(item:GetWorld(), world))
+        require_gate("stock_offhand.camera_owner", valid(camera) and same(camera:GetOwner(), pawn))
+        require_gate("stock_offhand.camera_attachment", valid(item.Box) and same(item.Box:GetAttachParent(), camera))
+        require_gate("capture.equipment_authority", item:HasAuthority())
+
+        local child = item.FlashLight_Source_BP
+        local emitter = valid(child) and child.ChildActor
+        require_gate("stock_beam.source_class", exact(emitter, source_path))
+        require_gate("stock_beam.source_lifetime", not emitter:IsActorBeingDestroyed() and emitter.bReplicates == false)
+        require_gate("stock_beam.source_ownership", same(child:GetOwner(), item) and same(emitter:GetParentActor(), item)
+            and same(emitter:GetWorld(), world))
+        local spot = emitter.SpotLight
+        require_gate("stock_beam.spotlight_class", exact(spot, "/Script/Engine.SpotLightComponent"))
+        require_gate("stock_beam.spotlight_owner", same(spot:GetOwner(), emitter))
+        metric("spot_intensity", spot.Intensity)
+        metric("spot_radius", spot.AttenuationRadius)
+        metric("spot_inner", spot.InnerConeAngle)
+        metric("spot_outer", spot.OuterConeAngle)
+        require_gate("stock_beam.shape", spot.Intensity == 17 and spot.AttenuationRadius == 5000
+            and spot.InnerConeAngle == 15 and spot.OuterConeAngle == 40)
+        local cookie = spot.LightFunctionMaterial
+        require_gate("stock_beam.cookie", valid(cookie) and cookie:GetFullName() ==
+            "Material /Game/Assets/Materials/Mat_Misc/M_LightCookie.M_LightCookie")
+        require_gate("capture.source_authority", emitter:HasAuthority())
+        metric("stock_source_powered", emitter.Powered)
+        metric("stock_spot_visible", spot:IsVisible())
+        require_gate("capture.source_power_visibility", type(emitter.Powered) == "boolean" and emitter.Powered == spot:IsVisible())
+        local model = item.SM_Prop_Torch_01
+        require_gate("capture.torch_mesh", valid(model) and same(model:GetOwner(), item) and valid(model.StaticMesh)
+            and model.StaticMesh:GetFullName() == mesh_name)
+        require_gate("capture.player_id", player_id(pawn) ~= nil)
+        local api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+        require_gate("capture.math_library", valid(api))
+        local relative = api:MakeRelativeTransform(spot:K2_GetComponentToWorld(), model:K2_GetComponentToWorld())
+        local p, r, c = relative.Translation, api:Quat_Rotator(relative.Rotation), emitter.Color
+        local actual = {p.X, p.Y, p.Z, r.Pitch, r.Yaw, r.Roll, c.R, c.G, c.B}
+        local expected = {0, 21.66062, 0, 0, 90, 0, 1, .970104, .947917}
+        local keys = {"x", "y", "z", "pitch", "yaw", "roll", "r", "g", "b"}
+        local function bounds(numbers, label)
+            for n, key in ipairs(keys) do
+                local value = numbers[n]
+                metric(label .. "." .. key, value)
+                local limit = n <= 3 and 250 or n <= 6 and 180 or 1
+                require_gate(label .. ".bounds." .. key,
+                    type(value) == "number" and value >= (n <= 6 and -limit or 0) and value <= limit)
+            end
+        end
+        bounds(actual, "mesh_relative")
+        for n, key in ipairs(keys) do
+            require_gate("mesh_relative.stock_pose." .. key, math.abs(actual[n] - expected[n]) <= .05)
+        end
+        local aim = api:Quat_Rotator(api:MakeRelativeTransform(spot:K2_GetComponentToWorld(), pawn:GetTransform()).Rotation)
+        metric("aim_pitch_raw", aim.Pitch)
+        metric("aim_yaw_raw", aim.Yaw)
+        metric("aim_roll_raw", aim.Roll)
+        actual[4], actual[5], actual[6] = math.floor(aim.Pitch * 10 + .5) / 10,
+            math.floor(aim.Yaw * 10 + .5) / 10, math.floor(aim.Roll * 10 + .5) / 10
+        bounds(actual, "pawn_aim")
+    end)
+    if not ok and scope == "none" then metric("exception", tostring(detail):gsub("[%c]", " ")) end
+    return table.concat({ok and "qualified" or scope == "none" and "exception" or scope, table.concat(values, "\t")}, "\t")
+end
+
 local function offhand_rig(pawn)
     local meshes = pawn:K2_GetComponentsByClass(asset("/Script/Engine.SkeletalMeshComponent"))
     local display
@@ -426,6 +540,7 @@ local function run(operation)
     local pawn = asset("/Script/Engine.Default__GameplayStatics"):GetPlayerPawn(world, 0)
     assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn:GetWorld(), world), "flashlight_probe_local_pawn_unavailable")
     local connected = valid(driver.ServerConnection)
+    if connected and guest_offhand and operation == "diagnoseoffhand" then return diagnose_offhand(world, pawn, driver) end
     if connected and not guest_source and not guest_offhand then
         return observe(world, pawn, assert(math.tointeger(operation:match("^observe(%d+)$"))))
     end

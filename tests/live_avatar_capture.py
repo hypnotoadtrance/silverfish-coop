@@ -334,6 +334,22 @@ async def observe_guest_offhand_flashlight(host_run, guest_run):
 
         watcher = asyncio.create_task(watch_source())
 
+        async def diagnose_turn(label, since):
+            item = {"phase": label, "seconds_after_turn": round(clock() - since, 3)}
+            try:
+                async with asyncio.timeout(4):
+                    gate, *values = await avatar_probe(guest_run, "diagnoseoffhand")
+                item["first_rejected_check"] = None if gate == "qualified" else gate
+                item["stock_values"] = dict(zip(values[::2], values[1::2], strict=True))
+            except (TimeoutError, AssertionError, OSError) as error:
+                item["probe_error"] = str(error) or type(error).__name__
+            guest_status = guest_frame() or {}
+            item["guest_source_sequence"] = guest_status.get("sequence")
+            item["guest_source"] = guest_status.get(source_key)
+            item["host_receipt"] = status(host_run).get("game", {}).get(view_key, {}).get(player)
+            proof.setdefault("stock_turn_diagnostics", []).append(item)
+            record()
+
         async def aligned_source(receipt, since, table):
             assert receipt["epoch"] == epoch, table
             identity = [receipt["instance"], receipt["switch"], True, "offhand"]
@@ -407,8 +423,17 @@ async def observe_guest_offhand_flashlight(host_run, guest_run):
         await hold_c("equip", True)
         active = await phase("offhand_started", offhand_owner(await avatar_probe(guest_run, "readoffhand")), since=equipped_at)
         turned_at = clock()
+        await diagnose_turn("before_turn", turned_at)
+        turned_at = clock()
         later = offhand_owner(await avatar_probe(guest_run, "turnoffhand"))
-        await phase("offhand_turned", later, since=turned_at, after_aim=active["receipt"]["aim"])
+        for delay in (.20, .65):
+            await asyncio.sleep(max(0., turned_at + delay - clock()))
+            await diagnose_turn("after_turn", turned_at)
+        try:
+            await phase("offhand_turned", later, since=turned_at, after_aim=active["receipt"]["aim"])
+        except (RuntimeError, AssertionError):
+            await diagnose_turn("after_observer_failure", turned_at)
+            raise
         await hold_c("holster", False)
         await phase("offhand_cleared", offhand_owner(await avatar_probe(guest_run, "readoffhand")))
         assert all(row["host_primary_meshes"] == baseline["host_primary_meshes"] for row in proof["phases"].values()), proof
