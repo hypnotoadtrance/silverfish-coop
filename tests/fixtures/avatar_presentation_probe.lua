@@ -15,11 +15,14 @@ local portable_fixture = mailbox
     and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
 local wipe_fixture = mailbox and mailbox:match("[/\\]clients[/\\]stock%-wipe%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
     and os.getenv("SILVERFISH_COOP_WIPE_AIM_PROBE") == "1"
+local wipe_host = mailbox and mailbox:match("[/\\]campaigns[/\\]stock%-wipe%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
+    and os.getenv("SILVERFISH_COOP_WIPE_AIM_PROBE") == "1"
+    and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1"
-    or not (guest_fixture or host_fixture or portable_fixture or wipe_fixture) then return end
+    or not (guest_fixture or host_fixture or portable_fixture or wipe_fixture or wipe_host) then return end
 
 local command, reply = mailbox .. "/avatar-probe-command.tsv", mailbox .. "/avatar-probe-reply.tsv"
-local map = portable_fixture and "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
+local map = (portable_fixture or wipe_fixture or wipe_host) and "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
     or "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local mesh_root = "/Game/Classes/Player/PlayerAssets/HelmetMeshes/"
 local inventory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
@@ -355,7 +358,20 @@ local function movement_probe(operation, local_pawn, remote_pawn)
     end
 end
 
+local function held_equipment_row(pawn)
+    local slots, index = pawn.Save.PlayerEquipment, pawn.Save.PlayerEquipIndex
+    local selected = index >= 0 and index < slots:GetArrayNum() and slots[index + 1][item_class]
+    local held = pawn.EquipedItem
+    return table.concat({valid(held) and not held:IsActorBeingDestroyed() and held:GetClass():GetFullName() or "-",
+        valid(selected) and selected:GetFullName() or "-"}, "\t")
+end
+
 local function run(operation)
+    if wipe_host then
+        assert(operation == "heldstate", "avatar_probe_unknown_wipe_operation")
+        local _, guest = player_pair()
+        return held_equipment_row(guest)
+    end
     if wipe_fixture then
         local viewport = FindFirstOf("GameViewportClient")
         local world = valid(viewport) and viewport.World
@@ -372,6 +388,7 @@ local function run(operation)
             end
         end
         assert(pawn, "avatar_probe_rig_pending")
+        if operation == "heldstate" then return held_equipment_row(pawn) end
         if operation == "aim" then
             assert(not pawn.IsWeaponBlocked and valid(pawn.Save), "avatar_probe_wipe_aim_unavailable")
             local held = pawn.EquipedItem

@@ -21,7 +21,8 @@ LOOSE_PICKUP = "observatory-comp-board"
 
 
 async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, authored_pickup: bool, stock_rules: bool,
-                   wipe_view: bool, difficulty: str | None = None, downed_aim: bool = False) -> None:
+                   wipe_view: bool, difficulty: str | None = None, downed_aim: bool = False,
+                   drop_held: bool = False) -> None:
     name = "stock-wipe-" + uuid.uuid4().hex[:8]
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
@@ -94,14 +95,17 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
         await wait(host, lambda status: status.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
         character = invitation["character_id"]
         gun, reserve = (uuid.uuid4().hex.upper() for _ in range(2))
+        retained_item = reserve if drop_held else gun
         await action(primary, "native-guest-weapon-seed", "--item-guid", gun)
         await action(secondary, "native-guest-weapon-equip", "--target", gun)
         await action(primary, "native-guest-weapon-seed-ammo", "--item-guid", reserve)
-        if downed_aim:
+        if downed_aim or drop_held:
             async with asyncio.timeout(10):
                 while not (aiming := await avatar_probe(guest, "aim", allow_pending=True)):
                     await asyncio.sleep(.15)
             assert aiming == ["aiming"], aiming
+            local_held = await avatar_probe(guest, "heldstate")
+            assert local_held[0] == local_held[1] and local_held[0].endswith("Wep_SMG_UBGL_C"), local_held
         await action(primary, "native-guest-damage", "--target", "guest")
         if downed_aim:
             def guest_is_crouched_and_downed(status):
@@ -131,11 +135,11 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
                 await wait(directory, lambda status: status.get("game", {}).get("native_wipe_view", {}).get("state") == "selecting")
             current = (await command("status", *secondary))["game"]["native_wipe_view"]
             assert current["deadline"] == 0, current
-            if current["guid"] != gun:
+            if current["guid"] != retained_item:
                 current = await key(secondary, "down")
-            assert current["guid"] == gun and current["limit"] == keep_slots and current["total"] == 2, current
+            assert current["guid"] == retained_item and current["limit"] == keep_slots and current["total"] == 2, current
             selected = await key(secondary, "toggle")
-            assert selected["selected"] == 1 and selected["guid"] == gun, selected
+            assert selected["selected"] == 1 and selected["guid"] == retained_item, selected
             submitted = []
             for owner, count in ((secondary, 1), (primary, 0)):
                 confirmed = await key(owner, "submit")
@@ -147,10 +151,10 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
                     waiting = await wait(host, lambda status: character in
                                          ((status.get("gameplay", {}).get("wipe") or {}).get("choices", {})))
                     assert waiting["game"]["native_wipe_view"]["state"] == "selecting", waiting
-                    assert waiting["gameplay"]["wipe"]["choices"] == {character: {gun: 1}}, waiting
+                    assert waiting["gameplay"]["wipe"]["choices"] == {character: {retained_item: 1}}, waiting
                     assert waiting["gameplay"]["wipe"]["deadline"] is None, waiting
         elif keep_slots:
-            await action(secondary, "keep", "--keep", f"{gun}=1")
+            await action(secondary, "keep", "--keep", f"{retained_item}=1")
             await action(primary, "keep")
         revived = await wait(host, lambda status: status.get("state") == "hosting"
                              and status.get("gameplay", {}).get("native_backpacks")
@@ -166,7 +170,14 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
         denied = await action(primary, "native-wipe-recover", "--target", bag_id, expected=False)
         assert denied["error"] == "native_wipe_bag_not_owned", denied
         after_wipe = (await action(secondary, "native-inventory-list"))["native_inventory"]
-        assert [row["guid"] for row in after_wipe["items"]] == ([gun] if keep_slots else []), after_wipe
+        assert [row["guid"] for row in after_wipe["items"]] == ([retained_item] if keep_slots else []), after_wipe
+        if drop_held or downed_aim:
+            expected_hold = ["-", "-"] if drop_held or not keep_slots else local_held
+            host_held = await avatar_probe(host, "heldstate")
+            async with asyncio.timeout(10):
+                while (guest_held := await avatar_probe(guest, "heldstate"))[1] != expected_hold[1]:
+                    await asyncio.sleep(.15)
+            assert host_held == guest_held == expected_hold, {"host": host_held, "guest": guest_held}
         if visible_bag:
             viewed = await wait(guest, lambda status: status.get("game", {}).get("native_bag_projection", {}).get("count") == 1)
             bag_projection = viewed["game"]["native_bag_projection"]
@@ -189,6 +200,8 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
         if downed_aim:
             proof["guest_aim_released_on_down"] = {"before": aiming[0], "downed": lowered[0],
                                                   "movement": downed["game"]["player_effects"]["local"]}
+        if drop_held or downed_aim:
+            proof["weapon_after_respawn"] = {"before": local_held, "host": host_held, "guest": guest_held}
         if visible_bag:
             await wait(guest, lambda status: status.get("game", {}).get("state") == "connected"
                        and not status["game"].get("native_bag_projection", {}).get("count")
@@ -250,14 +263,19 @@ if __name__ == "__main__":
     arguments.add_argument("--difficulty", choices=("Respawn_WtPenalty", "Decimation"))
     arguments.add_argument("--wipe-view", action="store_true")
     arguments.add_argument("--downed-aim", action="store_true")
+    arguments.add_argument("--drop-held", action="store_true")
     options = arguments.parse_args()
     if options.difficulty and options.stock_rules:
         arguments.error("Choose a stock difficulty preset or custom stock extraction fields")
     if options.difficulty == "Decimation" and options.wipe_view:
         arguments.error("Decimation has no retained item selector")
+    if options.difficulty == "Decimation" and options.drop_held:
+        arguments.error("The held weapon check retains a different item")
     work = options.work.resolve()
-    if options.downed_aim:
+    weapon_probe = options.downed_aim or options.drop_held
+    if weapon_probe:
         os.environ["SILVERFISH_COOP_WIPE_AIM_PROBE"] = "1"
-    with installed_probe(work) if options.downed_aim else nullcontext():
+    with installed_probe(work) if weapon_probe else nullcontext():
         asyncio.run(validate(work, options.vanilla_saved, options.visible_bag, options.authored_pickup,
-                             options.stock_rules, options.wipe_view, options.difficulty, options.downed_aim))
+                             options.stock_rules, options.wipe_view, options.difficulty, options.downed_aim,
+                             options.drop_held))

@@ -44,16 +44,21 @@ local function item_identity(row)
     return guid:find("[^0]") and guid or nil
 end
 
+local function selected_row(save)
+    local index = math.tointeger(save.PlayerEquipIndex)
+    local equipment = save.PlayerEquipment
+    local count = equipment and math.tointeger(equipment:GetArrayNum())
+    if index and count and index >= 0 and index < count and count <= 4096 then
+        return equipment[index + 1]
+    end
+end
+
 local function equipped_guid(pawn, save, world, area)
     local held = pawn.EquipedItem
     if not held or not held:IsValid() then return nil end
     local held_class = held:GetClass()
     if not held_class or not held_class:IsValid() then return nil end
-    local index = math.tointeger(save.PlayerEquipIndex)
-    local equipment = save.PlayerEquipment
-    local count = equipment and math.tointeger(equipment:GetArrayNum())
-    if not index or not count or index < 0 or index >= count or count > 4096 then return nil end
-    local row = equipment[index + 1]
+    local row = selected_row(save)
     local class = row and row[class_field]
     if not same(class, held_class) then return end
     local guid = item_identity(row)
@@ -72,6 +77,18 @@ local function equipped_guid(pawn, save, world, area)
         end
     end
     return guid, weapon_profiles.kinds[class_name], row
+end
+
+function guest_weapon.clear_empty_slot_hold(pawn, save)
+    local held, row = pawn.EquipedItem, selected_row(save)
+    if not held or not held:IsValid() or not row or item_identity(row)
+        or (row[class_field] and row[class_field]:IsValid()) then return end
+    if not same(pawn.Save, save) or not held:HasAuthority() or held:IsActorBeingDestroyed()
+        or not same(held:GetWorld(), pawn:GetWorld()) or not same(held:GetOwner(), pawn)
+        or not same(held.Instigator, pawn) or not same(held.User, pawn) or held.HeldByPlayer ~= true then return end
+    if pawn.Aiming then pawn:CancelScope() end
+    if same(pawn.EquipedItem, held) then pawn.EquipedItem = nil end
+    held:K2_DestroyActor()
 end
 
 local function valid_rounds(weapon, amount)

@@ -1,5 +1,6 @@
 local wipe = {}
 local guest_save = require("guest_save")
+local guest_weapon = require("native_guest_weapon")
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local save_path = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
@@ -85,6 +86,8 @@ function wipe.command(fields, state, phase)
         local ok, status, count
         if apply then
             ok, status = native(original:GetAddress(), candidate:GetAddress(), save:GetAddress(), pawn:GetAddress())
+            -- A same-map respawn reuses the pawn after its stock inventory changes.
+            if ok then guest_weapon.clear_empty_slot_hold(pawn, save) end
         else
             ok, status, count = native(original:GetAddress(), save:GetAddress(), pawn:GetAddress())
         end

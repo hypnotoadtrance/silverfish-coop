@@ -308,12 +308,16 @@ local function project(state, phase, character, path, raw)
         for index = 1, layout[key] do array[index] = positions[index] or {} end
         if count(array) ~= layout[key] then error("The stock co-op inventory layout failed readback", 0) end
     end
+    local selected = old.PlayerEquipIndex
+    local cleared_slot = selected == layout.selected and selected >= 0 and selected < count(old.PlayerEquipment)
+        and valid(old.PlayerEquipment[selected + 1][item.class]) and not item_positions.equipment[selected + 1]
     -- Magazine updates use the live equipment snapshot. A slower inventory
     -- response must leave that count in place for the same held item.
     guest_weapon.preserve_magazine(pawn, old, view.PlayerEquipment, layout.selected)
     for _, name in pairs(slots) do old[name] = view[name] end
     old.PlayerEquipIndex = layout.selected
     if old.PlayerEquipIndex ~= layout.selected then error("The stock co-op equipped slot failed readback", 0) end
+    if cleared_slot then guest_weapon.clear_empty_slot_hold(pawn, old) end
     if view.Character[creator.name_field]:ToString() ~= "" then
         local old_voice, old_pitch = creator.voice(old.Character)
         local voice, pitch = creator.voice(view.Character)
