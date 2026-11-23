@@ -2285,6 +2285,10 @@ class Bridge:
                     data[native_inventory.STORE_CAPABILITY] = 1
                 elif fields[0] == native_inventory.STORE_EQUIPMENT and len(fields) == 7:
                     data[native_inventory.STORE_KEY] = native_inventory.equipment_receipt(fields, data.get("map"))
+                elif fields == [native_inventory.UNEQUIP + "-capability", "1"]:
+                    data[native_inventory.UNEQUIP_CAPABILITY] = 1
+                elif fields[0] == native_inventory.UNEQUIP and len(fields) == 7:
+                    data[native_inventory.UNEQUIP_KEY] = native_inventory.unequip_receipt(fields, data.get("map"))
                 elif fields == ["native-inventory-split-capability", "1"]:
                     data[native_inventory.SPLIT_CAPABILITY] = 1
                 elif (fields[0] == native_inventory.SPLIT and len(fields) == 9 and data.get("map") == fields[1]

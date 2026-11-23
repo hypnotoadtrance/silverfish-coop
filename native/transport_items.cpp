@@ -150,6 +150,7 @@ namespace
         Unreal::FName drop_item{STR("DropItem")};
         Unreal::FName action_drop{STR("ActionDrop")};
         Unreal::FName action_equip{STR("ActionEquip")};
+        Unreal::FName action_unequip{STR("ActionUnequip")};
         Unreal::FName equip_to_slot{STR("EquipToNumberSlot")};
         Unreal::FName insert_item{STR("InsertItem")};
         Unreal::FName action_use{STR("ActionUse")};
@@ -268,6 +269,7 @@ namespace
         Unreal::FWeakObjectPtr manager, screen, panel;
         std::string_view entry;
         std::int32_t expected{};
+        Unreal::FWeakObjectPtr prior_held{};
     };
 
     struct StashSplit
@@ -1567,6 +1569,7 @@ namespace
         if (!exact_class(card, card_path)) return;
         const auto candidate = card_item(card);
         const auto equipped_index = drop_equipment_index(manager, candidate.panel);
+        const bool unequipping = action == "unequip";
         auto* item_class = object_value(field<Unreal::FClassProperty>(candidate.structure, item_class_name), candidate.value);
         if ((candidate.panel != panel && !equipped_index) || !item_class) return;
         const auto stacks = action.empty() ? silverfish::drop_item_class::stacks(Unreal::Cast<Unreal::UClass>(item_class))
@@ -1587,7 +1590,8 @@ namespace
         auto* underwater = using_item ? field<Unreal::FBoolProperty>(scope.pawn.Get(), STR("HeadUnderWater")) : nullptr;
         const auto held = inventory_item(manager, STR("HeldItem"));
         auto* held_class = field<Unreal::FClassProperty>(held.structure, item_class_name);
-        if (!bound || (!scope.host && equipped_index) ||
+        if (!bound || (!scope.host && equipped_index && !unequipping) ||
+            (unequipping && (scope.host || !equipped_index)) ||
             (host_drop_request && now < host_drop_request->expires) || host_drop_sequence >= max_drop_sequence ||
             (action.empty() && (!allow || !allow->GetPropertyValueInContainer(manager))) ||
             (using_item && (!underwater || underwater->GetPropertyValueInContainer(scope.pawn.Get()))) ||
@@ -1608,8 +1612,19 @@ namespace
         if (guid == Guid{} || (stack && (saved_ammo < 1 || saved_ammo > max_drop_ammo)) ||
             (unload && !silverfish::native_guest_item::take_ammo_supported(item_class, saved_ammo)) ||
             !exact_canonical_drop_row(save, candidate, guid, saved_ammo, item_class, equipped_index,
-                                      !using_item && action != "equip")) return;
-        if (equipped_index)
+                                      !using_item && action != "equip" && !unequipping)) return;
+        Unreal::UObject* prior_held{};
+        if (unequipping)
+        {
+            auto* selected = field<Unreal::FIntProperty>(save, STR("PlayerEquipIndex"));
+            if (!selected) return;
+            if (selected->GetPropertyValueInContainer(save) == *equipped_index)
+            {
+                auto* actor = object_field(scope.pawn.Get(), STR("EquipedItem"));
+                if (live(actor) && actor->GetClassPrivate() == item_class) prior_held = actor;
+            }
+        }
+        else if (equipped_index)
         {
             auto* hover = field<Unreal::FObjectProperty>(manager, STR("HoveredCard"));
             auto* begin = stock_no_args(manager, Unreal::FName(STR("InitiateItemTake")));
@@ -1626,7 +1641,8 @@ namespace
             equipped_index ? (from_menu ? "equipped_context_menu" : "equipped_ctrl_click") :
                              (from_menu ? "context_menu" : "ctrl_click");
         host_drop_request = HostDropRequest{guid, count, ++host_drop_sequence, false, now + request_lease, manager,
-            screen, panel, entry, target_slot ? *target_slot + 1 : unload ? saved_ammo : 0};
+            screen, panel, entry, unequipping ? *equipped_index + 1 : target_slot ? *target_slot + 1 : unload ? saved_ammo : 0,
+            prior_held};
     }
 
     [[nodiscard]] bool request_current(const TransportRequest& request, Unreal::UObject* save)
@@ -2354,6 +2370,12 @@ namespace
                 }
             }
         }
+        if (name == entries->action_unequip && guarded_inventory())
+        {
+            intercept_backpack_action(iteration, context, function, true, "unequip");
+            if (!iteration.OriginalFunctionCallPrevented()) iteration.PreventOriginalFunctionCall();
+            return;
+        }
         if (host_drop_scope.stock_inventory &&
             std::ranges::find(entries->guarded_inventory_actions, name) != entries->guarded_inventory_actions.end() &&
             guarded_inventory())
@@ -2721,7 +2743,7 @@ namespace
         lua.set_string({guid.data(), guid.size()});
         lua.set_integer(request.count);
         lua.set_string(request.entry);
-        if (request.entry == "split" || request.entry == "take-ammo" || request.entry == "equip")
+        if (request.entry == "split" || request.entry == "take-ammo" || request.entry == "equip" || request.entry == "unequip")
         {
             lua.set_integer(request.expected);
             return 5;
@@ -2732,8 +2754,9 @@ namespace
     template <bool host>
     int lua_finish_drop(const Lua& lua)
     {
-        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_string(2) ||
-            !lua.is_integer(3))
+        const auto count = lua.get_stack_size();
+        if (!Unreal::IsInGameThreadRaw() || (count != 3 && (host || count != 4 || !lua.is_integer(4))) ||
+            !lua.is_integer(1) || !lua.is_string(2) || !lua.is_integer(3))
             return probe_result(lua, false, "scope_changed");
         const auto sequence = lua.get_integer(3);
         const std::string epoch{lua.get_string(2)};
@@ -2749,6 +2772,16 @@ namespace
             host_drop_request.reset();
             return probe_result(lua, ok, status);
         };
+        if (count == 4)
+        {
+            const auto rounds = lua.get_integer(4);
+            if (completed.entry != "unequip" || rounds < -1 || rounds > INT32_MAX)
+                return finish(false, "unequip_projection_unavailable");
+            const auto guid = format_guid(completed.guid);
+            if (!silverfish::native_guest_item::finish_local_unequip(scope.pawn.Get(), canonical_host_save(),
+                    completed.prior_held.Get(), completed.expected - 1, {guid.data(), guid.size()}, static_cast<int>(rounds)))
+                return finish(false, "unequip_projection_unavailable");
+        }
         auto* manager = completed.manager.Get();
         auto* panel = completed.panel.Get();
         if (!exact_drop_screen(manager, completed.screen.Get(), panel))
@@ -2760,6 +2793,7 @@ namespace
             manager->ProcessEvent(cancel, nullptr);
         }
         if (completed.entry == "context_menu" || completed.entry == "equipped_context_menu" || completed.entry == "equip" ||
+            completed.entry == "unequip" ||
             completed.entry == "take-ammo" ||
             completed.entry.starts_with("use-"))
         {
@@ -2774,7 +2808,7 @@ namespace
         auto* refresh = stock_no_args(panel, refresh_name);
         if (!refresh) return finish(false, "refresh_unavailable");
         panel->ProcessEvent(refresh, nullptr);
-        if (completed.entry == "equip")
+        if (completed.entry == "equip" || completed.entry == "unequip")
         {
             auto* slots = field<Unreal::FArrayProperty>(manager, STR("EquipSlots"));
             auto* slot_property = slots ? Unreal::CastField<Unreal::FObjectProperty>(slots->GetInner()) : nullptr;

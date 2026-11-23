@@ -705,10 +705,15 @@ local function finish_stock_drop(fields, current, state, phase)
     local equipped = slot and (not pending.expected or pending.expected == 0 or slot + 1 == pending.expected)
         and (displaced == "-" or #displaced == 32 and displaced:match("^[0-9A-F]+$")
         and displaced:find("[^0]") and displaced ~= pending.guid)
-    if (not split and not equipped and #fields ~= 5) or not pending or not same_context(current, pending.context)
+    local source = pending and pending.entry == "unequip" and fields[5] == "unequipped" and #fields == 7
+        and integer(fields[6], 7)
+    local rounds = source and fields[7]:match("^%-?%d+$") and math.tointeger(fields[7])
+    local unequipped = source and pending.expected == source + 1 and rounds and rounds >= -1 and rounds <= 2147483647
+    if (not split and not equipped and not unequipped and #fields ~= 5) or not pending or not same_context(current, pending.context)
         or fields[3] ~= pending.epoch or integer(fields[4], 9007199254740991) ~= pending.sequence
-        or (not sorted and not split and not equipped
-            and (not remaining or pending.sort or pending.split or pending.equip) and fields[5] ~= "refused") then
+        or (not sorted and not split and not equipped and not unequipped
+            and (not remaining or pending.sort or pending.split or pending.equip or pending.entry == "unequip")
+            and fields[5] ~= "refused") then
         error("The stock inventory settlement belongs to another request", 0)
     end
     stock_drop = nil
@@ -719,8 +724,23 @@ local function finish_stock_drop(fields, current, state, phase)
                                                                                   pending.live == true) then
             error("The stock inventory settlement lost its isolated backpack", 0)
         end
-        local finished, status = SilverfishFinishNativeGuestDropRequest(pawn, pending.epoch, pending.sequence)
+        local finished, status
+        if unequipped then
+            finished, status = SilverfishFinishNativeGuestDropRequest(pawn, pending.epoch, pending.sequence, rounds)
+        else
+            finished, status = SilverfishFinishNativeGuestDropRequest(pawn, pending.epoch, pending.sequence)
+        end
         if pending.live and finished and status == "screen_closed" then return "verified stock inventory settlement" end
+        if unequipped then
+            local widget = widget_at(pending.screen.ItemManager.EquipSlots, source + 1)
+            local item = save.PlayerEquipment[source + 1]
+            if not finished or status ~= "refreshed" or not valid(widget) or widget.ItemIndex ~= source
+                or valid(item[item_class]) or stock_card_guid(widget.ItemCard) == pending.guid
+                or not stock_cards(pending.screen, save, pending.guid, rounds, false, true) then
+                error("The stock equipment slot and returned backpack item did not verify", 0)
+            end
+            return ("verified stock unequip from slot %d"):format(source)
+        end
         if equipped then
             local widget = widget_at(pending.screen.ItemManager.EquipSlots, slot + 1)
             if not finished or status ~= "refreshed" or not valid(widget) or widget.ItemIndex ~= slot

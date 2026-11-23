@@ -171,6 +171,19 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                     or ((displaced := receipt.get("displaced")) != "-" and (not valid_guid(displaced) or displaced == guid))):
                 raise RuntimeError("The host did not verify the saved stock equipment slot")
             committed = ("equipped", str(slot), displaced)
+        elif mode == "unequip":
+            slot = int(expected or 0) - 1
+            if (entry != "unequip" or quantity != 1 or not 0 <= slot < 8
+                    or client.gameplay.get(native_inventory.UNEQUIP_CAPABILITY) != 1):
+                raise ValueError("The selected quick slot has no host-authoritative Unequip action")
+            key = native_inventory.UNEQUIP_KEY
+            receipt = (await client.gameplay_action(native_inventory.UNEQUIP, operation, f"{guid}|{slot}")).get(key)
+            if (not isinstance(receipt, dict) or type(receipt.get("slot")) is not int
+                    or tuple(receipt.get(field) for field in ("state", "owner", "map", "guid", "slot"))
+                    != ("unequipped", client.invite["character_id"], area, guid, slot)
+                    or type(rounds := receipt.get("ammo")) is not int or not -1 <= rounds < 2**31):
+                raise RuntimeError("The host did not verify returning the stock equipment to the backpack")
+            committed = ("unequipped", str(slot), str(rounds))
         elif mode == "use":
             action = f"native-guest-{entry.removeprefix('use-')}"
             meal = native_guest_consumable.MEALS.get(action)

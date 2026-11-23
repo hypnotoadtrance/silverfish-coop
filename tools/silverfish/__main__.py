@@ -283,7 +283,7 @@ def parser() -> argparse.ArgumentParser:
         "native-lenny-preflight", "native-lenny-approach", "native-lenny-aim", "native-lenny-revive-approach",
         "native-spratt-preflight", "native-spratt-approach", "native-spratt-xp-fixture", "native-spratt-aim", "native-spratt-revive-approach",
         "native-inventory-list", "native-inventory-split", "native-inventory-take-ammo", "native-inventory-sort",
-        "native-inventory-store-equipment",
+        "native-inventory-store-equipment", "native-inventory-unequip",
         "native-stash-list", "native-stash-move",
         "native-stash-approach-fixture", "native-stash-setting-fixture",
         "native-guest-stack-drop-probe", "native-guest-stack-drop", "native-guest-stack-reclaim", "native-host-stack-drop",

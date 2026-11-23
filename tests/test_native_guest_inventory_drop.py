@@ -144,6 +144,43 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
             "native-inventory-stock-drop-finish", client.zone_epoch, "5", "refused", timeout=3,
         )
 
+    async def test_stock_unequip_returns_host_round_count_to_the_exact_open_screen(self):
+        client = self.client()
+        client.gameplay[native_inventory.UNEQUIP_CAPABILITY] = 1
+        client.guest_ui = SimpleNamespace(refresh=AsyncMock())
+        operation = "a" * 32
+        envelope = [record.STOCK_ACTION_ROW, MAP, PAWN, client.zone_epoch, "5", "unequip", GUID]
+        intent = record.parse_stock_action([*envelope, "1", "2"], client.last_game)
+        self.assertEqual((intent["mode"], intent["expected"]), ("unequip", 2))
+        for count, slot in (("1", "0"), ("1", "9"), ("2", "2")):
+            with self.assertRaisesRegex(ValueError, "Invalid stock backpack operation"):
+                record.parse_stock_action([*envelope, count, slot], client.last_game)
+        frame = [native_inventory.UNEQUIP, MAP, PAWN, GUID, "1", record.LIGHT_PISTOL]
+        receipt = dict(native_inventory.unequip_receipt([*frame, "3"], MAP), owner=client.invite["character_id"])
+        for ammo in ("-2", "2147483648", "+3"):
+            with self.assertRaises(ValueError):
+                native_inventory.unequip_receipt([*frame, ammo], MAP)
+        self.assertEqual(native_inventory.unequip_receipt([*frame, "-1"], MAP)["ammo"], -1)
+        client.gameplay_action.side_effect = None
+        client.gameplay_action.return_value = {native_inventory.UNEQUIP_KEY: receipt}
+        args = (client, MAP, client.zone_epoch, operation, "unequip", "unequip", GUID, 1, "5", "2", None)
+        self.assertEqual((await drop.settle_stock_action(*args))[native_inventory.UNEQUIP_KEY], receipt)
+        client.gameplay_action.assert_awaited_once_with(native_inventory.UNEQUIP, operation, f"{GUID}|1")
+        client.guest_ui.refresh.assert_awaited_once_with(client)
+        client.bridge.command.assert_awaited_once_with(
+            "native-inventory-stock-drop-finish", client.zone_epoch, "5", "unequipped", "1", "3", timeout=5,
+        )
+
+        client.bridge.command.reset_mock()
+        client.guest_ui.refresh.reset_mock()
+        client.gameplay_action.return_value = {native_inventory.UNEQUIP_KEY: {**receipt, "slot": 3}}
+        with self.assertRaisesRegex(RuntimeError, "did not verify returning"):
+            await drop.settle_stock_action(*args)
+        client.guest_ui.refresh.assert_not_awaited()
+        client.bridge.command.assert_awaited_once_with(
+            "native-inventory-stock-drop-finish", client.zone_epoch, "5", "refused", timeout=3,
+        )
+
     def test_take_ammo_result_must_match_registered_primary_ammo_and_capacity(self):
         for weapon in FIREARMS:
             with self.subTest(weapon=weapon.kind):

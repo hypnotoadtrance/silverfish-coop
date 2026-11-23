@@ -3,7 +3,7 @@ local guest_save = require("guest_save")
 local host_save = require("native_host_save")
 local weapon_profiles = require("guest_weapon_registry")
 local statics_path = "/Script/Engine.Default__GameplayStatics"
-local observation, split, unloaded, sorted, stored
+local observation, split, unloaded, sorted, stored, removed
 local stock_backpack = "/Game/Classes/GUI/New/InventoryScreen.InventoryScreen_C"
 local page_size = 16
 
@@ -81,6 +81,26 @@ function inventory.command(fields, state, phase)
     if fields[2] == "native-inventory-sort" then return sort_backpack(fields, state, phase) end
     if fields[2] == "native-inventory-split" then return split_stack(fields, state, phase) end
     if fields[2] == "native-inventory-take-ammo" then return take_ammo(fields, state, phase) end
+    if fields[2] == "native-inventory-unequip" then
+        removed = nil
+        local name, item = fields[3], fields[4]
+        local slot = math.tointeger(tonumber(fields[5]))
+        if #fields ~= 5 or not slot or slot < 0 or slot > 7 or phase ~= "hosting" or not state.listening
+            or state.server ~= false or not guid(item) or type(SilverfishUnequipNativeGuestEquipment) ~= "function" then
+            error("native_inventory_unequip_refused_scope", 0)
+        end
+        local exact, pawn, save = pcall(guest_save.exact_item_context, state, phase, name)
+        if not exact or not pawn or not save then error("native_inventory_unequip_refused_owner", 0) end
+        local ok, status, source, class, rounds = SilverfishUnequipNativeGuestEquipment(
+            pawn:GetAddress(), save:GetAddress(), item, slot)
+        if ok ~= true then error(tostring(status), 0) end
+        if status ~= "unequipped" or source ~= slot or type(class) ~= "string" or not class:match("^/Game/[%w_./%-]+$")
+            or math.type(rounds) ~= "integer" or rounds < -1 or rounds > 2147483647 then
+            error("mutation_unverified_native_inventory_unequip_receipt", 0)
+        end
+        removed = {map = state.map, pawn = name, guid = item, slot = slot, class = class, rounds = rounds}
+        return "native guest unequip to backpack verified"
+    end
     if fields[2] == "native-inventory-store-equipment" then
         stored = nil
         local name, item = fields[3], fields[4]
@@ -195,6 +215,13 @@ function inventory.rows(state, phase, status_row)
     if stored and stored.map == state.map then
         rows[#rows + 1] = status_row("native-inventory-store-equipment", stored.map, stored.pawn, stored.guid,
             stored.slot, stored.class, stored.displaced)
+    end
+    if type(SilverfishUnequipNativeGuestEquipment) == "function" then
+        rows[#rows + 1] = status_row("native-inventory-unequip-capability", 1)
+    end
+    if removed and removed.map == state.map then
+        rows[#rows + 1] = status_row("native-inventory-unequip", removed.map, removed.pawn, removed.guid,
+            removed.slot, removed.class, removed.rounds)
     end
     local report = observation
     if not report or report.map ~= state.map then return rows end
