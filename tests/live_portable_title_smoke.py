@@ -653,7 +653,7 @@ async def verify_resident_turret_death(host: Seat, guest: Seat) -> dict:
 
     assert await command(guest, "turret-state") == "absent"
     replication = await command(host, "turret-spawn")
-    assert replication in ("true", "false"), replication
+    assert replication == "true", replication
     async with asyncio.timeout(8):
         while (guest_before := await command(guest, "turret-state")) == "absent":
             await asyncio.sleep(.05)

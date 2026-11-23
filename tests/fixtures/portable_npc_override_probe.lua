@@ -163,15 +163,10 @@ local function turret_state(pawn, world, host, action)
         assert(same(turret, statics:FinishSpawningActor(turret, transform, 0)) and turret:HasAuthority() and turret.Alive,
             "stock turret did not start on the host")
         turret:SetActorTickEnabled(false)
-        local stock_replication = turret.bReplicates
-        if not stock_replication then
-            -- Attach this isolated fixture to the same native channel used for campaign turrets.
-            turret:SetReplicates(true)
-            turret:SetReplicateMovement(true)
-        end
+        assert(turret.bReplicates, "the stock turret did not enable native replication")
         turret:ForceNetUpdate()
         authority_turret = turret
-        return tostring(stock_replication)
+        return "true"
     end
     if not host then
         for _, candidate in ipairs(FindAllOf("Turret_MechGun_01_BP_C") or {}) do
@@ -187,7 +182,9 @@ local function turret_state(pawn, world, host, action)
         assert(host and turret.Alive and turret.Health > 0, "only the host may destroy the live turret")
         local total, lethal = {}, {}
         turret:DealDamage({[damage_key]=2000}, {}, pawn, {X=0,Y=0,Z=0}, false, total, lethal)
-        assert(total.TotalDamage > 0 and lethal.IsLethal == true, "stock turret damage did not resolve a death")
+        -- The stock turret reports remaining health in the TotalDamage out slot.
+        assert(lethal.IsLethal == true and turret.Alive == false and turret.Health <= 0,
+            ("stock turret stayed alive at %.2f HP, lethal=%s"):format(turret.Health, tostring(lethal.IsLethal)))
     end
     local gun = turret.Turret_Gun
     assert(valid(gun) and same(gun:GetOwner(), turret), "stock turret gun unavailable")
