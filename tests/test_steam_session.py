@@ -5,15 +5,19 @@ import struct
 import tempfile
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from tools.silverfish import direct_ip, link, runtime, steam_browser, steam_session
+from tools.silverfish import direct_ip, link, native_title_entry, runtime, service, steam_browser, steam_session
 from tools.silverfish.campaign import CampaignStore
+from tools.silverfish.control import Control, status as control_status
 from tools.silverfish.native_session_exit import SESSION
 from tools.silverfish.steam_transport import SteamTransport, _CALLBACK_FRIEND_JOIN, _CALLBACK_INVITE
-from tools.silverfish.title_handoff import DESCRIPTOR_FILE
+from tools.silverfish.title_handoff import DESCRIPTOR_FILE, REQUEST_FILE
+from tools.silverfish.title_session import STATUS_FILE, SessionPlan, TitleSession
+from tools.silverfish.travel import OBSERVATORY
 
 from tests.test_steam_transport import GUEST, HOST, LOBBY, Platform
+from tests.test_title_handoff import ready as stock_title
 
 
 class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
@@ -99,6 +103,147 @@ class SteamSessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(guest.transport.lobby)
         self.assertFalse(offer.exists())
         self.assertIsNone(host_api.presence)
+
+    async def test_invite_only_character_admission_reaches_resident_ready_and_resumes_on_same_route(self):
+        self.enterContext(patch.multiple(link, _IDLE_TIMEOUT=1.5, _KEEPALIVE_INTERVAL=.2))
+        host_api, host, host_mailbox = await self.start(HOST)
+        guest_api, guest, guest_mailbox = await self.start(GUEST)
+        build = "fixture-build"
+        identity = link.make_server_identity()
+        store = self.enterContext(CampaignStore(self.directory / "campaign"))
+        host_control = self.enterContext(Control(self.directory / "host-run", resident=True))
+        authority = service.Host(store, host_control, build, identity, "127.0.0.1", 0, False, None,
+                                 native_backend=None, native_events=False, native_guest=False)
+        authority.last_game = dict(state="hosting", map=OBSERVATORY)
+        authority.last_seen = time.monotonic()
+        enrollment = direct_ip.Enrollment(store, identity, build, service.PROTOCOL, {"native_zones": True}, "")
+
+        def admit(request):
+            if not enrollment.authorized(request["guest_id"]):
+                return {"accepted": False, "reason": "guest_unavailable"}
+            return authority.admit(request)
+
+        server = await link.start_host("127.0.0.1", 0, "127.0.0.1", 32123, identity,
+                                       admit, authority.disconnected, on_request=authority.guest_request, enroll=enrollment)
+        self.addAsyncCleanup(server.close)
+        token = "a" * 32
+        runtime.write_text(host_mailbox / SESSION, f"1\t{token}\thost\t{int(time.time()) + 10}\n", newline="\n")
+        async with host.playing(role="host"), host.host_panel(
+            host_mailbox, "127.0.0.1", server.address[1], identity.certificate_pem, host_control, access="invite",
+        ):
+            await self.ready((host_mailbox / steam_session.HOST_OFFER).exists)
+            runtime.write_text(host_mailbox / steam_session.HOST_INVITE, f"1\t{token}\tinvite\n", newline="\n")
+            await self.ready(lambda: host_api.invited == LOBBY)
+            self.assertEqual(host_api.lobby_access, "invite")
+            self.assertIsNone(host_api.presence)
+            guest_api.callbacks.append((_CALLBACK_INVITE, struct.pack("<QQ", LOBBY, HOST), 0))
+            offer = guest_mailbox / steam_session.JOIN_OFFER
+            await self.ready(offer.exists)
+            _, nonce, port_text, _ = offer.read_text().split()
+            address, port = "127.0.0.1", int(port_text)
+            runtime.write_text(guest_mailbox / steam_session.JOIN_OPENED, f"1\t{nonce}\topened\n", newline="\n")
+            await self.ready(lambda: not offer.exists())
+            pin = guest.fingerprint_for(address, port)
+            self.assertEqual(pin, sha256(identity.certificate_pem.encode("utf-8")).hexdigest())
+
+            connection = await direct_ip.connect(guest_mailbox, address, port, "", build, service.PROTOCOL,
+                                                 verified_fingerprint=pin, require_trust=True)
+            catalog = await service._character_catalog(connection.session(), None, None)
+            self.assertEqual(catalog, {"ok": True, "characters": []})
+            created = await service._character_catalog(connection.session(), "Invite Scout", "b" * 32)
+            self.assertTrue(created["ok"], created)
+            character = created["character"]["character_id"]
+            invite = connection.session(character)
+            guest_id = invite["guest_id"]
+
+            # The installed title's file stays at the solo menu while its child has the resident game frame.
+            saved = guest_mailbox / "Saved"
+            saved.mkdir()
+            bridge = runtime.Bridge(guest_mailbox, Mock(poll=Mock(return_value=None)))
+            sequence = 1
+            live_game = None
+            finish = asyncio.Event()
+            guest_run = self.directory / "guest-run"
+            transport = await link.start_client()
+            self.addAsyncCleanup(transport.close)
+            client = None
+
+            def file_snapshot():
+                nonlocal sequence
+                if live_game is None:
+                    sequence += 1
+                data = stock_title(sequence)
+                data["save_scope"] = None
+                data[native_title_entry.PANEL_KEY] = dict(state="ready", mounted=True, actions=["join"])
+                data[native_title_entry.STARTUP_KEY] = dict(map=data["map"], sequence=sequence, saved_directory=str(saved))
+                return data
+
+            async def join():
+                nonlocal client, live_game
+                async with guest.playing(address, port, role="guest"):
+                    with Control(guest_run, resident=True) as control:
+                        client = service.Client(control, transport, invite, bridge, allowed_maps=frozenset({OBSERVATORY}))
+                        result = await client.connect()
+                        self.assertEqual((result["character_id"], result["resumed"]), (character, False))
+                        live_game = dict(mode="client", state="connected", map=OBSERVATORY, sequence=sequence + 1,
+                                         save_scope=character, server_connection=True)
+                        control.status(role="client", active=True, state="connected", character_id=character,
+                                       gameplay_fresh=True, link_connected=transport.connected, game=live_game)
+                        try:
+                            await finish.wait()
+                        finally:
+                            control.status(role="client", active=False, state="stopped")
+
+            bridge.snapshot = file_snapshot
+            read_game = Mock(return_value=None)
+            plan = SessionPlan(join, lambda: control_status(guest_run), lambda frame: frame.get("character_id") == character
+                               and frame.get("gameplay_fresh") is True, read_game=read_game)
+            title = TitleSession(bridge, {"join": plan}, resident=True, title_saved_directory=saved,
+                                 on_title_ready=Mock(), poll_interval=.01)
+            task = asyncio.create_task(title.run())
+            self.addAsyncCleanup(self.stop_browser, task)
+
+            def title_state():
+                path = guest_mailbox / STATUS_FILE
+                return runtime.read_json(path) if path.exists() else {}
+
+            await self.ready(lambda: title_state().get("state") == "offered")
+            generation = (guest_mailbox / DESCRIPTOR_FILE).read_text().split("\t")[1]
+            runtime.write_text(guest_mailbox / REQUEST_FILE, f"1\t{generation}\t{'c' * 32}\tjoin\n", newline="\n")
+            await self.ready(lambda: read_game.called or title_state().get("last_failure"))
+            self.assertTrue(read_game.called, title_state())
+            self.assertEqual(title_state()["state"], "starting")
+            read_game.return_value = live_game
+            await self.ready(lambda: title_state().get("state") == "ready" or title_state().get("last_failure"))
+            status = title_state()
+            self.assertEqual((status["state"], status.get("progress")), ("ready", "connected"), status)
+            self.assertEqual(bridge.snapshot()["map"], native_title_entry.MAP)
+            self.assertTrue(server.connected(guest_id))
+            lease_id = authority.guest["lease_id"]
+            host_endpoint, guest_endpoint = server.guest_endpoint(guest_id), transport.address
+
+            self.platform.owner = 0
+            host.transport._refresh_roster()
+            guest.transport._refresh_roster()
+            await self.ready(lambda: authority.guest["disconnected"] is not None and not transport.connected)
+            reserved, = store.status()["leases"]
+            self.assertEqual((reserved["state"], reserved["character_id"]), ("reserved", character))
+            self.assertEqual((host.transport.lobby, guest.transport.lobby), (LOBBY, LOBBY))
+            self.assertEqual(title_state()["state"], "ready")
+
+            self.platform.owner = HOST
+            host.transport._refresh_roster()
+            guest.transport._refresh_roster()
+            resumed = await client.connect()
+            self.assertEqual((resumed["resumed"], resumed["character_id"]), (True, character))
+            self.assertEqual(authority.guest["lease_id"], lease_id)
+            self.assertEqual((server.guest_endpoint(guest_id), transport.address), (host_endpoint, guest_endpoint))
+            self.assertEqual(guest.fingerprint_for(address, port), pin)
+            self.assertTrue(server.connected(guest_id))
+            self.assertIsNone(title_state()["last_failure"])
+            finish.set()
+            await self.ready(lambda: title_state().get("state") == "offered")
+            self.assertIsNone(title_state()["last_failure"])
 
     async def test_public_lobby_browser_search_and_selection_use_the_steam_join_route(self):
         _, host, _ = await self.start(HOST)
