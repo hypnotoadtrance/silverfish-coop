@@ -103,6 +103,14 @@ namespace
     };
     constexpr std::array ruin_fields_squads{squad_assets[0], squad_assets[1], boar_squads[0]};
 
+    struct TypedDirectorProfile
+    {
+        std::size_t initial_markers;
+        std::size_t reinforcement_markers;
+        const U::TCHAR* clock;
+        bool keep_legacy_families{};
+    };
+
     struct DirectorProfile
     {
         const U::TCHAR* package;
@@ -111,7 +119,7 @@ namespace
         const U::TCHAR* pool;
         const U::TCHAR* marker_prefix;
         std::span<const int> markers;
-        std::size_t director_marker_limit{};
+        const TypedDirectorProfile* typed{};
         std::span<const U::TCHAR* const> directed_squads{};
     };
 
@@ -125,17 +133,28 @@ namespace
         STR("/Game/Classes/Libraries/DataAssets/AmbientSpawnPools/DeadBridgeSquadPool.DeadBridgeSquadPool"),
         STR("/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P.DeadBridge_P:PersistentLevel.AI_Spawner_Squad_BP_C_"),
         dead_bridge_markers};
+    // Keep the already-qualified Ruin marker cap and its legacy Husk/boar receipts.
+    constexpr TypedDirectorProfile ruin_schema{29, 29,
+        STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P:PersistentLevel.DayCycle_SunControler_BP_C_0"), true};
+    constexpr TypedDirectorProfile forest_schema{13, 3,
+        STR("/Game/Classes/Maps/Maps_OverWorld/Forest_01_P.Forest_01_P:PersistentLevel.DayCycle_SunControler_BP_C_0")};
     constexpr DirectorProfile ruin_fields{
         STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"),
         STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P"),
         STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P:PersistentLevel.DynaimicSpawnControler_BP_C_0"),
         STR("/Game/Classes/Libraries/DataAssets/AmbientSpawnPools/FloodPlainsSquadPool.FloodPlainsSquadPool"),
         STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P:PersistentLevel.AI_Spawner_Squad_BP_C_"),
-        {}, 29, ruin_fields_squads};
+        {}, &ruin_schema, ruin_fields_squads};
+    constexpr DirectorProfile forest{
+        STR("/Game/Classes/Maps/Maps_OverWorld/Forest_01_P"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/Forest_01_P.Forest_01_P"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/Forest_01_P.Forest_01_P:PersistentLevel.DynaimicSpawnControler_BP_C_0"),
+        STR("/Game/Classes/Libraries/DataAssets/AmbientSpawnPools/GoldWoodSquadPool.GoldWoodSquadPool"),
+        STR("/Game/Classes/Maps/Maps_OverWorld/Forest_01_P.Forest_01_P:PersistentLevel.AI_Spawner_Squad_BP_C_"),
+        {}, &forest_schema};
     constexpr auto combined_pool_path = STR("/Game/Classes/Libraries/DataAssets/AmbientSpawnPools/AmbientSquadPoolData.AmbientSquadPoolData_C:GetCombinedPool");
-    constexpr auto ruin_clock_class = STR("/Game/Classes/Actors/DayCycle_SunControler_BP.DayCycle_SunControler_BP_C");
-    constexpr auto ruin_clock_path = STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P:PersistentLevel.DayCycle_SunControler_BP_C_0");
-    constexpr std::array ambient_directors{&crossroads, &dead_bridge, &ruin_fields};
+    constexpr auto director_clock_class = STR("/Game/Classes/Actors/DayCycle_SunControler_BP.DayCycle_SunControler_BP_C");
+    constexpr std::array ambient_directors{&crossroads, &dead_bridge, &ruin_fields, &forest};
     constexpr std::array maximum_squad_sizes{4, 3, 5};
     constexpr std::size_t max_scene_npcs = 128;
 
@@ -304,7 +323,7 @@ namespace
             !in_level(actor, active.world) || object(actor, STR("As Game Instance FP")) != active.instance) return false;
         if (active.director == &crossroads) return true;
         auto* pool = object(actor, STR("AmbientSquadPool"));
-        if (active.director->director_marker_limit && !exact(pool, pool_class)) return false;
+        if (active.director->typed && !exact(pool, pool_class)) return false;
         return live(pool) && pool->GetPathName() == active.director->pool;
     }
 
@@ -353,7 +372,9 @@ namespace
     bool director_marker(U::UObject* actor, U::UObject* director, const Network& active, bool initial)
     {
         const auto& profile = *active.director;
-        if (!profile.director_marker_limit) return placed_spawner(actor, active.world);
+        if (!profile.typed) return placed_spawner(actor, active.world);
+        const auto marker_limit = initial ? profile.typed->initial_markers : profile.typed->reinforcement_markers;
+        if (marker_limit == 0) return false;
         if (!stock_spawner(actor, active.world) || byte_field(actor, STR("Usage")) != (initial ? 0 : 3)) return false;
         const std::wstring_view prefix{profile.marker_prefix};
         const auto path = actor->GetPathName();
@@ -367,7 +388,7 @@ namespace
         auto* entry = array ? U::CastField<U::FObjectProperty>(array->GetInner()) : nullptr;
         if (!entry || entry->GetPropertyClass().Get() != actor->GetClassPrivate()) return false;
         U::FScriptArrayHelper rows(array, array->ContainerPtrToValuePtr<void>(director));
-        if (rows.Num() <= 0 || static_cast<std::size_t>(rows.Num()) > profile.director_marker_limit) return false;
+        if (rows.Num() <= 0 || static_cast<std::size_t>(rows.Num()) > marker_limit) return false;
         int matches = 0;
         for (int index = 0; index < rows.Num(); ++index)
         {
@@ -421,13 +442,13 @@ namespace
         return 1 + rows.Num();
     }
 
-    // The largest authored Flood Plains roster is one leader and five followers.
-    constexpr std::size_t ruin_squad_cap = 6;
+    // The qualified stock pools contain up to one leader and five followers.
+    constexpr std::size_t typed_squad_cap = 6;
 
-    struct RuinSquad
+    struct TypedSquad
     {
-        std::array<std::wstring, ruin_squad_cap> classes;
-        std::array<bool, ruin_squad_cap> matched{};
+        std::array<std::wstring, typed_squad_cap> classes;
+        std::array<bool, typed_squad_cap> matched{};
         std::size_t size{};
         bool all_classes_loaded{true};
 
@@ -451,7 +472,7 @@ namespace
         }
     };
 
-    std::optional<bool> ruin_pool_contains(U::UObject* pool, U::UObject* data, const U::TCHAR* name)
+    std::optional<bool> typed_pool_contains(U::UObject* pool, U::UObject* data, const U::TCHAR* name)
     {
         auto* map = field<U::FMapProperty>(pool, name);
         auto* key = map ? U::CastField<U::FObjectProperty>(map->GetKeyProp()) : nullptr;
@@ -476,28 +497,29 @@ namespace
         return false;
     }
 
-    bool ruin_pool_asset(U::UObject* director, U::UObject* data)
+    bool typed_pool_asset(const DirectorProfile& profile, U::UObject* director, U::UObject* data)
     {
         auto* pool = object(director, STR("AmbientSquadPool"));
-        if (!exact(pool, pool_class) || pool->GetPathName() != ruin_fields.pool || !exact(data, data_class))
+        if (!exact(pool, pool_class) || pool->GetPathName() != profile.pool || !exact(data, data_class))
             return false;
-        const auto day = ruin_pool_contains(pool, data, STR("DayTimeSpawns"));
-        const auto night = ruin_pool_contains(pool, data, STR("NightTimeSpawns"));
+        const auto day = typed_pool_contains(pool, data, STR("DayTimeSpawns"));
+        const auto night = typed_pool_contains(pool, data, STR("NightTimeSpawns"));
         return day && night && (*day || *night);
     }
 
-    std::string_view ruin_squad_shape(U::UObject* director, U::UObject* data, RuinSquad& squad)
+    std::string_view typed_squad_shape(const DirectorProfile& profile, U::UObject* director,
+                                       U::UObject* data, TypedSquad& squad)
     {
-        if (!ruin_pool_asset(director, data)) return "stock_ruin_pool_asset_unqualified";
+        if (!typed_pool_asset(profile, director, data)) return "stock_ambient_pool_asset_unqualified";
         auto* base = find<U::UClass>(npc_base);
         auto* leader = field<U::FSoftClassProperty>(data, STR("Leader"));
         auto* followers = field<U::FArrayProperty>(data, STR("Followers"));
         auto* follower = followers ? U::CastField<U::FSoftClassProperty>(followers->GetInner()) : nullptr;
         if (!base || !leader || !follower || leader->GetMetaClass().Get() != base || follower->GetMetaClass().Get() != base)
-            return "stock_ruin_squad_class_schema_unqualified";
+            return "stock_ambient_squad_class_schema_unqualified";
         U::FScriptArrayHelper rows(followers, followers->ContainerPtrToValuePtr<void>(data));
-        if (rows.Num() < 0 || static_cast<std::size_t>(rows.Num()) >= ruin_squad_cap)
-            return "stock_ruin_squad_size_unqualified";
+        if (rows.Num() < 0 || static_cast<std::size_t>(rows.Num()) >= typed_squad_cap)
+            return "stock_ambient_squad_size_unqualified";
 
         const auto add = [&](const U::FSoftObjectPtr& soft) {
             const auto& reference = soft.ToSoftObjectPath();
@@ -526,18 +548,20 @@ namespace
             squad.classes[squad.size++].assign(path);
             return true;
         };
-        if (!add(*leader->ContainerPtrToValuePtr<U::FSoftObjectPtr>(data))) return "stock_ruin_leader_class_unqualified";
+        if (!add(*leader->ContainerPtrToValuePtr<U::FSoftObjectPtr>(data))) return "stock_ambient_leader_class_unqualified";
         for (int index = 0; index < rows.Num(); ++index)
             if (!add(*follower->ContainerPtrToValuePtr<U::FSoftObjectPtr>(rows.GetRawPtr(index))))
-                return "stock_ruin_follower_class_unqualified";
+                return "stock_ambient_follower_class_unqualified";
         return {};
     }
 
     NpcFamily directed_family(U::UObject* data, const Network& active)
     {
+        const auto* typed = active.director->typed;
+        if (typed && !typed->keep_legacy_families) return NpcFamily::Ambient;
         if (boar_squad_size(data) > 0) return NpcFamily::Boar;
         if (data_index(data) >= 0 && bool_field(data, STR("ForceWander"), true)) return NpcFamily::Husk;
-        return active.director == &ruin_fields ? NpcFamily::Ambient : NpcFamily::Unknown;
+        return typed ? NpcFamily::Ambient : NpcFamily::Unknown;
     }
 
     struct SpawnSchema
@@ -764,34 +788,34 @@ namespace
         Counts counts;
     } scope;
 
-    struct RuinDecision
+    struct DirectorDecision
     {
         int stock_day{-1}, is_day{-1}, only_track_time{-1};
         std::optional<std::int64_t> game_time_ticks;
     };
 
-    struct RuinDraw
+    struct DirectorDraw
     {
         U::FWeakObjectPtr marker, asset;
-        RuinDecision decision;
+        DirectorDecision decision;
         std::string_view stage;
     };
 
-    struct RuinPhase
+    struct DirectorPhase
     {
         // Keep the first pool calculation, first draw, and first supported draw per stock phase.
-        std::optional<RuinDecision> first_pool;
-        RuinDecision current_pool;
+        std::optional<DirectorDecision> first_pool;
+        DirectorDecision current_pool;
         U::FFrame* director_frame{};
-        RuinDraw first_draw, first_supported_draw;
+        DirectorDraw first_draw, first_supported_draw;
     };
 
-    struct RuinDiagnostic
+    struct DirectorDiagnostic
     {
         U::FWeakObjectPtr world, driver;
         Seat seat{Seat::Inactive};
-        std::array<RuinPhase, 2> phases;
-    } ruin_diagnostic;
+        std::array<DirectorPhase, 2> phases;
+    } director_diagnostic;
 
     struct Attempt
     {
@@ -803,8 +827,8 @@ namespace
         NpcFamily family{NpcFamily::Husk};
         bool initial{};
         std::string_view birth_failure{};
-        RuinDraw* ruin_draw{};
-        std::optional<RuinSquad> ruin_squad;
+        DirectorDraw* director_draw{};
+        std::optional<TypedSquad> typed_squad;
     } attempt;
 
     struct AntfarmLoad
@@ -854,7 +878,7 @@ namespace
     bool watch_combat{};
     bool watch_flayer_projectiles{};
     bool refresh_fixture{};
-    bool watch_ruin_director{};
+    bool watch_director{};
 
     void update_scope(const Network& active)
     {
@@ -869,39 +893,39 @@ namespace
         scope.seat = active.seat;
     }
 
-    RuinPhase* ruin_phase(const Network& active, U::FFrame& caller)
+    DirectorPhase* director_phase(const Network& active, U::FFrame& caller)
     {
-        if (!watch_ruin_director || active.director != &ruin_fields || active.seat == Seat::Inactive) return nullptr;
+        if (!watch_director || active.seat == Seat::Inactive || !active.director->typed) return nullptr;
         const bool initial = caller.Node() == find<U::UFunction>(initial_path);
         if (!initial && caller.Node() != find<U::UFunction>(refresh_path)) return nullptr;
         if (!exact_director(caller.Object(), active)) return nullptr;
-        if (ruin_diagnostic.world.Get() != active.world || ruin_diagnostic.driver.Get() != active.driver ||
-            ruin_diagnostic.seat != active.seat)
+        if (director_diagnostic.world.Get() != active.world || director_diagnostic.driver.Get() != active.driver ||
+            director_diagnostic.seat != active.seat)
         {
-            ruin_diagnostic = {};
-            ruin_diagnostic.world = active.world;
-            ruin_diagnostic.driver = active.driver;
-            ruin_diagnostic.seat = active.seat;
+            director_diagnostic = {};
+            director_diagnostic.world = active.world;
+            director_diagnostic.driver = active.driver;
+            director_diagnostic.seat = active.seat;
         }
-        return &ruin_diagnostic.phases[initial ? 0 : 1];
+        return &director_diagnostic.phases[initial ? 0 : 1];
     }
 
-    void observe_ruin_pool(U::UObject* receiver, U::FFrame& frame)
+    void observe_director_pool(U::UObject* receiver, U::FFrame& frame)
     {
         auto* caller = frame.PreviousFrame();
         if (!caller || !exact(caller->Object(), director_class)) return;
         const auto active = network(static_cast<U::AActor*>(caller->Object())->GetWorld(), true);
-        auto* phase = ruin_phase(active, *caller);
+        auto* phase = director_phase(active, *caller);
         if (!phase || object(caller->Object(), STR("AmbientSquadPool")) != receiver ||
             frame.Node() != find<U::UFunction>(combined_pool_path)) return;
 
-        RuinDecision decision;
+        DirectorDecision decision;
         auto* argument = field<U::FBoolProperty>(frame.Node(), STR("IsDayTime"));
         if (argument && frame.Locals() && argument->HasAnyPropertyFlags(U::CPF_Parm) &&
             !argument->HasAnyPropertyFlags(U::CPF_OutParm | U::CPF_ReturnParm))
             decision.stock_day = argument->GetPropertyValueInContainer(frame.Locals());
         auto* clock = object(caller->Object(), STR("DayControler_Ref"));
-        if (exact(clock, ruin_clock_class) && clock->GetPathName() == ruin_clock_path && in_level(clock, active.world))
+        if (exact(clock, director_clock_class) && clock->GetPathName() == active.director->typed->clock && in_level(clock, active.world))
         {
             if (auto* is_day = field<U::FBoolProperty>(clock, STR("IsDay")))
                 decision.is_day = is_day->GetPropertyValueInContainer(clock);
@@ -925,21 +949,21 @@ namespace
         phase->current_pool = decision;
     }
 
-    RuinDraw* observe_ruin_draw(const Network& active, U::FFrame& frame, U::UObject* marker, U::UObject* data)
+    DirectorDraw* observe_director_draw(const Network& active, U::FFrame& frame, U::UObject* marker, U::UObject* data)
     {
         auto* caller = frame.PreviousFrame();
-        auto* phase = watch_ruin_director && caller ? ruin_phase(active, *caller) : nullptr;
+        auto* phase = watch_director && caller ? director_phase(active, *caller) : nullptr;
         if (!phase) return nullptr;
-        RuinDraw* draw{};
+        DirectorDraw* draw{};
         if (phase->first_draw.stage.empty()) draw = &phase->first_draw;
         else if (!directed_squad(phase->first_draw.asset.Get(), active) && phase->first_supported_draw.stage.empty() &&
                  directed_squad(data, active)) draw = &phase->first_supported_draw;
         if (draw)
-            *draw = {marker, data, phase->director_frame == caller ? phase->current_pool : RuinDecision{}, "stock_draw_observed"};
+            *draw = {marker, data, phase->director_frame == caller ? phase->current_pool : DirectorDecision{}, "stock_draw_observed"};
         return draw;
     }
 
-    void ruin_stage(RuinDraw* draw, std::string_view stage)
+    void director_stage(DirectorDraw* draw, std::string_view stage)
     {
         if (draw) draw->stage = stage;
     }
@@ -969,7 +993,9 @@ namespace
 
     bool roster_family(const Network& active, NpcFamily family)
     {
-        return active.director == &crossroads || family == NpcFamily::Husk || family == NpcFamily::Boar;
+        if (active.director == &crossroads) return true;
+        if (active.director->typed && !active.director->typed->keep_legacy_families) return false;
+        return family == NpcFamily::Husk || family == NpcFamily::Boar;
     }
 
     bool hook_ready()
@@ -983,8 +1009,8 @@ namespace
         auto* world = U::Cast<U::UWorld>(attempt.world.Get());
         if (!attempt.birth_failure.empty()) return;
         auto* actor_class = actor ? actor->GetClassPrivate() : nullptr;
-        auto* base = attempt.ruin_squad ? find<U::UClass>(npc_base) : nullptr;
-        const bool expected_class = attempt.ruin_squad
+        auto* base = attempt.typed_squad ? find<U::UClass>(npc_base) : nullptr;
+        const bool expected_class = attempt.typed_squad
             ? actor_class && base && actor_class != base && actor_class->IsChildOf(base)
             : npc_family(actor) == attempt.family;
         if (!world || parent.Object() != spawner || !expected_class ||
@@ -1009,9 +1035,9 @@ namespace
             attempt.birth_failure = "stock_husk_birth_count_unverified";
             return;
         }
-        if (attempt.ruin_squad && !attempt.ruin_squad->match(actor_class->GetPathName(), leader))
+        if (attempt.typed_squad && !attempt.typed_squad->match(actor_class->GetPathName(), leader))
         {
-            attempt.birth_failure = "stock_ruin_birth_class_unqualified";
+            attempt.birth_failure = "stock_ambient_birth_class_unqualified";
             return;
         }
         attempt.births.emplace_back(actor);
@@ -1542,8 +1568,8 @@ namespace
 
     void prevent_client_spawn(Iteration& call, U::UObject* receiver, U::FFrame& frame, const Network& active)
     {
-        const bool uses_director_markers = active.director->director_marker_limit > 0;
-        if (!uses_director_markers && !placed_spawner(receiver, active.world)) return;
+        const bool uses_typed_squads = active.director->typed != nullptr;
+        if (!uses_typed_squads && !placed_spawner(receiver, active.world)) return;
         update_scope(active);
         SpawnSchema schema;
         if (const auto error = schema.bind_base(frame.Node()); !error.empty())
@@ -1552,14 +1578,13 @@ namespace
             return;
         }
         auto* data = get_object(schema.data, frame.Locals());
-        auto* draw = observe_ruin_draw(active, frame, receiver, data);
-        const bool ruin = active.director == &ruin_fields;
-        if (!ruin && !directed_squad(data, active)) return;
+        auto* draw = observe_director_draw(active, frame, receiver, data);
+        if (!uses_typed_squads && !directed_squad(data, active)) return;
         const auto family = directed_family(data, active);
         if (family == NpcFamily::Unknown) return;
         auto* caller = frame.PreviousFrame();
         bool initial{};
-        if (production_roster || uses_director_markers)
+        if (production_roster || uses_typed_squads)
         {
             if (!caller || !exact_director(caller->Object(), active)) return;
             const auto usage = byte_field(receiver, STR("Usage"));
@@ -1567,24 +1592,24 @@ namespace
             const bool refresh = usage == 3 && caller->Node() == find<U::UFunction>(refresh_path);
             if (!initial && !refresh)
             {
-                ruin_stage(draw, "director_usage_unqualified");
+                director_stage(draw, "director_usage_unqualified");
                 return;
             }
-            if (uses_director_markers && !director_marker(receiver, caller->Object(), active, initial))
+            if (uses_typed_squads && !director_marker(receiver, caller->Object(), active, initial))
             {
-                ruin_stage(draw, "director_marker_unqualified");
+                director_stage(draw, "director_marker_unqualified");
                 return;
             }
         }
         auto* cohort = antfarm_cohort(family);
         auto& latest = cohort ? cohort->latest : scope.latest;
         bool declared_unloaded{};
-        if (ruin)
+        if (uses_typed_squads)
         {
-            RuinSquad squad;
-            if (const auto error = ruin_squad_shape(caller->Object(), data, squad); !error.empty())
+            TypedSquad squad;
+            if (const auto error = typed_squad_shape(*active.director, caller->Object(), data, squad); !error.empty())
             {
-                ruin_stage(draw, error);
+                director_stage(draw, error);
                 return;
             }
             // This exact cooked director and pool provide a typed NPC declaration. Vetoing its local
@@ -1598,7 +1623,7 @@ namespace
             boar ? "stock_client_boar_spawn_observed" : "stock_client_husk_spawn_observed", 0};
         if (!boar && !operate && !production_roster)
         {
-            ruin_stage(draw, "suppression_disabled");
+            director_stage(draw, "suppression_disabled");
             return;
         }
         auto* output = schema.output_address(frame);
@@ -1606,21 +1631,21 @@ namespace
         {
             latest.stage = ambient ? "stock_client_ambient_output_unverified" :
                 boar ? "stock_client_boar_output_unverified" : "stock_client_husk_output_unverified";
-            ruin_stage(draw, "stock_count_output_unqualified");
+            director_stage(draw, "stock_count_output_unqualified");
             return;
         }
         call.PreventOriginalFunctionCall();
         if (call.OriginalFunctionCallPrevented())
         {
             schema.count->SetPropertyValue(output, 0);
-            ruin_stage(draw, declared_unloaded ? "client_spawn_denied_declared_unloaded" : "client_spawn_denied");
+            director_stage(draw, declared_unloaded ? "client_spawn_denied_declared_unloaded" : "client_spawn_denied");
             ++(cohort ? cohort->spawn_denials : scope.spawn_denials);
             if (network(active.world).seat != Seat::Client)
                 ++births_for(family).early_spawn_denials;
             latest.stage = ambient ? (initial ? "stock_client_ambient_initial_spawn_denied" : "stock_client_ambient_refresh_spawn_denied") :
                 boar ? "stock_client_boar_spawn_denied" : "stock_client_husk_spawn_denied";
         }
-        else ruin_stage(draw, "client_spawn_not_denied");
+        else director_stage(draw, "client_spawn_not_denied");
     }
 
     void on_pre(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
@@ -1632,10 +1657,10 @@ namespace
         static const U::FName perceive_name{STR("Proscess_TargetPerception")};
         static const U::FName damage_name{STR("DealDamage")};
         const auto name = frame.Node()->GetFName();
-        if (watch_ruin_director)
+        if (watch_director)
         {
             static const U::FName pool_name{STR("GetCombinedPool")};
-            if (name == pool_name) observe_ruin_pool(receiver, frame);
+            if (name == pool_name) observe_director_pool(receiver, frame);
         }
         if (prevent_roster_damage(call, receiver, frame.Node(), &frame, nullptr)) return;
         if (name == damage_name)
@@ -1697,11 +1722,11 @@ namespace
         if (!director_marker(receiver, director, active, initial) ||
             byte_field(receiver, STR("Role")) != 3 || byte_field(receiver, STR("Usage")) != (initial ? 0 : 3))
         {
-            if (watch_ruin_director && active.director == &ruin_fields)
+            if (watch_director && active.director->typed)
             {
                 SpawnSchema refused;
                 if (refused.bind_base(frame.Node()).empty())
-                    ruin_stage(observe_ruin_draw(active, frame, receiver, get_object(refused.data, frame.Locals())),
+                    director_stage(observe_director_draw(active, frame, receiver, get_object(refused.data, frame.Locals())),
                                "host_marker_or_authority_unqualified");
             }
             return;
@@ -1715,14 +1740,14 @@ namespace
         }
         ++scope.natural_calls;
         auto* data = get_object(schema.data, frame.Locals());
-        auto* draw = observe_ruin_draw(active, frame, receiver, data);
-        std::optional<RuinSquad> ruin_squad;
-        if (active.director == &ruin_fields)
+        auto* draw = observe_director_draw(active, frame, receiver, data);
+        std::optional<TypedSquad> typed_squad;
+        if (active.director->typed)
         {
-            ruin_squad.emplace();
-            if (const auto error = ruin_squad_shape(director, data, *ruin_squad); !error.empty())
+            typed_squad.emplace();
+            if (const auto error = typed_squad_shape(*active.director, director, data, *typed_squad); !error.empty())
             {
-                ruin_stage(draw, error);
+                director_stage(draw, error);
                 return;
             }
         }
@@ -1741,32 +1766,32 @@ namespace
         if (const auto error = schema.bind_birth(frame.Node()); !error.empty())
         {
             if (latest.cohort.empty()) latest = {receiver, data, {}, error, 0};
-            ruin_stage(draw, error);
+            director_stage(draw, error);
             return;
         }
         if (!local_pawn(director, active))
         {
-            ruin_stage(draw, "host_canonical_pawn_unqualified");
+            director_stage(draw, "host_canonical_pawn_unqualified");
             return;
         }
         const bool boar = family == NpcFamily::Boar;
         Handles baseline;
-        if (!ruin_squad)
+        if (!typed_squad)
         {
             Actors before;
             if (!scene_npcs(active.world, boar ? boar_class : npc_class, before))
             {
-                ruin_stage(draw, "pre_spawn_census_unavailable");
+                director_stage(draw, "pre_spawn_census_unavailable");
                 return;
             }
             baseline.reserve(before.size());
             for (auto* existing : before) baseline.emplace_back(existing);
         }
-        const auto maximum = ruin_squad ? static_cast<int>(ruin_squad->size) :
+        const auto maximum = typed_squad ? static_cast<int>(typed_squad->size) :
             boar ? boar_squad_size(data) : maximum_squad_sizes[static_cast<std::size_t>(data_index(data))];
         attempt = {&frame, active.world, director, receiver, data, std::move(baseline), {}, schema,
-            maximum, family, initial, {}, draw, std::move(ruin_squad)};
-        ruin_stage(draw, "awaiting_stock_spawn_result");
+            maximum, family, initial, {}, draw, std::move(typed_squad)};
+        director_stage(draw, "awaiting_stock_spawn_result");
     }
 
     void prune_roster(U::UWorld* world)
@@ -1779,8 +1804,8 @@ namespace
     void on_post(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
     {
         if (!hook_ready()) return;
-        if (watch_ruin_director)
-            for (auto& phase : ruin_diagnostic.phases)
+        if (watch_director)
+            for (auto& phase : director_diagnostic.phases)
                 if (phase.director_frame == &frame) phase.director_frame = nullptr;
         if (flayer_hit.frame == &frame)
         {
@@ -1805,10 +1830,10 @@ namespace
         if (attempt.frame != &frame || attempt.spawner.Get() != receiver) return;
         const auto observed = std::move(attempt);
         attempt = {};
-        auto* draw = ruin_diagnostic.world.Get() == observed.world.Get() ? observed.ruin_draw : nullptr;
+        auto* draw = director_diagnostic.world.Get() == observed.world.Get() ? observed.director_draw : nullptr;
         if (call.OriginalFunctionCallPrevented())
         {
-            ruin_stage(draw, "stock_spawn_prevented");
+            director_stage(draw, "stock_spawn_prevented");
             return;
         }
         const auto active = network(U::Cast<U::UWorld>(observed.world.Get()));
@@ -1821,11 +1846,11 @@ namespace
         if (active.seat != Seat::Host || !exact_director(director, active) || !local_pawn(director, active) ||
             !director_marker(receiver, director, active, observed.initial) || frame.Node() != find<U::UFunction>(spawn_path) ||
             data != get_object(schema.data, frame.Locals()) ||
-            (observed.ruin_squad ? !ruin_pool_asset(director, data) : !directed_squad(data, active)) ||
+            (observed.typed_squad ? !typed_pool_asset(*active.director, director, data) : !directed_squad(data, active)) ||
             directed_family(data, active) != observed.family ||
-            (!observed.ruin_squad && boar && boar_squad_size(data) != observed.max_count))
+            (!observed.typed_squad && boar && boar_squad_size(data) != observed.max_count))
         {
-            ruin_stage(draw, "post_spawn_scope_unqualified");
+            director_stage(draw, "post_spawn_scope_unqualified");
             return;
         }
 
@@ -1837,11 +1862,11 @@ namespace
         {
             if (output) next.stage = "stock_count_unexpected";
         }
-        else if (observed.ruin_squad)
+        else if (observed.typed_squad)
         {
             if (!observed.births.empty() && observed.birth_failure.empty())
                 for (const auto& unit : observed.births) after.push_back(unit.Get());
-            else next.stage = observed.birth_failure.empty() ? "stock_ruin_births_unverified" : observed.birth_failure;
+            else next.stage = observed.birth_failure.empty() ? "stock_ambient_births_unverified" : observed.birth_failure;
         }
         else if (!scene_npcs(active.world, boar ? boar_class : npc_class, after))
         {
@@ -1862,7 +1887,7 @@ namespace
         }
         if (after.empty())
         {
-            ruin_stage(draw, next.stage);
+            director_stage(draw, next.stage);
             if (latest.cohort.empty()) latest = std::move(next);
             return;
         }
@@ -1901,7 +1926,7 @@ namespace
             }
         }
         if (draw)
-            ruin_stage(draw, next.cohort.empty() ? next.stage
+            director_stage(draw, next.cohort.empty() ? next.stage
                 : next.replicated > 0 ? "host_cohort_published" : "host_cohort_not_replicated");
         // Retain the latest successful stock receipt across an occupied or failed marker.
         if (!next.cohort.empty() || latest.cohort.empty()) latest = std::move(next);
@@ -1918,7 +1943,7 @@ namespace
         scope.boars.counts = {};
         scope.ambient.counts = {};
         scope.not_deer_replica.Reset();
-        if (active.director == &ruin_fields && active.seat == Seat::Host)
+        if (active.director->typed && active.seat == Seat::Host)
         {
             prune_roster(active.world);
             for (const auto& member : scope.roster)
@@ -2009,7 +2034,7 @@ namespace
             selection == "ambient" ? NpcFamily::Ambient : NpcFamily::Unknown);
         if (arguments >= 3 && selection != "husk" && !family) return 0;
         const auto* profile = arguments == 4 ? director_for(RC::ensure_str(lua.get_string())) : &crossroads;
-        if (!profile || (selection == "ambient" && profile != &ruin_fields) ||
+        if (!profile || (selection == "ambient" && !profile->typed) ||
             (profile != &crossroads && selection != "husk" && selection != "boar" && selection != "ambient")) return 0;
         const auto active = network(find<U::UWorld>(profile->world));
         auto* director = find<U::UObject>(profile->director);
@@ -2070,27 +2095,29 @@ namespace
         return 27;
     }
 
-    int read_ruin_diagnostic(const Lua& lua)
+    int read_director_diagnostic(const Lua& lua)
     {
-        if (!hook_ready() || !watch_ruin_director || lua.get_stack_size() != 2 ||
-            !lua.is_integer(1) || !lua.is_bool(2)) return 0;
+        if (!hook_ready() || !watch_director || lua.get_stack_size() != 3 ||
+            !lua.is_integer(1) || !lua.is_bool(2) || !lua.is_string(3)) return 0;
         const auto expected = static_cast<std::uintptr_t>(lua.get_integer());
         const bool host = lua.get_bool();
-        const auto active = network(find<U::UWorld>(ruin_fields.world));
-        auto* director = find<U::UObject>(ruin_fields.director);
+        const auto* profile = director_for(RC::ensure_str(lua.get_string(3)));
+        if (!profile || !profile->typed) return 0;
+        const auto active = network(find<U::UWorld>(profile->world));
+        auto* director = find<U::UObject>(profile->director);
         if (!expected || active.seat != (host ? Seat::Host : Seat::Client) || !exact_director(director, active) ||
             reinterpret_cast<std::uintptr_t>(local_pawn(director, active)) != expected ||
-            ruin_diagnostic.world.Get() != active.world || ruin_diagnostic.driver.Get() != active.driver ||
-            ruin_diagnostic.seat != active.seat) return 0;
+            director_diagnostic.world.Get() != active.world || director_diagnostic.driver.Get() != active.driver ||
+            director_diagnostic.seat != active.seat) return 0;
 
         const auto object_name = [](U::UObject* object) {
             return live(object) ? RC::to_utf8_string(object->GetFullName()) : std::string{"-"};
         };
         std::string rows;
-        for (std::size_t index = 0; index < ruin_diagnostic.phases.size(); ++index)
+        for (std::size_t index = 0; index < director_diagnostic.phases.size(); ++index)
         {
-            const auto& phase = ruin_diagnostic.phases[index];
-            const auto append = [&](std::string_view kind, const RuinDecision& decision, std::string_view stage,
+            const auto& phase = director_diagnostic.phases[index];
+            const auto append = [&](std::string_view kind, const DirectorDecision& decision, std::string_view stage,
                                     U::UObject* marker, U::UObject* asset) {
                 rows.append(index == 0 ? "initial\t" : "refresh\t");
                 rows.append(kind).append("\t");
@@ -2450,7 +2477,8 @@ namespace silverfish::campaign_npc
         watch_flayer_projectiles = headless_fixture && publish_flayers && veto_flayer_spawns;
         watch_combat = headless_fixture && env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT");
         refresh_fixture = headless_fixture && env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH");
-        watch_ruin_director = production_roster && env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_RUIN_NPC_DIAGNOSTIC");
+        watch_director = production_roster && env("SILVERFISH_COOP_HEADLESS") &&
+            (env("SILVERFISH_COOP_RUIN_NPC_DIAGNOSTIC") || env("SILVERFISH_COOP_FOREST_NPC_DIAGNOSTIC"));
         callbacks[0] = Hook::RegisterProcessLocalScriptFunctionPreCallback(
             on_pre, {false, false, STR("SilverfishCoopNative"), STR("Qualify natural CrossRoads Husk squads")});
         callbacks[1] = Hook::RegisterProcessLocalScriptFunctionPostCallback(
@@ -2529,7 +2557,7 @@ namespace silverfish::campaign_npc
         if (U::IsInGameThreadRaw())
         {
             pending_client_load = {};
-            ruin_diagnostic = {};
+            director_diagnostic = {};
         }
         installed.store(false, std::memory_order_release);
         for (auto& callback : callbacks)
@@ -2544,7 +2572,7 @@ namespace silverfish::campaign_npc
         lua.register_function("SilverfishReadCampaignNpc", report);
         lua.register_function("SilverfishClearCampaignNpc", reset);
         if (production_roster) lua.register_function("SilverfishReadCampaignNpcHostRoster", report_host_roster);
-        if (watch_ruin_director) lua.register_function("SilverfishReadRuinDirectorDiagnostic", read_ruin_diagnostic);
+        if (watch_director) lua.register_function("SilverfishReadAmbientDirectorDiagnostic", read_director_diagnostic);
         if (watch_flayer_projectiles)
             lua.register_function("SilverfishReadCampaignFlayerProjectile", read_flayer_projectile);
         if (refresh_fixture) lua.register_function("SilverfishStockCampaignNpcRefresh", stock_refresh);

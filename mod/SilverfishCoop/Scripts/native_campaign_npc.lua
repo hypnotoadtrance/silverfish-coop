@@ -17,9 +17,12 @@ local detached_sickness = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SICKNESS") == 
 local refresh_fixture = fixture and os.getenv("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH") == "1"
 local map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 local dead_bridge = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
+local ruin_fields = "/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"
+local forest = "/Game/Classes/Maps/Maps_OverWorld/Forest_01_P"
 local ambient_worlds = {
-    [dead_bridge] = true,
-    ["/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"] = true,
+    [dead_bridge] = {legacy = true},
+    [ruin_fields] = {legacy = true, diagnostic = "native-campaign-npc-ruin-director"},
+    [forest] = {diagnostic = "native-campaign-npc-forest-director"},
 }
 local level = map .. ".CrossRoads_P:PersistentLevel."
 local types = {
@@ -617,7 +620,9 @@ local function read_rows(state, phase, status_row)
         return {}
     end
     if type(SilverfishReadCampaignNpc) ~= "function" then return {} end
-    local rows = family_rows(state, pawn, host, status_row, ambient and "husk" or view, "native-campaign-npc")
+    local only_typed = ambient and not ambient.legacy
+    local rows = family_rows(state, pawn, host, status_row, only_typed and "ambient" or ambient and "husk" or view,
+        only_typed and "native-campaign-npc-ambient" or "native-campaign-npc")
     if #rows == 0 then return rows end
     active = state.world:GetAddress()
     if host and type(SilverfishReadCampaignNpcHostRoster) == "function" then
@@ -629,22 +634,26 @@ local function read_rows(state, phase, status_row)
         end
     end
     if ambient then
-        for _, row in ipairs(family_rows(state, pawn, host, status_row, "boar", "native-campaign-npc-boar")) do
-            rows[#rows + 1] = row
-        end
-        if host then append_approach(rows, state, status_row) end
-        if state.map == "/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P" then
-            for _, row in ipairs(family_rows(state, pawn, host, status_row, "ambient", "native-campaign-npc-ambient")) do
+        if ambient.legacy then
+            for _, row in ipairs(family_rows(state, pawn, host, status_row, "boar", "native-campaign-npc-boar")) do
                 rows[#rows + 1] = row
             end
-            if type(SilverfishReadRuinDirectorDiagnostic) == "function" then
-                local trace = SilverfishReadRuinDirectorDiagnostic(pawn:GetAddress(), host)
+            if host then append_approach(rows, state, status_row) end
+        end
+        if ambient.diagnostic then
+            if ambient.legacy then
+                for _, row in ipairs(family_rows(state, pawn, host, status_row, "ambient", "native-campaign-npc-ambient")) do
+                    rows[#rows + 1] = row
+                end
+            end
+            if type(SilverfishReadAmbientDirectorDiagnostic) == "function" then
+                local trace = SilverfishReadAmbientDirectorDiagnostic(pawn:GetAddress(), host, state.map)
                 if type(trace) == "string" then
                     for line in trace:gmatch("[^\n]+") do
                         local fields = {}
                         for field in line:gmatch("[^\t]+") do fields[#fields + 1] = field end
                         if #fields == 9 then
-                            rows[#rows + 1] = status_row("native-campaign-npc-ruin-director", state.map,
+                            rows[#rows + 1] = status_row(ambient.diagnostic, state.map,
                                 host and "host" or "client", table.unpack(fields))
                         end
                     end
