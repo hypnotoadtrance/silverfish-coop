@@ -241,6 +241,8 @@ The guest's provisional NPC barter widget is hidden in the stock menu-open callb
 
 The remote avatar keeps one displayed weapon when the stock equipped actor is also attached. A muted pair verified the reported suppressed shotgun with actual stock quick-slot selection and guest ADS. The host saw one visible shotgun and the stock aim and lower transitions. A separate test sampled interpolated head yaw during the turn and verified neck and tail alignment through landing. [Avatar trial](../tests/live_avatar_capture.py)
 
+A simulated copy of the host could run the stock passive equipment refresh on the guest and clear the guest’s offhand flashlight flag in their shared stock save object. The native guard blocks that write on the simulated pawn. In a muted Observatory test, the guest kept the pistol and flashlight equipped through the same passive refresh, the host saw the beam follow the guest’s turn, and the guest used the stock control to holster it on both peers. [Offhand flashlight trial](../tests/live_avatar_capture.py)
+
 A muted pair dragged a blowtorch into the guest's stock Utility slot 7. The host held the same typed utility item, the guest's Character Info showed SwiftPaw and 1.5/25 kg, and only the host's jump velocity changed when the host gained DoubleJump. The save hashes matched through equip and inspection. The number-slot shortcut also uses the same host transaction and still needs live input verification.
 
 In a muted drag-and-drop installation test, the guest turned while holding the Observatory lantern. The host's copy moved about 150 cm while held and then registered the guest's stock throw. Both workers used the in-process bridge, and the host made no prop-pose mailbox file.
