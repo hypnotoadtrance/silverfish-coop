@@ -39,6 +39,20 @@ class ItemUseCueTests(unittest.IsolatedAsyncioTestCase):
         control.event.assert_any_call("native_avatar_use_sound_played", serial=1, item_class=self.item)
         control.event.assert_any_call("native_avatar_use_visual_played", serial=1, item_class=self.item, player_id=257)
 
+    async def test_dry_fire_has_only_a_deduplicated_sound_receipt(self):
+        mailbox = f"{self.area}\n3|dry|121|-59|2.05\n4|dry|inf|0|0\n"
+        area, cues = _captured(mailbox)
+        self.assertEqual(cues, [[3, "dry", 121.0, -59.0, 2.05]])
+        bridge = SimpleNamespace(command=AsyncMock(return_value={"ack": {"message": "3:dry,3:1:1:1:1"}}))
+        control = SimpleNamespace(event=Mock())
+        observer = Playback()
+        payload = [json.dumps([area, self.epoch, cues[0]])]
+        await observer.sync(bridge, control, {"map": area}, payload, self.epoch)
+        await observer.sync(bridge, control, {"map": area}, payload, self.epoch)
+        bridge.command.assert_awaited_once_with("native-weapon-play-shots", area, self.epoch,
+                                               "3|dry|121.00|-59.00|2.05", timeout=1.5)
+        control.event.assert_called_once_with("native_weapon_dry_fire_played", serial=3)
+
     async def test_resident_relay_reads_only_its_memory_queue_and_refuses_the_wrong_map(self):
         host = self.host()
         path = MagicMock(spec=Path)

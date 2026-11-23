@@ -70,6 +70,11 @@ def valid_use(cue):
             and (len(cue) == 6 or type(cue[6]) is int and 0 <= cue[6] <= 2147483647))
 
 
+def valid_dry_fire(cue):
+    return (type(cue) is list and len(cue) == 5 and type(cue[0]) is int and 0 < cue[0] < 10**15
+            and cue[1] == "dry" and valid_position(cue[2:]))
+
+
 def _captured(data):
     lines = data.splitlines()
     if not data.endswith("\n") or not 1 < len(lines) <= LIMIT + 1:
@@ -79,6 +84,14 @@ def _captured(data):
     for row in rows:
         fields = row.split("|")
         if not re.fullmatch(r"[1-9][0-9]{0,14}", fields[0]):
+            continue
+        if len(fields) == 5 and fields[1] == "dry":
+            try:
+                cue = [int(fields[0]), "dry", *map(float, fields[2:])]
+            except ValueError:
+                continue
+            if valid_dry_fire(cue):
+                cues.append(cue)
             continue
         if len(fields) == 5 and fields[1] == "cycle" and re.fullmatch(r"[0-9]{1,10}", fields[2]):
             cue = [int(fields[0]), "cycle", int(fields[2]), fields[3], fields[4]]
@@ -194,7 +207,8 @@ class Playback:
                 continue
             if type(decoded) is list and len(decoded) == 3 and decoded[:2] == scope:
                 cue = decoded[2]
-                if (valid_cycle(cue) or valid_melee(cue) or valid_use(cue) or valid_shot(cue)) and cue[0] > self.last_played:
+                if (valid_cycle(cue) or valid_melee(cue) or valid_use(cue) or valid_dry_fire(cue)
+                        or valid_shot(cue)) and cue[0] > self.last_played:
                     selected[cue[0]] = cue[1:]
         if not selected:
             return game
@@ -209,6 +223,10 @@ class Playback:
             return game
         self.last_played = max(selected)
         for receipt in result.get("ack", {}).get("message", "").split(","):
+            dry = re.fullmatch(r"([0-9]{1,15}):dry", receipt)
+            if dry and (source := selected.get(int(dry[1]))) and source[0] == "dry":
+                control.event("native_weapon_dry_fire_played", serial=int(dry[1]))
+                continue
             use = re.fullmatch(r"([0-9]{1,15}):consume", receipt)
             if use and (source := selected.get(int(use[1]))) and source[0] == "consume":
                 control.event("native_avatar_use_sound_played", serial=int(use[1]), item_class=source[1])
@@ -228,7 +246,7 @@ class Playback:
                 control.event("native_avatar_melee_played", serial=int(hit[1]), player_id=source[1], clip=hit[2])
                 continue
             match = re.fullmatch(r"([0-9]{1,15}):([01]):([01]):([01]):([01])", receipt)
-            if match and (serial := int(match[1])) in selected and selected[serial][0] not in ("melee", "cycle", "consume"):
+            if match and (serial := int(match[1])) in selected and stock_weapon_class(selected[serial][0]):
                 control.event("native_weapon_shot_played", serial=serial, weapon=selected[serial][0],
                               muzzle_flash=match[2] == "1", audio_component=match[3] == "1", stock_sound=match[4] == "1",
                               recoil=match[5] == "1")

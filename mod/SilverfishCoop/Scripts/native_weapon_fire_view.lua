@@ -10,6 +10,8 @@ local play_animation = "/Script/Engine.SkeletalMeshComponent:PlayAnimation"
 local attack_animation = "Animation_2_C8CAEADF40C9F2C76A885BA8E5E9AA27"
 local attack_rate = "SwingRate_17_17DEA9B2431C48BC143445BD3516142E"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
+local sound_at_location = "/Script/Engine.GameplayStatics:PlaySoundAtLocation"
+local trigger_click = "/Game/Assets/Sounds/CUEs/Weapon_Cues/Reload_Cues/TriggerClick_Cue.TriggerClick_Cue"
 local math_path = "/Script/Engine.Default__KismetMathLibrary"
 local stock_rest_inverse = {Pitch = 0, Yaw = 90, Roll = 0}
 local attenuation_path = "/Game/Assets/Sounds/SoundClasses/Weapon_Attenuation.Weapon_Attenuation"
@@ -18,7 +20,7 @@ local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 local maximum, range = 36, 30000
 local current, hooked, melee_hooked, recoil_hooked, cycle_hooked, visit, last_played, last_round
 local serial, published, pending = 0, 0, {}
-local use_hooked
+local use_hooked, dry_hooked
 
 local function valid(object) return object and object:IsValid() end
 local function same(first, second)
@@ -56,12 +58,12 @@ local function consumable_defaults(path)
     if valid(defaults) and valid(base) and defaults:IsA(base) then return defaults end
 end
 
-local function use_sound(defaults, listener, point)
+local function play_quiet_sound(sound, listener, point)
     local statics, attenuation = StaticFindObject(statics_path), asset(local_attenuation)
-    if not valid(statics) or not valid(attenuation) or not valid(defaults.UseSound) then return false end
+    if not valid(statics) or not valid(attenuation) or not valid(sound) then return false end
     local origin = listener:K2_GetActorLocation()
     if (origin.X - point.X)^2 + (origin.Y - point.Y)^2 + (origin.Z - point.Z)^2 > 1800^2 then return false end
-    statics:PlaySoundAtLocation(listener, defaults.UseSound, point, {Pitch = 0, Yaw = 0, Roll = 0},
+    statics:PlaySoundAtLocation(listener, sound, point, {Pitch = 0, Yaw = 0, Roll = 0},
         1, 1, 0, attenuation, nil, nil, nil)
     return true
 end
@@ -87,6 +89,30 @@ local function record(row)
     if #pending > maximum then table.remove(pending, 1) end
 end
 
+local function record_dry_fire(pawn, point)
+    if not point or not bounded(point.X, -1e7, 1e7) or not bounded(point.Y, -1e7, 1e7)
+        or not bounded(point.Z, -1e7, 1e7) then return end
+    serial = serial + 1
+    record({serial, "dry", point.X, point.Y, point.Z, expires = current.statics:GetRealTimeSeconds(pawn) + .25})
+end
+
+local function capture_dry_fire(_, source, sound, location)
+    if not current then return end
+    local cue = sound:get()
+    if not valid(cue) or cue:GetFullName() ~= "SoundCue " .. trigger_click then return end
+    local weapon, pawn = equipped_player(source:get())
+    if weapon then record_dry_fire(pawn, location:get()) end
+end
+
+function view.dry_fired(pawn)
+    if not current or not valid(pawn) or pawn:IsLocallyControlled() then return end
+    local weapon = equipped_player(pawn.EquipedItem)
+    if not weapon or weapon.Ammo ~= 0 or not bounded(weapon.AmmoCost_PerShot, 1, 16) then return end
+    local point = weapon:K2_GetActorLocation()
+    record_dry_fire(pawn, point)
+    if valid(current.listener) then play_quiet_sound(asset(trigger_click), current.listener, point) end
+end
+
 function view.consumed(pawn, path, stock_played)
     if not current or not valid(pawn) or not pawn:HasAuthority() or not stock_consumable(path)
         or not same(pawn:GetWorld(), current.world) then return end
@@ -98,7 +124,7 @@ function view.consumed(pawn, path, stock_played)
     if not stock_played and valid(current.listener) then
         local defaults = consumable_defaults(path)
         if not defaults then return end
-        pcall(use_sound, defaults, current.listener, point)
+        pcall(play_quiet_sound, defaults.UseSound, current.listener, point)
         pcall(current.avatar.play_consumable, current.world, player, path, defaults, serial)
     end
 end
@@ -269,6 +295,10 @@ function view.sync(state, phase, avatar)
         RegisterHook(play_animation, function(context, clip, looping) pcall(capture_cycle, context, clip, looping) end)
         cycle_hooked = true
     end
+    if not dry_hooked and valid(StaticFindObject(sound_at_location)) then
+        RegisterHook(sound_at_location, function(...) pcall(capture_dry_fire, ...) end)
+        dry_hooked = true
+    end
 end
 
 function view.flush(get_world)
@@ -348,6 +378,17 @@ function view.command(args, state, phase, avatar)
         local values = {}
         for field in (args[index] .. "|"):gmatch("([^|]*)|") do values[#values + 1] = field end
         local id, path = math.tointeger(tonumber(values[1])), values[2]
+        if #values == 5 and id and id > last_played and path == "dry" then
+            local x, y, z = tonumber(values[3]), tonumber(values[4]), tonumber(values[5])
+            if bounded(x, -1e7, 1e7) and bounded(y, -1e7, 1e7) and bounded(z, -1e7, 1e7) then
+                last_played = id
+                local ok, heard = pcall(function()
+                    return play_quiet_sound(asset(trigger_click), pawn, {X = x, Y = y, Z = z})
+                end)
+                if ok and heard then receipts[#receipts + 1] = ("%d:dry"):format(id) end
+            end
+            goto next_cue
+        end
         if (#values == 6 or #values == 7) and id and id > last_played and path == "consume"
             and stock_consumable(values[3]) then
             local x, y, z = tonumber(values[4]), tonumber(values[5]), tonumber(values[6])
@@ -355,7 +396,7 @@ function view.command(args, state, phase, avatar)
                 last_played = id
                 local resolved, defaults = pcall(consumable_defaults, values[3])
                 if resolved and defaults then
-                    local ok, heard = pcall(use_sound, defaults, pawn, {X = x, Y = y, Z = z})
+                    local ok, heard = pcall(play_quiet_sound, defaults.UseSound, pawn, {X = x, Y = y, Z = z})
                     if ok and heard then receipts[#receipts + 1] = ("%d:consume"):format(id) end
                     local player = math.tointeger(tonumber(values[7]))
                     if player and player >= 0 and player <= 2147483647 then
