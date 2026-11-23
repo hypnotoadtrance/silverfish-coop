@@ -134,6 +134,7 @@ class MosbyDialogueTests(unittest.IsolatedAsyncioTestCase):
         self.progress = dict(zip(dialogue.PROGRESS_KEYS, (0, 0, 0, None, 250, 2)))
         self.checkpoints = []
         self.writes = []
+        self.host.pending_host_save = None
         self.host.checkpoint_native = AsyncMock(side_effect=self.checkpoint)
         self.bridge = SimpleNamespace(command=AsyncMock(side_effect=self.stock))
         self.sessions = dialogue.DialogueSessions()
@@ -171,15 +172,18 @@ class MosbyDialogueTests(unittest.IsolatedAsyncioTestCase):
         action, target = (dialogue.OPEN, dialogue.MOSBY) if reply is None else (dialogue.CHOOSE, f"{reply['token']}@{ordinal}")
         return (await self.sessions.act(self.host, self.bridge, guest, action, target, operation or uuid.uuid4().hex))["native_dialogue"]
 
-    async def test_qualified_topics_and_shared_issue_checkpoint_only_once(self):
+    async def test_qualified_topics_and_shared_issue_defer_until_checkpoint(self):
         first = await self.act("first", await self.act("first"), 4)
         second = await self.act("second", await self.act("second"), 4)
         self.assertEqual([choice["ordinal"] for choice in first["choices"]], [1, 3])
         with self.assertRaisesRegex(ValueError, "native_dialogue_choice_unavailable"):
             await self.act("first", first, 6)
         anomaly = await self.act("first", first, 3)
-        self.assertEqual((anomaly["row"], anomaly["effect"], anomaly["revision"]), (dialogue.ANOMALIES, "topic_eather_drill", 2))
-        self.assertEqual((self.checkpoints[0][0]["topic_eather_drill"], self.checkpoints[1][0]["topic_eather_drill"]), (0, 1))
+        self.assertEqual((anomaly["row"], anomaly["effect"], anomaly["revision"]),
+                         (dialogue.ANOMALIES, "topic_eather_drill", None))
+        self.assertEqual(self.progress["topic_eather_drill"], 1)
+        self.assertIs(self.host.pending_host_save, False)
+        self.host.checkpoint_native.assert_not_awaited()
         with self.assertRaisesRegex(ValueError, "native_dialogue_choice_unavailable"):
             await self.act("second", second, 5)
         other_anomaly = await self.act("second", second, 3)
@@ -192,16 +196,19 @@ class MosbyDialogueTests(unittest.IsolatedAsyncioTestCase):
         first = await self.act("first", await self.act("first", drill, 1), 6)
         second = await self.act("second", await self.act("second", other_drill, 1), 6)
         self.assertEqual((first["row"], second["row"]), (dialogue.OFFER, dialogue.OFFER))
+        self.host.pending_host_save = True  # Preserve an earlier typed inventory capture.
         operation = uuid.uuid4().hex
         issued = await self.act("first", first, 2, operation)
         self.assertEqual((issued["state"], issued["effect"], issued["progress"]["quest_step"]), ("closed", "stone_maze_issued", 1))
         self.assertEqual(await self.act("first", first, 2, operation), issued)
         self.assertEqual((await self.act("second", second, 2))["effect"], "stone_maze_already_present")
         record = {"quest_id": dialogue.MOSBY_QUEST, "step": 1, "actor": "first"}
-        self.assertEqual(self.checkpoints[-1][1]["native_quests"][dialogue.MOSBY_QUEST], record)
+        self.assertEqual(self.host.party["native_quests"][dialogue.MOSBY_QUEST], record)
         self.assertEqual(self.writes, ["topic_eather_drill", "topic_drill_data", "stone_maze_issued"])
-        self.assertEqual(len(self.checkpoints), 6)
+        self.host.checkpoint_native.assert_not_awaited()
+        self.assertIs(self.host.pending_host_save, True)
 
+        self.assertEqual(await self.host.checkpoint_native(self.bridge), 1)
         saved_progress, saved_party = self.checkpoints[-1]
         self.progress = saved_progress.copy()
         self.host.party, self.host.control.generation = party.load_party(saved_party), "restarted-generation"
@@ -212,7 +219,7 @@ class MosbyDialogueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restarted["progress"], dict(zip(dialogue.PROGRESS_KEYS, (1, 1, 0, 1, 250, 2))))
         self.assertEqual(self.host.party["native_quests"][dialogue.MOSBY_QUEST], record)
 
-    async def test_unverified_mosby_mutation_stops_before_a_second_checkpoint(self):
+    async def test_unverified_mosby_mutation_stops_without_checkpointing(self):
         questions = await self.act("first", await self.act("first"), 4)
 
         async def failed(command, pawn, *arguments, timeout):
@@ -223,7 +230,8 @@ class MosbyDialogueTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.command.side_effect = failed
         with self.assertRaisesRegex(RuntimeError, "mutation_unverified_native_dialogue_mosby"):
             await self.act("first", questions, 3)
-        self.assertEqual(len(self.checkpoints), 1)
+        self.host.checkpoint_native.assert_not_awaited()
+        self.assertIsNone(self.host.pending_host_save)
         self.assertTrue(self.host.stopping and self.host.native_checkpoint_unsafe)
         self.assertFalse(self.host.transitioning)
 

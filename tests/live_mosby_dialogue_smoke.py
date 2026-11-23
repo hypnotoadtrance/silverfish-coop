@@ -9,7 +9,7 @@ import sys
 import uuid
 
 from live_ai_smoke import wait
-from live_multi_smoke import saved_hashes
+from live_multi_smoke import campaign_save_hashes, saved_hashes
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -133,6 +133,8 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
                 right = enrolled
         assert invitations[0]["character_id"] != invitations[1]["character_id"] and left[:2] != right[:2]
 
+        before_dialogue = campaign_save_hashes(run.parent)
+        assert str(Path("save/campaign.json")) in before_dialogue, before_dialogue
         left_root = await press("open", dialogue.GREET)
         before = await open_mosby(1)
         assert left_root["token"] != before["token"]
@@ -174,7 +176,13 @@ async def exercise(work: Path, vanilla_saved: Path | None) -> None:
         lines = [json.loads(line) for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
         writes = [row for row in lines if row.get("event") == "native_dialogue_committed"]
         effects = ("topic_eather_drill", "topic_drill_data", "stone_maze_issued")
-        assert [(row["effect"], row["character"]) for row in writes] == [(effect, primary_actor) for effect in effects], writes
+        assert [(row["effect"], row["character"], row["revision"]) for row in writes] == [
+            (effect, primary_actor, None) for effect in effects
+        ], writes
+        assert campaign_save_hashes(run.parent) == before_dialogue, "A topic or quest offer wrote a save"
+        checkpoint = await action(host, "checkpoint")
+        assert checkpoint.get("revision") and campaign_save_hashes(run.parent) != before_dialogue
+        evidence["deferred_save"] = {"unchanged_files": len(before_dialogue), "checkpoint": checkpoint["revision"]}
         serials = [row["sequence"] for row in evidence["stock_input"]]
         assert serials == sorted(set(serials)), serials
         evidence.update(quest=record, canonical_progress=progress, writes=writes, sibling_replay=settlement["effect"])

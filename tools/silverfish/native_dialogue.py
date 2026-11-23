@@ -334,7 +334,6 @@ class DialogueSessions:
     async def _mutate_mosby(self, host, bridge, character, scope, before, command, arguments, expected, quest=None):
         host.transitioning = True
         try:
-            await host.checkpoint_native(bridge)
             member = host.native_recipients().get(character, {})
             if (not member.get("connected") or member.get("pawn") != scope[3] or host.stopping
                     or (host.control.generation, host.zone_epoch, host.last_game.get("map")) != scope[:3]):
@@ -352,17 +351,15 @@ class DialogueSessions:
                 raise
             if observed["connection"] != scope[4] or observed["progress"] != expected:
                 raise RuntimeError("The canonical host save did not verify the exact stock dialogue change")
-            candidate = None
             if quest:
                 candidate = party.load_party(host.party)
                 candidate.setdefault("native_quests", {})[quest] = {"quest_id": quest, "step": 1, "actor": character}
-            revision = await host.checkpoint_native(bridge, candidate)
-            if candidate is not None:
                 host.party = candidate
+            host.pending_host_save = bool(host.pending_host_save)
             host.native_checkpoint_unsafe = False
             effect = expected["effect"]
-            host.control.event("native_dialogue_committed", revision=revision, effect=effect, character=character)
-            return observed, effect, revision
+            host.control.event("native_dialogue_committed", revision=None, effect=effect, character=character)
+            return observed, effect, None
         except (OSError, RuntimeError, ValueError, KeyError, asyncio.CancelledError):
             if host.native_checkpoint_unsafe:
                 host.stopping = True
