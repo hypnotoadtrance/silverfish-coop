@@ -806,10 +806,18 @@ async def verify_stock_npc_rivalry(host: Seat, guest: Seat, _pawn: str) -> dict:
 
     guest_run = guest.client / "run"
     frame = await wait_resident_status(guest_run, lambda status: status.get("state") == "connected")
+    assert await ask(guest, "rivalry-watch") == "watching"
     began = time.time()
     baseline = await ask(host, "rivalry-start")
-    snapshots, target_seen, initialized, weapons = None, False, False, set()
+    snapshots, target_seen, weapons = None, False, set()
     try:
+        async with asyncio.timeout(8):
+            while True:
+                ready = await sample(guest)
+                if len(ready) == 2 and all(row[:3] == ["true", "false", "0"] for row in ready):
+                    break
+                await asyncio.sleep(.15)
+        assert await ask(host, "rivalry-initialize") == "initialized"
         try:
             async with asyncio.timeout(24):
                 while True:
@@ -818,17 +826,16 @@ async def verify_stock_npc_rivalry(host: Seat, guest: Seat, _pawn: str) -> dict:
                     if len(source) != 2 or len(observer) != 2 or any(len(row) != 10 for row in source + observer):
                         await asyncio.sleep(.15)
                         continue
-                    initialized |= all(row[8:] == ["true", "true"] for row in source)
                     target_seen |= any(row[4] == "true" for row in source)
                     weapons.update(row[7] for row in source if row[7] != "-")
                     killed = [i for i, row in enumerate(source) if row[:3] == ["false", "true", "1"]
                               and int(row[5]) > 0 and row[6] == "true"]
-                    if initialized and target_seen and killed and all(observer[i][:3] == ["false", "true", "1"] for i in killed):
+                    if target_seen and killed and all(observer[i][:3] == ["false", "true", "1"] for i in killed):
                         break
                     await asyncio.sleep(.15)
         except TimeoutError as error:
-            raise AssertionError(f"Stock NPC rivalry did not resolve: {baseline}, initialized={initialized}, "
-                                 f"targets={target_seen}, last={snapshots}") from error
+            raise AssertionError(f"Stock NPC rivalry did not resolve: {baseline}, targets={target_seen}, "
+                                 f"last={snapshots}") from error
         shots = [row for row in await resident_events(guest_run, frame) if row["time_unix"] >= began
                  and row["event"] == "native_weapon_shot_played" and row["weapon"] in weapons and row["stock_sound"]]
         assert shots, (weapons, snapshots)
@@ -984,12 +991,17 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
                 break
             # Give the shooter another clear lane while the stock worker keeps moving and attacking.
             retreat = tuple(map(float, (await command(host, "dock-natural-retreat")).split(",")))
-            async with asyncio.timeout(6):
-                while True:
-                    local_point = await command(guest, "dock-natural-seat")
-                    if math.dist(retreat, tuple(map(float, local_point.split(",")))) < 80:
-                        break
-                    await asyncio.sleep(.05)
+            local_point = None
+            try:
+                async with asyncio.timeout(6):
+                    while True:
+                        local_point = await command(guest, "dock-natural-seat")
+                        if math.dist(retreat, tuple(map(float, local_point.split(",")))) < 80:
+                            break
+                        await asyncio.sleep(.05)
+            except TimeoutError as error:
+                raise AssertionError(f"The guest did not reach the warehouse retreat {retreat} from {local_point}. "
+                                     f"Last stock fight sample was {current}") from error
             for seat in (guest, host):
                 target = await command(seat, "dock-natural-position")
                 assert target != "absent" and await command(seat, f"dock-aim\t{target}") == "ready"
@@ -1177,7 +1189,8 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
                                      "stock_swing": {"host": source, "guest": observer, "received": received}}}
 
 
-async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool = False, rusty: bool = False) -> dict:
+async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool = False,
+                                      rusty: bool = False, npc_rivalry: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_frame, guest_frame = await asyncio.gather(
         wait_resident_status(host_run, lambda frame: frame.get("local_bridge") == "memory"),
@@ -1232,7 +1245,7 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
     footsteps = await verify_resident_footsteps(host, guest)
     pistol = await verify_resident_pistol(host, guest, guest_combat=guest_combat, rusty=rusty)
     npc_shots = await verify_resident_npc_shots(host, guest_run, guest_frame) if guest_combat else []
-    npc_kill = await verify_resident_npc_kill(host, guest) if guest_combat else {}
+    npc_kill = await verify_resident_npc_kill(host, guest) if guest_combat and not npc_rivalry else {}
     turret_death = await verify_resident_turret_combat(host, guest, guest_frame) if guest_combat else {}
     assert not weapon_cue_files(host, guest), "Stock player cues wrote a legacy weapon cue mailbox"
     after = save_state()
@@ -3155,9 +3168,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_weather_travel, "stock_weather_travel",
          lambda host, guest, pawn: verify_weather_travel(host, guest, pawn, portable_probe_command)),
         (stock_melee_family, "stock_melee_family", verify_stock_melee_family),
-        (resident_weapon_cues, "resident_weapon_cues",
-         lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override, rusty=rusty_pistol)),
         (stock_npc_rivalry, "stock_npc_rivalry", verify_stock_npc_rivalry),
+        (resident_weapon_cues, "resident_weapon_cues",
+         lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override,
+                                                               rusty=rusty_pistol, npc_rivalry=stock_npc_rivalry)),
         (stock_food, "stock_food", verify_resident_guest_food),
         (stock_take_ammo, "stock_take_ammo", verify_stock_take_ammo),
         (stock_bandage_revisit, "stock_bandage_revisit", verify_tutorial_bandage_revisit),
