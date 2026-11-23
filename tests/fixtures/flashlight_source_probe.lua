@@ -6,6 +6,7 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_FL
 local map = "World /Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local guest_source = os.getenv("SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE") == "1"
 local offhand = not guest_source and os.getenv("SILVERFISH_COOP_OFFHAND_FLASHLIGHT_PROBE") == "1"
+local offhand_view = offhand and os.getenv("SILVERFISH_COOP_OFFHAND_FLASHLIGHT_VIEW_PROBE") == "1"
 local heavy = os.getenv("SILVERFISH_COOP_HEAVY_FLASHLIGHT_PROBE") == "1"
 local heavy_view = heavy and os.getenv("SILVERFISH_COOP_HEAVY_FLASHLIGHT_VIEW_PROBE") == "1"
 local equipment_asset = heavy and "Eqp_Heavy_Flashlight" or "Eqp_Flashlight"
@@ -167,6 +168,10 @@ local function offhand_operation(operation, pawn, world)
         pawn:CanOffhandFlashlight(eligible)
         assert(eligible.CanEquip == true or eligible[1] == true, "flashlight_probe_stock_offhand_ineligible")
         pawn:OffhandFlashlight(true)
+    elseif operation == "turnoffhand" and offhand_view then
+        assert(save.PlayerOffhandingFlashlight == true and valid(pawn.Controller), "flashlight_probe_offhand_turn_unavailable")
+        local rot = pawn.Controller:GetControlRotation()
+        pawn.Controller:SetControlRotation({Pitch = rot.Pitch < 0 and 25 or -25, Yaw = rot.Yaw, Roll = 0})
     elseif operation == "offhandoff" or operation == "waitoffhand" or operation == "clearoffhand" then
         if operation == "offhandoff" and save.PlayerOffhandingFlashlight then pawn:OffhandFlashlight(false) end
         assert(save.PlayerOffhandingFlashlight == false, "flashlight_probe_stock_offhand_flag_clear_failed")
@@ -284,7 +289,26 @@ local function observe(world, local_pawn, id)
     end
     local census = string.format("%s\t%d\t%d\t%d\t%d\t%d\t%d", remote:GetFullName(), sources, powered, visible, components,
         held_sources, display_meshes)
-    if offhand then return census .. "\t" .. offhand_rig(remote) end
+    if offhand then
+        local row = census .. "\t" .. offhand_rig(remote)
+        if not offhand_view then return row end
+        row = row .. "\tbeam"
+        if not visible_component then return row .. "\t-" end
+        assert(components == 1 and display_meshes == 1 and same(visible_component:GetAttachParent(), avatar_torch)
+            and avatar_torch:GetAttachSocketName():ToString() == "LeftHand", "flashlight_probe_offhand_display_mount_unavailable")
+        local body = avatar_torch:GetAttachParent()
+        local function joint(name) return body:GetSocketLocation(FName(name, EFindName.FNAME_Find)) end
+        local wrist, i, r = joint("LeftHand"), joint("LeftHandIndex1"), joint("LeftHandRing1")
+        local palm = {X = (2*wrist.X + i.X + r.X)/4, Y = (2*wrist.Y + i.Y + r.Y)/4, Z = (2*wrist.Z + i.Z + r.Z)/4}
+        local api = asset("/Script/Engine.Default__KismetMathLibrary")
+        local torch_transform = avatar_torch:K2_GetComponentToWorld()
+        local grip = api:TransformLocation(torch_transform, {X = 2.1321736, Y = -9.03324555, Z = -6.46371144})
+        local error_cm = math.sqrt((grip.X-palm.X)^2 + (grip.Y-palm.Y)^2 + (grip.Z-palm.Z)^2)
+        local spot_transform = visible_component:K2_GetComponentToWorld()
+        local relative = api:MakeRelativeTransform(spot_transform, remote:GetTransform())
+        local lens = api:InverseTransformLocation(torch_transform, spot_transform.Translation)
+        return table.concat({row, error_cm, lens.X, lens.Y, lens.Z, transform_row(relative, api)}, "\t")
+    end
     local row = census
     if guest_source then
         assert(remote:HasAuthority() and valid(remote.Save) and not same(remote.Save, local_pawn.Save),
