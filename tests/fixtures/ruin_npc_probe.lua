@@ -1,4 +1,4 @@
--- Read only a requested NPC census from the exact private, muted Ruin Fields pair.
+-- Private, muted Ruin census and opt-in stock reinforcement proof.
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
 if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_RUIN_NPC_PROBE") ~= "1"
     or not bridge or not bridge:match("[/\\]campaign%-npc%-ruin%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$") then
@@ -9,11 +9,28 @@ local world_name = "/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P"
 local level_path = world_name .. ":PersistentLevel."
 local classes = {"NPC_Zomb_01_C", "NPC_WildBoar_C", "NPC_FeralDog_C", "NPC_Survivor_FlowerLady_C",
     "NPC_MinorStag_C", "NPC_Doe_C", "NPC_Survivor_Worker_C", "NPC_Homunculus_C"}
-local last
+local marker_name = "AI_Spawner_Squad_BP_C " .. level_path .. "AI_Spawner_Squad_BP_C_8"
+local marker_check = "/Game/Classes/ScriptingActors/AI_Spawner_Squad_BP.AI_Spawner_Squad_BP_C:SpawnIsValid"
+local stock_squads = {
+    host = {"WildLife/Stag_WtDoe.Stag_WtDoe", "NPC_MinorStag", "NPC_Doe"},
+    client = {"Monsters/Surv_Workers.Surv_Workers", "NPC_Survivor_Worker"},
+}
+local last, refresh_used
 
 local function valid(value) return value and value:IsValid() end
 
-local function census()
+local function same(first, second)
+    return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
+end
+
+local function object(value)
+    if type(value) == "userdata" and type(value.type) == "function" and value:type() == "RemoteUnrealParam" then
+        return value:get()
+    end
+    return value
+end
+
+local function active_ruin()
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     assert(valid(world) and world:GetFullName() == "World " .. world_name and valid(world.NetDriver), "world")
@@ -22,6 +39,11 @@ local function census()
         "AmbientSquadPoolData_C /Game/Classes/Libraries/DataAssets/AmbientSpawnPools/FloodPlainsSquadPool.FloodPlainsSquadPool",
         "director")
     local viewer = valid(world.NetDriver.ServerConnection) and "client" or "host"
+    return world, director, viewer
+end
+
+local function census()
+    local world, _, viewer = active_ruin()
     local rows = {viewer}
     for _, class in ipairs(classes) do
         local expected = "/Game/Classes/NPCs/" .. class:sub(1, -3) .. "." .. class
@@ -40,15 +62,141 @@ local function census()
     return table.concat(rows, "\n")
 end
 
+local function stock_refresh()
+    assert(os.getenv("SILVERFISH_COOP_RUIN_NPC_REFRESH_PROBE") == "1" and not refresh_used, "refresh scope")
+    refresh_used = true
+    local world, director, viewer = active_ruin()
+    local driver = world.NetDriver
+    assert(same(driver.World, world) and (viewer == "client" or driver.ClientConnections:GetArrayNum() == 1),
+        "exact loopback seat")
+    local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    local pawn = statics:GetPlayerPawn(world, 0)
+    assert(valid(pawn) and same(pawn:GetWorld(), world) and pawn:IsLocallyControlled()
+        and pawn:HasAuthority() == (viewer == "host"), "local pawn")
+
+    local stock = stock_squads[viewer]
+    local asset_name = "SquadData_C /Game/Classes/Libraries/DataAssets/Squads/" .. stock[1]
+    local maps = {director.AmbientSquadPool.DayTimeSpawns, director.AmbientSquadPool.NightTimeSpawns}
+    local saved_weights, found = {{}, {}}, 0
+    for index, map in ipairs(maps) do
+        map:ForEach(function(key, value)
+            local data, weight = key:get(), value:get()
+            assert(valid(data) and type(weight) == "number" and weight == weight and weight > 0 and weight < 100,
+                "stock pool weight")
+            local selected = data:GetFullName() == asset_name
+            if selected then found = found + 1 end
+            saved_weights[index][#saved_weights[index] + 1] = {data = data, weight = weight, selected = selected}
+        end)
+        assert(#saved_weights[index] == (index == 1 and 8 or 2), "stock day and night key counts")
+    end
+    assert(found == 1 and math.abs(director.AmbientSquadPool.TimeOfDayInfluence - .9944) < .00001,
+        "selected asset must already belong to the authored blended pool")
+
+    local originals, marker = {}, nil
+    local marker_array = director.Spawns_Reinforcments
+    assert(marker_array:GetArrayNum() == 4, "expected four authored reinforcement markers")
+    for index = 1, marker_array:GetArrayNum() do
+        local candidate = object(marker_array[index])
+        assert(valid(candidate) and same(candidate:GetWorld(), world) and candidate.Usage == 3, "stock marker")
+        originals[index] = candidate
+        if candidate:GetFullName() == marker_name then
+            assert(not marker, "duplicate selected stock marker")
+            marker = candidate
+        end
+    end
+    assert(valid(marker) and same(marker.Arrow_Leader:GetOwner(), marker), "exact reinforcement marker")
+    local point, arrival = marker.Arrow_Leader:K2_GetComponentLocation(), pawn:K2_GetActorLocation()
+    local distance = math.sqrt((point.X-arrival.X)^2 + (point.Y-arrival.Y)^2 + (point.Z-arrival.Z)^2)
+    assert(distance > 3200 and distance < 9500, "party is not at the stock Market door")
+    local classes_loaded = {}
+    for index = 2, #stock do
+        local name = stock[index]
+        local class = StaticFindObject("/Game/Classes/NPCs/" .. name .. "." .. name .. "_C")
+        classes_loaded[#classes_loaded + 1] = name .. "=" .. tostring(valid(class))
+    end
+
+    local geometry, stock_attempt, phase, hook_failure, maps_changed, markers_changed
+    local pre, post = RegisterHook(marker_check, function(context, radius, eligible)
+        if not phase or not same(context:get(), marker) then return end
+        if radius:get() ~= true or type(eligible:get()) ~= "boolean" then
+            hook_failure = "stock geometry output schema"
+            return
+        end
+        if phase == "inspect" then
+            geometry = eligible:get()
+        else
+            stock_attempt = eligible:get()
+            if geometry == false and stock_attempt == false then eligible:set(true) end
+        end
+    end)
+    local ok, failure = pcall(function()
+        phase = "inspect"
+        marker:SpawnIsValid(true, {})
+        phase = nil
+        assert(type(geometry) == "boolean" and not hook_failure, hook_failure or "missing stock geometry readback")
+
+        -- Keep the sole selected key in its own authored pool. A zero-weight key can win a zero roll.
+        maps_changed = true
+        for index, map in ipairs(maps) do
+            map:Empty()
+            for _, row in ipairs(saved_weights[index]) do
+                if row.selected then map:Add(row.data, row.weight) end
+            end
+        end
+        markers_changed = true
+        marker_array:Empty()
+        marker_array[1] = marker
+        assert(marker_array:GetArrayNum() == 1 and same(object(marker_array[1]), marker), "single stock marker")
+        phase = "refresh"
+        director:RefreshEnemies()
+        phase = nil
+        assert(not hook_failure, hook_failure)
+    end)
+    phase = nil
+
+    local weights_ok, weights_error = pcall(function()
+        if not maps_changed then return end
+        for index, map in ipairs(maps) do
+            map:Empty()
+            for _, row in ipairs(saved_weights[index]) do map:Add(row.data, row.weight) end
+            assert(#map == #saved_weights[index], "stock pool size restore verification")
+            for _, row in ipairs(saved_weights[index]) do
+                local current = map:Find(row.data)
+                assert(current and current:get() == row.weight, "stock pool restore verification")
+            end
+        end
+    end)
+    local markers_ok, markers_error = pcall(function()
+        if not markers_changed then return end
+        marker_array:Empty()
+        for index, saved in ipairs(originals) do marker_array[index] = saved end
+        assert(marker_array:GetArrayNum() == #originals, "stock marker array restore verification")
+        for index, saved in ipairs(originals) do
+            assert(same(object(marker_array[index]), saved), "stock marker order restore verification")
+        end
+    end)
+    local hook_ok, hook_error = pcall(UnregisterHook, marker_check, pre, post)
+    assert(weights_ok, weights_error)
+    assert(markers_ok, markers_error)
+    assert(hook_ok, hook_error)
+    assert(ok, failure)
+    return table.concat({viewer, "refresh", asset_name, marker_name, tostring(geometry),
+        tostring(stock_attempt), tostring(geometry == false and stock_attempt == false),
+        table.concat(classes_loaded, ","), ("%.2f"):format(distance), tostring(#originals), "restored"}, "\t")
+end
+
 LoopInGameThreadWithDelay(150, function()
     local file = io.open(bridge .. "/ruin-npc-command.tsv", "rb")
     if not file then return false end
-    local request = file:read(40)
+    local request = file:read(64) or ""
     file:close()
-    local ticket = (request or ""):match("^(%x+)\n$")
-    if not ticket or #ticket ~= 32 or ticket == last then return false end
+    local ticket, operation = request:match("^(%x+)\t([a-z]+)\n$")
+    if not ticket then ticket, operation = request:match("^(%x+)\n$"), "census" end
+    if not ticket or #ticket ~= 32 or ticket == last or (operation ~= "refresh" and operation ~= "census") then
+        return false
+    end
     last = ticket
-    local ok, result = pcall(census)
+    local ok, result = pcall(operation == "refresh" and stock_refresh or census)
     local output = assert(io.open(bridge .. "/ruin-npc-reply.tsv", "wb"))
     output:write(ticket, ok and "\n" or "\nerror\t", result, "\nend\n")
     output:close()

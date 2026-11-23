@@ -22,7 +22,7 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_host_save
 from tools.silverfish.campaign import CampaignStore
-from ruin_npc_probe import RUIN, RUIN_LEVEL, capture, compare, installed_probe, read_director_trace
+from ruin_npc_probe import RUIN, RUIN_LEVEL, capture, compare, installed_probe, read_director_trace, stock_refresh as probe_ruin_refresh
 
 
 MAP = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
@@ -429,7 +429,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                    stock_refresh: bool = False, antfarm_replay: Path | None = None,
                    projectile_tap: bool = False, flayer_defaults: bool = False, dead_bridge: bool = False,
                    ruin_fields: bool = False, private_canaries: Path | None = None, ruin_diagnostic: bool = False,
-                   ruin_ambient: bool = False) -> None:
+                   ruin_ambient: bool = False, ruin_refresh: bool = False) -> None:
     if os.name != "nt":
         raise OSError("The live canary requires the staged Windows game")
     name = ("campaign-npc-ruin-" if ruin_fields else "campaign-npc-") + uuid.uuid4().hex[:8]
@@ -482,6 +482,9 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
     environment.pop("SILVERFISH_COOP_RUIN_NPC_DIAGNOSTIC", None)
     if ruin_diagnostic:
         environment["SILVERFISH_COOP_RUIN_NPC_DIAGNOSTIC"] = "1"
+    environment.pop("SILVERFISH_COOP_RUIN_NPC_REFRESH_PROBE", None)
+    if ruin_refresh:
+        environment["SILVERFISH_COOP_RUIN_NPC_REFRESH_PROBE"] = "1"
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
     canaries = saved_hashes(private_canaries) if private_canaries else None
     if ruin_fields and (not original or not canaries):
@@ -734,10 +737,32 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         seconds = scene["game_seconds"]
         assert scene["instance_seed"] == WANDERER_SEED and 7 * 3600 <= seconds % 86400 < 17 * 3600, scene
         evidence["stock_daytime"] = {"instance_seed": scene["instance_seed"], "game_seconds": seconds}
+        fixture = None
+        if ruin_refresh:
+            fixture = evidence["ruin_refresh_fixture"] = {"anchors": {}, "requests": {}}
+            for role in ("host", "guest"):
+                fixture["anchors"][role] = await command(
+                    "action", *primary, "native-door-position", "--target", role, "--exit-position", "near",
+                    "--entrance", "Market_Flood"
+                )
+            await wait("No same-epoch pair at the stock Market anchor", pair_in(RUIN), 10)
+            for run, seat in ((host, "host"), (guest, "client")):
+                assert "refresh" not in read_director_trace(run, seat), "A stock refresh already ran before the scoped fixture"
+            fixture["native_before"] = {
+                "host": read_npcs(host, "host", RUIN, topic="native-campaign-npc-ambient") or {},
+                "client": read_npcs(guest, "client", RUIN, topic="native-campaign-npc-ambient") or {},
+            }
+            fixture["guest_local_workers_before"] = sorted(
+                name for name, row in (await capture(guest, "client")).items()
+                if row["class"] == "NPC_Survivor_Worker_C" and row["role"] == 3
+            )
+            for run, seat in ((guest, "client"), (host, "host")):
+                fixture["requests"][seat] = await probe_ruin_refresh(run, seat)
         denials = evidence["observed_client_denials"] = {}
         latest = evidence["ruin_frames"] = {}
         deadline = time.monotonic() + min(timeout, 28)
-        limitation = "No captured natural supported director receipt"
+        limitation = ("No captured stock reinforcement receipt for the scoped fixture" if fixture
+                      else "No captured natural supported director receipt")
         topics = (("ambient", "native-campaign-npc-ambient"),) if ruin_ambient else (
             ("husk", "native-campaign-npc"), ("boar", "native-campaign-npc-boar"))
         while time.monotonic() < deadline:
@@ -755,9 +780,21 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                 if not owner or not observer:
                     continue
                 if family == "ambient":
-                    if ruin_ambient_receipt(observer, denial=True):
+                    host_matches = not fixture or (
+                        owner["stage"] == "stock_refresh"
+                        and owner["data"] == fixture["requests"]["host"]["asset"]
+                        and owner["spawner"] == fixture["requests"]["host"]["marker"]
+                        and owner["receipts"] > fixture["native_before"]["host"].get("receipts", 0))
+                    guest_matches = not fixture or (
+                        observer["data"] == fixture["requests"]["client"]["asset"]
+                        and observer["spawner"] == fixture["requests"]["client"]["marker"])
+                    if guest_matches and ruin_ambient_receipt(observer, denial=True) and (not fixture or (
+                            observer["stage"] == "stock_client_ambient_refresh_spawn_denied"
+                            and observer["spawn_denials"] > fixture["native_before"]["client"].get("spawn_denials", 0))):
                         denials[family] = observer
-                    if ruin_ambient_receipt(owner):
+                    if fixture and guest_matches and observer["stage"] == "stock_ruin_guest_class_unloaded":
+                        fixture["guest_outcome"] = observer["stage"]
+                    if host_matches and ruin_ambient_receipt(owner):
                         qualified[family] = set(owner["members"])
                     continue
                 network = observer["network"]
@@ -784,15 +821,34 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                 continue
             evidence["ruin_roster"] = matched
             evidence["ruin_cohorts"] = {family: sorted(members) for family, members in qualified.items()}
-            if denials:
+            if fixture:
+                fixture["host_mixed_cohort_verified"] = {owner[name]["class"] for name in required} == {
+                    "NPC_MinorStag_C", "NPC_Doe_C"
+                }
+                fixture["guest_local_workers_added"] = sorted(
+                    name for name, row in observer.items()
+                    if row["class"] == "NPC_Survivor_Worker_C" and row["role"] == 3
+                    and name not in fixture["guest_local_workers_before"]
+                )
+                if denials:
+                    assert not fixture["guest_local_workers_added"], fixture
+                    fixture["guest_outcome"] = "scoped stock Worker reinforcement denied"
+                    evidence["client_spawn_ownership"] = fixture["guest_outcome"]
+                if fixture.get("guest_outcome") == "stock_ruin_guest_class_unloaded":
+                    raise RuntimeError("The stock Worker was selected but its unloaded class left the stock spawn active")
+                if denials and fixture["host_mixed_cohort_verified"]:
+                    return
+                limitation = "No mixed stag/doe cohort and matching Worker veto both verified"
+            elif denials:
                 evidence["client_spawn_ownership"] = "observed exact native stock veto"
                 return
-            limitation = "No supported client stock veto receipt observed in the bounded window"
+            else:
+                limitation = "No supported client stock veto receipt observed in the bounded window"
             await asyncio.sleep(.2)
         if "ruin_roster" not in evidence:
             raise RuntimeError(limitation)
         evidence["client_spawn_ownership"] = limitation
-        if require_client_denial:
+        if require_client_denial or fixture:
             raise RuntimeError(limitation)
 
     try:
@@ -992,6 +1048,8 @@ if __name__ == "__main__":
     parser.add_argument("--cohort", choices=tuple(DATA), default="husk", help="stock encounter family to verify")
     parser.add_argument("--ruin-fields", action="store_true", help="observe the real daytime Ruin Fields stock director")
     parser.add_argument("--ruin-ambient", action="store_true", help="verify a stock Ruin squad outside the legacy Husk and boar topics")
+    parser.add_argument("--ruin-stock-refresh", action="store_true",
+                        help="exercise one scoped authored reinforcement per seat at the Ruin Market door")
     parser.add_argument("--ruin-diagnostic", action="store_true", help="capture exact stock Ruin pool inputs and first draw outcomes")
     parser.add_argument("--private-canaries", type=Path, help="private SaveGames to hash before and after the Ruin proof")
     parser.add_argument("--dead-bridge", action="store_true", help="verify the stock Dead Bridge Husk director with production defaults")
@@ -1019,8 +1077,10 @@ if __name__ == "__main__":
                         options.flayer_veto))):
             parser.error("--ruin-fields verifies Husk/boar stock cohorts and requires original and private canary paths")
         options.replicate = True
-    elif options.private_canaries or options.ruin_diagnostic or options.ruin_ambient:
-        parser.error("--private-canaries, --ruin-diagnostic, and --ruin-ambient require --ruin-fields")
+        if options.ruin_stock_refresh:
+            options.ruin_ambient = options.ruin_diagnostic = True
+    elif options.private_canaries or options.ruin_diagnostic or options.ruin_ambient or options.ruin_stock_refresh:
+        parser.error("Ruin diagnostics, refresh and private canaries require --ruin-fields")
     if options.dead_bridge:
         if options.cohort != "husk" or any((options.approach, options.combat, options.stock_refresh, options.join_only,
                                             options.flayer_replay, options.notdeer_replay, options.projectile_tap)):
@@ -1073,7 +1133,7 @@ if __name__ == "__main__":
                    projectile_tap=options.projectile_tap, flayer_defaults=options.flayer_defaults,
                    dead_bridge=options.dead_bridge, ruin_fields=options.ruin_fields,
                    private_canaries=options.private_canaries, ruin_diagnostic=options.ruin_diagnostic,
-                   ruin_ambient=options.ruin_ambient)
+                   ruin_ambient=options.ruin_ambient, ruin_refresh=options.ruin_stock_refresh)
     if options.ruin_fields:
         with installed_probe(options.work.resolve()):
             asyncio.run(run)

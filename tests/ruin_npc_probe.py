@@ -15,6 +15,11 @@ RUIN_LEVEL = RUIN + ".RuinFeilds_P:PersistentLevel."
 SUPPORTED = {"NPC_Zomb_01_C", "NPC_WildBoar_C"}
 UNSUPPORTED = {"NPC_FeralDog_C", "NPC_Survivor_FlowerLady_C", "NPC_MinorStag_C", "NPC_Doe_C",
                "NPC_Survivor_Worker_C", "NPC_Homunculus_C"}
+REFRESH_MARKER = f"AI_Spawner_Squad_BP_C {RUIN_LEVEL}AI_Spawner_Squad_BP_C_8"
+REFRESH_SQUADS = {
+    "host": ("WildLife/Stag_WtDoe.Stag_WtDoe", {"NPC_MinorStag", "NPC_Doe"}),
+    "client": ("Monsters/Surv_Workers.Surv_Workers", {"NPC_Survivor_Worker"}),
+}
 
 
 @contextmanager
@@ -90,21 +95,51 @@ def read_director_trace(run: Path, viewer: str):
     return trace
 
 
-async def capture(run: Path, viewer: str):
+async def request(run: Path, operation: str | None = None):
     bridge, = (run / "game-bridge").iterdir()
     ticket = uuid.uuid4().hex
-    request = bridge / "ruin-npc-command.tsv"
+    command = bridge / "ruin-npc-command.tsv"
     reply = bridge / "ruin-npc-reply.tsv"
-    runtime.write_text(request, ticket + "\n", newline="")
-    async with asyncio.timeout(5):
+    runtime.write_text(command, (ticket if operation is None else f"{ticket}\t{operation}") + "\n", newline="")
+    async with asyncio.timeout(8 if operation == "refresh" else 5):
         while True:
             try:
                 lines = reply.read_text(encoding="ascii").splitlines()
             except (FileNotFoundError, PermissionError):
                 lines = []
             if len(lines) >= 3 and lines[0] == ticket and lines[-1] == "end":
-                return decode(lines[1:-1], viewer)
+                if lines[1].startswith("error\t"):
+                    raise RuntimeError(lines[1].partition("\t")[2])
+                return lines[1:-1]
             await asyncio.sleep(.05)
+
+
+async def capture(run: Path, viewer: str):
+    return decode(await request(run), viewer)
+
+
+def decode_refresh(line, viewer):
+    seat, operation, asset, marker, geometry, attempt, override, loaded, distance, markers, restored = line.split("\t")
+    suffix, classes = REFRESH_SQUADS[viewer]
+    assert (seat, operation, asset, marker, markers, restored) == (
+        viewer, "refresh", "SquadData_C /Game/Classes/Libraries/DataAssets/Squads/" + suffix,
+        REFRESH_MARKER, "4", "restored"), line
+    assert geometry in ("true", "false") and attempt in ("true", "false", "nil") and override in ("true", "false"), line
+    assert (override == "true") == (geometry == "false" and attempt == "false"), line
+    states = [field.split("=") for field in loaded.split(",")]
+    assert len(states) == len(classes) and {name for name, _ in states} == classes, line
+    assert all(state in ("true", "false") for _, state in states), line
+    cm = float(distance)
+    assert 3200 < cm < 9500, line
+    return {"seat": seat, "asset": asset, "marker": marker, "original_geometry": geometry == "true",
+            "stock_geometry_during_refresh": None if attempt == "nil" else attempt == "true",
+            "geometry_override": override == "true", "classes_loaded_before": {name: state == "true" for name, state in states},
+            "pawn_marker_distance_cm": cm, "original_markers_restored": int(markers), "stock_weights_restored": True}
+
+
+async def stock_refresh(run: Path, viewer: str):
+    row, = await request(run, "refresh")
+    return decode_refresh(row, viewer)
 
 
 def compare(host, guest, required, *, classes=SUPPORTED):

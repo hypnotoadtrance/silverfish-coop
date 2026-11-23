@@ -2,7 +2,7 @@
 
 import unittest
 
-from tests.ruin_npc_probe import RUIN_LEVEL, compare, decode
+from tests.ruin_npc_probe import REFRESH_MARKER, RUIN_LEVEL, compare, decode, decode_refresh
 
 
 def stock_actor(kind, identifier, role, position):
@@ -41,6 +41,20 @@ class RuinNpcProbeTests(unittest.TestCase):
         self.assertEqual({owner: row["replica"] for owner, row in report["matched"].items()},
                          {stag: proxy_stag, doe: proxy_doe})
         self.assertEqual(report["unsupported"]["guest"], {worker: guest[worker]})
+
+    def test_refresh_preserves_unloaded_class_and_distinguishes_geometry_from_attempt(self):
+        worker = "SquadData_C /Game/Classes/Libraries/DataAssets/Squads/Monsters/Surv_Workers.Surv_Workers"
+        fields = ["client", "refresh", worker, REFRESH_MARKER, "false", "false", "true",
+                  "NPC_Survivor_Worker=false", "4500", "4", "restored"]
+        report = decode_refresh("\t".join(fields), "client")
+        self.assertFalse(report["original_geometry"])
+        self.assertTrue(report["geometry_override"])
+        self.assertFalse(report["classes_loaded_before"]["NPC_Survivor_Worker"])
+        fields[5:7] = ["nil", "false"]
+        self.assertIsNone(decode_refresh("\t".join(fields), "client")["stock_geometry_during_refresh"])
+        fields[6] = "true"
+        with self.assertRaises(AssertionError):
+            decode_refresh("\t".join(fields), "client")
 
     def test_rejects_client_authority_and_out_of_range_roles(self):
         authority, owner_row = stock_actor("NPC_Zomb_01_C", 1, 3, (1000, -2000, 20))
