@@ -20,7 +20,8 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
 from tools.silverfish import (
-    direct_ip, embedded_startup, native_guest_consumable, native_guest_drop, native_host_save, native_inventory, native_loose_pickup,
+    direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop,
+    native_host_save, native_inventory, native_loose_pickup,
     native_lantern, native_loot, native_prop_carry, native_world_loot, runtime,
 )
 from tools.silverfish.authored_loot import GUARANTEED_CRATES
@@ -50,26 +51,30 @@ class PortableRelease:
     activation: dict[Path, str | None]
 
 
-@contextmanager
 def portable_main_overlay(game: Path, patch_script):
+    return portable_script_overlay(game, "main.lua", patch_script)
+
+
+@contextmanager
+def portable_script_overlay(game: Path, script_name: str, patch_script):
     """Qualify and restore an isolated Lua overlay on a versioned portable replica."""
     if any(part.casefold() == "steamapps" for part in game.parts):
         raise ValueError("Use only a private portable replica for the test overlay")
-    script = (game / runtime.SHIPPING).parent / runtime.MOD_SCRIPTS / "main.lua"
+    script = (game / runtime.SHIPPING).parent / runtime.MOD_SCRIPTS / script_name
     manifest = game / runtime.PORTABLE_STAGE_MANIFEST
     for file in (script, manifest):
         install_stage._ordinary(file)
     original_script, original_manifest = script.read_bytes(), manifest.read_bytes()
     inventory = json.loads(original_manifest)
     normalized_before = sha256(original_script.replace(b"\r\n", b"\n")).hexdigest()
-    if inventory.get("lua_files", {}).get("main.lua") != normalized_before:
-        raise ValueError("The portable replica must start with its exact released main.lua")
+    if inventory.get("lua_files", {}).get(script_name) != normalized_before:
+        raise ValueError(f"The portable replica must start with its exact released {script_name}")
 
     newline = "\r\n" if b"\r\n" in original_script else "\n"
     original = original_script.decode("utf-8").replace("\r\n", "\n")
     patched = patch_script(original).replace("\n", newline)
     normalized_after = sha256(patched.replace("\r\n", "\n").encode("utf-8")).hexdigest()
-    inventory["lua_files"]["main.lua"] = normalized_after
+    inventory["lua_files"][script_name] = normalized_after
     patched_manifest = json.dumps(inventory, ensure_ascii=True, allow_nan=False) + "\n"
     provenance = {
         "script_source_before": normalized_before,
@@ -97,6 +102,17 @@ def portable_main_overlay(game: Path, patch_script):
             restore(manifest, original_manifest, patched_manifest)
         provenance["original_bytes_restored"] = script.read_bytes() == original_script and manifest.read_bytes() == original_manifest
         assert provenance["original_bytes_restored"], "The private portable overlay failed to restore its release files"
+
+
+def shop_lease_overlay(game: Path):
+    def allow_isolated_approach(text):
+        gate = 'local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"'
+        if text.count(gate) != 1:
+            raise ValueError("The replica lacks the known stock merchant approach gate")
+        return text.replace(gate, gate + '\n    or (os.getenv("SILVERFISH_COOP_HEADLESS") == "1"'
+                            + '\n        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")', 1)
+
+    return portable_script_overlay(game, "native_finite_shop.lua", allow_isolated_approach)
 
 
 def compact_crate_status_overlay(game: Path):
@@ -279,6 +295,84 @@ async def verify_stock_prop_grip(host: Seat, guest: Seat, pawn: str) -> dict:
         "authored_prop": native_lantern.ACTOR, "grab": grab, "drop": drop,
         "filter_while_held": held_filter, "filter_after_drop": active_counters(resumed_state),
         "held_position": held_position, "released_position": released_position,
+    }
+
+
+async def verify_guest_shop_lease(host: Seat, guest: Seat, pawn: str) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    host_status, guest_status = await asyncio.gather(
+        wait(host_run, lambda state: state.get("local_bridge") == "memory"),
+        wait(guest_run, lambda state: state.get("local_bridge") == "memory" and state.get("gameplay_fresh") is True),
+    )
+    area, actor = native_finite_shop.OBSERVATORY, native_finite_shop.ACTOR
+    local_pawn = guest_status["game"]["pawns"]["local"]["name"]
+    assert host_status["game"]["map"] == guest_status["game"]["map"] == area and local_pawn
+
+    paths = tuple(guest.bridge.directory / name for name in (
+        "native-shop-view-heartbeat", "native-broker-input-heartbeat",
+        "native-dialogue-heartbeat", "native-mosby-station-heartbeat",
+    ))
+
+    def require_memory_only():
+        files = [path.name for path in paths if os.path.lexists(path)]
+        assert not files, files
+
+    save_roots = ((host.campaign / "save", "campaign*.json"),
+                  (host.profile / "Saved" / "SaveGames", "*.sav"),
+                  (guest.profile / "Saved" / "SaveGames", "*.sav"))
+
+    def saves():
+        return tuple({path.name: (runtime._file_sha256(path), path.stat().st_mtime_ns) for path in root.glob(pattern)}
+                     for root, pattern in save_roots)
+
+    baseline = saves()
+    assert all(baseline)
+    require_memory_only()
+    approached = await host.bridge.command("native-finite-shop-approach", pawn, timeout=5)
+    assert approached["ack"]["message"] == "exact stock merchant approach verified", approached["ack"]
+    position, = [row["location"] for row in approached["pawns"].values() if row.get("name") == pawn]
+
+    def arrived(state):
+        local = state.get("game", {}).get("pawns", {}).get("local", {})
+        point = local.get("location")
+        return local.get("name") == local_pawn and point and math.dist(point, position) < 50
+
+    await wait(guest_run, arrived)
+    opened = await submit(guest_run, "native-shop-view-fixture", target="open")
+    assert opened["ok"], opened
+    pending = opened["native_shop_view"]
+    assert (pending["state"], pending["map"], pending["actor"], pending["pawn"]) == (
+        "pending", area, actor, local_pawn), pending
+
+    def stock_ready(state):
+        panel = state.get("game", {}).get("native_shop_view", {})
+        return (state.get("state") == "connected" and state.get("local_bridge") == "memory"
+                and panel.get("state") == "ready" and panel.get("stock") is True and panel.get("visible", 0) > 0
+                and all(panel.get(key) == pending[key] for key in ("sequence", "map", "actor", "pawn")))
+
+    ready = await wait(guest_run, stock_ready)
+    started = time.monotonic()
+    while time.monotonic() - started < 3.2:
+        require_memory_only()
+        await asyncio.sleep(.1)
+    require_memory_only()
+    checked_seconds = round(time.monotonic() - started, 3)
+    # A single integer-second timestamp expires in at most three wall-clock seconds.
+    current = await wait(guest_run, lambda state: stock_ready(state)
+                         and state["game"]["sequence"] > ready["game"]["sequence"], timeout=5)
+    closed = await submit(guest_run, "native-shop-view-fixture", target="back")
+    assert closed["ok"], closed
+    await wait(guest_run, lambda state: state.get("game", {}).get("native_shop_view", {}).get("state") in (None, "closed"))
+    require_memory_only()
+    assert saves() == baseline, "Opening the stock shop changed a campaign or stock save"
+    return {
+        "local_bridge": {"host": host_status["local_bridge"], "guest": guest_status["local_bridge"]},
+        "host_authority_pawn": pawn, "guest_local_pawn": local_pawn, "stock_menu": current["game"]["native_shop_view"],
+        "native_game_sequence_before": ready["game"]["sequence"],
+        "native_game_sequence_after": current["game"]["sequence"],
+        "absent_heartbeat_files": [path.name for path in paths],
+        "heartbeat_check_seconds": checked_seconds,
+        "saves_unchanged_before_checkpoint": True,
     }
 
 
@@ -928,7 +1022,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_use: bool = False, memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False,
-                 compact_crate_status: bool = False, compact_world_view: bool = False) -> None:
+                 compact_crate_status: bool = False, compact_world_view: bool = False,
+                 guest_shop_lease: bool = False) -> None:
     guest_world_start = guest_world_start or guest_world_start_travel
     container_nearby = container_nearby or guest_ui_memory
     roots = (work, first_game, second_game, original)
@@ -970,6 +1065,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                  fixture="portable_lantern_probe.lua"))
         if compact_crate_status:
             proof["crate_status_overlay"] = {str(game): probes.enter_context(compact_crate_status_overlay(game)) for game in games}
+        if guest_shop_lease:
+            overlays = [probes.enter_context(shop_lease_overlay(game)) for game in games]
+            proof["shop_lease_overlay"] = dict(zip(map(str, games), overlays, strict=True))
+            for key in ("script_source_overlay", "manifest_overlay_sha256"):
+                assert overlays[0][key] == overlays[1][key], "The enrolled seats need identical overlay source"
         if compact_world_view:
             proof["world_view_overlay"] = {
                 str(game): probes.enter_context(portable_main_overlay(game, patch_world_view_receipts)) for game in games
@@ -1070,6 +1170,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                       after_reconnect=refresh_host_pause))
         elif stock_crate_ring:
             proof["sessions"].append(await start_pair(first, second, "Crate scout", on_join=verify_stock_crate_ring))
+        elif guest_shop_lease:
+            proof["sessions"].append(await start_pair(first, second, "Merchant scout", on_join=verify_guest_shop_lease))
         elif guest_ui_memory:
             proof["sessions"].append(await start_pair(first, second, "Inventory scout", on_join=check_gameplay))
         else:
@@ -1095,13 +1197,15 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             assert seat.bridge.process.poll() is None
         proof.update(verified=True, solo_slots_and_settings_preserved=True,
                      both_titles_reused=not (stock_prop_grip or stock_crate_ring or guest_world_start or guest_ui_memory
-                                             or compact_crate_status or compact_world_view),
+                                             or compact_crate_status or compact_world_view or guest_shop_lease),
                      launched_without_coop_environment=True)
     except Exception as error:
         if compact_crate_status:
             proof["crate_status_failure"] = str(error)
         if compact_world_view:
             proof["world_view_receipt_failure"] = str(error) or type(error).__name__
+        if guest_shop_lease:
+            proof["shop_lease_failure"] = str(error) or type(error).__name__
         if guest_world_start_travel:
             proof["stock_travel_failure"] = str(error)
         raise
@@ -1110,7 +1214,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         for _, process in reversed(processes):
             if process.poll() is None:
                 await runtime.stop_game(process)
-        if stock_prop_grip or stock_crate_ring or guest_world_start or compact_crate_status or compact_world_view:
+        if (stock_prop_grip or stock_crate_ring or guest_world_start
+                or compact_crate_status or compact_world_view or guest_shop_lease):
             proof["processes_closed"] = len(processes) == 2 and all(process.poll() is not None for _, process in processes)
             proof["verified"] &= proof["processes_closed"]
         probes.close()
@@ -1122,8 +1227,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         runtime.write_json(case / "portable-title-verification.json", proof)
         assert proof["original_saves_verified"], "The original player saves changed"
         assert proof["portable_files_and_existing_activation_preserved"], "The portable marker or existing activation changed"
-        if guest_world_start:
-            assert all(process.poll() is not None for _, process in processes), "A portable startup process is still running"
+        if guest_world_start or guest_shop_lease:
+            assert all(process.poll() is not None for _, process in processes), "A portable test process is still running"
 
 
 if __name__ == "__main__":
@@ -1148,6 +1253,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-crate-ring", action="store_true", help="verify one guest stock F crate open through the in-process ring")
     parser.add_argument("--compact-crate-status", action="store_true",
                         help="test normal crate status routing with one private muted portable pair and a temporary Lua overlay")
+    parser.add_argument("--guest-shop-lease", action="store_true",
+                        help="verify the Observatory stock shop remains open while guest interaction leases stay in memory")
     parser.add_argument("--compact-world-view", action="store_true",
                         help="verify one compact resident stock weather receipt in a private muted portable pair")
     parser.add_argument("--guest-world-start", action="store_true",
@@ -1157,6 +1264,12 @@ if __name__ == "__main__":
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
+    if args.guest_shop_lease and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
+                                     args.projected_nearby, args.container_nearby, args.stock_use, args.stock_prop_grip,
+                                     args.stock_crate_ring, args.guest_world_start, args.guest_world_start_travel,
+                                     args.guest_ui_memory, args.compact_crate_status, args.compact_world_view,
+                                     args.steam_cloud, args.second_legacy_work)):
+        parser.error("Use --guest-shop-lease with two fresh private replicas and no other gameplay fixtures")
     if args.compact_world_view and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
                                         args.projected_nearby, args.container_nearby, args.stock_use, args.stock_prop_grip,
                                         args.stock_crate_ring, args.guest_world_start, args.guest_world_start_travel,
@@ -1198,4 +1311,5 @@ if __name__ == "__main__":
                        stock_use=args.stock_use, memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
-                       compact_crate_status=args.compact_crate_status, compact_world_view=args.compact_world_view))
+                       compact_crate_status=args.compact_crate_status, compact_world_view=args.compact_world_view,
+                       guest_shop_lease=args.guest_shop_lease))
