@@ -6,7 +6,7 @@ local mesh_path = "/Game/Assets/StaticMeshes/Mesh_Props/PropActor_Meshes/SM_Prop
 local light_class = "/Script/Engine.SpotLightComponent"
 local cookie_path = "/Game/Assets/Materials/Mat_Misc/M_LightCookie.M_LightCookie"
 local click_path = "/Game/Assets/Sounds/CUEs/Mechanical_Cues/Switch_Reset_Cue.Switch_Reset_Cue"
-local attenuation = "/Game/Assets/Sounds/SoundClasses/SmallSound_Attenuation.SmallSound_Attenuation"
+local click_range = 4000 -- Switch_Reset_Cue's stock attenuation maximum in centimeters.
 local maths = "/Script/Engine.Default__KismetMathLibrary"
 local statics = "/Script/Engine.Default__GameplayStatics"
 local avatar = require("native_player_avatar")
@@ -162,11 +162,11 @@ local function local_beam(pawn, mount, values)
 end
 
 local function click(listener, mount)
-    local api, sound, falloff = StaticFindObject(statics), asset(click_path), asset(attenuation)
-    if not valid(api) or not valid(sound) or not valid(falloff) then return false end
+    local api, sound = StaticFindObject(statics), asset(click_path)
+    if not valid(api) or not valid(sound) then return false end
     local point, ear = mount:K2_GetComponentLocation(), listener:K2_GetActorLocation()
-    if (point.X - ear.X)^2 + (point.Y - ear.Y)^2 + (point.Z - ear.Z)^2 > 1800^2 then return false end
-    api:PlaySoundAtLocation(listener, sound, point, {Pitch = 0, Yaw = 0, Roll = 0}, 1, 1, 0, falloff, nil, nil, nil)
+    if (point.X - ear.X)^2 + (point.Y - ear.Y)^2 + (point.Z - ear.Z)^2 > click_range^2 then return false end
+    api:PlaySoundAtLocation(listener, sound, point, {Pitch = 0, Yaw = 0, Roll = 0}, 1, 1, 0, nil, nil, nil, nil)
     return true
 end
 
