@@ -4,9 +4,12 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, call, patch
+import uuid
 
-from tools.silverfish import native_player_avatar, native_stock_door, runtime, service
-from tools.silverfish.travel import PLAYTEST_MAPS
+from tools.silverfish import (
+    native_flashlight, native_loot, native_player_avatar, native_stock_door, native_world_loot, runtime, service,
+)
+from tools.silverfish.travel import OBSERVATORY, PLAYTEST_MAPS
 
 
 class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
@@ -54,6 +57,71 @@ class SessionInputSchedulingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.gameplay, {"players": {}})
         self.assertEqual(client.gameplay_seen, 100.0)
+
+    async def test_queued_stock_interactions_dispatch_before_delayed_flashlight_projection(self):
+        session, epoch, operation = "a" * 32, "b" * 32, "c" * 32
+        pawn = f"Player_FP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Player_FP_C_0"
+        door = f"Door_BP_C {OBSERVATORY}.Observitory_P:PersistentLevel.Door_BP_C_1"
+        crate, = (name for name, area in native_loot.CRATES.items() if area == OBSERVATORY
+                  and name.endswith(":PersistentLevel.LootCrate_Small_BP_C_1"))
+        source = {"map": OBSERVATORY, "epoch": epoch, "player": 257, "instance": 2, "switch": 1,
+                  "power": True, "pose": [1, 2, 3, 0, 35, 0, .5, .6, .7], "profile": native_flashlight.OFFHAND}
+        state = {"state": "connected", "map": OBSERVATORY, "pawns": {"local": {"name": pawn}},
+                 native_world_loot.CAPABILITY: native_world_loot.SHARED_PICKUPS_VERSION}
+        request = AsyncMock(return_value={"ok": True})
+        client = self.guest(request)
+        client.transport.connected = client.transport.game_access = True
+        client.transport.take_weapon_shots = client.transport.take_loot_motion = lambda: []
+        client.invite["native_loot_input"] = True
+        client.host_session, client.zone_epoch, client.expected_zone = session, epoch, OBSERVATORY
+        client.next_snapshot = float("inf")
+        ready = asyncio.get_running_loop().create_future()
+        ready.set_result(({"ok": True, "gameplay": {native_flashlight.KEY: source},
+                           "zone_epoch": epoch, "zone": OBSERVATORY}, service.time.monotonic()))
+        client.snapshot_request = ready
+        identity = uuid.UUID(int=1)
+        client.bridge.input_namespace = identity
+        client.bridge.process.poll.return_value = None
+        client.bridge.snapshot.return_value = state
+        client.bridge.native_crate_inputs.return_value = [f"loot-crate-open\t{OBSERVATORY}\t{crate}\t{pawn}\t12".encode()]
+        client.bridge.interactions.return_value = [(operation, native_stock_door.TARGET_PREFIX + door)]
+        client.bridge.native_inventory_view_requests.return_value = []
+        client.bridge.native_inventory_equip_requests.return_value = []
+        client.control.requests.return_value = []
+        client.control.gameplay_status_due.return_value = False
+        client.world_loot.sync = AsyncMock(return_value=state)
+        client.project_gameplay = AsyncMock()
+        outcome = native_flashlight.parse_view(
+            [native_flashlight.VIEW_TAG, epoch, "257", "2", "1", "1o", "1", "-", "0", "35", "0"], "connected")
+        marked, allow_reply = asyncio.Event(), asyncio.Event()
+
+        async def delayed_view(action, *_arguments, **_kwargs):
+            self.assertEqual(action, native_flashlight.VIEW_TAG)
+            marked.set()
+            await allow_reply.wait()
+            return {**state, native_flashlight.VIEW: outcome}
+
+        async def stop(*_arguments, **_kwargs):
+            client.stopping = True
+
+        client.bridge.command = AsyncMock(side_effect=delayed_view)
+        client.bridge.wait_for_interaction = AsyncMock(side_effect=stop)
+        task = asyncio.create_task(client.run_session())
+        try:
+            await asyncio.wait_for(marked.wait(), 1)
+            crate_operation = uuid.uuid5(identity, f"{session}:{epoch}:guest:crate:12:{crate}").hex
+            self.assertEqual([entry.args[0] for entry in request.await_args_list], [
+                {"action": "native-loot-open", "operation_id": crate_operation, "target": crate},
+                {"action": native_stock_door.ACTION, "operation_id": operation, "target": f"{epoch}@{door}"},
+            ])
+            client.control.event.assert_any_call("native_stock_crate_interaction", sequence=12,
+                                                 operation_id=crate_operation, crate=crate, input_source="memory_input")
+            client.control.event.assert_any_call("local_interaction", operation_id=operation)
+            self.assertIsNone(client.snapshot_request)
+        finally:
+            allow_reply.set()
+            await asyncio.wait_for(task, 1)
+        client.bridge.command.assert_awaited_once()
 
     async def test_lid_restoration_keeps_its_turn_during_other_projection_backoff(self):
         client = self.guest(AsyncMock())

@@ -6353,14 +6353,6 @@ class Client:
                     self.next_retry = time.monotonic() + self.auto_delay
             active = (self.transport.connected and self.last_game.get("state") == "connected"
                       and not self.needs_travel and not self.server_transitioning)
-            flashlight = (self.gameplay.get(native_flashlight.KEY)
-                          if active and self.transport.game_access and time.monotonic() - self.gameplay_seen < 3 else None)
-            with contextlib.suppress(OSError, RuntimeError):
-                self.last_game = await native_flashlight.project(self.bridge, self.last_game, flashlight, self.zone_epoch)
-            with contextlib.suppress(OSError, RuntimeError, TimeoutError):
-                peer_beams = (self.gameplay.get(native_flashlight.GUEST_BEAMS)
-                              if active and self.transport.game_access and time.monotonic() - self.gameplay_seen < 1.5 else None)
-                self.last_game = await native_flashlight.project_peers(self.bridge, self.last_game, peer_beams, self.zone_epoch)
             await self.guest_ui.sync_health(self, active)
             if active and self.last_game.get("map") == self.expected_zone and time.monotonic() - self.gameplay_seen < 2:
                 self.last_game = await self.hurt_playback.sync(
@@ -6431,6 +6423,15 @@ class Client:
                             await native_loose_pickup.refresh_claimed_stock_view(self)
                     except (ValueError, OSError, RuntimeError) as error:
                         self.control.event("interaction_rejected", operation_id=operation_id, reason=str(error))
+            # Drain stock interaction ingress before waiting on replaceable light views.
+            flashlight = (self.gameplay.get(native_flashlight.KEY)
+                          if active and self.transport.game_access and time.monotonic() - self.gameplay_seen < 3 else None)
+            with contextlib.suppress(OSError, RuntimeError):
+                self.last_game = await native_flashlight.project(self.bridge, self.last_game, flashlight, self.zone_epoch)
+            with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                peer_beams = (self.gameplay.get(native_flashlight.GUEST_BEAMS)
+                              if active and self.transport.game_access and time.monotonic() - self.gameplay_seen < 1.5 else None)
+                self.last_game = await native_flashlight.project_peers(self.bridge, self.last_game, peer_beams, self.zone_epoch)
             if (self.loot_view and self.last_game.get(native_world_loot.CAPABILITY, 0)
                     < native_world_loot.SHARED_PICKUPS_VERSION):
                 rolls = (self.gameplay.get(native_loot.STATE_KEY, {})
