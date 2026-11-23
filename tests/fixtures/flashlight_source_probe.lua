@@ -12,7 +12,7 @@ local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local equip_factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local guest_source = os.getenv("SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE") == "1"
-local source, cue_calls, power_calls, hooked = nil, 0, 0, false
+local source, cue_calls, power_calls, hooked, selected_guid = nil, 0, 0, false, nil
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -185,6 +185,7 @@ local function run(operation)
         assert(not valid(pawn.EquipedItem), "flashlight_probe_expected_empty_active_slot")
         pawn:Equip_NextItem(0, false)
         assert(pawn.Save.PlayerEquipIndex == 0, "flashlight_probe_guest_selection_failed")
+        selected_guid = selected
     end
 
     if operation == "seedlight" and not connected then
@@ -207,13 +208,14 @@ local function run(operation)
         equipment:Use_Item_Primary(true, 0)
         equipment:Use_Item_Primary(false, 0)
         assert(actor.Powered == requested and spot:IsVisible() == requested, "flashlight_probe_stock_power_readback_failed")
-    elseif operation == "clearlight" and not connected then
+    elseif operation == "clearlight" and (not connected or guest_source and selected_guid == slot_guid(pawn)) then
         if actor.Powered then equipment:Use_Item_Primary(true, 0) end
         local index = math.tointeger(pawn.Save.PlayerEquipIndex)
         local row = index and pawn.Save.PlayerEquipment[index + 1]
         assert(row and same(row[item_class], asset(equipment_path)), "flashlight_probe_removal_scope_unavailable")
         world.OwningGameInstance:RemoveItemFromLoadout(row)
         assert(not valid(pawn.Save.PlayerEquipment[index + 1][item_class]), "flashlight_probe_removal_failed")
+        if connected then selected_guid = nil end
         return "restored"
     else
         assert(selected or operation == "seedlight" and not connected or operation == "readlight",
