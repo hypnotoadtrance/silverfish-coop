@@ -216,3 +216,61 @@ class GuestPoseTransportTests(unittest.IsolatedAsyncioTestCase):
             packed = transport.send_prop_pose.call_args.args[0]
             self.assertEqual(carry.unpack_pose(packed), (epoch, lease, 2, position))
             transport.request.assert_awaited_once()
+
+    async def test_active_filter_requires_a_new_exact_host_grip_receipt(self):
+        epoch, lease, character = "a" * 32, "b" * 32, "c" * 32
+        actor = "Prop_TypeWriter_C /Game/Test.Test:PersistentLevel.Prop_TypeWriter_C_3"
+        game = {"sequence": 10, carry.HELD: {lease: {
+            "lease": lease, "serial": 4, "pawn": "guest pawn", "actor": actor, "remaining": 950,
+        }}}
+        authority = SimpleNamespace(zone_epoch=epoch, last_game=game, last_seen=2)
+        host = carry.Host(authority)
+        host._reset()
+        holder = {"lease": lease, "pawn": "guest pawn", "sequence": 4, "deadline": 3.3,
+                  "identity": {"placement": actor.split(" ", 1)[1]}}
+        host.holders[character] = holder
+        service = SimpleNamespace(gameplay={}, gameplay_seen=2.05, last_game={},
+                                  bridge=SimpleNamespace(command=AsyncMock(), local_bridge=object()))
+        with patch.object(carry, "os", SimpleNamespace(getenv=Mock(return_value=None))):
+            guest = carry.Guest(service)
+        self.assertTrue(guest.filter_enabled)
+        self.assertFalse(guest.filter_file_fixture)
+        guest.epoch, guest.lease, guest.grab, guest.filter_actor = epoch, lease, 4, actor
+
+        clock = Mock(return_value=2.1)
+        with (patch.object(carry, "time", SimpleNamespace(monotonic=clock)),
+              patch.object(host, "_pawn", return_value="guest pawn")):
+            frame = host.grip_confirmation(character)
+            self.assertIsNotNone(frame)
+            service.gameplay[carry.FILTER] = frame
+            guest._poll_filter({"grab": 4})
+            self.assertIsNone(guest.filter_job)
+            service.last_game[carry.FILTER_READY] = carry.parse(
+                (carry.FILTER_READY_ROW, "/Game/Test"), "connected", "/Game/Test")
+            service.bridge.local_bridge = None
+            guest._poll_filter({"grab": 4})
+            self.assertIsNone(guest.filter_job)
+            service.bridge.local_bridge = object()
+            service.gameplay[carry.FILTER] = dict(frame, actor=actor + "_wrong")
+            guest._poll_filter({"grab": 4})
+            self.assertIsNone(guest.filter_job)
+            service.gameplay[carry.FILTER] = frame
+            guest._poll_filter({"grab": 4})
+            await guest.filter_job
+            service.bridge.command.assert_awaited_once()
+            self.assertEqual(service.bridge.command.await_args.args[:4],
+                             ("native-prop-carry-arm-filter", lease, "4", actor))
+            self.assertGreater(int(service.bridge.command.await_args.args[4]), 700)
+            guest._poll_filter({"grab": 4})
+            service.bridge.command.assert_awaited_once()
+            clock.return_value = 2.6
+            self.assertIsNone(host.grip_confirmation(character))
+            clock.return_value = 2.1
+            holder["closing"] = True
+            self.assertIsNone(host.grip_confirmation(character))
+
+    def test_stock_filter_can_be_disabled_on_both_seats_for_a_baseline(self):
+        with patch.object(carry, "os", SimpleNamespace(getenv=Mock(return_value="0"))):
+            guest = carry.Guest(SimpleNamespace())
+        self.assertFalse(guest.filter_enabled)
+        self.assertFalse(guest.filter_file_fixture)

@@ -3,6 +3,7 @@
 import asyncio
 from collections import deque
 import math
+import os
 import re
 from struct import Struct
 import time
@@ -22,6 +23,12 @@ PLACED_PROP_ROW = "native-authored-physics-prop"
 INPUT = "native_prop_carry_input"
 TARGET = "native_prop_carry_target"
 PROOF = "native_prop_carry"
+HELD_ROW = "native-prop-carry-held"
+HELD = "native_prop_carry_held"
+FILTER_ROW = "native-prop-carry-filter"
+FILTER = "native_prop_carry_filter"
+FILTER_READY_ROW = "native-prop-carry-filter-ready"
+FILTER_READY = "native_prop_carry_filter_ready"
 _CLASS = re.compile(r"/Game/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+_C\Z")
 _PLACED_NAME = re.compile(r"[A-Za-z0-9_-]{1,100}\Z")
 _BONE = re.compile(r"[A-Za-z0-9_ .-]{1,64}\Z")
@@ -132,6 +139,25 @@ def parse(fields, phase, area):
         if not fields[2].startswith(prefix) or not _PLACED_NAME.fullmatch(fields[2][len(prefix):]) or mass <= 0:
             raise ValueError("Invalid placed stock physics prop identity")
         return dict(actor=fields[2], class_path=fields[3], mass=mass)
+    if fields[0] == HELD_ROW:
+        if len(fields) != 7 or phase != "hosting" or not _token(fields[2]):
+            raise ValueError("Invalid host stock grip confirmation")
+        remaining = int(fields[6])
+        if not 1 <= remaining <= 1500:
+            raise ValueError("Invalid host stock grip expiry")
+        return dict(lease=fields[2], serial=_serial(fields[3]), pawn=fields[4], actor=fields[5], remaining=remaining)
+    if fields[0] == FILTER_ROW:
+        if (len(fields) != 6 or phase != "connected" or not _token(fields[2])
+                or fields[3] not in ("0", "1")):
+            raise ValueError("Invalid guest stock grip filter counters")
+        suppressed, passed = map(int, fields[4:])
+        if min(suppressed, passed) < 0:
+            raise ValueError("Invalid guest stock grip filter count")
+        return dict(lease=fields[2], active=fields[3] == "1", suppressed=suppressed, passed=passed)
+    if fields[0] == FILTER_READY_ROW:
+        if len(fields) != 2 or phase != "connected":
+            raise ValueError("Invalid stock grip filter availability")
+        return True
     if phase != "connected":
         raise ValueError("Physics carry input belongs to the guest")
     if fields[0] == "native-prop-carry-input":
@@ -172,6 +198,26 @@ class Host:
             self.holders.clear()
             self.poses.clear()
             self.epoch = self.service.zone_epoch
+
+    def grip_confirmation(self, character):
+        self._reset()
+        game = self.service.last_game
+        now = time.monotonic()
+        holder = self.holders.get(character)
+        if (not holder or holder.get("closing") or holder["pawn"] != self._pawn(character)
+                or not 0 <= now - self.service.last_seen < .5):
+            return None
+        lease = holder["lease"]
+        live = game.get(HELD, {}).get(lease)
+        if (not live or live["serial"] != holder["sequence"] or live["pawn"] != holder["pawn"]
+                or live["actor"].partition(" ")[2] != holder["identity"].get("placement")):
+            return None
+        remaining = int(min(live["remaining"] - 1000 * (now - self.service.last_seen),
+                            1000 * (holder["deadline"] - now), 900))
+        if remaining <= 0:
+            return None
+        return dict(epoch=self.epoch, lease=lease, serial=live["serial"], actor=live["actor"],
+                    remaining=remaining, version=game["sequence"])
 
     async def operate(self, bridge, character, target):
         self._reset()
@@ -268,6 +314,11 @@ class Guest:
         self.pose_error = None
         self.edges = deque(maxlen=6)
         self.action = self.pose = None
+        filter_setting = os.getenv("SILVERFISH_COOP_PROP_GRIP_FILTER")
+        self.filter_enabled = filter_setting != "0"
+        self.filter_file_fixture = filter_setting == "1"
+        self.filter_actor = self.filter_job = None
+        self.filter_version = 0
 
     async def _operate(self, row):
         service, edge, number = self.service, row["edge"], row["sequence"]
@@ -288,12 +339,20 @@ class Guest:
         target = "@".join((self.epoch, lease, edge, str(number), str(pitch), str(yaw), *suffix))
         try:
             returned = await service.gameplay_action(ACTION, operation, target)
-            if returned.get(PROOF, {}).get("sequence") != number:
+            proof = returned.get(PROOF, {})
+            if proof.get("sequence") != number:
                 raise ValueError("The host action did not match the stock carry")
             self.lease, self.grab = (lease, number) if edge == "grab" else (None, None)
+            self.filter_actor = None
+            self.filter_version = 0
+            if self.filter_enabled and edge == "grab" and row.get("placement"):
+                actor = proof.get("actor", "")
+                if proof.get("lease") == lease and proof.get("edge") == "grab" and actor.partition(" ")[2] == row["placement"]:
+                    self.filter_actor = actor
             self.last_pose = None
         except (OSError, ValueError, RuntimeError) as error:
             self.lease = self.grab = None
+            self.filter_actor = None
             service.control.event("native_prop_carry_refused", edge=edge, reason=str(error))
             if edge == "grab" and any(key in row for key in ("corpse", "placement", "loot_id")):
                 try:
@@ -312,6 +371,37 @@ class Guest:
             self.pose_error = reason
             if reason:
                 self.service.control.event("native_prop_carry_pose_refused", reason=reason)
+
+    async def _arm_filter(self, confirmation, seen):
+        remaining = int(confirmation["remaining"] - 1000 * (time.monotonic() - seen))
+        if self.lease != confirmation["lease"] or remaining < 150:
+            return
+        try:
+            await self.service.bridge.command("native-prop-carry-arm-filter", self.lease, str(self.grab),
+                                              self.filter_actor, str(remaining), timeout=.5)
+        except (OSError, ValueError, RuntimeError):
+            # Stock movement stays enabled when the local grip or fresh lease cannot be proved.
+            pass
+
+    def _poll_filter(self, grip):
+        # Keep periodic lease renewals on the in-process bridge during ordinary play.
+        if (not self.service.last_game.get(FILTER_READY)
+                or (self.service.bridge.local_bridge is None and not self.filter_file_fixture) or not self.filter_actor
+                or not self.lease or grip.get("grab") != self.grab
+                or self.filter_job is not None and not self.filter_job.done()):
+            return
+        confirmation = self.service.gameplay.get(FILTER)
+        if not isinstance(confirmation, dict):
+            return
+        if any(confirmation.get(key) != value for key, value in (
+            ("epoch", self.epoch), ("lease", self.lease), ("serial", self.grab), ("actor", self.filter_actor),
+        )):
+            return
+        version, remaining = confirmation.get("version"), confirmation.get("remaining")
+        if type(version) is not int or version <= self.filter_version or type(remaining) is not int or not 0 < remaining <= 900:
+            return
+        self.filter_version = version
+        self.filter_job = asyncio.create_task(self._arm_filter(confirmation, self.service.gameplay_seen))
 
     def poll(self, active):
         service = self.service
@@ -332,6 +422,8 @@ class Guest:
             self.action = asyncio.create_task(self._operate(self.edges.popleft()))
         now = time.monotonic()
         grip = game.get(TARGET, {})
+        if self.filter_enabled:
+            self._poll_filter(grip)
         if (self.lease and grip.get("grab") == self.grab and now >= self.next_pose
                 and (self.pose is None or self.pose.done())):
             position = tuple(f"{axis:.1f}" for axis in grip["pose"])
@@ -346,10 +438,12 @@ class Guest:
                 self.pose = asyncio.create_task(self._pose(target))
 
     def close(self):
-        for task in (self.action, self.pose):
+        for task in (self.action, self.pose, self.filter_job):
             if task and not task.done():
                 task.cancel()
         self.action = self.pose = None
         self.lease = self.grab = None
+        self.filter_actor = self.filter_job = None
+        self.filter_version = 0
         self.last_pose = self.pose_error = None
         self.edges.clear()

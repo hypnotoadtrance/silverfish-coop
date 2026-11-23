@@ -227,6 +227,19 @@ namespace
         Receipt pending{};
     };
 
+    struct PropCarryMovement
+    {
+        Unreal::UFunction* notify{};
+        Unreal::FStructProperty* body_instance{};
+        Unreal::FBoolProperty* simulating{};
+        Unreal::FWeakObjectPtr pawn{}, actor{}, root{}, grip{}, world{}, driver{}, server{};
+        std::uint64_t scope_generation{};
+        std::string lease;
+        Clock::time_point expires{};
+        std::uint64_t suppressed{}, passed{};
+        bool released{};
+    };
+
     struct StockBoardAction
     {
         Receipt receipt{};
@@ -259,6 +272,7 @@ namespace
     std::atomic<std::uint64_t> generation{1};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
     Scope scope;
+    PropCarryMovement prop_movement;
     ScopedInteraction wire_board, dialogue_input, valve_input, stash_input, lantern_input;
 
     ScopedInteraction npc_barter_input, npc_barter_confirm;
@@ -1002,9 +1016,44 @@ namespace
         ++count;
     }
 
+    bool current_prop_grip(const PropCarryMovement& bound, Clock::time_point now)
+    {
+        if (scope.host || now >= scope.expires || bound.scope_generation != scope.generation || !live_scope(scope) ||
+            bound.world.Get() != scope.world.Get() || bound.driver.Get() != scope.driver.Get() ||
+            bound.server.Get() != scope.server.Get()) return false;
+        auto* pawn = bound.pawn.Get();
+        auto* actor = bound.actor.Get();
+        auto* root = bound.root.Get();
+        auto* grip = bound.grip.Get();
+        if (!pawn || pawn != scope.pawn.Get() || !standing(pawn) || !live(root) || !live(grip) ||
+            !live_actor(actor, scope.world.Get(), 1)) return false; // ROLE_SimulatedProxy
+        auto* movement = field<Unreal::FBoolProperty>(actor, STR("bReplicateMovement"));
+        return movement && movement->GetPropertyValueInContainer(actor) &&
+            object_field(pawn, STR("HeldObject")) == actor && object_field(pawn, STR("PhysicsHandle")) == grip &&
+            object_field(grip, STR("GrabbedComponent")) == root && object_field(actor, STR("RootComponent")) == root &&
+            object_field(actor, STR("PropMesh")) == root && root->GetOuterPrivate() == actor && grip->GetOuterPrivate() == pawn &&
+            bound.simulating->GetPropertyValueInContainer(bound.body_instance->ContainerPtrToValuePtr<void>(root));
+    }
+
+    bool prop_carry_movement_active(Clock::time_point now)
+    {
+        if (prop_movement.released || now >= prop_movement.expires) return false;
+        if (current_prop_grip(prop_movement, now)) return true;
+        prop_movement.released = true;
+        return false;
+    }
+
     void event_pre(Iteration& iteration, Unreal::UObject* pawn, Unreal::UFunction* function, void* parameters)
     {
         if (!available()) return;
+        if (function && function == prop_movement.notify && pawn == prop_movement.actor.Get())
+        {
+            if (iteration.OriginalFunctionCallPrevented()) return;
+            if (prop_carry_movement_active(Clock::now())) iteration.PreventOriginalFunctionCall();
+            if (iteration.OriginalFunctionCallPrevented()) ++prop_movement.suppressed;
+            else ++prop_movement.passed;
+            return;
+        }
         if (!exact_dispatch(pawn, function))
         {
             route_interaction(iteration, pawn, function, parameters);
@@ -1051,6 +1100,86 @@ namespace
         lua.set_bool(ok);
         lua.set_string(status);
         return 2;
+    }
+
+    int arm_prop_carry_movement(const Lua& lua)
+    {
+        if (!available() || lua.get_stack_size() != 5 || !lua.is_integer(1) || !lua.is_integer(2) ||
+            !lua.is_integer(3) || !lua.is_string(4) || !lua.is_integer(5))
+            return report(lua, false, "stock_prop_movement_arguments");
+        const auto pawn_address = lua.get_integer();
+        const auto actor_address = lua.get_integer();
+        const auto root_address = lua.get_integer();
+        const std::string lease_id{lua.get_string()};
+        const auto duration = lua.get_integer();
+        if (lease_id.size() != 32 || lease_id.find_first_not_of("0123456789abcdef") != std::string::npos ||
+            duration <= 0 || duration > 1000)
+            return report(lua, false, "stock_prop_movement_lease");
+        auto* pawn = scope.pawn.Get();
+        if (!pawn || address(pawn) != pawn_address || scope.host)
+            return report(lua, false, "stock_prop_movement_pawn");
+        auto* actor = object_field(pawn, STR("HeldObject"));
+        auto* root = object_field(actor, STR("RootComponent"));
+        auto* grip = object_field(pawn, STR("PhysicsHandle"));
+        if (!live(actor) || address(actor) != actor_address || !live(root) || address(root) != root_address || !live(grip))
+            return report(lua, false, "stock_prop_movement_grip");
+
+        const auto now = Clock::now();
+        if (prop_movement.lease == lease_id)
+        {
+            if (prop_movement.released || prop_movement.pawn.Get() != pawn || prop_movement.actor.Get() != actor ||
+                prop_movement.root.Get() != root || prop_movement.grip.Get() != grip || !current_prop_grip(prop_movement, now))
+            {
+                prop_movement.released = true;
+                return report(lua, false, "stock_prop_movement_released");
+            }
+            prop_movement.expires = now + std::chrono::milliseconds(duration);
+            return report(lua, true, "stock_prop_movement_armed");
+        }
+
+        auto* base = find<Unreal::UClass>(STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C"));
+        auto* core = find<Unreal::UClass>(STR("/Game/Classes/Actors/MindCore_BP.MindCore_BP_C"));
+        auto* mesh = find<Unreal::UClass>(STR("/Script/Engine.StaticMeshComponent"));
+        auto* world = scope.world.Get();
+        auto* level = object_field(world, STR("PersistentLevel"));
+        if (!base || !actor->IsA(base) || (core && actor->IsA(core)) || !mesh || !root->IsA(mesh) || !live(level) ||
+            actor->GetOuterPrivate() != level || !actor->HasAnyFlags(Unreal::RF_WasLoaded) ||
+            actor->HasAnyFlags(Unreal::RF_Transient))
+            return report(lua, false, "stock_prop_movement_placement");
+
+        auto* owner_type = find<Unreal::UClass>(STR("/Script/Engine.Actor"));
+        auto* notify = find<Unreal::UFunction>(STR("/Script/Engine.Actor:OnRep_ReplicatedMovement"));
+        auto* instance_type = find<Unreal::UScriptStruct>(STR("/Script/Engine.BodyInstance"));
+        auto* body = field<Unreal::FStructProperty>(root, STR("BodyInstance"));
+        auto* simulating = field<Unreal::FBoolProperty>(instance_type, STR("bSimulatePhysics"));
+        if (!owner_type || !notify || notify->GetOuterPrivate() != owner_type || notify->GetNumParms() ||
+            notify->GetParmsSize() || notify->GetReturnProperty() || !notify->HasAnyFunctionFlags(Unreal::FUNC_Native) ||
+            notify->HasAnyFunctionFlags(Unreal::FUNC_Net) ||
+            actor->GetClassPrivate()->GetFunctionByNameInChain(notify->GetFName()) != notify ||
+            !instance_type || !body || body->GetStruct().Get() != instance_type || !simulating)
+            return report(lua, false, "stock_prop_movement_schema");
+
+        PropCarryMovement next{notify, body, simulating, pawn, actor, root, grip, world, scope.driver, scope.server,
+                               scope.generation, lease_id, now + std::chrono::milliseconds(duration)};
+        if (!current_prop_grip(next, now)) return report(lua, false, "stock_prop_movement_grip");
+        prop_movement = std::move(next);
+        return report(lua, true, "stock_prop_movement_armed");
+    }
+
+    int release_prop_carry_movement(const Lua&)
+    {
+        if (available()) prop_movement.released = true;
+        return 0;
+    }
+
+    int prop_carry_movement_status(const Lua& lua)
+    {
+        if (!available() || prop_movement.lease.empty()) return 0;
+        lua.set_string(prop_movement.lease);
+        lua.set_bool(prop_carry_movement_active(Clock::now()));
+        lua.set_integer(static_cast<std::int64_t>(prop_movement.suppressed));
+        lua.set_integer(static_cast<std::int64_t>(prop_movement.passed));
+        return 4;
     }
 
     int set_scope(const Lua& lua)
@@ -1642,6 +1771,13 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishSetNativeInteractScope", set_scope);
         lua.register_function("SilverfishTakeNativeInteractPress", take_press);
         lua.register_function("SilverfishClearNativeInteractScope", lua_clear);
+        const auto* grip_filter = std::getenv("SILVERFISH_COOP_PROP_GRIP_FILTER");
+        if (!grip_filter || std::string_view{grip_filter} != "0")
+        {
+            lua.register_function("SilverfishSetNativePropCarryMovement", arm_prop_carry_movement);
+            lua.register_function("SilverfishReleaseNativePropCarryMovement", release_prop_carry_movement);
+            lua.register_function("SilverfishReadNativePropCarryMovement", prop_carry_movement_status);
+        }
         lua.register_function("SilverfishSetNativeWireBoardScope", set_wire_board);
         lua.register_function("SilverfishTakeNativeWireBoardPress", take_wire_board_press);
         lua.register_function("SilverfishTakeNativeStockBoardAction", take_stock_board_action);
@@ -1674,6 +1810,7 @@ namespace silverfish::native_interaction_input
         generation.fetch_add(1, std::memory_order_acq_rel);
         if (!Unreal::IsInGameThreadRaw()) return;
         scope = {};
+        prop_movement = {};
         wire_board = {};
         stock_board_action = {};
         stock_board_menu = {};

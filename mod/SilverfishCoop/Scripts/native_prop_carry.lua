@@ -17,10 +17,11 @@ local max_linear_velocity = 6000
 local max_angular_velocity = 7200
 local color = {R = 0, G = 0, B = 0, A = 0}
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
-local world, state, phase, hook, mailbox, sequence, next_read
+local world, state, phase, hook, release_hook, mailbox, sequence, next_read
 local enrolled, holdings, edges, local_hold, latest = {}, {}, {}, nil, nil
 local fixture_actor, loose_fixtures = nil, {}
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local grip_filter = os.getenv("SILVERFISH_COOP_PROP_GRIP_FILTER") ~= "0"
 local fixtures = headless and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local offering_fixture = headless and observers.enabled and os.getenv("SILVERFISH_COOP_OBSERVER_THROW_FIXTURE") == "1"
 
@@ -94,6 +95,28 @@ local function rigid_root(entry, grip, bone)
     if same(root, actor.RootComponent) and root:IsSimulatingPhysics(bone) then return root end
 end
 
+local function filter_root(entry, grip)
+    local actor = entry.actor
+    local root = rigid_root(entry, grip, FName("None", EFindName.FNAME_Find))
+    if root and not item_body(actor) and actor:HasAnyFlags(EObjectFlags.RF_WasLoaded)
+        and same(actor:GetOuter(), world.PersistentLevel) then return root end
+end
+
+local function filter_available()
+    return grip_filter and release_hook
+        and type(SilverfishSetNativePropCarryMovement) == "function"
+        and type(SilverfishReleaseNativePropCarryMovement) == "function"
+        and type(SilverfishReadNativePropCarryMovement) == "function"
+end
+
+local function release_grip_filter()
+    if local_hold and local_hold.filter_lease
+        and type(SilverfishReleaseNativePropCarryMovement) == "function" then
+        SilverfishReleaseNativePropCarryMovement()
+        local_hold.filter_lease = nil
+    end
+end
+
 local function solved_pose(root, bone)
     local location, rotation = root:K2_GetComponentLocation(), root:K2_GetComponentRotation()
     local velocity = root:GetPhysicsLinearVelocity(bone)
@@ -109,6 +132,8 @@ local function capture_release(grip)
     local pawn = state.local_pawn and state.local_pawn.pawn
     if not same(pawn, local_hold.pawn) or not same(grip, handle(pawn)) or not pawn:IsLocallyControlled()
         or pawn:HasAuthority() or pawn.Dead ~= false or players.is_downed(pawn) then return end
+    -- Drop the bounded receive filter in the same native pre-release call.
+    release_grip_filter()
     local_hold.release = nil
     local bone = FName("None", EFindName.FNAME_Find)
     local root = rigid_root(local_hold, grip, bone)
@@ -193,6 +218,7 @@ local function observe(pawn, throwing, dropping)
         local final = (throwing or dropping) and age and age >= 0 and age <= final_capture_age and capture.pose
         emit(pawn, throwing and "throw" or "drop", local_hold.class,
             pawn:K2_GetActorLocation(), pitch, yaw, nil, nil, nil, final)
+        release_grip_filter()
         if local_hold.loot_id then loot.stop_carry(pawn, local_hold.actor) end
         local_hold = nil
     end
@@ -622,12 +648,32 @@ end
 
 function carry.command(fields, current, seat)
     if fields[2] == "native-prop-carry-fixture" then return fixture(fields, current, seat) end
+    if fields[2] == "native-prop-carry-arm-filter" then
+        local lease, serial, name, ms = fields[3], math.tointeger(fields[4]), fields[5], math.tointeger(fields[6])
+        local pawn = current.local_pawn and current.local_pawn.pawn
+        if not filter_available() or not enabled or seat ~= "connected" or not current.server or not current.listening
+            or #fields ~= 6 or not guid(lease) or not ms or ms < 150 or ms > 900
+            or not same(world, current.world) or not local_hold or not same(pawn, local_hold.pawn)
+            or serial ~= local_hold.serial or not valid(local_hold.actor) or local_hold.actor:GetFullName() ~= name
+            or not pawn:IsLocallyControlled() or pawn:HasAuthority() or pawn.Dead ~= false or players.is_downed(pawn)
+            or local_hold.filter_lease and local_hold.filter_lease ~= lease then
+            error("native_prop_carry_filter_unavailable", 0)
+        end
+        local root = filter_root(local_hold, handle(pawn))
+        if not root or local_hold.actor:HasAuthority() then error("native_prop_carry_filter_root_unavailable", 0) end
+        local armed, reason = SilverfishSetNativePropCarryMovement(
+            pawn:GetAddress(), local_hold.actor:GetAddress(), root:GetAddress(), lease, ms)
+        if not armed then error(reason or "native_prop_carry_filter_refused", 0) end
+        local_hold.filter_lease = lease
+        return "stock grip filter armed for the acknowledged carry"
+    end
     if fields[2] == "native-prop-carry-refuse" and enabled and seat == "connected" and current.server
         and same(world, current.world) and #fields == 3 then
         local pawn = current.local_pawn and current.local_pawn.pawn
         if local_hold and math.tointeger(fields[3]) == local_hold.serial
             and same(pawn, local_hold.pawn) and pawn:IsLocallyControlled() and not pawn:HasAuthority() then
             local refused = local_hold
+            release_grip_filter()
             local_hold = nil
             if held(pawn, refused.actor, handle(pawn), refused.corpse) then pawn:Grab_Release_Object(false, true, false) end
             if refused.loot_id then loot.stop_carry(pawn, refused.actor) end
@@ -778,6 +824,8 @@ local function read_targets(now)
 end
 
 function carry.update()
+    if phase == "connected" and local_hold and local_hold.filter_lease
+        and (not valid(local_hold.pawn) or players.is_downed(local_hold.pawn)) then release_grip_filter() end
     if phase ~= "hosting" or not next(holdings) then return end
     local now = os.clock()
     read_targets(now)
@@ -819,7 +867,25 @@ function carry.rows(current, seat, row)
             carrying and 1 or 0, table.unpack(grip))
     end
     if seat == "hosting" and latest then rows[#rows + 1] = row("native-prop-carry", current.map, table.unpack(latest)) end
+    if seat == "hosting" and filter_available() then
+        local now = os.clock()
+        for id, entry in pairs(holdings) do
+            local remaining = math.min(1500, math.floor((entry.deadline - now) * 1000))
+            if remaining > 0 and filter_root(entry, entry.grip)
+                and players.is_standing_guest(entry.pawn, entry.pawn:GetFullName()) then
+                rows[#rows + 1] = row("native-prop-carry-held", current.map, id, entry.serial,
+                    entry.pawn:GetFullName(), entry.actor_name, remaining)
+            end
+        end
+    end
     if seat ~= "connected" then return rows end
+    if filter_available() then
+        rows[#rows + 1] = row("native-prop-carry-filter-ready", current.map)
+        local lease, active, suppressed, passed = SilverfishReadNativePropCarryMovement()
+        if guid(lease) then
+            rows[#rows + 1] = row("native-prop-carry-filter", current.map, lease, active and 1 or 0, suppressed, passed)
+        end
+    end
     for _, edge in ipairs(edges) do rows[#rows + 1] = row("native-prop-carry-input", current.map, table.unpack(edge)) end
     local grip = local_hold and handle(local_hold.pawn)
     if not local_hold or not held(local_hold.pawn, local_hold.actor, grip, local_hold.corpse) then return rows end
@@ -833,6 +899,7 @@ end
 
 function carry.sync(current, seat, bridge)
     if not enabled then return end
+    if seat ~= "connected" or not same(world, current.world) then release_grip_filter() end
     if not same(world, current.world) then
         world, enrolled, holdings, edges, local_hold, latest = current.world, {}, {}, {}, nil, nil
         fixture_actor, loose_fixtures, next_read = nil, {}, nil
@@ -842,7 +909,7 @@ function carry.sync(current, seat, bridge)
         if valid(StaticFindObject(release_component_path)) then
             -- The Blueprint hook runs after release. Both release branches call this native method
             -- while HeldObject still identifies the grip and before applying stock velocity.
-            pcall(RegisterHook, release_component_path, function(context) pcall(capture_release, context:get()) end)
+            release_hook = pcall(RegisterHook, release_component_path, function(context) pcall(capture_release, context:get()) end)
         end
         RegisterHook(grab_path, function(context, throwing, dropping)
             pcall(observe, context:get(), throwing:get() == true, dropping:get() == true)

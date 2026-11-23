@@ -1866,6 +1866,9 @@ class Host:
         roles = self.roles()
         character = roles.get(role, "")
         gameplay["native_backpacks"] = native_inventory_death.visible_bags(self.party, character)
+        if self.prop_carry_bridge is not None and native_prop_carry.HELD in self.last_game:
+            if confirmation := self.prop_carry.grip_confirmation(character):
+                gameplay[native_prop_carry.FILTER] = confirmation
         if "native_pawns" in gameplay:
             positions = self.authoritative_pawns(roles) if not self.transitioning and self.last_game.get("state") == "hosting" else {}
             gameplay[native_downed_markers.KEY] = native_downed_markers.frame(
