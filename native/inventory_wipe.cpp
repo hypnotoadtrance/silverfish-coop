@@ -59,6 +59,7 @@ namespace
     };
 
     std::atomic<bool> screen_hooks_installed{};
+    std::atomic<Unreal::UClass*> guarded_screen_class{};
     thread_local std::array<ScreenScope, 8> screens;
     std::array<Hook::GlobalCallbackId, 2> screen_callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
 
@@ -98,7 +99,8 @@ namespace
 
     void intercept_screen(Hook::TCallbackIterationData<void>& iteration, Unreal::UObject* widget, Unreal::UFunction* callee)
     {
-        if (!screen_hooks_installed.load(std::memory_order_acquire) || !widget || !callee ||
+        auto* type = guarded_screen_class.load(std::memory_order_acquire);
+        if (!type || !widget || !callee || widget->GetClassPrivate() != type ||
             !Unreal::IsInGameThreadRaw() || iteration.OriginalFunctionCallPrevented()) return;
         for (auto& screen : screens)
         {
@@ -157,6 +159,7 @@ namespace
         // Keep the guard active until Unreal destroys the widget so a deferred
         // callback cannot start the stock respawn after the menu is removed.
         *position = scope;
+        guarded_screen_class.store(type, std::memory_order_release);
         return true;
     }
 
@@ -922,6 +925,7 @@ namespace silverfish::inventory_wipe
     void uninstall_screen_hooks()
     {
         screen_hooks_installed.store(false, std::memory_order_release);
+        guarded_screen_class.store(nullptr, std::memory_order_release);
         for (auto& callback : screen_callbacks)
         {
             if (callback != Hook::ERROR_ID) Hook::UnregisterCallback(callback);
