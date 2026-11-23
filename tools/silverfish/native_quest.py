@@ -42,6 +42,12 @@ def _record(host, actor: str, step: int, eligible: set[str]) -> dict:
 
 
 async def action(host, bridge, actor: str, verb: str, target: str | None) -> dict:
+    stock_verb = verb in ("native-quest-start", "native-quest-turnin")
+    visit, board = None, None
+    if stock_verb and isinstance(target, str) and "|" in target:
+        visit, board, target = native_board_contract.menu_selection(target)
+        native_board_contract.require_visit(host, visit)
+        native_board_contract.scope(host, actor, board)
     if target == native_subway_valve.QUEST:
         if verb not in ("native-quest-start", "native-quest-turnin"):
             raise party.RuleError("stock_subway_valve_requires_authored_objective")
@@ -76,8 +82,9 @@ async def action(host, bridge, actor: str, verb: str, target: str | None) -> dic
         return await native_flood_jammer.act(host, bridge, actor, operation)
     if isinstance(target, str) and target in native_broker.QUESTS:
         return await native_broker.action(host, bridge, actor, verb, quest_id=target)
-    if native_board_contract.quest_id(target) and verb in ("native-quest-start", "native-quest-turnin"):
-        return await native_board_contract.perform(host, bridge, actor, verb.removeprefix("native-quest-"), target)
+    if native_board_contract.quest_id(target) and stock_verb:
+        return await native_board_contract.perform(
+            host, bridge, actor, verb.removeprefix("native-quest-"), target, board=board, visit=visit)
     roles = host.roles()
     player = host.party["players"].get(actor)
     if (not host.fixtures or not player or actor not in host.authoritative_pawns(roles)

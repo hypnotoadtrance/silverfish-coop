@@ -197,7 +197,9 @@ class WireBoardView:
                 return snapshot
         verb, state = ("native-quest-start", "accepted") if starting else ("native-quest-turnin", "completed")
         try:
-            result = await action(verb, operation, quest)
+            target = (native_board_contract.menu_target(epoch, board, quest)
+                      if projected and quest not in catalog_specialists(area) else quest)
+            result = await action(verb, operation, target)
             step = result.get("step")
             valid_step = type(step) is int and (step > 0 if projected and starting else step == (1 if starting else -10))
             if result.get("quest_id") != quest or not valid_step:

@@ -94,6 +94,7 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
         area, pawn = wire.SHOPKEEP, "Player_FP_C ClientView"
         board = wire.BOARDS[area]
         quest = "Clt_Eye_02"
+        visit = "12" * 16
         other = "Clt_Molasis"
         bridge = SimpleNamespace(input_namespace=uuid.uuid4(), native_wire_board_requests=Mock(), command=AsyncMock())
         control = SimpleNamespace(event=Mock())
@@ -106,7 +107,7 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
                 "map": area, "pawn": pawn, "board": board, "quest": id, "state": shown, "sequence": sequence, "open": opened,
             }}
 
-        async def press(kind, sequence, opened, id, epoch="visit"):
+        async def press(kind, sequence, opened, id, epoch=visit):
             snapshot = frame(wire.WAITING[kind], sequence, opened, id)
             bridge.native_wire_board_requests.return_value = [(sequence, opened, kind, area, pawn, board, id)]
             return await view.sync(snapshot, epoch, True, action)
@@ -123,7 +124,7 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(action.await_count, 1)
         action.return_value = {"quest_id": quest, "step": 1}
         await press("stock-start", 4, 1, quest)
-        self.assertEqual(action.await_args.args[0::2], ("native-quest-start", quest))
+        self.assertEqual(action.await_args.args[0::2], ("native-quest-start", native_board_contract.menu_target(visit, board, quest)))
         self.assertEqual(bridge.command.await_args.args, ("native-wire-board-stock-result", "4", area, pawn, quest, "accepted"))
         await press("stock-start", 4, 1, quest)
         self.assertEqual(action.await_count, 2)
@@ -136,7 +137,7 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.command.await_args.args, ("native-wire-board-stock-open", "5", area, pawn, "-", quest))
         action.return_value = {"quest_id": quest, "step": -10}
         await press("stock-turnin", 6, 5, quest)
-        self.assertEqual(action.await_args.args[0::2], ("native-quest-turnin", quest))
+        self.assertEqual(action.await_args.args[0::2], ("native-quest-turnin", native_board_contract.menu_target(visit, board, quest)))
         self.assertEqual(bridge.command.await_args.args, ("native-wire-board-stock-result", "6", area, pawn, quest, "completed"))
         self.assertIsNone(view.stock_open)
 

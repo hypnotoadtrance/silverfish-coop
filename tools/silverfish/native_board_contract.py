@@ -12,11 +12,35 @@ CATALOG = "native-board-contract-catalog"
 CATALOG_KEY = "native_board_contract_catalog"
 REFUSAL = "stock_board_contract_"
 QUEST_ID = re.compile(r"[A-Za-z0-9_]{1,96}")
+VISIT_ID = re.compile(r"[0-9a-f]{32}")
 COMPLETE = -10
 
 
 def quest_id(value):
     return isinstance(value, str) and QUEST_ID.fullmatch(value) is not None
+
+
+def menu_selection(target):
+    if not isinstance(target, str) or len(target) > 642:
+        raise party.RuleError("native_board_contract_selection_invalid")
+    visit, separator, remainder = target.partition("|")
+    board, second, quest = remainder.partition("|")
+    if (not separator or not second or not VISIT_ID.fullmatch(visit)
+            or not board.startswith("BountyBoard_BP_C /Game/Classes/Maps/")
+            or len(board) > 512 or not board.isascii() or not board.isprintable() or not quest_id(quest)):
+        raise party.RuleError("native_board_contract_selection_invalid")
+    return visit, board, quest
+
+
+def menu_target(visit, board, quest):
+    encoded = f"{visit}|{board}|{quest}"
+    menu_selection(encoded)
+    return encoded
+
+
+def require_visit(host, visit):
+    if visit is not None and visit != host.zone_epoch:
+        raise party.RuleError("native_board_contract_stale_visit")
 
 
 def parse(fields):
@@ -140,9 +164,10 @@ async def catalog(host, bridge, actor, selected_board=None, *, specialized=()):
     return {CATALOG_KEY: proof}
 
 
-async def perform(host, bridge, actor, verb, quest, *, board=None):
+async def perform(host, bridge, actor, verb, quest, *, board=None, visit=None):
     if verb not in {"start", "turnin"} or not quest_id(quest):
         raise party.RuleError("native_board_contract_arguments")
+    require_visit(host, visit)
     area, pawn, board = scope(host, actor, board)
     turning_in = verb == "turnin"
     prior = host.party.get("native_quests", {}).get(quest, {})
@@ -152,6 +177,7 @@ async def perform(host, bridge, actor, verb, quest, *, board=None):
     host.transitioning = True
     try:
         before = await _command(host, bridge, verb, "inspect", area, pawn, board, quest)
+        require_visit(host, visit)
         if before["state"] == "already":
             return {"effect": "native_quest_present", "quest_id": quest, "step": before["step_after"]}
         if (before["state"] != "qualified" or before["expected_step"] is None
@@ -168,9 +194,11 @@ async def perform(host, bridge, actor, verb, quest, *, board=None):
             if not await native_inventory.retain_guest_save(host, bridge, actor, pawn):
                 raise party.RuleError("native_board_objective_retention_unavailable")
 
+        require_visit(host, visit)
         host.native_checkpoint_unsafe = True
         units = "-" if before["units"] is None else str(before["units"])
         result = await _command(host, bridge, verb, "apply", area, pawn, board, quest, before["guid"], units)
+        require_visit(host, visit)
         record = _receipt(actor, before, result)
         if turning_in:
             record["recipients"] = recipients

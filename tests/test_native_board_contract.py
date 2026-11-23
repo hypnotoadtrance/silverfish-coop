@@ -14,6 +14,7 @@ UNREGISTERED_KILL = "Asn_EggHead"
 GUID = "19" * 16
 PAWN = "Player_FP_C ExactGuest"
 BOARD = native_computer_board.BOARDS[SHOPKEEP]
+VISIT = "12" * 16
 
 
 def result(quest, verb, mode, before, expected, *, cash=0, xp=0, guid="-", board_name=BOARD,
@@ -73,6 +74,56 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.command.await_count, 4)
         host.checkpoint_native.assert_not_awaited()
         host.checkpoint.assert_not_called()
+
+    async def test_selected_board_cannot_be_substituted_by_another_board_in_the_same_map(self):
+        host = self.host()
+        host.zone_epoch = VISIT
+        second = BOARD.removesuffix("_1") + "_2"
+        bridge = SimpleNamespace(command=AsyncMock())
+        selection = board.menu_target(VISIT, BOARD, EYE)
+
+        # The other board occupies the same level and could offer the same contract.
+        # Its availability cannot replace the board chosen by the opening receipt.
+        with patch.dict(native_computer_board.BOARDS, {SHOPKEEP: second}):
+            with self.assertRaisesRegex(party.RuleError, "native_board_contract_unavailable"):
+                await native_quest.action(host, bridge, "guest", "native-quest-start", selection)
+        bridge.command.assert_not_awaited()
+
+        with self.assertRaisesRegex(party.RuleError, "native_board_contract_stale_visit"):
+            await native_quest.action(
+                host, bridge, "guest", "native-quest-start", board.menu_target("34" * 16, BOARD, EYE))
+        bridge.command.assert_not_awaited()
+
+        bridge.command.return_value = result(EYE, "start", "inspect", None, 1, board_name=second)
+        with self.assertRaisesRegex(RuntimeError, "did not identify the current actor and board"):
+            await native_quest.action(host, bridge, "guest", "native-quest-start", selection)
+        bridge.command.assert_awaited_once_with(board.COMMAND, "start", "inspect", PAWN, BOARD, EYE, timeout=5)
+        self.assertEqual(host.party.get("native_quests", {}), {})
+        self.assertFalse(host.pending_host_save or host.native_checkpoint_unsafe)
+
+        bridge.command.reset_mock()
+        bridge.command.side_effect = (
+            result(EYE, "start", "inspect", None, 1), result(EYE, "start", "apply", None, 1),
+        )
+        started = await native_quest.action(host, bridge, "guest", "native-quest-start", selection)
+        self.assertEqual(started["step"], 1)
+        self.assertEqual([call.args[4] for call in bridge.command.await_args_list], [BOARD, BOARD])
+
+    async def test_current_board_visit_is_rechecked_after_awaiting_inspection(self):
+        host = self.host()
+        host.zone_epoch = VISIT
+
+        async def inspect(*_arguments, **_options):
+            host.zone_epoch = "34" * 16
+            return result(EYE, "start", "inspect", None, 1)
+
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=inspect))
+        with self.assertRaisesRegex(party.RuleError, "native_board_contract_stale_visit"):
+            await native_quest.action(
+                host, bridge, "guest", "native-quest-start", board.menu_target(VISIT, BOARD, EYE))
+        self.assertEqual(bridge.command.await_count, 1)
+        self.assertFalse(host.native_checkpoint_unsafe or host.stopping)
+        self.assertEqual(host.party.get("native_quests", {}), {})
 
     async def test_stock_terminal_without_deposit_uses_native_progress_and_no_retention(self):
         host = self.host()
