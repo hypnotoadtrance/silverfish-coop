@@ -6,6 +6,7 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_FL
 local map = "World /Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local guest_source = os.getenv("SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE") == "1"
 local guest_offhand = os.getenv("SILVERFISH_COOP_GUEST_OFFHAND_PROBE") == "1"
+local offhand_trace = guest_offhand and os.getenv("SILVERFISH_COOP_GUEST_OFFHAND_TRACE") == "1"
 local offhand = guest_offhand or not guest_source and os.getenv("SILVERFISH_COOP_OFFHAND_FLASHLIGHT_PROBE") == "1"
 local offhand_view = guest_offhand or offhand and os.getenv("SILVERFISH_COOP_OFFHAND_FLASHLIGHT_VIEW_PROBE") == "1"
 local heavy = os.getenv("SILVERFISH_COOP_HEAVY_FLASHLIGHT_PROBE") == "1"
@@ -23,6 +24,7 @@ local pistol_path = "/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C"
 local source, cue_calls, power_calls, hooked, selected_guid = nil, 0, 0, false, nil
 local offhand_pawn, primary, seeded_slots
 local guest_hold, host_guard
+local trace_pawn, trace_instance, trace_hooks, trace_rows
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -84,6 +86,74 @@ local function item_identity(row)
     local guid = row[item_guid]
     return string.format("%08x%08x%08x%08x", guid.A & 0xffffffff, guid.B & 0xffffffff,
         guid.C & 0xffffffff, guid.D & 0xffffffff)
+end
+
+local function trace_event(event, argument)
+    if not trace_rows or not valid(trace_pawn) or not trace_pawn:IsLocallyControlled()
+        or trace_pawn:HasAuthority() or not same(trace_pawn:GetWorld().OwningGameInstance, trace_instance) then return end
+    local save, equipment, torch = trace_pawn.Save, trace_pawn.EquipedItem, trace_pawn.OffhandEquipment
+    local slots = valid(save) and save.PlayerEquipment
+    local offhand_slot = slots and slots:GetArrayNum() >= 5 and slots[5]
+    local gear_slot = slots and slots:GetArrayNum() >= 2 and slots[2]
+    local function named(object) return valid(object) and object:GetFullName() or "-" end
+    local hand_class, item_type, two_handed = "-", "-", false
+    if valid(equipment) then
+        hand_class, item_type = named(equipment:GetClass()), tostring(equipment.ItemType)
+        local ok, tagged = pcall(function()
+            for _, tag in ipairs(equipment.Tags) do
+                if tag:ToString() == "TwoHanded" then return true end
+            end
+            return false
+        end)
+        if ok then two_handed = tagged else two_handed = "unavailable" end
+    end
+    if #trace_rows >= 80 then table.remove(trace_rows, 1) end
+    trace_rows[#trace_rows + 1] = table.concat({event, os.clock(), tostring(argument), named(save),
+        tostring(same(save, trace_instance.SaveSlot_Ref)), tostring(valid(save) and save.PlayerOffhandingFlashlight),
+        tostring(trace_pawn.ForceOffhandLower), tostring(valid(save) and save.PlayerEquipIndex), hand_class, item_type,
+        tostring(two_handed), named(equipment), named(torch), gear_slot and named(gear_slot[item_class]) or "-",
+        gear_slot and item_identity(gear_slot) or "-", offhand_slot and named(offhand_slot[item_class]) or "-",
+        offhand_slot and item_identity(offhand_slot) or "-"}, "\t")
+end
+
+local function start_offhand_trace(pawn, instance)
+    assert(not trace_rows, "flashlight_probe_trace_already_started")
+    trace_pawn, trace_instance, trace_hooks, trace_rows = pawn, instance, {}, {}
+    local function observe(path, object, names)
+        for name, arg in pairs(names) do
+            -- UE4SS runs script UFunction hooks after their Blueprint body.
+            local ok, handle = pcall(RegisterHook, path .. ":" .. name, function(context, parameter)
+                local read_ok, detail = pcall(function()
+                    if same(context:get(), object) then
+                        local value = "-"
+                        if arg then value = parameter:get() end
+                        trace_event(name, value)
+                    end
+                end)
+                if not read_ok then trace_hooks[name] = "callback error: " .. tostring(detail):gsub("[%c]", " ") end
+            end)
+            trace_hooks[name] = ok and "registered" or tostring(handle):gsub("[%c]", " ")
+        end
+    end
+    observe("/Game/Classes/Player/Player_FP.Player_FP_C", pawn, {
+        OffhandFlashlight = true, LowerOffhand = true, Equip_NextItem = true,
+        CanOffhandFlashlight = true, ReEquipFlashlight = false, PassivesUpdate = false,
+    })
+    observe("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C", instance, {
+        Compile_PassiveEffects = false, Calc_CarryWeight = false,
+    })
+    trace_event("fixture_trace_started", "-")
+    return tostring(os.clock())
+end
+
+local function stop_offhand_trace()
+    assert(trace_rows, "flashlight_probe_trace_not_started")
+    trace_event("fixture_trace_stopped", "-")
+    local fields = {#trace_rows}
+    for _, row in ipairs(trace_rows) do fields[#fields + 1] = row end
+    for name, result in pairs(trace_hooks) do fields[#fields + 1] = name .. "\t" .. result end
+    trace_pawn, trace_instance, trace_rows = nil, nil, nil
+    return table.concat(fields, "\t")
 end
 
 local function slot_guid(pawn)
@@ -198,6 +268,7 @@ local function stock_c_edge(operation, pawn)
     if operation == "coffhandstart" then
         assert(not guest_hold, "flashlight_probe_guest_offhand_c_already_pressed")
         guest_hold = {since = os.clock(), before = before}
+        trace_event(operation, "-")
         -- The cooked C binding has no Started delegate; the initial pressed sample enters Ongoing.
         pawn:InpActEvt_IA_ModeToggle_K2Node_EnhancedInputActionEvent_28(input:MakeInputActionValueOfType(1, 0, 0, 0), 0, 0, action)
         assert(pawn.Save.PlayerOffhandingFlashlight == before, "flashlight_probe_guest_offhand_short_hold_changed")
@@ -208,6 +279,7 @@ local function stock_c_edge(operation, pawn)
     if operation == "coffhandhold" then
         if elapsed < .32 then error("avatar_probe_rig_pending", 0) end
         assert(not guest_hold.held and before == guest_hold.before, "flashlight_probe_guest_offhand_hold_scope_changed")
+        trace_event(operation, elapsed)
         pawn:InpActEvt_IA_ModeToggle_K2Node_EnhancedInputActionEvent_28(
             input:MakeInputActionValueOfType(1, 0, 0, 0), elapsed, elapsed, action)
         assert(pawn.Save.PlayerOffhandingFlashlight == not before, "flashlight_probe_guest_offhand_stock_hold_unverified")
@@ -215,6 +287,7 @@ local function stock_c_edge(operation, pawn)
         return "ongoing_hold\t" .. elapsed .. "\t" .. tostring(not before)
     end
     assert(operation == "coffhandrelease" and guest_hold.held, "flashlight_probe_guest_offhand_c_hold_missing")
+    trace_event(operation, elapsed)
     pawn:InpActEvt_IA_ModeToggle_K2Node_EnhancedInputActionEvent_29(input:MakeInputActionValueOfType(0, 0, 0, 0), elapsed, elapsed, action)
     guest_hold = nil
     assert(pawn.Save.PlayerOffhandingFlashlight == before, "flashlight_probe_guest_offhand_stock_release_changed")
@@ -252,6 +325,7 @@ local function offhand_operation(operation, pawn, world)
         pawn:OffhandFlashlight(true)
     elseif operation == "turnoffhand" and offhand_view then
         assert(save.PlayerOffhandingFlashlight == true and valid(pawn.Controller), "flashlight_probe_offhand_turn_unavailable")
+        trace_event(operation, "-")
         local rot = pawn.Controller:GetControlRotation()
         pawn.Controller:SetControlRotation({Pitch = rot.Pitch < 0 and 25 or -25, Yaw = rot.Yaw, Roll = 0})
     elseif operation == "offhandoff" or operation == "waitoffhand" or operation == "clearoffhand" then
@@ -556,6 +630,10 @@ local function run(operation)
             return observe(world, pawn, assert(math.tointeger(operation:match("^observe(%d+)$"))))
         end
         assert(not pawn:HasAuthority(), "flashlight_probe_guest_offhand_not_autonomous")
+        if offhand_trace and same(offhand_pawn, pawn) then
+            if operation == "traceoffhandstart" then return start_offhand_trace(pawn, world.OwningGameInstance) end
+            if operation == "traceoffhandstop" then return stop_offhand_trace() end
+        end
         local identities = operation:match("^selectoffhandgun(%x+)$")
         if identities then
             assert(#identities == 64 and not seeded_slots, "flashlight_probe_guest_offhand_invalid_selection")

@@ -12,6 +12,7 @@ import shutil
 from statistics import median
 import subprocess
 import sys
+import time
 import uuid
 
 from live_ai_smoke import status, wait
@@ -265,6 +266,7 @@ async def observe_guest_offhand_flashlight(host_run, guest_run):
     clock = asyncio.get_running_loop().time
     source_frames = deque(maxlen=64)
     watcher = None
+    trace = None
 
     def record():
         proof_path.write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
@@ -294,6 +296,12 @@ async def observe_guest_offhand_flashlight(host_run, guest_run):
     record()
     try:
         seeded = offhand_owner(await command_when_ready(f"selectoffhandgun{gun_guid}{torch_guid}"))
+        if os.getenv("SILVERFISH_COOP_GUEST_OFFHAND_TRACE") == "1":
+            start = time.time()
+            lua_start, = await avatar_probe(guest_run, "traceoffhandstart")
+            trace = proof["stock_offhand_call_trace"] = {
+                "lua_started": float(lua_start), "unix_started_bounds": [start, time.time()],
+            }
         player = str(seeded["player"])
         authority = {"pawn": authority_pawn, "profile": "offhand"}
         await wait(host_run, lambda frame: frame.get("game", {}).get(authority_key, {}).get(player) == authority, timeout=10)
@@ -447,6 +455,20 @@ async def observe_guest_offhand_flashlight(host_run, guest_run):
             watcher.cancel()
             with suppress(asyncio.CancelledError):
                 await watcher
+        if trace is not None:
+            try:
+                async with asyncio.timeout(5):
+                    count, *values = await avatar_probe(guest_run, "traceoffhandstop")
+                columns = ("event", "lua_time", "argument", "save", "bound_save", "offhand", "force_lower",
+                           "equip_index", "held_class", "held_type", "two_handed", "held_actor", "offhand_actor",
+                           "pistol_slot_class", "pistol_slot_guid", "torch_slot_class", "torch_slot_guid")
+                end = int(count) * len(columns)
+                trace["calls"] = [dict(zip(columns, values[i:i + len(columns)], strict=True))
+                                  for i in range(0, end, len(columns))]
+                trace["hooks"] = dict(zip(values[end::2], values[end + 1::2], strict=True))
+                trace["guest_ui_projections"] = events(guest_run, "native_guest_ui_projected")
+            except (TimeoutError, AssertionError, OSError, ValueError) as error:
+                trace["probe_error"] = str(error) or type(error).__name__
         record()
     return proof
 
