@@ -83,13 +83,20 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         bridge = SimpleNamespace(command=AsyncMock())
         selection = board.menu_target(VISIT, second, EYE)
 
-        # An authored specialist can only use its own board, even when the other
-        # live board has an ordinary offer with the same map and visit.
         specialist = native_computer_board.MOLASSES.quest_id
+        specialist_selection = board.menu_target(VISIT, second, specialist)
         with self.assertRaisesRegex(party.RuleError, "native_board_contract_requires_authored_board"):
-            await native_quest.action(
-                host, bridge, "guest", "native-quest-start", board.menu_target(VISIT, second, specialist))
+            await native_quest.action(host, bridge, "guest", "native-quest-turnin", specialist_selection)
         bridge.command.assert_not_awaited()
+        bridge.command.side_effect = (
+            result(specialist, "start", "inspect", None, 1, board_name=second),
+            result(specialist, "start", "apply", None, 1, board_name=second),
+        )
+        started = await native_quest.action(host, bridge, "guest", "native-quest-start", specialist_selection)
+        self.assertEqual(started["step"], 1)
+        self.assertEqual([call.args[4] for call in bridge.command.await_args_list], [second, second])
+        bridge.command.reset_mock()
+        bridge.command.side_effect = None
 
         with self.assertRaisesRegex(party.RuleError, "native_board_contract_stale_visit"):
             await native_quest.action(
@@ -100,7 +107,7 @@ class DynamicBoardTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "did not identify the current actor and board"):
             await native_quest.action(host, bridge, "guest", "native-quest-start", selection)
         bridge.command.assert_awaited_once_with(board.COMMAND, "start", "inspect", PAWN, second, EYE, timeout=5)
-        self.assertEqual(host.party.get("native_quests", {}), {})
+        self.assertEqual(set(host.party["native_quests"]), {specialist})
         self.assertFalse(host.pending_host_save or host.native_checkpoint_unsafe)
 
         bridge.command.reset_mock()

@@ -54,6 +54,11 @@ end
 
 board_contract.board_accepts = board_accepts
 
+local function offer_step(row)
+    local step, final = row[keys.step], row[keys.final]
+    if int(step) and int(final) and step >= 1 and step <= final then return step end
+end
+
 local function shape(row)
     local step, final, cash, xp = row[keys.step], row[keys.final], row[keys.cash], row[keys.xp]
     local quantity, consumed = len(row[keys.objective]), row[keys.consumed]
@@ -198,35 +203,31 @@ local function catalog(fields, state, phase)
     local function descriptor(raw_key, raw_row, target, accepting)
         local key, row = raw_key:get(), raw_row:get()
         local id = name(key)
-        if type(id) ~= "string" or #id > 96 or not id:match("^[A-Za-z0-9_]+$") or excluded[id] then return end
+        if type(id) ~= "string" or #id > 96 or not id:match("^[A-Za-z0-9_]+$") then return end
+        if accepting then
+            -- Configure_Stock has already checked the board's eligibility rules.
+            -- Accepting a quest only needs its starting step, not a payout recipe.
+            if offer_step(row) and not wire.stock_row(active, key) then target[#target + 1] = id end
+            return
+        end
+        if excluded[id] or not board_accepts(context.board, key, row) then return end
         if special[id] then
-            local live_step = row[keys.step]
-            if int(live_step) and live_step > 0 and
-                (accepting and not wire.stock_row(active, key)
-                    or not accepting and board_accepts(context.board, key, row) and specialist_ready(context, row)) then
-                target[#target + 1] = id
-            end
+            if specialist_ready(context, row) then target[#target + 1] = id end
             return
         end
         local supported, contract = pcall(shape, row)
         if not supported or contract.step <= 0 then return end
-        if accepting then
-            if contract.step > contract.final or wire.stock_row(active, key) then return end
-        else
-            if not board_accepts(context.board, key, row) then return end
-            if contract.objective then
-                local permitted, guid = pcall(backpack_objective, context.receiving_save, contract)
-                if not permitted or not guid then return end
-                if not same(context.save, context.receiving_save) then
-                    local known, other = pcall(backpack_objective, context.save, contract)
-                    if not known or other then return end
-                end
-            elseif contract.step < contract.final then
-                return
+        if contract.objective then
+            local permitted, guid = pcall(backpack_objective, context.receiving_save, contract)
+            if not permitted or not guid then return end
+            if not same(context.save, context.receiving_save) then
+                local known, other = pcall(backpack_objective, context.save, contract)
+                if not known or other then return end
             end
-            if not pcall(expected_effects, context, row) then return end
+        elseif contract.step < contract.final then
+            return
         end
-        target[#target + 1] = id
+        if pcall(expected_effects, context, row) then target[#target + 1] = id end
     end
     contracts:ForEach(function(key, row) descriptor(key, row, offers, true) end)
     active:ForEach(function(key, row) descriptor(key, row, ready, false) end)
@@ -267,12 +268,13 @@ function board_contract.command(fields, state, phase)
     end
 
     local contract, effects, library
+    local starting_step
     if verb == "start" then
         context.board:Configure_Stock()
         local offer = wire.stock_row(context.board.Contracts, context.key)
         if not offer then refuse("not_offered") end
-        contract = shape(offer)
-        if contract.step < 1 or contract.step > contract.final then refuse("offer_step_unqualified") end
+        starting_step = offer_step(offer)
+        if not starting_step then refuse("offer_step_unqualified") end
     else
         if not active or step <= 0 or not board_accepts(context.board, context.key, active) then refuse("wrong_turnin") end
         contract = shape(active)
@@ -294,7 +296,7 @@ function board_contract.command(fields, state, phase)
             refuse("turnin_unqualified")
         end
     end
-    outcome.expected_step = verb == "start" and contract.step or completed_step
+    outcome.expected_step = starting_step or completed_step
     outcome.state = "qualified"
     if mode == "inspect" then
         last = outcome

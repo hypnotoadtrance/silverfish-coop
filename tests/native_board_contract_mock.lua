@@ -37,6 +37,7 @@ local item_units = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local eye = "Clt_Eye_02"
 local kill = "Asn_EggHead"
+local multi_reward = "MultiReward"
 local item_path = "/Game/Classes/Items/Item_MonsterEye.Item_MonsterEye_C"
 local class = object({GetFullName = function() return "BlueprintGeneratedClass " .. item_path end})
 class.GetCDO = function() return object({Stacks = true, GetClass = function() return class end}) end
@@ -55,6 +56,9 @@ local function quest(at, class_value, payout, flag_values, rep_values)
 end
 
 local eye_recipe, kill_recipe = quest(2, class, 801), quest(0, nil, 3000, {BountyDone = 1}, {[8] = 20})
+local complex_recipe = quest(2, class, 100)
+complex_recipe[items] = array({class})
+complex_recipe[chained] = array({eye})
 local store = object({ActiveQuests = map({}), PlayerBackpack = array({}), PlayerEquipment = array({})})
 local player = object({Save = store})
 local bag = object({PlayerBackpack = array({}), PlayerEquipment = array({})})
@@ -63,7 +67,9 @@ local world = object({})
 local host_flags = {Player_Cash = 17, Player_Xp = 3, Rep_Freelancer = 2}
 local game_instance = object({SaveSlot_Ref = store})
 game_instance.FindPassiveEffect = function(_, _, _, out) out.EffectActive, out.Instances = true, 1 end
-game_instance.AddQuest_ByName = function(_, key) store.ActiveQuests[key] = assert(({[eye] = eye_recipe, [kill] = kill_recipe})[key]) end
+game_instance.AddQuest_ByName = function(_, key)
+    store.ActiveQuests[key] = assert(({[eye] = eye_recipe, [kill] = kill_recipe, [multi_reward] = complex_recipe})[key])
+end
 local board = object({TurnIn_ID = 2, RedeemableQuests = array({}), BountyBoard_RedeemableHere = true,
     AcceptAllGlobalContracts = false})
 local fresh = false
@@ -71,6 +77,7 @@ board.Configure_Stock = function(self)
     self.Contracts = map({})
     if fresh and not store.ActiveQuests[eye] then self.Contracts[eye] = eye_recipe end
     if fresh and not store.ActiveQuests[kill] then self.Contracts[kill] = kill_recipe end
+    if fresh and not store.ActiveQuests[multi_reward] then self.Contracts[multi_reward] = complex_recipe end
 end
 
 package.loaded.native_wire_quest = {
@@ -142,9 +149,17 @@ local function catalog(specialist, excluded)
     mod.command({"1", "native-board-contract-catalog", "Guest", "Board", specialist, excluded}, state, "hosting")
     return proof()
 end
+local offered = "Asn_EggHead,Clt_Eye_02,MultiReward"
+assert(catalog()[7] == offered and catalog()[8] == "-")
+assert(catalog("-", kill)[7] == offered)
+assert(catalog(kill, kill)[7] == offered)
+action("start", "inspect", multi_reward)
+assert(proof()[8] == "qualified" and proof()[11] == 1)
+action("start", "apply", multi_reward, "-")
+assert(proof()[8] == "applied" and proof()[10] == 1 and proof()[13] == 17 and proof()[15] == 3)
+assert(store.ActiveQuests[multi_reward] == complex_recipe)
+denied("specialized_recipe", "turnin", "inspect", multi_reward)
 assert(catalog()[7] == "Asn_EggHead,Clt_Eye_02" and catalog()[8] == "-")
-assert(catalog("-", kill)[7] == eye)
-assert(catalog(kill, kill)[7] == eye)
 action("start", "inspect", eye)
 assert(proof()[8] == "qualified" and proof()[9] == "-" and proof()[11] == 1)
 action("start", "apply", eye, "-")

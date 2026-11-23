@@ -729,6 +729,50 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
                                     "stock_widget_tick_invoked_in_muted_fixture": True}}
 
 
+async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> dict:
+    from tools.silverfish.native_flood_jammer import OBSERVATORY_BOUNTY_BOARD
+    from tools.silverfish.native_quest import AUTHORED_BOARD_ACTIONS
+
+    async def command(seat, action, quest=None):
+        request = f"{action}\t{quest}" if quest is not None else action
+        return await portable_probe_command(seat.bridge, "portable-board-offer", request)
+
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    checkpoint = campaign_save_hashes(host.campaign)
+    target = tuple(map(float, (await command(host, "approach")).split(",")))
+    await wait_resident_status(guest_run, lambda frame: (
+        (point := frame.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+        and math.dist(point, target) <= 25))
+    catalog, extended = (await command(host, "catalog")).split(";")
+    offered = set(filter(None, catalog.split(",")))
+    advanced = set(filter(None, extended.split(","))) - AUTHORED_BOARD_ACTIONS
+    assert advanced <= offered and advanced, (offered, advanced)
+    quest = min(advanced)
+
+    opened = await submit(guest_run, "native-wire-board-stock-f-fixture", target=OBSERVATORY_BOUNTY_BOARD)
+    assert opened["ok"], opened
+    guest_frame = await wait_resident_status(guest_run, lambda frame: (
+        (board := frame.get("game", {}).get("native_wire_board_stock", {}))
+        and board.get("state") == "visible" and board.get("board") == OBSERVATORY_BOUNTY_BOARD))
+    visible = set(filter(None, (await command(guest, "menu")).split(",")))
+    assert visible == offered, (visible, offered)
+    accepted = await submit(guest_run, "native-wire-board-stock-fixture", target=f"{quest}|start")
+    assert accepted["ok"], accepted
+
+    async with asyncio.timeout(8):
+        while True:
+            observed = await asyncio.gather(*(command(seat, "journal", quest) for seat in (host, guest)))
+            if observed[0] == observed[1] and observed[0] != "-":
+                break
+            await asyncio.sleep(.1)
+    entries = await resident_events(guest_run, guest_frame)
+    assert any(entry.get("quest") == quest and entry.get("state") == "accepted" for entry in entries), entries
+    assert campaign_save_hashes(host.campaign) == checkpoint, "Accepting a stock board offer caused an early save"
+    return {"resident_board_offers": {"stock_offers": sorted(offered), "guest_offers": sorted(visible),
+                                      "advanced_offers": sorted(advanced), "accepted": quest, "journal_step": int(observed[0]),
+                                      "campaign_checkpoint_unchanged": True}}
+
+
 async def verify_resident_npc_override(host: Seat, guest: Seat, _pawn: str) -> dict:
     async def command(seat, action, actor=None):
         request = f"{action}\t{actor}" if actor is not None else action
@@ -2078,7 +2122,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
                  stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False,
-                 stock_npc_override: bool = False,
+                 stock_npc_override: bool = False, stock_board_offers: bool = False,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
@@ -2130,6 +2174,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     resident_checks = tuple((name, check) for enabled, name, check in (
         (stock_campfire, "stock_campfire", verify_resident_campfire),
         (stock_npc_override, "stock_npc_override", verify_resident_npc_override),
+        (stock_board_offers, "stock_board_offers", verify_resident_board_offers),
         (resident_weapon_cues, "resident_weapon_cues", verify_resident_weapon_cues),
         (stock_food, "stock_food", verify_resident_guest_food),
     ) if enabled)
@@ -2154,6 +2199,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableGuestFoodProbe",
                                                      fixture="portable_guest_food_probe.lua"))
+        if stock_board_offers:
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
+                                                     fixture="portable_board_offer_probe.lua"))
         if stock_npc_override:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
@@ -2442,6 +2491,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-use", action="store_true", help="open a starter bag by stock drag and use a Bandage by stock click")
     parser.add_argument("--stock-food", action="store_true", help="verify the guest's Food stat after a meal, combinable with campfire and weapon cues")
     parser.add_argument("--stock-campfire", action="store_true", help="verify stock campfire damage and feedback, combinable with food and weapon cues")
+    parser.add_argument("--stock-board-offers", action="store_true",
+                        help="compare the stock Observatory board on both seats and accept a complex contract")
     parser.add_argument("--stock-npc-override", action="store_true",
                         help="verify guest damage rejection and host death on a stock drone")
     parser.add_argument("--stock-split", action="store_true", help="test the stock guest stack-split popup with a Veteran loadout")
@@ -2544,11 +2595,11 @@ if __name__ == "__main__":
             args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory, args.compact_crate_status,
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
-    resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "resident_weapon_cues"}
-    if (args.stock_food or args.stock_campfire or args.stock_npc_override) and (
+    resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "stock_board_offers", "resident_weapon_cues"}
+    if (args.stock_food or args.stock_campfire or args.stock_npc_override or args.stock_board_offers) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
-        parser.error("Combine --stock-food, --stock-campfire, --stock-npc-override, and --resident-weapon-cues without other gameplay fixtures")
+        parser.error("Run the resident gameplay checks without other gameplay fixtures")
     if args.resident_weapon_cues and any((
             args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby, args.projected_nearby,
             args.container_nearby, args.stock_use, args.steam_cloud, args.stock_prop_grip, args.stock_host_prop_observer,
@@ -2584,7 +2635,7 @@ if __name__ == "__main__":
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
                        stock_use=args.stock_use, stock_food=args.stock_food, stock_campfire=args.stock_campfire,
-                       stock_npc_override=args.stock_npc_override,
+                       stock_npc_override=args.stock_npc_override, stock_board_offers=args.stock_board_offers,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
