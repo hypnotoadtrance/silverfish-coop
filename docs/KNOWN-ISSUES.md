@@ -7,7 +7,7 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 | Area | Known issue |
 | --- | --- |
 | Guest weapons and combat | A guest can aim and fire locally while the host sees no shot and hears no report. Ammo can return after the shot, and manual reload can fail. Guest shots and melee were also reported to leave the Intro warehouse robots unharmed on the host. |
-| Party wipe and respawn | The wipe uses a temporary selection screen. A party can return to the last rest site before everyone confirms what to keep. After respawn, the guest can see a weapon in hand while the host sees them unarmed. |
+| Party wipe and respawn | Published builds can respawn the party early and show a dropped weapon still in hand. The development build uses the base-game keep slots and waits for both confirmations. An isolated two-player test verified a choice from a 17-item inventory, and separate tests verified the kept and dropped weapon states. Foreground mouse and keyboard interaction still needs playtesting. Keep whole stacks when selecting items. |
 | Quests and bounty boards | Some eligible offers disappear from Simmi's jobs and the physical board. The development build restored a missing Flood Plains offer in an isolated Observatory test and accepted it into both journals. Additional offers, objectives, and redemption still need verification. |
 | Crossroads weather | After traveling, a guest can see a storm while the host has clear skies. In another playtest, both players saw the storm and heard its siren during the same visit. |
 
@@ -16,7 +16,7 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 | Area | Known issue |
 | --- | --- |
 | Guest inventory and medical items | Guests can fail to equip or remove armor, or to use a medical item to restore health. Exact behavior varies by item and slot. |
-| Downed controls | A player downed while aiming can stay zoomed in while the downed state forces them to crouch. |
+| Downed controls | In published builds, a player downed while aiming can stay zoomed in. The development fix calls the game's aim-cancel routine. An isolated two-player test verified that the guest stopped aiming and crouched when downed. |
 | Held items and animations | Rifle aiming can show an incorrect grip or muzzle angle. Eating a mushroom is visible and audible to the other player, but the hand motion can appear near the hips. Some weapon and equipment effects still need coverage. |
 | Roaming NPC barter | Dedicated traders worked in the reported session. Ordinary talkable NPCs can reject guest exchanges or leave the guest looking at stale stock after a host purchase. |
 | Warehouse doors, props, and switches | Breakable doorway boards can remain in one player's way after the other breaks them. The office switch and lights can disagree, and a locally broken bottle can remain intact on the host. |
