@@ -258,6 +258,7 @@ async def exercise(work, vanilla_saved, *, client_projection=False, pose_only=Fa
         await stock_button("start", "starting")
         accepted = await committed(1)
         assert (accepted["actor"], accepted["quest_id"]) == (character, quest), accepted
+        assert await seat_probe(guest_bridge, "closesimmi") == "closed"
         await wait(client_run, lambda frame: not frame.get("game", {}).get("native_wire_board_stock"))
         remaining = await physical_offers()
         assert remaining == original - {quest}, (original, remaining)

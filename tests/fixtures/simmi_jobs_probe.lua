@@ -145,6 +145,15 @@ local function sync(state, phase)
     local ok, result = pcall(function()
         if operation == "host" or operation == "guest" or operation == "board" then return approach(state, phase, operation) end
         if operation == "read" then return read_menu(state.controller) end
+        if operation == "closesimmi" then
+            local menu = top(state.controller)
+            if not valid(menu) then return "closed" end
+            local board = StaticFindObject(level .. "BountyBoard_BP_C_0")
+            assert(exact(menu, log_class) and same(menu.BountyBoard_Ref, board))
+            state.controller:CloseMenu({})
+            assert(not valid(top(state.controller)))
+            return "closed"
+        end
         if operation == "close" then
             local board = StaticFindObject(level .. "BountyBoard_BP_C_2")
             local menu = top(state.controller)
