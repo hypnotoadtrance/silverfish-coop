@@ -1205,7 +1205,7 @@ class Bridge:
                         raise ValueError("Invalid co-op save scope status")
                     data["save_scope"] = None if fields[1] == "-" else fields[1]
                 elif fields[0] == "native-guest-world-start":
-                    key = "native_guest_world_start"
+                    key = native_guest_clock.WORLD_START
                     if (len(fields) != 6 or key in data or data.get("mode") != "client"
                             or data.get("state") not in ("joining", "connected")
                             or not all(re.fullmatch(r"[0-9a-f]{32}", value) and value != "0" * 32 for value in fields[1:3])

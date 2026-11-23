@@ -1850,6 +1850,27 @@ class Host:
             return "guest", self.guest["character_id"]
         return None
 
+    def guest_world_start_frame(self, epoch: object) -> dict | None:
+        game = self.last_game
+        area = game.get("map")
+        if (not self.native_zones or self.transitioning or self.native_checkpoint_unsafe
+                or time.monotonic() - self.last_seen > 1.5 or game.get("state") != "hosting"
+                or game.get("server_connection") is not False or epoch != self.zone_epoch
+                or not isinstance(area, str) or area not in self.allowed_maps or area in PLAYTEST_MAPS):
+            return None
+        scene = game.get("native_scene")
+        if not isinstance(scene, dict) or scene.get("active_map") != area:
+            return None
+        seed, seconds = scene.get("instance_seed"), scene.get("game_seconds")
+        if (type(seed) not in (float, int) or not -2147483648 <= seed <= 2147483647 or int(seed) != seed
+                or type(seconds) not in (float, int) or not 0 < seconds <= native_guest_clock.MAX_MILLISECONDS / 1000):
+            return None
+        milliseconds = round(seconds * 1000)
+        if not 0 < milliseconds <= native_guest_clock.MAX_MILLISECONDS:
+            return None
+        return {"session": self.control.generation, "epoch": epoch, "map": area,
+                "seed": int(seed), "milliseconds": milliseconds}
+
     def snapshot_for_guest(self, guest_id: str, role: str) -> dict:
         gameplay = self.public_gameplay()
         if self.native_guest and self.prop_carry_bridge is not None:
@@ -1978,7 +1999,7 @@ class Host:
             return {"ok": False, "error": "guest_not_active"}
         role, character = identity
         if request.get("action") == "snapshot" and request.keys() <= {
-            "action", "voice_events", "avatar_aim", "sprinting", "zone_epoch",
+            "action", "voice_events", "avatar_aim", "sprinting", "zone_epoch", native_guest_clock.WORLD_START,
         }:
             if request.get("zone_epoch") == self.zone_epoch and not self.transitioning:
                 member = self.native_recipients().get(character) if self.native_guest else None
@@ -1992,7 +2013,11 @@ class Host:
                         self.guest_sprints[character] = (
                             self.zone_epoch, member["pawn"], request["sprinting"], time.monotonic() + 1.5,
                         )
-            return self.snapshot_for_guest(guest_id, role)
+            reply = self.snapshot_for_guest(guest_id, role)
+            if (request.get(native_guest_clock.WORLD_START) is True and reply.get("travel_in_progress") is False
+                    and (start := self.guest_world_start_frame(request.get("zone_epoch"))) is not None):
+                reply[native_guest_clock.WORLD_START] = start
+            return reply
         action = request.get("action")
         if action in (link.GUEST_LEAVE, link.GUEST_LEAVE_CONFIRM):
             operation, epoch = request.get("operation_id"), request.get("target")
@@ -5062,26 +5087,24 @@ class Client:
         if (game.get("state"), game.get("map"), game.get("save_scope")) != ("ready", MENU, scope):
             return ()
         try:
-            reply = await self.transport.request({"action": "snapshot"}, timeout=1)
+            reply = await self.transport.request(
+                {"action": "snapshot", "zone_epoch": epoch, native_guest_clock.WORLD_START: True}, timeout=1,
+            )
         except (OSError, RuntimeError, ValueError):
             return ()
         if (not self.transport.game_access or (self.host_session, self.zone_epoch, self.expected_zone) != visit
                 or not isinstance(reply, dict) or reply.get("ok") is not True
                 or reply.get("travel_in_progress") is not False or (reply.get("zone_epoch"), reply.get("zone")) != (epoch, area)):
             return ()
-        gameplay = reply.get("gameplay")
-        world = gameplay.get("host_world") if isinstance(gameplay, dict) else None
-        scene = world.get("native_scene") if isinstance(world, dict) else None
-        if not isinstance(scene, dict) or scene.get("active_map") != area:
+        start = reply.get(native_guest_clock.WORLD_START)
+        if (not isinstance(start, dict) or start.keys() != {"session", "epoch", "map", "seed", "milliseconds"}
+                or (start["session"], start["epoch"], start["map"]) != (session, epoch, area)):
             return ()
-        seed, seconds = scene.get("instance_seed"), scene.get("game_seconds")
-        if (type(seed) not in (float, int) or not -2147483648 <= seed <= 2147483647 or int(seed) != seed
-                or type(seconds) not in (float, int) or not 0 < seconds <= native_guest_clock.MAX_MILLISECONDS / 1000):
+        seed, milliseconds = start["seed"], start["milliseconds"]
+        if (type(seed) is not int or not -2147483648 <= seed <= 2147483647
+                or type(milliseconds) is not int or not 0 < milliseconds <= native_guest_clock.MAX_MILLISECONDS):
             return ()
-        milliseconds = round(seconds * 1000)
-        if not 0 < milliseconds <= native_guest_clock.MAX_MILLISECONDS:
-            return ()
-        return str(int(seed)), str(milliseconds)
+        return str(seed), str(milliseconds)
 
     async def open_game_link(self, *, timeout: float = 18, renew_endpoint: bool = False) -> None:
         if renew_endpoint:

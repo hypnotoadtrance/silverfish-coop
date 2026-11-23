@@ -1,11 +1,13 @@
+import time
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish.link import ClientLink
+from tools.silverfish.native_guest_clock import WORLD_START
 from tools.silverfish.native_zone_rejoin import EmptyZoneRetry
 from tools.silverfish.runtime import MENU
-from tools.silverfish.service import Client
+from tools.silverfish.service import Client, Host
 
 
 CITY = "/Game/Classes/Maps/Maps_OverWorld/City_01_P"
@@ -125,10 +127,12 @@ class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
         bridge = SimpleNamespace(local_bridge=object(), snapshot=lambda: game,
                                  command=AsyncMock(return_value={"state": "joining"}),
                                  wait_for=AsyncMock(return_value={"state": "connected", "map": CITY}))
-        reply = {"ok": True, "travel_in_progress": False, "zone_epoch": visit, "zone": CITY,
-                 "gameplay": {"host_world": {"native_scene": {
-                     "active_map": CITY, "instance_seed": -123.0, "game_seconds": 113312.523,
-                 }}}}
+        startup = {"session": session, "epoch": visit, "map": CITY, "seed": -123, "milliseconds": 113312523}
+        old_snapshot = {"ok": True, "travel_in_progress": False, "zone_epoch": visit, "zone": CITY,
+                        "gameplay": {"host_world": {"native_scene": {
+                            "active_map": CITY, "instance_seed": -123.0, "game_seconds": 113312.523,
+                        }}}}
+        reply = {**old_snapshot, WORLD_START: startup}
         transport = SimpleNamespace(address=("127.0.0.1", 31000), game_access=True,
                                     reset_game_endpoint=Mock(), request=AsyncMock(return_value=reply))
         client = Client(SimpleNamespace(event=Mock()), transport, {"character_id": character, "native_zones": True},
@@ -138,15 +142,18 @@ class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
 
         await client.open_game_link()
         bridge.command.assert_awaited_once_with(*expected, "-123", "113312523")
-        transport.request.assert_awaited_once_with({"action": "snapshot"}, timeout=1)
+        transport.request.assert_awaited_once_with({"action": "snapshot", "zone_epoch": visit, WORLD_START: True},
+                                                   timeout=1)
 
-        for mismatch in ({"zone_epoch": "d" * 32}, {"zone": BOROUGH}, {"travel_in_progress": True},
-                         {"gameplay": {"host_world": {"native_scene": {
-                             "active_map": BOROUGH, "instance_seed": -123, "game_seconds": 113312,
-                         }}}}):
-            with self.subTest(mismatch=mismatch):
+        invalid = (old_snapshot, {"ok": False, "error": "unknown_action"},
+                   {**reply, "zone_epoch": "d" * 32}, {**reply, "zone": BOROUGH}, {**reply, "travel_in_progress": True},
+                   {**reply, WORLD_START: {**startup, "session": "d" * 32}},
+                   {**reply, WORLD_START: {**startup, "epoch": "d" * 32}},
+                   {**reply, WORLD_START: {**startup, "map": BOROUGH}})
+        for response in invalid:
+            with self.subTest(response=response):
                 bridge.command.reset_mock()
-                transport.request.return_value = {**reply, **mismatch}
+                transport.request.return_value = response
                 await client.open_game_link()
                 bridge.command.assert_awaited_once_with(*expected)
 
@@ -156,6 +163,24 @@ class ZoneRejoinIntegrationTests(IsolatedAsyncioTestCase):
         await client.open_game_link()
         transport.request.assert_not_awaited()
         bridge.command.assert_awaited_once_with(*expected)
+
+    def test_host_omits_world_start_from_a_stale_scene_for_the_same_authenticated_visit(self):
+        session, visit = "a" * 32, "b" * 32
+        game = {"state": "hosting", "map": CITY, "server_connection": False,
+                "native_scene": {"active_map": CITY, "instance_seed": -123.0, "game_seconds": 113312.523}}
+        host = SimpleNamespace(stopping=False, transitioning=False, native_checkpoint_unsafe=False, native_guest=False,
+                               native_zones=True, zone_epoch=visit, allowed_maps={CITY}, last_game=game,
+                               last_seen=time.monotonic() - 10, control=SimpleNamespace(generation=session),
+                               authenticated_guest=Mock(return_value=("guest", "guest-character")),
+                               snapshot_for_guest=lambda *_args: {"ok": True, "travel_in_progress": False,
+                                                                   "zone": CITY, "zone_epoch": visit})
+        host.guest_world_start_frame = Host.guest_world_start_frame.__get__(host)
+        query = {"action": "snapshot", "zone_epoch": visit, WORLD_START: True}
+        self.assertNotIn(WORLD_START, Host.guest_request(host, "authenticated-guest", query))
+        host.last_seen = time.monotonic()
+        self.assertEqual(Host.guest_request(host, "authenticated-guest", query)[WORLD_START],
+                         {"session": session, "epoch": visit, "map": CITY, "seed": -123, "milliseconds": 113312523})
+        self.assertNotIn(WORLD_START, Host.guest_request(host, "authenticated-guest", {"action": "snapshot"}))
 
     async def test_client_zone_change_recovers_zero_packet_attempt_at_fresh_local_port(self):
         game = {"map": BOROUGH, "state": "connected", "mode": "client", "server_connection": True,

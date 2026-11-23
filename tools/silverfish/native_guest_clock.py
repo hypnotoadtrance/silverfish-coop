@@ -4,6 +4,7 @@ import time
 
 
 FIXTURE = "native-guest-clock-fixture"
+WORLD_START = "native_guest_world_start"
 MAX_MILLISECONDS = 922_337_203_685_477
 
 
