@@ -65,7 +65,8 @@ options.add_argument("--dream-stone", action="store_true", help="return from Bla
 options.add_argument("--dream-nothing", action="store_true", help="continue from Black Ocean into Nothing and return as the host")
 options.add_argument("--dream-tarot", choices=("rook", "obelisk", "night", "black-stag"), help="stage a stock Tarot route")
 options.add_argument("--rook-motion", action="store_true", help="test the Rook's wandering anomaly through the stock return")
-options.add_argument("--rook-mixed-fields", action="store_true", help="also read both seats' stock Rook Gravity/Vortex populations")
+options.add_argument("--rook-mixed-fields", nargs="?", const="baseline", choices=("baseline", "authority"),
+                     help="read the stock Rook fields and optionally verify host-only spawns")
 options.add_argument("--fruiting-stardust", action="store_true", help="use the stock Fruiting Dream Dust stack")
 options.add_argument("--native-seed", action="store_true", help="verify the saved seed reaches the stock day cycle on restart")
 options.add_argument("--native-world-view", action="store_true", help="verify the guest renders the authenticated stock sun")
@@ -1075,7 +1076,7 @@ async def stardust_visit(character_id, host_session):
     assert math.dist(pawns["local"]["location"], pawns["guest"]["location"]) <= 250, pawns
     await peer_in(dream_map)
     if args.rook_mixed_fields:
-        await verify_rook_mixed_fields(wait, note, run, client_run)
+        await verify_rook_mixed_fields(wait, note, run, client_run, authority=args.rook_mixed_fields == "authority")
     if args.rook_motion:
         await verify_rook_anomaly_motion()
     await dust("inspect", dream_map, pawns["local"]["name"], "present", starting_quantity - 1)

@@ -101,25 +101,47 @@ def compare(host, guest):
             "guest_replica_kinds": sorted({row["kind"] for row in replicated.values()})}
 
 
-async def verify_rook_mixed_fields(wait, note, host_run, guest_run):
+def authority_errors(host, guest, result):
+    host_actors = [host["actors"][name] for name in result["host_stock"]]
+    guest_actors = [row for row in guest["actors"].values() if row["role"] == 1]
+    return {
+        "unpublished_host_actors": sum(not row["replicates"] for row in host_actors),
+        "guest_local_actors": len(result["guest_local_stock"]),
+        "unmatched_replicas": sum(not sources for sources in result["guest_replica_candidates"].values()),
+        "active_replicas": sum(row["collision"] or row["kind"] == "gravity" and row["ticking"] for row in guest_actors),
+        "missing_replica_kinds": sorted(KINDS.keys() - set(result["guest_replica_kinds"])),
+        "missing_guest_skips": max(0, len(FIELD_PATHS) - (guest["stock_telemetry"] or {}).get("suppressed", 0)),
+    }
+
+
+async def verify_rook_mixed_fields(wait, note, host_run, guest_run, *, authority=False):
     def ready(status):
         game = status.get("game", {})
         return (game.get("map") == MAP and game.get("state") in {"hosting", "connected"}
                 and status.get("link_connected") and status.get("zone_epoch"))
 
-    host_status, guest_status = await asyncio.gather(wait(host_run, ready), wait(guest_run, ready))
-    assert host_status["zone_epoch"] == guest_status["zone_epoch"]
-    host, guest = await asyncio.gather(raw_census(host_run, "host"), raw_census(guest_run, "guest"))
-    for raw, status in ((host, host_status), (guest, guest_status)):
-        assert raw["pawn"] == status["game"]["pawns"]["local"]["name"], raw
-        raw["stock_telemetry"] = status["game"].get("native_anomaly_field")
-        raw["status_sequence"] = status["game"]["sequence"]
-    assert host["fields"] == guest["fields"], (host["fields"], guest["fields"])
-    result = compare(host, guest)
-    proof = {"map": MAP, "epoch": host_status["zone_epoch"], "host": host, "guest": guest, **result}
     path = host_run / "live-rook-mixed-field-probe.json"
+    # Give ordinary actor replication a bounded warm-up after entering the Rook.
+    for readback in range(5 if authority else 1):
+        host_status, guest_status = await asyncio.gather(wait(host_run, ready), wait(guest_run, ready))
+        assert host_status["zone_epoch"] == guest_status["zone_epoch"]
+        host, guest = await asyncio.gather(raw_census(host_run, "host"), raw_census(guest_run, "guest"))
+        for raw, status in ((host, host_status), (guest, guest_status)):
+            assert raw["pawn"] == status["game"]["pawns"]["local"]["name"], raw
+            raw["stock_telemetry"] = status["game"].get("native_anomaly_field")
+            raw["status_sequence"] = status["game"]["sequence"]
+        assert host["fields"] == guest["fields"], (host["fields"], guest["fields"])
+        result = compare(host, guest)
+        errors = authority_errors(host, guest, result) if authority else {}
+        proof = {"map": MAP, "epoch": host_status["zone_epoch"], "host": host, "guest": guest,
+                 **result, "authority_errors": errors}
+        if not any(errors.values()):
+            break
+        if readback < 4:
+            await asyncio.sleep(.35)
     path.write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
     assert {host["actors"][key]["kind"] for key in result["host_stock"]} == set(KINDS), path
+    assert not any(errors.values()), (errors, path)
     note("rook_mixed_stock_anomaly_census", {"file": str(path), "fields": len(host["fields"]),
         "host_stock": len(result["host_stock"]), "guest_local_stock": len(result["guest_local_stock"]),
         "guest_local_kinds": result["guest_local_kinds"], "guest_replica_kinds": result["guest_replica_kinds"]})
