@@ -50,7 +50,7 @@ def decode(lines, viewer):
         point = tuple(map(float, (x, y, z)))
         prefix = f"{kind} {RUIN_LEVEL}"
         assert kind in SUPPORTED | UNSUPPORTED and name.startswith(prefix) and name not in actors, line
-        assert role in ("1", "2", "3") and replicates in ("true", "false") and alive in ("true", "false"), line
+        assert role in ("0", "1", "2", "3") and replicates in ("true", "false") and alive in ("true", "false"), line
         assert all(map(math.isfinite, point)), line
         actors[name] = {"class": kind, "role": int(role), "replicates": replicates == "true",
                         "alive": alive == "true", "position": point}
@@ -109,12 +109,16 @@ async def capture(run: Path, viewer: str):
 
 def compare(host, guest, required):
     """Match the received set uniquely, including every member of a qualified stock receipt."""
-    authority = {name: row for name, row in host.items() if row["class"] in SUPPORTED and row["replicates"]}
-    observed = {name: row for name, row in guest.items() if row["class"] in SUPPORTED}
+    seats = {"host": host, "guest": guest}
+    inactive = {side: {name: row for name, row in actors.items() if row["role"] == 0} for side, actors in seats.items()}
+    # ROLE_None can appear briefly at origin before a stock actor enters the active scene.
+    authority = {name: row for name, row in host.items()
+                 if row["role"] != 0 and row["class"] in SUPPORTED and row["replicates"]}
+    observed = {name: row for name, row in guest.items() if row["role"] != 0 and row["class"] in SUPPORTED}
     assert all(row["role"] == 3 for row in authority.values()), authority
     assert all(row["role"] == 1 for row in observed.values()), observed
-    unsupported = {side: {name: row for name, row in actors.items() if row["class"] in UNSUPPORTED}
-                   for side, actors in (("host", host), ("guest", guest))}
+    unsupported = {side: {name: row for name, row in actors.items() if row["role"] != 0 and row["class"] in UNSUPPORTED}
+                   for side, actors in seats.items()}
 
     def distance(owner, observer):
         if (owner["class"], owner["alive"]) != (observer["class"], observer["alive"]):
@@ -140,4 +144,4 @@ def compare(host, guest, required):
     if not required or not required <= pairs.keys():
         raise ValueError("Some published members are outside the guest's observed replica set")
     return {"matched": pairs, "unobserved_authorities": sorted(authority.keys() - pairs.keys()),
-            "unsupported": unsupported, "identity_basis": "exact UObject name or unambiguous class/position, no NetGUID"}
+            "unsupported": unsupported, "inactive": inactive, "identity_basis": "exact UObject name or unambiguous class/position, no NetGUID"}
