@@ -21,7 +21,7 @@ from zipfile import ZipFile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
 from tools.silverfish import (
-    direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop,
+    direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop, native_guest_melee,
     native_host_save, native_inventory, native_loose_pickup,
     native_lantern, native_loot, native_prop_carry, native_stash, native_weapon_fire_view, native_world_loot, runtime,
 )
@@ -704,6 +704,48 @@ async def verify_resident_turret_combat(host: Seat, guest: Seat, guest_frame: di
             "replica_fire_denied": True, "host_skipped_downed_target": True, "guest_stock_fire_cue": shot}
 
 
+async def verify_resident_guest_melee(host: Seat, guest: Seat) -> dict:
+    async def command(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-npc-override", action)
+
+    guest_run = guest.client / "run"
+    guid = await command(host, "seed-pipe")
+    assert re.fullmatch(r"[0-9A-F]{32}", guid), guid
+    async with asyncio.timeout(8):
+        while await command(guest, f"select-pipe\t{guid}") != "selected":
+            await asyncio.sleep(.05)
+    frame = await wait_resident_status(guest_run, lambda current: (
+        current.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid), timeout=12)
+    center, name = (await command(host, "stage-melee")).split(";", 1)
+    async with asyncio.timeout(6):
+        while not (await command(guest, f"melee-state\t{center}")).startswith("true;false;"):
+            await asyncio.sleep(.05)
+    assert await command(guest, f"face-melee\t{center}") == "ready"
+    await asyncio.sleep(.25)
+    assert await command(host, f"align-melee\t{center}") == "true"
+    tap = await submit(guest_run, "native-guest-primary-input-fixture")
+    sequence = tap["native_guest_primary_fixture"]["sequence"]
+    async with asyncio.timeout(8):
+        while True:
+            events = await resident_events(guest_run, frame)
+            event = next((row for row in events if row.get("sequence") == sequence
+                          and row["event"] in {"native_guest_melee_input", "native_guest_melee_input_rejected"}), None)
+            if event:
+                break
+            await asyncio.sleep(.05)
+    assert event["event"] == "native_guest_melee_input", event
+    proof = event[native_guest_melee.SWING_KEY]
+    contact = await command(host, "melee-contact")
+    assert proof["target"] == name and proof["enemy_health_after"] <= 0 and native_guest_melee.verified_damage(proof), (proof, contact)
+    async with asyncio.timeout(8):
+        while True:
+            states = await asyncio.gather(*(command(seat, f"melee-state\t{center}") for seat in (host, guest)))
+            if all(state.startswith("false;true;") for state in states):
+                break
+            await asyncio.sleep(.05)
+    return {"stock_input": tap, "host_damage": proof, "both_peers_dead_and_ragdolled": states}
+
+
 async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_frame, guest_frame = await asyncio.gather(
@@ -760,6 +802,7 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
     npc_shots = await verify_resident_npc_shots(host, guest_run, guest_frame) if guest_combat else []
     npc_kill = await verify_resident_npc_kill(host, guest) if guest_combat else {}
     turret_death = await verify_resident_turret_combat(host, guest, guest_frame) if guest_combat else {}
+    guest_melee = await verify_resident_guest_melee(host, guest) if guest_combat else {}
     assert not weapon_cue_files(host, guest), "Stock player cues wrote a legacy weapon cue mailbox"
     after = save_state()
     changed = [path for path in before.keys() | after.keys() if before.get(path) != after.get(path)]
@@ -777,7 +820,7 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
                                      "no_cue_mailbox": True, "saves_unchanged_before_checkpoint": True,
                                      "previous_checkpoint_cloud_copies": backup_revisions,
                                      "stock_footsteps": footsteps, "stock_pistol": pistol, "npc_shots": npc_shots, "npc_kill": npc_kill,
-                                     "turret_death": turret_death}}
+                                     "turret_death": turret_death, "guest_melee": guest_melee}}
 
 
 async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict:

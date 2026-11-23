@@ -601,6 +601,7 @@ namespace
         {
             U::FWeakObjectPtr target{}, component{}, sweep{}, deal{}, library{}, graph{};
             std::string target_name{"-"};
+            std::string_view contact_status{"awaiting_contact"};
             U::FFrame *contact_frame{}, *sweep_frame{}, *deal_frame{};
             Vector origin{}, direction{};
             int sweeps{}, calls{};
@@ -894,7 +895,7 @@ namespace
                 health(swing.canonical.Get()) != swing.host_health || health(swing.save.Get()) != swing.guest_health)))
             return refuse("mutation_unverified_guest_melee_damage_scope");
         TraceDiagnostic diagnostic;
-        auto trace = stock_trace(receiver, swing.pawn.Get(), ordinary ? nullptr : enemy, nullptr,
+        auto trace = stock_trace(receiver, swing.pawn.Get(), ordinary ? nullptr : enemy, &swing.damage.contact_status,
             swing.fixture ? &diagnostic : nullptr);
         if (ordinary && trace) enemy = trace->first->GetOuterPrivate();
         bool allowed = trace && (!ordinary || eligible(enemy));
@@ -951,6 +952,7 @@ namespace
         if (!allowed)
         {
             if (!ordinary) return refuse("stock_damage_aim_fenced");
+            if (trace) swing.damage.contact_status = "target_unqualified";
             call.PreventOriginalFunctionCall();
             ++swing.qualified;
             swing.damage.fenced_miss = true;
@@ -961,6 +963,7 @@ namespace
             auto* deal = combat_damage(enemy);
             if (!deal)
             {
+                swing.damage.contact_status = "damage_function_unqualified";
                 if (swing.fixture && !restore_fixture_camera(*swing.fixture, swing.pawn.Get()))
                     return refuse("mutation_unverified_guest_melee_fixture_camera_restore");
                 call.PreventOriginalFunctionCall();
@@ -1401,6 +1404,11 @@ void silverfish::native_guest_melee::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (!enabled()) return;
     lua.register_function("SilverfishStartNativeGuestOldPipeSwing", start<SwingMode::ordinary>);
+    if (env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_TITLE_FIXTURES"))
+        lua.register_function("SilverfishReadNativeGuestMeleeContactStatus", [](const Lua& state) {
+            state.set_string(swing.damage.contact_status);
+            return 1;
+        });
     if (fixture_enabled())
     {
         lua.register_function("SilverfishStartNativeGuestMeleeCanary", start<SwingMode::surface_fixture>);

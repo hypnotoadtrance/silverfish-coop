@@ -11,6 +11,11 @@ local last, authority_drone, authority_turret
 local shooters = {}
 local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
 local color = {R=0, G=0, B=0, A=0}
+local pipe_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
+local factory_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
+local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
+local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
+local payload = "DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -20,7 +25,7 @@ local function heading(from, target)
     return {Pitch = math.deg(math.atan(z, math.sqrt(x*x + y*y))), Yaw = math.deg(math.atan(y, x)), Roll = 0}
 end
 
-local function gun_target(pawn, world)
+local function authoritative_guest(world)
     local guest
     for _, candidate in ipairs(FindAllOf("Player_FP_C") or {}) do
         if valid(candidate) and not candidate:IsActorBeingDestroyed() and candidate:HasAuthority()
@@ -29,6 +34,13 @@ local function gun_target(pawn, world)
             guest = candidate
         end
     end
+    assert(valid(guest) and valid(guest.Save) and not same(guest.Save, world.OwningGameInstance.SaveSlot_Ref),
+        "the test needs a detached authoritative guest")
+    return guest
+end
+
+local function gun_target(pawn, world)
+    local guest = authoritative_guest(world)
     assert(valid(guest) and valid(guest.Camera) and valid(guest.EquipedItem), "the test needs an equipped stock guest")
     local eye = guest.Camera:K2_GetComponentLocation()
     local origin, weapon = guest:K2_GetActorLocation(), guest.EquipedItem
@@ -41,6 +53,120 @@ local function gun_target(pawn, world)
         end
     end
     error("no clear test shot from the authoritative guest position")
+end
+
+local function guid_of(row)
+    local id = row[item_guid]
+    return ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
+end
+
+local function seed_pipe(world)
+    local guest = authoritative_guest(world)
+    local class = StaticFindObject(pipe_path)
+    if not valid(class) then LoadAsset(pipe_path); class = StaticFindObject(pipe_path) end
+    local factory = StaticFindObject(factory_path)
+    assert(valid(class) and valid(factory), "stock Old Pipe factory unavailable")
+    local defaults, output = class:GetCDO(), {}
+    factory:ItemActorToStruct(defaults, guest, output)
+    local row = output.Item or output
+    assert(same(row[item_class], class), "stock factory returned the wrong melee class")
+    local equipment = guest.Save.PlayerEquipment
+    for index = 1, equipment:GetArrayNum() do
+        if not valid(equipment[index][item_class]) then
+            equipment[index] = row
+            equipment[index][payload] = defaults.DataStruct
+            return guid_of(row)
+        end
+    end
+    error("stock Old Pipe needs an empty utility slot")
+end
+
+local function select_pipe(pawn, guid)
+    local equipment = pawn.Save.PlayerEquipment
+    for index = 1, equipment:GetArrayNum() do
+        local row = equipment[index]
+        if valid(row[item_class]) and guid_of(row) == guid then
+            pawn:Equip_NextItem(index - 1, false)
+            return "selected"
+        end
+    end
+    return "waiting"
+end
+
+local function position(text)
+    local x, y, z = text:match("^([%d%.%-]+),([%d%.%-]+),([%d%.%-]+)$")
+    assert(x, "expected a stock melee target position")
+    return {X=tonumber(x), Y=tonumber(y), Z=tonumber(z)}
+end
+
+local function melee_target(world, host, center)
+    if host then return shooters.state end
+    local closest, squared = nil, 100^2
+    for _, actor in ipairs(FindAllOf("NPC_State_Conscript_C") or {}) do
+        if valid(actor) and actor:GetLocalRole() == 1 and same(actor:GetWorld(), world) then
+            local point = actor:K2_GetActorLocation()
+            local distance = (point.X-center.X)^2 + (point.Y-center.Y)^2 + (point.Z-center.Z)^2
+            if distance < squared then closest, squared = actor, distance end
+        end
+    end
+    return closest
+end
+
+local function melee_lane(guest, target, angle)
+    local eye = guest.Camera:K2_GetComponentLocation()
+    local pitch, yaw = math.rad(angle.Pitch), math.rad(angle.Yaw)
+    local forward = {X=math.cos(pitch)*math.cos(yaw), Y=math.cos(pitch)*math.sin(yaw), Z=math.sin(pitch)}
+    local function step(origin, distance)
+        return {X=origin.X+forward.X*distance, Y=origin.Y+forward.Y*distance, Z=origin.Z+forward.Z*distance}
+    end
+    local line, sphere = {}, {}
+    local pipe = guest.EquipedItem
+    local ignored = {guest}
+    local endpoint = step(eye, 230)
+    if trace:LineTraceSingleForObjects(pipe, eye, endpoint, {0,4}, true, ignored, 0, line, true, color, color, 0) then
+        endpoint = (line.OutHit or line).ImpactPoint
+        if (endpoint.X-eye.X)^2 + (endpoint.Y-eye.Y)^2 + (endpoint.Z-eye.Z)^2 <= 65^2 then return false, "near surface" end
+    end
+    local blocking = trace:SphereTraceMulti(pipe, eye, step(endpoint, -65), 65, 6, false, ignored, 0, sphere, true, color, color, 0)
+    local count = 0
+    for _, raw in ipairs(sphere.OutHits or sphere) do
+        local wrapped, value = pcall(function() return raw:get() end)
+        local hit = wrapped and value or raw
+        local component = hit.Component and hit.Component:Get()
+        if not valid(component) or not same(component:GetOwner(), target) or hit.bStartPenetrating then
+            return false, (valid(component) and component:GetFName():ToString() or "missing component")
+                .. " overlap=" .. tostring(hit.bStartPenetrating)
+        end
+        count = count + 1
+    end
+    return count > 0, ("sphere hits=%d, blocking=%s, out=%s"):format(count, tostring(blocking), type(sphere.OutHits))
+end
+
+local function stage_melee(world)
+    local guest = authoritative_guest(world)
+    local target = melee_target(world, true)
+    local eye = guest.Camera:K2_GetComponentLocation()
+    local yaw = math.rad(guest:K2_GetActorRotation().Yaw)
+    assert(valid(target) and target.Alive and target:HasAuthority() and target.bReplicates, "stock melee target unavailable")
+    local blockers = {}
+    for _, range in ipairs({160, 195, 125}) do
+        for offset = 0, 315, 45 do
+            local angle = yaw + math.rad(offset)
+            local center = {X=eye.X+range*math.cos(angle), Y=eye.Y+range*math.sin(angle), Z=eye.Z-24}
+            if target:K2_SetActorLocation(center, false, {}, true) then
+                local clear, status = melee_lane(guest, target, heading(eye, center))
+                if clear then
+                    target.Health = 7
+                    target:ForceNetUpdate()
+                    return ("%.7f,%.7f,%.7f;%s"):format(center.X, center.Y, center.Z, target:GetFullName())
+                end
+                blockers[status] = true
+            end
+        end
+    end
+    local failures = {}
+    for status in pairs(blockers) do failures[#failures+1] = status end
+    error("no clear stock Old Pipe contact lane: " .. table.concat(failures, ", "))
 end
 
 local shooter_paths = {
@@ -278,6 +404,36 @@ local function run(action, actor_path)
         return npc_kill(pawn)
     elseif action == "npc-state" then
         return npc_combat_state(world, host)
+    elseif action == "seed-pipe" then
+        assert(host, "only the host can grant the test Old Pipe")
+        return seed_pipe(world)
+    elseif action == "select-pipe" then
+        assert(not host, "the guest must pick their test equipment")
+        return select_pipe(pawn, actor_path)
+    elseif action == "stage-melee" then
+        assert(host, "only the host can stage the stock target")
+        return stage_melee(world)
+    elseif action == "face-melee" then
+        assert(not host, "the guest must drive the test swing")
+        local angle = heading(pawn.Camera:K2_GetComponentLocation(), position(actor_path))
+        pawn.Controller:SetControlRotation(angle)
+        return "ready"
+    elseif action == "align-melee" then
+        assert(host, "the test needs the host's replica camera")
+        local guest = authoritative_guest(world)
+        local angle = heading(guest.Camera:K2_GetComponentLocation(), position(actor_path))
+        guest.Controller:SetControlRotation(angle)
+        guest.Camera:K2_SetWorldRotation(angle, false, {}, true)
+        local clear, status = melee_lane(guest, melee_target(world, true), guest.Camera:K2_GetComponentRotation())
+        return clear and "true" or status
+    elseif action == "melee-state" then
+        local target = melee_target(world, host, position(actor_path))
+        if not valid(target) then return "absent" end
+        return ("%s;%s;%.3f;%s"):format(tostring(target.Alive), tostring(target.Mesh:IsAnySimulatingPhysics()),
+            target.Health, target:GetFullName())
+    elseif action == "melee-contact" then
+        assert(host, "the authoritative contact runs on the host")
+        return SilverfishReadNativeGuestMeleeContactStatus()
     elseif action:match("^turret%-") then
         return turret_state(pawn, world, host, action)
     end
