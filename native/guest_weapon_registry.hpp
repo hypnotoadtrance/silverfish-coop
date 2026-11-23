@@ -60,6 +60,7 @@ namespace silverfish::guest_weapon_profiles
         Profile{"1911", STR("/Game/Classes/Weapons/Wep_1911.Wep_1911_C"), true, 8, 1, 0.1, true, &forty_five_ball, true},
         Profile{"1911-fancy", STR("/Game/Classes/Weapons/Wep_1911_Fancy.Wep_1911_Fancy_C"), true, 8, 1, 0.1, true, &forty_five_ball, true},
         Profile{"heavy-pistol", STR("/Game/Classes/Weapons/Wep_HeavyPistol.Wep_HeavyPistol_C"), true, 12, 1, 0.15, true, &forty_five_ball, true},
+        Profile{"revolver-9mm", STR("/Game/Classes/Weapons/Wep_Revolver_9mm.Wep_Revolver_9mm_C"), true, 7, 1, 0.2, true, &nine_mm_ball, true},
         Profile{"revolver-01", STR("/Game/Classes/Weapons/Wep_Revolver_01.Wep_Revolver_01_C"), true, 6, 1, 0.5, true, &forty_five_ball, true},
         Profile{"revolver-02", STR("/Game/Classes/Weapons/Wep_Revolver_02.Wep_Revolver_02_C"), true, 6, 1, 0.5, true, &forty_five_hollow_point, true},
         Profile{"revolver-03", STR("/Game/Classes/Weapons/Wep_Revolver_03.Wep_Revolver_03_C"), true, 6, 1, 0.5, true, &forty_five_hollow_point, true},

@@ -43,6 +43,13 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
             "revolver-01": ("Wep_Revolver_01", 6, 1),
         })
 
+    def test_9mm_revolver_uses_the_stock_seven_round_ball_magazine(self):
+        path = "/Game/Classes/Weapons/Wep_Revolver_9mm.Wep_Revolver_9mm_C"
+        self.assertEqual(native_guest_weapon.FIRE_CLASSES["revolver-9mm"], path)
+        self.assertIn("revolver-9mm", native_guest_weapon.SEED_KINDS)
+        self.assertEqual(guest_weapon_profiles.TAKE_AMMO_MAGAZINES[path],
+                         guest_weapon_profiles.Magazine(7, 1, 0.2, True, reload_first_stack=True))
+
     def test_long_barrel_revolvers_keep_their_cooked_ammo_rows(self):
         hollow = guest_weapon_profiles.FORTY_FIVE_HOLLOW_POINT
         self.assertEqual((hollow.caliber, hollow.row, hollow.item, hollow.projectile, hollow.fixture_units),
@@ -96,7 +103,7 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
             "army-pistol", "pistol", "pistol-02", "tac-pistol", "1911", "1911-fancy", "heavy-pistol",
             "rusty-pistol",
             "sg-71-a", "sg-71-b", "sg-71-a-suppressed", "model-1931", "fennec-57", "black-fox", "break-action-50",
-            "revolver-01", "revolver-02", "revolver-03",
+            "revolver-9mm", "revolver-01", "revolver-02", "revolver-03",
         })
 
 

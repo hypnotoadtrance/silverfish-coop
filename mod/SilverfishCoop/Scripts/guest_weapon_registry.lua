@@ -17,6 +17,7 @@ for _, row in ipairs({
     { "1911", "/Game/Classes/Weapons/Wep_1911.Wep_1911_C", true, "/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C", 8 },
     { "1911-fancy", "/Game/Classes/Weapons/Wep_1911_Fancy.Wep_1911_Fancy_C", true, "/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C", 8 },
     { "heavy-pistol", "/Game/Classes/Weapons/Wep_HeavyPistol.Wep_HeavyPistol_C", true, "/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C", 12 },
+    { "revolver-9mm", "/Game/Classes/Weapons/Wep_Revolver_9mm.Wep_Revolver_9mm_C", true, nil, 7 },
     { "revolver-01", "/Game/Classes/Weapons/Wep_Revolver_01.Wep_Revolver_01_C", true, "/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C", 6 },
     { "revolver-02", "/Game/Classes/Weapons/Wep_Revolver_02.Wep_Revolver_02_C", true, "/Game/Classes/Items/Ammo_Magnum_HollowPoint_BP.Ammo_Magnum_HollowPoint_BP_C", 6 },
     { "revolver-03", "/Game/Classes/Weapons/Wep_Revolver_03.Wep_Revolver_03_C", true, "/Game/Classes/Items/Ammo_Magnum_HollowPoint_BP.Ammo_Magnum_HollowPoint_BP_C", 6 },

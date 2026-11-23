@@ -78,6 +78,7 @@ FIREARMS = (
             Magazine(8, 1, 0.1, True, FORTY_FIVE_BALL, reload_first_stack=True)),
     Firearm("heavy-pistol", "Wep_HeavyPistol", True,
             Magazine(12, 1, 0.15, True, FORTY_FIVE_BALL, reload_first_stack=True)),
+    Firearm("revolver-9mm", "Wep_Revolver_9mm", True, Magazine(7, 1, 0.2, True, reload_first_stack=True)),
     # The three long-barrel variants inherit the stock whole-magazine reload.
     Firearm("revolver-01", "Wep_Revolver_01", True, Magazine(6, 1, 0.5, True, FORTY_FIVE_BALL, reload_first_stack=True)),
     Firearm("revolver-02", "Wep_Revolver_02", True,
