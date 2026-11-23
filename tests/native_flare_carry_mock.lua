@@ -45,10 +45,11 @@ package.loaded.native_observer_target = {}
 package.loaded.native_guest_drop_projection = {start_carry = function() end}
 package.loaded.players = {is_standing_guest = function(pawn) return pawn == authoritative_pawn end}
 
-local function projectile(path, server)
-    local world, driver = object(), object()
-    world.NetDriver, driver.World = driver, world
-    if not server then driver.ServerConnection = object() end
+local function projectile(path, server, world)
+    if not world then
+        world = object()
+        world.NetDriver = object({World = world, ServerConnection = not server and object() or nil})
+    end
     local class = object()
     function class:GetFullName() return "BlueprintGeneratedClass " .. path end
     local actor = object({Lit = true, bReplicateMovement = true, ReplicatedMovement = {bRepPhysics = false}})
@@ -135,10 +136,21 @@ post(client_context)
 assert(not replica.collision and not replica.ProjectileMovement.active and not replica.RotatingMovement.active)
 flare.sync(client, "connected")
 assert(replica.collision == false and not flare.carry_root(replica, client.world), "in-flight copy must remain inert")
-local bolt, _, bolt_context = projectile(folder .. "Bolt_Projectile_BP.Bolt_Projectile_BP_C", false)
+local bolt_path = folder .. "Bolt_Projectile_BP.Bolt_Projectile_BP_C"
+local bolt, bolt_client, bolt_context = projectile(bolt_path, false, client.world)
+bolt.FuseTime = 3
 pre(bolt_context)
 post(bolt_context)
-assert(bolt.collision == nil and bolt.ProjectileMovement.active, "unscoped projectile touched")
+assert(bolt.collision == false and not bolt.ProjectileMovement.active and not bolt.RotatingMovement.active)
+assert(bolt.FuseTime == 3, "bolt replica must keep the stock lifetime")
+bolt.ReplicatedMovement.bRepPhysics = true
+now = now + 1
+flare.sync(bolt_client, "connected")
+assert(not flare.carry_root(bolt, bolt_client.world) and bolt.collision == false, "bolt was treated as a flare")
+local grenade, _, grenade_context = projectile(folder .. "GrenadeProjectile_Master_BP.GrenadeProjectile_Master_BP_C", false)
+pre(grenade_context)
+post(grenade_context)
+assert(grenade.collision == nil and grenade.ProjectileMovement.active, "unscoped projectile touched")
 
 now = now + 1
 replica.ReplicatedMovement.bRepPhysics = true
@@ -193,4 +205,15 @@ assert(authoritative_pawn.HeldObject == authority)
 local drop = {"ticket", "native-prop-carry", lease, "Guest pawn", "drop", "2", "0", "0"}
 assert(carry.command(drop, host, "hosting") == "stock physics prop action verified")
 assert(not authoritative_pawn.HeldObject and authority.collision == nil, "host stock collision was altered")
-print("stock flare carry scoped to the host's landed physics and the guest's trace-only body")
+
+local stock_bolt, bolt_host, stock_bolt_context = projectile(bolt_path, true)
+stock_bolt.FuseTime = 3
+stock_bolt.Lit = false
+function stock_bolt:K2_DestroyActor() error("flare expiry touched a stock bolt") end
+pre(stock_bolt_context)
+post(stock_bolt_context)
+assert(stock_bolt.bReplicates and stock_bolt.bReplicateMovement)
+assert(stock_bolt.collision == nil and stock_bolt.ProjectileMovement.active and stock_bolt.RotatingMovement.active)
+assert(stock_bolt.FuseTime == 3 and not flare.carry_root(stock_bolt, bolt_host.world))
+flare.sync(bolt_host, "hosting")
+print("qualified flare grip and inert bolt replica use distinct stock lifecycles")

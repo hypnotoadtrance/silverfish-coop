@@ -19,6 +19,17 @@ class StockFlareReceiptTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     native_flare.parse(row, "hosting", OBSERVATORY)
 
+    def test_bolt_uses_the_stack_throw_path_without_accepting_a_flare_receipt(self):
+        bolt = "/Game/Classes/Equipment/Eqp_Bolt.Eqp_Bolt_C"
+        row = [native_flare.INPUT, OBSERVATORY, "guest", "77", "C" * 32, "1", bolt]
+        self.assertEqual(native_flare.parse(row, "connected", OBSERVATORY),
+                         {"map": OBSERVATORY, "pawn": "guest", "sequence": 77,
+                          "guid": "C" * 32, "toss": "1", "class_path": bolt})
+        wrong_projectile = f"{OBSERVATORY}.Observitory_P:PersistentLevel.Flare_Projectile_BP_C_25"
+        with self.assertRaisesRegex(ValueError, "Invalid stock flare throw receipt"):
+            native_flare.parse([native_flare.ACTION, OBSERVATORY, "guest", "C" * 32, "1", "1", "0",
+                                bolt, wrong_projectile], "hosting", OBSERVATORY)
+
     def test_receipt_requires_exactly_one_consumed_unit_and_current_map(self):
         item, projectile = next(iter(native_flare.CLASSES.items()))
         path = f"{OBSERVATORY}.Observitory_P:PersistentLevel.{projectile}_25"

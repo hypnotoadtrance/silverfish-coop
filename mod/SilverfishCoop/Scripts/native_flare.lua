@@ -2,12 +2,13 @@ local flare = {}
 local guest_save = require("guest_save")
 
 local folder = "/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/"
-local classes = {}
+local bolt = "BlueprintGeneratedClass " .. folder .. "Bolt_Projectile_BP.Bolt_Projectile_BP_C"
+local classes = {[bolt] = "bolt"}
 for _, name in ipairs({"Flare_Projectile_BP", "Blue_Flare_Projectile_BP", "Yellow_Flare_Projectile_BP"}) do
-    classes["BlueprintGeneratedClass " .. folder .. name .. "." .. name .. "_C"] = true
+    classes["BlueprintGeneratedClass " .. folder .. name .. "." .. name .. "_C"] = "flare"
 end
 flare.equipment = {}
-for _, name in ipairs({"Eqp_Flare", "Eqp_Flare_Blue", "Eqp_Flare_Yellow"}) do
+for _, name in ipairs({"Eqp_Flare", "Eqp_Flare_Blue", "Eqp_Flare_Yellow", "Eqp_Bolt"}) do
     flare.equipment["/Game/Classes/Equipment/" .. name .. "." .. name .. "_C"] = true
 end
 local intent, receipt
@@ -40,12 +41,13 @@ local function qualified(context, client)
     local actor = context:get()
     if not valid(actor) then return end
     local class = actor:GetClass()
-    if not valid(class) or not classes[class:GetFullName()] or actor:IsActorBeingDestroyed() then return end
+    local kind = valid(class) and classes[class:GetFullName()]
+    if not kind or actor:IsActorBeingDestroyed() then return end
     local world = actor:GetWorld()
     local driver = valid(world) and world.NetDriver
     if not valid(driver) or not valid(driver.World) or driver.World:GetAddress() ~= world:GetAddress()
         or valid(driver.ServerConnection) ~= client then return end
-    if client and actor:GetLocalRole() == 1 or not client and actor:HasAuthority() then return actor end
+    if client and actor:GetLocalRole() == 1 or not client and actor:HasAuthority() then return actor, kind end
 end
 
 local function capsule(actor)
@@ -142,9 +144,10 @@ function flare.start(role)
     if type(RegisterBeginPlayPreHook) ~= "function" or type(RegisterBeginPlayPostHook) ~= "function" then return end
     RegisterBeginPlayPreHook(function(context)
         if role() ~= "client" then return end
-        local actor = qualified(context, true)
-        if actor then
-            actor:SetActorEnableCollision(false)
+        local actor, kind = qualified(context, true)
+        if not actor then return end
+        actor:SetActorEnableCollision(false)
+        if kind == "flare" then
             -- FuseTime is supplied by the equipped flare and is not replicated.
             -- The host retires this actor after the real stock fuse and fade.
             actor.FuseTime = replica_fuse
@@ -154,7 +157,7 @@ function flare.start(role)
         local current = role()
         if current ~= "host" and current ~= "client" then return end
         local client = current == "client"
-        local actor = qualified(context, client)
+        local actor, kind = qualified(context, client)
         if not actor then return end
         if client then
             actor:SetActorEnableCollision(false)
@@ -162,13 +165,14 @@ function flare.start(role)
             if valid(movement) then movement:Deactivate() end
             local spin = actor.RotatingMovement
             if valid(spin) then spin:Deactivate() end
-            replicas[actor:GetAddress()] = {actor = actor}
+            -- A bolt's stock bounce replaces it with a separate ground item.
+            if kind == "flare" then replicas[actor:GetAddress()] = {actor = actor} end
         else
             actor.NetUpdateFrequency = 24
             actor:SetReplicates(true)
             actor:SetReplicateMovement(true)
             actor:ForceNetUpdate()
-            projectiles[actor:GetAddress()] = {actor = actor, root = capsule(actor)}
+            if kind == "flare" then projectiles[actor:GetAddress()] = {actor = actor, root = capsule(actor)} end
         end
     end)
 end
@@ -252,7 +256,7 @@ local function complete(fields, state, phase)
     elseif actor.Ammo ~= after or updated[ammo_field] ~= after then
         error("native_guest_flare_local_consumption_unverified", 0)
     end
-    return "stock flare charge reconciled"
+    return "stock throwable charge reconciled"
 end
 
 function flare.command(fields, state, phase)
@@ -269,7 +273,7 @@ function flare.command(fields, state, phase)
         pawn:GetAddress(), detached:GetAddress(), guid, toss == "1")
     if not ok then error(reason, 0) end
     receipt = {state.map, name, guid, toss, before, after, class, projectile}
-    return "stock flare thrown"
+    return "stock throwable thrown"
 end
 
 function flare.rows(state, phase, row)

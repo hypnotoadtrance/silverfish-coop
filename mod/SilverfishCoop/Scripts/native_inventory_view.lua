@@ -1,6 +1,6 @@
 local inventory_view = {}
 local weapon_profiles = require("guest_weapon_registry")
-local flares = require("native_flare").equipment
+local throwables = require("native_flare").equipment
 local cqc = require("native_enemy_loot_registry")
 local drop_maps = require("native_guest_drop_maps")
 local drop_items = require("native_guest_drop_items")
@@ -212,7 +212,7 @@ local function page(fields)
         slots[position] = true
         seen[guid] = true
         local equippable = ((source == "backpack" or source == "equipment")
-            and (weapon_profiles.kinds[class] ~= nil or class == camera_path or pry_tool_paths[class] or flares[class]
+            and (weapon_profiles.kinds[class] ~= nil or class == camera_path or pry_tool_paths[class] or throwables[class]
                 or (class == "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
                     and cqc[fields[4]] ~= nil)))
             or (source == "backpack" and (body_armor.is_body_path(class) or body_armor.is_helmet_path(class)))

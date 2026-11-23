@@ -5608,10 +5608,10 @@ class Client:
         sequence, area, pawn, guid, item_class = entries[-1]
         view = self.last_game.get("native_guest_inventory_equip_view", {})
         armor = native_guest_armor.EQUIP_ACTIONS.get(item_class)
-        flare = item_class in native_flare.CLASSES
+        throwable = item_class in native_flare.CLASSES
         if (view != {"sequence": sequence, "map": area, "pawn": pawn, "guid": guid, "state": "equipping"}
                 or area != self.last_game.get("map") or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")
-                or not native_gold.valid_guid(guid) or not (armor or flare or item_class in native_guest_weapon.CLASS_PATHS)):
+                or not native_gold.valid_guid(guid) or not (armor or throwable or item_class in native_guest_weapon.CLASS_PATHS)):
             return
         epoch = self.host_session, self.zone_epoch
         identifier = f"{epoch[0]}:{epoch[1]}:{pawn}:inventory-equip:{sequence}"
@@ -5629,7 +5629,7 @@ class Client:
             if ((self.host_session, self.zone_epoch) != epoch or current.get("native_guest_inventory_equip_view") != view
                     or native_inventory.displayed_offset(current, sequence, area, pawn) != offset):
                 raise ValueError("The inventory equip confirmation expired")
-            action = armor or (native_inventory.STORE_EQUIPMENT if flare else "native-guest-weapon-equip")
+            action = armor or (native_inventory.STORE_EQUIPMENT if throwable else "native-guest-weapon-equip")
             equipped = await self.gameplay_action(action, operation, guid)
             key = "native_guest_helmet" if action == native_guest_armor.HELMET_ACTION else "native_guest_armor"
             if armor and equipped.get(key, {}).get("class_path") != item_class:

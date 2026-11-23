@@ -17,6 +17,7 @@ local flare_fixture_paths = {
     ["stock-flare"] = "/Game/Classes/Equipment/Eqp_Flare.Eqp_Flare_C",
     ["stock-flare-blue"] = "/Game/Classes/Equipment/Eqp_Flare_Blue.Eqp_Flare_Blue_C",
     ["stock-flare-yellow"] = "/Game/Classes/Equipment/Eqp_Flare_Yellow.Eqp_Flare_Yellow_C",
+    ["stock-bolt"] = "/Game/Classes/Equipment/Eqp_Bolt.Eqp_Bolt_C",
 }
 local old_pipe_path = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
 local camera_map = "/Game/Classes/Maps/Maps_OverWorld/DeadBridge_P"
