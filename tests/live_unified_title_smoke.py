@@ -42,7 +42,8 @@ async def offered(seat):
 
 async def start_pair(host, guest, character_name, *, on_join=None, create_character=None,
                      before_join=None, after_reconnect=None, wait_status=wait,
-                     host_exit_actions=("save_and_quit",), after_exit=None, load_existing=False):
+                     host_exit_actions=("save_and_quit",), after_exit=None, load_existing=False,
+                     wait_for_host_pause=None):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_pid, guest_pid = host.bridge.process.pid, guest.bridge.process.pid
     host_form = "native-title-host-form-fixture"
@@ -110,7 +111,10 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
     if after_reconnect:
         await after_reconnect(guest, reconnect_started)
 
-    await host.bridge.wait_for(lambda game: game.get("stock_pause_exit", {}).get("state") == "armed")
+    if wait_for_host_pause is None:
+        await host.bridge.wait_for(lambda game: game.get("stock_pause_exit", {}).get("state") == "armed")
+    else:
+        await wait_for_host_pause(host_run)
     await stock_pause(host.bridge, "open")
     for action in host_exit_actions:
         await stock_pause(host.bridge, action)

@@ -31,7 +31,8 @@ class SessionPlan:
     """Trusted starter and its private status reader and extra readiness checks.
 
     The starter owns the child resources until it exits, including on cancellation.
-    Its progress uses the existing Control status envelope.
+    Its progress uses the existing Control status envelope. A resident starter
+    can also expose the current game frame from its own bridge.
     """
 
     start: Callable[..., Awaitable[str | None]]
@@ -39,6 +40,7 @@ class SessionPlan:
     ready: Callable[[dict], bool]
     producer_pid: Callable[[Claim], int | None] | None = None
     resolve_claim: Callable[[Claim], "SessionPlan"] | None = None
+    read_game: Callable[[], dict | None] | None = None
 
 
 def _read_plan_status(plan: SessionPlan) -> dict:
@@ -362,6 +364,7 @@ class TitleSession:
             return await plan.start(claim)
 
         task = asyncio.create_task(start())
+        read_game = plan.read_game if self._resident else None
         retired = False
         try:
             while not task.done():
@@ -372,7 +375,7 @@ class TitleSession:
                 if self._bridge.process.poll() is not None:
                     error = "title_exited"
                     break
-                snapshot = self._bridge.snapshot()
+                snapshot = self._bridge.snapshot() if read_game is None else None
                 title = _stock_title(snapshot)
                 if not self._resident and snapshot is not None and (title is None or title[1] != original_title[1]):
                     error = "stock_title_changed"
@@ -413,8 +416,11 @@ class TitleSession:
                         ready_at = title[0] if title else original_title[0]
                     if self._resident:
                         game = status["game"]
+                        if read_game is not None:
+                            snapshot = read_game()
                         ready_here = (snapshot is not None and snapshot.get("mode") == game["mode"]
                                       and snapshot.get("state") == game["state"] and snapshot.get("map") == game["map"]
+                                      and (read_game is None or snapshot.get("save_scope") == game.get("save_scope"))
                                       and snapshot.get("sequence", 0) >= game.get("sequence", 0))
                     else:
                         ready_here = title and title[0] > max(ready_at, original_title[0])

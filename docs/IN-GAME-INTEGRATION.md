@@ -125,6 +125,8 @@ Keep a local, versioned JSON interface alongside the menu. It should expose sess
 
 The host sent a Steam invite and the guest accepted and entered the campaign. The remaining Steam checks cover reconnect, longer sessions, and whether the fixes below behave the same over Steam as in muted Direct IP tests.
 
+RC `958d534` fixes a startup watchdog that cancelled a listening host approximately two minutes after launching a campaign. The installed game publishes gameplay status in memory. The title supervisor now checks the current session's own bridge during startup and still verifies the released solo save scope on the title screen after leaving. With file mirroring disabled in a muted installed pair, both title supervisors reported ready while their gameplay status files remained stale. The host stayed ready through stock guest character creation, Direct IP admission, same-pawn reconnect, and Save and Quit. [Nonmirrored startup trial](../tests/live_portable_title_smoke.py)
+
 | Report | Progress | Completion check |
 | --- | --- | --- |
 | Avatar head shifts after jumping, tail floats, body pivots off center and clips into walls | Muted pair verified the centered body, stable head through a turn and jump, and both stock tail attachments | Observe both players against walls, on landing, and while turning in a two-PC session |
