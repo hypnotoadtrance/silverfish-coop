@@ -6,7 +6,7 @@ import uuid
 
 from . import native_host_save, native_rewards, party
 from .native_gold import valid_guid
-from .native_wire_quest import BOARD
+from .native_wire_quest import BOARD, _retain_reward_guest, defer_reward_save
 from .travel import BOROUGH
 
 
@@ -247,9 +247,11 @@ async def activate(host, bridge, character, epoch):
     return {"effect": "native_quest_changed", **record}
 
 
-async def _reward(host, bridge, action, pawn, slot, bundle, assigned=None):
+async def _reward(host, bridge, action, pawn, slot, bundle, assigned=None, *, memory=False):
     area = host.last_game["map"]
     extra = (pawn, *assigned) if assigned else ()
+    if memory:
+        extra += ("memory",)
     snapshot = await _call(host, bridge, action, area, slot, *bundle, *extra)
     proof = snapshot.get(REWARD, {})
     states = ("granted", "already_granted") if assigned else ("captured",)
@@ -258,26 +260,52 @@ async def _reward(host, bridge, action, pawn, slot, bundle, assigned=None):
         raise RuntimeError("The exact Flood Control reward bundle did not survive native readback")
 
 
-async def _deliver(host, bridge, candidate):
+async def _deliver(host, bridge, candidate, *, defer_save):
     stage = candidate.get(PENDING)
     if not stage or not host.last_game.get("native_guest_xp_ready"):
         return frozenset()
     authenticated = host.native_recipients()
-    deliver = [actor for actor in stage["pending"] if authenticated.get(actor, {}).get("connected")]
-    if not deliver:
+    ready = [actor for actor in stage["pending"] if authenticated.get(actor, {}).get("connected")]
+    if not ready:
         return frozenset()
     frame = stage["escrow"]
-    await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)
-    for actor in deliver:
-        await _reward(host, bridge, GRANT, authenticated[actor]["pawn"], frame["slot"], stage["template"], stage["pending"][actor])
+    if frame.get("map") != BOROUGH:
+        raise RuntimeError("The Flood Control escrow belongs to the wrong map")
+    memory = frame.get("pending") is True
+    if not memory:
+        await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)
+    delivered = set()
+    for actor in ready:
+        member = host.native_recipients().get(actor, {})
+        if not member.get("connected"):
+            continue
+        pawn = member["pawn"]
+        if defer_save:
+            if not await _retain_reward_guest(host, bridge, actor, pawn):
+                continue
+            current = host.native_recipients().get(actor, {})
+            if not current.get("connected") or current.get("pawn") != pawn:
+                continue
+        try:
+            await _reward(host, bridge, GRANT, pawn, frame["slot"], stage["template"], stage["pending"][actor], memory=memory)
+        except (RuntimeError, party.RuleError) as error:
+            # Only the three pre-grant checks below establish that no stock reward changed.
+            if defer_save and str(error) in ("An exact authoritative co-op guest is required",
+                                             "stock_subway_valve_reward_recipient_unavailable",
+                                             "subway_valve_reward_exact_detached_guest_required"):
+                continue
+            raise
         native_rewards.queue(candidate["players"][actor], 1)
         del stage["pending"][actor]
-    if not stage["pending"]:
-        del candidate[PENDING]
-    recipients = [row for row in native_rewards.pending_recipients(host, candidate) if row[0] in deliver]
+        delivered.add(actor)
+    recipients = [row for row in native_rewards.pending_recipients(host, candidate) if row[0] in delivered]
     applied = await native_rewards.project(host, bridge, candidate, recipients)
-    if set(deliver) != set(applied):
+    if applied != delivered:
         raise RuntimeError("Flood Control item recipients did not also receive their exact stock XP")
+    if not stage["pending"]:
+        if memory:
+            await _call(host, bridge, "native-loot-release-escrows", host.last_game["map"], frame["slot"])
+        del candidate[PENDING]
     return applied
 
 
@@ -292,7 +320,8 @@ async def board_action(host, bridge, character, action):
         raise party.RuleError("stock_subway_valve_quest_objective_not_complete")
     if action == XP_FIXTURE and (character != "host" or not host.fixtures):
         raise party.RuleError("stock_subway_valve_xp_fixture_unavailable")
-    if action != START:
+    defer_save = action == TURN_IN and defer_reward_save(host)
+    if action != START and not defer_save:
         await host.checkpoint_native(bridge)
         if _owner(host, character, BOROUGH) != pawn:
             raise party.RuleError("stock_subway_valve_actor_scope")
@@ -314,15 +343,18 @@ async def board_action(host, bridge, character, action):
             recipients = sorted(set(host.roles().values()) & candidate["players"].keys())
             bundle = proof["bundle"]
             assert bundle
-            slot = native_host_save.new_slot()
-            host_pawn = host.last_game["pawns"]["local"]["name"]
-            await _reward(host, bridge, CAPTURE, host_pawn, slot, bundle)
-            frame = await asyncio.to_thread(native_host_save.record, host.native_profile, slot, BOROUGH, flush=True)
             assigned = {name: [uuid.uuid5(uuid.UUID(hex=template), f"flood-control:{name}").hex.upper() for template in bundle]
                         for name in recipients if name != "host"}
             if assigned:
+                slot = native_host_save.new_slot()
+                host_pawn = host.last_game["pawns"]["local"]["name"]
+                await _reward(host, bridge, CAPTURE, host_pawn, slot, bundle, memory=defer_save)
+                if defer_save:
+                    frame = {"slot": slot, "map": BOROUGH, "pending": True}
+                else:
+                    frame = await asyncio.to_thread(native_host_save.record, host.native_profile, slot, BOROUGH, flush=True)
                 candidate[PENDING] = {"escrow": frame, "template": bundle, "pending": assigned.copy()}
-                delivered = await _deliver(host, bridge, candidate)
+                delivered = await _deliver(host, bridge, candidate, defer_save=defer_save)
             for name in recipients:
                 player = candidate["players"][name]
                 player["quest_xp"] = player.get("quest_xp", 0) + 1
@@ -332,8 +364,8 @@ async def board_action(host, bridge, character, action):
         if action != XP_FIXTURE:
             candidate.setdefault("native_quests", {})[QUEST] = record
         revision = None
-        if action == START:
-            host.pending_host_save = bool(host.pending_host_save)
+        if action == START or defer_save:
+            host.pending_host_save = bool(host.pending_host_save or defer_save)
         else:
             revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=delivered)
     except (OSError, RuntimeError, ValueError, KeyError, asyncio.CancelledError):
@@ -349,15 +381,20 @@ async def settle(host, bridge):
     if (not host.party.get(PENDING) or host.last_game.get("state") != "hosting" or host.stopping or host.transitioning
             or host.native_checkpoint_unsafe or host.party["wipe"] or host.last_game.get("map") not in host.allowed_maps):
         return
+    defer_save = defer_reward_save(host)
+    if host.party[PENDING]["escrow"].get("pending") is True and not defer_save:
+        return
     candidate = party.load_party(host.party)
     host.native_checkpoint_unsafe = True
     try:
-        delivered = await _deliver(host, bridge, candidate)
+        delivered = await _deliver(host, bridge, candidate, defer_save=defer_save)
         if delivered:
-            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=delivered)
+            revision = None
+            if not defer_save:
+                revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=delivered)
             host.party = candidate
             host.control.event("native_subway_valve_rewards_delivered", revision=revision, recipients=sorted(delivered))
-    except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
+    except (OSError, RuntimeError, ValueError, KeyError, asyncio.CancelledError):
         host.stopping = True
         raise
     host.native_checkpoint_unsafe = False

@@ -6,10 +6,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call, patch
 
-from tools.silverfish import native_host_save, native_quest, native_subway_valve as valve, native_wire_board, party
+from tools.silverfish import native_host_save, native_loot, native_quest, native_subway_valve as valve, native_wire_board, party
 from tools.silverfish.campaign import CampaignFormatError
 from tools.silverfish.runtime import Bridge
-from tools.silverfish.travel import BOROUGH
+from tools.silverfish.travel import BOROUGH, CITY
 
 
 EPOCH = "12" * 16
@@ -208,3 +208,182 @@ class FloodControlTests(unittest.IsolatedAsyncioTestCase):
             reward["pending"] = invalid
             with self.subTest(invalid=invalid), self.assertRaises(CampaignFormatError):
                 native_host_save._escrow_frames(checkpoint)
+
+
+class FloodControlDeferredRewardsTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.host = authority()
+        self.host.native_profile = Path(self.enterContext(TemporaryDirectory()))
+        self.host.native_loot_input = True
+        self.host.allowed_maps = {BOROUGH, CITY}
+        self.host.pending_guest_saves = {}
+        self.host.queue_guest_save = self.queue_guest_save
+        self.host.roles = lambda: {"host": "host", "guest": CHARACTER}
+        self.host.party["native_quests"][valve.QUEST].update(step=2, objective=objective())
+        self.host.last_game = {
+            "state": "hosting", "map": BOROUGH, "native_guest_save_retention": True,
+            "native_guest_xp_ready": True, "pawns": {"local": {"name": BOROUGH_PAWN}},
+        }
+        self.connected = False
+        self.guest_pawn = BOROUGH_PAWN.replace("_20", "_23")
+        self.host.native_recipients = lambda: {CHARACTER: {"pawn": self.guest_pawn, "connected": self.connected}}
+        self.pools = set()
+        self.items = []
+        self.xp = 0
+        self.xp_delta = 1
+        self.refusal = None
+        self.bridge = SimpleNamespace(command=AsyncMock(side_effect=self.command))
+
+    def queue_guest_save(self, character, pawn):
+        self.host.pending_guest_saves[character] = (pawn, {})
+
+    def write_template(self, slot):
+        path = native_host_save.slot_path(self.host.native_profile, slot)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"GVAS exact artifact and helmet")
+
+    async def command(self, verb, *arguments, timeout=None):
+        frame = dict(self.host.last_game)
+        area = frame["map"]
+        if verb == valve.TURN_IN:
+            self.assertEqual(arguments, (BOROUGH_PAWN,))
+            fields = ["native-subway-valve-board", "turn-in", BOROUGH, BOROUGH_PAWN, valve.BOARD, "2", "-10", "1",
+                      "9", "9", "7", "8", *TEMPLATE]
+            frame[valve.BOARD_KEY] = valve.parse_board(fields, "hosting", BOROUGH)
+            frame[valve.BOARD_KEY]["reputation"] = dict.fromkeys(valve.FACTIONS, 0)
+        elif verb == valve.CAPTURE:
+            slot, art, mask, *mode = arguments
+            self.assertEqual([art, mask], TEMPLATE)
+            if mode == ["memory"]:
+                self.pools.add(slot)
+            else:
+                self.assertFalse(mode)
+                self.write_template(slot)
+            fields = ["native-subway-valve-reward", area, BOROUGH_PAWN, "captured", slot, *TEMPLATE, *TEMPLATE]
+            frame[valve.REWARD] = valve.parse_reward(fields, "hosting", area)
+        elif verb == valve.GRANT:
+            slot, art, mask, pawn, personal_art, personal_mask, *mode = arguments
+            self.assertEqual([art, mask], TEMPLATE)
+            self.assertEqual(pawn, self.guest_pawn)
+            self.assertEqual(mode, ["memory"] if slot in self.pools else [])
+            if self.host.native_loot_input:
+                self.assertEqual(self.host.pending_guest_saves[CHARACTER][0], pawn)
+            if self.refusal:
+                raise RuntimeError(self.refusal)
+            ids = [personal_art, personal_mask]
+            self.assertFalse(self.items)
+            self.items.extend(ids)
+            fields = ["native-subway-valve-reward", area, pawn, "granted", slot, *TEMPLATE, *ids]
+            frame[valve.REWARD] = valve.parse_reward(fields, "hosting", area)
+        elif verb == "native-guest-save-retain":
+            self.assertEqual(arguments, (self.guest_pawn, CHARACTER))
+            self.assertTrue(self.connected)
+        elif verb == "native-guest-quest-xp":
+            self.assertEqual(arguments, (self.guest_pawn, "1"))
+            before = self.xp
+            self.xp += self.xp_delta
+            frame["native_guest_xp"] = {"map": area, "pawn": self.guest_pawn, "before": before, "after": self.xp}
+        elif verb == "native-loot-flush-escrows":
+            for slot in arguments:
+                self.assertIn(slot, self.pools)
+                self.write_template(slot)
+        elif verb == "native-loot-release-escrows":
+            self.assertEqual(self.xp, 1)
+            for slot in arguments:
+                self.pools.remove(slot)
+        else:
+            self.fail(f"Unexpected Flood Control command {verb}")
+        return frame
+
+    async def redeem(self):
+        return await native_quest.action(self.host, self.bridge, "host", "native-quest-turnin", valve.QUEST)
+
+    async def test_connected_guest_receives_both_stock_rows_and_xp_without_a_save(self):
+        self.connected = True
+        receipt = await self.redeem()
+        self.assertListEqual(receipt["rewards"][CHARACTER], self.items)
+        self.assertEqual((len(set(self.items + TEMPLATE)), self.xp), (4, 1))
+        self.assertListEqual([c.args[0] for c in self.bridge.command.await_args_list],
+                             [valve.TURN_IN, valve.CAPTURE, "native-guest-save-retain", valve.GRANT,
+                              "native-guest-quest-xp", "native-loot-release-escrows"])
+        self.assertTrue(self.host.pending_host_save)
+        self.assertFalse(self.pools)
+        self.assertNotIn(valve.PENDING, self.host.party)
+        self.host.checkpoint_native.assert_not_awaited()
+        self.assertEqual((await self.redeem())["effect"], "native_quest_already_settled")
+        self.assertEqual(len(self.items), 2)
+
+    async def test_offline_bundle_promotes_into_the_existing_schema_and_settles_after_travel(self):
+        receipt = await self.redeem()
+        pending = self.host.party[valve.PENDING]
+        slot = pending["escrow"]["slot"]
+        self.assertEqual(pending["pending"][CHARACTER], receipt["rewards"][CHARACTER])
+        self.assertTrue(pending["escrow"]["pending"])
+        self.assertFalse(native_host_save.slot_path(self.host.native_profile, slot).exists())
+        updated, records = await native_loot.flush_pending_escrows(self.host, self.bridge, self.host.party)
+        checkpoint = {"world": {"party": updated}, "characters": {CHARACTER: {"state": {}}}}
+        native_host_save.verify_checkpoint(self.host.native_profile, checkpoint)
+        self.assertEqual(native_host_save.references(checkpoint), [records[(valve.PENDING, None)]])
+
+        # The normal save leaves a disk-backed template for the next world or process.
+        self.pools.remove(slot)
+        self.host.party = party.load_party(updated)
+        self.host.last_game["map"] = CITY
+        self.guest_pawn = f"Player_FP_C {CITY}.City_01_P:PersistentLevel.Player_FP_C_23"
+        self.connected = True
+        await valve.settle(self.host, self.bridge)
+        self.assertEqual((self.items, self.xp), (receipt["rewards"][CHARACTER], 1))
+        self.assertNotIn(valve.PENDING, self.host.party)
+        self.host.checkpoint_native.assert_not_awaited()
+
+    async def test_missing_guest_leaves_bundle_pending_but_template_failure_fences_campaign(self):
+        await self.redeem()
+        pending = self.host.party[valve.PENDING]
+        self.connected = True
+        self.refusal = "stock_subway_valve_reward_recipient_unavailable"
+        await valve.settle(self.host, self.bridge)
+        self.assertFalse(self.host.stopping or self.host.native_checkpoint_unsafe)
+        self.assertIs(self.host.party[valve.PENDING], pending)
+        self.assertEqual((self.items, self.xp), ([], 0))
+
+        self.refusal = "mutation_unverified_stock_subway_valve_reward_template"
+        with self.assertRaisesRegex(RuntimeError, "reward_template"):
+            await valve.settle(self.host, self.bridge)
+        self.assertTrue(self.host.stopping and self.host.native_checkpoint_unsafe)
+        self.assertIs(self.host.party[valve.PENDING], pending)
+        self.host.checkpoint_native.assert_not_awaited()
+
+    async def test_no_deferred_commit_or_pool_release_after_unverified_bundle_mutation(self):
+        await self.redeem()
+        pending = self.host.party[valve.PENDING]
+        self.connected = True
+        self.refusal = "mutation_unverified_subway_valve_reward_delivery"
+        with self.assertRaisesRegex(RuntimeError, "reward_delivery"):
+            await valve.settle(self.host, self.bridge)
+        self.assertTrue(self.host.stopping and self.host.native_checkpoint_unsafe)
+        self.assertIs(self.host.party[valve.PENDING], pending)
+        self.assertIn(pending["escrow"]["slot"], self.pools)
+        self.assertEqual(self.xp, 0)
+        self.host.checkpoint_native.assert_not_awaited()
+
+    async def test_verified_bundle_still_requires_the_exact_xp_readback(self):
+        await self.redeem()
+        pending = self.host.party[valve.PENDING]
+        self.connected = True
+        self.xp_delta = 0
+        with self.assertRaisesRegex(RuntimeError, "quest XP did not survive native readback"):
+            await valve.settle(self.host, self.bridge)
+        self.assertEqual(self.items, pending["pending"][CHARACTER])
+        self.assertTrue(self.host.stopping and self.host.native_checkpoint_unsafe)
+        self.assertIn(pending["escrow"]["slot"], self.pools)
+        self.assertIs(self.host.party[valve.PENDING], pending)
+        self.host.checkpoint_native.assert_not_awaited()
+
+    async def test_older_host_uses_durable_capture_and_checkpoint(self):
+        self.host.native_loot_input = False
+        self.connected = True
+        receipt = await self.redeem()
+        self.assertEqual((self.items, self.xp), (receipt["rewards"][CHARACTER], 1))
+        self.assertEqual(self.host.checkpoint_native.await_count, 2)
+        self.assertEqual(self.host.checkpoint_native.await_args.kwargs["require_guest_frames"], {CHARACTER})
+        self.assertFalse(self.pools or self.host.pending_guest_saves)

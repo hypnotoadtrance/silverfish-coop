@@ -2,6 +2,7 @@ local valve = {}
 local wire = require("native_wire_quest")
 local transport = require("native_transport")
 local guest_save = require("guest_save")
+local loot_escrow = require("native_loot_actions")
 local players = require("players")
 
 local area = "/Game/Classes/Maps/Maps_Dungeons/Subway_01_P"
@@ -489,35 +490,55 @@ end
 local function escrow(fields, state, phase, operation)
     local context = canonical(state, phase)
     local slot, art, mask = fields[3], fields[4], fields[5]
+    local memory = fields[#fields] == "memory"
+    local extra = memory and 1 or 0
     if not slot_ok(slot) or not valid_id(art, "[^0-9A-F]") or not valid_id(mask, "[^0-9A-F]") or art == mask
         or progress(context).step ~= -10 or type(SilverfishVerifySubwayValveRewards) ~= "function" then refuse("reward_scope_unavailable") end
     local name, assigned_art, assigned_mask = context.host:GetFullName(), art, mask
     local detail
     if operation == "reward-capture" then
-        if #fields ~= 5 or state.map ~= board.map or context.statics:DoesSaveGameExist(slot, 0) ~= false
+        if #fields ~= 5 + extra or state.map ~= board.map
             or type(SilverfishCaptureSubwayValveRewards) ~= "function" then refuse("reward_capture_scope_unavailable") end
-        local scratch = context.statics:CreateSaveGameObject(StaticFindObject(save_class))
+        local function verify_roundtrip(source, reopened)
+            return exact(reopened, save_class)
+                and SilverfishVerifySubwayValveRewards(reopened:GetAddress(), art, mask, source:GetAddress()) == true
+        end
+        local scratch
+        if memory then
+            scratch = loot_escrow.create_pending_escrow(context.save, context.instance, context.world, slot, verify_roundtrip)
+        else
+            if context.statics:DoesSaveGameExist(slot, 0) ~= false then refuse("reward_capture_scope_unavailable") end
+            scratch = context.statics:CreateSaveGameObject(StaticFindObject(save_class))
+        end
         if not exact(scratch, save_class) then refuse("reward_scratch_unavailable") end
         local ok, reason = SilverfishCaptureSubwayValveRewards(context.host:GetAddress(), context.save:GetAddress(), scratch:GetAddress(), art, mask)
-        if ok ~= true or reason ~= "captured" or context.statics:SaveGameToSlot(scratch, slot, 0) ~= true then
+        if ok ~= true or reason ~= "captured" then
             error("mutation_unverified_stock_subway_valve_reward_capture:" .. tostring(reason), 0)
         end
-        local reopened = context.statics:LoadGameFromSlot(slot, 0)
-        if not exact(reopened, save_class)
-            or not SilverfishVerifySubwayValveRewards(reopened:GetAddress(), art, mask, scratch:GetAddress()) then
-            error("mutation_unverified_stock_subway_valve_reward_saved_template", 0)
+        if not memory then
+            if context.statics:SaveGameToSlot(scratch, slot, 0) ~= true
+                or not verify_roundtrip(scratch, context.statics:LoadGameFromSlot(slot, 0)) then
+                error("mutation_unverified_stock_subway_valve_reward_saved_template", 0)
+            end
         end
         detail = reason
     else
         name, assigned_art, assigned_mask = fields[6], fields[7], fields[8]
-        if #fields ~= 8 or name == context.host:GetFullName() or not valid_id(assigned_art, "[^0-9A-F]")
+        if #fields ~= 8 + extra or name == context.host:GetFullName() or not valid_id(assigned_art, "[^0-9A-F]")
             or not valid_id(assigned_mask, "[^0-9A-F]") or assigned_art == assigned_mask
             or type(SilverfishGrantSubwayValveRewards) ~= "function" then refuse("reward_grant_scope_unavailable") end
+        local saved
+        if memory then
+            saved = loot_escrow.pending_escrow(context.world, slot)
+        else
+            saved = context.statics:LoadGameFromSlot(slot, 0)
+        end
+        if not exact(saved, save_class) or not SilverfishVerifySubwayValveRewards(saved:GetAddress(), art, mask) then
+            error("mutation_unverified_stock_subway_valve_reward_template", 0)
+        end
         local pawn, save = guest_save.exact_item_context(state, phase, name)
-        local saved = context.statics:LoadGameFromSlot(slot, 0)
-        if not exact(pawn, pawn_class) or not exact(save, save_class) or same(save, context.save) or not same(pawn.Save, save)
-            or not exact(saved, save_class) or not SilverfishVerifySubwayValveRewards(saved:GetAddress(), art, mask) then
-            refuse("reward_recipient_or_template_unavailable")
+        if not exact(pawn, pawn_class) or not exact(save, save_class) or same(save, context.save) or not same(pawn.Save, save) then
+            refuse("reward_recipient_unavailable")
         end
         local ok, reason = SilverfishGrantSubwayValveRewards(pawn:GetAddress(), save:GetAddress(), context.save:GetAddress(),
             saved:GetAddress(), art, mask, assigned_art, assigned_mask)
