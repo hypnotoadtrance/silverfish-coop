@@ -119,7 +119,8 @@ async def capture(run: Path, viewer: str):
 
 
 def decode_refresh(line, viewer):
-    seat, operation, asset, marker, geometry, attempt, override, loaded, distance, markers, restored = line.split("\t")
+    (seat, operation, asset, marker, geometry, attempt, override, loaded, distance, markers, restored,
+     population, original_cap, applied_cap, active_population, count_calls) = line.split("\t")
     suffix, classes = REFRESH_SQUADS[viewer]
     assert (seat, operation, asset, marker, markers, restored) == (
         viewer, "refresh", "SquadData_C /Game/Classes/Libraries/DataAssets/Squads/" + suffix,
@@ -131,10 +132,19 @@ def decode_refresh(line, viewer):
     assert all(state in ("true", "false") for _, state in states), line
     cm = float(distance)
     assert 3200 < cm < 9500, line
+    population, original_cap, applied_cap, count_calls = map(int, (population, original_cap, applied_cap, count_calls))
+    active_population = None if active_population == "nil" else int(active_population)
+    assert 0 <= population < 128 and 0 < original_cap <= 128 and applied_cap == max(original_cap, population + 1), line
+    assert count_calls == (0 if active_population is None else 1), line
+    assert active_population is None or 0 <= active_population < 128, line
     return {"seat": seat, "asset": asset, "marker": marker, "original_geometry": geometry == "true",
             "stock_geometry_during_refresh": None if attempt == "nil" else attempt == "true",
             "geometry_override": override == "true", "classes_loaded_before": {name: state == "true" for name, state in states},
-            "pawn_marker_distance_cm": cm, "original_markers_restored": int(markers), "stock_weights_restored": True}
+            "pawn_marker_distance_cm": cm, "original_markers_restored": int(markers), "stock_weights_restored": True,
+            "population_before_refresh": population, "original_population_cap": original_cap,
+            "applied_population_cap": applied_cap, "population_cap_raised": applied_cap != original_cap,
+            "population_cap_restored": True, "stock_population_during_refresh": active_population,
+            "stock_population_call_count": count_calls}
 
 
 async def stock_refresh(run: Path, viewer: str):

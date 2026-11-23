@@ -10,6 +10,7 @@ local level_path = world_name .. ":PersistentLevel."
 local classes = {"NPC_Zomb_01_C", "NPC_WildBoar_C", "NPC_FeralDog_C", "NPC_Survivor_FlowerLady_C",
     "NPC_MinorStag_C", "NPC_Doe_C", "NPC_Survivor_Worker_C", "NPC_Homunculus_C"}
 local marker_name = "AI_Spawner_Squad_BP_C " .. level_path .. "AI_Spawner_Squad_BP_C_8"
+local living_count = "/Game/Classes/Actors/DynaimicSpawnControler_BP.DynaimicSpawnControler_BP_C:Calc_LivingNPCs"
 local marker_check = "/Game/Classes/ScriptingActors/AI_Spawner_Squad_BP.AI_Spawner_Squad_BP_C:SpawnIsValid"
 local stock_squads = {
     host = {"WildLife/Stag_WtDoe.Stag_WtDoe", "NPC_MinorStag", "NPC_Doe"},
@@ -60,6 +61,28 @@ local function census()
         end
     end
     return table.concat(rows, "\n")
+end
+
+local function stock_population(director)
+    local count = StaticFindObject(living_count)
+    assert(valid(count) and count:GetFullName() == "Function " .. living_count
+        and same(count:GetOuter(), director:GetClass()) and count:GetFunctionFlags() & 0x440 == 0,
+        "exact stock population function")
+    local parameters = 0
+    count:ForEachProperty(function(property)
+        if property:GetFName():ToString() == "NPCs" then
+            assert(property:GetClass():GetFName():ToString() == "IntProperty" and property:GetOffset_Internal() == 0,
+                "stock population output schema")
+            parameters = parameters + 1
+        end
+    end)
+    assert(parameters == 1, "expected one exact stock population output")
+    local output = {}
+    director:Calc_LivingNPCs(output)
+    local population, cap = math.tointeger(output.NPCs), math.tointeger(director.MaxNPCs)
+    assert(population and population >= 0 and population < 128 and cap and cap > 0 and cap <= 128,
+        "stock population and cap readback")
+    return population, cap
 end
 
 local function stock_refresh()
@@ -116,6 +139,8 @@ local function stock_refresh()
     end
 
     local geometry, stock_attempt, phase, hook_failure, maps_changed, markers_changed
+    local population, stock_cap, applied_cap, active_population, count_calls, count_pre, count_post
+    local cap_changed
     local pre, post = RegisterHook(marker_check, function(context, radius, eligible)
         if not phase or not same(context:get(), marker) then return end
         if radius:get() ~= true or type(eligible:get()) ~= "boolean" then
@@ -134,6 +159,16 @@ local function stock_refresh()
         marker:SpawnIsValid(true, {})
         phase = nil
         assert(type(geometry) == "boolean" and not hook_failure, hook_failure or "missing stock geometry readback")
+        population, stock_cap = stock_population(director)
+        applied_cap, count_calls = math.max(stock_cap, population + 1), 0
+        count_pre, count_post = RegisterHook(living_count, function(context, result)
+            if phase ~= "refresh" or not same(context:get(), director) then return end
+            count_calls = count_calls + 1
+            active_population = math.tointeger(result:get())
+            if count_calls ~= 1 or not active_population or active_population < 0 or active_population >= 128 then
+                hook_failure = "stock population during refresh unqualified"
+            end
+        end)
 
         -- Keep the sole selected key in its own authored pool. A zero-weight key can win a zero roll.
         maps_changed = true
@@ -147,6 +182,11 @@ local function stock_refresh()
         marker_array:Empty()
         marker_array[1] = marker
         assert(marker_array:GetArrayNum() == 1 and same(object(marker_array[1]), marker), "single stock marker")
+        if applied_cap ~= stock_cap then
+            cap_changed = true
+            director.MaxNPCs = applied_cap
+            assert(director.MaxNPCs == applied_cap, "temporary stock population cap")
+        end
         phase = "refresh"
         director:RefreshEnemies()
         phase = nil
@@ -154,6 +194,12 @@ local function stock_refresh()
     end)
     phase = nil
 
+    local cap_ok, cap_error = pcall(function()
+        if cap_changed then
+            director.MaxNPCs = stock_cap
+            assert(director.MaxNPCs == stock_cap, "stock population cap restore verification")
+        end
+    end)
     local weights_ok, weights_error = pcall(function()
         if not maps_changed then return end
         for index, map in ipairs(maps) do
@@ -176,13 +222,18 @@ local function stock_refresh()
         end
     end)
     local hook_ok, hook_error = pcall(UnregisterHook, marker_check, pre, post)
+    local count_ok, count_error = true, nil
+    if count_pre then count_ok, count_error = pcall(UnregisterHook, living_count, count_pre, count_post) end
+    assert(cap_ok, cap_error)
     assert(weights_ok, weights_error)
     assert(markers_ok, markers_error)
     assert(hook_ok, hook_error)
+    assert(count_ok, count_error)
     assert(ok, failure)
     return table.concat({viewer, "refresh", asset_name, marker_name, tostring(geometry),
         tostring(stock_attempt), tostring(geometry == false and stock_attempt == false),
-        table.concat(classes_loaded, ","), ("%.2f"):format(distance), tostring(#originals), "restored"}, "\t")
+        table.concat(classes_loaded, ","), ("%.2f"):format(distance), tostring(#originals), "restored",
+        population, stock_cap, applied_cap, tostring(active_population), count_calls}, "\t")
 end
 
 LoopInGameThreadWithDelay(150, function()

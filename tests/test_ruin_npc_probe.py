@@ -45,13 +45,20 @@ class RuinNpcProbeTests(unittest.TestCase):
     def test_refresh_preserves_unloaded_class_and_distinguishes_geometry_from_attempt(self):
         worker = "SquadData_C /Game/Classes/Libraries/DataAssets/Squads/Monsters/Surv_Workers.Surv_Workers"
         fields = ["client", "refresh", worker, REFRESH_MARKER, "false", "false", "true",
-                  "NPC_Survivor_Worker=false", "4500", "4", "restored"]
+                  "NPC_Survivor_Worker=false", "4500", "4", "restored", "12", "12", "13", "12", "1"]
         report = decode_refresh("\t".join(fields), "client")
         self.assertFalse(report["original_geometry"])
         self.assertTrue(report["geometry_override"])
         self.assertFalse(report["classes_loaded_before"]["NPC_Survivor_Worker"])
+        self.assertTrue(report["population_cap_raised"])
+        self.assertEqual(report["stock_population_during_refresh"], 12)
+        fields[11:] = ["7", "12", "12", "7", "1"]
+        self.assertFalse(decode_refresh("\t".join(fields), "client")["population_cap_raised"])
         fields[5:7] = ["nil", "false"]
-        self.assertIsNone(decode_refresh("\t".join(fields), "client")["stock_geometry_during_refresh"])
+        fields[14:] = ["nil", "0"]
+        no_body = decode_refresh("\t".join(fields), "client")
+        self.assertIsNone(no_body["stock_geometry_during_refresh"])
+        self.assertIsNone(no_body["stock_population_during_refresh"])
         fields[6] = "true"
         with self.assertRaises(AssertionError):
             decode_refresh("\t".join(fields), "client")
