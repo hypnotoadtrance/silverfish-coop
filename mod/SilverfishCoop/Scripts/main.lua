@@ -1312,6 +1312,7 @@ local function write_status(state, current_phase, failure, fields, pending, crat
     for _, row in ipairs(native_player_avatar.rows(status_row)) do rows[#rows + 1] = row end
     local flashlight = native_flashlight.rows(state, current_phase, status_row)
     if flashlight then rows[#rows + 1] = flashlight end
+    for _, light in ipairs(native_flashlight.peer_rows(state, current_phase, status_row)) do rows[#rows + 1] = light end
     for _, row in ipairs(native_voice.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
     for _, row in ipairs(native_replication_budget.rows(status_row)) do rows[#rows + 1] = row end
     rows[#rows + 1] = status_row("native-zone-loading-support", 1)

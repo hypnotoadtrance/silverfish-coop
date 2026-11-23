@@ -10,7 +10,10 @@ local click_range = 4000 -- Switch_Reset_Cue's stock attenuation maximum in cent
 local maths = "/Script/Engine.Default__KismetMathLibrary"
 local statics = "/Script/Engine.Default__GameplayStatics"
 local avatar = require("native_player_avatar")
-local owner, target, rendered, serial = nil, nil, nil, 0
+local players = require("players")
+local owner, guest_owner, target, peers, serial = nil, nil, nil, nil, 0
+-- TR_S's qualified spotlight transform relative to the held stock torch mesh.
+local stock_pose = {0, 21.66062, 0, 0, 90, 0, 1, .970104, .947917}
 local transform = {Translation = {X = 0, Y = 0, Z = 0}, Rotation = {X = 0, Y = 0, Z = 0, W = 1}, Scale3D = {X = 1, Y = 1, Z = 1}}
 
 local function valid(value) return value and value:IsValid() end
@@ -68,40 +71,46 @@ local function numbers(fields, offset)
     return values
 end
 
-local function capture(state, pawn)
+local function capture(state, pawn, previous, guest)
     local equipment = pawn.EquipedItem
     local instance = state.world.OwningGameInstance
     if not pawn:HasAuthority() or not held(equipment, pawn, state.world) or not equipment:HasAuthority()
         or not same(equipment.User, pawn) or not valid(instance) or not same(pawn.Save, instance.SaveSlot_Ref) then
-        owner = nil
         return
     end
     local spot, source = stock_beam(equipment, state.world)
     local model = equipment.SM_Prop_Torch_01
     if not spot or not source:HasAuthority() or type(source.Powered) ~= "boolean" or source.Powered ~= spot:IsVisible()
         or not valid(model) or not same(model:GetOwner(), equipment) or not valid(model.StaticMesh)
-        or model.StaticMesh:GetFullName() ~= "StaticMesh " .. mesh_path then owner = nil; return end
-    if owner and same(owner.source, source) and same(owner.pawn, pawn) and owner.power == source.Powered then return end
+        or model.StaticMesh:GetFullName() ~= "StaticMesh " .. mesh_path then return end
+    if previous and same(previous.source, source) and same(previous.pawn, pawn)
+        and previous.power == source.Powered then return previous end
 
     local id = avatar.player_id(state.local_pawn)
     local math_api = StaticFindObject(maths)
-    if id == nil or not valid(math_api) then owner = nil; return end
+    if id == nil or not valid(math_api) then return end
     local relative = math_api:MakeRelativeTransform(spot:K2_GetComponentToWorld(), model:K2_GetComponentToWorld())
     local p, r, c = relative.Translation, math_api:Quat_Rotator(relative.Rotation), source.Color
     local values = numbers({p.X, p.Y, p.Z, r.Pitch, r.Yaw, r.Roll, c.R, c.G, c.B}, 0)
-    if not values then owner = nil; return end
-    local prior = owner and same(owner.source, source) and same(owner.pawn, pawn) and owner
+    if not values then return end
+    if guest then
+        for index, expected in ipairs(stock_pose) do
+            if math.abs(expected - values[index]) > .05 then return end
+        end
+    end
+    local prior = previous and same(previous.source, source) and same(previous.pawn, pawn) and previous
     if not prior then serial = serial + 1 end
-    owner = {world = state.world, pawn = pawn, id = id, source = source, instance = serial,
+    return {world = state.world, pawn = pawn, id = id, source = source, instance = serial,
         switch = prior and prior.switch + 1 or 0, power = source.Powered, values = values}
 end
 
-local function clear_render()
+local function clear_render(view)
+    local rendered = view and view.rendered
     if rendered and valid(rendered.light) then
         if rendered.visual_only and valid(rendered.pawn) then rendered.light:K2_DestroyComponent(rendered.pawn)
         elseif valid(rendered.source) and rendered.source.Powered == false then rendered.light:SetVisibility(false, false) end
     end
-    rendered = nil
+    if view then view.rendered = nil end
 end
 
 local function remote(state, id)
@@ -170,50 +179,110 @@ local function click(listener, mount)
     return true
 end
 
-local function project(state, listener)
-    local pawn = target and remote(state, target.id)
+local function project(state, listener, view)
+    local pawn = remote(state, view.id)
     local mount = pawn and avatar.equipment_mesh(pawn, mesh_path)
-    if not target or not valid(pawn) or not valid(mount) then clear_render(); return end
-    if rendered and (not same(rendered.pawn, pawn) or not same(rendered.mount, mount) or rendered.instance ~= target.instance
-        or not valid(rendered.light) or not target.power) then clear_render() end
+    if not valid(pawn) or not valid(mount) then clear_render(view); return end
+    local rendered = view.rendered
+    if rendered and (not same(rendered.pawn, pawn) or not same(rendered.mount, mount) or rendered.instance ~= view.instance
+        or not valid(rendered.light) or not view.power) then clear_render(view); rendered = nil end
     local now = os.clock()
-    if target.power and not rendered and now >= target.next_retry then
-        target.next_retry = now + .5
+    if view.power and not rendered and now >= view.next_retry then
+        view.next_retry = now + .5
         local light, source = existing_beam(state.world, pawn)
         -- If the source is already active on this seat, leave the stock effect in charge.
         if light and (source.Powered ~= false or light:IsVisible()) then return end
-        if not light then
-            light, source = local_beam(pawn, mount, target.values), nil
+        if not light or view.guest then
+            light, source = local_beam(pawn, mount, view.values), nil
         end
         if valid(light) then
             rendered = {pawn = pawn, mount = mount, light = light, source = source,
-                instance = target.instance, visual_only = not source}
+                instance = view.instance, visual_only = not source}
+            view.rendered = rendered
         end
     end
     if rendered and not rendered.light:IsVisible() then rendered.light:SetVisibility(true, false) end
-    if target.click_until then
-        local current = now <= target.click_until
-        target.click_until = nil
-        if current and click(listener, rendered and rendered.light or mount) then target.heard = target.switch end
+    if view.click_until then
+        local current = now <= view.click_until
+        view.click_until = nil
+        if current and click(listener, rendered and rendered.light or mount) then view.heard = view.switch end
+    end
+end
+
+local function current(view, state, phase, pawn, driver, connection)
+    return view and view.phase == phase and same(view.pawn, pawn) and same(view.driver, driver)
+        and (phase == "hosting" or same(view.connection, connection)) and same(view.world, state.world)
+        and view.map == state.map
+end
+
+local function clear_peers()
+    if peers then
+        for _, view in pairs(peers.views) do clear_render(view) end
+        peers = nil
     end
 end
 
 function flashlight.sync(state, phase)
     local pawn, driver, connection = scope(state, phase)
-    if phase ~= "hosting" or not pawn or not pcall(capture, state, pawn) then owner = nil end
-    if target and (phase ~= "connected" or not same(target.pawn, pawn) or not same(target.driver, driver)
-        or not same(target.connection, connection) or not same(target.world, state.world) or target.map ~= state.map) then target = nil end
-    if phase == "connected" and pawn then project(state, pawn) else clear_render() end
+    local host_ok, host_source = false, nil
+    if phase == "hosting" and pawn then host_ok, host_source = pcall(capture, state, pawn, owner, false) end
+    owner = host_ok and host_source or nil
+    local guest_ok, guest_source = false, nil
+    if phase == "connected" and pawn and players.is_downed(pawn) == false then
+        guest_ok, guest_source = pcall(capture, state, pawn, guest_owner, true)
+    end
+    guest_owner = guest_ok and guest_source or nil
+    if target and not current(target, state, phase, pawn, driver, connection) then clear_render(target); target = nil end
+    if peers and not current(peers, state, phase, pawn, driver, connection) then clear_peers() end
+    if target then project(state, pawn, target) end
+    if peers then
+        for _, view in pairs(peers.views) do project(state, pawn, view) end
+    end
 end
 
 function flashlight.command(fields, state, phase)
-    if fields[2] ~= "native-flashlight-view" then return end
+    local guest_views = fields[2] == "native-guest-flashlight-view"
+    if not guest_views and fields[2] ~= "native-flashlight-view" then return end
     local pawn, driver, connection = scope(state, phase)
     local epoch = fields[4]
-    if phase ~= "connected" or fields[3] ~= state.map or not pawn or not epoch or #epoch ~= 32 or not epoch:match("^%x+$") then
-        error("flashlight view requires the authenticated local guest", 0)
+    if (phase ~= "connected" and (not guest_views or phase ~= "hosting")) or fields[3] ~= state.map
+        or not pawn or not epoch or #epoch ~= 32 or not epoch:match("^%x+$") then
+        error("flashlight view requires an active co-op listener", 0)
     end
-    if #fields == 4 then target = nil; clear_render(); return "flashlight view cleared" end
+    if guest_views then
+        if (#fields - 4) % 4 ~= 0 or #fields > 68 then error("invalid guest flashlight list", 0) end
+        if #fields == 4 then clear_peers(); return "guest flashlight views cleared" end
+        local previous = current(peers, state, phase, pawn, driver, connection) and peers.epoch == epoch and peers.views or {}
+        local views, local_id = {}, avatar.player_id(state.local_pawn)
+        for index = 5, #fields, 4 do
+            local id = math.tointeger(tonumber(fields[index]))
+            local instance = math.tointeger(tonumber(fields[index + 1]))
+            local switch = math.tointeger(tonumber(fields[index + 2]))
+            local power = fields[index + 3]
+            if not finite(id, 0, 2147483647) or not finite(instance, 1, 2147483647)
+                or not finite(switch, 0, 2147483647) or (power ~= "0" and power ~= "1") or views[id] or id == local_id then
+                error("invalid guest flashlight view", 0)
+            end
+            local prior = previous[id]
+            if prior and (instance < prior.instance or instance == prior.instance and switch < prior.switch) then
+                error("stale guest flashlight view", 0)
+            end
+            local same_source = prior and instance == prior.instance
+            views[id] = {guest = true, id = id, instance = instance, switch = switch, power = power == "1",
+                values = stock_pose, next_retry = 0, rendered = same_source and prior.rendered or nil,
+                click_until = same_source and (switch > prior.switch and os.clock() + .75 or prior.click_until) or nil,
+                heard = same_source and prior.heard or nil}
+        end
+        if peers and previous ~= peers.views then clear_peers() end
+        for id, prior in pairs(previous) do
+            if not views[id] or views[id].rendered ~= prior.rendered then clear_render(prior) end
+        end
+        peers = {world = state.world, driver = driver, connection = connection, map = state.map, pawn = pawn,
+            phase = phase, epoch = epoch, views = views}
+        for _, view in pairs(views) do project(state, pawn, view) end
+        return "guest flashlight views received"
+    end
+    if #fields == 4 then clear_render(target); target = nil; return "flashlight view cleared" end
     local id, instance, switch = math.tointeger(tonumber(fields[5])), math.tointeger(tonumber(fields[6])), math.tointeger(tonumber(fields[7]))
     local power, values = fields[8], numbers(fields, 8)
     if #fields ~= 17 or not finite(id, 0, 2147483647) or not finite(instance, 1, 2147483647)
@@ -222,10 +291,13 @@ function flashlight.command(fields, state, phase)
     local prior = target and target.epoch == epoch and target.id == id and target.instance == instance
         and same(target.pawn, pawn) and same(target.connection, connection) and target
     if prior and switch < prior.switch then error("flashlight view receipt is stale", 0) end
-    target = {world = state.world, driver = driver, connection = connection, map = state.map, pawn = pawn, epoch = epoch, id = id,
+    if not prior then clear_render(target) end
+    target = {world = state.world, driver = driver, connection = connection, map = state.map, pawn = pawn, epoch = epoch,
+        phase = phase, id = id,
         instance = instance, switch = switch, power = power == "1", values = values, next_retry = 0,
+        rendered = prior and prior.rendered or nil,
         click_until = prior and switch > prior.switch and os.clock() + .75 or nil, heard = prior and prior.heard or nil}
-    project(state, pawn)
+    project(state, pawn, target)
     return "stock flashlight beam view received"
 end
 
@@ -235,9 +307,36 @@ function flashlight.rows(state, phase, row)
             table.unpack(owner.values))
     end
     if phase == "connected" and target and same(target.world, state.world) and target.map == state.map then
+        local rendered = target.rendered
         return row("native-flashlight-view", target.epoch, target.id, target.instance, target.switch, target.power and 1 or 0,
             rendered and valid(rendered.light) and rendered.light:IsVisible() and 1 or 0, target.heard or "-")
     end
+end
+
+function flashlight.peer_rows(state, phase, row)
+    local rows = {}
+    if guest_owner and phase == "connected" and same(guest_owner.world, state.world) then
+        rows[#rows + 1] = row("native-guest-flashlight-source", state.local_pawn.name, guest_owner.instance,
+            guest_owner.switch, guest_owner.power and 1 or 0)
+    elseif phase == "hosting" then
+        for _, details in ipairs(state.guests) do
+            local pawn = details.pawn
+            if valid(pawn) and pawn:HasAuthority() and not pawn:IsLocallyControlled() and same(pawn:GetWorld(), state.world)
+                and not pawn:IsActorBeingDestroyed() and held(pawn.EquipedItem, pawn, state.world)
+                and same(pawn.EquipedItem.User, pawn) and pawn.EquipedItem:HasAuthority() then
+                local id = avatar.player_id(details)
+                if id ~= nil then rows[#rows + 1] = row("native-guest-flashlight-authority", id, details.name) end
+            end
+        end
+    end
+    if peers and peers.phase == phase and same(peers.world, state.world) then
+        for id, view in pairs(peers.views) do
+            local rendered = view.rendered
+            rows[#rows + 1] = row("native-guest-flashlight-view", peers.epoch, id, view.instance, view.switch,
+                view.power and 1 or 0, rendered and valid(rendered.light) and rendered.light:IsVisible() and 1 or 0, view.heard or "-")
+        end
+    end
+    return rows
 end
 
 return flashlight

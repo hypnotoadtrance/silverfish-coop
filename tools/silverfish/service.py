@@ -297,6 +297,7 @@ class Host:
         self.pickup_audio, self.pickup_playback = native_pickup_audio.PickupAudio(), native_pickup_audio.Playback()
         self.voice_audio, self.voice_playback = native_voice.VoiceQueue(), native_voice.Playback()
         self.guest_avatar_aims = {}
+        self.guest_flashlights = {}
         self.guest_sprints = {}
         self.applied_guest_sprints = None
         self.native_zone_walls = native_zone_walls
@@ -1920,6 +1921,9 @@ class Host:
         member = self.native_recipients().get(character) if self.native_guest else None
         if member and member["connected"] and not self.transitioning and time.monotonic() - self.last_seen < 2:
             pawn = member["pawn"]
+            gameplay[native_flashlight.GUEST_SUPPORT] = True
+            if beams := native_flashlight.peer_frame(self, exclude=character):
+                gameplay[native_flashlight.GUEST_BEAMS] = beams
             if health := native_guest_ui.health_frame(
                 self.last_game, self.zone_epoch, character, member, gameplay["players"].get(role, {})
             ):
@@ -2027,6 +2031,7 @@ class Host:
         role, character = identity
         if request.get("action") == "snapshot" and request.keys() <= {
             "action", "voice_events", "avatar_aim", "sprinting", "zone_epoch", native_guest_clock.WORLD_START,
+            native_flashlight.GUEST_SOURCE,
         }:
             if request.get("zone_epoch") == self.zone_epoch and not self.transitioning:
                 member = self.native_recipients().get(character) if self.native_guest else None
@@ -2036,6 +2041,8 @@ class Host:
                         self.voice_audio.received(self.last_game, self.zone_epoch, member["pawn"], request["voice_events"])
                     if type(request.get("avatar_aim")) is bool:
                         native_player_avatar.guest_aim(self, character, member, request["avatar_aim"])
+                    if native_flashlight.GUEST_SOURCE in request:
+                        native_flashlight.receive_guest(self, character, member["pawn"], request[native_flashlight.GUEST_SOURCE])
                     if type(request.get("sprinting")) is bool:
                         self.guest_sprints[character] = (
                             self.zone_epoch, member["pawn"], request["sprinting"], time.monotonic() + 1.5,
@@ -4119,6 +4126,9 @@ class Host:
                     self.last_game = await native_player_avatar.project_host(self, bridge)
                 with contextlib.suppress(OSError, RuntimeError, TimeoutError):
                     await self.project_guest_sprints(bridge)
+            with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                beams = native_flashlight.peer_frame(self)
+                self.last_game = await native_flashlight.project_peers(bridge, self.last_game, beams, self.zone_epoch)
             if self.mindcore_carry:
                 self.mindcore_carry.maintain()
             try:
@@ -5019,6 +5029,7 @@ class Client:
         self.next_snapshot = 0.0
         self.last_sprint_sent = None
         self.last_aim_sent = None
+        self.last_flashlight_sent = None
         self.next_projection = 0.0
         self.gameplay_seen = 0.0
         self.guest_clock = native_guest_clock.GuestClockView() if guest_clock else None
@@ -5114,6 +5125,7 @@ class Client:
         self.native_return_retry_allowed = False
         self.next_snapshot = 0.0
         self.last_sprint_sent = self.last_aim_sent = None
+        self.last_flashlight_sent = None
         self.stack_drop_projection.rebind()
         self.crate_lids.reset()
         self.control.event("client_link_authenticated", character_id=request["character_id"],
@@ -5779,9 +5791,12 @@ class Client:
         aim = self.last_game.get(native_player_avatar.LOCAL_AIM) if active else None
         sprint_update = (self.zone_epoch, sprint) if type(sprint) is bool else None
         aim_update = (self.zone_epoch, aim) if type(aim) is bool else None
+        flashlight_ready = active and self.gameplay.get(native_flashlight.GUEST_SUPPORT) is True
+        flashlight_update = native_flashlight.guest_update(self.last_game, self.zone_epoch) if flashlight_ready else None
         sprint_changed = sprint_update is not None and sprint_update != self.last_sprint_sent
         aim_changed = aim_update is not None and aim_update != self.last_aim_sent
-        if not (sprint_changed or aim_changed) and (edges_only or now < self.next_snapshot):
+        flashlight_changed = flashlight_ready and flashlight_update != self.last_flashlight_sent
+        if not (sprint_changed or aim_changed or flashlight_changed) and (edges_only or now < self.next_snapshot):
             return
         self.next_snapshot = now + 0.5
         request = {"action": "snapshot"}
@@ -5792,7 +5807,11 @@ class Client:
                 request.update(avatar_aim=aim, zone_epoch=self.zone_epoch)
             if sprint_update is not None:
                 request.update(sprinting=sprint, zone_epoch=self.zone_epoch)
+            if flashlight_update is not None or flashlight_changed:
+                request.update({native_flashlight.GUEST_SOURCE: flashlight_update[1] if flashlight_update else None,
+                                "zone_epoch": self.zone_epoch})
         self.last_sprint_sent, self.last_aim_sent = sprint_update, aim_update
+        self.last_flashlight_sent = flashlight_update
         self.snapshot_request = asyncio.create_task(self.transport.request(request, timeout=2))
 
     async def refresh_gameplay(self, *, project: bool = True, wait: bool = True) -> None:
@@ -6324,6 +6343,10 @@ class Client:
                           if active and self.transport.game_access and time.monotonic() - self.gameplay_seen < 3 else None)
             with contextlib.suppress(OSError, RuntimeError):
                 self.last_game = await native_flashlight.project(self.bridge, self.last_game, flashlight, self.zone_epoch)
+            with contextlib.suppress(OSError, RuntimeError, TimeoutError):
+                peer_beams = (self.gameplay.get(native_flashlight.GUEST_BEAMS)
+                              if active and self.transport.game_access and time.monotonic() - self.gameplay_seen < 1.5 else None)
+                self.last_game = await native_flashlight.project_peers(self.bridge, self.last_game, peer_beams, self.zone_epoch)
             await self.guest_ui.sync_health(self, active)
             if active and self.last_game.get("map") == self.expected_zone and time.monotonic() - self.gameplay_seen < 2:
                 self.last_game = await self.hurt_playback.sync(

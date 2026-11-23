@@ -1,4 +1,6 @@
-"""Project the listen host's qualified standard flashlight to nearby peers."""
+"""Project a qualified standard flashlight to other co-op players."""
+
+import time
 
 from . import native_player_avatar
 from .party import REQUEST_ID
@@ -8,6 +10,16 @@ SOURCE_TAG = "native-flashlight-source"
 VIEW_TAG = "native-flashlight-view"
 KEY = "native_flashlight"
 VIEW = "native_flashlight_view"
+GUEST_SOURCE_TAG = "native-guest-flashlight-source"
+GUEST_AUTHORITY_TAG = "native-guest-flashlight-authority"
+GUEST_VIEW_TAG = "native-guest-flashlight-view"
+GUEST_SOURCE = "native_guest_flashlight_source"
+GUEST_AUTHORITY = "native_guest_flashlight_authority"
+GUEST_VIEW = "native_guest_flashlight_view"
+GUEST_BEAMS = "native_guest_flashlights"
+GUEST_SUPPORT = "native_guest_flashlight_support"
+MAX_GUEST_SOURCES = 16
+_LEASE = 1.5
 _BOUNDS = ((-250, 250),) * 3 + ((-180, 180),) * 3 + ((0, 1),) * 3
 
 
@@ -39,11 +51,118 @@ def parse_view(fields, phase):
     _, epoch, player, instance, switch, power, visible, heard = fields
     identity = tuple(map(int, (player, instance, switch)))
     heard = None if heard == "-" else int(heard)
-    if (phase != "connected" or not _identifier(epoch) or power not in ("0", "1") or visible not in ("0", "1")
+    permitted = ("connected", "hosting") if fields[0] == GUEST_VIEW_TAG else ("connected",)
+    if (phase not in permitted or not _identifier(epoch) or power not in ("0", "1") or visible not in ("0", "1")
             or not _identity(*identity) or heard is not None and not 0 <= heard <= identity[2]):
         raise ValueError("Invalid local flashlight view receipt")
     return dict(epoch=epoch, player=identity[0], instance=identity[1], switch=identity[2],
                 power=power == "1", visible=visible == "1", heard=heard)
+
+
+def _source_sample(values):
+    return (isinstance(values, (list, tuple)) and len(values) == 3
+            and _identity(0, values[0], values[1]) and type(values[2]) is bool)
+
+
+def parse_guest_source(fields, phase):
+    _, pawn, instance, switch, power = fields
+    sample = [int(instance), int(switch), power == "1"]
+    if (phase != "connected" or not pawn.startswith("Player_FP_C ") or len(pawn) > 480
+            or power not in ("0", "1") or not _source_sample(sample)):
+        raise ValueError("Invalid local guest flashlight source")
+    return {"pawn": pawn, "sample": sample}
+
+
+def parse_guest_authority(fields, phase):
+    _, player, pawn = fields
+    player = int(player)
+    if phase != "hosting" or not _identity(player, 1, 0) or not pawn.startswith("Player_FP_C ") or len(pawn) > 480:
+        raise ValueError("Invalid guest flashlight authority")
+    return player, pawn
+
+
+def guest_update(game, epoch):
+    source = game.get(GUEST_SOURCE, {})
+    pawn = game.get("pawns", {}).get("local", {}).get("name")
+    sample = source.get("sample")
+    if _identifier(epoch) and pawn and source.get("pawn") == pawn and _source_sample(sample):
+        return epoch, tuple(sample)
+
+
+def receive_guest(host, character, pawn, sample):
+    if sample is None:
+        host.guest_flashlights.pop(character, None)
+        return
+    if (not _source_sample(sample) or host.party.get("wipe")
+            or host.party.get("players", {}).get(character, {}).get("downed") is not False
+            or not pawn or pawn not in host.last_game.get(GUEST_AUTHORITY, {}).values()):
+        return
+    scope = host.zone_epoch, pawn
+    sample = tuple(sample)
+    prior = host.guest_flashlights.get(character)
+    if prior and prior[0] == scope:
+        old = prior[1]
+        if sample[:2] < old[:2] or sample[:2] == old[:2] and sample[2] != old[2]:
+            return
+    host.guest_flashlights[character] = scope, sample, time.monotonic()
+
+
+def peer_frame(host, exclude=None):
+    game, epoch, now = host.last_game, host.zone_epoch, time.monotonic()
+    if (game.get("state") != "hosting" or not isinstance(game.get("map"), str) or not _identifier(epoch)
+            or host.transitioning or host.party.get("wipe") or now - host.last_seen > _LEASE):
+        host.guest_flashlights.clear()
+        return
+    if not host.guest_flashlights:
+        return
+    players = host.party.get("players", {})
+    members = host.native_recipients()
+    ids = {pawn: int(player) for player, pawn in game.get(GUEST_AUTHORITY, {}).items()}
+    rows = []
+    for character, (scope, state, seen) in tuple(host.guest_flashlights.items()):
+        member = members.get(character, {})
+        pawn = member.get("pawn")
+        if (scope != (epoch, pawn) or not member.get("connected") or now - seen > _LEASE
+                or players.get(character, {}).get("downed") is not False or pawn not in ids):
+            del host.guest_flashlights[character]
+        elif character != exclude:
+            rows.append([ids[pawn], *state])
+    if 0 < len(rows) <= MAX_GUEST_SOURCES:
+        return {"map": game["map"], "epoch": epoch, "sources": sorted(rows)}
+
+
+async def project_peers(bridge, game, incoming, epoch):
+    area, applied = game.get("map"), game.get(GUEST_VIEW, {})
+    if game.get("state") not in ("hosting", "connected") or not isinstance(area, str) or not _identifier(epoch):
+        return game
+    if incoming is None:
+        if not applied:
+            return game
+        expected = {}
+    else:
+        if not isinstance(incoming, dict) or (incoming.get("map"), incoming.get("epoch")) != (area, epoch):
+            return game
+        expected = {}
+        rows = incoming.get("sources")
+        if not isinstance(rows, list) or not 0 < len(rows) <= MAX_GUEST_SOURCES:
+            return game
+        for row in rows:
+            if (not isinstance(row, list) or len(row) != 4 or not _identity(*row[:3])
+                    or type(row[3]) is not bool or str(row[0]) in expected):
+                return game
+            expected[str(row[0])] = epoch, *row[1:]
+
+    def assigned(value):
+        return {key: (row["epoch"], row["instance"], row["switch"], row["power"]) for key, row in value.items()}
+
+    if assigned(applied) == expected:
+        return game
+    fields = [str(value) for row in (incoming or {}).get("sources", [])
+              for value in (*row[:3], int(row[3]))]
+    result = await bridge.command(GUEST_VIEW_TAG, area, epoch, *fields, timeout=2)
+    if assigned(result.get(GUEST_VIEW, {})) != expected:
+        raise RuntimeError("The observer did not accept the guest flashlight views")
+    return result
 
 
 def frame(host):

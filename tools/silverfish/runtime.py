@@ -1588,6 +1588,21 @@ class Bridge:
                     data[native_flashlight.KEY] = native_flashlight.parse_source(fields, data.get("state"))
                 elif fields[0] == native_flashlight.VIEW_TAG and len(fields) == 8 and native_flashlight.VIEW not in data:
                     data[native_flashlight.VIEW] = native_flashlight.parse_view(fields, data.get("state"))
+                elif fields[0] == native_flashlight.GUEST_SOURCE_TAG and len(fields) == 5 and native_flashlight.GUEST_SOURCE not in data:
+                    data[native_flashlight.GUEST_SOURCE] = native_flashlight.parse_guest_source(fields, data.get("state"))
+                elif fields[0] == native_flashlight.GUEST_AUTHORITY_TAG and len(fields) == 3:
+                    player, pawn = native_flashlight.parse_guest_authority(fields, data.get("state"))
+                    entries = data.setdefault(native_flashlight.GUEST_AUTHORITY, {})
+                    if str(player) in entries or len(entries) >= native_flashlight.MAX_GUEST_SOURCES:
+                        raise ValueError("Repeated or oversized guest flashlight authority")
+                    entries[str(player)] = pawn
+                elif fields[0] == native_flashlight.GUEST_VIEW_TAG and len(fields) == 8:
+                    report = native_flashlight.parse_view(fields, data.get("state"))
+                    entries = data.setdefault(native_flashlight.GUEST_VIEW, {})
+                    player = str(report["player"])
+                    if player in entries or len(entries) >= native_flashlight.MAX_GUEST_SOURCES:
+                        raise ValueError("Repeated or oversized guest flashlight view")
+                    entries[player] = report
                 elif fields[0] == native_stock_door.TAG:
                     report = native_stock_door.parse(fields, data.get("state"), data.get("map"))
                     doors = data.setdefault(native_stock_door.KEY, {})
