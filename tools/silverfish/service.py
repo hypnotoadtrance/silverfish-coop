@@ -42,7 +42,7 @@ from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
 from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore_carry, native_mindcore_view
-from . import native_lantern, native_stock_door
+from . import native_flashlight, native_lantern, native_stock_door
 from . import native_player_avatar
 from . import native_pickup_audio
 from . import native_damage_feedback, native_weather_view
@@ -986,6 +986,8 @@ class Host:
             view[native_loot.POWER_BOX_STATES] = boxes
         if lantern := native_lantern.frame(self.last_game, self.zone_epoch):
             view[native_lantern.KEY] = lantern
+        if flashlight := native_flashlight.frame(self):
+            view[native_flashlight.KEY] = flashlight
         if doors := native_stock_door.frame(self.last_game, self.zone_epoch):
             view[native_stock_door.KEY] = doors
         if rolls := self.party.get(native_enemy_loot.STATE_KEY):
@@ -6296,6 +6298,10 @@ class Client:
                     self.next_retry = time.monotonic() + self.auto_delay
             active = (self.transport.connected and self.last_game.get("state") == "connected"
                       and not self.needs_travel and not self.server_transitioning)
+            flashlight = (self.gameplay.get(native_flashlight.KEY)
+                          if active and self.transport.game_access and time.monotonic() - self.gameplay_seen < 3 else None)
+            with contextlib.suppress(OSError, RuntimeError):
+                self.last_game = await native_flashlight.project(self.bridge, self.last_game, flashlight, self.zone_epoch)
             await self.guest_ui.sync_health(self, active)
             if active and self.last_game.get("map") == self.expected_zone and time.monotonic() - self.gameplay_seen < 2:
                 self.last_game = await self.hurt_playback.sync(

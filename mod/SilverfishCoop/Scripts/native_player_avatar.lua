@@ -830,6 +830,15 @@ end
 
 avatar.player_id = player_id
 
+function avatar.equipment_mesh(pawn, path)
+    local entry = valid(pawn) and avatars[pawn:GetAddress()]
+    for _, component in ipairs(entry and entry.weapon_parts or {}) do
+        local mesh = valid(component) and component:IsA(StaticFindObject("/Script/Engine.StaticMeshComponent"))
+            and component.StaticMesh
+        if valid(mesh) and mesh:GetFullName() == "StaticMesh " .. path then return component end
+    end
+end
+
 function avatar.visible(pawn)
     local entry = avatars[pawn:GetAddress()]
     return entry and entry.status == "default_body"

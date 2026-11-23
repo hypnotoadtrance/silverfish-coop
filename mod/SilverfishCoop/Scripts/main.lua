@@ -37,6 +37,7 @@ local native_datasilo_lift = require("native_datasilo_lift")
 local native_datasilo_door = require("native_datasilo_door")
 local native_stock_door = require("native_stock_door")
 local native_lantern = require("native_lantern")
+local native_flashlight = require("native_flashlight")
 local native_stock_enemy_drops = require("native_stock_enemy_drops")
 local native_cistern_lockpick = require("native_cistern_lockpick")
 local native_mindcore_carry = require("native_mindcore_carry")
@@ -1125,6 +1126,7 @@ local function run_command(fields, state, current_phase)
         or native_datasilo_door.command(fields, state, current_phase)
         or native_stock_door.command(fields, state, current_phase)
         or native_lantern.command(fields, state, current_phase)
+        or native_flashlight.command(fields, state, current_phase)
         or native_crate_props.command(fields, state, current_phase)
         or native_prop_carry.command(fields, state, current_phase)
         or native_flare.command(fields, state, current_phase)
@@ -1308,6 +1310,8 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         end
     end
     for _, row in ipairs(native_player_avatar.rows(status_row)) do rows[#rows + 1] = row end
+    local flashlight = native_flashlight.rows(state, current_phase, status_row)
+    if flashlight then rows[#rows + 1] = flashlight end
     for _, row in ipairs(native_voice.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
     for _, row in ipairs(native_replication_budget.rows(status_row)) do rows[#rows + 1] = row end
     rows[#rows + 1] = status_row("native-zone-loading-support", 1)
@@ -1733,6 +1737,7 @@ local function tick(fields, pending, periodic)
         players.sync(state, current_phase)
         native_stash_view.sync(state, current_phase)
         native_player_avatar.sync(state, current_phase)
+        pcall(native_flashlight.sync, state, current_phase)
         native_avatar_lean_bridge.sync(state, current_phase)
         native_replication_budget.sync(state, current_phase)
         native_avatar_capture_fixture.sync(state, current_phase, native_player_avatar)

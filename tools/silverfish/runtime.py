@@ -35,7 +35,7 @@ from . import native_mushrooms
 from . import native_prop_carry
 from . import native_flare
 from . import native_stock_enemy_drops
-from . import native_lantern, native_stock_door
+from . import native_flashlight, native_lantern, native_stock_door
 from . import native_player_avatar
 from . import native_weapon_fire_view
 from . import native_damage_feedback, native_guest_clock, native_weather_view
@@ -1584,6 +1584,10 @@ class Bridge:
                     if native_lantern.KEY in data:
                         raise ValueError("Duplicate Observatory lantern status")
                     data[native_lantern.KEY] = native_lantern.parse(fields, data.get("state"), data.get("map"))
+                elif fields[0] == native_flashlight.SOURCE_TAG and len(fields) == 14 and native_flashlight.KEY not in data:
+                    data[native_flashlight.KEY] = native_flashlight.parse_source(fields, data.get("state"))
+                elif fields[0] == native_flashlight.VIEW_TAG and len(fields) == 8 and native_flashlight.VIEW not in data:
+                    data[native_flashlight.VIEW] = native_flashlight.parse_view(fields, data.get("state"))
                 elif fields[0] == native_stock_door.TAG:
                     report = native_stock_door.parse(fields, data.get("state"), data.get("map"))
                     doors = data.setdefault(native_stock_door.KEY, {})
