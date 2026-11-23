@@ -748,9 +748,16 @@ async def verify_resident_npc_override(host: Seat, guest: Seat, _pawn: str) -> d
     assert float(await command(host, "observe", drone)) == before
     total = float(await command(host, "host-damage", drone))
     assert total >= before
-    async with asyncio.timeout(8):
-        while await command(guest, "death", drone) != "ragdoll" or await command(host, "death", drone) != "ragdoll":
-            await asyncio.sleep(.1)
+    result = None
+    try:
+        async with asyncio.timeout(8):
+            while True:
+                result = await asyncio.gather(*(command(seat, "death", drone) for seat in (host, guest)))
+                if result == ["false,true,1"] * 2:
+                    break
+                await asyncio.sleep(.1)
+    except TimeoutError as error:
+        raise AssertionError(f"The host and guest drone death states were {result}") from error
     assert campaign_save_hashes(host.campaign) == checkpoint, "Drone damage caused an early checkpoint"
     return {"resident_npc_override": {"host_stock_drone": drone, "guest_stock_drone": guest_drone,
                                       "hit_points_before": before,

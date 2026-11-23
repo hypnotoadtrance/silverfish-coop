@@ -3,7 +3,7 @@ local corpses = {}
 local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local drone_path = "/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C"
 local marker_path = "/Script/Engine.TargetPoint"
-local npc_class, marker_class, clock, death_hook, drone_death_hook
+local npc_class, marker_class, clock, death_hook, drone_death_hook, drone_seen
 local active_world, markers, numbered, mirrors, ended, anchors = nil, {}, {}, {}, {}, {}
 local pending = {}
 local next_sample, corpse_number = 0, 0
@@ -21,7 +21,7 @@ end
 
 local function is_drone(actor)
     local class = actor:GetClass()
-    return class:GetName() == "NPC_Drone_C" and class:GetFullName() == "BlueprintGeneratedClass " .. drone_path
+    return class:GetFName():ToString() == "NPC_Drone_C" and class:GetFullName() == "BlueprintGeneratedClass " .. drone_path
 end
 
 local function supported_corpse(actor)
@@ -234,13 +234,13 @@ function corpses.start(role)
             pending[marker:GetAddress()] = marker
         end
     end)
-    RegisterBeginPlayPostHook(function(context)
-        if drone_death_hook or role() ~= "host" then return end
-        local actor = context:get()
-        if not valid(actor) or not is_drone(actor) then return end
-        RegisterHook(drone_path .. ":Die", function(victim) pcall(publish, victim:get()) end)
-        drone_death_hook = true
-    end)
+    if type(NotifyOnNewObject) == "function" then
+        NotifyOnNewObject(drone_path, function(actor)
+            if role() ~= "host" or not valid(actor) or not is_drone(actor) then return end
+            drone_seen = true
+            return true
+        end)
+    end
     RegisterEndPlayPreHook(function(context)
         if next(markers) == nil and next(mirrors) == nil and next(pending) == nil then return end
         local actor = context:get()
@@ -265,6 +265,10 @@ function corpses.sync(state, phase)
     end
     if not valid(world) then return end
     if not valid(npc_class) then npc_class = StaticFindObject(npc_path) end
+    if hosting and drone_seen and not drone_death_hook and valid(StaticFindObject(drone_path .. ":Die")) then
+        RegisterHook(drone_path .. ":Die", function(victim) pcall(publish, victim:get()) end)
+        drone_death_hook = true
+    end
     if hosting and not death_hook and valid(StaticFindObject(npc_path .. ":ResolveDeath")) then
         -- UE4SS invokes hooks on Blueprint functions after the original script.
         RegisterHook(npc_path .. ":ResolveDeath", function(context) pcall(publish, context:get()) end)

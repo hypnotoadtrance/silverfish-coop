@@ -64,7 +64,11 @@ local function run(action, actor_path)
     if action == "death" then
         local mesh = actor.Mesh
         assert(valid(mesh) and same(mesh:GetOwner(), actor), "stock drone mesh unavailable")
-        return actor.Alive == false and mesh:IsAnySimulatingPhysics() and "ragdoll" or "waiting"
+        local markers = 0
+        for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
+            if valid(marker) and same(marker:GetOwner(), actor) and marker.bReplicates then markers = markers + 1 end
+        end
+        return ("%s,%s,%d"):format(tostring(actor.Alive), tostring(mesh:IsAnySimulatingPhysics()), markers)
     end
 
     assert((action == "guest-damage" and not host) or (action == "host-damage" and host), "wrong damage test seat")
