@@ -193,6 +193,36 @@ class ReleaseHandoffTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GuestPoseTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_local_samples_can_move_the_current_grip_between_status_frames(self):
+        epoch, lease = "a" * 32, "b" * 32
+        transport = SimpleNamespace(game_access=True, send_prop_pose=Mock(return_value=True))
+        game = {"state": "connected", "map": "/Game/Test", "pawns": {"local": {"name": "local pawn"}}}
+        service = SimpleNamespace(zone_epoch=epoch, expected_zone="/Game/Test",
+                                  needs_travel=False, server_transitioning=False,
+                                  gameplay={carry.POSE_DATAGRAM: True}, transport=transport, last_game=game)
+        guest = carry.Guest(service)
+        guest.epoch, guest.lease, guest.grab = epoch, lease, 4
+        guest._forward_local_pose(b"unowned pawn\t4\t400\t100\t80\t0\t45\t0", 2)
+        guest._forward_local_pose(b"local pawn\t3\t400\t100\t80\t0\t45\t0", 2)
+        guest._forward_local_pose(b"local pawn\t4\t400\t100\tinf\t0\t45\t0", 2)
+        transport.send_prop_pose.assert_not_called()
+
+        guest._forward_local_pose(b"local pawn\t4\t400\t100\t80\t0\t45\t0", 2)
+        guest._forward_local_pose(b"local pawn\t4\t410\t100\t80\t0\t47\t0", 2.02)
+        guest._forward_local_pose(b"local pawn\t4\t425\t100\t80\t0\t50\t0", 2.06)
+        self.assertEqual([carry.unpack_pose(call.args[0]) for call in transport.send_prop_pose.call_args_list], [
+            (epoch, lease, 1, (400, 100, 80, 0, 45, 0)),
+            (epoch, lease, 2, (425, 100, 80, 0, 50, 0)),
+        ])
+
+        guest._forward_local_pose(b"local pawn\t4\t425\t100\t80\t0\t50\t0", 2.12)
+        service.needs_travel = True
+        guest._forward_local_pose(b"local pawn\t4\t440\t100\t80\t0\t55\t0", 2.26)
+        service.needs_travel = False
+        service.zone_epoch = "c" * 32
+        guest._forward_local_pose(b"local pawn\t4\t440\t100\t80\t0\t55\t0", 2.32)
+        self.assertEqual(transport.send_prop_pose.call_count, 2)
+
     async def test_uses_datagrams_only_after_the_host_advertises_support(self):
         epoch, lease = "a" * 32, "b" * 32
         position = (400.1, -39.3, 2300.7, 11.4, -163.1, 0.0)

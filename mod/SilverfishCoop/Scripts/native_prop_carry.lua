@@ -17,7 +17,7 @@ local max_linear_velocity = 6000
 local max_angular_velocity = 7200
 local color = {R = 0, G = 0, B = 0, A = 0}
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
-local world, state, phase, hook, release_hook, mailbox, sequence, next_read
+local world, state, phase, hook, release_hook, mailbox, sequence, next_read, next_local_pose
 local enrolled, holdings, edges, local_hold, latest = {}, {}, {}, nil, nil
 local fixture_actor, loose_fixtures = nil, {}
 local headless = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -823,9 +823,29 @@ local function read_targets(now)
     end
 end
 
+local function publish_local_pose(now)
+    if not local_hold or now < (next_local_pose or 0) or type(SilverfishPublishLocalPropPose) ~= "function" then return end
+    next_local_pose = now + .05
+    local pawn = local_hold.pawn
+    if not state.listening or state.server ~= true or not same(state.local_pawn and state.local_pawn.pawn, pawn)
+        or pawn.Dead ~= false or not pawn:IsLocallyControlled() or pawn:HasAuthority() or players.is_downed(pawn) ~= false
+        or not held(pawn, local_hold.actor, handle(pawn), local_hold.corpse) then return end
+    local position, rotation = stock_target(pawn)
+    if point(position) and pose(rotation) then
+        SilverfishPublishLocalPropPose(string.format("%s\t%d\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f",
+            pawn:GetFullName(), local_hold.serial, position.X, position.Y, position.Z,
+            rotation.Pitch, rotation.Yaw, rotation.Roll))
+    end
+end
+
 function carry.update()
-    if phase == "connected" and local_hold and local_hold.filter_lease
-        and (not valid(local_hold.pawn) or players.is_downed(local_hold.pawn)) then release_grip_filter() end
+    if phase == "connected" then
+        if not local_hold then return end
+        if local_hold.filter_lease
+            and (not valid(local_hold.pawn) or players.is_downed(local_hold.pawn)) then release_grip_filter() end
+        publish_local_pose(os.clock())
+        return
+    end
     if phase ~= "hosting" or not next(holdings) then return end
     local now = os.clock()
     read_targets(now)
@@ -902,7 +922,7 @@ function carry.sync(current, seat, bridge)
     if seat ~= "connected" or not same(world, current.world) then release_grip_filter() end
     if not same(world, current.world) then
         world, enrolled, holdings, edges, local_hold, latest = current.world, {}, {}, {}, nil, nil
-        fixture_actor, loose_fixtures, next_read = nil, {}, nil
+        fixture_actor, loose_fixtures, next_read, next_local_pose = nil, {}, nil, nil
     end
     state, phase, mailbox = current, seat, bridge and bridge .. "/native-prop-carry-poses"
     if not hook and type(RegisterHook) == "function" and valid(StaticFindObject(grab_path)) then

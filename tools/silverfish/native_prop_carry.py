@@ -37,6 +37,7 @@ _ORDER_LIMIT = 2**53
 _POSE_LIMITS = (1e7, 1e7, 1e7, 360, 360, 360)
 _RELEASE_LIMITS = (*_POSE_LIMITS, 6000, 6000, 6000, 7200, 7200, 7200)
 _POSE_FRAME = Struct("!16s16sQiiihhh")
+_LOCAL_POSE_INTERVAL = .05
 
 
 def _serial(value):
@@ -310,6 +311,8 @@ class Guest:
         self.seen = self.sample = 0
         self.next_pose = 0
         self.last_pose = None
+        self.last_local_sample = None
+        self.local_pose_ready = asyncio.Event()
         self.pose_heartbeat = 0
         self.pose_error = None
         self.edges = deque(maxlen=6)
@@ -343,6 +346,10 @@ class Guest:
             if proof.get("sequence") != number:
                 raise ValueError("The host action did not match the stock carry")
             self.lease, self.grab = (lease, number) if edge == "grab" else (None, None)
+            if self.lease:
+                self.local_pose_ready.set()
+            else:
+                self.local_pose_ready.clear()
             self.filter_actor = None
             self.filter_version = 0
             if self.filter_enabled and edge == "grab" and row.get("placement"):
@@ -350,8 +357,11 @@ class Guest:
                 if proof.get("lease") == lease and proof.get("edge") == "grab" and actor.partition(" ")[2] == row["placement"]:
                     self.filter_actor = actor
             self.last_pose = None
+            self.last_local_sample = None
+            self.next_pose = 0
         except (OSError, ValueError, RuntimeError) as error:
             self.lease = self.grab = None
+            self.local_pose_ready.clear()
             self.filter_actor = None
             service.control.event("native_prop_carry_refused", edge=edge, reason=str(error))
             if edge == "grab" and any(key in row for key in ("corpse", "placement", "loot_id")):
@@ -403,6 +413,50 @@ class Guest:
         self.filter_version = version
         self.filter_job = asyncio.create_task(self._arm_filter(confirmation, self.service.gameplay_seen))
 
+    def _send_pose(self, position, now, interval):
+        service = self.service
+        if (now < self.next_pose or self.pose is not None and not self.pose.done()
+                or position == self.last_pose and now < self.pose_heartbeat):
+            return
+        self.next_pose, self.sample = now + interval, self.sample + 1
+        if service.gameplay.get(POSE_DATAGRAM) is True:
+            if not service.transport.send_prop_pose(pack_pose(self.epoch, self.lease, self.sample, position)):
+                return
+        else:
+            target = "@".join((self.epoch, self.lease, str(self.sample), *(f"{axis:.1f}" for axis in position)))
+            self.pose = asyncio.create_task(self._pose(target))
+        self.last_pose, self.pose_heartbeat = position, now + .45
+
+    @property
+    def has_local_pose_stream(self):
+        return getattr(self.service.bridge.local_bridge, "local_prop_pose_available", False)
+
+    def _forward_local_pose(self, frame, now):
+        service, game = self.service, self.service.last_game
+        if (not frame or self.epoch is None or self.epoch != service.zone_epoch or not self.lease
+                or not service.transport.game_access or service.gameplay.get(POSE_DATAGRAM) is not True
+                or game.get("state") != "connected" or game.get("map") != service.expected_zone
+                or service.needs_travel or service.server_transitioning):
+            return
+        pawn = game.get("pawns", {}).get("local", {}).get("name")
+        try:
+            fields = frame.decode("ascii").split("\t")
+            if len(fields) != 8 or fields[0] != pawn or _serial(fields[1]) != self.grab:
+                return
+            position = _numbers(fields[2:], _POSE_LIMITS)
+        except ValueError:
+            return
+        self.last_local_sample = now
+        self._send_pose(position, now, _LOCAL_POSE_INTERVAL)
+
+    async def stream_local_poses(self):
+        mailbox = self.service.bridge.local_bridge
+        while not self.service.stopping:
+            await self.local_pose_ready.wait()
+            if self.lease:
+                self._forward_local_pose(mailbox.take_local_prop_pose(), time.monotonic())
+            await asyncio.sleep(_LOCAL_POSE_INTERVAL)
+
     def poll(self, active):
         service = self.service
         game = service.last_game
@@ -424,18 +478,10 @@ class Guest:
         grip = game.get(TARGET, {})
         if self.filter_enabled:
             self._poll_filter(grip)
-        if (self.lease and grip.get("grab") == self.grab and now >= self.next_pose
-                and (self.pose is None or self.pose.done())):
-            position = tuple(f"{axis:.1f}" for axis in grip["pose"])
-            if position == self.last_pose and now < self.pose_heartbeat:
-                return
-            self.next_pose, self.sample = now + .1, self.sample + 1
-            self.last_pose, self.pose_heartbeat = position, now + .45
-            if service.gameplay.get(POSE_DATAGRAM) is True:
-                service.transport.send_prop_pose(pack_pose(self.epoch, self.lease, self.sample, position))
-            else:
-                target = "@".join((self.epoch, self.lease, str(self.sample), *position))
-                self.pose = asyncio.create_task(self._pose(target))
+        if (self.lease and grip.get("grab") == self.grab
+                and (self.last_local_sample is None or now - self.last_local_sample >= .3)):
+            position = tuple(round(axis, 1) for axis in grip["pose"])
+            self._send_pose(position, now, .1)
 
     def close(self):
         for task in (self.action, self.pose, self.filter_job):
@@ -443,7 +489,10 @@ class Guest:
                 task.cancel()
         self.action = self.pose = None
         self.lease = self.grab = None
+        self.local_pose_ready.clear()
         self.filter_actor = self.filter_job = None
         self.filter_version = 0
+        self.last_local_sample = None
+        self.next_pose = 0
         self.last_pose = self.pose_error = None
         self.edges.clear()

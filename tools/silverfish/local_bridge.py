@@ -60,6 +60,12 @@ class LocalBridge:
         if self._prop_poses is not None:
             self._prop_poses.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
             self._prop_poses.restype = ctypes.c_int
+        self._take_local_prop_pose = getattr(library, "SilverfishBridgeTakeLocalPropPoseV1", None)
+        self._local_prop_pose_buffer = None
+        if self._take_local_prop_pose is not None:
+            self._take_local_prop_pose.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            self._take_local_prop_pose.restype = ctypes.c_uint32
+            self._local_prop_pose_buffer = ctypes.create_string_buffer(768)
         self._take_avatar_pose = getattr(library, "SilverfishBridgeTakeAvatarPoseV1", None)
         self._publish_avatar_poses = getattr(library, "SilverfishBridgePublishAvatarPosesV1", None)
         self._avatar_pose_buffer = None
@@ -197,6 +203,17 @@ class LocalBridge:
             return False
         payload = frame.encode("ascii")
         return bool(self._prop_poses(payload, len(payload)))
+
+    @property
+    def local_prop_pose_available(self) -> bool:
+        return self._local_prop_pose_buffer is not None
+
+    def take_local_prop_pose(self) -> bytes | None:
+        buffer = self._local_prop_pose_buffer
+        if buffer is None:
+            return None
+        size = self._take_local_prop_pose(buffer, len(buffer))
+        return buffer[:size] if size else None
 
     @property
     def avatar_pose_available(self) -> bool:

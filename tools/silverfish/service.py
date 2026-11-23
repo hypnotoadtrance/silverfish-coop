@@ -6293,6 +6293,8 @@ class Client:
         held = asyncio.create_task(self.guest_held_input.run()) if self.guest_held_input else None
         lean = (asyncio.create_task(native_avatar_lean.follow(self))
                 if native_avatar_lean.enabled(self.bridge) else None)
+        prop_poses = (asyncio.create_task(self.prop_carry.stream_local_poses())
+                      if self.prop_carry.has_local_pose_stream else None)
         try:
             await self.run_session(pause_exit=pause_exit)
         finally:
@@ -6303,7 +6305,7 @@ class Client:
             if self.mindcore_carry:
                 self.mindcore_carry.close()
             self.prop_carry.close()
-            for task in (held, lean):
+            for task in (held, lean, prop_poses):
                 if task:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
