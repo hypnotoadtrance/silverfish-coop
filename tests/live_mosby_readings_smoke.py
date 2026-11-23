@@ -366,7 +366,8 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
 
         async def replay():
             receipt = await action(client, "native-quest-turnin", "--target", drill.QUEST_ID)
-            assert receipt == {"effect": "native_quest_already_settled", **record}, receipt
+            replayed = {key: value for key, value in receipt.items() if key not in ("id", "ok")}
+            assert receipt["ok"] is True and replayed == {"effect": "native_quest_already_settled", **record}, receipt
             observed = (await wait(run, lambda status: ready_stock(status, -10, 1)))["game"][drill.KEY]
             assert (observed["station"], observed["objective_guid"], observed["armor_guid"]) == (drill.STATION, None, None)
             assert observed["tape_after"] is True and observed["drill_tested_after"] is True and observed["eligible"] is False
