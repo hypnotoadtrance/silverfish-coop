@@ -84,6 +84,7 @@ namespace
     using Equipment = silverfish::guest_weapon_profiles::Profile;
     constexpr Equipment camera{"camera", camera_path, false, 0, 0, 0.0, false, nullptr, false};
     constexpr Equipment old_pipe{"old-pipe", old_pipe_path, false, 0, 0, 0.0, false, nullptr, false};
+    constexpr Equipment melee{"melee", nullptr, false, 0, 0, 0.0, false, nullptr, false};
     constexpr Equipment blowtorch{"blowtorch", STR("/Game/Classes/Equipment/Eqp_BlowTorch.Eqp_BlowTorch_C"),
                                     false, 0, 0, 0.0, false, nullptr, false};
     constexpr Equipment crowbar{"crowbar", STR("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Crowbar.MeleeWep_Crowbar_C"),
@@ -349,7 +350,8 @@ namespace
         // Stock held-actor references are not replicated. An authenticated
         // server authorization can cover an otherwise empty local proxy.
         if (!current.seat.mirrored) return !observed && !current.seat.host && held == nullptr;
-        auto* item = find<U::UClass>(current.item->path);
+        auto* item = current.item == &melee ? (live(held) ? held->GetClassPrivate() : nullptr)
+                                            : find<U::UClass>(current.item->path);
         if (!live(held) || held != current.seat.held.Get() || !item || held->GetClassPrivate() != item ||
             object_field(held, STR("Owner")) != pawn || object_field(held, STR("Instigator")) != pawn ||
             static_cast<U::AActor*>(held)->GetWorld() != current.seat.world.Get()) return false;
@@ -384,7 +386,7 @@ namespace
         if (index < 0 || index >= items.Num() || items.Num() > 4096) return false;
         const auto* row = items.GetRawPtr(index);
         if (schema.row_class(row) != item) return false;
-        if (current.item == &old_pipe || current.item == &crowbar || current.item == &spade)
+        if (current.item == &old_pipe || current.item == &melee || current.item == &crowbar || current.item == &spade)
         {
             auto* amount = field<U::FIntProperty>(held, STR("Ammo"));
             auto* held_by_player = field<U::FBoolProperty>(held, STR("HeldByPlayer"));
@@ -630,8 +632,9 @@ namespace
             !local->IsA(local_type) || (next.seat.host ? server != nullptr : !live(server) || !server->IsA(connection_type)))
             return "stock_guest_primary_connection_unavailable";
         if (next.item->kind == "camera" && !camera_scope(world)) return "stock_guest_camera_primary_unqualified";
-        if (next.item == &old_pipe && (next.seat.host || !silverfish::native_guest_melee::ordinary_world(world)))
-            return "stock_guest_old_pipe_primary_unqualified";
+        const bool uses_melee = next.item == &old_pipe || next.item == &melee;
+        if (uses_melee && (next.seat.host || !silverfish::native_guest_melee::ordinary_world(world)))
+            return "stock_guest_melee_primary_unqualified";
         next.seat.pawn = pawn;
         next.seat.world = world;
         next.seat.controller = controller;
@@ -641,6 +644,8 @@ namespace
         next.seat.server = server;
         if (next.seat.host) next.seat.stock = object_field(next.seat.instance.Get(), STR("SaveSlot_Ref"));
         auto* held = object_field(pawn, STR("EquipedItem"));
+        if (next.item == &melee && held && !silverfish::native_guest_melee::ordinary_weapon(held))
+            return "stock_guest_melee_equipment_unqualified";
         next.seat.mirrored = held != nullptr;
         next.seat.held = held;
         next.action = action;
@@ -657,7 +662,7 @@ namespace
         if (!next.started.function.Get()) return "stock_guest_primary_wrappers_unavailable";
         if (observed) return {};
         next.completed = bind_wrapper(pawn_type, action, completed_path, 16);
-        if (!next.seat.host && next.item != &old_pipe && next.item != &blowtorch && next.item != &camera && next.item != &spade)
+        if (!next.seat.host && !uses_melee && next.item != &blowtorch && next.item != &camera && next.item != &spade)
         {
             if (auto* aim = find<U::UObject>(aim_action_path); live(aim) && aim->GetClassPrivate() == action_type)
             {
@@ -893,6 +898,7 @@ namespace
             return result(lua, false, "native_guest_primary_exact_scope_required");
         if (kind == camera.kind) next.item = &camera;
         else if (kind == old_pipe.kind) next.item = &old_pipe;
+        else if (kind == melee.kind) next.item = &melee;
         else if (kind == blowtorch.kind) next.item = &blowtorch;
         else if (!host && kind == crowbar.kind) next.item = &crowbar;
         else if (!host && kind == spade.kind) next.item = &spade;
