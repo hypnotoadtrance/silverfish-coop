@@ -473,6 +473,68 @@ async def verify_resident_footsteps(host: Seat, guest: Seat) -> list[dict]:
     return receipts
 
 
+async def verify_resident_dry_fire(host: Seat, guest: Seat) -> dict:
+    async def command(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-dry-fire", action)
+
+    async def wait_for(seat, action, expected):
+        async with asyncio.timeout(8):
+            while await command(seat, action) != expected:
+                await asyncio.sleep(.05)
+
+    async def read_single_click(seat, source):
+        async with asyncio.timeout(6):
+            while True:
+                projectiles, clicks = (await command(seat, "read")).split(";")
+                assert projectiles == "0", (source, projectiles)
+                if clicks:
+                    break
+                await asyncio.sleep(.05)
+        await asyncio.sleep(.12)
+        assert await command(seat, "read") == f"0;{clicks}", "trigger click repeated or spawned a projectile"
+        kind, *position = clicks.split(",")
+        assert kind == source and len(position) == 3, clicks
+        return [float(axis) for axis in position]
+
+    for seat in (host, guest):
+        assert await command(seat, "arm") == "armed"
+    host_guid = await command(host, "seed-local")
+    guest_guid = await command(host, "seed-peer")
+    assert all(re.fullmatch(r"[0-9A-F]{32}", guid) for guid in (host_guid, guest_guid)) and host_guid != guest_guid
+    await wait_for(guest, "projected", guest_guid)
+    for seat, guid in ((host, host_guid), (guest, guest_guid)):
+        assert await command(seat, "equip") == "selected"
+        await wait_for(seat, "ready", guid)
+    await wait_for(host, "peer-ready", guest_guid)
+
+    guest_run = guest.client / "run"
+    guest_frame = await wait_resident_status(guest_run, lambda frame: (scope := frame.get("game", {}).get("native_guest_primary_scope", {}))
+                                            and (scope.get("guid"), scope.get("kind")) == (guest_guid, "pistol"), timeout=12)
+    tracked = {"native_weapon_shot_played", "native_weapon_dry_fire_played"}
+    before = [entry for entry in await resident_events(guest_run, guest_frame) if entry["event"] in tracked]
+    for seat in (host, guest):
+        assert await command(seat, "clear") == "clear"
+    assert await command(host, "host-press") == "pressed"
+    host_click, guest_heard = await asyncio.gather(read_single_click(host, "stock-weapon"), read_single_click(guest, "observer"))
+    assert math.dist(host_click, guest_heard) <= .03, (host_click, guest_heard)
+
+    for seat in (host, guest):
+        assert await command(seat, "clear") == "clear"
+    press = await submit(guest_run, "native-guest-primary-input-fixture")
+    assert press["ok"] and press["native_guest_primary_fixture"]["sequence"] > 0, press
+    host_heard, guest_click = await asyncio.gather(read_single_click(host, "observer"), read_single_click(guest, "observer"))
+    assert math.dist(host_heard, guest_click) <= .03, (host_heard, guest_click)
+    assert await command(host, "ready") == host_guid and await command(guest, "ready") == guest_guid
+    assert await command(host, "peer-ready") == guest_guid
+
+    events = [entry for entry in await resident_events(guest_run, guest_frame) if entry["event"] in tracked and entry not in before]
+    assert [entry["event"] for entry in events] == ["native_weapon_dry_fire_played"] * 2, events
+    assert len({entry["serial"] for entry in events}) == 2, events
+    return {"host_stock_click": host_click, "guest_heard_host": guest_heard, "guest_primary_input": press,
+            "host_heard_guest": host_heard, "guest_click": guest_click, "guest_cue_receipts": events,
+            "pistols_still_empty": True, "projectiles_spawned": 0, "observers_played_shot_effects": 0}
+
+
 async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_frame, guest_frame = await asyncio.gather(
@@ -521,12 +583,13 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str) -> dic
     visual, = [entry for entry in cues if entry["event"] == event_names[1]]
     assert visual["player_id"] == player_id, visual
     footsteps = await verify_resident_footsteps(host, guest)
+    dry_fire = await verify_resident_dry_fire(host, guest)
     assert not weapon_cue_files(host, guest), "Stock player cues wrote a legacy weapon cue mailbox"
     assert save_state() == before, "Stock use wrote a campaign save before the normal checkpoint"
     return {"resident_weapon_cues": {"stock_player_id": player_id, "source": class_name, "observer_cues": cues,
                                      "prop": prop, "local_bridge_both_peers": "memory",
                                      "no_cue_mailbox": True, "saves_unchanged_before_checkpoint": True,
-                                     "stock_footsteps": footsteps}}
+                                     "stock_footsteps": footsteps, "stock_dry_fire": dry_fire}}
 def unequip_rows(raw):
     result = []
     for entry in raw.split("|"):
@@ -1822,6 +1885,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableFootstepProbe",
                                                      fixture="portable_footstep_probe.lua"))
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableDryFireProbe",
+                                                     fixture="portable_dry_fire_probe.lua"))
         if stock_unequip:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableUnequipProbe",
