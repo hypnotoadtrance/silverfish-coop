@@ -925,7 +925,13 @@ namespace
         if (!available() || scope.seat.host != host || !count || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
         const auto pawn = lua.get_integer();
         const auto now = Clock::now();
-        if (pawn != address(scope.seat.pawn.Get()) || !qualified(scope, now) || !can_act(scope.seat)) return 0;
+        if (pawn != address(scope.seat.pawn.Get()) || !qualified(scope, now)) return 0;
+        if (!can_act(scope.seat))
+        {
+            // Pending taps cannot fire when a temporary weapon lock expires.
+            head = count = 0;
+            return 0;
+        }
         discard_expired(now);
         if (!count) return 0;
         lua.set_integer(static_cast<std::int64_t>(receipts[head].sequence));

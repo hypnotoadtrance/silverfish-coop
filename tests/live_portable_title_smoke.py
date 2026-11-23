@@ -771,6 +771,20 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
 
     guest_run = guest.client / "run"
 
+    scope = frame["game"]["native_guest_primary_scope"]
+    rejected = None
+    assert await command(guest, "dock-block-weapon") == "true"
+    try:
+        # Include a service renewal while the stock action gate is closed.
+        await asyncio.sleep(1.1)
+        locked = await wait_resident_status(guest_run, lambda snapshot:
+            snapshot.get("game", {}).get("native_guest_primary_scope") == scope, timeout=2)
+        rejected = await submit(guest_run, "native-guest-primary-input-fixture")
+        assert rejected.get("ok") is False and "temporarily blocked" in rejected["error"], rejected
+        assert locked["game"]["native_guest_primary_scope"] == scope
+    finally:
+        assert await command(guest, "dock-unblock-weapon") == "false"
+
     center, seat_point = (await command(host, "dock-natural-stage")).split(";")
     try:
         baseline = await command(host, "dock-natural-sample")
@@ -816,7 +830,8 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
                     await asyncio.sleep(.08)
         except (TimeoutError, RuntimeError) as error:
             raise AssertionError(f"Stock NPC did not retaliate against its guest attacker: {baseline} to {current}") from error
-        return {"baseline": baseline, "shot": info, "stock_target_and_hit": current}
+        return {"temporary_weapon_block": {"scope": scope, "rejected": rejected},
+                "baseline": baseline, "shot": info, "stock_target_and_hit": current}
     finally:
         assert await command(host, "dock-natural-stop") == "stopped"
 

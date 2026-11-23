@@ -640,6 +640,11 @@ local function run(action, actor_path)
         return select_equipment(pawn, function(row)
             return row[item_class]:GetFName():ToString() == "Wep_RustyPistol_C"
         end)
+    elseif action == "dock-block-weapon" or action == "dock-unblock-weapon" then
+        assert(not host and pawn.Dead == false and valid(pawn.EquipedItem), "the guest needs a live equipped pawn")
+        local blocked = action == "dock-block-weapon"
+        pawn.IsWeaponBlocked = blocked
+        return tostring(pawn.IsWeaponBlocked)
     elseif action == "dock-natural-stage" then
         assert(host, "the test stages the stock host NPC")
         return stage_live_worker(pawn, world)

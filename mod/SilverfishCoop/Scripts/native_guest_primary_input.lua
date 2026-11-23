@@ -61,7 +61,11 @@ end
 
 local function standing(current)
     return current and current.controller.Loading == false and current.pawn.Dead == false
-        and current.pawn.IsWeaponBlocked == false and type(is_downed) == "function" and is_downed(current.pawn) == false
+        and type(is_downed) == "function" and is_downed(current.pawn) == false
+end
+
+local function can_use(current)
+    return standing(current) and current.pawn.IsWeaponBlocked == false
 end
 
 local function emit(path, fields)
@@ -97,14 +101,15 @@ function primary.reset()
 end
 
 local function drain_taps(current, address)
+    if not standing(current) then
+        primary.reset()
+        return 0
+    end
     local emitted = 0
     for _ = 1, 8 do
         local sequence, owner, guid, kind = SilverfishTakeNativeGuestPrimaryIntent(address)
         if not valid_sequence(sequence) or owner ~= address or guid ~= binding.guid or kind ~= binding.kind then break end
-        if emitted == 0 and not standing(current) then
-            primary.reset()
-            break
-        end
+        if not can_use(current) then break end
         if kind == "blowtorch" or kind == "crowbar" then
             local actor = current.pawn.ActorBeingLookedAt
             local name = valid(actor) and actor:GetFullName()
@@ -167,6 +172,11 @@ function primary.command(fields, state, phase)
         primary.reset()
         error("Stock primary input requires the exact standing connected guest", 0)
     end
+    -- A stock weapon lock can outlast a scope renewal. Keep the same
+    -- authenticated equipment bound so input resumes when the lock clears.
+    if action ~= "native-guest-primary-scope" and not can_use(current) then
+        error("Stock primary input is temporarily blocked by the equipped player's state", 0)
+    end
     if action == "native-guest-held-fire-fixture" then
         local edge, duration = fields[4], math.tointeger(fields[5])
         if not held_enabled or not fixtures or (#fields ~= 4 and #fields ~= 5) or fields[3] ~= current.name
@@ -180,7 +190,7 @@ function primary.command(fields, state, phase)
         if duration then
             ExecuteInGameThreadWithDelay(duration, function()
                 if held_fixture_proof ~= press or not same_context(current, binding)
-                    or not standing(current) or binding.guid ~= press.guid then return end
+                    or not can_use(current) or binding.guid ~= press.guid then return end
                 local owner_address = current.pawn:GetAddress()
                 local stroke, owner, guid = SilverfishReadNativeGuestHeldFire(owner_address)
                 if stroke ~= press.stroke or owner ~= owner_address or guid ~= press.guid then return end
@@ -266,7 +276,7 @@ function primary.rows(state, phase, status_row)
         rows[#rows + 1] = status_row("native-guest-primary-fixture", current.map, current.name, fixture_proof.guid,
             fixture_proof.sequence, fixture_proof.wrappers)
     end
-    if held_enabled and binding.kind == "smg-standard" and standing(current)
+    if held_enabled and binding.kind == "smg-standard" and can_use(current)
         and type(SilverfishReadNativeGuestHeldFire) == "function" then
         local address = current.pawn:GetAddress()
         local stroke, owner, guid, proof = SilverfishReadNativeGuestHeldFire(address)
