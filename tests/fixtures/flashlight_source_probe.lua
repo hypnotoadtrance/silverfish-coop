@@ -6,6 +6,7 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_FL
 local map = "World /Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local guest_source = os.getenv("SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE") == "1"
 local heavy = guest_source and os.getenv("SILVERFISH_COOP_HEAVY_FLASHLIGHT_PROBE") == "1"
+local heavy_view = heavy and os.getenv("SILVERFISH_COOP_HEAVY_FLASHLIGHT_VIEW_PROBE") == "1"
 local equipment_asset = heavy and "Eqp_Heavy_Flashlight" or "Eqp_Flashlight"
 local mesh_asset = heavy and "SM_Prop_Flashlight_02" or "SM_Prop_Flashlight_01"
 local equipment_path = "/Game/Classes/Equipment/" .. equipment_asset .. "." .. equipment_asset .. "_C"
@@ -82,16 +83,21 @@ local function owner_row(pawn, actor, spot)
         valid(cookie) and cookie:GetFullName() or "-", power_calls, cue_calls)
 end
 
+local function measure_local_beam(spot, mesh, color)
+    local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
+    local relative = math_api:MakeRelativeTransform(spot:K2_GetComponentToWorld(), mesh:K2_GetComponentToWorld())
+    local point, aim, scale = relative.Translation, math_api:Quat_Rotator(relative.Rotation), relative.Scale3D
+    return string.format("%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f",
+        point.X, point.Y, point.Z, aim.Pitch, aim.Yaw, aim.Roll,
+        scale.X, scale.Y, scale.Z, color.R, color.G, color.B)
+end
+
 local function heavy_measurement(equipment, actor, spot)
     local mesh = equipment.SM_Prop_Torch_01
     assert(valid(mesh) and same(mesh:GetOwner(), equipment) and valid(mesh.StaticMesh)
         and mesh.StaticMesh:GetFullName() == mesh_name, "flashlight_probe_heavy_torch_unavailable")
-    local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
-    local relative = math_api:MakeRelativeTransform(spot:K2_GetComponentToWorld(), mesh:K2_GetComponentToWorld())
-    local point, aim, scale, color = relative.Translation, math_api:Quat_Rotator(relative.Rotation), relative.Scale3D, actor.Color
-    return string.format("%s\t%s\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f",
-        mesh.StaticMesh:GetFullName(), tostring(actor.Type), point.X, point.Y, point.Z, aim.Pitch, aim.Yaw, aim.Roll,
-        scale.X, scale.Y, scale.Z, color.R, color.G, color.B)
+    return table.concat({mesh.StaticMesh:GetFullName(), tostring(actor.Type),
+        measure_local_beam(spot, mesh, actor.Color)}, "\t")
 end
 
 local function observe(world, local_pawn, id)
@@ -105,6 +111,7 @@ local function observe(world, local_pawn, id)
     end
     assert(remote, "flashlight_probe_remote_not_ready")
     local sources, powered, visible, components, held_sources, display_meshes = 0, 0, 0, 0, 0, 0
+    local visible_component, avatar_torch
     for _, actor in ipairs(FindAllOf("FlashLight_Source_BP_C") or {}) do
         if valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed() then
             local parent = actor:GetParentActor()
@@ -124,14 +131,16 @@ local function observe(world, local_pawn, id)
     for _, parameter in ipairs(remote:K2_GetComponentsByClass(asset("/Script/Engine.SpotLightComponent"))) do
         local spot = type(parameter.type) == "function" and parameter:type() == "RemoteUnrealParam"
             and parameter:get() or parameter
-        if valid(spot) and same(spot:GetOwner(), remote) and spot:IsVisible() then components = components + 1 end
+        if valid(spot) and same(spot:GetOwner(), remote) and spot:IsVisible() then
+            components, visible_component = components + 1, spot
+        end
     end
     for _, parameter in ipairs(remote:K2_GetComponentsByClass(asset("/Script/Engine.StaticMeshComponent"))) do
         local component = type(parameter.type) == "function" and parameter:type() == "RemoteUnrealParam"
             and parameter:get() or parameter
         local mesh = valid(component) and component.StaticMesh
         if valid(mesh) and mesh:GetFullName() == mesh_name and same(component:GetOwner(), remote) then
-            display_meshes = display_meshes + 1
+            display_meshes, avatar_torch = display_meshes + 1, component
         end
     end
     local census = string.format("%s\t%d\t%d\t%d\t%d\t%d\t%d", remote:GetFullName(), sources, powered, visible, components,
@@ -147,7 +156,16 @@ local function observe(world, local_pawn, id)
         assert(equipment:HasAuthority(), "flashlight_probe_observer_equipment_authority_unavailable")
         mode, stock_power = tostring(equipment.Tertiary_Mode), tostring(actor.Powered)
     end
-    return table.concat({census, slot_guid(remote), held_class, mode, stock_power}, "\t")
+    local row = table.concat({census, slot_guid(remote), held_class, mode, stock_power}, "\t")
+    if not heavy_view then return row end
+    if not visible_component then return row .. "\t-" end
+    assert(components == 1 and display_meshes == 1 and same(visible_component:GetAttachParent(), avatar_torch),
+        "flashlight_probe_heavy_observer_mount_unavailable")
+    local cookie = visible_component.LightFunctionMaterial
+    local geometry = measure_local_beam(visible_component, avatar_torch, visible_component:GetLightColor())
+    return table.concat({row, avatar_torch.StaticMesh:GetFullName(), visible_component:GetFullName(),
+        valid(cookie) and cookie:GetFullName() or "-", visible_component.InnerConeAngle, visible_component.OuterConeAngle,
+        visible_component.Intensity, visible_component.AttenuationRadius, geometry}, "\t")
 end
 
 local function run(operation)

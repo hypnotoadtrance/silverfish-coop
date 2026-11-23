@@ -84,6 +84,11 @@ def flashlight_observer(values):
                 displayed_flashlight_mesh_count=int(display_meshes))
 
 
+def beam_geometry(axes):
+    x, y, z, pitch, yaw, roll, sx, sy, sz, r, g, b = map(float, axes)
+    return dict(relative_position=[x, y, z], relative_rotation=[pitch, yaw, roll], relative_scale=[sx, sy, sz], color=[r, g, b])
+
+
 async def observe_guest_stock_flashlight(host_run, guest_run, *, verify_view=False, heavy=False):
     proof_path = host_run / ("live-guest-heavy-flashlight-source-probe.json" if heavy
                              else "live-guest-flashlight-source-probe.json")
@@ -104,9 +109,7 @@ async def observe_guest_stock_flashlight(host_run, guest_run, *, verify_view=Fal
         row = dict(flashlight_owner(values[:-3]), slot_guid=guid, stacks=stacks, stock_mode=mode)
         if heavy:
             mesh, profile, *axes = geometry
-            x, y, z, pitch, yaw, roll, sx, sy, sz, r, g, b = map(float, axes)
-            row.update(mesh=mesh, stock_profile=profile, relative_position=[x, y, z], relative_rotation=[pitch, yaw, roll],
-                       relative_scale=[sx, sy, sz], color=[r, g, b])
+            row.update(mesh=mesh, stock_profile=profile, **beam_geometry(axes))
         return row
 
     async def phase(name, row, *, switch=None):
@@ -118,12 +121,15 @@ async def observe_guest_stock_flashlight(host_run, guest_run, *, verify_view=Fal
                 hosted = await wait(host_run, lambda frame: (
                     (local := frame.get("game", {}).get("native_guest_flashlight_view", {}).get(id_text))
                     and local["power"] is row["powered"] and local["visible"] is row["visible"]
+                    and local.get("profile") == ("heavy" if heavy else None)
                     and (local["heard"] is None if switch is None else local["heard"] == switch and local["switch"] == switch)
                 ), timeout=8)
                 table["receipt"] = hosted["game"]["native_guest_flashlight_view"][id_text]
+                expected = [table["receipt"]["instance"], table["receipt"]["switch"], row["powered"]]
+                if heavy:
+                    expected.append("heavy")
                 source = await wait(guest_run, lambda frame: (
-                    (local := frame.get("game", {}).get("native_guest_flashlight_source", {}).get("sample"))
-                    and local == [table["receipt"]["instance"], table["receipt"]["switch"], row["powered"]]
+                    frame.get("game", {}).get("native_guest_flashlight_source", {}).get("sample") == expected
                 ), timeout=5)
                 table["source"] = source["game"]["native_guest_flashlight_source"]
             finally:
@@ -136,10 +142,19 @@ async def observe_guest_stock_flashlight(host_run, guest_run, *, verify_view=Fal
         async with asyncio.timeout(6):
             while True:
                 values = await avatar_probe(host_run, f"observe{row['player']}")
+                if heavy and verify_view:
+                    values, projected = values[:11], values[11:]
                 guid, held_class, mode, power = values[-4:]
                 mirrored = table["host"] = dict(flashlight_observer(values[:-4]), slot_guid=guid,
                                                 authoritative_equipment=held_class, authoritative_mode=mode,
                                                 authoritative_power=power)
+                if heavy and verify_view:
+                    mirrored["projected_beam"] = None
+                    if projected != ["-"]:
+                        mesh, spotlight, cookie, inner, outer, intensity, radius, *axes = projected
+                        mirrored["projected_beam"] = dict(mesh=mesh, spotlight=spotlight, light_cookie=cookie,
+                                                          inner=float(inner), outer=float(outer), intensity=float(intensity),
+                                                          radius=float(radius), **beam_geometry(axes))
                 if not heavy or name != "off" or mirrored["displayed_flashlight_mesh_count"] == 1:
                     break
                 await asyncio.sleep(.2)
@@ -205,6 +220,14 @@ async def observe_guest_stock_flashlight(host_run, guest_run, *, verify_view=Fal
             assert all(row["powered_sources"] == row["visible_source_spotlights"] == 0
                        and row["displayed_flashlight_mesh_count"] == 1 for row in host_rows), proof
             assert len({phase["receipt"]["instance"] for phase in proof["phases"].values()}) == 1, proof
+            if heavy:
+                before, projected, after = (row["projected_beam"] for row in host_rows)
+                assert before is None and after is None and projected, proof
+                assert all(projected[key] == lit[key] for key in (
+                    "mesh", "light_cookie", "inner", "outer", "intensity", "radius", "color",
+                )), proof
+                assert all(math.isclose(a, b, abs_tol=.05) for key in ("relative_position", "relative_rotation", "relative_scale")
+                           for a, b in zip(projected[key], lit[key], strict=True)), proof
             assert await avatar_probe(guest_run, "clearlight") == ["restored"]
             await wait(guest_run, lambda state: "native_guest_flashlight_source" not in state.get("game", {}), timeout=6)
             await wait(host_run, lambda state: "native_guest_flashlight_view" not in state.get("game", {}), timeout=8)
@@ -560,6 +583,8 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
         env["SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE"] = "1"
     if guest_heavy_flashlight_source:
         env["SILVERFISH_COOP_HEAVY_FLASHLIGHT_PROBE"] = "1"
+        if guest_flashlight_view:
+            env["SILVERFISH_COOP_HEAVY_FLASHLIGHT_VIEW_PROBE"] = "1"
     else:
         env.pop("SILVERFISH_COOP_HEAVY_FLASHLIGHT_PROBE", None)
     if pose:
@@ -923,8 +948,12 @@ if __name__ == "__main__":
                        help="also verify host projection of the guest's beam and switch receipts")
     light.add_argument("--guest-heavy-flashlight-source", action="store_true",
                        help="measure the stock heavy flashlight beam relative to the guest's actual torch mesh")
+    light.add_argument("--guest-heavy-flashlight-view", action="store_true",
+                       help="also measure the host's projected heavy beam on the corresponding stock avatar mesh")
     options = parser.parse_args()
     options.flashlight_source |= options.flashlight_view
+    options.guest_heavy_flashlight_source |= options.guest_heavy_flashlight_view
+    options.guest_flashlight_view |= options.guest_heavy_flashlight_view
     options.guest_flashlight_source |= options.guest_flashlight_view or options.guest_heavy_flashlight_source
     use_flashlight_fixture = options.flashlight_source or options.guest_flashlight_source
     if use_flashlight_fixture and any((options.lifecycle, options.equipment, options.melee, options.pose, options.rifle,
