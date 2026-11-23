@@ -2374,7 +2374,7 @@ class Host:
         return snapshot
 
     async def stock_wipe_arrival(self, bridge: Bridge, transport) -> dict:
-        snapshot, rest = await self.blue_route(bridge, "native-blue-route")
+        snapshot, rest = await self.blue_route(bridge, "native-wipe-route")
         self.last_game, self.last_seen = snapshot, time.monotonic()
         destination = rest["destination"]
         roles = self.roles()

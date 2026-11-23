@@ -185,6 +185,58 @@ class NativeInventoryWipeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(native_wipe.InventoryWipeError, "invalid_native_frame"):
             native_wipe.plan(self.profile, draft, {})
 
+    async def test_committed_wipe_resumes_travel_without_reapplying_its_inventories(self):
+        state = party.new_party()
+        location = [0, 0, 0]
+        rest = {"map": CROSSROADS, "location": location}
+        state["checkpoint"] = rest
+        roster = tuple(self.frames)
+        for actor in roster:
+            party.add_player(state, actor)
+            state["players"][actor]["downed"] = True
+        draft = party.begin_when_all_down(state, roster, {"host": rest}, time.time() - 180)
+        frozen = native_wipe.freeze(self.profile, draft["id"], list(roster), self.frames, self.censuses(),
+                                    keep_slots=0, drop_bone_pile=True)
+        plan = native_wipe.plan(self.profile, frozen, {})
+        draft.update(native=frozen, native_committed=plan["receipt"], keep_slots=0, drop_backpacks=True)
+        state["wipe"] = draft
+        state["native_backpacks"] = {identifier: {"owner_id": bag["owner_id"], "count": len(bag["guids"])}
+                                     for identifier, bag in plan["bags"].items()}
+
+        pawn = {"name": "authority-host", "location": location, "health": 250}
+        source = {"map": CROSSROADS, "state": "hosting", "pawns": {"local": pawn}}
+        arrival = {**source, "map": OBSERVATORY}
+        route = {"source": CROSSROADS, "destination": OBSERVATORY, "bed": ""}
+        bridge = Mock()
+        transport = Mock()
+        host = SimpleNamespace(
+            party=state, native_guest=True, native_zones=True, native_profile=self.profile,
+            allowed_maps={CROSSROADS, OBSERVATORY}, last_game=source, transitioning=False,
+            control=Mock(), checkpoint_native=AsyncMock(return_value=12), dream_isolated=lambda _: False,
+            roles=lambda: {"host": "host"}, travel_refusal=Mock(return_value=None), stock_respawn_marker=AsyncMock(),
+            blue_route=AsyncMock(return_value=(source, route)),
+        )
+        host.stock_wipe_arrival = lambda *args: Host.stock_wipe_arrival(host, *args)
+
+        async def switch(bridge, transport, destination, entrance, roles, *, respawn_plan):
+            self.assertEqual((destination, entrance, roles, respawn_plan), (OBSERVATORY, "Bed", {"host": "host"}, route))
+            host.last_game = arrival
+
+        host.switch_zone = AsyncMock(side_effect=switch)
+        with (patch.object(native_inventory_death, "freeze", new_callable=AsyncMock) as freeze,
+              patch.object(native_inventory_death, "prepare", new_callable=AsyncMock) as prepare,
+              patch.object(native_inventory_death, "action", new_callable=AsyncMock) as apply):
+            await Host.settle_wipe(host, bridge, transport)
+        host.blue_route.assert_awaited_once_with(bridge, "native-wipe-route")
+        host.switch_zone.assert_awaited_once()
+        for mutation in (freeze, prepare, apply):
+            mutation.assert_not_awaited()
+        self.assertIsNone(host.party["wipe"])
+        self.assertEqual(host.party["native_backpacks"], state["native_backpacks"])
+        self.assertFalse(host.party["players"]["host"]["downed"])
+        self.assertEqual(host.party["pending_spawns"][self.guest]["map"], OBSERVATORY)
+        host.checkpoint_native.assert_awaited_once_with(bridge, host.party)
+
     async def test_wipe_waits_for_guest_grace_then_finishes_with_exact_offline_generation(self):
         state = party.new_party()
         rest = {"map": CROSSROADS, "location": [0, 0, 0]}

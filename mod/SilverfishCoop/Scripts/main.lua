@@ -724,7 +724,8 @@ local function run_command(fields, state, current_phase)
         open_level(state.controller, argument, "listen", host_listen_port)
         expected_map = argument
         return "zone travel requested"
-    elseif command == "native-blue-route" or command == "native-blue-rest-fixture" or command == "native-blue-rest-restore" then
+    elseif command == "native-blue-route" or command == "native-wipe-route"
+        or command == "native-blue-rest-fixture" or command == "native-blue-rest-restore" then
         last_blue_route = nil
         local host = native_transport.scoped_host(state, current_phase)
         local restoring = command == "native-blue-rest-restore"
@@ -737,7 +738,7 @@ local function run_command(fields, state, current_phase)
         elseif restoring then
             last_blue_route = native_bed.restore(state, current_phase, fields[4], fields[5])
         else
-            last_blue_route = native_bed.source(state, current_phase)
+            last_blue_route = native_bed.source(state, current_phase, command == "native-wipe-route")
         end
         last_blue_route.pawn = host.name
         return "qualified stock rest route"
