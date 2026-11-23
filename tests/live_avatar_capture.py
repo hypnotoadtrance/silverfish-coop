@@ -89,7 +89,7 @@ def beam_geometry(axes):
     return dict(relative_position=[x, y, z], relative_rotation=[pitch, yaw, roll], relative_scale=[sx, sy, sz], color=[r, g, b])
 
 
-def heavy_owner_geometry(values):
+def torch_geometry(values):
     mesh, profile, *axes = values
     return dict(mesh=mesh, stock_profile=profile, **beam_geometry(axes))
 
@@ -108,6 +108,73 @@ def verify_heavy_geometry(observer_states, owner, proof):
     assert all(projected[key] == owner[key] for key in ("mesh", "light_cookie", "inner", "outer", "intensity", "radius", "color")), proof
     assert all(math.isclose(a, b, abs_tol=.05) for key in ("relative_position", "relative_rotation", "relative_scale")
                for a, b in zip(projected[key], owner[key], strict=True)), proof
+
+
+async def observe_stock_offhand_flashlight(host_run, guest_run):
+    proof_path = host_run / "live-offhand-flashlight-source-probe.json"
+    proof = {"verified": False, "phases": {}}
+
+    def record():
+        proof_path.write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
+
+    def transform(values):
+        x, y, z, pitch, yaw, roll, sx, sy, sz = map(float, values)
+        return {"position": [x, y, z], "rotation": [pitch, yaw, roll], "scale": [sx, sy, sz]}
+
+    def owner(values):
+        player, primary, primary_slot, primary_guid, torch_slot, torch_guid, offhand, *light = values
+        result = {"player": int(player), "primary": primary, "primary_slot": int(primary_slot),
+                  "primary_guid": primary_guid, "torch_slot": int(torch_slot), "torch_guid": torch_guid,
+                  "offhand": offhand == "true"}
+        if light:
+            item, replicates, camera, item_owner, *sample = light
+            result.update(item=item, replicates=replicates == "true", camera=camera, item_owner=item_owner,
+                          box_camera_relative=transform(sample[:9]), stock_offhand_transform=transform(sample[9:18]),
+                          light=dict(flashlight_owner(sample[18:-14]), **torch_geometry(sample[-14:])))
+        return result
+
+    async def phase(name, row):
+        proof["phases"][name] = table = {"owner": row}
+        record()
+        table["guest"] = observer = flashlight_observer(await avatar_probe(guest_run, f"observe{row['player']}"))
+        host_game, guest_game = status(host_run).get("game", {}), status(guest_run).get("game", {})
+        table["host_flashlight_frame"] = host_game.get("native_flashlight")
+        table["guest_flashlight_view"] = guest_game.get("native_flashlight_view")
+        table["guest_primary_meshes"] = guest_game["native_player_avatars"][observer["remote"]]["weapon_meshes"]
+        record()
+
+    seeded = owner(await avatar_probe(host_run, "seedoffhand"))
+    try:
+        await wait(guest_run, lambda status: any(row.get("player_id") == seeded["player"] and row.get("weapon_meshes")
+                   for row in status.get("game", {}).get("native_player_avatars", {}).values()), timeout=8)
+        await phase("primary_only", seeded)
+        started = owner(await avatar_probe(host_run, "offhandon"))
+        await phase("offhand_started", started)
+        await asyncio.sleep(.4)
+        later = owner(await avatar_probe(host_run, "readoffhand"))
+        await phase("offhand_later", later)
+        cleared = owner(await avatar_probe(host_run, "offhandoff"))
+        await phase("offhand_cleared", cleared)
+        assert not seeded["offhand"] and started["offhand"] and later["offhand"] and not cleared["offhand"], proof
+        assert seeded["primary_slot"] != seeded["torch_slot"] and seeded["primary_guid"] != seeded["torch_guid"], proof
+        assert all(row[key] == seeded[key] for row in (started, later, cleared) for key in (
+            "player", "primary", "primary_slot", "primary_guid", "torch_slot", "torch_guid",
+        )), proof
+        assert started["item"] == later["item"] and started["light"]["source"] == later["light"]["source"], proof
+        assert all(row["light"]["powered"] and row["light"]["visible"] and row["light"]["player"] == seeded["player"]
+                   and (row["light"]["inner"], row["light"]["outer"], row["light"]["intensity"], row["light"]["radius"]) ==
+                   (15, 40, 17, 5000) for row in (started, later)), proof
+        first = proof["phases"]["primary_only"]["guest_primary_meshes"]
+        assert first and all(phase["guest_primary_meshes"] == first for phase in proof["phases"].values()), proof
+        assert all(phase["host_flashlight_frame"] is None and phase["guest_flashlight_view"] is None
+                   and all(phase["guest"][key] == 0 for key in ("powered_sources", "visible_source_spotlights",
+                           "visible_pawn_spotlights", "displayed_flashlight_mesh_count")) for phase in proof["phases"].values()), proof
+        proof["verified"] = True
+    finally:
+        proof["stock_cleanup"] = await avatar_probe(host_run, "clearoffhand") == ["restored"]
+        record()
+        assert proof["stock_cleanup"], proof
+    return proof
 
 
 async def observe_guest_stock_flashlight(host_run, guest_run, *, verify_view=False, heavy=False):
@@ -129,7 +196,7 @@ async def observe_guest_stock_flashlight(host_run, guest_run, *, verify_view=Fal
         guid, stacks, mode = values[-3:]
         row = dict(flashlight_owner(values[:-3]), slot_guid=guid, stacks=stacks, stock_mode=mode)
         if heavy:
-            row.update(heavy_owner_geometry(geometry))
+            row.update(torch_geometry(geometry))
         return row
 
     async def phase(name, row, *, switch=None):
@@ -258,7 +325,7 @@ async def observe_stock_flashlight(host_run, guest_run, *, verify_view=False, he
     async def owner(operation):
         values = await avatar_probe(host_run, operation)
         if heavy:
-            return dict(flashlight_owner(values[:-14]), **heavy_owner_geometry(values[-14:]))
+            return dict(flashlight_owner(values[:-14]), **torch_geometry(values[-14:]))
         return flashlight_owner(values)
 
     async def observer(player):
@@ -599,7 +666,7 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
                   aim_movement: bool = False, stock_shotgun_aim: bool = False, flashlight_source: bool = False,
                   flashlight_view: bool = False, guest_flashlight_source: bool = False,
                   guest_flashlight_view: bool = False, guest_heavy_flashlight_source: bool = False,
-                  heavy_flashlight_view: bool = False) -> None:
+                  heavy_flashlight_view: bool = False, offhand_flashlight_source: bool = False) -> None:
     profile = "avatar-" + uuid.uuid4().hex[:8]
     host_dir = work / "campaigns" / profile
     guest_dir = work / "clients" / profile
@@ -608,6 +675,8 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
     env = dict(os.environ, SILVERFISH_COOP_RENDER_CAPTURE="guest")
     if flashlight_source or guest_flashlight_source:
         env["SILVERFISH_COOP_FLASHLIGHT_PROBE"] = "1"
+    if offhand_flashlight_source:
+        env["SILVERFISH_COOP_OFFHAND_FLASHLIGHT_PROBE"] = "1"
     if guest_flashlight_source:
         env["SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE"] = "1"
     if guest_heavy_flashlight_source or heavy_flashlight_view:
@@ -679,7 +748,9 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             assert all(row["state"] == "default_body" for row in evidence[role].values()), evidence
         if flashlight_source or guest_flashlight_source:
             await wait(host_run, lambda state: state.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
-            if guest_flashlight_source:
+            if offhand_flashlight_source:
+                evidence["stock_offhand_flashlight_observation"] = await observe_stock_offhand_flashlight(host_run, guest_run)
+            elif guest_flashlight_source:
                 receipt = await observe_guest_stock_flashlight(host_run, guest_run, verify_view=guest_flashlight_view,
                                                               heavy=guest_heavy_flashlight_source)
                 if guest_flashlight_view:
@@ -973,6 +1044,8 @@ if __name__ == "__main__":
     light.add_argument("--flashlight-view", action="store_true", help="also require the observer's flashlight beam and switch receipt")
     light.add_argument("--heavy-flashlight-view", action="store_true",
                        help="verify a stock heavy flashlight held by the host and measured by the observing guest")
+    light.add_argument("--offhand-flashlight-source", action="store_true",
+                       help="measure the host's stock offhand torch and the observing guest's primary gear")
     light.add_argument("--guest-flashlight-source", action="store_true",
                        help="compare an equipped guest's stock beam with its host authority pawn")
     light.add_argument("--guest-flashlight-view", action="store_true",
@@ -983,7 +1056,7 @@ if __name__ == "__main__":
                        help="also measure the host's projected heavy beam on the corresponding stock avatar mesh")
     options = parser.parse_args()
     options.flashlight_view |= options.heavy_flashlight_view
-    options.flashlight_source |= options.flashlight_view
+    options.flashlight_source |= options.flashlight_view or options.offhand_flashlight_source
     options.guest_heavy_flashlight_source |= options.guest_heavy_flashlight_view
     options.guest_flashlight_view |= options.guest_heavy_flashlight_view
     options.guest_flashlight_source |= options.guest_flashlight_view or options.guest_heavy_flashlight_source
@@ -1019,4 +1092,5 @@ if __name__ == "__main__":
                             options.rifle, options.consumable, options.movement, options.movement_traits,
                             options.aim_movement, options.stock_shotgun_aim, options.flashlight_source, options.flashlight_view,
                             options.guest_flashlight_source, options.guest_flashlight_view,
-                            options.guest_heavy_flashlight_source, options.heavy_flashlight_view))
+                            options.guest_heavy_flashlight_source, options.heavy_flashlight_view,
+                            options.offhand_flashlight_source))

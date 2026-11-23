@@ -5,6 +5,7 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_FL
 
 local map = "World /Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local guest_source = os.getenv("SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE") == "1"
+local offhand = not guest_source and os.getenv("SILVERFISH_COOP_OFFHAND_FLASHLIGHT_PROBE") == "1"
 local heavy = os.getenv("SILVERFISH_COOP_HEAVY_FLASHLIGHT_PROBE") == "1"
 local heavy_view = heavy and os.getenv("SILVERFISH_COOP_HEAVY_FLASHLIGHT_VIEW_PROBE") == "1"
 local equipment_asset = heavy and "Eqp_Heavy_Flashlight" or "Eqp_Flashlight"
@@ -16,7 +17,9 @@ local click_path = "SoundCue /Game/Assets/Sounds/CUEs/Mechanical_Cues/Switch_Res
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local equip_factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
+local pistol_path = "/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C"
 local source, cue_calls, power_calls, hooked, selected_guid = nil, 0, 0, false, nil
+local offhand_pawn, primary, seeded_slots
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -38,23 +41,26 @@ end
 
 local function count_dispatch()
     if hooked then return end
+    local function owns_source(emitter)
+        if same(emitter, source) then return true end
+        local item = valid(offhand_pawn) and offhand_pawn.OffhandEquipment
+        local child = valid(item) and item.FlashLight_Source_BP
+        return valid(child) and same(emitter, child.ChildActor)
+    end
     pcall(RegisterHook, source_path .. ":Send_PowerSignal", function(context)
         local ok, emitter = pcall(function() return context:get() end)
-        if ok and same(emitter, source) then power_calls = power_calls + 1 end
+        if ok and owns_source(emitter) then power_calls = power_calls + 1 end
     end)
     pcall(RegisterHook, "/Script/Engine.GameplayStatics:PlaySoundAtLocation", function(_, context, sound)
         pcall(function()
             local emitter, cue = context:get(), sound:get()
-            if same(emitter, source) and valid(cue) and cue:GetFullName() == click_path then cue_calls = cue_calls + 1 end
+            if owns_source(emitter) and valid(cue) and cue:GetFullName() == click_path then cue_calls = cue_calls + 1 end
         end)
     end)
     hooked = true
 end
 
-local function owned_source(pawn, world)
-    local equipped = pawn.EquipedItem
-    assert(valid(equipped) and same(equipped:GetClass(), asset(equipment_path)) and same(equipped.User, pawn)
-        and same(equipped:GetOwner(), pawn) and same(equipped:GetWorld(), world), "flashlight_probe_equipment_unbound")
+local function source_from(equipped, world)
     local child = equipped.FlashLight_Source_BP
     local actor = valid(child) and child.ChildActor
     local spot = valid(actor) and actor.SpotLight
@@ -64,13 +70,24 @@ local function owned_source(pawn, world)
     return equipped, actor, spot
 end
 
+local function owned_source(pawn, world)
+    local equipped = pawn.EquipedItem
+    assert(valid(equipped) and same(equipped:GetClass(), asset(equipment_path)) and same(equipped.User, pawn)
+        and same(equipped:GetOwner(), pawn) and same(equipped:GetWorld(), world), "flashlight_probe_equipment_unbound")
+    return source_from(equipped, world)
+end
+
+local function item_identity(row)
+    local guid = row[item_guid]
+    return string.format("%08x%08x%08x%08x", guid.A & 0xffffffff, guid.B & 0xffffffff,
+        guid.C & 0xffffffff, guid.D & 0xffffffff)
+end
+
 local function slot_guid(pawn)
     local rows = valid(pawn.Save) and pawn.Save.PlayerEquipment
     local row = rows and rows:GetArrayNum() >= 1 and rows[1]
     if not row or not same(row[item_class], asset(equipment_path)) then return "-" end
-    local guid = row[item_guid]
-    return string.format("%08x%08x%08x%08x", guid.A & 0xffffffff, guid.B & 0xffffffff,
-        guid.C & 0xffffffff, guid.D & 0xffffffff)
+    return item_identity(row)
 end
 
 local function owner_row(pawn, actor, spot)
@@ -92,12 +109,95 @@ local function measure_local_beam(spot, mesh, color)
         scale.X, scale.Y, scale.Z, color.R, color.G, color.B)
 end
 
-local function heavy_measurement(equipment, actor, spot)
+local function torch_measurement(equipment, actor, spot)
     local mesh = equipment.SM_Prop_Torch_01
     assert(valid(mesh) and same(mesh:GetOwner(), equipment) and valid(mesh.StaticMesh)
-        and mesh.StaticMesh:GetFullName() == mesh_name, "flashlight_probe_heavy_torch_unavailable")
+        and mesh.StaticMesh:GetFullName() == mesh_name, "flashlight_probe_stock_torch_unavailable")
     return table.concat({mesh.StaticMesh:GetFullName(), tostring(actor.Type),
         measure_local_beam(spot, mesh, actor.Color)}, "\t")
+end
+
+local function transform_row(value, math_api)
+    local p, r, s = value.Translation, math_api:Quat_Rotator(value.Rotation), value.Scale3D
+    return string.format("%.7f\t%.7f\t%.7f\t%.7f\t%.7f\t%.7f\t%.7f\t%.7f\t%.7f",
+        p.X, p.Y, p.Z, r.Pitch, r.Yaw, r.Roll, s.X, s.Y, s.Z)
+end
+
+local function seed_loadout(pawn, world, class)
+    local output, result = {}, {}
+    asset(equip_factory):MakeDefaultItem(class, pawn, output)
+    local row = output.Item or output
+    assert(same(row[item_class], class), "flashlight_probe_stock_item_factory_failed")
+    local guid = item_identity(row)
+    assert(guid ~= string.rep("0", 32), "flashlight_probe_stock_guid_unavailable")
+    world.OwningGameInstance:EquipItemToLoadout(row, result)
+    assert(result.EquippedSuccessfully == true or result[1] == true, "flashlight_probe_stock_loadout_failed")
+    for index = 1, 8 do
+        local saved = pawn.Save.PlayerEquipment[index]
+        if same(saved[item_class], class) and item_identity(saved) == guid then return {index = index, guid = guid} end
+    end
+    error("flashlight_probe_stock_slot_readback_failed", 0)
+end
+
+local function offhand_operation(operation, pawn, world)
+    local save = pawn.Save
+    if operation == "seedoffhand" then
+        assert(valid(save) and save.PlayerEquipment:GetArrayNum() >= 8 and not valid(pawn.EquipedItem)
+            and not valid(pawn.OffhandEquipment) and save.PlayerOffhandingFlashlight == false,
+            "flashlight_probe_offhand_loadout_occupied")
+        local flashlight_class, pistol = asset(equipment_path), asset(pistol_path)
+        for index = 1, 8 do
+            assert(not valid(save.PlayerEquipment[index][item_class]), "flashlight_probe_offhand_fixture_already_owned")
+        end
+        seeded_slots = {seed_loadout(pawn, world, flashlight_class), seed_loadout(pawn, world, pistol)}
+        if save.PlayerEquipIndex ~= seeded_slots[2].index - 1 then pawn:Equip_NextItem(seeded_slots[2].index - 1, false) end
+        primary, offhand_pawn = pawn.EquipedItem, pawn
+        assert(valid(primary) and same(primary:GetClass(), pistol) and same(primary.User, pawn),
+            "flashlight_probe_offhand_primary_unavailable")
+        count_dispatch()
+    end
+    assert(seeded_slots and same(offhand_pawn, pawn), "flashlight_probe_offhand_scope_unavailable")
+    for _, slot in ipairs(seeded_slots) do
+        assert(item_identity(save.PlayerEquipment[slot.index]) == slot.guid, "flashlight_probe_offhand_slot_changed")
+    end
+    assert(same(pawn.EquipedItem, primary) and save.PlayerEquipIndex == seeded_slots[2].index - 1,
+        "flashlight_probe_offhand_primary_changed")
+    if operation == "offhandon" then
+        local eligible = {}
+        pawn:CanOffhandFlashlight(eligible)
+        assert(eligible.CanEquip == true or eligible[1] == true, "flashlight_probe_stock_offhand_ineligible")
+        pawn:OffhandFlashlight(true)
+    elseif operation == "offhandoff" or operation == "clearoffhand" then
+        if save.PlayerOffhandingFlashlight then pawn:OffhandFlashlight(false) end
+        assert(save.PlayerOffhandingFlashlight == false and (not valid(pawn.OffhandEquipment)
+            or pawn.OffhandEquipment:IsActorBeingDestroyed()), "flashlight_probe_stock_offhand_clear_failed")
+        if operation == "clearoffhand" then
+            for _, slot in ipairs(seeded_slots) do
+                world.OwningGameInstance:RemoveItemFromLoadout(save.PlayerEquipment[slot.index])
+                assert(not valid(save.PlayerEquipment[slot.index][item_class]), "flashlight_probe_offhand_slot_clear_failed")
+            end
+            offhand_pawn, primary, seeded_slots = nil, nil, nil
+            return "restored"
+        end
+    else
+        assert(operation == "seedoffhand" or operation == "readoffhand", "flashlight_probe_offhand_unknown_operation")
+    end
+    assert(same(pawn.EquipedItem, primary), "flashlight_probe_offhand_primary_changed_after_input")
+    local row = table.concat({assert(player_id(pawn)), primary:GetFullName(), seeded_slots[2].index - 1, seeded_slots[2].guid,
+        seeded_slots[1].index - 1, seeded_slots[1].guid, tostring(save.PlayerOffhandingFlashlight)}, "\t")
+    if not save.PlayerOffhandingFlashlight then return row end
+    local item, camera = pawn.OffhandEquipment, pawn.Camera
+    assert(valid(item) and same(item:GetClass(), asset(equipment_path)) and same(item.User, pawn) and valid(camera)
+        and valid(item.Box) and same(item.Box:GetAttachParent(), camera), "flashlight_probe_stock_offhand_mount_unavailable")
+    local _, actor, spot = source_from(item, world)
+    assert(actor.Powered == true and spot:IsVisible(), "flashlight_probe_stock_offhand_dark")
+    local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
+    local box = math_api:MakeRelativeTransform(item.Box:K2_GetComponentToWorld(), camera:K2_GetComponentToWorld())
+    local item_owner = item:GetOwner()
+    return table.concat({row, item:GetFullName(), tostring(item.bReplicates), camera:GetFullName(),
+        valid(item_owner) and item_owner:GetFullName() or "-",
+        transform_row(box, math_api), transform_row(pawn.OffhandTransform, math_api),
+        owner_row(pawn, actor, spot), torch_measurement(item, actor, spot)}, "\t")
 end
 
 local function observe(world, local_pawn, id)
@@ -194,6 +294,7 @@ local function run(operation)
         assert(pawn:HasAuthority() and #driver.ClientConnections == 1 and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1",
             "flashlight_probe_host_scope_unavailable")
     end
+    if offhand then return offhand_operation(operation, pawn, world) end
 
     if guest_source and not connected then
         if operation ~= "seedguest" then
@@ -268,7 +369,7 @@ local function run(operation)
     if guest_source then
         row = table.concat({row, slot_guid(pawn), tostring(equipment.Stacks), tostring(equipment.Tertiary_Mode)}, "\t")
     end
-    if heavy then row = row .. "\t" .. heavy_measurement(equipment, actor, spot) end
+    if heavy then row = row .. "\t" .. torch_measurement(equipment, actor, spot) end
     return row
 end
 
