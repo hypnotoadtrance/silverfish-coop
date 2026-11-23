@@ -12,6 +12,7 @@ STATE = "native_loose_pickup_claims"
 KEY = "native_loose_pickups"
 ROW = "native-loose-pickup"
 CAPABILITY = "native_loose_pickup_version"
+VIEW_SCOPE = "native_loose_pickup_view_scope"
 CLAIM = "native-loose-pickup-claim"
 PROOF = "native_loose_pickup_claim"
 FIXTURE = "native-loose-pickup-fixture"
@@ -127,11 +128,13 @@ class Visibility:
             return
         self.next_check = now + 2
         pending = [path for path, row in host.party.get(STATE, {}).items()
-                   if row["map"] == game.get("map") and row["mode"] == 1 and row["epoch"] != epoch
+                   if row["map"] == game.get("map") and row["mode"] in (0, 1) and row["epoch"] != epoch
                    and path not in self.replenished]
         for index in range(0, len(pending), 64):
             batch = pending[index:index + 64]
             snapshot = await bridge.command(CHECK, *batch, timeout=4)
+            if host.zone_epoch != epoch or host.transitioning:
+                return
             observed = snapshot.get(CHECK_KEY, {})
             if (snapshot.get("state"), snapshot.get("map")) != ("hosting", game.get("map")) or observed.keys() != set(batch):
                 raise RuntimeError("The placed stock replenishment reply did not match the requested map and sources")
@@ -142,34 +145,46 @@ class Visibility:
         area, epoch = host.last_game.get("map"), host.zone_epoch
         replenished = self.replenished if self.epoch == epoch else ()
         return [path for path, row in host.party.get(STATE, {}).items()
-                if row["map"] == area and (row["epoch"] == epoch or row["mode"] == 2
-                                          or row["mode"] == 1 and path not in replenished)]
+                if row["map"] == area and (row["epoch"] == epoch or row["mode"] == 2 or path not in replenished)]
 
 
-async def project(service, bridge, hidden):
-    game = service.last_game
-    area = game.get("map")
-    if (game.get(CAPABILITY) != 1 or game.get("state") != "connected" or not isinstance(hidden, list)
-            or any(actor_map(path) != area for path in hidden)):
-        return
-    hidden_set = set(hidden)
-    nearby = game.get(KEY, {})
-    updates = [("hide", [path for path, row in nearby.items() if path in hidden_set and row["state"] == "available"]),
-               ("show", [path for path, row in nearby.items() if path not in hidden_set and row["state"] == "claimed"])]
-    for mode, paths in updates:
-        if not paths:
-            continue
-        reply = await bridge.command(PROJECT, mode, *paths, timeout=4)
-        if (reply.get("map"), reply.get("state")) != (area, "connected"):
-            raise RuntimeError("The loose pickup projection changed worlds")
-        service.last_game = reply
+class GuestView:
+    def __init__(self):
+        self.scope = None
+        self.hidden = set()
+
+    async def project(self, service, bridge, hidden):
+        game = service.last_game
+        area, generation = game.get("map"), game.get(VIEW_SCOPE)
+        if (game.get(CAPABILITY) != 1 or game.get("state") != "connected"
+                or type(generation) is not int or generation <= 0 or not isinstance(hidden, list)
+                or any(actor_map(path) != area for path in hidden)):
+            return
+        scope = (area, generation)
+        if self.scope != scope:
+            self.scope = scope
+            self.hidden.clear()
+
+        desired = set(hidden)
+        updates = (("hide", sorted(desired - self.hidden)), ("show", sorted(self.hidden - desired)))
+        for mode, paths in updates:
+            for index in range(0, len(paths), 64):
+                batch = paths[index:index + 64]
+                reply = await bridge.command(PROJECT, str(generation), mode, *batch, timeout=4)
+                if (reply.get("map"), reply.get("state"), reply.get(VIEW_SCOPE)) != (area, "connected", generation):
+                    raise RuntimeError("The loose pickup projection changed worlds")
+                if mode == "hide":
+                    self.hidden.update(batch)
+                else:
+                    self.hidden.difference_update(batch)
+                service.last_game = reply
 
 
 async def refresh_claimed_stock_view(client):
     if client.last_game.get("native_inventory_view", {}).get("state") != "stock":
         return
     try:
-        await project(client, client.bridge, client.gameplay.get(STATE))
+        await client.loose_pickup_view.project(client, client.bridge, client.gameplay.get(STATE))
     except (OSError, RuntimeError, ValueError) as error:
         client.control.event("native_loose_pickup_view_refresh_unavailable", reason=str(error))
     client.guest_ui.queue_stock_inventory(client)

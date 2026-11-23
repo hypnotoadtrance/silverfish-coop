@@ -2395,6 +2395,11 @@ class Bridge:
                 elif fields[0] == "native-loose-pickup-capability" and len(fields) == 3:
                     data[native_loose_pickup.CAPABILITY] = int(fields[1])
                     data["native_loose_pickup_count"] = int(fields[2])
+                elif fields[0] == "native-loose-pickup-view-scope" and len(fields) == 2:
+                    generation = int(fields[1])
+                    if data.get("state") != "connected" or not 0 < generation < 2**53:
+                        raise ValueError("Invalid loose pickup view scope")
+                    data[native_loose_pickup.VIEW_SCOPE] = generation
                 elif fields == ["native-mushroom-capability", "1"]:
                     data[native_mushrooms.CAPABILITY] = 1
                 elif fields[0] == "native-mushroom-suppression" and len(fields) == 2:

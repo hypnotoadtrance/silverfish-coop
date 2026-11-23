@@ -147,6 +147,37 @@ def shop_lease_overlay(game: Path):
     return portable_script_overlay(game, "native_finite_shop.lua", allow_isolated_approach)
 
 
+def stock_nearby_overlay(game: Path):
+    def omit_available_bolt(script):
+        marker = '                if path then\n                    rows[#rows + 1] = status_row("native-loose-pickup",'
+        if script.count(marker) != 1:
+            raise ValueError("The replica lacks the stock loose-item nearby report")
+        condition = f'if path and (phase ~= "connected" or path ~= "{DEFAULT_ACTOR}" or availability ~= "available") then'
+        return script.replace(marker, marker.replace("if path then", condition), 1)
+
+    return portable_script_overlay(game, "native_authored_pickup.lua", omit_available_bolt)
+
+
+def bandage_revisit_overlay(game: Path):
+    def add_bandage_observation(script):
+        marker = '    if action == "native-loose-pickup-check" then'
+        observer = '''    if action == "fixture-bandage-visibility" and fixtures and title_fixtures then
+        local dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
+        assert(state.map == dock and (phase == "hosting" or phase == "connected"), "The test needs Tutorial Dock")
+        local diagnosis = SilverfishDiagnoseLoosePickup(dock .. ".Tut_Dock_P:PersistentLevel.Item_Bandage_C_1")
+        if diagnosis == "actor_absent" then return "absent" end
+        if diagnosis == "hidden_or_disabled" then return "hidden" end
+        if diagnosis == "stock_item_available" then return "visible" end
+        error("Unexpected stock bandage state " .. tostring(diagnosis), 0)
+    end
+'''
+        if script.count(marker) != 1:
+            raise ValueError("The replica lacks the stock loose-item command")
+        return script.replace(marker, observer + marker, 1)
+
+    return portable_script_overlay(game, "native_authored_pickup.lua", add_bandage_observation)
+
+
 def stash_memory_overlays(probes: ExitStack, game: Path, *, large: bool = False) -> dict:
     def replace(text, original, updated):
         if text.count(original) != 1:
@@ -865,21 +896,26 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
         await asyncio.sleep(.15)
         target = await command(host, "dock-natural-position")
         assert await command(host, f"dock-aim\t{target}") == "ready"
+        async def shoot_guest(remaining):
+            started = time.time()
+            tap = await submit(guest_run, "native-guest-primary-input-fixture")
+            assert tap["ok"], tap
+            sequence = tap["native_guest_primary_fixture"]["sequence"]
+            async with asyncio.timeout(8):
+                while True:
+                    shot = next((row for row in await resident_events(guest_run, frame)
+                                 if row.get("sequence") == sequence and row["time_unix"] >= started
+                                 and row["event"] in ("native_guest_primary_input", "native_guest_primary_input_rejected")), None)
+                    if shot:
+                        break
+                    await asyncio.sleep(.05)
+            assert shot["event"] == "native_guest_primary_input", shot
+            proof = shot["native_guest_weapon"]
+            assert (proof["before"], proof["after"], proof["projectiles"]) == (remaining, remaining - 1, 1), proof
+            return proof
+
         began = time.time()
-        tap = await submit(guest_run, "native-guest-primary-input-fixture")
-        assert tap["ok"], tap
-        sequence = tap["native_guest_primary_fixture"]["sequence"]
-        async with asyncio.timeout(8):
-            while True:
-                shot = next((row for row in await resident_events(guest_run, frame)
-                             if row.get("sequence") == sequence and row["time_unix"] >= began
-                             and row["event"] in ("native_guest_primary_input", "native_guest_primary_input_rejected")), None)
-                if shot:
-                    break
-                await asyncio.sleep(.05)
-        assert shot["event"] == "native_guest_primary_input", shot
-        info = shot["native_guest_weapon"]
-        assert (info["before"], info["after"], info["projectiles"]) == (7, 6, 1), info
+        info = await shoot_guest(7)
         current = baseline
         try:
             async with asyncio.timeout(15):
@@ -901,10 +937,97 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
                 if impacts:
                     break
                 await asyncio.sleep(.05)
+        retaliation = current
+        fight = [{"shot": info, "stock_result": current}]
+        for remaining in range(info["after"], 0, -1):
+            if current.startswith("false;"):
+                break
+            # Give the shooter another clear lane while the stock worker keeps moving and attacking.
+            retreat = tuple(map(float, (await command(host, "dock-natural-retreat")).split(",")))
+            async with asyncio.timeout(6):
+                while True:
+                    local_point = await command(guest, "dock-natural-seat")
+                    if math.dist(retreat, tuple(map(float, local_point.split(",")))) < 80:
+                        break
+                    await asyncio.sleep(.05)
+            for seat in (guest, host):
+                target = await command(seat, "dock-natural-position")
+                assert target != "absent" and await command(seat, f"dock-aim\t{target}") == "ready"
+            result = await shoot_guest(remaining)
+            before_health = float(current.split(";")[3])
+            deadline = time.monotonic() + 1.2
+            while True:
+                current = await command(host, "dock-natural-sample")
+                health = float(current.split(";")[3])
+                if health < before_health or current.startswith("false;") or time.monotonic() >= deadline:
+                    break
+                await asyncio.sleep(.05)
+            fight.append({"shot": result, "stock_result": current})
+
+        assert current.startswith("false;true;") and any(
+            float(entry["stock_result"].split(";")[3]) < float(retaliation.split(";")[3]) for entry in fight[1:]
+        ), ("The stock-health warehouse worker survived the guest's magazine", fight)
+        async with asyncio.timeout(10):
+            while True:
+                bodies = await asyncio.gather(*(command(seat, "dock-natural-state") for seat in (host, guest)))
+                if all(body.startswith("false;true;1;") for body in bodies):
+                    break
+                await asyncio.sleep(.05)
         return {"temporary_weapon_block": {"scope": scope, "rejected": rejected},
-                "baseline": baseline, "shot": info, "stock_target_and_hit": current, "guest_impact_sound": impacts[0]}
+                "baseline": baseline, "shot": info, "stock_target_and_hit": retaliation, "guest_impact_sound": impacts[0],
+                "stock_health_fight": fight, "both_peers_dead_and_ragdolled": bodies}
     finally:
         assert await command(host, "dock-natural-stop") == "stopped"
+
+
+async def verify_tutorial_bandage_revisit(host: Seat, guest: Seat, pawn: str) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
+    observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+    bandage = f"{dock}.Tut_Dock_P:PersistentLevel.Item_Bandage_C_1"
+
+    def bound(frame, area):
+        game = frame.get("game", {})
+        return (game.get("map") == area and not frame.get("awaiting_zone_guest")
+                and game.get("native_guest_save", {}).get("state") == "bound"
+                and game.get("native_zone", {}).get("state") == "ready")
+
+    async def travel(source, target, exit_actor, guest_pawn=None):
+        prior = await wait_resident_status(host_run, lambda frame: bound(frame, source))
+        participant = guest_pawn or prior["game"]["native_guest_save"]["pawn"]
+        for seat, placement in ((participant, "near"), ("local", "near"), ("local", "inside")):
+            await host.bridge.command("native-exit-position", seat, placement, "Obs_Dock", exit_actor)
+        arrival = await wait_resident_status(host_run, lambda frame: bound(frame, target)
+                                             and frame.get("zone_epoch") != prior["zone_epoch"], timeout=60)
+        await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected"
+                                   and frame.get("game", {}).get("map") == target
+                                   and frame.get("zone_epoch") == arrival["zone_epoch"], timeout=35)
+        return arrival
+
+    async def visibility(seat):
+        report = await seat.bridge.command("fixture-bandage-visibility", update_status=False)
+        return report["ack"]["message"]
+
+    first = await travel(observatory, dock, "Level_Exit_BP_C_213", pawn)
+    assert await visibility(host) == await visibility(guest) == "visible"
+    await host.bridge.command(native_loose_pickup.APPROACH, bandage, first["game"]["pawns"]["local"]["name"])
+    claimed = await submit(host_run, native_loose_pickup.CLAIM, target=f"loose:{bandage}")
+    assert claimed["ok"] and claimed[native_loose_pickup.PROOF]["mode"] == 0, claimed
+    await wait_resident_status(guest_run, lambda frame: bandage in frame.get("gameplay", {}).get(native_loose_pickup.STATE, []))
+    await travel(dock, observatory, "Level_Exit_BP_C_1")
+    revisit = await travel(observatory, dock, "Level_Exit_BP_C_213")
+    await host.bridge.wait_for(lambda game: game.get(native_loose_pickup.CHECK_KEY, {}).get(bandage) is False)
+    await wait_resident_status(guest_run, lambda frame: frame.get("zone_epoch") == revisit["zone_epoch"]
+                               and bandage in frame.get("gameplay", {}).get(native_loose_pickup.STATE, []), timeout=10)
+    host_visibility = await visibility(host)
+    assert host_visibility in ("absent", "hidden"), host_visibility
+    async with asyncio.timeout(8):
+        while (guest_visibility := await visibility(guest)) == "visible":
+            await asyncio.sleep(.05)
+    assert guest_visibility in ("absent", "hidden"), guest_visibility
+    return {"stock_bandage_revisit": {"actor": bandage, "claim": claimed[native_loose_pickup.PROOF],
+            "first_visit": first["zone_epoch"], "revisit": revisit["zone_epoch"],
+            "host_visibility": host_visibility, "guest_visibility": guest_visibility}}
 
 
 async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, retaliation: bool = False) -> dict:
@@ -2195,8 +2318,14 @@ async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: boo
             item = game.get(native_loose_pickup.KEY, {}).get(DEFAULT_ACTOR, {})
             origin = game.get("pawns", {}).get("local", {}).get("location")
             return item.get("state") == "available" and origin and math.dist(item["location"], origin) <= 250
-        for run in (host_run, guest_run):
-            await wait(run, bolt_in_reach)
+        near_host = await wait(host_run, bolt_in_reach)
+        location = near_host["game"][native_loose_pickup.KEY][DEFAULT_ACTOR]["location"]
+        near_guest = await guest.bridge.wait_for(
+            lambda frame: frame.get("state") == "connected"
+            and frame.get(native_loose_pickup.VIEW_SCOPE)
+            and math.dist(frame["pawns"]["local"]["location"], location) <= 250)
+        # The stock panel sees the actor even when the bridge's capped nearby list omits it.
+        assert DEFAULT_ACTOR not in near_guest.get(native_loose_pickup.KEY, {}), near_guest
         host_before = (await submit(host_run, "native-inventory-list"))["native_inventory"]
     dropped_actor = None
     if projected_nearby:
@@ -2592,6 +2721,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
                  rusty_pistol: bool = False, tutorial_dock_combat: bool = False, tutorial_dock_retaliation: bool = False,
+                 stock_bandage_revisit: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
@@ -2646,6 +2776,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override, rusty=rusty_pistol)),
         (stock_npc_rivalry, "stock_npc_rivalry", verify_stock_npc_rivalry),
         (stock_food, "stock_food", verify_resident_guest_food),
+        (stock_bandage_revisit, "stock_bandage_revisit", verify_tutorial_bandage_revisit),
         (tutorial_dock_combat, "tutorial_dock_retaliation" if tutorial_dock_retaliation else "tutorial_dock_combat",
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, retaliation=tutorial_dock_retaliation)),
     ) if enabled)
@@ -2670,6 +2801,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableGuestFoodProbe",
                                                      fixture="portable_guest_food_probe.lua"))
+        if stock_nearby:
+            proof["stock_nearby_overlays"] = [probes.enter_context(stock_nearby_overlay(game)) for game in games]
+        if stock_bandage_revisit:
+            proof["bandage_revisit_overlays"] = [probes.enter_context(bandage_revisit_overlay(game)) for game in games]
         if stock_board_offers:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
@@ -2681,7 +2816,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 for game in games:
                     probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                          fixture="portable_npc_override_probe.lua"))
-        if tutorial_dock_combat:
+        if tutorial_dock_combat or stock_bandage_revisit:
             proof["dock_zone_overlays"] = [probes.enter_context(tutorial_dock_zone_overlay(game)) for game in games]
         if stock_campfire:
             for game in games:
@@ -2822,7 +2957,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         elif resident_checks:
             results = proof["resident_check_results"] = {}
             campaign_started = time.perf_counter()
-            exit_actions = ("prompt", "confirm") if tutorial_dock_combat else ("save_and_quit",)
+            exit_actions = ("prompt", "confirm") if tutorial_dock_combat or stock_bandage_revisit else ("save_and_quit",)
 
             async def run_resident_checks(host, guest, pawn):
                 proof["join_seconds"] = round(time.perf_counter() - campaign_started, 3)
@@ -2990,6 +3125,8 @@ if __name__ == "__main__":
                         help="follow the stock exit to Tutorial Dock and dispatch a shot at a placed worker")
     parser.add_argument("--tutorial-dock-retaliation", action="store_true",
                         help="observe the stock AI's response to a nonlethal guest shot at a placed worker")
+    parser.add_argument("--stock-bandage-revisit", action="store_true",
+                        help="collect the Tutorial Dock bandage and verify both views after revisiting the map")
     parser.add_argument("--stock-npc-rivalry", action="store_true",
                         help="observe stock perception, attacks, and death between two NPC factions")
     parser.add_argument("--guest-ui-memory", action="store_true",
@@ -3081,14 +3218,16 @@ if __name__ == "__main__":
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "stock_board_offers", "resident_weapon_cues",
-                              "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "stock_npc_rivalry"}
+                              "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "stock_npc_rivalry",
+                              "stock_bandage_revisit"}
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
     if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
         parser.error("Use --tutorial-dock-combat with --rusty-pistol and --stock-npc-override")
     if args.tutorial_dock_retaliation and not args.tutorial_dock_combat:
         parser.error("Use --tutorial-dock-retaliation with --tutorial-dock-combat")
-    if (args.stock_food or args.stock_campfire or args.stock_npc_override or args.stock_board_offers or args.stock_npc_rivalry) and (
+    if any((args.stock_food, args.stock_campfire, args.stock_npc_override, args.stock_board_offers,
+            args.stock_npc_rivalry, args.stock_bandage_revisit)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
         parser.error("Run the resident gameplay checks without other gameplay fixtures")
@@ -3132,7 +3271,7 @@ if __name__ == "__main__":
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
-                       tutorial_dock_retaliation=args.tutorial_dock_retaliation,
+                       tutorial_dock_retaliation=args.tutorial_dock_retaliation, stock_bandage_revisit=args.stock_bandage_revisit,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
                        nonmirrored_startup=args.nonmirrored_startup,
