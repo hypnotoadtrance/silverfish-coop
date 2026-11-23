@@ -21,7 +21,7 @@ from zipfile import ZipFile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
 from tools.silverfish import (
-    direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop,
+    direct_ip, embedded_startup, native_finite_shop, native_guest_armor, native_guest_consumable, native_guest_drop,
     native_host_save, native_inventory, native_loose_pickup,
     native_lantern, native_loot, native_prop_carry, native_stash, native_world_loot, runtime,
 )
@@ -578,6 +578,11 @@ async def verify_stock_unequip(first, second, evidence):
             await wait_resident_status(guest_run, lambda frame:
                 frame.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
 
+        async def close_stock():
+            assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+            await wait_resident_status(guest_run, lambda row:
+                row.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
+
         await await_current_mirror(host)
         before = saves()
         ids = (await portable_probe_command(host.bridge, probe, f"remote-seed\t{pawn}")).split(",")
@@ -604,6 +609,11 @@ async def verify_stock_unequip(first, second, evidence):
         assert host_before == guest_before and host_before["held"] == "pistol" and host_before["ammo"] == 5
         evidence["guest_before"] = {"guest": guest_before, "host": host_before, "selection": selection}
 
+        canceled = unequip_seat(await portable_probe_command(guest.bridge, probe, "guest-cancel-inactive"))
+        assert canceled == host_before
+        current = await wait_resident_status(guest_run, lambda row: row.get("state") == "connected")
+        entries = await resident_events(guest_run, current)
+        assert all(row.get("event") != "native_stock_inventory_action" for row in entries), entries
         await portable_probe_command(guest.bridge, probe, "guest-press-inactive")
         inactive = await witness("native_stock_inventory_action", "native_inventory_unequip", ids[2])
         assert (inactive["native_inventory_unequip"]["slot"], inactive["stock_inventory_proof"]) == (
@@ -612,7 +622,8 @@ async def verify_stock_unequip(first, second, evidence):
         guest_inactive = unequip_seat(await portable_probe_command(guest.bridge, probe, "guest-read"))
         host_inactive = unequip_seat(await portable_probe_command(host.bridge, probe, f"remote-read\t{pawn}"))
         assert guest_inactive == host_inactive == dict(host_before, rows=rows), (guest_inactive, host_inactive)
-        evidence["guest_inactive"] = {"guest": guest_inactive, "host": host_inactive, "receipt": inactive}
+        evidence["guest_inactive"] = {"guest": guest_inactive, "host": host_inactive, "receipt": inactive,
+                                      "canceled_drag_kept_slot": True}
         await leaves_stock_open()
 
         changed = unequip_seat(await portable_probe_command(host.bridge, probe, f"remote-ammo\t{pawn}"))
@@ -641,12 +652,41 @@ async def verify_stock_unequip(first, second, evidence):
                 4, "fallback", True), state
         evidence["guest_selected"] = {"guest": guest_after, "host": host_after, "receipt": selected,
                                       "host_live_rounds": changed["ammo"], "guest_live_rounds": locally_pressed["ammo"]}
+        await close_stock()
+
+        worn = ((native_guest_armor.HELMET_ACTION, 8, "guest-remove-helmet"),
+                (native_guest_armor.ACTION, 9, "guest-drag-armor"))
+        worn_guids = (await portable_probe_command(host.bridge, probe, f"remote-worn-seed\t{pawn}")).split(",")
+        assert len(worn_guids) == len(set(worn_guids)) == 2 and all(re.fullmatch(r"[0-9A-F]{32}", guid) for guid in worn_guids)
+        for (action, _, _), guid in zip(worn, worn_guids, strict=True):
+            equipped = await submit(guest_run, action, target=guid)
+            assert equipped["ok"], equipped
+
+        current_worn = list(worn_guids)
+        async with asyncio.timeout(15):
+            while (await portable_probe_command(guest.bridge, probe, "guest-worn-state")).split(",") != current_worn:
+                await asyncio.sleep(.25)
+        assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+        await leaves_stock_open()
+        evidence["guest_worn"] = []
+        for index, ((_, slot, action), guid) in enumerate(zip(worn, worn_guids, strict=True)):
+            assert (await portable_probe_command(guest.bridge, probe, f"{action}\t{guid}")).split(",") == current_worn
+            receipt = await witness("native_stock_inventory_action", "native_inventory_unequip", guid)
+            assert (receipt["native_inventory_unequip"]["slot"], receipt["stock_inventory_proof"]) == (
+                slot, f"verified stock unequip from slot {slot}"), receipt
+            current_worn[index] = "-"
+            assert (await portable_probe_command(guest.bridge, probe, "guest-worn-state")).split(",") == current_worn
+            authoritative = await submit(guest_run, "native-inventory-list")
+            assert authoritative["ok"], authoritative
+            rows = [row for row in authoritative["native_inventory"]["items"] if row["guid"] == guid]
+            assert len(rows) == 1 and rows[0]["source"] == "backpack", authoritative
+            evidence["guest_worn"].append({"receipt": receipt, "backpack_row": rows[0]})
+
         assert saves() == before, "The guest stock Unequip wrote a save before a checkpoint"
         await leaves_stock_open()
-        assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
-        await wait_resident_status(guest_run, lambda row: row.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
+        await close_stock()
         return {"selected_and_inactive_slots_checked": True, "guest_duplicate_clicks_rejected": True,
-                "saves_unchanged_before_checkpoint": True}
+                "guest_worn_slots_checked": True, "saves_unchanged_before_checkpoint": True}
 
     return await start_pair(first, second, "Unequip probe scout", before_join=solo_baseline, on_join=guest_stock_actions)
 

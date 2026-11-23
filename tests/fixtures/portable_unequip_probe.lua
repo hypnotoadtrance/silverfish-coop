@@ -16,6 +16,11 @@ local specs = {
     {index = 5, class = "/Game/Classes/Equipment/Eqp_Flashlight.Eqp_Flashlight_C"},
     {index = 6, class = "/Game/Classes/Equipment/Eqp_Compass.Eqp_Compass_C"},
 }
+local worn_fields = {[9] = "PlayerHelmet", [10] = "PlayerArmor"}
+local worn_classes = {
+    "/Game/Classes/Armor_Items/Helm_Basic.Helm_Basic_C",
+    "/Game/Classes/Armor_Items/Armor_HunterJacket.Armor_HunterJacket_C",
+}
 local stored_rounds, live_rounds = 5, 3
 local seed, remote_seed, last
 
@@ -107,7 +112,7 @@ local function widget_at(array, index)
     return value
 end
 
-local function unequip(pawn, index, guid, repeat_count)
+local function equipped_card(pawn, index, guid)
     local control, save = pawn.Controller, pawn.Save
     local menu_stack = control.MenuStack
     local count = menu_stack:GetArrayNum()
@@ -120,10 +125,18 @@ local function unequip(pawn, index, guid, repeat_count)
         "fixture stock inventory widget not open")
     local slot = widget_at(manager.EquipSlots, index)
     local card = valid(slot) and slot.ItemCard
-    assert(valid(card) and same(slot.ItemManager, manager) and same(slot.Target, pawn) and slot.InventoryIndex == 0
-        and slot.ItemIndex == index - 1 and same(card.InventoryWidget, slot) and same(card.ItemManager, manager)
-        and identity(card.Item) == guid and identity(save.PlayerEquipment[index]) == guid,
-        "fixture stock quick-slot card mismatch")
+    local worn = worn_fields[index]
+    local target = worn and pawn:GetWorld().OwningGameInstance or pawn
+    local saved_item = worn and save[worn] or save.PlayerEquipment[index]
+    assert(valid(card) and same(slot.ItemManager, manager) and same(slot.Target, target)
+        and slot.InventoryIndex == (worn and 1 or 0) and slot.ItemIndex == (worn and index - 9 or index - 1)
+        and same(card.InventoryWidget, slot) and same(card.ItemManager, manager)
+        and identity(card.Item) == guid and identity(saved_item) == guid, "fixture stock equipment card mismatch")
+    return screen, manager, card
+end
+
+local function unequip(pawn, index, guid, repeat_count)
+    local _, manager, card = equipped_card(pawn, index, guid)
     manager:OpenContextMenu(card)
     local menu = manager.ItemContextMenu
     assert(same(menu["Item Card"], card) and valid(menu.Button_Unequip) and menu.Button_Unequip:IsVisible(),
@@ -132,6 +145,22 @@ local function unequip(pawn, index, guid, repeat_count)
         menu:BndEvt__ItemContextMenu_Button_Unequip_K2Node_ComponentBoundEvent_4_Pressed__DelegateSignature()
     end
     if menu:IsVisible() then manager:CloseContextMenu() end
+end
+
+local function drag(pawn, index, guid, cancel)
+    local screen, manager, card = equipped_card(pawn, index, guid)
+    manager.HoveredCard = card
+    manager:InitiateItemTake()
+    manager:FinalTakeItem()
+    assert(manager.HoldingItem == true and identity(manager.HeldItem) == guid, "stock cursor did not hold the exact item")
+    if cancel then manager:ReturnItem(manager.HeldItem, {}) else manager:InsertItem(screen.BackpackPanel, -1) end
+    assert(manager.HoldingItem == false, "stock equipment drag retained the cursor item")
+end
+
+local function worn_state(pawn)
+    local save, fields = pawn.Save, {}
+    for index = 9, 10 do fields[#fields + 1] = identity(save[worn_fields[index]]) end
+    return table.concat(fields, ",")
 end
 
 local function exercise(pawn, ids)
@@ -173,7 +202,8 @@ local function run(action, argument)
         and valid(pawn) and pawn:IsLocallyControlled() and pawn:HasAuthority() ~= guest and pawn.Dead == false
         and valid(control) and control:IsLocalController() and same(control.Pawn, pawn)
         and same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref), "fixture exact private player scope unavailable")
-    if action == "remote-seed" or action == "remote-ready" or action == "remote-ammo" or action == "remote-read" then
+    if action == "remote-seed" or action == "remote-ready" or action == "remote-ammo" or action == "remote-read"
+        or action == "remote-worn-seed" then
         assert(not guest and #driver.ClientConnections == 1, "one enrolled guest required")
         local name = argument and argument:match("^Player_FP_C (.+)$")
         local remote = name and StaticFindObject(name)
@@ -187,7 +217,24 @@ local function run(action, argument)
         end
         assert(remote_seed and same(remote_seed.pawn, remote) and same(remote_seed.save, remote.Save),
             "fixture authoritative detached owner changed")
-        if action == "remote-ready" then
+        if action == "remote-worn-seed" then
+            assert(not remote_seed.worn, "fixture worn items already seeded")
+            local save, ids = remote.Save, {}
+            assert(worn_state(remote) == "-,-", "fixture expected unoccupied worn slots")
+            for index, name in ipairs(worn_classes) do
+                local class, out = asset(name), {}
+                asset(factory):MakeDefaultItem(class, remote, out)
+                local row = out.Item or out
+                assert(same(row[item_class], class), "fixture stock wearable creation failed")
+                local slot = save.PlayerBackpack:GetArrayNum() + 1
+                save.PlayerBackpack[slot] = row
+                ids[index] = identity(row)
+                assert(identity(save.PlayerBackpack[slot]) == ids[index] and ids[index] ~= "-",
+                    "fixture failed to seed the detached backpack")
+            end
+            remote_seed.worn = ids
+            return table.concat(ids, ",")
+        elseif action == "remote-ready" then
             assert(not remote_seed.pistol and item_actor(remote, specs[1]) and remote.EquipedItem.Ammo == stored_rounds
                 and remote.Save.PlayerEquipIndex == specs[1].index - 1, "guest stock selection did not settle on host")
             remote_seed.pistol = remote.EquipedItem
@@ -230,7 +277,7 @@ local function run(action, argument)
         select_pistol(pawn, ids)
         seed.pistol = pawn.EquipedItem
         return settled(pawn, seed)
-    elseif action == "guest-press-inactive" or action == "guest-press-selected" then
+    elseif action == "guest-cancel-inactive" or action == "guest-press-inactive" or action == "guest-press-selected" then
         assert(guest and seed and same(pawn, seed.pawn) and same(pawn.EquipedItem, seed.pistol)
             and pawn.Save.PlayerEquipIndex == specs[1].index - 1, "fixture guest no longer holds the selected pistol")
         if action == "guest-press-selected" then
@@ -238,15 +285,27 @@ local function run(action, argument)
             assert(seed.pistol.Ammo == 2, "fixture couldn't distinguish guest and authority rounds")
         end
         local before = settled(pawn, seed)
-        local column = action == "guest-press-inactive" and 3 or 1
-        unequip(pawn, specs[column].index, seed.ids[column], 2)
+        if action == "guest-press-selected" then
+            unequip(pawn, specs[1].index, seed.ids[1], 2)
+        else
+            drag(pawn, specs[3].index, seed.ids[3], action == "guest-cancel-inactive")
+        end
         assert(settled(pawn, seed) == before, "the stock guest press mutated inventory before authority settled")
-        if action == "guest-press-inactive" then return before end
+        if action ~= "guest-press-selected" then return before end
         local pistol = seed.pistol
         return before .. ";" .. table.concat({
             tostring(pistol:HasAuthority()), tostring(same(pistol.Instigator, pawn)),
             tostring(pistol.HeldByPlayer), tostring(pistol:IsActorBeingDestroyed()),
         }, ",")
+    elseif action == "guest-worn-state" then
+        assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
+        return worn_state(pawn)
+    elseif action == "guest-remove-helmet" or action == "guest-drag-armor" then
+        assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
+        local prior = worn_state(pawn)
+        if action == "guest-remove-helmet" then unequip(pawn, 9, argument, 2) else drag(pawn, 10, argument, false) end
+        assert(worn_state(pawn) == prior, "the stock guest removed worn equipment before authority settled")
+        return prior
     elseif action == "guest-read" then
         assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
         return settled(pawn, seed)
