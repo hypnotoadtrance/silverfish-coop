@@ -175,19 +175,24 @@ local shooter_paths = {
     bandit = "/Game/Classes/NPCs/NPC_Bandit.NPC_Bandit_C",
 }
 
-local function spawn_stock_npc(pawn, world, kind)
+local function create_stock_npc(pawn, world, kind, point, yaw)
     local path = assert(shooter_paths[kind], "unknown NPC firing fixture")
     local class = StaticFindObject(path)
     if not valid(class) then LoadAsset(path); class = StaticFindObject(path) end
     assert(valid(class), "stock NPC class unavailable")
-    local origin = pawn:K2_GetActorLocation()
-    local x = kind == "state" and 170 or 570
-    local transform = {Translation={X=origin.X+x,Y=origin.Y+180,Z=origin.Z+120},
-        Rotation={X=0,Y=0,Z=0,W=1}, Scale3D={X=1,Y=1,Z=1}}
+    local half = math.rad(yaw) / 2
+    local transform = {Translation=point, Rotation={X=0,Y=0,Z=math.sin(half),W=math.cos(half)}, Scale3D={X=1,Y=1,Z=1}}
     local actor = statics:BeginDeferredActorSpawnFromClass(pawn, class, transform, 1, nil, 0)
     assert(valid(actor) and same(actor:GetClass(), class) and same(actor:GetWorld(), world), "stock shooter spawn unavailable")
     assert(same(actor, statics:FinishSpawningActor(actor, transform, 0)) and actor:HasAuthority() and actor.Alive,
         "stock shooter did not start on the host")
+    return actor, path
+end
+
+local function spawn_stock_npc(pawn, world, kind)
+    local origin = pawn:K2_GetActorLocation()
+    local x = kind == "state" and 170 or 570
+    local actor, path = create_stock_npc(pawn, world, kind, {X=origin.X+x,Y=origin.Y+180,Z=origin.Z+120}, 0)
     actor:SetActorTickEnabled(false)
     actor.CharacterMovement:DisableMovement()
     local controller = actor.Controller
@@ -199,6 +204,99 @@ local function spawn_stock_npc(pawn, world, kind)
     assert(valid(weapon) and same(weapon.Instigator, actor) and weapon:HasAuthority() and weapon.Ammo > 0,
         "NPC did not equip its stock ranged weapon")
     return actor, weapon, path
+end
+
+local rivalry, rivalry_hook
+
+local function rivalry_lane(pawn, guest)
+    local center = pawn:K2_GetActorLocation()
+    local other = guest:K2_GetActorLocation()
+    local ignored = {pawn, guest}
+    local function stood(x, y)
+        if (x-other.X)^2 + (y-other.Y)^2 < 1750^2 then return end
+        local hit = {}
+        local found = trace:LineTraceSingle(pawn, {X=x,Y=y,Z=center.Z+300}, {X=x,Y=y,Z=center.Z-370},
+            0, false, ignored, 0, hit, true, color, color, 0)
+        hit = hit.OutHit or hit
+        local surface = found and hit.Component and hit.Component:Get()
+        if valid(surface) and surface:GetCollisionObjectType() == 0 and hit.ImpactNormal.Z > .8 then
+            return {X=x,Y=y,Z=hit.ImpactPoint.Z+100}
+        end
+    end
+    for step = 0, 11 do
+        local angle = step * math.pi / 6
+        local x, y = center.X + math.cos(angle)*2150, center.Y + math.sin(angle)*2150
+        local dx, dy = -math.sin(angle)*425, math.cos(angle)*425
+        local first, second = stood(x+dx,y+dy), stood(x-dx,y-dy)
+        if first and second and math.abs(first.Z-second.Z) < 80
+            and trace:LineTraceSingle(pawn, first, second, 0, true, ignored, 0, {}, true, color, color, 0) == false then
+            return first, second
+        end
+    end
+    error("no separate firing lane for the two NPC factions")
+end
+
+local function begin_rivalry(pawn, world)
+    local guest = authoritative_guest(world)
+    for _, actor in pairs(shooters) do if valid(actor) then actor:K2_DestroyActor() end end
+    shooters = {}
+    local first, second = rivalry_lane(pawn, guest)
+    local state = create_stock_npc(pawn, world, "state", first, heading(first, second).Yaw)
+    local bandit = create_stock_npc(pawn, world, "bandit", second, heading(second, first).Yaw)
+    assert(state.Max_Health > 1 and bandit.Max_Health > 1 and state.Faction ~= bandit.Faction,
+        "expected two stock opposing factions")
+    rivalry = {state = state, bandit = bandit, hits = {0, 0}}
+    if not rivalry_hook then
+        RegisterHook("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C:DealDamage",
+            function(context, _, _, instigator)
+                if not rivalry then return end
+                local victim, source = context:get(), instigator:get()
+                if same(victim, rivalry.state) and same(source, rivalry.bandit) then rivalry.hits[1] = rivalry.hits[1] + 1 end
+                if same(victim, rivalry.bandit) and same(source, rivalry.state) then rivalry.hits[2] = rivalry.hits[2] + 1 end
+            end)
+        rivalry_hook = true
+    end
+    -- The stock squad spawner calls InitializeAI after FinishSpawningActor.
+    -- That entry point primes each actor's own health, equipment and behavior tree.
+    for _, actor in ipairs({state, bandit}) do
+        if not actor.Initialized then actor:InitializeAI() end
+    end
+    return ("%.2f,%.2f;%d,%d"):format(state.Max_Health, bandit.Max_Health, state.Faction, bandit.Faction)
+end
+
+local function rivalry_member(world, host, kind)
+    if host then return rivalry and rivalry[kind] end
+    local found
+    local class = kind == "state" and "NPC_State_Conscript_C" or "NPC_Bandit_C"
+    for _, actor in ipairs(FindAllOf(class) or {}) do
+        if valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed() then
+            if found then return end
+            found = actor
+        end
+    end
+    return found
+end
+
+local function observe_rivalry(world, host)
+    local first, second = rivalry_member(world, host, "state"), rivalry_member(world, host, "bandit")
+    if not valid(first) or not valid(second) then return "waiting" end
+    local function sample(actor, target, index)
+        local role = host and 3 or 1
+        if not actor.bReplicates or actor:GetLocalRole() ~= role then return "waiting" end
+        local markers = 0
+        if not actor.Alive then
+            for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
+                if valid(marker) and same(marker:GetOwner(), actor) and marker:GetLocalRole() == role then markers = markers + 1 end
+            end
+        end
+        local weapon = actor.Weapon_Ranged
+        local path = valid(weapon) and weapon:GetClass():GetFullName():match(" (%S+)$") or "-"
+        return ("%s,%s,%d,%.2f,%s,%d,%s,%s,%s,%s"):format(tostring(actor.Alive),
+            tostring(actor.Mesh:IsAnySimulatingPhysics()), markers, actor.Health,
+            tostring(same(actor.CombatTarget, target)), host and rivalry.hits[index] or 0,
+            tostring(same(actor.LastDamagedMe, target)), path, tostring(actor.Initialized), tostring(valid(actor.Controller) == true))
+    end
+    return sample(first, second, 1) .. ";" .. sample(second, first, 2)
 end
 
 local function fire_stock_npc(pawn, world, kind)
@@ -780,6 +878,18 @@ local function run(action, actor_path)
         return npc_kill(pawn)
     elseif action == "npc-state" then
         return npc_combat_state(world, host)
+    elseif action == "rivalry-start" then
+        assert(host, "only the host spawns the stock rivalry")
+        return begin_rivalry(pawn, world)
+    elseif action == "rivalry-state" then
+        return observe_rivalry(world, host)
+    elseif action == "rivalry-cleanup" then
+        assert(host, "only the host clears the test NPCs")
+        if rivalry then
+            for _, actor in ipairs({rivalry.state, rivalry.bandit}) do if valid(actor) then actor:K2_DestroyActor() end end
+        end
+        rivalry = nil
+        return "cleared"
     elseif action == "seed-pipe" then
         assert(host, "only the host can grant the test Old Pipe")
         spawn_stock_npc(pawn, world, "state")

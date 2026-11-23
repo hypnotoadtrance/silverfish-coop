@@ -738,6 +738,47 @@ async def verify_resident_turret_combat(host: Seat, guest: Seat, guest_frame: di
             "replica_fire_denied": True, "host_skipped_downed_target": True, "guest_stock_fire_cue": shot,
             "death_blast_sound_smoke_and_fire_fields": death_effects, "guest_fire_extinguished": finished}
 
+async def verify_stock_npc_rivalry(host: Seat, guest: Seat, _pawn: str) -> dict:
+    async def ask(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-npc-override", action)
+
+    async def sample(seat):
+        return [part.split(",") for part in (await ask(seat, "rivalry-state")).split(";")]
+
+    guest_run = guest.client / "run"
+    frame = await wait_resident_status(guest_run, lambda status: status.get("state") == "connected")
+    began = time.time()
+    baseline = await ask(host, "rivalry-start")
+    snapshots, target_seen, initialized, weapons = None, False, False, set()
+    try:
+        try:
+            async with asyncio.timeout(24):
+                while True:
+                    source, observer = await asyncio.gather(sample(host), sample(guest))
+                    snapshots = source, observer
+                    if len(source) != 2 or len(observer) != 2 or any(len(row) != 10 for row in source + observer):
+                        await asyncio.sleep(.15)
+                        continue
+                    initialized |= all(row[8:] == ["true", "true"] for row in source)
+                    target_seen |= any(row[4] == "true" for row in source)
+                    weapons.update(row[7] for row in source if row[7] != "-")
+                    killed = [i for i, row in enumerate(source) if row[:3] == ["false", "true", "1"]
+                              and int(row[5]) > 0 and row[6] == "true"]
+                    if initialized and target_seen and killed and all(observer[i][:3] == ["false", "true", "1"] for i in killed):
+                        break
+                    await asyncio.sleep(.15)
+        except TimeoutError as error:
+            raise AssertionError(f"Stock NPC rivalry did not resolve: {baseline}, initialized={initialized}, "
+                                 f"targets={target_seen}, last={snapshots}") from error
+        shots = [row for row in await resident_events(guest_run, frame) if row["time_unix"] >= began
+                 and row["event"] == "native_weapon_shot_played" and row["weapon"] in weapons and row["stock_sound"]]
+        assert shots, (weapons, snapshots)
+        return {"stock_npc_rivalry": {"stock_max_health_and_factions": baseline, "stock_target_seen": target_seen,
+                "killed": [["State Conscript", "Bandit"][i] for i in killed], "host_and_guest": snapshots,
+                "remote_fire_cues": len(shots)}}
+    finally:
+        assert await ask(host, "rivalry-cleanup") == "cleared"
+
 
 async def verify_resident_guest_melee(host: Seat, guest: Seat) -> dict:
     async def command(seat, action):
@@ -2537,6 +2578,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
                  stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False,
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
+                 stock_npc_rivalry: bool = False,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
                  rusty_pistol: bool = False, tutorial_dock_combat: bool = False, tutorial_dock_retaliation: bool = False,
@@ -2592,6 +2634,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_board_offers, "stock_board_offers", verify_resident_board_offers),
         (resident_weapon_cues, "resident_weapon_cues",
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override, rusty=rusty_pistol)),
+        (stock_npc_rivalry, "stock_npc_rivalry", verify_stock_npc_rivalry),
         (stock_food, "stock_food", verify_resident_guest_food),
         (tutorial_dock_combat, "tutorial_dock_retaliation" if tutorial_dock_retaliation else "tutorial_dock_combat",
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, retaliation=tutorial_dock_retaliation)),
@@ -2621,8 +2664,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
                                                      fixture="portable_board_offer_probe.lua"))
-        if stock_npc_override:
-            if resident_weapon_cues:
+        if stock_npc_override or stock_npc_rivalry:
+            if stock_npc_override and resident_weapon_cues:
                 proof["npc_combat_overlays"] = [probes.enter_context(host_npc_combat_overlay(game)) for game in games]
             else:
                 for game in games:
@@ -2937,6 +2980,8 @@ if __name__ == "__main__":
                         help="follow the stock exit to Tutorial Dock and dispatch a shot at a placed worker")
     parser.add_argument("--tutorial-dock-retaliation", action="store_true",
                         help="observe the stock AI's response to a nonlethal guest shot at a placed worker")
+    parser.add_argument("--stock-npc-rivalry", action="store_true",
+                        help="observe stock perception, attacks, and death between two NPC factions")
     parser.add_argument("--guest-ui-memory", action="store_true",
                         help="verify the resident guest UI refresh on one stock Nearby Items container pickup")
     parser.add_argument("--stock-prop-grip", action="store_true", help="verify default guest carry filtering in one portable lantern session")
@@ -3026,14 +3071,14 @@ if __name__ == "__main__":
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "stock_board_offers", "resident_weapon_cues",
-                              "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation"}
+                              "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "stock_npc_rivalry"}
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
     if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
         parser.error("Use --tutorial-dock-combat with --rusty-pistol and --stock-npc-override")
     if args.tutorial_dock_retaliation and not args.tutorial_dock_combat:
         parser.error("Use --tutorial-dock-retaliation with --tutorial-dock-combat")
-    if (args.stock_food or args.stock_campfire or args.stock_npc_override or args.stock_board_offers) and (
+    if (args.stock_food or args.stock_campfire or args.stock_npc_override or args.stock_board_offers or args.stock_npc_rivalry) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
         parser.error("Run the resident gameplay checks without other gameplay fixtures")
@@ -3073,6 +3118,7 @@ if __name__ == "__main__":
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
                        stock_use=args.stock_use, stock_food=args.stock_food, stock_campfire=args.stock_campfire,
                        stock_npc_override=args.stock_npc_override, stock_board_offers=args.stock_board_offers,
+                       stock_npc_rivalry=args.stock_npc_rivalry,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
