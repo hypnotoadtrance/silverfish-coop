@@ -270,6 +270,8 @@ The transport-item hook now requires an active co-op session before intercepting
 
 At stock walk-through exits, all active players must be within 15 metres when the wall admits the host. After the host reaches that exit's stock trigger, the party departs together even if the host has run farther ahead during the crossing. The transition still requires the same source world, route, and connected party when departure starts. Doors that trigger travel check the distance when the host interacts.
 
+A muted two-player run on candidate `69abfba` exercised the stock Observatory-to-Crossroads exit. The wall admitted the host at 14.80 metres from the guest. The host reached 15.60 metres before the overlap and 16.72 metres on the sweep into the exit. Both players reached the stock destination entrance in the same Crossroads visit. [Stock exit test](../tests/live_authored_route_matrix_smoke.py)
+
 The guest's provisional NPC barter widget is hidden in the stock menu-open callback. The visible stock menu opens after applying the host's inventory and shared wallet. A muted Observatory test observed zero opacity immediately after the native interaction, then verified the visible host offers and a later refresh at the same trader. [NPC barter trial](../tests/live_npc_barter_smoke.py)
 
 The remote avatar keeps one displayed weapon when the stock equipped actor is also attached. A muted pair verified the reported suppressed shotgun with actual stock quick-slot selection and guest ADS. The host saw one visible shotgun and the stock aim and lower transitions. A separate test sampled interpolated head yaw during the turn and verified neck and tail alignment through landing. [Avatar trial](../tests/live_avatar_capture.py)
