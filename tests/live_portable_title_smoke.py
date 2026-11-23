@@ -311,6 +311,15 @@ async def verify_stock_prop_grip(host: Seat, guest: Seat, pawn: str) -> dict:
     held_filter = active_counters(holding_state)
     held, held_position = await sample()
     assert held, held_position
+    before = (await wait(host_run, lambda state: state.get("transport", {}).get("prop_pose_datagrams_received", 0) > 0))
+    prior_count = before["transport"]["prop_pose_datagrams_received"]
+    local_pawn = holding_state["game"]["pawns"]["local"]["name"]
+    assert await portable_probe_command(guest.bridge, "portable-lantern", f"sweep\t{local_pawn}") == "sweeping"
+    await asyncio.sleep(1.35)
+    moved, swept_position = await sample()
+    after = await wait(host_run, lambda state: state.get("updated_unix", 0) > before["updated_unix"] + 1.2)
+    streamed = after["transport"]["prop_pose_datagrams_received"] - prior_count
+    assert moved and math.dist(held_position, swept_position) > 25 and streamed > 0, (swept_position, streamed)
     dropped = await submit(guest_run, native_prop_carry.FIXTURE, target="drop")
     assert dropped["ok"], dropped
     drop = await edge("drop", grab["lease"])
@@ -329,6 +338,9 @@ async def verify_stock_prop_grip(host: Seat, guest: Seat, pawn: str) -> dict:
         "authored_prop": native_lantern.ACTOR, "grab": grab, "drop": drop,
         "filter_while_held": held_filter, "filter_after_drop": active_counters(resumed_state),
         "held_position": held_position, "released_position": released_position,
+        "stock_sweep": {"target_seconds": 1.2, "received": streamed,
+                        "host_displacement_cm": math.dist(held_position, swept_position),
+                        "swept_position": swept_position},
     }
 
 
@@ -1112,8 +1124,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableRuinExitProbe",
                                                  fixture="portable_ruin_exit_probe.lua"))
         if stock_prop_grip:
-            probes.enter_context(installed_probe(first_game, mod="SilverfishPortableLanternProbe",
-                                                 fixture="portable_lantern_probe.lua"))
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableLanternProbe",
+                                                     fixture="portable_lantern_probe.lua"))
         if compact_crate_status:
             proof["crate_status_overlay"] = {str(game): probes.enter_context(compact_crate_status_overlay(game)) for game in games}
         if guest_shop_lease:
