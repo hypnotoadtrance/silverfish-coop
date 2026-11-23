@@ -1228,6 +1228,15 @@ end
 local function write_status(state, current_phase, failure, fields, pending, crate_diagnostic)
     local compact_crates = resident_title and status_publication.installed
         and not status_publication.mirror and status_publication.memory_live
+    local published = status_publication.context
+    local pawn = state.local_pawn and state.local_pawn.pawn
+    -- Autonomous sync can run before the next status publish. Keep exact command replies
+    -- and scope changes on the full path, without building an idle frame to discard.
+    if compact_crates and not fields and not pending and not failure and not crate_diagnostic and published
+        and (current_phase == "hosting" or current_phase == "connected")
+        and published.phase == current_phase and published.map == state.map and published.clients == state.clients
+        and same_object(published.world, state.world) and same_object(published.pawn, pawn)
+        and os.clock() < status_publication.next_frame then return end
     local crate_details
     if crate_diagnostic and (failure or current_phase ~= crate_diagnostic.phase
         or not same_object(state.world, crate_diagnostic.world)
@@ -1523,6 +1532,11 @@ local function write_status(state, current_phase, failure, fields, pending, crat
     -- explicit filesystem commands can still observe their game-thread receipts.
     status_publication.memory_live = type(SilverfishPublishLocalBridgeStatus) == "function"
         and SilverfishPublishLocalBridgeStatus(frame)
+    if resident_title and status_publication.installed and status_publication.memory_live and not status_publication.mirror then
+        status_publication.context = {phase = current_phase, map = state.map, clients = state.clients, world = state.world, pawn = pawn}
+    else
+        status_publication.context = nil
+    end
     if status_publication.memory_live and not status_publication.mirror and not file_command then return end
     if crate_details and #crate_details > 0 then frame = frame .. table.concat(crate_details, "\n") .. "\n" end
     local temporary = status_path .. ".tmp"

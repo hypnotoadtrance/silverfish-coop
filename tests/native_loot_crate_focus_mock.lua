@@ -160,7 +160,7 @@ end
 
 local function status_case(installed, headless, resident)
     local callback, memory, file, reply
-    local attached, time = true, 0
+    local attached, time, collections = true, 0, 0
     local modules = setmetatable({}, {__index = function(_, key)
         if key == "rows" or key:sub(-5) == "_rows" then return function() return {} end end
         return function() end
@@ -169,6 +169,9 @@ local function status_case(installed, headless, resident)
         require = function(name)
             if name == "native_loot_crate_input" then return input end
             if name == "native_cubes" then return {new = function() return modules end} end
+            if name == "native_stock_creator" then
+                return setmetatable({rows = function() collections = collections + 1; return {} end}, {__index = modules})
+            end
             return modules
         end,
         LoopInGameThreadWithDelay = function(_, fn) callback = fn end,
@@ -206,11 +209,23 @@ local function status_case(installed, headless, resident)
     status()
     assert(has_detail(memory))
     status()
+    local before, frame = collections, memory
+    time = time + .025
+    write(state, "connected")
     if installed and not headless and resident then
+        assert(collections == before and memory == frame, "An unpublished stable resident pass must skip collection")
         assert(not has_detail(memory) and not file)
+
+        state.clients = 1
+        write(state, "connected")
+        assert(collections == before + 1, "A membership change still collects before the publish deadline")
+        state.clients = 0
+        write(state, "connected", "mock failure")
+        assert(collections == before + 2, "An observation failure still enters the full writer path")
+
         local pending = {ticket = 1, fields = query}
-        time = time + .3
         tick(query, pending)
+        assert(collections == before + 3 and memory == frame, "An immediate command gets a full receipt without forcing a publish")
         assert(not has_detail(memory) and has_detail(reply))
         assert(reply:find("ack\t" .. query[1] .. "\taccepted", 1, true))
         local _, detail_end = reply:find(action .. "\t", 1, true)
@@ -227,6 +242,7 @@ local function status_case(installed, headless, resident)
         status()
         assert(not memory and has_detail(file))
     else
+        assert(collections == before + 1, "Legacy and mirrored sessions retain their full collection path")
         assert(has_detail(memory))
         if headless then assert(has_detail(file)) end
     end
