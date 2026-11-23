@@ -11,9 +11,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <format>
 #include <map>
 #include <memory>
+#include <numbers>
+#include <optional>
 #include <ranges>
 #include <string>
 #include <string_view>
@@ -1089,6 +1092,174 @@ namespace
         }
     };
 
+    using AimVector = std::array<double, 3>;
+    constexpr auto aim_vector_type = STR("/Script/CoreUObject.Vector");
+    constexpr auto aim_rotator_type = STR("/Script/CoreUObject.Rotator");
+    constexpr auto aim_hit_type = STR("/Script/Engine.HitResult");
+    constexpr auto scene_component_type = STR("/Script/Engine.SceneComponent");
+
+    bool aim_vector_field(Unreal::FStructProperty* property, const Unreal::TCHAR* type)
+    {
+        return property && property->GetSize() == sizeof(AimVector) &&
+            property->GetStruct().Get() == find<Unreal::UScriptStruct>(type);
+    }
+
+    std::optional<AimVector> read_aim_vector(Unreal::FStructProperty* property, const void* source)
+    {
+        AimVector result{};
+        std::memcpy(result.data(), property->ContainerPtrToValuePtr<void>(source), sizeof(result));
+        if (!std::ranges::all_of(result, [](double value) { return std::isfinite(value); })) return {};
+        return result;
+    }
+
+    std::optional<AimVector> component_aim_vector(Unreal::UObject* component, const Unreal::TCHAR* path)
+    {
+        auto* fn = find<Unreal::UFunction>(path);
+        auto* result = fn ? Unreal::CastField<Unreal::FStructProperty>(fn->GetReturnProperty()) : nullptr;
+        if (!fn || !fn->HasAnyFunctionFlags(Unreal::FUNC_Native) || fn->GetNumParms() != 1 ||
+            fn->GetParmsSize() != sizeof(AimVector) || !aim_vector_field(result, aim_vector_type) ||
+            result->GetOffset_Internal() != 0) return {};
+        AimVector storage{};
+        component->ProcessEvent(fn, storage.data());
+        return read_aim_vector(result, storage.data());
+    }
+
+    struct AimParameters
+    {
+        alignas(16) std::array<std::byte, 512> data{};
+        std::array<Unreal::FProperty*, 2> initialized{};
+        std::size_t count{};
+
+        void initialize(Unreal::FProperty* property)
+        {
+            property->InitializeValue_InContainer(data.data());
+            initialized[count++] = property;
+        }
+
+        ~AimParameters()
+        {
+            while (count) initialized[--count]->DestroyValue_InContainer(data.data());
+        }
+    };
+
+    std::optional<AimVector> guest_aim_point(Unreal::UObject* pawn, Unreal::UObject* weapon,
+                                            const AimVector& eye, const AimVector& forward)
+    {
+        auto* library = find<Unreal::UObject>(STR("/Script/Engine.Default__KismetSystemLibrary"));
+        auto* fn = find<Unreal::UFunction>(STR("/Script/Engine.KismetSystemLibrary:LineTraceSingle"));
+        auto* range = field<Unreal::FDoubleProperty>(pawn, STR("SightRange"));
+        if (!library || !fn || !range || fn->GetOuterPrivate() != library->GetClassPrivate() ||
+            !fn->HasAnyFunctionFlags(Unreal::FUNC_Native) || fn->GetNumParms() != 13 ||
+            fn->GetParmsSize() > sizeof(AimParameters::data)) return {};
+        auto* context = input<Unreal::FObjectProperty>(fn, STR("WorldContextObject"), 0);
+        auto* start = input<Unreal::FStructProperty>(fn, STR("Start"), 8);
+        auto* end = input<Unreal::FStructProperty>(fn, STR("End"), 0x20);
+        auto* channel = input<Unreal::FByteProperty>(fn, STR("TraceChannel"), 0x38);
+        auto* complex = input<Unreal::FBoolProperty>(fn, STR("bTraceComplex"), 0x39);
+        auto* ignored = field<Unreal::FArrayProperty>(fn, STR("ActorsToIgnore"));
+        auto* actor = ignored ? Unreal::CastField<Unreal::FObjectProperty>(ignored->GetInner()) : nullptr;
+        auto* hit = field<Unreal::FStructProperty>(fn, STR("OutHit"));
+        auto* hit_type = find<Unreal::UScriptStruct>(aim_hit_type);
+        auto* impact = field<Unreal::FStructProperty>(hit_type, STR("ImpactPoint"));
+        auto* ignore_self = field<Unreal::FBoolProperty>(fn, STR("bIgnoreSelf"));
+        auto* found = Unreal::CastField<Unreal::FBoolProperty>(fn->GetReturnProperty());
+        const double distance = range->GetPropertyValueInContainer(pawn);
+        if (!context || !aim_vector_field(start, aim_vector_type) || !aim_vector_field(end, aim_vector_type) ||
+            !channel || !complex || !actor || actor->GetOffset_Internal() != 0 ||
+            !hit || !hit_type || hit->GetStruct().Get() != hit_type || !hit->HasAnyPropertyFlags(Unreal::CPF_OutParm) ||
+            !aim_vector_field(impact, STR("/Script/Engine.Vector_NetQuantize")) ||
+            !ignore_self || !found || !std::isfinite(distance) || distance <= 0.0) return {};
+        AimVector destination{eye[0] + forward[0] * distance, eye[1] + forward[1] * distance, eye[2] + forward[2] * distance};
+
+        AimParameters arguments;
+        arguments.initialize(ignored);
+        arguments.initialize(hit);
+        auto* data = arguments.data.data();
+        Unreal::FScriptArrayHelper actors(ignored, ignored->ContainerPtrToValuePtr<void>(data));
+        actor->SetObjectPropertyValue(actors.GetRawPtr(actors.AddValue()), weapon);
+        context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(data), pawn);
+        std::memcpy(start->ContainerPtrToValuePtr<void>(data), eye.data(), sizeof(eye));
+        std::memcpy(end->ContainerPtrToValuePtr<void>(data), destination.data(), sizeof(destination));
+        channel->SetPropertyValueInContainer(data, 1); // Stock LookTrace visibility channel.
+        complex->SetPropertyValueInContainer(data, true);
+        ignore_self->SetPropertyValueInContainer(data, true);
+        library->ProcessEvent(fn, data);
+        return found->GetPropertyValueInContainer(data)
+            ? read_aim_vector(impact, hit->ContainerPtrToValuePtr<void>(data)) : std::optional{destination};
+    }
+
+    struct GuestMuzzleAim
+    {
+        Unreal::FWeakObjectPtr component;
+        AimVector previous{};
+
+        static bool set_rotation(Unreal::UObject* muzzle, const AimVector& rotation, bool relative)
+        {
+            auto* fn = find<Unreal::UFunction>(relative ? STR("/Script/Engine.SceneComponent:K2_SetRelativeRotation")
+                                                        : STR("/Script/Engine.SceneComponent:K2_SetWorldRotation"));
+            auto* value = input<Unreal::FStructProperty>(fn, STR("NewRotation"), 0);
+            auto* sweep = input<Unreal::FBoolProperty>(fn, STR("bSweep"), 0x18);
+            auto* hit = field<Unreal::FStructProperty>(fn, STR("SweepHitResult"));
+            auto* teleport = input<Unreal::FBoolProperty>(fn, STR("bTeleport"), 0x118);
+            if (!fn || fn->GetOuterPrivate() != find<Unreal::UClass>(scene_component_type) ||
+                !fn->HasAnyFunctionFlags(Unreal::FUNC_Native) || fn->GetNumParms() != 4 || fn->GetReturnProperty() ||
+                fn->GetParmsSize() > sizeof(AimParameters::data) || !aim_vector_field(value, aim_rotator_type) ||
+                !sweep || !hit || hit->GetOffset_Internal() != 0x20 ||
+                hit->GetStruct().Get() != find<Unreal::UScriptStruct>(aim_hit_type) ||
+                !hit->HasAnyPropertyFlags(Unreal::CPF_OutParm) || !teleport) return false;
+            AimParameters args;
+            args.initialize(hit);
+            auto* data = args.data.data();
+            std::memcpy(value->ContainerPtrToValuePtr<void>(data), rotation.data(), sizeof(rotation));
+            sweep->SetPropertyValueInContainer(data, false);
+            teleport->SetPropertyValueInContainer(data, true);
+            muzzle->ProcessEvent(fn, data);
+            return true;
+        }
+
+        bool apply(Unreal::UObject* pawn, Unreal::UObject* weapon)
+        {
+            auto* camera = object(pawn, STR("Camera"));
+            auto* muzzle = object(weapon, STR("Arrow_Muzzle"));
+            if (!live(camera) || camera->GetOuterPrivate() != pawn ||
+                camera->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.CameraComponent")) ||
+                !live(muzzle) || muzzle->GetOuterPrivate() != weapon ||
+                muzzle->GetClassPrivate() != find<Unreal::UClass>(STR("/Script/Engine.ArrowComponent"))) return false;
+            auto* relative = field<Unreal::FStructProperty>(muzzle, STR("RelativeRotation"));
+            if (!aim_vector_field(relative, aim_rotator_type)) return false;
+            const auto old = read_aim_vector(relative, muzzle);
+            constexpr auto location = STR("/Script/Engine.SceneComponent:K2_GetComponentLocation");
+            const auto origin = component_aim_vector(muzzle, location);
+            const auto eye = component_aim_vector(camera, location);
+            const auto direction = component_aim_vector(camera, STR("/Script/Engine.SceneComponent:GetForwardVector"));
+            if (!old || !origin || !eye || !direction ||
+                std::abs(std::hypot((*direction)[0], (*direction)[1], (*direction)[2]) - 1.0) > 0.001) return false;
+            const auto target = guest_aim_point(pawn, weapon, *eye, *direction);
+            if (!target) return false;
+            AimVector toward{(*target)[0] - (*origin)[0], (*target)[1] - (*origin)[1], (*target)[2] - (*origin)[2]};
+            // A surface can lie between the camera and muzzle. Keep the shot facing forward in that case.
+            if (toward[0] * (*direction)[0] + toward[1] * (*direction)[1] + toward[2] * (*direction)[2] < 1.0)
+                toward = *direction;
+            constexpr double degrees = 180.0 / std::numbers::pi;
+            const AimVector rotation{std::atan2(toward[2], std::hypot(toward[0], toward[1])) * degrees,
+                                     std::atan2(toward[1], toward[0]) * degrees, 0.0};
+            if (!set_rotation(muzzle, rotation, false)) return false;
+            component = muzzle;
+            previous = *old;
+            return true;
+        }
+
+        bool restore()
+        {
+            auto* muzzle = component.Get();
+            if (!muzzle) return true;
+            component.Reset();
+            return live(muzzle) && set_rotation(muzzle, previous, true);
+        }
+
+        ~GuestMuzzleAim() { restore(); }
+    };
+
     int fire(const Lua& lua, const Context& context, const Inventory& inventory, bool disarm)
     {
         const auto report = [&](bool ok, std::string_view status, std::int32_t first = -1, std::int32_t second = -1,
@@ -1150,9 +1321,13 @@ namespace
         Unreal::FWeakObjectPtr held_actor;
         held_actor = actor;
         ProjectileSnapshot projectiles;
+        // Pose the authoritative muzzle for the stock launch. The remote pawn's first-person
+        // weapon animation does not run on this seat.
+        GuestMuzzleAim aim;
         if (!disarm)
         {
             if (!projectiles.capture(context, projectile)) return report(false, "guest_weapon_projectile_scope_full");
+            if (!aim.apply(context.pawn, actor)) return report(false, "guest_weapon_aim_unavailable");
             held->SetPropertyValueInContainer(&parameters, true);
             actor->ProcessEvent(action, &parameters);
         }
@@ -1161,6 +1336,7 @@ namespace
         // Always release the verified live actor before deciding whether the shot produced a valid receipt.
         held->SetPropertyValueInContainer(&parameters, false);
         actor->ProcessEvent(action, &parameters);
+        if (!aim.restore()) return report(false, "mutation_unverified_guest_weapon_muzzle_restore", before);
 
         Inventory after;
         if (!ownership_current(context) || !locate(context, after).empty() || equipped(context, after) != actor ||
@@ -1439,6 +1615,7 @@ namespace
         Guid guid{};
         HoldClock::time_point deadline{};
         profiles::Profile profile{};
+        GuestMuzzleAim aim;
         std::string_view status{"inactive"};
         std::int64_t serial{};
         int before{-1}, after{-1}, shot_before{-1}, rounds{}, projectiles{}, shot_births{};
@@ -1556,6 +1733,8 @@ namespace
                 ammo->GetPropertyValueInContainer(receiver) != smg_hold.after ||
                 inventory.ammo->GetPropertyValueInContainer(inventory.item) != smg_hold.after)
                 hold_stop(smg_hold, "mutation_unverified_guest_smg_hold_shot_scope", true);
+            else if (!smg_hold.aim.apply(context.pawn, receiver))
+                hold_stop(smg_hold, "guest_weapon_aim_unavailable");
             else
             {
                 shot_hold = &smg_hold;
@@ -1593,7 +1772,7 @@ namespace
         Context context;
         Inventory inventory;
         auto* ammo = field<Unreal::FIntProperty>(receiver, STR("Ammo"));
-        if (smg_hold.shot_births != 1 || !smg_hold.owned_birth || !smg_hold.birth.Get() || !ammo ||
+        if (!smg_hold.aim.restore() || smg_hold.shot_births != 1 || !smg_hold.owned_birth || !smg_hold.birth.Get() || !ammo ||
             !hold_locate(smg_hold, receiver, context, inventory) || ammo->GetPropertyValueInContainer(receiver) != remaining ||
             inventory.ammo->GetPropertyValueInContainer(inventory.item) != remaining)
         {
@@ -1618,6 +1797,7 @@ namespace
     {
         if (shot_hold)
         {
+            shot_hold->aim.restore();
             shot_hold->shot_before = -1;
             hold_stop(*shot_hold, "mutation_unverified_guest_smg_hold_missing_post", true);
             shot_hold = nullptr;
@@ -1760,7 +1940,11 @@ namespace
         hold_primary(actor, action, true);
         if (smg_hold.rounds != 1)
         {
-            if (shot_hold == &smg_hold) shot_hold = nullptr;
+            if (shot_hold == &smg_hold)
+            {
+                smg_hold.aim.restore();
+                shot_hold = nullptr;
+            }
             smg_hold.shot_before = -1;
             hold_stop(smg_hold, "mutation_unverified_guest_smg_hold_begin", true);
             hold_release(smg_hold);

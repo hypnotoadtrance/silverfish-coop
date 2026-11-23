@@ -473,7 +473,7 @@ async def verify_resident_footsteps(host: Seat, guest: Seat) -> list[dict]:
     return receipts
 
 
-async def verify_resident_pistol(host: Seat, guest: Seat) -> dict:
+async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool = False) -> dict:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-dry-fire", action)
 
@@ -572,7 +572,18 @@ async def verify_resident_pistol(host: Seat, guest: Seat) -> dict:
     await wait_for(guest, "reserve", "")
     assert await command(host, "peer-reserve") == "" and await command(host, "reserve") == ""
     assert await command(host, "ready") == f"{host_guid},0,0"
-    return {"host_stock_click": host_click, "guest_heard_host": guest_heard, "guest_primary_input": press,
+
+    async def fire_at_drone():
+        loaded_press = await submit(guest_run, "native-guest-primary-input-fixture")
+        assert loaded_press["ok"], loaded_press
+        result = await input_result("native_guest_primary_input", loaded_press["native_guest_primary_fixture"]["sequence"])
+        assert (result["guid"], result["before"], result["after"], result["projectiles"]) == (guest_guid, 9, 8, 1), result
+        await wait_for(host, "peer-ready", f"{guest_guid},8,8")
+        await wait_for(guest, "ready", f"{guest_guid},8,8")
+        return result
+
+    combat = await verify_resident_npc_override(host, guest, fire_guest=fire_at_drone) if guest_combat else {}
+    return {**combat, "host_stock_click": host_click, "guest_heard_host": guest_heard, "guest_primary_input": press,
             "host_heard_guest": host_heard, "guest_click": guest_click, "guest_cue_receipts": events,
             "guest_live_round": shot, "host_guest_shot_dispatch": {"projectile_calls": host_shot[0],
                 "shot_sounds": host_shot[1], "muzzle_flashes": host_shot[2]},
@@ -582,7 +593,7 @@ async def verify_resident_pistol(host: Seat, guest: Seat) -> dict:
             "both_games_projected_reloaded_magazine": True, "host_magazine_and_reserve_unchanged": True}
 
 
-async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str) -> dict:
+async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_frame, guest_frame = await asyncio.gather(
         wait_resident_status(host_run, lambda frame: frame.get("local_bridge") == "memory"),
@@ -634,7 +645,7 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str) -> dic
     visual, = [entry for entry in cues if entry["event"] == event_names[1]]
     assert visual["player_id"] == player_id, visual
     footsteps = await verify_resident_footsteps(host, guest)
-    pistol = await verify_resident_pistol(host, guest)
+    pistol = await verify_resident_pistol(host, guest, guest_combat=guest_combat)
     assert not weapon_cue_files(host, guest), "Stock player cues wrote a legacy weapon cue mailbox"
     after = save_state()
     changed = [path for path in before.keys() | after.keys() if before.get(path) != after.get(path)]
@@ -778,25 +789,33 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> d
                                       "campaign_checkpoint_unchanged": True}}
 
 
-async def verify_resident_npc_override(host: Seat, guest: Seat, _pawn: str) -> dict:
+async def verify_resident_npc_override(host: Seat, guest: Seat, _pawn=None, *, fire_guest=None) -> dict:
     async def command(seat, action, actor=None):
         request = f"{action}\t{actor}" if actor is not None else action
         return await portable_probe_command(seat.bridge, "portable-npc-override", request)
 
     checkpoint = campaign_save_hashes(host.campaign)
     assert await command(guest, "census") == "empty", "A drone already existed on the guest before the test spawn"
-    drone = await command(host, "spawn")
+    drone = await command(host, "spawn-guest-target" if fire_guest else "spawn")
     async with asyncio.timeout(8):
         while (observed := await command(guest, "observe", drone)) == "absent":
             await asyncio.sleep(.1)
     before = float(await command(host, "observe", drone))
-    assert float(observed) == before > 0, (before, observed)
+    assert float(observed) > 0 and before > 0, (before, observed)
+    if not fire_guest:
+        assert float(observed) == before, (before, observed)
     assert await command(guest, "guest-damage", drone) == "damage denied"
     guest_drone = await command(guest, "census")
     assert guest_drone.startswith("NPC_Drone_C /Game/"), guest_drone
     assert float(await command(host, "observe", drone)) == before
-    total = float(await command(host, "host-damage", drone))
-    assert total >= before
+    if fire_guest:
+        aim = await command(guest, "guest-aim", drone)
+        views = await asyncio.gather(*(command(seat, "view", drone) for seat in (host, guest)))
+        authority = {"guest_aim": aim, "views_before_shot": views, "guest_shot": await fire_guest()}
+    else:
+        total = float(await command(host, "host-damage", drone))
+        assert total >= before
+        authority = {"authority_damage": total}
     result = None
     try:
         async with asyncio.timeout(8):
@@ -806,11 +825,12 @@ async def verify_resident_npc_override(host: Seat, guest: Seat, _pawn: str) -> d
                     break
                 await asyncio.sleep(.1)
     except TimeoutError as error:
-        raise AssertionError(f"The host and guest drone death states were {result}") from error
+        health = await asyncio.gather(*(command(seat, "observe", drone) for seat in (host, guest)))
+        raise AssertionError(f"The host and guest drone death states were {result}, health {health}, {authority}") from error
     assert campaign_save_hashes(host.campaign) == checkpoint, "Drone damage caused an early checkpoint"
     return {"resident_npc_override": {"host_stock_drone": drone, "guest_stock_drone": guest_drone,
                                       "hit_points_before": before,
-                                      "guest_local_damage_denied": True, "authority_damage": total,
+                                      "guest_local_damage_denied": True, **authority,
                                       "ragdoll_on_both": True, "campaign_checkpoint_unchanged": True}}
 
 
@@ -2192,9 +2212,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     # vitals for its own test and therefore runs after the other checks.
     resident_checks = tuple((name, check) for enabled, name, check in (
         (stock_campfire, "stock_campfire", verify_resident_campfire),
-        (stock_npc_override, "stock_npc_override", verify_resident_npc_override),
+        (stock_npc_override and not resident_weapon_cues, "stock_npc_override", verify_resident_npc_override),
         (stock_board_offers, "stock_board_offers", verify_resident_board_offers),
-        (resident_weapon_cues, "resident_weapon_cues", verify_resident_weapon_cues),
+        (resident_weapon_cues, "resident_weapon_cues",
+         lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override)),
         (stock_food, "stock_food", verify_resident_guest_food),
     ) if enabled)
     single_scenario = (bool(resident_checks) or stock_prop_grip or stock_host_prop_observer

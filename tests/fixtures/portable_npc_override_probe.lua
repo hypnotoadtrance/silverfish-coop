@@ -8,9 +8,39 @@ local class_path = "/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C"
 local damage_key = "Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5"
 local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
 local last, authority_drone
+local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+local color = {R=0, G=0, B=0, A=0}
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
+
+local function heading(from, target)
+    local x, y, z = target.X - from.X, target.Y - from.Y, target.Z - from.Z
+    return {Pitch = math.deg(math.atan(z, math.sqrt(x*x + y*y))), Yaw = math.deg(math.atan(y, x)), Roll = 0}
+end
+
+local function gun_target(pawn, world)
+    local guest
+    for _, candidate in ipairs(FindAllOf("Player_FP_C") or {}) do
+        if valid(candidate) and not candidate:IsActorBeingDestroyed() and candidate:HasAuthority()
+            and not candidate:IsLocallyControlled() and same(candidate:GetWorld(), world) then
+            assert(not guest, "expected one authoritative guest")
+            guest = candidate
+        end
+    end
+    assert(valid(guest) and valid(guest.Camera) and valid(guest.EquipedItem), "the test needs an equipped stock guest")
+    local eye = guest.Camera:K2_GetComponentLocation()
+    local origin, weapon = guest:K2_GetActorLocation(), guest.EquipedItem
+    local yaw = math.rad(guest:K2_GetActorRotation().Yaw)
+    for _, offset in ipairs({0, 45, -45, 90, -90, 135, -135, 180}) do
+        local bearing = yaw + math.rad(offset)
+        local point = {X=origin.X+450*math.cos(bearing), Y=origin.Y+450*math.sin(bearing), Z=eye.Z+35}
+        if trace:LineTraceSingle(pawn, eye, point, 0, true, {guest, weapon}, 0, {}, true, color, color, 0) == false then
+            return point
+        end
+    end
+    error("no clear test shot from the authoritative guest position")
+end
 
 local function run(action, actor_path)
     local viewport = FindFirstOf("GameViewportClient")
@@ -22,7 +52,8 @@ local function run(action, actor_path)
     local host = pawn:HasAuthority()
     local class = StaticFindObject(class_path)
     local drone
-    if not host or action == "census" or action == "spawn" then
+    local spawn = action == "spawn" or action == "spawn-guest-target"
+    if not host or action == "census" or spawn then
         for _, candidate in ipairs(FindAllOf("NPC_Drone_C") or {}) do
             if valid(candidate) and not candidate:IsActorBeingDestroyed() and same(candidate:GetWorld(), world) then
                 assert(not drone, "unexpected stock drone already in the test world")
@@ -31,18 +62,21 @@ local function run(action, actor_path)
         end
     end
     if action == "census" then return drone and drone:GetFullName() or "empty" end
-    if action == "spawn" then
+    if spawn then
         assert(host and not drone and not valid(authority_drone), "only the isolated host may spawn one fixture drone")
         if not valid(class) then LoadAsset(class_path); class = StaticFindObject(class_path) end
         assert(valid(class), "stock drone class unavailable")
         local origin = pawn:K2_GetActorLocation()
-        local transform = {Translation={X=origin.X+180,Y=origin.Y,Z=origin.Z+180},
+        local point = action == "spawn-guest-target" and gun_target(pawn, world)
+            or {X=origin.X+180,Y=origin.Y,Z=origin.Z+180}
+        local transform = {Translation=point,
             Rotation={X=0,Y=0,Z=0,W=1}, Scale3D={X=1,Y=1,Z=1}}
         local actor = statics:BeginDeferredActorSpawnFromClass(pawn, class, transform, 1, nil, 0)
         assert(valid(actor) and same(actor:GetClass(), class) and same(actor:GetWorld(), world), "stock drone spawn unavailable")
         actor.bAlwaysRelevant = true
         assert(same(actor, statics:FinishSpawningActor(actor, transform, 0)) and actor:GetLocalRole() == 3,
             "stock drone did not finish on the authority")
+        if action == "spawn-guest-target" then actor.Health = 1 end
         actor:SetReplicates(true)
         actor:SetReplicateMovement(true)
         actor:ForceNetUpdate()
@@ -61,6 +95,32 @@ local function run(action, actor_path)
     if host then assert(same(actor, authority_drone), "the target is outside the fixture") end
     local before = actor.Health
     if action == "observe" then return ("%.6f"):format(before) end
+    if action == "guest-aim" then
+        assert(not host and valid(pawn.Controller) and valid(pawn.Camera), "only the guest may aim its camera")
+        local target = actor.CapsuleComponent:K2_GetComponentLocation()
+        local aim = heading(pawn.Camera:K2_GetComponentLocation(), target)
+        pawn.Controller:SetControlRotation(aim)
+        return ("%.2f,%.2f"):format(aim.Yaw, aim.Pitch)
+    end
+    if action == "view" then
+        local shooter = pawn
+        if host then
+            for _, candidate in ipairs(FindAllOf("Player_FP_C") or {}) do
+                if valid(candidate) and not candidate:IsActorBeingDestroyed() and not candidate:IsLocallyControlled()
+                    and same(candidate:GetWorld(), world) then shooter = candidate end
+            end
+            assert(shooter ~= pawn, "authoritative guest pawn unavailable")
+        end
+        local muzzle = shooter.EquipedItem.Arrow_Muzzle
+        assert(valid(muzzle) and same(muzzle:GetOwner(), shooter.EquipedItem), "guest stock muzzle unavailable")
+        local camera = shooter.Camera:K2_GetComponentRotation()
+        local base = shooter:GetBaseAimRotation()
+        local barrel = muzzle:K2_GetComponentRotation()
+        local target = actor.CapsuleComponent:K2_GetComponentLocation()
+        local needed = heading(muzzle:K2_GetComponentLocation(), target)
+        return ("base=%.2f/%.2f camera=%.2f/%.2f muzzle=%.2f/%.2f target=%.2f/%.2f"):format(
+            base.Yaw, base.Pitch, camera.Yaw, camera.Pitch, barrel.Yaw, barrel.Pitch, needed.Yaw, needed.Pitch)
+    end
     if action == "death" then
         local mesh = actor.Mesh
         assert(valid(mesh) and same(mesh:GetOwner(), actor), "stock drone mesh unavailable")
