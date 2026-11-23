@@ -86,6 +86,20 @@ async def stock_health(run: Path) -> dict:
     return {"pawn": pawn, "slot": slot, "health": health, "maximum": maximum, "hud": hud, "player_card": player_card}
 
 
+def prop_impact_evidence(hit, stock, released):
+    if hit["impacts"] == 0 or hit["collision_target"] != stock["npc"]:
+        return None
+    if hit["impulses_decoded"]:
+        # The stock prop hands damage to the NPC only above this normal-impulse threshold.
+        return "measured_normal_impulse" if (hit["largest_thrower_impulse"] or 0) > 5000 else None
+    host = stock["host_pawn"]
+    if (hit["largest_impulse"] is None and hit["largest_thrower_impulse"] is None
+            and (released["holder"], released["instigator_before"], released["instigator_after"]) == (host, host, host)
+            and math.isfinite(released["speed_cm_s"]) and released["speed_cm_s"] > 0):
+        # The exact collision and stock release can qualify only with the host-attributed damage receipt below.
+        return "stock_damage_receipt_impulse_unavailable"
+
+
 async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damage: bool,
                    require_stock_health: bool = False, prop_retarget: bool = False) -> None:
     name = "observatory-jug-" + uuid.uuid4().hex[:8]
@@ -193,22 +207,24 @@ async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damag
             impact_verified = attack in ("pistol", "pistols") or (
                 hit["impacts"] > 0 and hit["collision_target"] == stock["npc"])
             if prop_retarget:
-                # The stock prop passes damage to the NPC only above this normal-impulse threshold.
-                impact_verified = impact_verified and (hit["largest_thrower_impulse"] or 0) > 5000
+                impact_evidence = prop_impact_evidence(hit, stock, released)
+                impact_verified = impact_evidence is not None
             remembered = not both_threats or all(hit["threats"].count(stock[role]) == 1
                                                  for role in ("host_pawn", "guest_pawn"))
             if (impact_verified and hit["target"] == stock["host_pawn"]
                     and 0 < hit["npc_health"] < pre_host_health and hit["npc_damage_calls"] == (2 if both_threats else 1)
                     and hit["npc_damage_instigator"] == stock["host_pawn"] and remembered):
+                if prop_retarget:
+                    evidence["stock_impact_evidence"] = impact_evidence
                 break
             await asyncio.sleep(.12)
         else:
             if attack in ("jug", "toolbox") and hit["impacts"] == 0:
                 raise AssertionError("the authored prop missed the stalker")
-            if prop_retarget and (hit["largest_impulse"] is None or hit["largest_impulse"] <= 5000):
+            if prop_retarget and hit["impulses_decoded"] and (hit["largest_impulse"] or 0) <= 5000:
                 raise AssertionError("the authored prop hit the stalker without crossing the stock impact damage threshold")
-            if prop_retarget and (hit["largest_thrower_impulse"] or 0) <= 5000:
-                raise AssertionError("the stock prop impact did not retain the exact thrower as instigator")
+            if prop_retarget and impact_evidence is None:
+                raise AssertionError("the stock prop hit did not verify its normal impulse or exact thrower")
             raise AssertionError("the stock attack did not establish damage and the host as the stalker's target")
 
         if require_stock_health:
