@@ -732,6 +732,8 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
 async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> dict:
     from tools.silverfish.native_flood_jammer import OBSERVATORY_BOUNTY_BOARD
     from tools.silverfish.native_quest import AUTHORED_BOARD_ACTIONS
+    from tools.silverfish.native_wire_board import catalog_specialists
+    from tools.silverfish.travel import OBSERVATORY
 
     async def command(seat, action, quest=None):
         request = f"{action}\t{quest}" if quest is not None else action
@@ -746,8 +748,10 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> d
     catalog, extended = (await command(host, "catalog")).split(";")
     offered = set(filter(None, catalog.split(",")))
     advanced = set(filter(None, extended.split(","))) - AUTHORED_BOARD_ACTIONS
-    assert advanced <= offered and advanced, (offered, advanced)
-    quest = min(advanced)
+    other_boards = offered & (AUTHORED_BOARD_ACTIONS - catalog_specialists(OBSERVATORY, OBSERVATORY_BOUNTY_BOARD))
+    previously_filtered = advanced | other_boards
+    assert previously_filtered <= offered and previously_filtered, (offered, previously_filtered)
+    quest = min(previously_filtered)
 
     opened = await submit(guest_run, "native-wire-board-stock-f-fixture", target=OBSERVATORY_BOUNTY_BOARD)
     assert opened["ok"], opened
@@ -769,7 +773,8 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> d
     assert any(entry.get("quest") == quest and entry.get("state") == "accepted" for entry in entries), entries
     assert campaign_save_hashes(host.campaign) == checkpoint, "Accepting a stock board offer caused an early save"
     return {"resident_board_offers": {"stock_offers": sorted(offered), "guest_offers": sorted(visible),
-                                      "advanced_offers": sorted(advanced), "accepted": quest, "journal_step": int(observed[0]),
+                                      "previously_filtered_offers": sorted(previously_filtered),
+                                      "accepted": quest, "journal_step": int(observed[0]),
                                       "campaign_checkpoint_unchanged": True}}
 
 

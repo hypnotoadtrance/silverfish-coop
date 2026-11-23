@@ -5,7 +5,7 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TI
 local prefix = bridge .. "/portable-board-offer-"
 local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local board_path = map .. ":PersistentLevel.BountyBoard_BP_C_2"
-local menu_class = "BlueprintGeneratedClass /Game/Classes/GUI/Menu_QuestLog_Widget.Menu_QuestLog_Widget_C"
+local menu_class = "/Game/Classes/GUI/Menu_QuestLog_Widget.Menu_QuestLog_Widget_C"
 local step = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A"
 local final = "Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B"
 local items = "Reward_Items_32_2B334D5F4DBA7AA760BF33A8E93A4C0A"
@@ -83,7 +83,8 @@ local function run(action, quest)
     if action == "menu" then
         local stack = pawn.Controller.MenuStack
         local panel = stack[stack:GetArrayNum()]
-        assert(valid(panel) and panel:GetClass():GetFullName() == menu_class and same(panel.BountyBoard_Ref, board),
+        if panel and type(panel.type) == "function" and panel:type() == "RemoteUnrealParam" then panel = panel:get() end
+        assert(valid(panel) and same(panel:GetClass(), StaticFindObject(menu_class)) and same(panel.BountyBoard_Ref, board),
             "The stock Observatory board is not open")
         local list = panel.VerticalBox_ContractsList
         local visible = {}
