@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from collections import Counter
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from hashlib import sha256
@@ -24,6 +25,7 @@ from tools.silverfish.control import submit
 from tools.silverfish.native_rest import site
 from tools.silverfish.travel import CROSSROADS, GOLD_NEXUS, OBSERVATORY
 
+TUTORIAL_DOCK = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
 
 def select_routes(selectors):
     routes = []
@@ -87,7 +89,8 @@ async def probe_command(run, name, action, argument):
 
 
 async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=False, insomnia=False,
-                 check_network_budget=False, check_transition_presentation=False, fast_boundary=False):
+                 check_network_budget=False, check_transition_presentation=False, fast_boundary=False,
+                 intro_npc_census=False):
     name = "authored-route-" + uuid.uuid4().hex[:8]
     campaign = ("--campaign", name)
     profile = ("--profile", name)
@@ -273,6 +276,17 @@ async def verify(work, vanilla, routes, check_regroup=False, sleep_and_wipe=Fals
             ), arrival
             leg["arrival"] = arrival
             leg["destination_epoch"] = current["zone_epoch"]
+            if intro_npc_census:
+                census = {}
+                for seat, directory in (("host", run), ("guest", client_run)):
+                    viewer, *actors = (await probe_command(directory, "intro-npc", "census", "-")).split("|")
+                    assert viewer == seat and actors, (viewer, actors)
+                    counts = Counter(tuple(actor.split(";")) for actor in actors)
+                    census[seat] = [{"family": family, "class": path, "role": int(role),
+                                     "replicates": replicates == "true",
+                                     "alive": None if alive == "-" else alive == "true", "count": count}
+                                    for (family, path, role, replicates, alive), count in sorted(counts.items())]
+                leg["intro_npc_census"] = census
             if fast_boundary:
                 request, = [entry for entry in events("native_authored_zone_request", current["generation"])
                             if (entry["source"], entry["destination"], entry["entrance"], entry["actor"]) ==
@@ -338,6 +352,7 @@ if __name__ == "__main__":
     parser.add_argument("--route", action="append", required=True, metavar="MAP@ENTRANCE[@ACTOR]")
     parser.add_argument("--verify-regroup-message", action="store_true")
     parser.add_argument("--fast-boundary", action="store_true", help="verify the exact Observatory 15 m approach crossing")
+    parser.add_argument("--intro-npc-census", action="store_true", help="compare Tutorial Dock NPCs after stock travel")
     parser.add_argument("--verify-network-budget", action="store_true")
     parser.add_argument("--verify-transition-presentation", action="store_true")
     parser.add_argument("--sleep-and-wipe", action="store_true",
@@ -353,9 +368,14 @@ if __name__ == "__main__":
             raise ValueError("Choose only Observitory_P@Obsv_Etr@Level_Exit_BP_C_1 for --fast-boundary")
         if config.stock_insomnia and not config.sleep_and_wipe:
             raise ValueError("--stock-insomnia requires --sleep-and-wipe at a neutral bed")
+        if config.intro_npc_census and (len(selected) != 1 or selected[0].destination != TUTORIAL_DOCK
+                or config.fast_boundary):
+            raise ValueError("--intro-npc-census requires a single stock route into Tutorial Dock")
     except ValueError as error:
         parser.error(str(error))
-    with staged_probe(config.work.resolve(), "fast_stock_exit_probe") if config.fast_boundary else nullcontext():
+    fixture = "fast_stock_exit_probe" if config.fast_boundary else "intro_npc_probe" if config.intro_npc_census else None
+    with staged_probe(config.work.resolve(), fixture) if fixture else nullcontext():
         asyncio.run(verify(config.work.resolve(), config.vanilla_saved.resolve(), selected,
                            config.verify_regroup_message, config.sleep_and_wipe, config.stock_insomnia,
-                           config.verify_network_budget, config.verify_transition_presentation, config.fast_boundary))
+                           config.verify_network_budget, config.verify_transition_presentation, config.fast_boundary,
+                           config.intro_npc_census))
