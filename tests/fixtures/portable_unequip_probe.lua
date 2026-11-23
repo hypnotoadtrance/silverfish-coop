@@ -240,7 +240,8 @@ LoopInGameThreadWithDelay(40, function()
     local ok, response = pcall(run, action, argument)
     local output = io.open(mailbox .. "/portable-unequip-reply.tsv", "wb")
     if output then
-        output:write(ticket, "\t", ok and "ok" or "error", "\t", tostring(response):gsub("[\r\n\t]", " "))
+        local message = tostring(response):gsub("[\r\n\t]", " ")
+        output:write(ticket, "\t", ok and "ok" or "error", "\t", message)
         output:close()
     end
 end)

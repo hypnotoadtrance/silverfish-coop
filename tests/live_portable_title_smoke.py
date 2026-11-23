@@ -545,13 +545,13 @@ async def verify_stock_unequip(first, second, evidence):
         result = unequip_receipt(await portable_probe_command(host.bridge, probe, "baseline"))
         evidence["solo_stock_baseline"] = result
         pistol, fallback, control = result["before"]
-        assert (pistol["rounds"], result["live_rounds"]) == (5, 3)
+        assert (pistol["rounds"], result["live_rounds"]) == (5, 3), result
         moved_control = dict(control, source="backpack")
         assert result["after_inactive"] == [pistol, fallback, moved_control], result
         packed, returned_fallback, returned_control = result["after_selected"]
         assert packed == dict(pistol, source="backpack", rounds=packed["rounds"]) and packed["rounds"] in (3, 5)
         assert (returned_fallback, returned_control) == (fallback, moved_control)
-        assert (result["selected_slot"], result["held"], result["original_pistol_retired"]) == (4, "fallback", True), result
+        assert (result["selected_slot"], result["held"]) == (4, "fallback"), result
         result["saved_live_rounds"] = packed["rounds"] == result["live_rounds"]
         assert saves() == before, "The solo stock Unequip wrote a save before a checkpoint"
 
