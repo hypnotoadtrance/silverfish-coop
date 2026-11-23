@@ -865,21 +865,26 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
         await asyncio.sleep(.15)
         target = await command(host, "dock-natural-position")
         assert await command(host, f"dock-aim\t{target}") == "ready"
+        async def shoot_guest(remaining):
+            started = time.time()
+            tap = await submit(guest_run, "native-guest-primary-input-fixture")
+            assert tap["ok"], tap
+            sequence = tap["native_guest_primary_fixture"]["sequence"]
+            async with asyncio.timeout(8):
+                while True:
+                    shot = next((row for row in await resident_events(guest_run, frame)
+                                 if row.get("sequence") == sequence and row["time_unix"] >= started
+                                 and row["event"] in ("native_guest_primary_input", "native_guest_primary_input_rejected")), None)
+                    if shot:
+                        break
+                    await asyncio.sleep(.05)
+            assert shot["event"] == "native_guest_primary_input", shot
+            proof = shot["native_guest_weapon"]
+            assert (proof["before"], proof["after"], proof["projectiles"]) == (remaining, remaining - 1, 1), proof
+            return proof
+
         began = time.time()
-        tap = await submit(guest_run, "native-guest-primary-input-fixture")
-        assert tap["ok"], tap
-        sequence = tap["native_guest_primary_fixture"]["sequence"]
-        async with asyncio.timeout(8):
-            while True:
-                shot = next((row for row in await resident_events(guest_run, frame)
-                             if row.get("sequence") == sequence and row["time_unix"] >= began
-                             and row["event"] in ("native_guest_primary_input", "native_guest_primary_input_rejected")), None)
-                if shot:
-                    break
-                await asyncio.sleep(.05)
-        assert shot["event"] == "native_guest_primary_input", shot
-        info = shot["native_guest_weapon"]
-        assert (info["before"], info["after"], info["projectiles"]) == (7, 6, 1), info
+        info = await shoot_guest(7)
         current = baseline
         try:
             async with asyncio.timeout(15):
@@ -901,8 +906,45 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
                 if impacts:
                     break
                 await asyncio.sleep(.05)
+        retaliation = current
+        fight = [{"shot": info, "stock_result": current}]
+        for remaining in range(info["after"], 0, -1):
+            if current.startswith("false;"):
+                break
+            # Give the shooter another clear lane while the stock worker keeps moving and attacking.
+            retreat = tuple(map(float, (await command(host, "dock-natural-retreat")).split(",")))
+            async with asyncio.timeout(6):
+                while True:
+                    local_point = await command(guest, "dock-natural-seat")
+                    if math.dist(retreat, tuple(map(float, local_point.split(",")))) < 80:
+                        break
+                    await asyncio.sleep(.05)
+            for seat in (guest, host):
+                target = await command(seat, "dock-natural-position")
+                assert target != "absent" and await command(seat, f"dock-aim\t{target}") == "ready"
+            result = await shoot_guest(remaining)
+            before_health = float(current.split(";")[3])
+            deadline = time.monotonic() + 1.2
+            while True:
+                current = await command(host, "dock-natural-sample")
+                health = float(current.split(";")[3])
+                if health < before_health or current.startswith("false;") or time.monotonic() >= deadline:
+                    break
+                await asyncio.sleep(.05)
+            fight.append({"shot": result, "stock_result": current})
+
+        assert current.startswith("false;true;") and any(
+            float(entry["stock_result"].split(";")[3]) < float(retaliation.split(";")[3]) for entry in fight[1:]
+        ), ("The stock-health warehouse worker survived the guest's magazine", fight)
+        async with asyncio.timeout(10):
+            while True:
+                bodies = await asyncio.gather(*(command(seat, "dock-natural-state") for seat in (host, guest)))
+                if all(body.startswith("false;true;1;") for body in bodies):
+                    break
+                await asyncio.sleep(.05)
         return {"temporary_weapon_block": {"scope": scope, "rejected": rejected},
-                "baseline": baseline, "shot": info, "stock_target_and_hit": current, "guest_impact_sound": impacts[0]}
+                "baseline": baseline, "shot": info, "stock_target_and_hit": retaliation, "guest_impact_sound": impacts[0],
+                "stock_health_fight": fight, "both_peers_dead_and_ragdolled": bodies}
     finally:
         assert await command(host, "dock-natural-stop") == "stopped"
 

@@ -577,8 +577,8 @@ local function dock_worker(world, name)
     end
 end
 
-local function dock_combat(pawn, world, host, action)
-    local actor = dock_worker(world, "NPC_Survivor_Worker_C_1")
+local function dock_combat(pawn, world, host, action, name)
+    local actor = dock_worker(world, name or "NPC_Survivor_Worker_C_1")
     if not valid(actor) then return "absent" end
     assert(actor.bReplicates and actor:GetLocalRole() == (host and 3 or 1), "the stock Dock worker needs one authority")
     if action == "dock-stage" then
@@ -844,6 +844,15 @@ local function run(action, actor_path)
     elseif action == "dock-natural-sample" then
         assert(host, "the host owns the fight")
         return sample_live_worker()
+    elseif action == "dock-natural-state" then
+        return dock_combat(pawn, world, host, action, live_worker)
+    elseif action == "dock-natural-retreat" then
+        assert(host and live_probe and valid(live_probe.actor) and live_probe.actor.Alive,
+            "a living stock attacker is required")
+        local probe = live_probe
+        local point = assert(dock_fight_position(probe.guest, probe.actor, {pawn, probe.guest, probe.actor}, 350, true),
+            "the guest has no clear retreat from the worker")
+        return ("%.7f,%.7f,%.7f"):format(point.X, point.Y, point.Z)
     elseif action == "dock-natural-stop" then
         assert(host, "only the host can stop the test NPC")
         local actor = live_probe and live_probe.actor
