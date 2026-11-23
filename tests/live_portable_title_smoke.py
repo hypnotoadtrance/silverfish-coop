@@ -37,6 +37,7 @@ from live_same_process_listener_smoke import choose_ports
 from live_stock_creator_smoke import creator_action, installed_probe
 from live_stock_pause_exit_smoke import stock_pause
 from live_unified_title_smoke import Seat, offered, start_pair
+from portable_guest_world_start import GuestWorldStartProof, wait_resident_status
 
 
 @dataclass(frozen=True)
@@ -771,7 +772,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
                  stock_use: bool = False, memory_status: bool = False, stock_prop_grip: bool = False,
-                 stock_crate_ring: bool = False) -> None:
+                 stock_crate_ring: bool = False, guest_world_start: bool = False) -> None:
     roots = (work, first_game, second_game, original)
     if second_legacy_work is not None:
         roots += (second_legacy_work,)
@@ -800,6 +801,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     probes = ExitStack()
 
     try:
+        if guest_world_start:
+            probes.enter_context(installed_probe(second_game, mod="SilverfishPortableGuestWorldStartProbe",
+                                                 fixture="portable_guest_world_start_probe.lua"))
         if stock_prop_grip:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableLanternProbe",
                                                  fixture="portable_lantern_probe.lua"))
@@ -861,7 +865,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             if container_nearby:
                 evidence["guest_stock_nearby_container_pickup"] = await verify_container_pickup(host, guest, pawn)
             return evidence
-        if stock_prop_grip:
+        if guest_world_start:
+            startup = GuestWorldStartProof(second)
+            proof["sessions"].append(await start_pair(first, second, "Observatory startup scout",
+                                                      before_join=startup.arm, on_join=startup.joined,
+                                                      after_reconnect=startup.reconnected,
+                                                      wait_status=wait_resident_status))
+        elif stock_prop_grip:
             proof["sessions"].append(await start_pair(first, second, "Lantern scout", on_join=verify_stock_prop_grip))
         elif stock_crate_ring:
             proof["sessions"].append(await start_pair(first, second, "Crate scout", on_join=verify_stock_crate_ring))
@@ -887,13 +897,14 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             assert observed == hashes and await stock_profile(seat.bridge) == preferences
             assert seat.bridge.process.poll() is None
         proof.update(verified=True, solo_slots_and_settings_preserved=True,
-                     both_titles_reused=not (stock_prop_grip or stock_crate_ring), launched_without_coop_environment=True)
+                     both_titles_reused=not (stock_prop_grip or stock_crate_ring or guest_world_start),
+                     launched_without_coop_environment=True)
     finally:
         proof["native_boot_states"] = {str(game): boot_states(game) for game, _ in processes}
         for _, process in reversed(processes):
             if process.poll() is None:
                 await runtime.stop_game(process)
-        if stock_prop_grip or stock_crate_ring:
+        if stock_prop_grip or stock_crate_ring or guest_world_start:
             proof["processes_closed"] = len(processes) == 2 and all(process.poll() is not None for _, process in processes)
             proof["verified"] &= proof["processes_closed"]
         probes.close()
@@ -905,6 +916,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         runtime.write_json(case / "portable-title-verification.json", proof)
         assert proof["original_saves_verified"], "The original player saves changed"
         assert proof["portable_files_and_existing_activation_preserved"], "The portable marker or existing activation changed"
+        if guest_world_start:
+            assert all(process.poll() is not None for _, process in processes), "A portable startup process is still running"
 
 
 if __name__ == "__main__":
@@ -925,6 +938,8 @@ if __name__ == "__main__":
     parser.add_argument("--memory-status", action="store_true", help="verify both workers consume live frames through memory")
     parser.add_argument("--stock-prop-grip", action="store_true", help="verify default guest carry filtering in one portable lantern session")
     parser.add_argument("--stock-crate-ring", action="store_true", help="verify one guest stock F crate open through the in-process ring")
+    parser.add_argument("--guest-world-start", action="store_true",
+                        help="verify first stock guest map startup and short reconnect in one portable session")
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
@@ -940,6 +955,10 @@ if __name__ == "__main__":
                                      args.projected_nearby, args.container_nearby, args.stock_use, args.steam_cloud,
                                      args.second_legacy_work)):
         parser.error("Use --stock-crate-ring with two fresh private replicas and no other gameplay fixtures")
+    if args.guest_world_start and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
+                                       args.projected_nearby, args.container_nearby, args.stock_use,
+                                       args.stock_prop_grip, args.stock_crate_ring, args.steam_cloud)):
+        parser.error("Use --guest-world-start without other gameplay fixtures")
     legacy = args.second_legacy_work.resolve(strict=True) if args.second_legacy_work else None
     asyncio.run(verify(args.work.resolve(strict=True), args.first_game.resolve(strict=True),
                        args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy,
@@ -947,4 +966,4 @@ if __name__ == "__main__":
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
                        stock_use=args.stock_use, memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
-                       stock_crate_ring=args.stock_crate_ring))
+                       stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start))

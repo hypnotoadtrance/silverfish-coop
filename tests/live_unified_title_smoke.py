@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -39,7 +40,8 @@ async def offered(seat):
                                       and game[native_title_entry.PANEL_KEY]["actions"] == ["host", "join"])
 
 
-async def start_pair(host, guest, character_name, *, on_join=None, create_character=None):
+async def start_pair(host, guest, character_name, *, on_join=None, create_character=None,
+                     before_join=None, after_reconnect=None, wait_status=wait):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_pid, guest_pid = host.bridge.process.pid, guest.bridge.process.pid
     host_form = "native-title-host-form-fixture"
@@ -47,7 +49,7 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
     await host.bridge.command(host_form, "campaign", host.campaign.name)
     await host.bridge.command(host_form, "port", str(host.port))
     await host.bridge.command(host_form, "submit")
-    hosted = await wait(host_run, lambda frame: frame.get("state") == "hosting")
+    hosted = await wait_status(host_run, lambda frame: frame.get("state") == "hosting")
     assert hosted["pid"] == host_pid
     verify_loopback_socket(host_pid, host.port)
     assert hosted["game"]["save_scope"] == uuid.UUID(hosted["campaign"]["campaign_id"]).hex
@@ -75,28 +77,33 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
     checkpoint = CampaignStore.read_existing(host.campaign / "save", verify_world=service.verify_travel_checkpoint)
     character, = checkpoint["characters"]
     await join("select", character)
+    if before_join:
+        await before_join(host, guest, character)
     await join("submit")
-    joined = await wait(guest_run, lambda frame: frame.get("state") == "connected" and frame.get("gameplay_fresh") is True)
+    joined = await wait_status(guest_run, lambda frame: frame.get("state") == "connected" and frame.get("gameplay_fresh") is True)
     assert joined["pid"] == guest_pid and joined["character_id"] == character and joined["game"]["map"] == OBSERVATORY
     assert joined["game"]["save_scope"] == uuid.UUID(character).hex
     verify_loopback_socket(guest_pid, joined["unreal_local_port"])
 
-    paired = await wait(host_run, lambda frame: frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+    paired = await wait_status(host_run, lambda frame: frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
     pawn = paired["game"]["native_guest_save"]["pawn"]
     gameplay = await on_join(host, guest, pawn) if on_join else {}
     assert (await submit(guest_run, "drop-link"))["ok"]
-    await wait(host_run, lambda frame: any(row["character_id"] == character and row["state"] == "reserved"
-                                         for row in frame.get("campaign", {}).get("leases", ())))
+    await wait_status(host_run, lambda frame: any(row["character_id"] == character and row["state"] == "reserved"
+                                                for row in frame.get("campaign", {}).get("leases", ())))
+    reconnect_started = time.time()
     assert (await submit(guest_run, "reconnect"))["resumed"]
-    recovered = await wait(host_run, lambda frame: any(row["character_id"] == character and row["state"] == "active"
-                                                      for row in frame.get("campaign", {}).get("leases", ())))
+    recovered = await wait_status(host_run, lambda frame: any(row["character_id"] == character and row["state"] == "active"
+                                                             for row in frame.get("campaign", {}).get("leases", ())))
     assert recovered["game"]["native_guest_save"]["pawn"] == pawn
+    if after_reconnect:
+        await after_reconnect(guest, reconnect_started)
 
     await host.bridge.wait_for(lambda game: game.get("stock_pause_exit", {}).get("state") == "armed")
     await stock_pause(host.bridge, "open")
     await stock_pause(host.bridge, "save_and_quit")
     for run in (host_run, guest_run):
-        stopped = await wait(run, lambda frame: frame.get("state") == "stopped")
+        stopped = await wait_status(run, lambda frame: frame.get("state") == "stopped")
         assert stopped["stop_reason"] == "host_session_ended"
     await asyncio.gather(offered(host), offered(guest))
     assert not owns_udp_port(host_pid, host.port) and not owns_udp_port(guest_pid, joined["unreal_local_port"])
