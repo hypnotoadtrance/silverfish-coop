@@ -1487,8 +1487,8 @@ namespace
         if (path == STR("/Game/Classes/Items/Random_GearBag_Starter.Random_GearBag_Starter_C") ||
             path == STR("/Game/Classes/Items/HyperRandom_GearBag_Starter.HyperRandom_GearBag_Starter_C"))
             return "use-starter-bag";
-        for (const auto& meal : silverfish::native_guest_consumable::meals)
-            if (path == meal.path) return meal.entry;
+        for (const auto& consumable : silverfish::native_guest_consumable::consumables)
+            if (path == consumable.path) return consumable.entry;
         return {};
     }
 

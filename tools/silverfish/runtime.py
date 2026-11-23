@@ -51,7 +51,7 @@ from . import native_spratt_fixture
 from . import native_subway_valve
 from . import native_prototype_drill
 from . import native_kill_volume
-from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULT, STARTER_BAG, parse_meal, parse_starter_bag
+from .native_guest_consumable import STOCK_CONSUMABLES, RESULT as CONSUMABLE_RESULT, STARTER_BAG, parse_meal, parse_starter_bag
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
 from .enemy_loot_profiles import BY_ACTOR as ENEMY_LOOT_ACTORS
@@ -2099,7 +2099,7 @@ class Bridge:
                                                    "regen_before": _finite(fields[7]), "regen_after": _finite(fields[8]),
                                                    "health_before": _finite(fields[9]), "health_after": _finite(fields[10]),
                                                    "max_health": _finite(fields[11]), "hemophilia": fields[12] == "1"}
-                elif fields[0] in MEALS or fields[0] == STARTER_BAG:
+                elif fields[0] in STOCK_CONSUMABLES or fields[0] == STARTER_BAG:
                     proof = parse_starter_bag(fields) if fields[0] == STARTER_BAG else parse_meal(fields)
                     key = CONSUMABLE_RESULT[fields[0]]
                     if key in data or data.get("state") != "hosting" or data.get("map") != proof["map"]:

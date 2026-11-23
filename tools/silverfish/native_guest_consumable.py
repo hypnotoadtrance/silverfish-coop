@@ -34,6 +34,9 @@ class Meal:
     unit_value: int
     infection: int = 0
     fatigue: int = 0
+    instant: float | None = None
+    stim: float = 0
+    antibiotic: bool = False
 
 
 MEALS = {
@@ -58,17 +61,30 @@ MEALS = {
         )
     },
 }
-COMMANDS = {BANDAGE_CLASS: ACTION, **{profile.class_path: action for action, profile in MEALS.items()},
+MEDICINE = {
+    f"native-guest-{kind}": Meal(f"/Game/Classes/Items/Item_{asset}.Item_{asset}_C", 0, gain, value, infection,
+                                 instant=instant, stim=stim, antibiotic=kind == "antibiotics")
+    for kind, asset, gain, value, infection, instant, stim in (
+        ("dirty-bandage", "DirtyBandage", 45, 3, 5, 0, 0),
+        ("gauze", "Gauze", 60, 30, 0, 25, 0),
+        ("medical-salve", "MedSalve", 30, 40, -5, 20, 3),
+        ("large-medkit", "MedKit_Large", 100, 100, -5, 50, 4),
+        ("stim-pills", "StimPills", 0, 15, -5, 0, 4),
+        ("antibiotics", "Antibiotics", 0, 100, -100, 0, 0),
+    )
+}
+STOCK_CONSUMABLES = MEALS | MEDICINE
+COMMANDS = {BANDAGE_CLASS: ACTION, **{profile.class_path: action for action, profile in STOCK_CONSUMABLES.items()},
             **dict.fromkeys(STARTER_BAGS.values(), STARTER_BAG)}
 RESULT = {action: action.replace("-", "_") for action in COMMANDS.values()}
 
 
 def parse_meal(fields: list[str]) -> dict:
-    if len(fields) not in (17, 19, 22, 25):
+    if len(fields) not in (17, 19, 22, 25, 27):
         raise ValueError("Invalid stock food report size")
     (tag, status, area, pawn, guid, initial, remaining, food_before, food_after,
      regen_before, regen_after, hp, maximum, intox_before, intox_after, host_intox, hemophilia, *food_traits) = fields
-    meal = MEALS.get(tag)
+    meal = STOCK_CONSUMABLES.get(tag)
     if (meal is None or status != "used" or not valid_guid(guid) or len(pawn) > 512
             or not pawn.startswith("Player_FP_C " + area + ".") or hemophilia not in ("0", "1")):
         raise ValueError("Invalid stock food identity")
@@ -77,12 +93,32 @@ def parse_meal(fields: list[str]) -> dict:
     intox_start, intox_end, shared_intox = map(int, (intox_before, intox_after, host_intox))
     trait = hemophilia == "1"
     gourmand, healthy_eating = map(int, food_traits[:2]) if food_traits else (0, 0)
+    effects = {}
+    nominal_dose = meal.infection
+    instant = (meal.instant or 0) * (0.6 if trait else 1)
+    if meal.instant is not None:
+        if len(food_traits) != (10 if meal.antibiotic else 8):
+            raise ValueError("Missing stock medicine effect proof")
+        hp, stim_before, stim_after = map(float, food_traits[5:8])
+        if (hp != min(health + instant, max_health) or not math.isfinite(stim_before) or stim_before < 0
+                or stim_after != max(stim_before, meal.stim)):
+            raise ValueError("Invalid stock medicine effect proof")
+        effects.update(health_after=hp, stim_before=stim_before, stim_after=stim_after)
+        if meal.antibiotic:
+            resistance_before, resistance_after = map(int, food_traits[8:])
+            if not 0 <= resistance_before < resistance_after < 2**31 or resistance_after - resistance_before > 3:
+                raise ValueError("Invalid stock antibiotic resistance proof")
+            nominal_dose += resistance_before
+            effects.update(antibiotic_resistance_before=resistance_before, antibiotic_resistance_after=resistance_after)
     infection = {}
     if len(food_traits) >= 5:
         sick_before, sick_after, dose = map(int, food_traits[2:5])
+        if dose > 0:
+            infection_matches = 1 <= sick_after - sick_before <= dose
+        else:
+            infection_matches = sick_after == sick_before + (dose if sick_before > 0 else 0)
         if (not all(-2**31 <= value < 2**31 for value in (sick_before, sick_after))
-                or dose not in (0, meal.infection)
-                or (not 1 <= sick_after - sick_before <= dose if dose else sick_before != sick_after)):
+                or (dose != nominal_dose and (dose != 0 or nominal_dose < 0)) or not infection_matches):
             raise ValueError("Invalid stock food infection proof")
         infection = {"sickness_before": sick_before, "sickness_after": sick_after, "infection_dose": dose}
     elif meal.infection:
@@ -96,7 +132,7 @@ def parse_meal(fields: list[str]) -> dict:
                 or after_fatigue != min(max(before_fatigue + meal.fatigue, minimum_fatigue), 100)):
             raise ValueError("Invalid stock food fatigue proof")
         fatigue = {"fatigue_before": before_fatigue, "fatigue_after": after_fatigue}
-    elif len(food_traits) == 8:
+    elif meal.instant is None and len(food_traits) > 5:
         raise ValueError("Unexpected stock food fatigue proof")
     if not (0 <= gourmand <= 1025 and 0 <= healthy_eating <= 1025):
         raise ValueError("Invalid stock food traits")
@@ -109,7 +145,7 @@ def parse_meal(fields: list[str]) -> dict:
             or not all(math.isfinite(value) for value in (food, restored, regen, buffered, health, max_health))
             or not 25 <= max_health <= 10_000 or not 0 < health <= max_health
             or not 0 <= food <= 200 or restored != min(max(food + appetite, 0), 200)
-            or not 0 <= regen <= max_health or buffered != min(max(regen + gain, 25), max_health)
+            or not 0 <= regen <= max_health or buffered != min(max(min(regen + instant, max_health) + gain, 25), max_health)
             or not 0 <= intox_start <= 100 or intox_end != min(max(intox_start + intoxication_delta, 0), 100)
             or not 0 <= shared_intox <= 100):
         raise ValueError("Invalid stock food effect proof")
@@ -118,7 +154,7 @@ def parse_meal(fields: list[str]) -> dict:
             "regen_before": regen, "regen_after": buffered, "health_before": health, "health_after": health,
             "max_health": max_health, "hemophilia": trait, "gourmand": gourmand, "healthy_eating": healthy_eating,
             "intox_before": intox_start, "intox_after": intox_end,
-            "host_intox_before": shared_intox, "host_intox_after": shared_intox, **infection, **fatigue}
+            "host_intox_before": shared_intox, "host_intox_after": shared_intox, **infection, **fatigue, **effects}
 
 
 def starter_awards(guid, awards) -> bool:
@@ -147,7 +183,7 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
         raise party.RuleError("native_guest_consumable_unavailable")
     key = RESULT[action]
     kind = key.removeprefix("native_guest_")
-    meal = MEALS.get(action)
+    meal = STOCK_CONSUMABLES.get(action)
     starter = action == STARTER_BAG
     if not valid_guid(guid):
         raise party.RuleError(f"invalid_{kind}_guid")
@@ -174,6 +210,8 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
     area, pawn = host.last_game["map"], owner["pawn"]
     deferred = await retain_guest_save(host, bridge, character, pawn)
     if not deferred:
+        if action in MEDICINE:
+            raise party.RuleError(f"guest_{kind}_refused_working_save_unavailable")
         await host.checkpoint_native(bridge)
     host.native_checkpoint_unsafe = True
     try:
@@ -195,9 +233,10 @@ async def use(host, bridge, character: str, guid: str, operation_id: str, *, act
             if (before != 1 or proof.get("class_path") not in STARTER_BAGS.values()
                     or not starter_awards(guid, proof.get("awarded_guids"))):
                 raise RuntimeError("The native starter bag did not verify exact stock rewards")
-        elif (any(type(value) not in (int, float) for value in (hp, regen, maximum, proof.get("regen_before")))
+        elif (any(type(value) not in (int, float) for value in (hp, regen, maximum, proof.get("regen_before"), proof.get("health_after")))
                 or not 0 < hp <= maximum or not 25 <= regen <= maximum or not 0 <= proof["regen_before"] <= maximum
-                or proof.get("health_after") != hp or type(proof.get("hemophilia")) is not bool):
+                or type(proof.get("hemophilia")) is not bool
+                or proof["health_after"] != min(hp + ((meal and meal.instant) or 0) * (0.6 if proof["hemophilia"] else 1), maximum)):
             raise RuntimeError("The native consumable did not verify its exact quantity and stock regeneration")
         if action == ACTION and regen != min(max(proof["regen_before"] + (27 if proof["hemophilia"] else 45), 25), maximum):
             raise RuntimeError("The native Bandage did not apply the guest's stock regeneration effect")

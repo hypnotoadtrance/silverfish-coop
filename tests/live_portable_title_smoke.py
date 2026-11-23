@@ -1457,10 +1457,70 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
     assert campaign_save_hashes(host.campaign) == checkpoint_hashes, "A stock meal caused an early campaign checkpoint"
     assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
     await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
+    cases = ("leftovers", "honey-egg", "dirty-bandage", "gauze", "medical-salve", "large-medkit", "stim-pills", "antibiotics")
+    seeded_at = time.time()
+    seeded = (await command(host, "seed-use-cases")).split(",")
+    assert len(seeded) == len(set(seeded)) == len(cases) and all(re.fullmatch(r"[0-9A-F]{32}", value) for value in seeded)
+    stocked = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
+    async with asyncio.timeout(8):
+        while not any(row["event"] == "native_guest_ui_projected" and row["items"] == len(stocked)
+                      and row["time_unix"] >= seeded_at for row in await resident_events(guest_run, guest_frame)):
+            await asyncio.sleep(.08)
+    assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+    await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
+    canonical, _ = (await command(host, "host-medical-vitals")).split(";")
+    verified = {}
+    for label, item in zip(cases, seeded, strict=True):
+        verb = f"native-guest-{label}"
+        profile = native_guest_consumable.STOCK_CONSUMABLES[verb]
+        key = native_guest_consumable.RESULT[verb]
+        initial = 2 if label == "gauze" else 1
+        when = time.time()
+        pressed = await submit(guest_run, "native-inventory-stock-use-click-fixture", target=item)
+        assert pressed["ok"] and pressed["stock_action"]["guid"] == item, pressed
+        async with asyncio.timeout(10):
+            while True:
+                events = [row for row in await resident_events(guest_run, guest_frame) if row["time_unix"] >= when]
+                refused = [row for row in events if row["event"] == "native_stock_inventory_rejected"]
+                assert not refused, (label, refused)
+                results = [row[key] for row in events if row["event"] == "native_stock_inventory_action"
+                           and row.get(key, {}).get("guid") == item]
+                if results:
+                    receipt, = results
+                    break
+                await asyncio.sleep(.10)
+        assert (receipt["class_path"], receipt["quantity_before"], receipt["quantity_after"]) == (
+            profile.class_path, initial, initial - 1), receipt
+        if profile.food:
+            assert receipt["food_after"] > receipt["food_before"], receipt
+            await read_guest(receipt["food_after"] - .5)
+        else:
+            if profile.instant:
+                assert receipt["health_after"] > receipt["health_before"], receipt
+            if profile.stim:
+                assert receipt["stim_after"] >= profile.stim, receipt
+            if label == "antibiotics":
+                assert 1 <= receipt["antibiotic_resistance_after"] - receipt["antibiotic_resistance_before"] <= 3, receipt
+            async with asyncio.timeout(8):
+                while True:
+                    hp, regen, stim, _, _ = map(float, (await command(guest, "guest-medical-vitals")).split(","))
+                    if (hp >= receipt["health_after"] - .2 and abs(regen - receipt["regen_after"]) < .2
+                            and stim >= receipt["stim_after"] - .35):
+                        break
+                    await asyncio.sleep(.1)
+        verified[label] = receipt
+    remaining = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
+    assert [(row["guid"], row["quantity"]) for row in remaining if row["guid"] in seeded] == [(seeded[3], 1)], remaining
+    host_vitals, _ = (await command(host, "host-medical-vitals")).split(";")
+    assert host_vitals == canonical, (canonical, host_vitals)
+    assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == grouped
+    assert campaign_save_hashes(host.campaign) == checkpoint_hashes, "Stock medicine caused an early campaign checkpoint"
+    assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
+    await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
     return {"resident_guest_food": {"receipt": used, "before": before, "after": after,
                                     "host_food_before": host_before[0], "host_food_after": host_after[0],
                                     "host_regen_unchanged": True, "campaign_checkpoint_unchanged": True,
-                                    "stock_widget_tick_invoked_in_muted_fixture": True}}
+                                    "stock_widget_tick_invoked_in_muted_fixture": True, "additional_stock_uses": verified}}
 
 
 async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> dict:

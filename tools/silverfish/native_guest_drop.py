@@ -201,7 +201,7 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
             committed = ("unequipped", str(slot), str(rounds))
         elif mode == "use":
             action = f"native-guest-{entry.removeprefix('use-')}"
-            meal = native_guest_consumable.MEALS.get(action)
+            meal = native_guest_consumable.STOCK_CONSUMABLES.get(action)
             if (not entry.startswith("use-") or quantity != 1 or action not in native_guest_consumable.RESULT
                     or meal is not None and not client.invite.get("native_guest_mre")):
                 raise ValueError("The selected stock item has no host-authoritative Use action")
