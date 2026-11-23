@@ -5,8 +5,9 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_FL
 
 local map = "World /Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local guest_source = os.getenv("SILVERFISH_COOP_GUEST_FLASHLIGHT_PROBE") == "1"
-local offhand = not guest_source and os.getenv("SILVERFISH_COOP_OFFHAND_FLASHLIGHT_PROBE") == "1"
-local offhand_view = offhand and os.getenv("SILVERFISH_COOP_OFFHAND_FLASHLIGHT_VIEW_PROBE") == "1"
+local guest_offhand = os.getenv("SILVERFISH_COOP_GUEST_OFFHAND_PROBE") == "1"
+local offhand = guest_offhand or not guest_source and os.getenv("SILVERFISH_COOP_OFFHAND_FLASHLIGHT_PROBE") == "1"
+local offhand_view = guest_offhand or offhand and os.getenv("SILVERFISH_COOP_OFFHAND_FLASHLIGHT_VIEW_PROBE") == "1"
 local heavy = os.getenv("SILVERFISH_COOP_HEAVY_FLASHLIGHT_PROBE") == "1"
 local heavy_view = heavy and os.getenv("SILVERFISH_COOP_HEAVY_FLASHLIGHT_VIEW_PROBE") == "1"
 local equipment_asset = heavy and "Eqp_Heavy_Flashlight" or "Eqp_Flashlight"
@@ -21,6 +22,7 @@ local equip_factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default
 local pistol_path = "/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C"
 local source, cue_calls, power_calls, hooked, selected_guid = nil, 0, 0, false, nil
 local offhand_pawn, primary, seeded_slots
+local guest_hold, host_guard
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -140,6 +142,85 @@ local function seed_loadout(pawn, world, class)
     error("flashlight_probe_stock_slot_readback_failed", 0)
 end
 
+local function stock_row(pawn, class)
+    local output = {}
+    asset(equip_factory):MakeDefaultItem(class, pawn, output)
+    local row = output.Item or output
+    assert(same(row[item_class], class) and item_identity(row) ~= string.rep("0", 32),
+        "flashlight_probe_guest_offhand_stock_factory_failed")
+    return row
+end
+
+local function seed_guest_offhand(world, host)
+    local guest
+    for _, candidate in ipairs(FindAllOf("Player_FP_C") or {}) do
+        if valid(candidate) and candidate:HasAuthority() and not candidate:IsLocallyControlled()
+            and same(candidate:GetWorld(), world) and not candidate:IsActorBeingDestroyed() then
+            assert(not guest, "flashlight_probe_duplicate_guest")
+            guest = candidate
+        end
+    end
+    assert(guest and valid(guest.Save) and not same(guest.Save, host.Save), "flashlight_probe_detached_guest_unavailable")
+    local rows = guest.Save.PlayerEquipment
+    assert(rows:GetArrayNum() >= 8 and not valid(rows[2][item_class]) and not valid(rows[5][item_class]),
+        "flashlight_probe_guest_offhand_slots_occupied")
+    local pistol = stock_row(guest, asset(pistol_path))
+    local torch = stock_row(guest, asset(equipment_path))
+    local pistol_id, torch_id = item_identity(pistol), item_identity(torch)
+    assert(pistol_id ~= torch_id, "flashlight_probe_duplicate_offhand_guid")
+    rows[2], rows[5] = pistol, torch
+    assert(item_identity(rows[2]) == pistol_id and item_identity(rows[5]) == torch_id,
+        "flashlight_probe_guest_offhand_slots_unverified")
+    return table.concat({guest:GetFullName(), pistol_id, torch_id}, "\t")
+end
+
+local function host_offhand_save_boundary(pawn)
+    local save = pawn.Save
+    local rows = save.PlayerEquipment
+    local state = {save:GetFullName(), tostring(save.PlayerEquipIndex), tostring(save.PlayerOffhandingFlashlight)}
+    assert(rows:GetArrayNum() >= 8, "flashlight_probe_host_save_slots_unavailable")
+    for index = 1, 8 do
+        state[#state + 1] = valid(rows[index][item_class]) and item_identity(rows[index]) or "-"
+    end
+    local fingerprint = table.concat(state, "\t")
+    if host_guard then assert(host_guard == fingerprint, "flashlight_probe_host_save_boundary_changed")
+    else host_guard = fingerprint end
+    return fingerprint
+end
+
+local function stock_c_edge(operation, pawn)
+    local controller = pawn.Controller
+    local input = asset("/Script/EnhancedInput.Default__EnhancedInputLibrary")
+    local action = asset("/Game/Classes/Player/Player_Inputs/IA_ModeToggle.IA_ModeToggle")
+    assert(valid(controller) and controller:IsLocalController() and same(controller.Pawn, pawn)
+        and not pawn:HasAuthority(), "flashlight_probe_guest_offhand_c_scope_unavailable")
+    local before = pawn.Save.PlayerOffhandingFlashlight
+    if operation == "coffhandstart" then
+        assert(not guest_hold, "flashlight_probe_guest_offhand_c_already_pressed")
+        guest_hold = {since = os.clock(), before = before}
+        -- The cooked C binding has no Started delegate; the initial pressed sample enters Ongoing.
+        pawn:InpActEvt_IA_ModeToggle_K2Node_EnhancedInputActionEvent_28(input:MakeInputActionValueOfType(1, 0, 0, 0), 0, 0, action)
+        assert(pawn.Save.PlayerOffhandingFlashlight == before, "flashlight_probe_guest_offhand_short_hold_changed")
+        return "ongoing_start\t0\t" .. tostring(before)
+    end
+    assert(guest_hold, "flashlight_probe_guest_offhand_c_not_pressed")
+    local elapsed = os.clock() - guest_hold.since
+    if operation == "coffhandhold" then
+        if elapsed < .32 then error("avatar_probe_rig_pending", 0) end
+        assert(not guest_hold.held and before == guest_hold.before, "flashlight_probe_guest_offhand_hold_scope_changed")
+        pawn:InpActEvt_IA_ModeToggle_K2Node_EnhancedInputActionEvent_28(
+            input:MakeInputActionValueOfType(1, 0, 0, 0), elapsed, elapsed, action)
+        assert(pawn.Save.PlayerOffhandingFlashlight == not before, "flashlight_probe_guest_offhand_stock_hold_unverified")
+        guest_hold.held = true
+        return "ongoing_hold\t" .. elapsed .. "\t" .. tostring(not before)
+    end
+    assert(operation == "coffhandrelease" and guest_hold.held, "flashlight_probe_guest_offhand_c_hold_missing")
+    pawn:InpActEvt_IA_ModeToggle_K2Node_EnhancedInputActionEvent_29(input:MakeInputActionValueOfType(0, 0, 0, 0), elapsed, elapsed, action)
+    guest_hold = nil
+    assert(pawn.Save.PlayerOffhandingFlashlight == before, "flashlight_probe_guest_offhand_stock_release_changed")
+    return "completed_release\t" .. elapsed .. "\t" .. tostring(before)
+end
+
 local function offhand_operation(operation, pawn, world)
     local save = pawn.Save
     if operation == "seedoffhand" then
@@ -163,6 +244,7 @@ local function offhand_operation(operation, pawn, world)
     end
     assert(same(pawn.EquipedItem, primary) and save.PlayerEquipIndex == seeded_slots[2].index - 1,
         "flashlight_probe_offhand_primary_changed")
+    if guest_offhand and operation:match("^coffhand") then return stock_c_edge(operation, pawn) end
     if operation == "offhandon" then
         local eligible = {}
         pawn:CanOffhandFlashlight(eligible)
@@ -344,13 +426,39 @@ local function run(operation)
     local pawn = asset("/Script/Engine.Default__GameplayStatics"):GetPlayerPawn(world, 0)
     assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn:GetWorld(), world), "flashlight_probe_local_pawn_unavailable")
     local connected = valid(driver.ServerConnection)
-    if connected and not guest_source then
+    if connected and not guest_source and not guest_offhand then
         return observe(world, pawn, assert(math.tointeger(operation:match("^observe(%d+)$"))))
     end
     assert(same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref), "flashlight_probe_local_save_unavailable")
     if not connected then
         assert(pawn:HasAuthority() and #driver.ClientConnections == 1 and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1",
             "flashlight_probe_host_scope_unavailable")
+    end
+    if guest_offhand then
+        if not connected then
+            if operation == "guestoffhandboundary" then return host_offhand_save_boundary(pawn) end
+            if operation == "guestoffhandseed" then return seed_guest_offhand(world, pawn) end
+            return observe(world, pawn, assert(math.tointeger(operation:match("^observe(%d+)$"))))
+        end
+        assert(not pawn:HasAuthority(), "flashlight_probe_guest_offhand_not_autonomous")
+        local identities = operation:match("^selectoffhandgun(%x+)$")
+        if identities then
+            assert(#identities == 64 and not seeded_slots, "flashlight_probe_guest_offhand_invalid_selection")
+            local gun, torch = identities:sub(1, 32), identities:sub(33)
+            local rows = pawn.Save.PlayerEquipment
+            if not same(rows[2][item_class], asset(pistol_path)) or not same(rows[5][item_class], asset(equipment_path))
+                or item_identity(rows[2]) ~= gun or item_identity(rows[5]) ~= torch then error("avatar_probe_rig_pending", 0) end
+            assert(pawn.Save.PlayerOffhandingFlashlight == false and not valid(pawn.OffhandEquipment),
+                "flashlight_probe_guest_offhand_already_active")
+            pawn:Equip_NextItem(1, false)
+            primary, offhand_pawn = pawn.EquipedItem, pawn
+            assert(valid(primary) and same(primary:GetClass(), asset(pistol_path)) and same(primary.User, pawn),
+                "flashlight_probe_guest_offhand_primary_unavailable")
+            seeded_slots = {{index = 5, guid = torch}, {index = 2, guid = gun}}
+            count_dispatch()
+            operation = "readoffhand"
+        end
+        return offhand_operation(operation, pawn, world)
     end
     if offhand then return offhand_operation(operation, pawn, world) end
 
@@ -435,7 +543,7 @@ local last
 LoopInGameThreadWithDelay(100, function()
     local file = io.open(mailbox .. "/avatar-probe-command.tsv", "rb")
     if not file then return end
-    local text = file:read(100) or ""
+    local text = file:read(160) or ""
     file:close()
     local ticket, operation = text:match("^(%x+)\t([a-z0-9]+)\n$")
     if not ticket or #ticket ~= 32 or ticket == last then return end
