@@ -11,7 +11,7 @@ import uuid
 
 from live_ai_smoke import wait
 from live_computer_board_smoke import stock_flags
-from live_multi_smoke import saved_hashes
+from live_multi_smoke import campaign_save_hashes, saved_hashes
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -33,7 +33,7 @@ FROM_DRILL_HEAD = ((CISTERN, "Cistern_Sci"), (CROSSROADS, "CR_Cstrn"), (RUIN_FIE
 
 async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False, stock_station=False, stock_board=False,
                    equip_reward=False, prototype_dialogue=False, prototype_pickup=False, prototype_chamber_staged=False,
-                   prototype_redeem=False):
+                   prototype_redeem=False, verify_deferred_turn_in=False):
     if prototype_redeem:
         prototype_pickup = prototype_chamber_staged = True
     name = "stone-maze-readings-" + uuid.uuid4().hex[:8]
@@ -537,6 +537,8 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         assert board["objective_guid"] == product and board["objective_owner"] == "guest", board
         await action(authority, "checkpoint")
         first_flags = flags(saved())
+        before_turn_in = campaign_save_hashes(campaign)
+        assert str(Path("save/campaign.json")) in before_turn_in
         if stock_board:
             def panel(status):
                 return status.get("game", {}).get("native_wire_board", {})
@@ -556,7 +558,9 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
             assert confirming["sequence"] > started["sequence"]
             granted = panel(await wait(client_run, lambda state: matches(panel(state)) and (panel(state).get("state"), panel(state).get("sequence"))
                                        == ("completed", confirming["sequence"]), timeout=32))
-            completed = {"effect": "native_quest_changed", **saved()["world"]["party"]["native_quests"][tape.MOSBY_QUEST]}
+            state = await wait(run, lambda snapshot: snapshot.get("gameplay", {}).get("native_quests", {}).get(
+                tape.MOSBY_QUEST, {}).get("step") == -10)
+            completed = {"effect": "native_quest_changed", **state["gameplay"]["native_quests"][tape.MOSBY_QUEST]}
             evidence["stock_board"] = {"review": reviewed, "turn_in": granted}
         else:
             completed = await action(client, "native-quest-turnin", "--target", tape.MOSBY_QUEST)
@@ -568,13 +572,20 @@ async def exercise(work: Path, vanilla_saved: Path | None, *, stock_pickup=False
         new_armor = (tape.ARMOR_CLASS, "backpack", 1)
         assert product not in guest_items and product not in host_items and guest_armor not in host_items and host_armor not in guest_items
         assert host_items[host_armor] == guest_items[guest_armor] == new_armor
+        replay = await action(client, "native-quest-turnin", "--target", tape.MOSBY_QUEST)
+        assert (replay["effect"], replay["armor"]) == ("native_quest_already_settled", completed["armor"])
+        deferred = campaign_save_hashes(campaign) == before_turn_in
+        if verify_deferred_turn_in:
+            assert deferred, "Stone Maze turn-in or replay wrote campaign files"
+        if deferred:
+            checkpoint = await action(authority, "checkpoint")
+            assert checkpoint.get("revision") and campaign_save_hashes(campaign) != before_turn_in
+            evidence["deferred_turn_in"] = {"unchanged_save_files": len(before_turn_in), "revision": checkpoint["revision"]}
         gained = flags(saved())
         for role in ("host", "guest"):
             assert gained[role].get("Player_Xp", 0) - first_flags[role].get("Player_Xp", 0) == 3
             assert gained[role].get("Player_Cash", 0) - first_flags[role].get("Player_Cash", 0) == (7500 if role == "host" else 0)
         assert gained["host"].get("Mosby_SM_Readings") == 1 and tape.REWARDS not in saved()["world"]["party"]
-        replay = await action(client, "native-quest-turnin", "--target", tape.MOSBY_QUEST)
-        assert (replay["effect"], replay["armor"]) == ("native_quest_already_settled", completed["armor"])
         evidence["completed"] = completed
         standing = json.loads((run / "status.json").read_text(encoding="utf-8"))
         if standing["gameplay"]["players"]["host"]["downed"]:
@@ -642,6 +653,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-station", action="store_true", help="exercise two stock station presses and the exact authenticated offer")
     parser.add_argument("--stock-board", action="store_true", help="review and turn in the exact Scientist contract with stock Interact")
     parser.add_argument("--equip-reward", action="store_true", help="equip the earned HazOp gear and verify both exact swaps and restart")
+    parser.add_argument("--verify-deferred-turn-in", action="store_true",
+                        help="require Stone Maze turn-in and replay to leave saves unchanged until checkpoint")
     prototype = parser.add_mutually_exclusive_group()
     prototype.add_argument("--prototype-dialogue", action="store_true", help="accept the authentic Prototype Drill follow-up through Interact")
     prototype.add_argument("--prototype-pickup", action="store_true", help="issue Prototype Drill and verify the stock Sci Tunnel keypad and entry")
@@ -655,4 +668,5 @@ if __name__ == "__main__":
     asyncio.run(exercise(args.work.resolve(), args.vanilla_saved, stock_pickup=args.stock_pickup,
                          stock_station=args.stock_station, stock_board=args.stock_board, equip_reward=args.equip_reward,
                          prototype_dialogue=args.prototype_dialogue, prototype_pickup=args.prototype_pickup,
-                         prototype_chamber_staged=args.prototype_chamber_staged, prototype_redeem=args.prototype_redeem))
+                         prototype_chamber_staged=args.prototype_chamber_staged, prototype_redeem=args.prototype_redeem,
+                         verify_deferred_turn_in=args.verify_deferred_turn_in))

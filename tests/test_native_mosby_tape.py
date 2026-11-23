@@ -4,7 +4,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from tools.silverfish import native_host_save, native_mosby_tape as tape, party
+from tools.silverfish import native_host_save, native_loot, native_mosby_tape as tape, party
 
 
 PAWN = "Player_FP_C exact guest"
@@ -81,11 +81,47 @@ class MosbyTapeTests(unittest.IsolatedAsyncioTestCase):
               patch.object(native_host_save, "verify_record") as verify):
             granted = await tape._deliver(host, None, state)
         self.assertEqual(granted, {CHARACTER})
-        grant.assert_awaited_once_with(host, None, tape.GRANT, PAWN, slot, ARMOR, FILLED)
+        grant.assert_awaited_once_with(host, None, tape.GRANT, PAWN, slot, ARMOR, FILLED, memory=False)
         project.assert_awaited_once_with(host, None, state, [(CHARACTER, PAWN, 3)])
         verify.assert_called_once_with(host.native_profile, frame)
         self.assertEqual(state[tape.REWARDS]["pending"], {"sibling": OTHER})
         self.assertNotIn(tape.native_rewards.PENDING, state["players"]["sibling"])
+
+    async def test_pending_quest_gear_stays_in_memory_until_a_real_checkpoint(self):
+        slot = native_host_save.new_slot()
+        frame = {"slot": slot, "map": tape.SCIENTIST_SHOP, "pending": True}
+        game = {"state": "hosting", "map": tape.STONE_MAZE, "native_guest_xp_ready": True}
+        host = SimpleNamespace(native_profile=True, native_guest=True, last_game=game)
+        members = {CHARACTER: {"pawn": PAWN, "connected": True}, "other": {"connected": False}}
+        host.native_recipients = lambda: members
+        state = party.new_party()
+        for owner in members:
+            party.add_player(state, owner)
+        state[tape.REWARDS] = {"escrow": frame, "template_guid": ARMOR, "pending": {CHARACTER: FILLED, "other": OTHER}}
+        bridge = SimpleNamespace(command=AsyncMock(return_value=game))
+        with (patch.object(tape, "_reward", new_callable=AsyncMock) as grant,
+              patch.object(tape.native_wire_quest, "_retain_reward_guest", AsyncMock(return_value=True)) as retain,
+              patch.object(tape.native_rewards, "project", new_callable=AsyncMock),
+              patch.object(native_host_save, "verify_record") as verify,
+              patch.object(native_host_save, "record", side_effect=AssertionError("unexpected disk access"))):
+            delivered = await tape._deliver(host, bridge, state, defer_save=True)
+        self.assertEqual(delivered, {CHARACTER})
+        self.assertEqual(state[tape.REWARDS]["pending"], {"other": OTHER})
+        self.assertEqual(state[tape.REWARDS]["escrow"], frame)
+        retain.assert_awaited_once_with(host, bridge, CHARACTER, PAWN)
+        grant.assert_awaited_once_with(host, bridge, tape.GRANT, PAWN, slot, ARMOR, FILLED, memory=True)
+        verify.assert_not_called()
+        bridge.command.assert_not_awaited()
+
+        persisted = {"slot": slot, "map": tape.SCIENTIST_SHOP, "sha256": "f" * 64}
+        with patch.object(native_host_save, "record", return_value=persisted) as record:
+            updated, frames = await native_loot.flush_pending_escrows(host, bridge, state)
+        bridge.command.assert_awaited_once_with("native-loot-flush-escrows", slot)
+        record.assert_called_once_with(host.native_profile, slot, tape.SCIENTIST_SHOP, flush=True)
+        self.assertEqual(updated[tape.REWARDS]["escrow"], persisted)
+        self.assertEqual(frames, {(tape.REWARDS, None): persisted})
+        self.assertEqual(state[tape.REWARDS]["escrow"], frame)
+
 
     def test_wire_proofs_bind_world_actor_op_and_recipe(self):
         self.assertEqual(tape.parse_exchange(offer())["give"], {"class_path": tape.BLANK_CLASS, "quantity": 1, "cash": 0})

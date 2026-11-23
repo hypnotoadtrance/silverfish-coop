@@ -4,7 +4,7 @@ import asyncio
 import time
 import uuid
 
-from . import native_host_save, native_rewards, party
+from . import native_host_save, native_rewards, native_wire_quest, party
 from .native_dialogue import MOSBY_QUEST
 from .native_gold import valid_guid
 from .native_tape_profiles import (
@@ -258,9 +258,11 @@ async def convert(host, bridge, character, blank_guid, operation, *, profile=STO
         host.transitioning = False
 
 
-async def _reward(host, bridge, command, pawn, slot, template, assigned=None):
+async def _reward(host, bridge, command, pawn, slot, template, assigned=None, *, memory=False):
     area = host.last_game["map"]
     options = (pawn, assigned) if assigned else ()
+    if memory:
+        options += ("memory",)
     snapshot = await bridge.command(command, slot, template, *options, timeout=7)
     proof = snapshot.get("native_mosby_reward", {})
     states = ("granted", "already_granted") if assigned else ("captured",)
@@ -270,7 +272,7 @@ async def _reward(host, bridge, command, pawn, slot, template, assigned=None):
     host.last_game, host.last_seen = snapshot, time.monotonic()
 
 
-async def _deliver(host, bridge, candidate):
+async def _deliver(host, bridge, candidate, *, defer_save=False):
     pending = candidate.get(REWARDS)
     if not pending or not host.last_game.get("native_guest_xp_ready"):
         return frozenset()
@@ -279,17 +281,37 @@ async def _deliver(host, bridge, candidate):
     if not recipients:
         return frozenset()
     frame, template = pending["escrow"], pending["template_guid"]
-    await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)
+    memory = frame.get("pending") is True
+    if not memory:
+        await asyncio.to_thread(native_host_save.verify_record, host.native_profile, frame)
+    delivered = set()
     for actor in recipients:
+        member = host.native_recipients().get(actor, {})
+        if not member.get("connected"):
+            continue
+        pawn = member["pawn"]
+        if defer_save:
+            if not await native_wire_quest._retain_reward_guest(host, bridge, actor, pawn):
+                continue
+            current = host.native_recipients().get(actor, {})
+            if not current.get("connected") or current.get("pawn") != pawn:
+                continue
         guid = pending["pending"][actor]
-        await _reward(host, bridge, GRANT, eligible[actor]["pawn"], frame["slot"], template, guid)
+        await _reward(host, bridge, GRANT, pawn, frame["slot"], template, guid, memory=memory)
         native_rewards.queue(candidate["players"][actor], XP)
         del pending["pending"][actor]
+        delivered.add(actor)
     if not pending["pending"]:
+        if memory:
+            area = host.last_game["map"]
+            snapshot = await bridge.command("native-loot-release-escrows", frame["slot"], timeout=3)
+            if (snapshot.get("state"), snapshot.get("map")) != ("hosting", area):
+                raise RuntimeError("The stock HazOp Gear template release changed campaign map")
+            host.last_game, host.last_seen = snapshot, time.monotonic()
         del candidate[REWARDS]
-    xp = [row for row in native_rewards.pending_recipients(host, candidate) if row[0] in recipients]
+    xp = [row for row in native_rewards.pending_recipients(host, candidate) if row[0] in delivered]
     await native_rewards.project(host, bridge, candidate, xp)
-    return frozenset(recipients)
+    return frozenset(delivered)
 
 
 async def turn_in(host, bridge, actor):
@@ -305,8 +327,12 @@ async def turn_in(host, bridge, actor):
         objective = before["objective_guid"]
         if before["step_after"] not in (1, 2) or not valid_guid(objective):
             raise party.RuleError("native_mosby_readings_owned_tape_required")
-        await host.checkpoint_native(bridge)
+        defer_save = native_wire_quest.defer_reward_save(host)
+        if not defer_save:
+            await host.checkpoint_native(bridge)
         if actor != "host":
+            if defer_save and not await native_wire_quest._retain_reward_guest(host, bridge, actor, pawn):
+                raise party.RuleError("native_mosby_readings_exact_guest_required")
             _same_guest(host, actor, pawn)
         host.native_checkpoint_unsafe = True
         try:
@@ -331,10 +357,11 @@ async def turn_in(host, bridge, actor):
         awarded.update(assigned)
         if assigned:
             slot = native_host_save.new_slot()
-            await _reward(host, bridge, CAPTURE, host.last_game["pawns"]["local"]["name"], slot, armor)
-            frame = await asyncio.to_thread(native_host_save.record, host.native_profile, slot, SCIENTIST_SHOP, flush=True)
+            await _reward(host, bridge, CAPTURE, host.last_game["pawns"]["local"]["name"], slot, armor, memory=defer_save)
+            frame = ({"slot": slot, "map": SCIENTIST_SHOP, "pending": True} if defer_save else
+                     await asyncio.to_thread(native_host_save.record, host.native_profile, slot, SCIENTIST_SHOP, flush=True))
             candidate[REWARDS] = {"escrow": frame, "template_guid": armor, "pending": assigned.copy()}
-        delivered = await _deliver(host, bridge, candidate)
+        delivered = await _deliver(host, bridge, candidate, defer_save=defer_save)
         for recipient in recipients:
             player = candidate["players"][recipient]
             player["quest_xp"] = player.get("quest_xp", 0) + XP
@@ -343,7 +370,12 @@ async def turn_in(host, bridge, actor):
                   "wallet": after["cash_after"], "consumed_tape": objective, "objective_owner": actor,
                   "mosby_sm_readings": 1, "armor": awarded, "reputation": after["reputation"]}
         candidate.setdefault("native_quests", {})[MOSBY_QUEST] = record
-        revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=delivered | (frozenset({actor}) if actor != "host" else frozenset()))
+        revision = None
+        if defer_save:
+            host.pending_host_save = True
+        else:
+            required = delivered | frozenset({actor} - {"host"})
+            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=required)
         host.party, host.native_checkpoint_unsafe = candidate, False
         host.control.event("native_mosby_readings_completed", revision=revision, **record)
         return {"effect": "native_quest_changed", **record}
@@ -362,9 +394,12 @@ async def settle(host, bridge):
     candidate = party.load_party(host.party)
     host.native_checkpoint_unsafe = True
     try:
-        delivered = await _deliver(host, bridge, candidate)
+        defer_save = native_wire_quest.defer_reward_save(host)
+        delivered = await _deliver(host, bridge, candidate, defer_save=defer_save)
         if delivered:
-            revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=delivered)
+            revision = None
+            if not defer_save:
+                revision = await host.checkpoint_native(bridge, candidate, require_guest_frames=delivered)
             host.party = candidate
             host.control.event("native_mosby_rewards_delivered", revision=revision, recipients=sorted(delivered))
         host.native_checkpoint_unsafe = False

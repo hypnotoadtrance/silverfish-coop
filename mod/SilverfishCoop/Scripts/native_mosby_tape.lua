@@ -1,4 +1,5 @@
 local tape = {}
+local loot_escrow = require("native_loot_actions")
 local guest_save = require("guest_save")
 local mosby = require("native_dialogue_mosby")
 local players = require("players")
@@ -389,28 +390,43 @@ local function redeem(state, phase, name, operation, objective)
     return "exact Stone Maze Readings stock quest verified"
 end
 
-local function escrow(state, phase, operation, slot_name, template, name, assigned)
+local function escrow(state, phase, operation, slot_name, template, name, assigned, memory)
     if not slot(slot_name) or not guid(template) then refuse("escrow_identity_unavailable") end
     local progress, host = scope(state, phase, operation == "capture" and scientist or nil)
     if progress.step ~= -10 then refuse("stock_quest_not_completed") end
     local statics = StaticFindObject(statics_path)
     local class = StaticFindObject(save_path)
     if not valid(statics) or not valid(class) or type(SilverfishVerifyStoneMazeReward) ~= "function" then refuse("escrow_backend_unavailable") end
-    local scratch
+    local function verify(loaded, source)
+        if not exact(loaded, save_path) or same(loaded, host.save) or same(loaded, source) then return false end
+        local args = {loaded:GetAddress(), template}
+        if source then args[3] = source:GetAddress() end
+        local ok, reason = SilverfishVerifyStoneMazeReward(table.unpack(args))
+        return ok == true and reason == "verified"
+    end
+
+    local scratch, loaded
     if operation == "capture" then
-        if type(SilverfishCaptureStoneMazeReward) ~= "function" or statics:DoesSaveGameExist(slot_name, 0) ~= false then
-            refuse("escrow_capture_unavailable") end
-        scratch = statics:CreateSaveGameObject(class)
+        if type(SilverfishCaptureStoneMazeReward) ~= "function"
+            or not memory and statics:DoesSaveGameExist(slot_name, 0) ~= false then refuse("escrow_capture_unavailable") end
+        if memory then
+            scratch = loot_escrow.create_pending_escrow(host.save, host.instance, state.world, slot_name,
+                function(source, restored) return verify(restored, source) end)
+        else
+            scratch = statics:CreateSaveGameObject(class)
+        end
         if not exact(scratch, save_path) or same(scratch, host.save) then refuse("escrow_create_unverified") end
         local ok, reason = SilverfishCaptureStoneMazeReward(host.host:GetAddress(), host.save:GetAddress(), scratch:GetAddress(), template)
-        if ok ~= true or reason ~= "captured" or statics:SaveGameToSlot(scratch, slot_name, 0) ~= true then refuse("escrow_capture_unverified") end
+        if ok ~= true or reason ~= "captured"
+            or not memory and statics:SaveGameToSlot(scratch, slot_name, 0) ~= true then refuse("escrow_capture_unverified") end
     end
-    local loaded = statics:LoadGameFromSlot(slot_name, 0)
-    if not exact(loaded, save_path) or same(loaded, host.save) or same(loaded, scratch) then refuse("escrow_load_unverified") end
-    local args = {loaded:GetAddress(), template}
-    if scratch then args[3] = scratch:GetAddress() end
-    local ok, reason = SilverfishVerifyStoneMazeReward(table.unpack(args))
-    if ok ~= true or reason ~= "verified" then refuse("escrow_payload_unverified") end
+    if memory then
+        loaded = loot_escrow.pending_escrow(state.world, slot_name)
+        if not verify(loaded) then refuse("escrow_payload_unverified") end
+    else
+        loaded = statics:LoadGameFromSlot(slot_name, 0)
+        if not verify(loaded, scratch) then refuse("escrow_payload_unverified") end
+    end
     local status, recipient, id = "captured", host.host:GetFullName(), template
     if operation == "grant" then
         if not guid(assigned) or assigned == template or type(SilverfishGrantStoneMazeReward) ~= "function" then refuse("reward_grant_unavailable") end
@@ -439,9 +455,13 @@ function tape.command(fields, state, phase)
     if action == "native-mosby-readings-preflight" and #fields == 3 or action == "native-mosby-readings-turn-in" and #fields == 4 then
         last = nil; return redeem(state, phase, fields[3], action, fields[4])
     end
-    if action == "native-mosby-reward-capture" and #fields == 4 then last = nil; return escrow(state, phase, "capture", fields[3], fields[4]) end
-    if action == "native-mosby-reward-grant" and #fields == 6 then
-        last = nil; return escrow(state, phase, "grant", fields[3], fields[4], fields[5], fields[6])
+    if action == "native-mosby-reward-capture" and (#fields == 4 or #fields == 5 and fields[5] == "memory") then
+        last = nil
+        return escrow(state, phase, "capture", fields[3], fields[4], nil, nil, fields[5] == "memory")
+    end
+    if action == "native-mosby-reward-grant" and (#fields == 6 or #fields == 7 and fields[7] == "memory") then
+        last = nil
+        return escrow(state, phase, "grant", fields[3], fields[4], fields[5], fields[6], fields[7] == "memory")
     end
 end
 
