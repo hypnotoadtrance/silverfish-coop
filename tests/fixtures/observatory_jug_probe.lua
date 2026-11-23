@@ -29,6 +29,7 @@ local impact, host_hits, guest_hits = 0, 0, 0
 local largest_impulse, largest_thrower_impulse
 local impulses_decoded, impact_instigator, npc_damage_calls, npc_damage_instigator = 0, "-", 0, "-"
 local armed, thrown, hook, guest_fired, previous = false, false, false, false, nil
+local throw_count, throw_health = 0, nil
 
 local function valid(value)
     return value and value:IsValid()
@@ -105,11 +106,11 @@ local function stage(pawn, center, distance, heading, ignore)
     return pawn:K2_TeleportTo(at, rotation) == true
 end
 
-local function select_prop(world, pawn, center, toolbox)
+local function select_prop(world, pawn, center, toolbox, prior)
     local class = StaticFindObject(toolbox and toolbox_class or jug_class)
     assert(valid(class), "the stock Observatory prop class is unavailable")
     local found = {}
-    statics:GetAllActorsOfClass(world, class, found)
+    if prior then found[1] = prior else statics:GetAllActorsOfClass(world, class, found) end
     local nearest, best
     for _, candidate in ipairs(found.OutActors or found) do
         local actor = unwrap(candidate)
@@ -130,6 +131,20 @@ local function select_prop(world, pawn, center, toolbox)
     return nearest
 end
 
+local function stage_throw_lane(pawn, center, ignore, distances, first_heading)
+    for _, distance in ipairs(distances) do
+        for degrees = first_heading, first_heading + 330, 30 do
+            local heading = math.rad(degrees)
+            if stage(pawn, center, distance, heading, ignore) then
+                local eye = pawn.Camera:K2_GetComponentLocation()
+                if not trace:LineTraceSingle(pawn, eye, center, 0, false, ignore, 0, {}, true, color, color, 0) then
+                    return heading
+                end
+            end
+        end
+    end
+end
+
 local function place_players(pawn, guest, target, prop)
     assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled()
         and valid(pawn.Save) and valid(guest.Save) and not same(pawn.Save, guest.Save),
@@ -138,20 +153,7 @@ local function place_players(pawn, guest, target, prop)
         and not valid(target.CombatTarget) and not valid(pawn.HeldObject), "the Observatory stalker is not neutral and ready")
     local center = target:K2_GetActorLocation()
     local ignore = {pawn, guest, target, prop}
-    local clear_heading
-    for _, distance in ipairs({270, 340, 220}) do
-        for degrees = 0, 330, 30 do
-            local heading = math.rad(degrees)
-            if stage(pawn, center, distance, heading, ignore) then
-                local eye = pawn.Camera:K2_GetComponentLocation()
-                if not trace:LineTraceSingle(pawn, eye, center, 0, false, ignore, 0, {}, true, color, color, 0) then
-                    clear_heading = heading
-                    break
-                end
-            end
-        end
-        if clear_heading then break end
-    end
+    local clear_heading = stage_throw_lane(pawn, center, ignore, {270, 340, 220}, 0)
     assert(clear_heading, "no unobstructed stock throw lane to the exact Observatory stalker")
     local guest_placed = stage(guest, center, 360, clear_heading + math.rad(60), ignore)
         or stage(guest, center, 360, clear_heading - math.rad(60), ignore)
@@ -160,14 +162,19 @@ local function place_players(pawn, guest, target, prop)
     return center
 end
 
-local function prepare(world, pawn, guest, target, toolbox)
-    local prop = select_prop(world, pawn, target:K2_GetActorLocation(), toolbox)
+local function prepare(world, pawn, guest, target, toolbox, prior)
+    local prop = select_prop(world, pawn, target:K2_GetActorLocation(), toolbox, prior)
     if guest_fired then
         assert(same(target, npc) and target.Alive == true and same(target.CombatTarget, guest)
             and npc_damage_calls == 1 and npc_damage_instigator == name(guest) and not valid(pawn.HeldObject),
             "the exact stalker must already target the genuine guest attacker")
     end
     local center = guest_fired and target:K2_GetActorLocation() or place_players(pawn, guest, target, prop)
+    if prior then
+        local distances = throw_count == 1 and {220, 270, 340} or {340, 270, 220}
+        assert(stage_throw_lane(pawn, center, {pawn, guest, target, prop}, distances, 15 * throw_count),
+            "no unobstructed stock throw lane for the retry")
+    end
     local eye = pawn.Camera:K2_GetComponentLocation()
     orient(pawn, angle(eye, center))
     local direction = pawn.Camera:GetForwardVector()
@@ -181,6 +188,34 @@ local function prepare(world, pawn, guest, target, toolbox)
         "the stock pickup function did not grab the authored prop")
     jug, npc = prop, target
     return {name(prop), name(target), name(pawn), name(guest), prop.PropMesh:GetMass(), pawn.MaxHoldWeight}
+end
+
+local function still(vector)
+    return vector.X^2 + vector.Y^2 + vector.Z^2 <= 25
+end
+
+local function retry_throw(world, pawn, guest, target)
+    assert(guest_fired and thrown and throw_count < 3 and same(pawn, thrower) and same(target, npc)
+        and target.Alive == true and same(target.CombatTarget, guest) and target.Health == throw_health
+        and npc_damage_calls == 1 and npc_damage_instigator == name(guest),
+        "the previous throw changed stock aggression or damage, or exhausted the retry limit")
+    assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled() and same(guest:GetWorld(), world)
+        and pawn.Dead == false and guest.Dead == false and not valid(pawn.HeldObject)
+        and valid(pawn.Save) and valid(guest.Save) and not same(pawn.Save, guest.Save)
+        and pawn.Save.PlayerHealth > 0 and guest.Save.PlayerHealth > 0,
+        "the exact independent co-op pawns are no longer ready for another throw")
+    assert(valid(jug) and same(jug:GetWorld(), world) and not jug:IsActorBeingDestroyed()
+        and jug.Broken == false and jug.BeingHeld == false and valid(jug.PropMesh)
+        and same(jug.PropMesh, jug.RootComponent) and same(jug.PropMesh:GetOwner(), jug),
+        "the exact original prop is no longer intact and free to grab")
+    local body, bone = jug.PropMesh, FName("None")
+    if body:IsAnyRigidBodyAwake()
+        and (not still(body:GetPhysicsLinearVelocity(bone)) or not still(body:GetPhysicsAngularVelocityInDegrees(bone))) then
+        return {"settling"}
+    end
+    thrown, impact, collision_target, largest_impulse, largest_thrower_impulse, impulses_decoded, impact_instigator =
+        false, 0, nil, nil, nil, 0, "-"
+    return prepare(world, pawn, guest, target, same(jug:GetClass(), StaticFindObject(toolbox_class)), jug)
 end
 
 local function equip_host_pistol(world, pawn, class)
@@ -367,12 +402,18 @@ local function observe(operation)
         register_hooks()
         return prepare(world, pawn, guest, actor, operation == "grabtoolbox")
     end
+    if operation == "retrythrow" then return retry_throw(world, pawn, guest, actor) end
     if operation == "throw" then
         assert(same(actor, npc) and same(pawn.HeldObject, jug) and not thrown, "no exact Observatory jug is held")
+        if guest_fired then
+            assert(npc_damage_calls == 1 and npc_damage_instigator == name(guest) and same(actor.CombatTarget, guest),
+                "the exact stalker no longer targets the genuine guest attacker at release")
+        end
         local eye, center = pawn.Camera:K2_GetComponentLocation(), actor:K2_GetActorLocation()
         local holder = name(jug["Holding Actor"])
         local before_instigator = name(jug:GetInstigator())
         orient(pawn, angle(eye, center))
+        throw_count, throw_health = throw_count + 1, actor.Health
         armed, thrown, thrower = true, true, pawn
         pawn:Grab_Release_Object(true, false, false)
         assert(not same(pawn.HeldObject, jug) and not same(pawn.PhysicsHandle:GetGrabbedComponent(), jug.PropMesh),

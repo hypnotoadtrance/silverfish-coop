@@ -100,6 +100,16 @@ def prop_impact_evidence(hit, stock, released):
         return "stock_damage_receipt_impulse_unavailable"
 
 
+def retryable_prop_throw(hit, stock, npc_health):
+    return (hit["authority"] == 1
+            and (hit["npc"], hit["local_pawn"], hit["guest"]) ==
+            (stock["npc"], stock["host_pawn"], stock["guest_pawn"])
+            and hit["npc_damage_calls"] == 1 and hit["npc_health"] == npc_health
+            and hit["target"] == hit["npc_damage_instigator"] == stock["guest_pawn"]
+            and (hit["local_health"] or 0) > 0 and (hit["guest_health"] or 0) > 0
+            and hit["threats"].count(stock["guest_pawn"]) == 1)
+
+
 async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damage: bool,
                    require_stock_health: bool = False, prop_retarget: bool = False) -> None:
     name = "observatory-jug-" + uuid.uuid4().hex[:8]
@@ -128,6 +138,21 @@ async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damag
     async def pair():
         host, guest = await asyncio.gather(sample(host_run), sample(guest_run))
         return {"host": host, "guest": guest}
+
+    async def upright_pair():
+        await wait(host_run, lambda frame: frame.get("state") == "hosting" and all(
+            frame.get("gameplay", {}).get("players", {}).get(role, {}).get("downed") is False
+            for role in ("host", "guest")), timeout=1)
+
+    async def regrab():
+        settled_until = loop.time() + 1.25
+        while loop.time() < settled_until:
+            await upright_pair()
+            values = await probe(host_run, "retrythrow")
+            if values != ["settling"]:
+                return values
+            await asyncio.sleep(.12)
+        raise AssertionError("the previous stock throw did not settle in time for a safe regrab")
 
     try:
         await start("host", host_run, "--campaign", name, "--port", "0", "--start-zone", OBSERVATORY,
@@ -184,41 +209,59 @@ async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damag
             else:
                 raise AssertionError("the genuine guest shot did not enter the stock stalker's threat memory")
 
-        if attack in ("pistol", "pistols"):
-            keys = ("weapon", "npc", "host_pawn", "guest_pawn", "shot_lane_component")
-            values = await probe(host_run, "pistol")
-        else:
-            keys = ("prop", "npc", "host_pawn", "guest_pawn", "mass_kg", "hold_limit_kg")
-            values = await probe(host_run, "grabtoolbox" if attack == "toolbox" else "grab")
-            await asyncio.sleep(.3)
-            release_fields = ("prop", "npc", "holder", "instigator_before", "instigator_after", "speed_cm_s")
-            released = evidence["stock_throw"] = dict(zip(release_fields, await probe(host_run, "throw"), strict=True))
-            released["speed_cm_s"] = float(released["speed_cm_s"])
-            assert (released["prop"], released["npc"]) == tuple(values[:2]), released
-        stock = evidence["stock_attack"] = dict(zip(keys, values, strict=True))
-        assert (stock["npc"], stock["host_pawn"], stock["guest_pawn"]) == tuple(
-            baseline["host"][key] for key in ("npc", "local_pawn", "guest")), stock
-        observations = evidence["after_stock_attack"] = []
-        deadline = loop.time() + 5
-        while loop.time() < deadline:
-            snapshot = await pair()
-            observations.append(snapshot)
-            hit = snapshot["host"]
-            impact_verified = attack in ("pistol", "pistols") or (
-                hit["impacts"] > 0 and hit["collision_target"] == stock["npc"])
+        attempts = evidence.setdefault("stock_prop_attempts", []) if prop_retarget else []
+        attempt_limit = 3 if prop_retarget else 1
+        for attempt in range(1, attempt_limit + 1):
+            if attack in ("pistol", "pistols"):
+                keys = ("weapon", "npc", "host_pawn", "guest_pawn", "shot_lane_component")
+                values = await probe(host_run, "pistol")
+            else:
+                keys = ("prop", "npc", "host_pawn", "guest_pawn", "mass_kg", "hold_limit_kg")
+                if attempt > 1:
+                    values = await regrab()
+                    assert values[0] == attempts[0]["release"]["prop"], values
+                else:
+                    values = await probe(host_run, "grabtoolbox" if attack == "toolbox" else "grab")
+                await asyncio.sleep(.3)
+                release_fields = ("prop", "npc", "holder", "instigator_before", "instigator_after", "speed_cm_s")
+                released = evidence["stock_throw"] = dict(zip(release_fields, await probe(host_run, "throw"), strict=True))
+                released["speed_cm_s"] = float(released["speed_cm_s"])
+                assert (released["prop"], released["npc"]) == tuple(values[:2]), released
+            stock = evidence["stock_attack"] = dict(zip(keys, values, strict=True))
+            assert (stock["npc"], stock["host_pawn"], stock["guest_pawn"]) == tuple(
+                baseline["host"][key] for key in ("npc", "local_pawn", "guest")), stock
+            observations = evidence["after_stock_attack"] = []
+            qualified, impact_evidence = False, None
+            deadline = loop.time() + (1.5 if prop_retarget else 5)
+            while not observations or loop.time() < deadline:
+                snapshot = await pair()
+                observations.append(snapshot)
+                hit = snapshot["host"]
+                impact_verified = attack in ("pistol", "pistols") or (
+                    hit["impacts"] > 0 and hit["collision_target"] == stock["npc"])
+                if prop_retarget:
+                    impact_evidence = prop_impact_evidence(hit, stock, released)
+                    impact_verified = impact_evidence is not None
+                remembered = not both_threats or all(hit["threats"].count(stock[role]) == 1
+                                                     for role in ("host_pawn", "guest_pawn"))
+                if (impact_verified and hit["target"] == stock["host_pawn"]
+                        and 0 < hit["npc_health"] < pre_host_health and hit["npc_damage_calls"] == (2 if both_threats else 1)
+                        and hit["npc_damage_instigator"] == stock["host_pawn"] and remembered):
+                    qualified = True
+                    break
+                await asyncio.sleep(.12)
             if prop_retarget:
-                impact_evidence = prop_impact_evidence(hit, stock, released)
-                impact_verified = impact_evidence is not None
-            remembered = not both_threats or all(hit["threats"].count(stock[role]) == 1
-                                                 for role in ("host_pawn", "guest_pawn"))
-            if (impact_verified and hit["target"] == stock["host_pawn"]
-                    and 0 < hit["npc_health"] < pre_host_health and hit["npc_damage_calls"] == (2 if both_threats else 1)
-                    and hit["npc_damage_instigator"] == stock["host_pawn"] and remembered):
+                attempts.append({"attempt": attempt, "release": released, "last_observation": observations[-1],
+                                 "qualification": impact_evidence if qualified else None})
+            if qualified:
                 if prop_retarget:
                     evidence["stock_impact_evidence"] = impact_evidence
                 break
-            await asyncio.sleep(.12)
-        else:
+            if attempt < attempt_limit and retryable_prop_throw(hit, stock, pre_host_health):
+                attempts[-1]["outcome"] = "collision_without_damage" if hit["impacts"] else "miss"
+                continue
+            if prop_retarget:
+                attempts[-1]["outcome"] = "retry_limit" if attempt == attempt_limit else "scope_or_damage_changed"
             if attack in ("jug", "toolbox") and hit["impacts"] == 0:
                 raise AssertionError("the authored prop missed the stalker")
             if prop_retarget and hit["impulses_decoded"] and (hit["largest_impulse"] or 0) <= 5000:
@@ -233,6 +276,8 @@ async def exercise(work: Path, canary: Path, *, attack: str, require_guest_damag
             before_health = evidence["stock_health_before"] = await stock_health(guest_run)
             assert before_health["pawn"] == baseline["guest"]["local_pawn"]
 
+        if prop_retarget:
+            await upright_pair()
         identities_and_health = ("host_pawn", "host_before", "host_after", "guest_pawn", "guest_before", "guest_after")
         damage = dict(zip(identities_and_health, await probe(host_run, "downhost"), strict=True))
         for key in ("host_before", "host_after", "guest_before", "guest_after"):
