@@ -9,6 +9,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -130,6 +132,9 @@ namespace
         STR("/Game/Classes/Libraries/DataAssets/AmbientSpawnPools/FloodPlainsSquadPool.FloodPlainsSquadPool"),
         STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P:PersistentLevel.AI_Spawner_Squad_BP_C_"),
         {}, 29, ruin_fields_squads};
+    constexpr auto combined_pool_path = STR("/Game/Classes/Libraries/DataAssets/AmbientSpawnPools/AmbientSquadPoolData.AmbientSquadPoolData_C:GetCombinedPool");
+    constexpr auto ruin_clock_class = STR("/Game/Classes/Actors/DayCycle_SunControler_BP.DayCycle_SunControler_BP_C");
+    constexpr auto ruin_clock_path = STR("/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P.RuinFeilds_P:PersistentLevel.DayCycle_SunControler_BP_C_0");
     constexpr std::array ambient_directors{&crossroads, &dead_bridge, &ruin_fields};
     constexpr std::array maximum_squad_sizes{4, 3, 5};
     constexpr std::size_t max_scene_npcs = 128;
@@ -640,6 +645,35 @@ namespace
         Counts counts;
     } scope;
 
+    struct RuinDecision
+    {
+        int stock_day{-1}, is_day{-1}, only_track_time{-1};
+        std::optional<std::int64_t> game_time_ticks;
+    };
+
+    struct RuinDraw
+    {
+        U::FWeakObjectPtr marker, asset;
+        RuinDecision decision;
+        std::string_view stage;
+    };
+
+    struct RuinPhase
+    {
+        // Keep the first pool calculation, first draw, and first supported draw per stock phase.
+        std::optional<RuinDecision> first_pool;
+        RuinDecision current_pool;
+        U::FFrame* director_frame{};
+        RuinDraw first_draw, first_supported_draw;
+    };
+
+    struct RuinDiagnostic
+    {
+        U::FWeakObjectPtr world, driver;
+        Seat seat{Seat::Inactive};
+        std::array<RuinPhase, 2> phases;
+    } ruin_diagnostic;
+
     struct Attempt
     {
         U::FFrame* frame{};
@@ -650,6 +684,7 @@ namespace
         NpcFamily family{NpcFamily::Husk};
         bool initial{};
         std::string_view birth_failure{};
+        RuinDraw* ruin_draw{};
     } attempt;
 
     struct AntfarmLoad
@@ -699,6 +734,7 @@ namespace
     bool watch_combat{};
     bool watch_flayer_projectiles{};
     bool refresh_fixture{};
+    bool watch_ruin_director{};
 
     void update_scope(const Network& active)
     {
@@ -711,6 +747,81 @@ namespace
         scope.world = active.world;
         scope.driver = active.driver;
         scope.seat = active.seat;
+    }
+
+    RuinPhase* ruin_phase(const Network& active, U::FFrame& caller)
+    {
+        if (!watch_ruin_director || active.director != &ruin_fields || active.seat == Seat::Inactive) return nullptr;
+        const bool initial = caller.Node() == find<U::UFunction>(initial_path);
+        if (!initial && caller.Node() != find<U::UFunction>(refresh_path)) return nullptr;
+        if (!exact_director(caller.Object(), active)) return nullptr;
+        if (ruin_diagnostic.world.Get() != active.world || ruin_diagnostic.driver.Get() != active.driver ||
+            ruin_diagnostic.seat != active.seat)
+        {
+            ruin_diagnostic = {};
+            ruin_diagnostic.world = active.world;
+            ruin_diagnostic.driver = active.driver;
+            ruin_diagnostic.seat = active.seat;
+        }
+        return &ruin_diagnostic.phases[initial ? 0 : 1];
+    }
+
+    void observe_ruin_pool(U::UObject* receiver, U::FFrame& frame)
+    {
+        auto* caller = frame.PreviousFrame();
+        if (!caller || !exact(caller->Object(), director_class)) return;
+        const auto active = network(static_cast<U::AActor*>(caller->Object())->GetWorld(), true);
+        auto* phase = ruin_phase(active, *caller);
+        if (!phase || object(caller->Object(), STR("AmbientSquadPool")) != receiver ||
+            frame.Node() != find<U::UFunction>(combined_pool_path)) return;
+
+        RuinDecision decision;
+        auto* argument = field<U::FBoolProperty>(frame.Node(), STR("IsDayTime"));
+        if (argument && frame.Locals() && argument->HasAnyPropertyFlags(U::CPF_Parm) &&
+            !argument->HasAnyPropertyFlags(U::CPF_OutParm | U::CPF_ReturnParm))
+            decision.stock_day = argument->GetPropertyValueInContainer(frame.Locals());
+        auto* clock = object(caller->Object(), STR("DayControler_Ref"));
+        if (exact(clock, ruin_clock_class) && clock->GetPathName() == ruin_clock_path && in_level(clock, active.world))
+        {
+            if (auto* is_day = field<U::FBoolProperty>(clock, STR("IsDay")))
+                decision.is_day = is_day->GetPropertyValueInContainer(clock);
+            if (auto* track = field<U::FBoolProperty>(clock, STR("OnlyTrackTime")))
+                decision.only_track_time = track->GetPropertyValueInContainer(clock);
+            if (object(clock, STR("Game Instance")) == active.instance)
+            {
+                auto* save = object(active.instance, STR("SaveSlot_Ref"));
+                auto* time = exact(save, save_class) ? field<U::FStructProperty>(save, STR("GameTime")) : nullptr;
+                auto* timespan = find<U::UScriptStruct>(STR("/Script/CoreUObject.Timespan"));
+                if (time && timespan && time->GetStruct().Get() == timespan && time->GetSize() == sizeof(std::int64_t))
+                {
+                    std::int64_t ticks{};
+                    std::memcpy(&ticks, time->ContainerPtrToValuePtr<void>(save), sizeof(ticks));
+                    decision.game_time_ticks = ticks;
+                }
+            }
+        }
+        if (!phase->first_pool) phase->first_pool = decision;
+        phase->director_frame = caller;
+        phase->current_pool = decision;
+    }
+
+    RuinDraw* observe_ruin_draw(const Network& active, U::FFrame& frame, U::UObject* marker, U::UObject* data)
+    {
+        auto* caller = frame.PreviousFrame();
+        auto* phase = watch_ruin_director && caller ? ruin_phase(active, *caller) : nullptr;
+        if (!phase) return nullptr;
+        RuinDraw* draw{};
+        if (phase->first_draw.stage.empty()) draw = &phase->first_draw;
+        else if (!directed_squad(phase->first_draw.asset.Get(), active) && phase->first_supported_draw.stage.empty() &&
+                 directed_squad(data, active)) draw = &phase->first_supported_draw;
+        if (draw)
+            *draw = {marker, data, phase->director_frame == caller ? phase->current_pool : RuinDecision{}, "stock_draw_observed"};
+        return draw;
+    }
+
+    void ruin_stage(RuinDraw* draw, std::string_view stage)
+    {
+        if (draw) draw->stage = stage;
     }
 
     AntfarmCohort* antfarm_cohort(NpcFamily family)
@@ -1310,9 +1421,18 @@ namespace
             return;
         }
         auto* data = get_object(schema.data, frame.Locals());
-        if (!directed_squad(data, active)) return;
+        auto* draw = observe_ruin_draw(active, frame, receiver, data);
+        if (!directed_squad(data, active))
+        {
+            ruin_stage(draw, "unsupported_squad");
+            return;
+        }
         const bool boar = boar_squad_size(data) > 0;
-        if (!boar && (data_index(data) < 0 || !bool_field(data, STR("ForceWander"), true))) return;
+        if (!boar && (data_index(data) < 0 || !bool_field(data, STR("ForceWander"), true)))
+        {
+            ruin_stage(draw, "husk_asset_or_force_wander_refused");
+            return;
+        }
         if (production_roster || uses_director_markers)
         {
             auto* caller = frame.PreviousFrame();
@@ -1320,21 +1440,35 @@ namespace
             const auto usage = byte_field(receiver, STR("Usage"));
             const bool initial = usage == 0 && caller->Node() == find<U::UFunction>(initial_path);
             const bool refresh = usage == 3 && caller->Node() == find<U::UFunction>(refresh_path);
-            if (!initial && !refresh) return;
-            if (uses_director_markers && !director_marker(receiver, caller->Object(), active, initial)) return;
+            if (!initial && !refresh)
+            {
+                ruin_stage(draw, "director_usage_unqualified");
+                return;
+            }
+            if (uses_director_markers && !director_marker(receiver, caller->Object(), active, initial))
+            {
+                ruin_stage(draw, "director_marker_unqualified");
+                return;
+            }
         }
         auto& calls = boar ? scope.boars.calls : scope.natural_calls;
         auto& latest = boar ? scope.boars.latest : scope.latest;
         ++calls;
         latest = {receiver, data, {}, boar ? "stock_client_boar_spawn_observed" : "stock_client_husk_spawn_observed", 0};
-        if (!boar && !operate && !production_roster) return;
+        if (!boar && !operate && !production_roster)
+        {
+            ruin_stage(draw, "suppression_disabled");
+            return;
+        }
         auto* output = schema.output_address(frame);
         if (!output)
         {
             latest.stage = boar ? "stock_client_boar_output_unverified" : "stock_client_husk_output_unverified";
+            ruin_stage(draw, "stock_count_output_unqualified");
             return;
         }
         call.PreventOriginalFunctionCall();
+        ruin_stage(draw, call.OriginalFunctionCallPrevented() ? "client_spawn_denied" : "client_spawn_not_denied");
         if (call.OriginalFunctionCallPrevented())
         {
             schema.count->SetPropertyValue(output, 0);
@@ -1354,6 +1488,11 @@ namespace
         static const U::FName perceive_name{STR("Proscess_TargetPerception")};
         static const U::FName damage_name{STR("DealDamage")};
         const auto name = frame.Node()->GetFName();
+        if (watch_ruin_director)
+        {
+            static const U::FName pool_name{STR("GetCombinedPool")};
+            if (name == pool_name) observe_ruin_pool(receiver, frame);
+        }
         if (prevent_roster_damage(call, receiver, frame.Node(), &frame, nullptr)) return;
         if (name == damage_name)
         {
@@ -1410,8 +1549,19 @@ namespace
         const auto refresh = caller->Node() == find<U::UFunction>(refresh_path);
         if (!initial && !refresh) return;
         auto* director = caller->Object();
-        if (!exact_director(director, active) || !director_marker(receiver, director, active, initial) ||
-            byte_field(receiver, STR("Role")) != 3 || byte_field(receiver, STR("Usage")) != (initial ? 0 : 3)) return;
+        if (!exact_director(director, active)) return;
+        if (!director_marker(receiver, director, active, initial) ||
+            byte_field(receiver, STR("Role")) != 3 || byte_field(receiver, STR("Usage")) != (initial ? 0 : 3))
+        {
+            if (watch_ruin_director && active.director == &ruin_fields)
+            {
+                SpawnSchema refused;
+                if (refused.bind_base(frame.Node()).empty())
+                    ruin_stage(observe_ruin_draw(active, frame, receiver, get_object(refused.data, frame.Locals())),
+                               "host_marker_or_authority_unqualified");
+            }
+            return;
+        }
         update_scope(active);
         SpawnSchema schema;
         if (const auto error = schema.bind_base(frame.Node()); !error.empty())
@@ -1421,7 +1571,12 @@ namespace
         }
         ++scope.natural_calls;
         auto* data = get_object(schema.data, frame.Locals());
-        if (!directed_squad(data, active)) return;
+        auto* draw = observe_ruin_draw(active, frame, receiver, data);
+        if (!directed_squad(data, active))
+        {
+            ruin_stage(draw, "unsupported_squad");
+            return;
+        }
         if (refresh && scope.refresh.running)
         {
             ++scope.refresh.calls;
@@ -1430,23 +1585,37 @@ namespace
         }
         const auto boar_count = boar_squad_size(data);
         const auto source = data_index(data);
-        if (!boar_count && (source < 0 || !bool_field(data, STR("ForceWander"), true))) return;
+        if (!boar_count && (source < 0 || !bool_field(data, STR("ForceWander"), true)))
+        {
+            ruin_stage(draw, "husk_asset_or_force_wander_refused");
+            return;
+        }
         auto& latest = boar_count ? scope.boars.latest : scope.latest;
         if (boar_count) ++scope.boars.calls;
         if (const auto error = schema.bind_birth(frame.Node()); !error.empty())
         {
             if (latest.cohort.empty()) latest = {receiver, data, {}, error, 0};
+            ruin_stage(draw, error);
             return;
         }
-        if (!local_pawn(director, active)) return;
+        if (!local_pawn(director, active))
+        {
+            ruin_stage(draw, "host_canonical_pawn_unqualified");
+            return;
+        }
         Actors before;
-        if (!scene_npcs(active.world, boar_count ? boar_class : npc_class, before)) return;
+        if (!scene_npcs(active.world, boar_count ? boar_class : npc_class, before))
+        {
+            ruin_stage(draw, "pre_spawn_census_unavailable");
+            return;
+        }
         Handles baseline;
         baseline.reserve(before.size());
         for (auto* existing : before) baseline.emplace_back(existing);
         attempt = {&frame, active.world, director, receiver, data, std::move(baseline), {}, schema,
             boar_count ? boar_count : maximum_squad_sizes[static_cast<std::size_t>(source)],
-            boar_count ? NpcFamily::Boar : NpcFamily::Husk, initial, {}};
+            boar_count ? NpcFamily::Boar : NpcFamily::Husk, initial, {}, draw};
+        ruin_stage(draw, "awaiting_stock_spawn_result");
     }
 
     void prune_roster(U::UWorld* world)
@@ -1459,6 +1628,9 @@ namespace
     void on_post(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
     {
         if (!hook_ready()) return;
+        if (watch_ruin_director)
+            for (auto& phase : ruin_diagnostic.phases)
+                if (phase.director_frame == &frame) phase.director_frame = nullptr;
         if (flayer_hit.frame == &frame)
         {
             after_flayer_projectile(call, receiver, frame);
@@ -1482,7 +1654,12 @@ namespace
         if (attempt.frame != &frame || attempt.spawner.Get() != receiver) return;
         const auto observed = std::move(attempt);
         attempt = {};
-        if (call.OriginalFunctionCallPrevented()) return;
+        auto* draw = ruin_diagnostic.world.Get() == observed.world.Get() ? observed.ruin_draw : nullptr;
+        if (call.OriginalFunctionCallPrevented())
+        {
+            ruin_stage(draw, "stock_spawn_prevented");
+            return;
+        }
         const auto active = network(U::Cast<U::UWorld>(observed.world.Get()));
         auto* director = observed.director.Get();
         auto* data = observed.data.Get();
@@ -1493,7 +1670,11 @@ namespace
             !director_marker(receiver, director, active, observed.initial) || frame.Node() != find<U::UFunction>(spawn_path) ||
             !directed_squad(data, active) ||
             data != get_object(schema.data, frame.Locals()) ||
-            (boar ? boar_squad_size(data) != observed.max_count : data_index(data) < 0)) return;
+            (boar ? boar_squad_size(data) != observed.max_count : data_index(data) < 0))
+        {
+            ruin_stage(draw, "post_spawn_scope_unqualified");
+            return;
+        }
 
         Observation next{receiver, data, {}, "stock_count_unavailable", 0};
         Actors after;
@@ -1522,6 +1703,7 @@ namespace
         }
         if (after.empty())
         {
+            ruin_stage(draw, next.stage);
             if (latest.cohort.empty()) latest = std::move(next);
             return;
         }
@@ -1557,6 +1739,9 @@ namespace
                 }
             }
         }
+        if (draw)
+            ruin_stage(draw, next.cohort.empty() ? next.stage
+                : next.replicated > 0 ? "host_cohort_published" : "host_cohort_not_replicated");
         // Retain the latest successful stock receipt across an occupied or failed marker.
         if (!next.cohort.empty() || latest.cohort.empty()) latest = std::move(next);
     }
@@ -1705,6 +1890,47 @@ namespace
             return 28;
         }
         return 27;
+    }
+
+    int read_ruin_diagnostic(const Lua& lua)
+    {
+        if (!hook_ready() || !watch_ruin_director || lua.get_stack_size() != 2 ||
+            !lua.is_integer(1) || !lua.is_bool(2)) return 0;
+        const auto expected = static_cast<std::uintptr_t>(lua.get_integer());
+        const bool host = lua.get_bool();
+        const auto active = network(find<U::UWorld>(ruin_fields.world));
+        auto* director = find<U::UObject>(ruin_fields.director);
+        if (!expected || active.seat != (host ? Seat::Host : Seat::Client) || !exact_director(director, active) ||
+            reinterpret_cast<std::uintptr_t>(local_pawn(director, active)) != expected ||
+            ruin_diagnostic.world.Get() != active.world || ruin_diagnostic.driver.Get() != active.driver ||
+            ruin_diagnostic.seat != active.seat) return 0;
+
+        const auto object_name = [](U::UObject* object) {
+            return live(object) ? RC::to_utf8_string(object->GetFullName()) : std::string{"-"};
+        };
+        std::string rows;
+        for (std::size_t index = 0; index < ruin_diagnostic.phases.size(); ++index)
+        {
+            const auto& phase = ruin_diagnostic.phases[index];
+            const auto append = [&](std::string_view kind, const RuinDecision& decision, std::string_view stage,
+                                    U::UObject* marker, U::UObject* asset) {
+                rows.append(index == 0 ? "initial\t" : "refresh\t");
+                rows.append(kind).append("\t");
+                for (const auto value : {decision.stock_day, decision.is_day, decision.only_track_time})
+                    rows.append(value < 0 ? "-" : value == 0 ? "0" : "1").append("\t");
+                rows.append(decision.game_time_ticks ? std::to_string(*decision.game_time_ticks) : "-").append("\t");
+                rows.append(stage).append("\t").append(object_name(marker)).append("\t").append(object_name(asset)).append("\n");
+            };
+            if (phase.first_pool) append("pool", *phase.first_pool, "stock_pool_decision", nullptr, nullptr);
+            if (!phase.first_draw.stage.empty())
+                append("draw", phase.first_draw.decision, phase.first_draw.stage,
+                       phase.first_draw.marker.Get(), phase.first_draw.asset.Get());
+            if (!phase.first_supported_draw.stage.empty())
+                append("supported", phase.first_supported_draw.decision, phase.first_supported_draw.stage,
+                       phase.first_supported_draw.marker.Get(), phase.first_supported_draw.asset.Get());
+        }
+        lua.set_string(rows);
+        return 1;
     }
 
     int report_host_roster(const Lua& lua)
@@ -2046,6 +2272,7 @@ namespace silverfish::campaign_npc
         watch_flayer_projectiles = headless_fixture && publish_flayers && veto_flayer_spawns;
         watch_combat = headless_fixture && env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_COMBAT");
         refresh_fixture = headless_fixture && env("SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_REFRESH");
+        watch_ruin_director = production_roster && env("SILVERFISH_COOP_HEADLESS") && env("SILVERFISH_COOP_RUIN_NPC_DIAGNOSTIC");
         callbacks[0] = Hook::RegisterProcessLocalScriptFunctionPreCallback(
             on_pre, {false, false, STR("SilverfishCoopNative"), STR("Qualify natural CrossRoads Husk squads")});
         callbacks[1] = Hook::RegisterProcessLocalScriptFunctionPostCallback(
@@ -2121,7 +2348,11 @@ namespace silverfish::campaign_npc
     void uninstall_hooks()
     {
         clear_scope();
-        if (U::IsInGameThreadRaw()) pending_client_load = {};
+        if (U::IsInGameThreadRaw())
+        {
+            pending_client_load = {};
+            ruin_diagnostic = {};
+        }
         installed.store(false, std::memory_order_release);
         for (auto& callback : callbacks)
         {
@@ -2135,6 +2366,7 @@ namespace silverfish::campaign_npc
         lua.register_function("SilverfishReadCampaignNpc", report);
         lua.register_function("SilverfishClearCampaignNpc", reset);
         if (production_roster) lua.register_function("SilverfishReadCampaignNpcHostRoster", report_host_roster);
+        if (watch_ruin_director) lua.register_function("SilverfishReadRuinDirectorDiagnostic", read_ruin_diagnostic);
         if (watch_flayer_projectiles)
             lua.register_function("SilverfishReadCampaignFlayerProjectile", read_flayer_projectile);
         if (refresh_fixture) lua.register_function("SilverfishStockCampaignNpcRefresh", stock_refresh);

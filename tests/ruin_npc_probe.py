@@ -57,6 +57,39 @@ def decode(lines, viewer):
     return actors
 
 
+def read_director_trace(run: Path, viewer: str):
+    """Read the bounded exact native decisions carried in ordinary status frames."""
+    paths = tuple((run / "game-bridge").glob("*/status.tsv"))
+    if len(paths) != 1:
+        return {}
+    try:
+        lines = paths[0].read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, PermissionError):
+        return {}
+    trace = {}
+    for line in lines:
+        fields = line.split("\t")
+        if fields[0] != "native-campaign-npc-ruin-director" or fields[1:3] != [RUIN, viewer]:
+            continue
+        step, kind, stock_day, is_day, only_track_time, ticks, stage, marker, asset = fields[3:]
+        assert step in ("initial", "refresh") and kind in ("pool", "draw", "supported"), fields
+        assert all(value in ("-", "0", "1") for value in (stock_day, is_day, only_track_time)), fields
+        if kind == "pool":
+            assert (stage, marker, asset) == ("stock_pool_decision", "-", "-"), fields
+        else:
+            assert marker.startswith(f"AI_Spawner_Squad_BP_C {RUIN_LEVEL}"), fields
+        tick_value = None if ticks == "-" else int(ticks)
+        assert tick_value is None or -(1 << 63) <= tick_value < (1 << 63), fields
+        decisions = trace.setdefault(step, {})
+        assert kind not in decisions, fields
+        decisions[kind] = {
+            "stock_is_day_argument": stock_day, "sun_controller_is_day": is_day,
+            "sun_controller_only_track_time": only_track_time, "raw_game_time_ticks": tick_value,
+            "stage": stage, "marker": marker, "asset": asset,
+        }
+    return trace
+
+
 async def capture(run: Path, viewer: str):
     bridge, = (run / "game-bridge").iterdir()
     ticket = uuid.uuid4().hex

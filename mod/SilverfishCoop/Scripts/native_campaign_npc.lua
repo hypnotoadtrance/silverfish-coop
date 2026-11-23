@@ -633,6 +633,20 @@ local function read_rows(state, phase, status_row)
             rows[#rows + 1] = row
         end
         if host then append_approach(rows, state, status_row) end
+        if type(SilverfishReadRuinDirectorDiagnostic) == "function"
+            and state.map == "/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P" then
+            local trace = SilverfishReadRuinDirectorDiagnostic(pawn:GetAddress(), host)
+            if type(trace) == "string" then
+                for line in trace:gmatch("[^\n]+") do
+                    local fields = {}
+                    for field in line:gmatch("[^\t]+") do fields[#fields + 1] = field end
+                    if #fields == 9 then
+                        rows[#rows + 1] = status_row("native-campaign-npc-ruin-director", state.map,
+                            host and "host" or "client", table.unpack(fields))
+                    end
+                end
+            end
+        end
         return rows
     end
     if shot_ticket then

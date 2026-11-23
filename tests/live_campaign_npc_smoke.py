@@ -22,7 +22,7 @@ sys.path.insert(0, str(REPO))
 
 from tools.silverfish import native_host_save
 from tools.silverfish.campaign import CampaignStore
-from ruin_npc_probe import RUIN, RUIN_LEVEL, capture, compare, installed_probe
+from ruin_npc_probe import RUIN, RUIN_LEVEL, capture, compare, installed_probe, read_director_trace
 
 
 MAP = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
@@ -406,7 +406,7 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
                    flayer_veto: bool = False, join_only: bool = False, combat: bool = False,
                    stock_refresh: bool = False, antfarm_replay: Path | None = None,
                    projectile_tap: bool = False, flayer_defaults: bool = False, dead_bridge: bool = False,
-                   ruin_fields: bool = False, private_canaries: Path | None = None) -> None:
+                   ruin_fields: bool = False, private_canaries: Path | None = None, ruin_diagnostic: bool = False) -> None:
     if os.name != "nt":
         raise OSError("The live canary requires the staged Windows game")
     name = ("campaign-npc-ruin-" if ruin_fields else "campaign-npc-") + uuid.uuid4().hex[:8]
@@ -456,6 +456,9 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         environment["SILVERFISH_COOP_NATIVE_CAMPAIGN_NPC_NOTDEER"] = "1"
     if ruin_fields:
         environment["SILVERFISH_COOP_RUIN_NPC_PROBE"] = "1"
+    environment.pop("SILVERFISH_COOP_RUIN_NPC_DIAGNOSTIC", None)
+    if ruin_diagnostic:
+        environment["SILVERFISH_COOP_RUIN_NPC_DIAGNOSTIC"] = "1"
     original = saved_hashes(vanilla_saved) if vanilla_saved else None
     canaries = saved_hashes(private_canaries) if private_canaries else None
     if ruin_fields and (not original or not canaries):
@@ -714,6 +717,11 @@ async def validate(work: Path, vanilla_saved: Path | None, *, replicate: bool, t
         limitation = "No captured natural supported director receipt"
         while time.monotonic() < deadline:
             frames()  # Preserve the existing Husk birth/initialization diagnostic.
+            if ruin_diagnostic:
+                trace = evidence.setdefault("ruin_director_decisions", {})
+                for run, viewer in ((host, "host"), (guest, "client")):
+                    if rows := read_director_trace(run, viewer):
+                        trace[viewer] = rows
             qualified = {}
             for family, topic in (("husk", "native-campaign-npc"), ("boar", "native-campaign-npc-boar")):
                 owner, observer = (read_npcs(run, viewer, RUIN, topic=topic)
@@ -948,6 +956,7 @@ if __name__ == "__main__":
     parser.add_argument("--vanilla-saved", type=Path, help="optional original Saved directory to hash")
     parser.add_argument("--cohort", choices=tuple(DATA), default="husk", help="stock encounter family to verify")
     parser.add_argument("--ruin-fields", action="store_true", help="observe the real daytime Ruin Fields stock director")
+    parser.add_argument("--ruin-diagnostic", action="store_true", help="capture exact stock Ruin pool inputs and first draw outcomes")
     parser.add_argument("--private-canaries", type=Path, help="private SaveGames to hash before and after the Ruin proof")
     parser.add_argument("--dead-bridge", action="store_true", help="verify the stock Dead Bridge Husk director with production defaults")
     parser.add_argument("--flayer-defaults", action="store_true", help="verify stock Flayer combat and reconnect under ordinary campaign defaults")
@@ -974,8 +983,8 @@ if __name__ == "__main__":
                         options.flayer_veto))):
             parser.error("--ruin-fields verifies Husk/boar stock cohorts and requires original and private canary paths")
         options.replicate = True
-    elif options.private_canaries:
-        parser.error("--private-canaries requires --ruin-fields")
+    elif options.private_canaries or options.ruin_diagnostic:
+        parser.error("--private-canaries and --ruin-diagnostic require --ruin-fields")
     if options.dead_bridge:
         if options.cohort != "husk" or any((options.approach, options.combat, options.stock_refresh, options.join_only,
                                             options.flayer_replay, options.notdeer_replay, options.projectile_tap)):
@@ -1026,7 +1035,8 @@ if __name__ == "__main__":
                    join_only=options.join_only, combat=options.combat, stock_refresh=options.stock_refresh,
                    antfarm_replay=options.flayer_replay or options.notdeer_replay,
                    projectile_tap=options.projectile_tap, flayer_defaults=options.flayer_defaults,
-                   dead_bridge=options.dead_bridge, ruin_fields=options.ruin_fields, private_canaries=options.private_canaries)
+                   dead_bridge=options.dead_bridge, ruin_fields=options.ruin_fields,
+                   private_canaries=options.private_canaries, ruin_diagnostic=options.ruin_diagnostic)
     if options.ruin_fields:
         with installed_probe(options.work.resolve()):
             asyncio.run(run)
