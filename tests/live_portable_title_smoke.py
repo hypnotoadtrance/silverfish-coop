@@ -1313,7 +1313,27 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str) -> dict:
             assert await read_loadout() == "0,stored"
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
-        proofs.append({"source": source, **unloaded})
+        proof = {"source": source, **unloaded}
+        if kind == "obrez" and source == "equipped":
+            requested = await submit(guest_run, "native-guest-reload-input-fixture")
+            assert requested["ok"], requested
+            sequence = requested["native_guest_reload_fixture"]["sequence"]
+            async with asyncio.timeout(10):
+                while True:
+                    rows = [row for row in await resident_events(guest_run, guest_frame)
+                            if row.get("sequence") == sequence and row["event"].startswith("native_guest_reload_input")]
+                    if rows:
+                        break
+                    await asyncio.sleep(.1)
+            reload, = rows
+            assert reload["event"] == "native_guest_reload_input", reload
+            magazine = reload["native_guest_weapon"]
+            assert (magazine["guid"], magazine["before"], magazine["after"]) == (guid, 0, 1), magazine
+            async with asyncio.timeout(8):
+                while await read_loadout() != "1,1":
+                    await asyncio.sleep(.15)
+            proof["reload"] = magazine
+        proofs.append(proof)
 
     assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_inventory
     assert campaign_save_hashes(host.campaign) == checkpoint
