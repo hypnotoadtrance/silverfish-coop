@@ -7,7 +7,8 @@ local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local class_path = "/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C"
 local damage_key = "Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5"
 local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-local last, authority_drone
+local last, authority_drone, authority_turret
+local shooters = {}
 local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
 local color = {R=0, G=0, B=0, A=0}
 
@@ -53,17 +54,20 @@ local function fire_stock_npc(pawn, world, kind)
     if not valid(class) then LoadAsset(path); class = StaticFindObject(path) end
     assert(valid(class), "stock NPC class unavailable")
     local origin = pawn:K2_GetActorLocation()
-    local transform = {Translation={X=origin.X+280,Y=origin.Y+180,Z=origin.Z+100},
+    local x = kind == "state" and 170 or 570
+    local transform = {Translation={X=origin.X+x,Y=origin.Y+180,Z=origin.Z+120},
         Rotation={X=0,Y=0,Z=0,W=1}, Scale3D={X=1,Y=1,Z=1}}
     local actor = statics:BeginDeferredActorSpawnFromClass(pawn, class, transform, 1, nil, 0)
     assert(valid(actor) and same(actor:GetClass(), class) and same(actor:GetWorld(), world), "stock shooter spawn unavailable")
     assert(same(actor, statics:FinishSpawningActor(actor, transform, 0)) and actor:HasAuthority() and actor.Alive,
         "stock shooter did not start on the host")
     actor:SetActorTickEnabled(false)
+    actor.CharacterMovement:DisableMovement()
     local controller = actor.Controller
     if valid(controller) then controller:SetActorTickEnabled(false) end
     if not valid(actor.Weapon_Ranged) then actor:Equip_RangedWeapon() end
 
+    shooters[kind] = actor
     local weapon = actor.Weapon_Ranged
     assert(valid(weapon) and same(weapon.Instigator, actor) and weapon:HasAuthority() and weapon.Ammo > 0,
         "NPC did not equip its stock ranged weapon")
@@ -77,6 +81,122 @@ local function fire_stock_npc(pawn, world, kind)
         position.X, position.Y, position.Z)
 end
 
+local function npc_kill(pawn)
+    local shooter, victim = shooters.state, shooters.bandit
+    assert(valid(shooter) and valid(victim) and shooter:HasAuthority() and victim:HasAuthority()
+        and shooter.Alive and victim.Alive and shooter.bReplicates and victim.bReplicates,
+        "the fixture needs two living authoritative replicated NPCs")
+    local weapon = shooter.Weapon_Ranged
+    local muzzle, capsule = weapon.Arrow_Muzzle, victim.CapsuleComponent
+    assert(valid(muzzle) and same(muzzle:GetOwner(), weapon) and valid(capsule) and same(capsule:GetOwner(), victim),
+        "the registered NPCs no longer have their stock firing components")
+    local origin = muzzle:K2_GetComponentLocation()
+    local blockers, aim = {}, nil
+    for index = 0, 7 do
+        local angle = index * math.pi / 4
+        local position = {X=origin.X+300*math.cos(angle), Y=origin.Y+300*math.sin(angle), Z=origin.Z+40}
+        if victim:K2_SetActorLocation(position, false, {}, true) then
+            local target = capsule:K2_GetComponentLocation()
+            local hit = {}
+            local found = trace:LineTraceSingle(pawn, origin, target, 0, true, {shooter, weapon, pawn},
+                0, hit, true, color, color, 0)
+            hit = hit.OutHit or hit
+            local component = hit.Component and hit.Component:Get()
+            if found == true and valid(component) and same(component:GetOwner(), victim) then
+                aim = heading(origin, target)
+                break
+            end
+            blockers[#blockers + 1] = valid(component) and component:GetFullName() or "no blocking component"
+        end
+    end
+    assert(aim, "no clear stock NPC firing lane: " .. table.concat(blockers, ", "))
+    muzzle:K2_SetWorldRotation(aim, false, {}, true)
+    -- Give the real shot a deterministic lethal threshold. The stock projectile
+    -- and the victim's own damage/death scripts still resolve the hit.
+    victim.Health = 1
+    local before = weapon.Ammo
+    weapon:FireWeapon()
+    assert(weapon.Ammo == before - 1, "the stock NPC rifle did not fire")
+    return victim:GetFullName()
+end
+
+local function npc_combat_state(world, host)
+    local actor = host and shooters.bandit
+    if not host then
+        for _, candidate in ipairs(FindAllOf("NPC_Bandit_C") or {}) do
+            if valid(candidate) and same(candidate:GetWorld(), world) and not candidate:IsActorBeingDestroyed() then
+                assert(not actor, "expected a single bandit in the isolated test")
+                actor = candidate
+            end
+        end
+    end
+    if not valid(actor) then return "absent" end
+    assert(actor.bReplicates and actor:GetLocalRole() == (host and 3 or 1), "incorrect stock NPC owner")
+    local mesh = actor.Mesh
+    assert(valid(mesh) and same(mesh:GetOwner(), actor), "missing combatant mesh")
+    local markers = 0
+    for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
+        if valid(marker) and same(marker:GetOwner(), actor) and marker:GetLocalRole() == (host and 3 or 1) then
+            markers = markers + 1
+        end
+    end
+    local shooter = host and same(actor.LastDamagedMe, shooters.state) and "state" or "-"
+    return ("%s;%s;%d;%s;%s"):format(tostring(actor.Alive), tostring(mesh:IsAnySimulatingPhysics()),
+        markers, shooter, actor:GetFullName())
+end
+
+local turret_class = "/Game/Classes/NPCs/Turret_MechGun_01_BP.Turret_MechGun_01_BP_C"
+
+local function turret_state(pawn, world, host, action)
+    local turret = host and authority_turret
+    if action == "turret-spawn" then
+        assert(host and not valid(turret), "the isolated test turret must be spawned once on the host")
+        local class = StaticFindObject(turret_class)
+        if not valid(class) then LoadAsset(turret_class); class = StaticFindObject(turret_class) end
+        assert(valid(class), "stock turret is unavailable")
+        local at = pawn:K2_GetActorLocation()
+        local transform = {Translation={X=at.X-340,Y=at.Y,Z=at.Z+120},
+            Rotation={X=0,Y=0,Z=0,W=1}, Scale3D={X=1,Y=1,Z=1}}
+        turret = statics:BeginDeferredActorSpawnFromClass(pawn, class, transform, 1, nil, 0)
+        assert(valid(turret) and same(turret:GetClass(), class) and same(turret:GetWorld(), world), "stock turret spawn unavailable")
+        turret.bAlwaysRelevant = true
+        assert(same(turret, statics:FinishSpawningActor(turret, transform, 0)) and turret:HasAuthority() and turret.Alive,
+            "stock turret did not start on the host")
+        turret:SetActorTickEnabled(false)
+        local stock_replication = turret.bReplicates
+        if not stock_replication then
+            -- Attach this isolated fixture to the same native channel used for campaign turrets.
+            turret:SetReplicates(true)
+            turret:SetReplicateMovement(true)
+        end
+        turret:ForceNetUpdate()
+        authority_turret = turret
+        return tostring(stock_replication)
+    end
+    if not host then
+        for _, candidate in ipairs(FindAllOf("Turret_MechGun_01_BP_C") or {}) do
+            if valid(candidate) and same(candidate:GetWorld(), world) and not candidate:IsActorBeingDestroyed() then
+                assert(not turret, "expected one test turret")
+                turret = candidate
+            end
+        end
+    end
+    if not valid(turret) then return "absent" end
+    assert(turret.bReplicates and turret:GetLocalRole() == (host and 3 or 1), "test turret not bound to authoritative channel")
+    if action == "turret-kill" then
+        assert(host and turret.Alive and turret.Health > 0, "only the host may destroy the live turret")
+        local total, lethal = {}, {}
+        turret:DealDamage({[damage_key]=2000}, {}, pawn, {X=0,Y=0,Z=0}, false, total, lethal)
+        assert(total.TotalDamage > 0 and lethal.IsLethal == true, "stock turret damage did not resolve a death")
+    end
+    local gun = turret.Turret_Gun
+    assert(valid(gun) and same(gun:GetOwner(), turret), "stock turret gun unavailable")
+    local material = gun:GetMaterial(0)
+    local burned = valid(material) and material:GetFName():ToString() == "Mat_PolygonMilitary_VehBurnt_01"
+    return ("%s,%s,%s,%s"):format(tostring(turret.Alive), tostring(turret.Health <= 0), tostring(burned == true),
+        tostring(turret:ActorHasTag(FName("Dead", EFindName.FNAME_Find))))
+end
+
 local function run(action, actor_path)
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
@@ -88,6 +208,13 @@ local function run(action, actor_path)
     if action == "fire-npc" then
         assert(host, "NPC shots must start on the host")
         return fire_stock_npc(pawn, world, actor_path)
+    elseif action == "npc-kill" then
+        assert(host, "NPC kills must start on the host")
+        return npc_kill(pawn)
+    elseif action == "npc-state" then
+        return npc_combat_state(world, host)
+    elseif action == "turret-spawn" or action == "turret-state" or action == "turret-kill" then
+        return turret_state(pawn, world, host, action)
     end
     local class = StaticFindObject(class_path)
     local drone

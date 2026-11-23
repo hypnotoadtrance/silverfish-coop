@@ -2,8 +2,11 @@ local corpses = {}
 
 local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local drone_path = "/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C"
+local turret_path = "/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C"
+local turret_burnt = "/Game/Assets/Materials/Mat_Trimsheets/Mat_PolygonMilitary_VehBurnt_01.Mat_PolygonMilitary_VehBurnt_01"
 local marker_path = "/Script/Engine.TargetPoint"
-local npc_class, marker_class, clock, death_hook, drone_death_hook, drone_seen
+local npc_class, turret_class, marker_class, clock, death_hook, drone_death_hook, turret_death_hook, drone_seen
+local next_turret_lookup = 0
 local active_world, markers, numbered, mirrors, ended, anchors = nil, {}, {}, {}, {}, {}
 local pending = {}
 local next_sample, corpse_number = 0, 0
@@ -26,6 +29,10 @@ end
 
 local function supported_corpse(actor)
     return valid(actor) and ((valid(npc_class) and actor:IsA(npc_class)) or is_drone(actor))
+end
+
+local function supported_turret(actor)
+    return valid(actor) and valid(turret_class) and actor:IsA(turret_class)
 end
 
 local function world_driver(actor, guest)
@@ -125,12 +132,16 @@ local function publish(actor)
     local address = actor:GetAddress()
     if valid(markers[address]) and same(markers[address]:GetOwner(), actor) then return end
     -- The owner reference resolves to the same NPC over each connection even
-    -- when Unreal assigns a different local name to the replicated pawn.
-    local mesh = actor.Mesh
-    if not valid(mesh) then return end
+    -- when Unreal assigns a different local name to the replicated actor.
+    local point, index
+    if supported_turret(actor) then
+        point = actor:K2_GetActorLocation()
+    else
+        if not supported_corpse(actor) or not valid(actor.Mesh) then return end
+        point, index = corpses.position(actor)
+    end
     if corpse_number == 65535 then return end
     corpse_number = corpse_number + 1
-    local point, index = corpses.position(actor)
     local marker = world:SpawnActor(marker_class, point, {
         Pitch = anchor_pitch(index),
         Yaw = (corpse_number % 256) * byte_angle, Roll = (corpse_number // 256) * byte_angle,
@@ -146,18 +157,43 @@ local function publish(actor)
     markers[address], numbered[corpse_number] = marker, marker
 end
 
+local function apply_destroyed_turret(actor)
+    local gun, burnt = actor.Turret_Gun, StaticFindObject(turret_burnt)
+    if not valid(gun) or not same(gun:GetOwner(), actor) or not valid(burnt) then return end
+    -- Stock Die also changes reputation and spawns damaging explosion and fire
+    -- actors. The replicated turret only presents the terminal state.
+    actor.Alive = false
+    actor.Health = 0
+    actor.Search = false
+    actor.FireGate = false
+    gun:SetMaterial(0, burnt)
+    local dead = FName("Dead", EFindName.FNAME_Find)
+    if not actor:ActorHasTag(dead) then
+        local tags, saved = {}, actor.Tags
+        for i = 1, saved:GetArrayNum() do tags[i] = saved[i] end
+        tags[#tags + 1] = dead
+        actor.Tags = tags
+    end
+    return true
+end
+
 local function apply(marker, world)
     if not valid(marker) or not same(marker:GetWorld(), world) then return true end
     local actor = marker:GetOwner()
-    if not supported_corpse(actor) or not same(actor:GetWorld(), world)
-        or actor:IsActorBeingDestroyed() then return true end
+    if not valid(actor) or not same(actor:GetWorld(), world) or actor:IsActorBeingDestroyed() then return true end
+    local body = supported_corpse(actor)
+    if not body and not valid(turret_class) then turret_class = StaticFindObject(turret_path) end
+    local turret = not body and supported_turret(actor)
+    if not body and not turret then return true end
     -- The owner, simulated role and first movement update can arrive in separate frames.
     if marker:GetLocalRole() ~= 1 or actor:GetLocalRole() ~= 1 or not same(world_driver(marker, true), world)
         or marker_number(marker) == 0 then return end
+    if turret then return apply_destroyed_turret(actor) end
     local mesh, capsule, movement = actor.Mesh, actor.CapsuleComponent, actor.CharacterMovement
     if not valid(mesh) or not valid(capsule) or not valid(movement) then return end
     local key = actor:GetAddress()
     if not mirrors[key] or not same(mirrors[key].marker, marker) then mirrors[key] = {marker = marker} end
+    actor.Health = 0
     if actor.Alive == false and mesh:IsAnySimulatingPhysics() then return true end
     movement:SetMovementMode(0, 0)
     capsule:SetCollisionEnabled(0)
@@ -206,7 +242,7 @@ local function publish_positions(world)
         local actor = valid(marker) and marker:GetOwner()
         if not valid(actor) or not same(marker:GetWorld(), world) or actor:IsActorBeingDestroyed() then
             markers[address] = nil
-        else
+        elseif not supported_turret(actor) then
             local mesh = actor.Mesh
             if valid(mesh) and actor.Alive == false and mesh:IsAnySimulatingPhysics() then
                 local point, anchor = corpses.position(actor)
@@ -265,6 +301,17 @@ function corpses.sync(state, phase)
     end
     if not valid(world) then return end
     if not valid(npc_class) then npc_class = StaticFindObject(npc_path) end
+    if hosting and not turret_death_hook then
+        local wall_seconds = os.time()
+        if wall_seconds >= next_turret_lookup then
+            next_turret_lookup = wall_seconds + 1
+            turret_class = StaticFindObject(turret_path)
+            if hosting and valid(turret_class) and not turret_death_hook and valid(StaticFindObject(turret_path .. ":Die")) then
+                RegisterHook(turret_path .. ":Die", function(context) pcall(publish, context:get()) end)
+                turret_death_hook = true
+            end
+        end
+    end
     if hosting and drone_seen and not drone_death_hook and valid(StaticFindObject(drone_path .. ":Die")) then
         RegisterHook(drone_path .. ":Die", function(victim) pcall(publish, victim:get()) end)
         drone_death_hook = true

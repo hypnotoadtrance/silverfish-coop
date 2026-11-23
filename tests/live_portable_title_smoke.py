@@ -621,6 +621,58 @@ async def verify_resident_npc_shots(host: Seat, guest_run: Path, guest_frame: di
         evidence.append({"faction": faction, "weapon": path, "host_muzzle": list(map(float, position)), "guest": cue})
     return evidence
 
+
+async def verify_resident_npc_kill(host: Seat, guest: Seat) -> dict:
+    async def sample(seat):
+        return await portable_probe_command(seat.bridge, "portable-npc-override", "npc-state")
+
+    async with asyncio.timeout(8):
+        while (guest_alive := await sample(guest)) == "absent":
+            await asyncio.sleep(.05)
+    host_alive = await sample(host)
+    assert all(row.startswith("true;false;0;") for row in (host_alive, guest_alive)), (host_alive, guest_alive)
+    target = await portable_probe_command(host.bridge, "portable-npc-override", "npc-kill")
+    result = None
+    try:
+        async with asyncio.timeout(8):
+            while True:
+                result = await asyncio.gather(*(sample(seat) for seat in (host, guest)))
+                if all(row.startswith("false;true;1;") for row in result):
+                    break
+                await asyncio.sleep(.05)
+    except TimeoutError as error:
+        raise AssertionError(f"Stock rifle hit did not resolve on both seats for {target}: {result}") from error
+    assert result[0] == f"false;true;1;state;{target}", result
+    assert (result[0].split(";")[-1], result[1].split(";")[-1]) == (
+        host_alive.split(";")[-1], guest_alive.split(";")[-1]), result
+    return {"before": [host_alive, guest_alive], "after": result, "host_recorded_npc_shooter": True}
+
+async def verify_resident_turret_death(host: Seat, guest: Seat) -> dict:
+    async def command(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-npc-override", action)
+
+    assert await command(guest, "turret-state") == "absent"
+    replication = await command(host, "turret-spawn")
+    assert replication in ("true", "false"), replication
+    async with asyncio.timeout(8):
+        while (guest_before := await command(guest, "turret-state")) == "absent":
+            await asyncio.sleep(.05)
+    before = [await command(host, "turret-state"), guest_before]
+    assert before == ["true,false,false,false"] * 2, before
+    await command(host, "turret-kill")
+    after = None
+    try:
+        async with asyncio.timeout(8):
+            while True:
+                after = await asyncio.gather(*(command(seat, "turret-state") for seat in (host, guest)))
+                if after == ["false,true,true,true"] * 2:
+                    break
+                await asyncio.sleep(.05)
+    except TimeoutError as error:
+        raise AssertionError(f"Expected both turrets to be dead and visibly burnt: {after}") from error
+    return {"stock_replication": replication == "true", "before": before, "after": after}
+
+
 async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_frame, guest_frame = await asyncio.gather(
@@ -675,6 +727,8 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
     footsteps = await verify_resident_footsteps(host, guest)
     pistol = await verify_resident_pistol(host, guest, guest_combat=guest_combat)
     npc_shots = await verify_resident_npc_shots(host, guest_run, guest_frame) if guest_combat else []
+    npc_kill = await verify_resident_npc_kill(host, guest) if guest_combat else {}
+    turret_death = await verify_resident_turret_death(host, guest) if guest_combat else {}
     assert not weapon_cue_files(host, guest), "Stock player cues wrote a legacy weapon cue mailbox"
     after = save_state()
     changed = [path for path in before.keys() | after.keys() if before.get(path) != after.get(path)]
@@ -691,7 +745,8 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
                                      "prop": prop, "local_bridge_both_peers": "memory",
                                      "no_cue_mailbox": True, "saves_unchanged_before_checkpoint": True,
                                      "previous_checkpoint_cloud_copies": backup_revisions,
-                                     "stock_footsteps": footsteps, "stock_pistol": pistol, "npc_shots": npc_shots}}
+                                     "stock_footsteps": footsteps, "stock_pistol": pistol, "npc_shots": npc_shots, "npc_kill": npc_kill,
+                                     "turret_death": turret_death}}
 
 
 async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict:
