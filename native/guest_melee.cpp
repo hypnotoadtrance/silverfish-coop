@@ -1401,6 +1401,24 @@ namespace
     }
 }
 
+bool silverfish::native_guest_melee::apply_stock_control_rotation(RC::Unreal::UObject* camera,
+                                                                 RC::Unreal::UObject* controller,
+                                                                 std::array<double, 3>& previous)
+{
+    if (!live(camera) || !live(controller)) return false;
+    const auto relative = relative_rotation(camera);
+    const auto control = component_vector(controller, STR("/Script/Engine.Controller:GetControlRotation"), rotator_path);
+    if (!relative || !control || !set_camera_rotation(camera, *control, true)) return false;
+    previous = *relative;
+    return true;
+}
+
+bool silverfish::native_guest_melee::restore_stock_camera_rotation(RC::Unreal::UObject* camera,
+                                                                   const std::array<double, 3>& previous)
+{
+    return live(camera) && set_camera_rotation(camera, previous, false);
+}
+
 bool silverfish::native_guest_melee::ordinary_world(RC::Unreal::UWorld* world)
 {
     return live(world) && world->GetClassPrivate() == find<U::UClass>(STR("/Script/Engine.World")) &&

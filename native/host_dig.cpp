@@ -1,5 +1,6 @@
 #include "host_dig.hpp"
 #include "guest_primary_input.hpp"
+#include "guest_melee.hpp"
 #include "guest_regen.hpp"
 #include "interaction_input.hpp"
 #include "loot_escrow.hpp"
@@ -417,7 +418,56 @@ namespace
 
     std::int64_t live_serial{};
     bool ordinary{};
-    std::array ordinary_callbacks{Hook::ERROR_ID, Hook::ERROR_ID};
+    std::array ordinary_callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
+
+    struct GuestDigAttempt
+    {
+        U::FWeakObjectPtr pawn, save, spade, camera;
+        Clock::time_point expires{};
+        U::FFrame* frame{};
+        Point relative{};
+    };
+
+    std::array<GuestDigAttempt, 8> guest_digs;
+
+    bool guest_dig_graph(U::UObject* receiver, U::FFrame& frame)
+    {
+        static const U::FName graph_name{STR("ExecuteUbergraph_MeleeWep_Spade")};
+        return frame.Node() && frame.Node()->GetFName() == graph_name && frame.Object() == receiver &&
+            U::IsInGameThreadRaw() && exact(receiver, spade_class) && frame.Node() == find<U::UFunction>(spade_graph);
+    }
+
+    void aim_guest_dig_frame(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
+    {
+        if (call.OriginalFunctionCallPrevented() || !guest_dig_graph(receiver, frame)) return;
+        auto found = std::ranges::find_if(guest_digs, [receiver](const auto& attempt) { return attempt.spade.Get() == receiver; });
+        if (found == guest_digs.end() || found->frame) return;
+        auto* pawn = found->pawn.Get();
+        auto* camera = found->camera.Get();
+        if (Clock::now() >= found->expires || !authority(pawn) || !boolean(pawn, STR("Dead"), false) ||
+            object(pawn, STR("Save")) != found->save.Get() || object(pawn, STR("EquipedItem")) != receiver ||
+            object(pawn, STR("Camera")) != camera ||
+            !silverfish::native_guest_melee::apply_stock_control_rotation(camera, object(pawn, STR("Controller")), found->relative))
+        {
+            call.PreventOriginalFunctionCall();
+            return;
+        }
+        // The stock graph resumes its soil trace after a latent delay. The
+        // renderer normally aligns the camera only on the owning machine.
+        found->frame = &frame;
+    }
+
+    void restore_guest_dig_frame(Iteration&, U::UObject* receiver, U::FFrame& frame, void*)
+    {
+        if (!guest_dig_graph(receiver, frame)) return;
+        for (auto& attempt : guest_digs)
+        {
+            if (attempt.frame != &frame || attempt.spade.Get() != receiver) continue;
+            silverfish::native_guest_melee::restore_stock_camera_rotation(attempt.camera.Get(), attempt.relative);
+            attempt.frame = nullptr;
+            return;
+        }
+    }
 
     int start_guest_dig(const Lua& lua)
     {
@@ -456,8 +506,20 @@ namespace
         if (!primary || primary->GetOuterPrivate() != spade->GetClassPrivate() || primary->GetNumParms() != 0 ||
             primary->GetParmsSize() != 0 || primary->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net))
             return result(lua, false, "stock_guest_dig_primary_unavailable");
+        const auto now = Clock::now();
+        auto found = std::ranges::find_if(guest_digs, [spade](const auto& attempt) { return attempt.spade.Get() == spade; });
+        if (found == guest_digs.end())
+            found = std::ranges::find_if(guest_digs, [now](const auto& attempt) { return !attempt.frame && now >= attempt.expires; });
+        if (found == guest_digs.end() || found->frame) return result(lua, false, "stock_guest_dig_busy");
+        auto* camera = object(pawn, STR("Camera"));
+        Point relative{};
+        if (!exact(camera, STR("/Script/Engine.CameraComponent")) || camera->GetOuterPrivate() != pawn ||
+            !silverfish::native_guest_melee::apply_stock_control_rotation(camera, object(pawn, STR("Controller")), relative))
+            return result(lua, false, "stock_guest_dig_camera_unavailable");
+        *found = {pawn, save, spade, camera, now + std::chrono::seconds(2)};
         std::uint8_t args{};
         spade->ProcessEvent(primary, &args);
+        silverfish::native_guest_melee::restore_stock_camera_rotation(camera, relative);
         return result(lua, true, "stock_guest_dig_dispatched");
     }
 
@@ -736,6 +798,7 @@ namespace
     {
         if (!ordinary || !U::IsInGameThreadRaw() || call.OriginalFunctionCallPrevented() ||
             !frame.Node() || frame.Object() != receiver) return;
+        aim_guest_dig_frame(call, receiver, frame, nullptr);
         observe_live_event(call, receiver, frame.Node(), frame.Locals());
         if (receiver == live_dig.held.Get() && live_dig.state == LiveState::Arming &&
             Clock::now() < live_dig.press_until && frame.Node() == find<U::UFunction>(spade_primary))
@@ -1351,7 +1414,13 @@ namespace silverfish::native_host_dig
                 {false, false, STR("SilverfishCoopNative"), STR("Observe exact stock host dig and pickup input")});
             ordinary_callbacks[1] = Hook::RegisterProcessLocalScriptFunctionPreCallback(observe_live_script,
                 {false, false, STR("SilverfishCoopNative"), STR("Observe exact stock buried package custody")});
-            if (ordinary_callbacks[0] == Hook::ERROR_ID || ordinary_callbacks[1] == Hook::ERROR_ID)
+            ordinary_callbacks[2] = Hook::RegisterProcessLocalScriptFunctionPostCallback(restore_guest_dig_frame,
+                {false, false, STR("SilverfishCoopNative"), STR("Restore the remote shovel camera after its stock graph")});
+            ordinary_callbacks[3] = Hook::RegisterProcessInternalPreCallback(aim_guest_dig_frame,
+                {false, false, STR("SilverfishCoopNative"), STR("Align the remote shovel at its deferred stock trace")});
+            ordinary_callbacks[4] = Hook::RegisterProcessInternalPostCallback(restore_guest_dig_frame,
+                {false, false, STR("SilverfishCoopNative"), STR("Restore the remote shovel camera after its deferred stock trace")});
+            if (std::ranges::find(ordinary_callbacks, Hook::ERROR_ID) != ordinary_callbacks.end())
             {
                 ordinary = false;
                 for (auto& id : ordinary_callbacks)
@@ -1386,6 +1455,7 @@ namespace silverfish::native_host_dig
         if (!U::IsInGameThreadRaw()) return;
         watch = {};
         live_dig = {};
+        guest_digs = {};
     }
 
     void register_lua(Lua& lua)
