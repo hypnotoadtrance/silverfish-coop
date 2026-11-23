@@ -772,7 +772,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
                  stock_use: bool = False, memory_status: bool = False, stock_prop_grip: bool = False,
-                 stock_crate_ring: bool = False, guest_world_start: bool = False) -> None:
+                 stock_crate_ring: bool = False, guest_world_start: bool = False,
+                 guest_world_start_travel: bool = False) -> None:
+    guest_world_start = guest_world_start or guest_world_start_travel
     roots = (work, first_game, second_game, original)
     if second_legacy_work is not None:
         roots += (second_legacy_work,)
@@ -804,6 +806,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if guest_world_start:
             probes.enter_context(installed_probe(second_game, mod="SilverfishPortableGuestWorldStartProbe",
                                                  fixture="portable_guest_world_start_probe.lua"))
+        if guest_world_start_travel:
+            probes.enter_context(installed_probe(first_game, mod="SilverfishPortableRuinExitProbe",
+                                                 fixture="portable_ruin_exit_probe.lua"))
         if stock_prop_grip:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableLanternProbe",
                                                  fixture="portable_lantern_probe.lua"))
@@ -867,9 +872,15 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             return evidence
         if guest_world_start:
             startup = GuestWorldStartProof(second)
+
+            async def check_reconnect(guest, started):
+                await startup.reconnected(guest, started)
+                if guest_world_start_travel:
+                    await startup.travel(first, guest, portable_probe_command)
+
             proof["sessions"].append(await start_pair(first, second, "Observatory startup scout",
                                                       before_join=startup.arm, on_join=startup.joined,
-                                                      after_reconnect=startup.reconnected,
+                                                      after_reconnect=check_reconnect,
                                                       wait_status=wait_resident_status))
         elif stock_prop_grip:
             proof["sessions"].append(await start_pair(first, second, "Lantern scout", on_join=verify_stock_prop_grip))
@@ -899,6 +910,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         proof.update(verified=True, solo_slots_and_settings_preserved=True,
                      both_titles_reused=not (stock_prop_grip or stock_crate_ring or guest_world_start),
                      launched_without_coop_environment=True)
+    except Exception as error:
+        if guest_world_start_travel:
+            proof["stock_travel_failure"] = str(error)
+        raise
     finally:
         proof["native_boot_states"] = {str(game): boot_states(game) for game, _ in processes}
         for _, process in reversed(processes):
@@ -940,6 +955,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-crate-ring", action="store_true", help="verify one guest stock F crate open through the in-process ring")
     parser.add_argument("--guest-world-start", action="store_true",
                         help="verify first stock guest map startup and short reconnect in one portable session")
+    parser.add_argument("--guest-world-start-travel", action="store_true",
+                        help="also verify stock guest startup through Crossroads and Ruin Fields")
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
@@ -955,10 +972,10 @@ if __name__ == "__main__":
                                      args.projected_nearby, args.container_nearby, args.stock_use, args.steam_cloud,
                                      args.second_legacy_work)):
         parser.error("Use --stock-crate-ring with two fresh private replicas and no other gameplay fixtures")
-    if args.guest_world_start and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
-                                       args.projected_nearby, args.container_nearby, args.stock_use,
-                                       args.stock_prop_grip, args.stock_crate_ring, args.steam_cloud)):
-        parser.error("Use --guest-world-start without other gameplay fixtures")
+    if (args.guest_world_start or args.guest_world_start_travel) and any((
+            args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby, args.projected_nearby,
+            args.container_nearby, args.stock_use, args.stock_prop_grip, args.stock_crate_ring, args.steam_cloud)):
+        parser.error("Use the guest world-start checks without other gameplay fixtures")
     legacy = args.second_legacy_work.resolve(strict=True) if args.second_legacy_work else None
     asyncio.run(verify(args.work.resolve(strict=True), args.first_game.resolve(strict=True),
                        args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy,
@@ -966,4 +983,5 @@ if __name__ == "__main__":
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
                        stock_use=args.stock_use, memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
-                       stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start))
+                       stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
+                       guest_world_start_travel=args.guest_world_start_travel))
