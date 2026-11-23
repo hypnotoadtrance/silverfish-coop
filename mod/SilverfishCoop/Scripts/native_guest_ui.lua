@@ -334,9 +334,12 @@ local function project(state, phase, character, path, raw)
         error("The attached co-op Journal view failed readback", 0)
     end
     local instance = state.world.OwningGameInstance
-    -- The normal stock inventory mutations update these derived values. The
-    -- detached projection replaces its rows directly, so refresh them here.
-    instance:Compile_PassiveEffects()
+    -- The stock weight update compiles passives after resolving player zero.
+    -- Keep the explicit refresh if that lookup cannot reach this bound pawn.
+    local stock_player = api:GetPlayerCharacter(state.world, 0)
+    if not valid(stock_player) or stock_player:GetAddress() ~= pawn:GetAddress() then
+        instance:Compile_PassiveEffects()
+    end
     instance:Calc_CarryWeight()
     local stack = state.controller.MenuStack
     for index = math.min(stack:GetArrayNum(), 32), 1, -1 do
