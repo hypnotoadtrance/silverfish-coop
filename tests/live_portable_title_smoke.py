@@ -191,6 +191,18 @@ def stock_shovel_overlay(game: Path):
     return portable_script_overlay(game, "native_host_dig_live.lua", add_shovel_fixture)
 
 
+def stock_take_ammo_overlay(game: Path):
+    fixture = (Path(__file__).with_name("fixtures") / "portable_take_ammo_probe.lua").read_text(encoding="utf-8")
+
+    def add_weapon_fixture(script):
+        marker = "function guest_weapon.command(fields, state, phase)\n"
+        if script.count(marker) != 1:
+            raise ValueError("The replica lacks the guest weapon command")
+        return script.replace(marker, marker + fixture, 1)
+
+    return portable_script_overlay(game, "native_guest_weapon.lua", add_weapon_fixture)
+
+
 def stash_memory_overlays(probes: ExitStack, game: Path, *, large: bool = False) -> dict:
     def replace(text, original, updated):
         if text.count(original) != 1:
@@ -1234,11 +1246,18 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str) -> dict:
     proofs = []
 
     for kind in ("revolver-9mm", "break-action-50"):
-        guid = uuid.uuid4().hex.upper()
-        seeded = await submit(host_run, "native-guest-weapon-seed", target="guest", item_guid=guid, kind=kind)
-        assert seeded["ok"], seeded
+        seed_started = time.time()
+        seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, kind)
+        guid = seeded["ack"]["message"]
+        assert re.fullmatch(r"[0-9A-F]{32}", guid), seeded["ack"]
         before = (await submit(guest_run, "native-guest-weapon-inspect", target=guid))["native_guest_weapon"]
         assert before["status"] == "backpack" and before["stored_ammo"] > 0, before
+        inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
+        assert any(row["guid"] == guid and row["source"] == "backpack" for row in inventory["items"])
+        async with asyncio.timeout(8):
+            while not any(entry["event"] == "native_guest_ui_projected" and entry["items"] == len(inventory["items"])
+                          and entry["time_unix"] >= seed_started for entry in await resident_events(guest_run, guest_frame)):
+                await asyncio.sleep(.1)
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "stock")
         pressed = await submit(guest_run, "native-inventory-stock-use-click-fixture", target=f"{guid}|take-ammo")
@@ -2856,6 +2875,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["bandage_revisit_overlays"] = [probes.enter_context(bandage_revisit_overlay(game)) for game in games]
         if stock_shovel:
             proof["stock_shovel_overlays"] = [probes.enter_context(stock_shovel_overlay(game)) for game in games]
+        if stock_take_ammo:
+            proof["stock_take_ammo_overlays"] = [probes.enter_context(stock_take_ammo_overlay(game)) for game in games]
         if stock_board_offers:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
