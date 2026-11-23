@@ -1,5 +1,6 @@
 local guest_save = require("guest_save")
 local weapon_view = require("native_avatar_weapon_view")
+local handgun_view = require("native_avatar_handgun")
 local character_view = require("native_avatar_character_view")
 local avatar = {}
 
@@ -19,8 +20,10 @@ local max_lean = 40
 local lean_timeout = .45
 local zero_rotation = {Pitch = 0, Yaw = 0, Roll = 0}
 local zero_location = {X = 0, Y = 0, Z = 0}
-local aimed = {pistol = {"HandGun_Idle_3", "HandGun_Walk"}, rifle = {"Rifle_Aiming_Idle", "Rifle_Walk"}}
-local lowered = {pistol = "HandGun_Idle", rifle = "Rifle_Idle_1_"}
+-- The stock handgun lowers through HandGun_Lowered_BlendSpace and uses the
+-- alert gunman's RifleWalk_BlendSpace for the raised stance.
+local aimed = {pistol = {"Rifle_Aiming_Low_Close1", "Walk_Forward"}, rifle = {"Rifle_Aiming_Idle", "Rifle_Walk"}}
+local lowered = {pistol = "HandGun_Idle_2", rifle = "Rifle_Idle_1_"}
 local running = {pistol = "HandGun_Run", rifle = "Rifle_Run_Forward"}
 local melee_clips = {slash = "Standing_Melee_Attack_Horizontal", backhand = "Standing_Melee_Attack_Backhand",
     overhead = "Standing_Melee_Attack_Downward"}
@@ -220,6 +223,10 @@ local function visual_component(entry, field, parent, socket_name, skeletal)
     return attach_component(entry, field, parent, socket_name, class)
 end
 
+local function create_handgun_hardpoint(entry)
+    return attach_component(entry, "handgun_hardpoint", entry.body, "Weapon_Socket01", scene_class)
+end
+
 local function position_head(entry)
     -- The stock head meshes use HelmetSocket as their origin. Put the aim
     -- pivot on the Head bone itself so an animated socket offset cannot move
@@ -338,6 +345,7 @@ local function remove(entry)
     swings[entry] = nil
     stop_use(entry)
     weapon_view.clear(entry)
+    handgun_view.clear(entry)
     character_view.clear(entry)
     if valid(entry.helmet) and valid(entry.pawn) then
         entry.helmet:K2_DestroyComponent(entry.pawn)
@@ -580,6 +588,12 @@ function avatar.animate_head(get_world)
                 end
             end
             aim_head(entry, now, lean_changed, math_api)
+            if entry.handgun_view and entry.handgun_view.requested then
+                math_api = math_api or StaticFindObject(math_library)
+                if valid(math_api) and not pcall(handgun_view.update, entry, math_api) then
+                    pcall(handgun_view.release, entry)
+                end
+            end
         end
     end
 end
@@ -729,6 +743,9 @@ function avatar.sync(state, phase)
                                 aim = outfit and host_aims[entry.id] == outfit.gun and outfit.gun or "-"
                             end
                             apply_locomotion(entry, aim, outfit)
+                            if not pcall(handgun_view.sync, entry, aim == "pistol" and not uses[entry], create_handgun_hardpoint) then
+                                pcall(handgun_view.release, entry)
+                            end
                         end
                         if entry.weapon_parts and #entry.weapon_parts > 0 then
                             local socket = entry.body:GetSocketTransform(FName("Weapon_Socket01", EFindName.FNAME_Find), 2)

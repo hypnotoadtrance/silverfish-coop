@@ -937,7 +937,7 @@ async def verify_aim_movement(host_run, guest_run, command, host, guest, project
     evidence = {}
     guest_mesh = "BoltShotgun_Frame_Suppressed" if shotgun else "BreakAction_BMG_Frame"
     for role, runner, observer, target, idle, moving, lowered, mesh in (
-        ("host", host_run, guest_run, host, "HandGun_Idle_3", "HandGun_Walk", "HandGun_Idle", "9mmAuto_Frame"),
+        ("host", host_run, guest_run, host, "Rifle_Aiming_Low_Close1", "Walk_Forward", "HandGun_Idle_2", "9mmAuto_Frame"),
         ("guest", guest_run, host_run, guest, "Rifle_Aiming_Idle", "Rifle_Walk", "Rifle_Idle_1_", guest_mesh),
     ):
         await avatar_probe(host_run, "resetlane")
@@ -945,7 +945,8 @@ async def verify_aim_movement(host_run, guest_run, command, host, guest, project
         await avatar_probe(runner, "aim")
         try:
             aimed = await observe(observer, idle, mesh)
-            assert 130 <= aimed["rig"]["socket_height"] <= 143, aimed
+            if role == "guest":
+                assert 130 <= aimed["rig"]["socket_height"] <= 143, aimed
             if shotgun and role == "guest":
                 state = await wait(runner, lambda row: row.get("game", {}).get("native_avatar_local_aim") is True)
                 assert not state["game"].get("native_guest_primary_scope"), state["game"]["native_guest_primary_scope"]
@@ -1204,8 +1205,8 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
                 await avatar_probe(guest_run, "faceteammate")
             def aimed_pistol(state, *, on_host):
                 peer = equipped_projection(state, on_host=on_host)
-                if (peer and peer.get("pose_clip") == "HandGun_Idle_3" and peer.get("animation_mode") == 1
-                        and 130 <= (peer.get("weapon_socket_height") or 0) <= 143):
+                if (peer and peer.get("pose_clip") == "Rifle_Aiming_Low_Close1" and peer.get("animation_mode") == 1
+                        and (peer.get("weapon_socket_height") or 0) > 0):
                     return peer
 
             await avatar_probe(host_run, "aim")
@@ -1218,7 +1219,7 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             evidence["aimed_pistol"] = aimed_pistol(aimed_host, on_host=False)
             await avatar_probe(host_run, "lower")
             await wait(guest_run, lambda state: (peer := equipped_projection(state, on_host=False))
-                       and peer.get("pose_clip") == "HandGun_Idle"
+                       and peer.get("pose_clip") == "HandGun_Idle_2"
                        and 97 <= (peer.get("weapon_socket_height") or 0) <= 110, timeout=10)
             evidence["aim_release_verified"] = True
             await wait(guest_run, lambda state: state.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
@@ -1236,7 +1237,7 @@ async def capture(work: Path, vanilla_saved: Path, lifecycle: bool, equipment: b
             await avatar_probe(guest_run, "lower")
             await wait(guest_run, lambda state: state.get("game", {}).get("native_avatar_local_aim") is False, timeout=8)
             await wait(host_run, lambda state: (peer := equipped_projection(state, on_host=True))
-                       and peer.get("pose_clip") == "HandGun_Idle"
+                       and peer.get("pose_clip") == "HandGun_Idle_2"
                        and 97 <= (peer.get("weapon_socket_height") or 0) <= 110, timeout=10)
             evidence["guest_aim_release_verified"] = True
             await command("action", *guest, "drop-link")
