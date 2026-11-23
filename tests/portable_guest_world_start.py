@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 import time
 import uuid
 
@@ -131,7 +132,54 @@ class GuestWorldStartProof:
         assert self.log.read_bytes() == self.log_bytes
         self.evidence["same_guest_pawn_visit_and_startup_after_reconnect"] = True
 
-    async def travel(self, host, guest, probe_command):
+    @staticmethod
+    def _zone_files_absent(host, guest):
+        paths = [seat.bridge.directory / name for seat in (host, guest)
+                 for name in ("native-zone-heartbeat", "native-zone-roster")]
+        assert not any(path.exists() for path in paths), paths
+
+    async def _zone_lease_preflight(self, host, guest, baseline, pawn, name, entrance, actor):
+        run = host.campaign / "run"
+        self._zone_files_absent(host, guest)
+        near = await host.bridge.command("native-exit-position", "local", "near", entrance)
+        remote, = [row for row in near["pawns"].values() if row.get("name") == pawn]
+        if math.dist(near["pawns"]["local"]["location"], remote["location"]) <= 17 * 100:
+            await host.bridge.command("native-exit-position", pawn, "far", entrance)
+
+        def blocked(frame):
+            if not self._resident_scene(frame, OBSERVATORY) or frame.get("zone_epoch") != baseline["zone_epoch"]:
+                return False
+            game = frame["game"]
+            wall, regroup = game.get("native_zone_wall", {}), game.get("native_zone_regroup", {})
+            members = regroup.get("blockers", [])
+            return (game.get("native_guest_save", {}).get("pawn") == pawn
+                    and (wall.get("state"), wall.get("host_open")) == ("ready", False)
+                    and (regroup.get("map"), regroup.get("exit_actor"), regroup.get("display")) ==
+                        (OBSERVATORY, actor, "headless")
+                    and len(members) == 1 and (members[0]["pawn"], members[0]["role"], members[0]["name"]) ==
+                        (pawn, "guest", name) and members[0]["distance_m"] > 15)
+
+        await wait_resident_status(run, blocked, timeout=12)
+        swept = await host.bridge.command("native-exit-wall-probe", "local", entrance)
+        wall = swept["native_zone_wall"]
+        assert (wall["host_open"], wall["slot"], wall["outcome"]) == (False, "local", "wall"), swept
+        first = current = await wait_resident_status(run, blocked, timeout=8)
+        started = time.monotonic()
+        samples = 1
+        while time.monotonic() - started < 3.2:
+            self._zone_files_absent(host, guest)
+            sequence = current["game"]["sequence"]
+            current = await wait_resident_status(
+                run, lambda frame: frame.get("game", {}).get("sequence", 0) > sequence, timeout=4)
+            assert blocked(current), current
+            samples += 1
+        self._zone_files_absent(host, guest)
+        assert current["campaign"]["revision"] == baseline["campaign"]["revision"]
+        return {"host_wall": wall, "regroup": current["game"]["native_zone_regroup"],
+                "seconds": round(time.monotonic() - started, 3), "native_frames": samples,
+                "first_sequence": first["game"]["sequence"], "last_sequence": current["game"]["sequence"]}
+
+    async def travel(self, host, guest, probe_command, *, blocker_name=None):
         host_run, guest_run = host.campaign / "run", guest.client / "run"
         visits = {self.epoch}
         transitions = []
@@ -152,11 +200,17 @@ class GuestWorldStartProof:
             baseline = await wait_resident_status(host_run, lambda frame: host_ready(frame, source))
             assert (baseline["generation"], baseline["zone_epoch"]) == (self.session, previous)
             pawn = baseline["game"]["native_guest_save"]["pawn"]
+            if blocker_name is not None and source == OBSERVATORY:
+                self.evidence["zone_lease_preflight"] = await self._zone_lease_preflight(
+                    host, guest, baseline, pawn, blocker_name, entrance, actor)
             earliest_ms = round(baseline["game"]["native_scene"]["game_seconds"] * 1000)
             arm = uuid.uuid4().hex
             self._arm(destination, arm)
             if source == OBSERVATORY:
                 for player, position in ((pawn, "near"), ("local", "near"), ("local", "inside")):
+                    if position == "inside" and blocker_name is not None:
+                        await wait_resident_status(host_run, lambda frame: host_ready(frame, source)
+                                                   and frame["game"].get("native_zone_wall", {}).get("host_open") is True)
                     await host.bridge.command("native-exit-position", player, position, entrance)
             else:
                 expected = f"Level_Exit_BP_C {source}.CrossRoads_P:PersistentLevel.{actor}"
@@ -214,6 +268,9 @@ class GuestWorldStartProof:
             transitions[-1]["host_travel_receipt"] = transition
             transitions[-1]["guest_title_rejoin"] = leave
             previous, local_pawn = epoch, next_pawn
+            if blocker_name is not None:
+                self._zone_files_absent(host, guest)
+                transitions[-1]["zone_files_absent"] = True
 
     async def verify_travel_exit(self, host, stopped, saved, character):
         last = self.evidence["stock_travel"][-1]

@@ -1057,7 +1057,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
-                 guest_shop_lease: bool = False,
+                 guest_shop_lease: bool = False, zone_lease_preflight: bool = False,
                  resident_cabinet_archive: Path | None = None,
                  resident_cabinet_checkpoint: Path | None = None,
                  resident_cabinet_candidate_sha256: str | None = None) -> None:
@@ -1188,15 +1188,17 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             return evidence
         if guest_world_start:
             startup = GuestWorldStartProof(second)
+            character_name = "Observatory startup scout"
 
             async def check_reconnect(guest, started):
                 await startup.reconnected(guest, started)
                 if guest_world_start_travel:
-                    await startup.travel(first, guest, portable_probe_command)
+                    await startup.travel(first, guest, portable_probe_command,
+                                         blocker_name=character_name if zone_lease_preflight else None)
 
             exit_options = {"host_exit_actions": ("prompt", "confirm"), "after_exit": startup.verify_travel_exit} \
                 if guest_world_start_travel else {}
-            proof["sessions"].append(await start_pair(first, second, "Observatory startup scout",
+            proof["sessions"].append(await start_pair(first, second, character_name,
                                                       before_join=startup.arm, on_join=startup.joined,
                                                       after_reconnect=check_reconnect,
                                                       wait_status=wait_resident_status, **exit_options))
@@ -1333,6 +1335,8 @@ if __name__ == "__main__":
                         help="verify first stock guest map startup and short reconnect in one portable session")
     parser.add_argument("--guest-world-start-travel", action="store_true",
                         help="also verify stock guest startup through Crossroads and Ruin Fields")
+    parser.add_argument("--zone-lease-preflight", action="store_true",
+                        help="check the named Observatory wall blocker and file-free lease before the stock travel")
     parser.add_argument("--resident-cabinet-archive", type=Path,
                         help="profile one stock C_3 pickup using the published baseline or pinned candidate ZIP")
     parser.add_argument("--resident-cabinet-candidate-sha256",
@@ -1342,6 +1346,8 @@ if __name__ == "__main__":
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
+    if args.zone_lease_preflight and not args.guest_world_start_travel:
+        parser.error("Use --zone-lease-preflight with --guest-world-start-travel")
     if args.guest_shop_lease and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
                                      args.projected_nearby, args.container_nearby, args.stock_use, args.stock_prop_grip,
                                      args.stock_crate_ring, args.guest_world_start, args.guest_world_start_travel,
@@ -1402,6 +1408,6 @@ if __name__ == "__main__":
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
                        compact_crate_status=args.compact_crate_status, compact_world_view=args.compact_world_view,
-                       guest_shop_lease=args.guest_shop_lease,
+                       guest_shop_lease=args.guest_shop_lease, zone_lease_preflight=args.zone_lease_preflight,
                        resident_cabinet_archive=cabinet_archive, resident_cabinet_checkpoint=cabinet_checkpoint,
                        resident_cabinet_candidate_sha256=args.resident_cabinet_candidate_sha256))
