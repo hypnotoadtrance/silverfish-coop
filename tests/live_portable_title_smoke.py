@@ -1879,12 +1879,13 @@ async def verify_stock_unequip(first, second, evidence):
         for run in (host_run, guest_run):
             await wait_resident_status(run, lambda frame: frame.get("local_bridge") == "memory")
 
-        async def witness(event, field, guid):
+        async def witness(event, field, guid, since=0):
             async with asyncio.timeout(15):
                 while True:
                     frame = await wait_resident_status(guest_run, lambda row: row.get("state") == "connected")
                     entries = await resident_events(guest_run, frame)
-                    matches = [row for row in entries if row.get("event") == event and row.get(field, {}).get("guid") == guid]
+                    matches = [row for row in entries if row.get("event") == event and row.get(field, {}).get("guid") == guid
+                               and row["time_unix"] >= since]
                     assert len(matches) <= 1, matches
                     if matches:
                         return matches[0]
@@ -2018,8 +2019,9 @@ async def verify_stock_unequip(first, second, evidence):
         assert saves() == before, "The guest stock Unequip wrote a save before a checkpoint"
         evidence["guest_worn_world_drop"] = []
         for (key, slot, equip, _), guid in zip(worn, worn_guids, strict=True):
+            started = time.time()
             await portable_probe_command(guest.bridge, probe, f"{equip}\t{guid}")
-            await witness("native_stock_inventory_action", key, guid)
+            await witness("native_stock_inventory_action", key, guid, since=started)
             action = "guest-drop-helmet" if slot == 8 else "guest-drop-armor"
             await portable_probe_command(guest.bridge, probe, f"{action}\t{guid}")
             accepted = await witness("native_stock_inventory_action", native_guest_drop.RESULT, guid)
@@ -2031,10 +2033,12 @@ async def verify_stock_unequip(first, second, evidence):
             assert (await portable_probe_command(guest.bridge, probe, "guest-worn-state")) == "-,-"
             guest_items = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
             assert all(row["guid"] != guid for row in guest_items), guest_items
-            approached = await submit(host_run, native_world_loot.APPROACH, target=f"host@{identity}")
-            assert approached["ok"], approached
-            picked = await submit(host_run, native_world_loot.FIXTURE, target=identity)
-            assert picked["ok"], picked
+            host_state = await host.bridge.wait_for(lambda frame: identity in frame.get(native_world_loot.KEY, {}))
+            local_pawn = host_state["pawns"]["local"]["name"]
+            approached = await host.bridge.command(native_world_loot.APPROACH, identity, local_pawn, timeout=5)
+            assert approached["ack"]["message"] == "stock loot height and line of sight verified", approached["ack"]
+            picked = await host.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
+            assert picked["ack"]["message"] == "stock world loot interaction intercepted", picked["ack"]
             for run in (host_run, guest_run):
                 await wait_resident_status(run, lambda frame: identity not in frame.get("game", {}).get(native_world_loot.KEY, {})
                     and receipt["drop_id"] not in frame.get("gameplay", {}).get("native_guest_stack_drops", {}))
