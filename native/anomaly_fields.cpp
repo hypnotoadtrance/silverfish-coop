@@ -48,6 +48,7 @@ namespace
     constexpr auto roaming_teleport_class = STR("/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C");
     constexpr auto physics_prop = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
     constexpr auto fixed_prop = STR("/Game/Assets/StaticMeshes/Destructable/Explosive_Prop_Master_BP.Explosive_Prop_Master_BP_C");
+    constexpr auto drum_fire_class = STR("/Game/Classes/Anomalies/Fire_Molotov.Fire_Molotov_C");
     constexpr std::array<std::wstring_view, 3> canister_classes{
         STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_PropaneTank_Small.Prop_PropaneTank_Small_C"),
         STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_PropaneTank_Tall.Prop_PropaneTank_Tall_C"),
@@ -74,15 +75,15 @@ namespace
     bool observer_enabled{};
     bool observer_fixture{};
     bool observer_reward_replication_fixture{};
-    H::GlobalCallbackId observer_script_post = H::ERROR_ID, observer_internal_post = H::ERROR_ID;
-    H::GlobalCallbackId observer_actor_begin = H::ERROR_ID;
+    H::GlobalCallbackId stock_script_post = H::ERROR_ID, stock_internal_post = H::ERROR_ID;
+    H::GlobalCallbackId stock_event_post = H::ERROR_ID, stock_actor_begin = H::ERROR_ID;
     U::FName patch_name;
     std::array<U::FName, 3> patch_events;
     std::array<U::FName, 6> electrode_events;
     std::array<U::FName, 7> roaming_events;
     std::array<U::FName, canister_classes.size()> canister_names;
     std::array<U::FName, 16> canister_events;
-    U::FName fuel_drum, receive_tick;
+    U::FName fuel_drum, fuel_drum_graph, prop_broken, receive_tick, drum_fire_name;
     std::array<U::FName, 5> fixed_prop_events;
     thread_local bool guest_session{};
     thread_local U::FWeakObjectPtr observed_world;
@@ -172,7 +173,7 @@ namespace
     {
         bool accepted = false;
         if (observer_enabled && !guest_session && U::IsInGameThreadRaw() &&
-            observer_script_post != H::ERROR_ID && observer_internal_post != H::ERROR_ID &&
+            stock_script_post != H::ERROR_ID && stock_internal_post != H::ERROR_ID &&
             lua.get_stack_size() == 2 && lua.is_string(1) && lua.is_string(2))
         {
             const auto actor_path = RC::to_generic_string(lua.get_string());
@@ -320,6 +321,109 @@ namespace
         for (std::size_t index = 0; index < canister_names.size(); ++index)
             if (type->GetFName() == canister_names[index]) return type->GetPathName() == canister_classes[index];
         return false;
+    }
+
+    struct DrumFire
+    {
+        U::FWeakObjectPtr actor, world;
+    };
+    thread_local std::array<DrumFire, 4> drum_fires;
+
+    struct DrumBreak
+    {
+        const Iteration* call{};
+        U::FWeakObjectPtr source, world, child;
+    };
+    thread_local std::array<DrumBreak, 4> drum_breaks;
+
+    void begin_drum_break(Iteration& call, U::UObject* actor, U::UFunction* function)
+    {
+        if (!function || function->GetFName() != prop_broken || !U::IsInGameThreadRaw() || guest_session ||
+            call.OriginalFunctionCallPrevented() || !actor) return;
+        auto* type = actor->GetClassPrivate();
+        if (!type || type->GetFName() != fuel_drum || !canister_class(type) || function->GetOuterPrivate() != type ||
+            !actor->HasAnyFlags(U::RF_WasLoaded) || actor->IsUnreachable()) return;
+        if (std::ranges::any_of(drum_breaks, [actor](const auto& active) { return active.source.Get() == actor; })) return;
+        const auto slot = std::ranges::find_if(drum_breaks, [](const auto& active) { return !active.call; });
+        if (slot == drum_breaks.end()) return;
+        auto* world = static_cast<U::AActor*>(actor)->GetWorld();
+        auto* driver = object(world, STR("NetDriver"));
+        auto* role = property<U::FByteProperty>(actor, STR("Role"));
+        if (!world || object(world, STR("PersistentLevel")) != actor->GetOuterPrivate() ||
+            !driver || object(driver, STR("World")) != world || !property<U::FObjectProperty>(driver, STR("ServerConnection")) ||
+            object(driver, STR("ServerConnection")) || !role || role->GetPropertyValueInContainer(actor) != 3) return;
+        *slot = {&call, actor, world, {}};
+    }
+
+    void capture_drum_fire(Iteration& call, U::AActor* child)
+    {
+        if (!child || !U::IsInGameThreadRaw() || guest_session || call.OriginalFunctionCallPrevented() ||
+            std::ranges::all_of(drum_breaks, [](const auto& active) { return !active.call; })) return;
+        auto* child_type = child->GetClassPrivate();
+        constexpr auto destroyed = static_cast<U::EObjectFlags>(U::RF_BeginDestroyed | U::RF_FinishDestroyed);
+        if (!child_type || child_type->GetFName() != drum_fire_name || child_type->GetPathName() != drum_fire_class ||
+            child->HasAnyFlags(destroyed) || child->IsUnreachable()) return;
+        auto* world = child->GetWorld();
+        if (!world) return;
+        auto* role = property<U::FByteProperty>(child, STR("Role"));
+        auto* size = property<U::FDoubleProperty>(child, STR("Size"));
+        auto* burn = property<U::FDoubleProperty>(child, STR("BurnTime"));
+        if (!role || role->GetPropertyValueInContainer(child) != 3 || !size ||
+            size->GetPropertyValueInContainer(child) != 8 || !burn) return;
+        const double seconds = burn->GetPropertyValueInContainer(child);
+        if (!(seconds >= 8 && seconds <= 13)) return;
+
+        // FinishSpawning uses the drum's current location and calls BeginPlay synchronously.
+        // A second drum may break inside the original explosion, so corroborate the source.
+        const auto location = child->K2_GetActorLocation();
+        for (auto current = drum_breaks.rbegin(); current != drum_breaks.rend(); ++current)
+        {
+            auto* source = static_cast<U::AActor*>(current->source.Get());
+            if (!source || current->world.Get() != world || source->GetWorld() != world || current->child.Get()) continue;
+            const auto origin = source->K2_GetActorLocation();
+            const auto x = location.X() - origin.X(), y = location.Y() - origin.Y(), z = location.Z() - origin.Z();
+            if (x * x + y * y + z * z <= 25.0 * 25.0)
+            {
+                current->child = child;
+                return;
+            }
+        }
+    }
+
+    void end_drum_break(Iteration& call, U::UFunction* function)
+    {
+        if (!function || function->GetFName() != prop_broken || !U::IsInGameThreadRaw()) return;
+        const auto ended = std::ranges::find_if(drum_breaks, [&call](const auto& active) { return active.call == &call; });
+        if (ended == drum_breaks.end()) return;
+        auto* child = ended->child.Get();
+        auto* world = ended->world.Get();
+        *ended = {};
+        if (!child || !world || call.OriginalFunctionCallPrevented() ||
+            std::ranges::any_of(drum_fires, [child](const auto& slot) { return slot.actor.Get() == child; })) return;
+        const auto slot = std::ranges::find_if(drum_fires, [world](const auto& fire) {
+            return !fire.actor.Get() || fire.world.Get() != world;
+        });
+        if (slot == drum_fires.end()) return;
+        *slot = {child, world};
+    }
+
+    int take_drum_fire(const Lua& lua)
+    {
+        if (guest_session || !U::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto world = static_cast<std::uintptr_t>(lua.get_integer());
+        for (auto& slot : drum_fires)
+        {
+            auto* actor = slot.actor.Get();
+            if (!actor || reinterpret_cast<std::uintptr_t>(slot.world.Get()) != world)
+            {
+                slot = {};
+                continue;
+            }
+            lua.set_string(RC::to_utf8_string(actor->GetPathName()));
+            slot = {};
+            return 1;
+        }
+        return 0;
     }
 
     bool fixed_prop_class(U::UObject* type)
@@ -497,6 +601,8 @@ namespace
                 patch_world = U::FWeakObjectPtr{};
                 blocked_patches = 0;
                 loading = {};
+                drum_fires = {};
+                drum_breaks = {};
             }
         }
         lua.set_bool(valid);
@@ -588,6 +694,9 @@ namespace silverfish::native_anomaly_fields
             U::FName{STR("BndEvt__Wandering_Teleport_BP_Capsule_K2Node_ComponentBoundEvent_1_ComponentBeginOverlapSignature__DelegateSignature"), U::FNAME_Add},
         };
         fuel_drum = U::FName{STR("Prop_FuelDrum_C"), U::FNAME_Add};
+        fuel_drum_graph = U::FName{STR("ExecuteUbergraph_Prop_FuelDrum"), U::FNAME_Add};
+        prop_broken = U::FName{STR("PropBroken"), U::FNAME_Add};
+        drum_fire_name = U::FName{STR("Fire_Molotov_C"), U::FNAME_Add};
         receive_tick = U::FName{STR("ReceiveTick"), U::FNAME_Add};
         canister_names = {
             U::FName{STR("Prop_PropaneTank_Small_C"), U::FNAME_Add},
@@ -598,7 +707,7 @@ namespace silverfish::native_anomaly_fields
             U::FName{STR("DealDamage"), U::FNAME_Add},
             U::FName{STR("InstantKill"), U::FNAME_Add},
             U::FName{STR("PersistantDeath"), U::FNAME_Add},
-            U::FName{STR("PropBroken"), U::FNAME_Add},
+            prop_broken,
             U::FName{STR("SetOnFire"), U::FNAME_Add},
             U::FName{STR("Extinguish"), U::FNAME_Add},
             U::FName{STR("Ignite"), U::FNAME_Add},
@@ -609,7 +718,7 @@ namespace silverfish::native_anomaly_fields
             U::FName{STR("ExecuteUbergraph_Prop_PropaneTank_Small"), U::FNAME_Add},
             U::FName{STR("ExecuteUbergraph_Prop_PropaneTank_Tall"), U::FNAME_Add},
             U::FName{STR("IgniteOnFire"), U::FNAME_Add},
-            U::FName{STR("ExecuteUbergraph_Prop_FuelDrum"), U::FNAME_Add},
+            fuel_drum_graph,
             U::FName{STR("BndEvt__PhysicsProp_Master_BP_PropMesh_K2Node_ComponentBoundEvent_0_ComponentHitSignature__DelegateSignature"), U::FNAME_Add},
         };
         fixed_prop_name = U::FName{STR("Explosive_Prop_Master_BP_C"), U::FNAME_Add};
@@ -626,11 +735,25 @@ namespace silverfish::native_anomaly_fields
             begin_observer_offering(call, actor, frame);
         };
         hooks[0] = H::RegisterProcessEventPreCallback(
-            [](Iteration& call, U::UObject* actor, U::UFunction* function, void*) { intercept(call, actor, function); },
+            [](Iteration& call, U::UObject* actor, U::UFunction* function, void*) {
+                intercept(call, actor, function);
+                if (stock_actor_begin != H::ERROR_ID && stock_event_post != H::ERROR_ID)
+                    begin_drum_break(call, actor, function);
+            },
             {false, false, owner, STR("Suppress independent guest trap field generation")});
-        hooks[1] = H::RegisterProcessLocalScriptFunctionPreCallback(script,
+        hooks[1] = H::RegisterProcessLocalScriptFunctionPreCallback(
+            [script](Iteration& call, U::UObject* actor, U::FFrame& frame, void* result) {
+                script(call, actor, frame, result);
+                if (stock_actor_begin != H::ERROR_ID && stock_script_post != H::ERROR_ID)
+                    begin_drum_break(call, actor, frame.Node());
+            },
             {false, false, owner, STR("Suppress guest trap field Blueprint calls")});
-        hooks[2] = H::RegisterProcessInternalPreCallback(script,
+        hooks[2] = H::RegisterProcessInternalPreCallback(
+            [script](Iteration& call, U::UObject* actor, U::FFrame& frame, void* result) {
+                script(call, actor, frame, result);
+                if (stock_actor_begin != H::ERROR_ID && stock_internal_post != H::ERROR_ID)
+                    begin_drum_break(call, actor, frame.Node());
+            },
             {false, false, owner, STR("Suppress guest trap field reflected calls")});
         hooks[3] = H::RegisterLoadMapPreCallback(
             [](H::TCallbackIterationData<bool>&, U::UEngine*, U::FWorldContext& context,
@@ -649,25 +772,34 @@ namespace silverfish::native_anomaly_fields
                U::FURL, U::UPendingNetGame*, U::FString&) {
                 if (loading.context == &context) loading = {};
             }, {false, true, owner, STR("Release the guest trap map loading scope")});
-        if (observer_enabled)
-        {
-            const auto stock_result = [](Iteration& call, U::UObject* actor, U::FFrame& frame, void* result) {
+        const auto stock_result = [](Iteration& call, U::UObject* actor, U::FFrame& frame, void* result) {
+            end_drum_break(call, frame.Node());
+            if (observer_enabled)
+            {
                 end_observer_check(call, actor, frame, result);
                 end_observer_offering(call, actor, frame);
-            };
-            observer_script_post = H::RegisterProcessLocalScriptFunctionPostCallback(
-                stock_result, {false, false, owner, STR("Read stock Observer gaze and offering results")});
-            observer_internal_post = H::RegisterProcessInternalPostCallback(
-                stock_result, {false, false, owner, STR("Read reflected Observer gaze and offering results")});
-            observer_actor_begin = H::RegisterBeginPlayPostCallback(
-                capture_observer_reward, {false, false, owner, STR("Track the actual stock Observer reward actor")});
-        }
+            }
+        };
+        stock_script_post = H::RegisterProcessLocalScriptFunctionPostCallback(
+            stock_result, {false, false, owner, STR("Read stock anomaly and prop results")});
+        stock_internal_post = H::RegisterProcessInternalPostCallback(
+            stock_result, {false, false, owner, STR("Read reflected anomaly and prop results")});
+        stock_event_post = H::RegisterProcessEventPostCallback(
+            [](Iteration& call, U::UObject*, U::UFunction* function, void*) { end_drum_break(call, function); },
+            {false, false, owner, STR("Finish stock fuel drum actor scope")});
+        stock_actor_begin = H::RegisterBeginPlayPostCallback(
+            [](Iteration& call, U::AActor* actor) {
+                capture_drum_fire(call, actor);
+                if (observer_enabled) capture_observer_reward(call, actor);
+            }, {false, false, owner, STR("Track actual stock anomaly and prop child actors")});
         if (!installed()) uninstall_hooks();
     }
 
     void uninstall_hooks()
     {
-        for (auto* post : {&observer_script_post, &observer_internal_post, &observer_actor_begin})
+        drum_fires = {};
+        drum_breaks = {};
+        for (auto* post : {&stock_script_post, &stock_internal_post, &stock_event_post, &stock_actor_begin})
         {
             if (*post != H::ERROR_ID) H::UnregisterCallback(*post);
             *post = H::ERROR_ID;
@@ -683,6 +815,9 @@ namespace silverfish::native_anomaly_fields
     {
         lua.register_function("SilverfishSetNativeAnomalyGuest", set_guest);
         lua.register_function("SilverfishReadNativeAnomalySkips", count);
+        if (stock_actor_begin != H::ERROR_ID &&
+            (stock_event_post != H::ERROR_ID || stock_script_post != H::ERROR_ID || stock_internal_post != H::ERROR_ID))
+            lua.register_function("SilverfishTakeNativeDrumFire", take_drum_fire);
         if (observer_enabled) lua.register_function("SilverfishSetNativeObserverTarget", set_observer_target);
         if (observer_reward_replication_fixture)
             lua.register_function("SilverfishTakeNativeObserverReward", take_observer_reward);

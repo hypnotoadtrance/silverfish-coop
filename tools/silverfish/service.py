@@ -46,6 +46,7 @@ from . import native_pickup_audio
 from . import native_damage_feedback, native_weather_view
 from . import native_voice
 from . import native_anomaly_effects
+from . import native_drum_fire
 from . import native_weapon_fire_view
 from . import native_loose_pickup
 from . import native_mushrooms
@@ -1906,6 +1907,8 @@ class Host:
                 gameplay[native_voice.KEY] = voice_frame
             if hurt_frame := native_damage_feedback.frame(self.last_game, self.zone_epoch, pawn):
                 gameplay[native_damage_feedback.KEY] = hurt_frame
+            if ground_fire := native_drum_fire.host_frame(self.last_game, self.zone_epoch):
+                gameplay[native_drum_fire.KEY] = ground_fire
             if cues := self.last_game.get(native_anomaly_effects.KEY):
                 gameplay[native_anomaly_effects.KEY] = {
                     "map": self.last_game["map"], "epoch": self.zone_epoch, "cues": cues,
@@ -5775,6 +5778,8 @@ class Client:
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.ANGLER_COLORS), self.zone_epoch)
                     self.last_game = await native_anomaly_effects.project_observer_opacity(
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.OBSERVER_OPACITY), self.zone_epoch)
+                    self.last_game = await native_drum_fire.project(
+                        self.bridge, self.last_game, self.gameplay.get(native_drum_fire.KEY), self.zone_epoch)
                     self.last_game = await native_anomaly_effects.project_canisters(
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.CANISTERS), self.zone_epoch)
                     self.last_game = await native_anomaly_effects.project_fixed_explosives(

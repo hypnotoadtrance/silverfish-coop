@@ -2,6 +2,7 @@ local fields = {}
 local effects = require("native_anomaly_effects")
 local electrodes = require("native_electrode_view")
 local canisters = require("native_explosive_canisters")
+local drum_fire = require("native_drum_fire")
 local fixed = require("native_fixed_explosives")
 local pyrogeist = require("native_pyrogeist_view")
 local shadows = require("native_shadow_sphere_view")
@@ -237,6 +238,7 @@ function fields.start(role)
 end
 
 function fields.guest(enabled)
+    if not enabled then drum_fire.clear() end
     if type(SilverfishSetNativeAnomalyGuest) == "function" then SilverfishSetNativeAnomalyGuest(enabled) end
 end
 
@@ -246,6 +248,8 @@ function fields.command(args, state, phase)
     if args[2] == "native-observer-apply-opacity" then return observers.apply_opacity(args, state, phase, active) end
     local electrode = electrodes.command(args, state, phase, world, active)
     if electrode ~= nil then return electrode end
+    local fire_view = drum_fire.command(args, state, phase)
+    if fire_view ~= nil then return fire_view end
     local canister = canisters.command(args, state, phase)
     if canister ~= nil then return canister end
     local explosive = fixed.command(args, state, phase)
@@ -355,6 +359,7 @@ function fields.rows(state, phase, row)
     if phase ~= "hosting" and phase ~= "connected" or not valid(state.world) then
         lamps.clear()
         observers.clear_visuals()
+        drum_fire.clear()
         return {}
     end
     if not same(world, state.world) or world_map ~= state.map then
@@ -489,6 +494,7 @@ function fields.rows(state, phase, row)
         effects.retire_charges()
     end
     for _, canister in ipairs(canisters.rows(state, phase, row)) do rows[#rows + 1] = canister end
+    for _, view in ipairs(drum_fire.rows(state, phase, row)) do rows[#rows + 1] = view end
     for _, item in ipairs(fixed.rows(state, phase, row)) do rows[#rows + 1] = item end
     return rows
 end

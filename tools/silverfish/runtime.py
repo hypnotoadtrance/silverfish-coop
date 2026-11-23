@@ -41,6 +41,7 @@ from . import native_weapon_fire_view
 from . import native_damage_feedback, native_guest_clock, native_weather_view
 from . import native_voice
 from . import native_anomaly_effects
+from . import native_drum_fire
 from .native_guest_creator import valid_profile
 from . import native_host_stack_drop
 from . import native_black_box
@@ -2657,6 +2658,15 @@ class Bridge:
                         data["native_electrode_capture"] = electrode
                         data["native_canister_capture"] = canister
                         data["native_fuel_drum_capture"] = drum
+                elif fields[0] == "native-drum-fire-host" and 2 <= len(fields) <= 2 + native_drum_fire.MAX_FIELDS:
+                    if data.get("state") == "hosting" and (frame := native_drum_fire.parse_host(fields[1], fields[2:])):
+                        data[native_drum_fire.KEY] = frame
+                elif fields[0] == "native-drum-fire-view" and len(fields) == 5 and data.get("state") == "connected":
+                    epoch = fields[1]
+                    revision, desired, rendered = map(int, fields[2:])
+                    limit = native_drum_fire.MAX_FIELDS * native_drum_fire.MAX_PARTICLES
+                    if native_drum_fire.valid_id(epoch) and 0 < revision < 2**31 and max(desired, rendered) <= limit and min(desired, rendered) >= 0:
+                        data[native_drum_fire.VIEW] = {"epoch": epoch, "revision": revision, "desired": desired, "rendered": rendered}
                 elif fields[0] == "native-canister-blocked" and len(fields) == 2 and data.get("state") == "connected":
                     blocked = int(fields[1])
                     if blocked >= 0:

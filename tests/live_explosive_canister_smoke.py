@@ -18,10 +18,23 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from tools.silverfish.control import submit
 from tools.silverfish.native_anomaly_effects import CANISTERS
+from tools.silverfish.native_drum_fire import VIEW as DRUM_FIRE_VIEW
 from tools.silverfish.travel import CISTERN, CROSSROADS
 
 
-async def verify(work, vanilla, tall, standing=False, fuel_drum=False):
+def ground_fire_rows(directory):
+    for path in directory.glob("game-bridge/*/status.tsv"):
+        try:
+            rows = [line.split("\t") for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.startswith("fixture-drum-ground-fire\t")]
+        except OSError:
+            continue
+        if rows:
+            return rows
+    return []
+
+
+async def verify(work, vanilla, tall, standing=False, fuel_drum=False, ground_fire_probe=False, ground_fire_view=False):
     family = "fuel-drum" if fuel_drum else "standing-fuel-tank" if standing else "explosive-canister"
     name = f"{family}-{uuid.uuid4().hex[:8]}"
     host = work / "campaigns" / name / "run"
@@ -50,6 +63,8 @@ async def verify(work, vanilla, tall, standing=False, fuel_drum=False):
 
     async def launch(run, role, *args):
         env = dict(os.environ)
+        if ground_fire_probe:
+            env["SILVERFISH_COOP_FUEL_GROUND_PROBE"] = "1"
         if role == "guest":
             env["SILVERFISH_COOP_RENDER_CAPTURE"] = "guest"
         with (host / f"{role}.log").open("wb") as log:
@@ -145,6 +160,40 @@ async def verify(work, vanilla, tall, standing=False, fuel_drum=False):
         cue, = events(guest, cue_event)
         assert cue["particles"], cue
         proof["guest_stock_blast"] = cue
+        if ground_fire_view:
+            def populated_view(frame):
+                view = frame.get("game", {}).get(DRUM_FIRE_VIEW, {})
+                return view.get("desired", 0) > 0 and view["desired"] == view["rendered"]
+
+            populated = await wait(guest, populated_view, timeout=7)
+            proof["guest_ground_fire_rendered"] = populated["game"][DRUM_FIRE_VIEW]
+        if ground_fire_probe:
+            def stock_field_finished(_):
+                rows = ground_fire_rows(host)
+                proof["host_ground_fire"] = rows
+                if ground_fire_view and populated_view(guest_frame := status(guest)):
+                    view = guest_frame["game"][DRUM_FIRE_VIEW]
+                    peak = proof.get("guest_ground_fire_peak", {}).get("rendered", 0)
+                    if view["rendered"] > peak:
+                        proof["guest_ground_fire_peak"] = view
+                return any(len(row) == 13 and row[1] == "host" and row[11] != "-" and row[12] == "true" for row in rows)
+
+            await wait(host, stock_field_finished, timeout=22)
+            proof["guest_ground_fire"] = ground_fire_rows(guest)
+            assert any(row[1:] and row[1] == "particle" for row in proof["host_ground_fire"]), proof["host_ground_fire"]
+            assert any(row[1:3] == ["guest", "true"] for row in proof["guest_ground_fire"]), proof["guest_ground_fire"]
+        if ground_fire_view:
+            stock = next(row for row in proof["host_ground_fire"] if row[1] == "host")
+            assert proof.get("guest_ground_fire_peak", {}).get("rendered") == int(stock[9]), proof.get("guest_ground_fire_peak")
+
+            def retired_view(frame):
+                view = frame.get("game", {}).get(DRUM_FIRE_VIEW, {})
+                return view.get("revision", 0) > proof["guest_ground_fire_rendered"]["revision"] and (
+                    view.get("desired"), view.get("rendered")) == (0, 0)
+
+            retired = await wait(guest, retired_view, timeout=7)
+            proof["guest_ground_fire_retired"] = retired["game"][DRUM_FIRE_VIEW]
+            assert ["fixture-drum-ground-fire", "guest", "true", "0"] in proof["guest_ground_fire"]
         await action(guest, "drop-link")
         await wait(guest, lambda row: row.get("reconnect_suspended") and not row.get("link_connected"))
         assert (await action(guest, "reconnect"))["resumed"]
@@ -183,6 +232,12 @@ if __name__ == "__main__":
     kind.add_argument("--tall", action="store_true")
     kind.add_argument("--standing", action="store_true", help="verify an authored standing fuel tank's rotation")
     kind.add_argument("--fuel-drum", action="store_true", help="verify the authored Crossroads drum from one stock shot")
+    parser.add_argument("--ground-fire-probe", action="store_true", help="wait for the private ground-fire observation overlay")
+    parser.add_argument("--ground-fire-view", action="store_true", help="require guest projection and retirement in the probe")
     args = parser.parse_args()
+    if args.ground_fire_probe and not args.fuel_drum:
+        parser.error("--ground-fire-probe requires --fuel-drum")
+    if args.ground_fire_view and not args.ground_fire_probe:
+        parser.error("--ground-fire-view requires --ground-fire-probe")
     asyncio.run(verify(args.work.resolve(strict=True), args.vanilla_saved.resolve(strict=True),
-                       args.tall, args.standing, args.fuel_drum))
+                       args.tall, args.standing, args.fuel_drum, args.ground_fire_probe, args.ground_fire_view))
