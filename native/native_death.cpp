@@ -16,6 +16,7 @@
 #include <Mod/CppUserModBase.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
+#include <Unreal/CoreUObject/UObject/FStrProperty.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FFrame.hpp>
 #include <Unreal/FURL.hpp>
@@ -97,6 +98,8 @@ namespace
     constexpr auto damage_full_name = STR("Function /Game/Classes/Player/Player_FP.Player_FP_C:DealDamage");
     constexpr auto direct_damage_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Deal_DirectDamage");
     constexpr auto direct_damage_full_name = STR("Function /Game/Classes/Player/Player_FP.Player_FP_C:Deal_DirectDamage");
+    constexpr auto offhand_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:OffhandFlashlight");
+    constexpr auto offhand_full_name = STR("Function /Game/Classes/Player/Player_FP.Player_FP_C:OffhandFlashlight");
     constexpr auto mode_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:K2_OnMovementModeChanged");
     constexpr auto mode_full_name = STR("Function /Game/Classes/Player/Player_FP.Player_FP_C:K2_OnMovementModeChanged");
     constexpr auto landed_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:OnLanded");
@@ -106,6 +109,7 @@ namespace
     constexpr auto probe_timeout = std::chrono::seconds(2);
     constexpr auto scope_timeout = std::chrono::milliseconds(1250);
     constexpr auto fall_sample_interval = std::chrono::milliseconds(50);
+    constexpr std::uint8_t simulated_role = 1; // ENetRole::ROLE_SimulatedProxy in UE 5.4.
     constexpr std::uint8_t autonomous_role = 2; // ENetRole::ROLE_AutonomousProxy in UE 5.4.
     constexpr std::uint8_t authority_role = 3; // ENetRole::ROLE_Authority in UE 5.4.
     constexpr std::uint8_t falling_mode = 3; // EMovementMode::MOVE_Falling in UE 5.4.
@@ -1189,6 +1193,8 @@ namespace
         FriendlyFire damage;
         Unreal::UFunction* direct{};
         Unreal::UFunction* die{};
+        Unreal::UFunction* offhand{};
+        Unreal::FBoolProperty* offhand_equip{};
         std::uint64_t generation{};
         std::string session, epoch;
         std::int64_t deal_blocked{}, direct_blocked{}, die_blocked{}, output_faults{};
@@ -1298,6 +1304,16 @@ namespace
         scope.damage = damage;
         scope.direct = direct;
         scope.die = die;
+        auto* offhand = find_player_script(offhand_path, offhand_full_name);
+        if (offhand && offhand->GetOuterPrivate() == die->GetOuterPrivate() && offhand->GetNumParms() == 1)
+        {
+            auto* equip = damage_argument<Unreal::FBoolProperty>(offhand, STR("Equip"), false);
+            if (equip && !equip->HasAnyPropertyFlags(Unreal::CPF_ReferenceParm))
+            {
+                scope.offhand = offhand;
+                scope.offhand_equip = equip;
+            }
+        }
         scope.generation = bridge_generation.load(std::memory_order_acquire);
         return qualified_client_damage(scope);
     }
@@ -1368,6 +1384,48 @@ namespace
         return 1;
     }
 
+    [[nodiscard]] bool active_guest_save_slot(Unreal::UObject* instance)
+    {
+        auto* slot = reflected_field<Unreal::FStrProperty>(instance, STR("CurrentSaveSlot"));
+        constexpr RC::StringViewType prefix{STR("SFCoopGuest_")};
+        constexpr auto size = prefix.size() + 32;
+        if (!slot) return false;
+        const auto& value = slot->GetPropertyValueInContainer(instance);
+        if (value.Len() != static_cast<int>(size)) return false;
+        const RC::StringViewType name{*value, size};
+        const auto id = name.substr(prefix.size());
+        return name.starts_with(prefix) && id.find_first_not_of('0') != RC::StringViewType::npos &&
+            std::ranges::all_of(id, [](Unreal::TCHAR letter) {
+                return (letter >= '0' && letter <= '9') || (letter >= 'a' && letter <= 'f');
+            });
+    }
+
+    void intercept_replica_offhand(Iteration& iteration, Unreal::UObject* replica,
+                                   void* parameters, Unreal::FFrame* frame)
+    {
+        const auto& scope = client_damage_scope;
+        if (iteration.OriginalFunctionCallPrevented() || (frame && frame->Object() != replica)) return;
+        const auto* arguments = frame ? frame->Locals() : parameters;
+        if (!arguments || scope.offhand_equip->GetPropertyValueInContainer(arguments) ||
+            !live_object(replica) || replica->GetClassPrivate() != scope.offhand->GetOuterPrivate() ||
+            !live_client_actor(replica, scope.world.Get(), simulated_role) || !qualified_client_damage(scope)) return;
+        auto* instance = scope.instance.Get();
+        auto* world = static_cast<Unreal::UWorld*>(scope.world.Get());
+        SaveOwnership ownership;
+        if (!bind_save(ownership, scope.pawn.object.Get(), world) ||
+            !active_guest_save_slot(instance) || ownership.instance.Get() != instance) return;
+        auto* save = ownership.save.Get();
+        auto* offhanding = reflected_field<Unreal::FBoolProperty>(save, STR("PlayerOffhandingFlashlight"));
+        if (!save->GetOuterPrivate() || save->GetOuterPrivate()->GetPathName() != STR("/Engine/Transient") ||
+            read_object(ownership.instance_slot, instance) != save ||
+            read_object(ownership.pawn_save, replica) != save || !offhanding ||
+            !offhanding->GetPropertyValueInContainer(save)) return;
+
+        // Stock passive updates notify every Player_FP, including simulated replicas.
+        // A replica with no held item must not clear the autonomous player's shared save flag.
+        iteration.PreventOriginalFunctionCall();
+    }
+
     // Host damage and downing still run on the enrolled authority pawn. Client
     // Blueprints can call these same wrappers locally before replication arrives.
     bool intercept_client_damage(Iteration& iteration, Unreal::UObject* context, Unreal::UFunction* callee,
@@ -1378,7 +1436,6 @@ namespace
             !qualified_client_damage(scope)) return false;
         // The guest also has simulated copies of the other players. A locally
         // evaluated anomaly cannot damage or kill those pawns on this peer.
-        constexpr std::uint8_t simulated_role = 1;
         if (scope.pawn.object.Get() != context &&
             (!live_client_actor(context, scope.world.Get(), simulated_role) ||
              context->GetClassPrivate() != scope.die->GetOuterPrivate())) return false;
@@ -1462,6 +1519,11 @@ namespace
     void intercept_call(Iteration& iteration, Unreal::UObject* context, Unreal::UFunction* callee,
                         void* parameters, Unreal::FFrame* frame = nullptr)
     {
+        if (callee && callee == client_damage_scope.offhand)
+        {
+            intercept_replica_offhand(iteration, context, parameters, frame);
+            return;
+        }
         if (intercept_client_damage(iteration, context, callee, parameters, frame)) return;
         if (callee && callee == death_scope.friendly_fire.damage)
         {
@@ -1480,7 +1542,7 @@ namespace
             return;
         }
         auto* callee = frame.Node();
-        if (context && callee && (callee == probe.die || callee == death_scope.die ||
+        if (context && callee && (callee == probe.die || callee == death_scope.die || callee == client_damage_scope.offhand ||
                                   callee == death_scope.friendly_fire.damage || client_damage_scope.accepts(callee)))
         {
             // ProcessLocalScriptFunction receives the prepared callee frame on
