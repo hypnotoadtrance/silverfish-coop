@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 import uuid
 
-from .control import Control, select_run, status, submit
+from .control import Control, current_status, select_run, submit
 from .authored_routes import AUTHORED_ROUTES, MAPS as EXPANDED_MAPS
 from .native_guest_armor import SEED_PROFILES as ARMOR_SEED_PROFILES
 from .native_guest_consumable import RESULT as GUEST_CONSUMABLE_ACTIONS
@@ -339,7 +339,7 @@ def _repository_run(opts) -> Path:
 
 async def _events(directory: Path, limit: int) -> dict:
     try:
-        current = status(directory)
+        current = await current_status(directory)
     except FileNotFoundError:
         current = {}
     if current.get("event_source") == "memory":
@@ -536,9 +536,9 @@ async def execute(opts):
 
     directory = _repository_run(opts) / "run"
     if operation == "status":
-        return status(directory)
+        return await current_status(directory)
     if operation == "routes":
-        current = status(directory)
+        current = await current_status(directory)
         game = current.get("game") or {}
         role = current.get("role")
         expected = {"host": "hosting", "client": "connected"}.get(role)

@@ -16,7 +16,7 @@ from tempfile import NamedTemporaryFile
 import uuid
 
 from . import runtime
-from .control import NAME
+from .control import NAME, status as control_status
 from .embedded_engine import (
     BRIDGE_ENV, INSTALLED_ENV, OPT_IN_ENV, UNIFIED_ENV, EmbeddedEngine,
     _assert_no_reparse, _current_startup, _exact_existing, _qualify,
@@ -469,7 +469,7 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
                     await cloud_backups.mirror_host(selected, session)
 
         def status():
-            return runtime.read_json(selected / "run" / "status.json")
+            return control_status(selected / "run")
 
         def ready(frame):
             listener = frame.get("endpoint")
@@ -541,7 +541,7 @@ async def _resident_join(work: Path, directory: Path, mailbox: Path, saved: Path
                                     resident_engine=engine)
 
     def status():
-        return runtime.read_json(directory / "run" / "status.json")
+        return control_status(directory / "run")
 
     plan = SessionPlan(start, status, lambda frame: frame.get("character_id") == selection.character_id
                        and frame.get("gameplay_fresh") is True)
@@ -574,7 +574,7 @@ def _resident_direct_join_plan(work, directory, mailbox, saved, headless, *, ava
             raise ValueError("The resident guest lacks the host's staged game features")
 
     def status():
-        return runtime.read_json(directory / "run" / "status.json")
+        return control_status(directory / "run")
 
     settings = TitleJoinSettings(work, mailbox, direct_profile=directory, qualify_connection=qualify,
                                  timeout=18, saved=saved,

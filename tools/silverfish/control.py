@@ -17,6 +17,7 @@ from .runtime import read_json, write_json
 NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
 _RECENT_EVENTS = 64
 _EVENT_BYTES = 8_192
+_resident_snapshots: dict[Path, dict] = {}
 
 
 def select_run(work: Path, kind: str, name: str) -> Path:
@@ -30,13 +31,15 @@ def select_run(work: Path, kind: str, name: str) -> Path:
 
 
 class Control:
-    def __init__(self, run: Path, *, buffer_events: bool = False):
-        self.run = run
+    def __init__(self, run: Path, *, resident: bool = False):
+        self.run = run.absolute()
         self.generation = uuid.uuid4().hex
         self.started = time.time()
         self._gameplay_status_key = None
         self._next_gameplay_status = 0.0
-        self._recent_events: deque[str] | None = deque(maxlen=_RECENT_EVENTS) if buffer_events else None
+        self._resident = resident
+        self._published_phase = None
+        self._recent_events: deque[str] | None = deque(maxlen=_RECENT_EVENTS) if resident else None
         run.mkdir(parents=True, exist_ok=True)
         self._lock = (run / "control.lock").open("a+b")
         try:
@@ -54,6 +57,8 @@ class Control:
         return self
 
     def __exit__(self, *_):
+        if self._resident:
+            _resident_snapshots.pop(self.run, None)
         self._lock.close()
 
     def gameplay_status_due(self, *key) -> bool:
@@ -66,15 +71,23 @@ class Control:
         return True
 
     def status(self, **fields) -> None:
-        if self._recent_events is not None:
-            fields["event_source"] = "memory"
+        if self._resident:
+            fields.update(event_source="memory", status_source="memory")
             if fields.get("active") is False:
                 fields["recent_events"] = self._event_tail(_RECENT_EVENTS)
-        write_json(self.run / "status.json", {
+        frame = {
             "schema": 1, "generation": self.generation,
             "pid": os.getpid(), "started_unix": self.started, "updated_unix": time.time(),
             **fields,
-        })
+        }
+        phase = None
+        if self._resident:
+            _resident_snapshots[self.run] = frame
+            phase = fields.get("active"), fields.get("role"), fields.get("state")
+            if phase == self._published_phase:
+                return
+        write_json(self.run / "status.json", frame)
+        self._published_phase = phase
 
     def event(self, event: str, **fields) -> None:
         base = {
@@ -109,6 +122,9 @@ class Control:
             if data.get("generation") != self.generation:
                 self.respond(path, False, error="session_changed")
                 continue
+            if data.get("action") == "status-current" and self._resident:
+                self.respond(path, True, status=status(self.run))
+                continue
             if data.get("action") == "events-recent" and self._recent_events is not None:
                 limit = data.get("tail")
                 if type(limit) is int and limit > 0:
@@ -124,14 +140,42 @@ class Control:
 
 
 def status(run: Path) -> dict:
-    result = read_json(run / "status.json")
+    frame = _resident_snapshots.get(run.absolute())
+    result = frame.copy() if frame is not None else read_json(run / "status.json")
     result["stale"] = time.time() - result["updated_unix"] > 12
+    return result
+
+
+def _controller_lock_held(run: Path) -> bool:
+    try:
+        stream = (run / "control.lock").open("r+b")
+    except FileNotFoundError:
+        return False
+    with stream:
+        try:
+            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+        except PermissionError:
+            return True
+        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+    return False
+
+
+async def current_status(run: Path) -> dict:
+    result = status(run)
+    if (result.get("status_source") == "memory" and result.get("active") is True
+            and result.get("state") in {"hosting", "connected", "waiting_for_host"}
+            and run.absolute() not in _resident_snapshots and _controller_lock_held(run)):
+        reply = await submit(run, "status-current")
+        if reply.get("ok") is not True:
+            raise RuntimeError("The active controller could not return its current status")
+        return reply["status"]
     return result
 
 
 async def submit(run: Path, action: str, **arguments) -> dict:
     current = status(run)
-    if current["stale"] or not current.get("active"):
+    stale = current["stale"] and not (current.get("status_source") == "memory" and _controller_lock_held(run))
+    if stale or not current.get("active"):
         raise RuntimeError("No active controller for the chosen profile or campaign")
     request_id = uuid.uuid4().hex
     name = f"{request_id}.json"
@@ -139,11 +183,13 @@ async def submit(run: Path, action: str, **arguments) -> dict:
         "generation": current["generation"], "action": action, **arguments,
     })
     output = run / "responses" / name
-    limit = {"events-recent": 1_048_576, "native-quest-catalog": 1_048_576, "native-quest-list": 32768,
+    limit = {"status-current": 1_048_576, "events-recent": 1_048_576,
+             "native-quest-catalog": 1_048_576, "native-quest-list": 32768,
              "native-dialogue-open": 32768, "native-dialogue-choose": 32768,
              "native-finite-shop-list": 131072, "native-inventory-list": 16384,
              "native-wipe-items": 16384}.get(action, 8192)
-    for _ in range(200):
+    attempts = 15 if action in {"status-current", "events-recent"} else 200
+    for _ in range(attempts):
         if output.is_file():
             return read_json(output, limit=limit)
         await asyncio.sleep(0.2)
