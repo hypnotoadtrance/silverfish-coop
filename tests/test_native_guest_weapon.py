@@ -64,7 +64,8 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
                                  (6, 1, 0.5, ammo))
                 self.assertTrue(magazine.require_default_payload and magazine.reload_first_stack)
         self.assertEqual({profile.kind for profile in guest_weapon_profiles.FIREARMS
-                          if profile.magazine and profile.magazine.ammo == hollow}, {"revolver-02", "revolver-03"})
+                          if profile.magazine and profile.magazine.ammo == hollow},
+                         {"revolver-02", "revolver-03", "heavy-pistol-silenced", "tac-hmp2"})
 
     def test_obrez_routes_primary_to_authority_without_an_ordinary_magazine_profile(self):
         path = "/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C"
@@ -95,7 +96,8 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
                           ("black-fox", "Wep_Pistol_Fennec_02", 17, 1, 0.06),
                           ("rifle-57-01", "Wep_5-7AR_01", 50, 4, 0.05),
                           ("rifle-57-02", "Wep_5-7AR_02", 50, 4, 0.05),
-                          ("rifle-57-03", "Wep_5-7AR_03", 50, 4, 0.05)])
+                          ("rifle-57-03", "Wep_5-7AR_03", 50, 4, 0.05),
+                          ("vsk-01", "Wep_VSK_01", 20, 0, 0.0857)])
         self.assertTrue(all(p.magazine.require_default_payload and p.magazine.reload_first_stack for p in profiles))
 
     def test_only_audited_magazines_use_first_stack_reload(self):

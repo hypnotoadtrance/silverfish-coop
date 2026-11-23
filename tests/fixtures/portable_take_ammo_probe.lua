@@ -8,6 +8,8 @@
         if item_identity(row) ~= fields[4] then return "waiting" end
         if fields[5] == "equip" then
             pawn:Equip_NextItem(slot, false)
+            local facing = pawn.Controller:GetControlRotation()
+            pawn.Controller:SetControlRotation({Pitch = 70, Yaw = facing.Yaw, Roll = 0})
         end
         local guid = equipped_guid(pawn, save)
         return ("%d,%s"):format(row[ammo_field], guid == fields[4] and tostring(pawn.EquipedItem.Ammo) or "stored")
@@ -17,9 +19,8 @@
         assert(phase == "hosting" and state.map == "/Game/Classes/Maps/Maps_OverWorld/Observitory_P" and #fields == 4)
         local pawn, save = guest_save.exact_item_context(state, phase, fields[3])
         assert(pawn and save and not same(save, state.world.OwningGameInstance.SaveSlot_Ref))
-        local kind = fields[4]
-        assert(kind == "revolver-9mm" or kind == "break-action-50" or kind == "obrez")
-        local path = weapon_profiles.paths[kind]
+        local path = weapon_profiles.paths[fields[4]]
+        assert(path and weapon_profiles.magazine_capacity[path])
         local class = StaticFindObject(path)
         if not class or not class:IsValid() then LoadAsset(path) class = StaticFindObject(path) end
         local converter = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C")
