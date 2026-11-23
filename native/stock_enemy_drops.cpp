@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <string>
 #include <utility>
@@ -74,6 +75,25 @@ namespace
     std::atomic<bool> installed{};
     std::array<H::GlobalCallbackId, 3> hooks{H::ERROR_ID, H::ERROR_ID, H::ERROR_ID};
 
+    struct DigRollFixture
+    {
+        U::FWeakObjectPtr world;
+        U::FFrame* frame{};
+        std::uint8_t* operand{};
+    } dig_fixture;
+
+    bool dig_fixture_enabled()
+    {
+        for (const auto* name : {"SILVERFISH_COOP_HEADLESS", "SILVERFISH_COOP_TITLE_FIXTURES"})
+        {
+            std::array<char, 2> value{};
+            std::size_t length{};
+            if (getenv_s(&length, value.data(), value.size(), name) || length != value.size() || value[0] != '1')
+                return false;
+        }
+        return true;
+    }
+
     bool enabled()
     {
         std::array<char, 2> value{};
@@ -135,6 +155,51 @@ namespace
         return live(value) && item && value->IsA(item) && authority_in_level(static_cast<U::AActor*>(value), world);
     }
 
+    bool stock_dig_frame(U::UObject* receiver, U::FFrame& frame)
+    {
+        auto* caller = frame.PreviousFrame();
+        return live(receiver) && receiver->GetClassPrivate() == find<U::UClass>(hole_path) &&
+            frame.Object() == receiver && frame.Node() == find<U::UFunction>(hole_graph) && caller &&
+            caller->Object() == receiver && caller->Node() == find<U::UFunction>(hole_begin);
+    }
+
+    int arm_dig_fixture(const Lua& lua)
+    {
+        if (!available() || !dig_fixture_enabled() || dig_fixture.frame || lua.get_stack_size() != 1 || !lua.is_integer(1))
+            return 0;
+        auto* world = find<U::UWorld>(STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"));
+        const bool ready = world && address(world) == static_cast<Address>(lua.get_integer()) && listen_instance(world);
+        if (ready) dig_fixture.world = world;
+        lua.set_bool(ready);
+        return 1;
+    }
+
+    void force_fixture_roll(U::UObject* receiver, U::FFrame& frame)
+    {
+        auto* world = static_cast<U::UWorld*>(dig_fixture.world.Get());
+        if (!world || dig_fixture.frame || !stock_dig_frame(receiver, frame) ||
+            !authority_in_level(static_cast<U::AActor*>(receiver), world) || !listen_instance(world)) return;
+        auto& script = frame.Node()->GetScript();
+        if (script.Num() < 195) return;
+        constexpr std::array<std::uint8_t, 6> stock{0x1e, 0xcd, 0xcc, 0x4c, 0x3d, 0x16};
+        auto* end = script.GetData() + 195;
+        auto* match = std::search(script.GetData() + 170, end, stock.begin(), stock.end());
+        if (match == end) return;
+        // Test one real stock roll without waiting for the normal five-percent chance.
+        constexpr float always = 1.0f;
+        std::memcpy(match + 1, &always, sizeof(always));
+        dig_fixture.frame = &frame;
+        dig_fixture.operand = match + 1;
+    }
+
+    void restore_fixture_roll(U::FFrame& frame)
+    {
+        if (dig_fixture.frame != &frame) return;
+        constexpr float stock_chance = 0.05f;
+        std::memcpy(dig_fixture.operand, &stock_chance, sizeof(stock_chance));
+        dig_fixture = {};
+    }
+
     bool begin_roll(U::UWorld* world)
     {
         if (sequence > max_sequence - max_roll || roll >= max_sequence) return false;
@@ -156,12 +221,8 @@ namespace
 
     void record_unearthed(U::UObject* receiver, U::FFrame& frame)
     {
-        auto* hole = find<U::UClass>(hole_path);
         auto* function = frame.Node();
-        auto* caller = frame.PreviousFrame();
-        if (!hole || !live(receiver) || receiver->GetClassPrivate() != hole || frame.Object() != receiver ||
-            function != find<U::UFunction>(hole_graph) || !caller || caller->Object() != receiver ||
-            caller->Node() != find<U::UFunction>(hole_begin) || !frame.Locals()) return;
+        if (!stock_dig_frame(receiver, frame) || !frame.Locals()) return;
 
         auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
         if (!listen_instance(world) || !authority_in_level(static_cast<U::AActor*>(receiver), world)) return;
@@ -203,9 +264,11 @@ namespace
     void before_spawn(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
     {
         static const U::FName spawn_name{STR("SpawnLoot")};
+        static const U::FName dig_graph{STR("ExecuteUbergraph_DigHole_BP")};
         auto* function = frame.Node();
-        if (!available() || observing.frame || !function || function->GetFName() != spawn_name ||
-            call.OriginalFunctionCallPrevented() || frame.Object() != receiver || !live(receiver)) return;
+        if (!available() || !function || call.OriginalFunctionCallPrevented()) return;
+        if (function->GetFName() == dig_graph) force_fixture_roll(receiver, frame);
+        if (observing.frame || function->GetFName() != spawn_name || frame.Object() != receiver || !live(receiver)) return;
         auto* base = find<U::UClass>(npc_path);
         auto* caller = frame.PreviousFrame();
         if (!base || !receiver->IsA(base) || function != find<U::UFunction>(stock_spawn) || function->GetOuterPrivate() != base ||
@@ -265,6 +328,7 @@ namespace
     void after_spawn(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
     {
         if (!available()) return;
+        restore_fixture_roll(frame);
         static const U::FName dig_graph{STR("ExecuteUbergraph_DigHole_BP")};
         if (frame.Node() && frame.Node()->GetFName() == dig_graph && !call.OriginalFunctionCallPrevented())
             record_unearthed(receiver, frame);
@@ -402,6 +466,7 @@ namespace silverfish::stock_enemy_drops
     {
         installed.store(false, std::memory_order_release);
         observing = {};
+        dig_fixture = {};
         recent.clear();
         reported_world = U::FWeakObjectPtr{};
         for (auto& hook : hooks)
@@ -416,5 +481,6 @@ namespace silverfish::stock_enemy_drops
         if (!enabled()) return;
         lua.register_function("SilverfishReadStockEnemyDrop", read);
         lua.register_function("SilverfishReadStockDigProp", read_dig_prop);
+        if (dig_fixture_enabled()) lua.register_function("SilverfishArmStockDigRollFixture", arm_dig_fixture);
     }
 }
