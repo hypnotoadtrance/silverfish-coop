@@ -38,6 +38,7 @@ from live_stock_creator_smoke import creator_action, installed_probe
 from live_stock_pause_exit_smoke import stock_pause
 from live_unified_title_smoke import Seat, offered, start_pair
 from portable_guest_world_start import GuestWorldStartProof, wait_resident_status
+from portable_world_view_receipt import patch_world_view_receipts, verify_world_view_receipt
 
 
 @dataclass(frozen=True)
@@ -50,10 +51,10 @@ class PortableRelease:
 
 
 @contextmanager
-def compact_crate_status_overlay(game: Path):
-    """Exercise installed memory publication without disabling any portable isolation flags."""
+def portable_main_overlay(game: Path, patch_script):
+    """Qualify and restore an isolated Lua overlay on a versioned portable replica."""
     if any(part.casefold() == "steamapps" for part in game.parts):
-        raise ValueError("Use only a private portable replica for the crate status overlay")
+        raise ValueError("Use only a private portable replica for the test overlay")
     script = (game / runtime.SHIPPING).parent / runtime.MOD_SCRIPTS / "main.lua"
     manifest = game / runtime.PORTABLE_STAGE_MANIFEST
     for file in (script, manifest):
@@ -65,17 +66,8 @@ def compact_crate_status_overlay(game: Path):
         raise ValueError("The portable replica must start with its exact released main.lua")
 
     newline = "\r\n" if b"\r\n" in original_script else "\n"
-    text = original_script.decode("utf-8")
-    original_gate = ("    local compact_crates = resident_title and status_publication.installed\n"
-                     "        and not status_publication.mirror and status_publication.memory_live").replace("\n", newline)
-    original_mirror = "if status_publication.memory_live and not status_publication.mirror and not file_command then return end"
-    if text.count(original_gate) != 1 or text.count(original_mirror) != 1:
-        raise ValueError("The replica lacks the exact installed crate diagnostic gate")
-    # Keep the real HEADLESS environment and the full title/exit mirror. Only active gameplay status takes the normal memory path.
-    override = ("    local mirror_crate_status = status_publication.mirror\n"
-                '        and current_phase ~= "hosting" and current_phase ~= "connected"').replace("\n", newline)
-    patched = text.replace(original_gate, override + newline + original_gate.replace("status_publication.mirror", "mirror_crate_status"))
-    patched = patched.replace(original_mirror, original_mirror.replace("status_publication.mirror", "mirror_crate_status"))
+    original = original_script.decode("utf-8").replace("\r\n", "\n")
+    patched = patch_script(original).replace("\n", newline)
     normalized_after = sha256(patched.replace("\r\n", "\n").encode("utf-8")).hexdigest()
     inventory["lua_files"]["main.lua"] = normalized_after
     patched_manifest = json.dumps(inventory, ensure_ascii=True, allow_nan=False) + "\n"
@@ -89,7 +81,7 @@ def compact_crate_status_overlay(game: Path):
         install_stage._ordinary(path)
         current = path.read_bytes()
         if current not in (original, overlay.encode("utf-8")):
-            raise RuntimeError(f"The private crate status overlay changed unexpectedly at {path}")
+            raise RuntimeError(f"The private portable overlay changed unexpectedly at {path}")
         if current != original:
             runtime.write_text(path, original.decode("utf-8"), newline="")
 
@@ -104,7 +96,24 @@ def compact_crate_status_overlay(game: Path):
         finally:
             restore(manifest, original_manifest, patched_manifest)
         provenance["original_bytes_restored"] = script.read_bytes() == original_script and manifest.read_bytes() == original_manifest
-        assert provenance["original_bytes_restored"], "The private crate status overlay failed to restore its release files"
+        assert provenance["original_bytes_restored"], "The private portable overlay failed to restore its release files"
+
+
+def compact_crate_status_overlay(game: Path):
+    """Exercise installed memory publication without disabling any portable isolation flags."""
+    def patch_script(text):
+        original_gate = ("    local compact_crates = resident_title and status_publication.installed\n"
+                         "        and not status_publication.mirror and status_publication.memory_live")
+        original_mirror = "if status_publication.memory_live and not status_publication.mirror and not file_command then return end"
+        if text.count(original_gate) != 1 or text.count(original_mirror) != 1:
+            raise ValueError("The replica lacks the exact installed crate diagnostic gate")
+        # Keep the real HEADLESS environment and the full title/exit mirror.
+        override = ("    local mirror_crate_status = status_publication.mirror\n"
+                    '        and current_phase ~= "hosting" and current_phase ~= "connected"')
+        text = text.replace(original_gate, override + "\n" + original_gate.replace("status_publication.mirror", "mirror_crate_status"))
+        return text.replace(original_mirror, original_mirror.replace("status_publication.mirror", "mirror_crate_status"))
+
+    return portable_main_overlay(game, patch_script)
 
 
 def launch_portable(game: Path, profile: Path) -> GameProcess:
@@ -924,7 +933,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_use: bool = False, memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False,
-                 compact_crate_status: bool = False) -> None:
+                 compact_crate_status: bool = False, compact_world_view: bool = False) -> None:
     guest_world_start = guest_world_start or guest_world_start_travel
     container_nearby = container_nearby or guest_ui_memory
     roots = (work, first_game, second_game, original)
@@ -966,6 +975,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                  fixture="portable_lantern_probe.lua"))
         if compact_crate_status:
             proof["crate_status_overlay"] = {str(game): probes.enter_context(compact_crate_status_overlay(game)) for game in games}
+        if compact_world_view:
+            proof["world_view_overlay"] = probes.enter_context(portable_main_overlay(second_game, patch_world_view_receipts))
         if stock_crate_ring or compact_crate_status:
             probes.enter_context(installed_probe(second_game, mod="SilverfishPortableCrateProbe",
                                                  fixture="portable_crate_input_probe.lua"))
@@ -1041,6 +1052,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                       wait_status=wait_resident_status, **exit_options))
         elif stock_prop_grip:
             proof["sessions"].append(await start_pair(first, second, "Lantern scout", on_join=verify_stock_prop_grip))
+        elif compact_world_view:
+            proof["sessions"].append(await start_pair(first, second, "Weather receipt scout", on_join=verify_world_view_receipt,
+                                                      wait_status=wait_resident_status))
         elif compact_crate_status:
             async def refresh_host_pause(_guest, _started):
                 # The generic title helper reads Pause readiness over its file bridge.
@@ -1083,11 +1097,14 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             assert observed == hashes and await stock_profile(seat.bridge) == preferences
             assert seat.bridge.process.poll() is None
         proof.update(verified=True, solo_slots_and_settings_preserved=True,
-                     both_titles_reused=not (stock_prop_grip or stock_crate_ring or guest_world_start or guest_ui_memory or compact_crate_status),
+                     both_titles_reused=not (stock_prop_grip or stock_crate_ring or guest_world_start or guest_ui_memory
+                                             or compact_crate_status or compact_world_view),
                      launched_without_coop_environment=True)
     except Exception as error:
         if compact_crate_status:
             proof["crate_status_failure"] = str(error)
+        if compact_world_view:
+            proof["world_view_receipt_failure"] = str(error) or type(error).__name__
         if guest_world_start_travel:
             proof["stock_travel_failure"] = str(error)
         raise
@@ -1096,7 +1113,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         for _, process in reversed(processes):
             if process.poll() is None:
                 await runtime.stop_game(process)
-        if stock_prop_grip or stock_crate_ring or guest_world_start or compact_crate_status:
+        if stock_prop_grip or stock_crate_ring or guest_world_start or compact_crate_status or compact_world_view:
             proof["processes_closed"] = len(processes) == 2 and all(process.poll() is not None for _, process in processes)
             proof["verified"] &= proof["processes_closed"]
         probes.close()
@@ -1134,6 +1151,8 @@ if __name__ == "__main__":
     parser.add_argument("--stock-crate-ring", action="store_true", help="verify one guest stock F crate open through the in-process ring")
     parser.add_argument("--compact-crate-status", action="store_true",
                         help="test normal crate status routing with one private muted portable pair and a temporary Lua overlay")
+    parser.add_argument("--compact-world-view", action="store_true",
+                        help="verify one compact resident stock weather receipt in a private muted portable pair")
     parser.add_argument("--guest-world-start", action="store_true",
                         help="verify first stock guest map startup and short reconnect in one portable session")
     parser.add_argument("--guest-world-start-travel", action="store_true",
@@ -1141,6 +1160,12 @@ if __name__ == "__main__":
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
+    if args.compact_world_view and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
+                                        args.projected_nearby, args.container_nearby, args.stock_use, args.stock_prop_grip,
+                                        args.stock_crate_ring, args.guest_world_start, args.guest_world_start_travel,
+                                        args.guest_ui_memory, args.compact_crate_status, args.steam_cloud,
+                                        args.second_legacy_work)):
+        parser.error("Use --compact-world-view with two fresh private replicas and no other gameplay fixtures")
     if args.compact_crate_status and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
                                           args.projected_nearby, args.container_nearby, args.stock_use, args.stock_prop_grip,
                                           args.stock_crate_ring, args.guest_world_start, args.guest_world_start_travel,
@@ -1176,4 +1201,4 @@ if __name__ == "__main__":
                        stock_use=args.stock_use, memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
-                       compact_crate_status=args.compact_crate_status))
+                       compact_crate_status=args.compact_crate_status, compact_world_view=args.compact_world_view))
