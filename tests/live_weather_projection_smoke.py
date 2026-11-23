@@ -1,4 +1,4 @@
-"""Verify stock rain parameters and one storm warning in muted loopback replicas."""
+"""Verify stock weather and observe FogWalkers in muted loopback replicas."""
 
 import argparse
 import asyncio
@@ -14,6 +14,7 @@ import uuid
 
 from live_ai_smoke import wait
 from live_world_view_travel_smoke import CROSSROADS
+from live_multi_smoke import saved_hashes
 
 
 @contextmanager
@@ -33,7 +34,27 @@ def staged_probe(work):
         probe.rmdir()
 
 
-async def validate(work, the_fog=False, nullrhi=False):
+def walker_rows(lines, *, request=None):
+    result = {}
+    for line in lines:
+        if request is not None:
+            observed, _, line = line.partition("|")
+            if observed != request:
+                continue
+        (name, role, authority, replicated, alive, x, y, z, remote, dormancy, movement, always, owner_only,
+         owner_relevancy, cull, frequency, minimum_frequency) = line.split("|")
+        assert name.startswith("NPC_FogWalker_C /Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.")
+        assert all(flag in ("true", "false") for flag in (authority, replicated, alive, movement, always, owner_only, owner_relevancy))
+        result[name] = {"role": int(role), "remote_role": int(remote), "authority": authority == "true",
+                        "replicated": replicated == "true", "alive": alive == "true", "position": [float(x), float(y), float(z)],
+                        "movement_replicated": movement == "true", "dormancy": dormancy, "always_relevant": always == "true",
+                        "only_relevant_to_owner": owner_only == "true", "use_owner_relevancy": owner_relevancy == "true",
+                        "net_cull_distance_squared": float(cull), "net_update_frequency": float(frequency),
+                        "min_net_update_frequency": float(minimum_frequency)}
+    return result
+
+
+async def validate(work, the_fog=False, nullrhi=False, fog_walkers=False, vanilla_saved=None):
     name = "weather-proof-" + uuid.uuid4().hex[:8]
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
@@ -41,9 +62,14 @@ async def validate(work, the_fog=False, nullrhi=False):
     cli = [sys.executable, "-B", "-u", "-m", "tools.silverfish", "--work", str(work)]
     flags = subprocess.CREATE_NO_WINDOW
     processes = []
+    original = saved_hashes(vanilla_saved) if vanilla_saved else None
+    if vanilla_saved and not original:
+        raise ValueError("The requested original-save canary is empty")
 
     async def spawn(run, *args):
         env = dict(os.environ)
+        if fog_walkers:
+            env["SILVERFISH_COOP_FOG_WALKERS_PROBE"] = "1"
         if nullrhi:
             env.pop("SILVERFISH_COOP_RENDER_CAPTURE", None)
         else:
@@ -107,8 +133,16 @@ async def validate(work, the_fog=False, nullrhi=False):
             await spawn(guest, "join", "--profile", name, "--invite", invite["invite_file"], "--headless", "--native-zones")
             baseline = await wait(guest, lambda row: applied(row, 0))
             guest_box, = (guest / "game-bridge").iterdir()
-            if the_fog:
-                density, siren, duration = await probe(host, "the-fog")
+            if the_fog or fog_walkers:
+                host_box, = (host / "game-bridge").iterdir()
+                before = {}
+                if fog_walkers:
+                    for seat, run, mailbox in (("host", host, host_box), ("guest", guest, guest_box)):
+                        report = await probe(run, "fog-roster-before")
+                        storms, total = map(int, report[:2])
+                        before[seat] = walker_rows(lines(mailbox / "fog-walkers-roster"), request="fog-roster-before")
+                        assert storms == 0 and total == len(before[seat]), (seat, storms, total, before[seat])
+                density, siren, duration = await probe(host, "the-fog-walkers" if fog_walkers else "the-fog")
                 assert math.isclose(float(density), 1.2, abs_tol=.0001) and float(duration) == 44
 
                 def has_fog(row, expected, mode):
@@ -120,6 +154,8 @@ async def validate(work, the_fog=False, nullrhi=False):
                 peak_host = await wait(host, lambda row: has_fog(row, float(density), "sample"), timeout=35)
                 peak_guest = await wait(guest, lambda row: has_fog(row, float(density), "applied"))
                 assert peak_guest["game"]["native_world_view"]["save_unchanged"] is True
+                if fog_walkers:
+                    assert peak_guest["game"]["native_world_view"]["sky_verified"] is True
                 async with asyncio.timeout(8):
                     while not lines(guest_box / "guest-siren"):
                         await asyncio.sleep(.1)
@@ -127,16 +163,68 @@ async def validate(work, the_fog=False, nullrhi=False):
                 horn, = lines(guest_box / "guest-siren")
                 source, cue, remaining = horn.split("|")
                 assert source == siren and "StormSiren_03_Cue" in cue and 0 < float(remaining) <= float(duration), horn
+                roster = None
+                if fog_walkers:
+                    selected, *placement = await probe(host, "fog-roster-approach")
+                    coordinates = list(map(float, placement))
+                    assert len(coordinates) == 9, placement
+                    marker_position, placed_host, placed_guest = coordinates[:3], coordinates[3:6], coordinates[6:]
+
+                    def guest_near_placement(row):
+                        point = row.get("game", {}).get("pawns", {}).get("local", {}).get("location")
+                        return point and math.dist(point, placed_guest) <= 150
+
+                    near = await wait(guest, guest_near_placement, timeout=8)
+                    guest_arrival = near["game"]["pawns"]["local"]["location"]
+                    await asyncio.sleep(3)
+                    during, storm_counts, local_positions = {}, {}, {}
+                    for seat, run, mailbox in (("host", host, host_box), ("guest", guest, guest_box)):
+                        report = await probe(run, "fog-roster-during")
+                        storms, total = map(int, report[:2])
+                        during[seat] = walker_rows(lines(mailbox / "fog-walkers-roster"), request="fog-roster-during")
+                        assert total == len(during[seat])
+                        storm_counts[seat] = storms
+                        local_positions[seat] = list(map(float, report[2:]))
+                    assert math.dist(local_positions["guest"], marker_position) <= 4200
+                    assert math.dist(local_positions["host"], marker_position) <= 4200
+                    new_host = {name: row for name, row in during["host"].items() if name not in before["host"]}
+                    new_guest = {name: row for name, row in during["guest"].items() if name not in before["guest"]}
+                    members = walker_rows(lines(host_box / "fog-walkers-members"))
+                    distances = {name: math.dist(row["position"], local_positions["guest"]) for name, row in new_host.items()}
+                    within_cull = {name: distance**2 <= new_host[name]["net_cull_distance_squared"]
+                                   for name, distance in distances.items()}
+                    roster = {"host_stock_calls": lines(host_box / "fog-walkers-calls"),
+                              "host_marker_references": members, "host_new_walkers": new_host,
+                              "guest_stock_calls": lines(guest_box / "fog-walkers-calls"), "guest_new_walkers": new_guest,
+                              "stock_storm_counts": storm_counts, "matching_paths": sorted(new_host.keys() & new_guest),
+                              "host_stock_members_replicating": sum(row["replicated"] for row in new_host.values()),
+                              "geometry": {"marker": selected, "marker_position": marker_position, "placed_host": placed_host,
+                                           "placed_guest": placed_guest, "guest_arrival": guest_arrival,
+                                           "roster_sample_players": local_positions, "guest_to_walkers_cm": distances,
+                                           "guest_within_stock_cull_distance": within_cull}}
                 restored, = await probe(host, "clear-fog")
                 clear = await wait(guest, lambda row: has_fog(row, float(restored), "applied"))
                 assert float(restored) < 1.2
-                target = host / "live-the-fog-projection.json"
-                target.write_text(json.dumps({
-                    "stock_warning_seconds": float(duration), "guest_siren_once": horn,
-                    "host_fog": peak_host["game"]["native_world_view"],
-                    "guest_fog": peak_guest["game"]["native_world_view"],
-                    "guest_clear": clear["game"]["native_world_view"],
-                }, indent=2), encoding="utf-8")
+                target = host / ("live-fog-walkers-observation.json" if fog_walkers else "live-the-fog-projection.json")
+                evidence = {"stock_warning_seconds": float(duration), "guest_siren_once": horn,
+                            "host_fog": peak_host["game"]["native_world_view"], "guest_fog": peak_guest["game"]["native_world_view"],
+                            "guest_clear": clear["game"]["native_world_view"]}
+                if roster is not None:
+                    evidence["fog_walkers"] = roster
+                target.write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+                if roster is not None:
+                    invocation, = roster["host_stock_calls"]
+                    marker, asset, count, authority, selected = invocation.split("|")
+                    assert marker.startswith("AI_Spawner_Squad_BP_C /Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.")
+                    assert asset == "SquadData_C /Game/Classes/Libraries/DataAssets/Squads/Monsters/FogWalkers.FogWalkers"
+                    assert (authority, selected) == ("true", "true") and marker == roster["geometry"]["marker"], invocation
+                    assert int(count) == len(new_host) == 4, roster
+                    # This squad does not follow its leader. The marker keeps only the leader reference.
+                    assert len(members) == 1 and members.keys() <= new_host.keys(), roster
+                    assert all(member["authority"] and member["role"] == 3 for member in new_host.values()), roster
+                    assert all(roster["geometry"]["guest_within_stock_cull_distance"].values()), roster
+                    assert storm_counts == {"host": 1, "guest": 0} and not roster["guest_stock_calls"], roster
+                    assert all(not row["authority"] and row["role"] == 1 for row in new_guest.values()), roster
                 print(target)
                 return
             amount, siren, replicated = await probe(host, "wet")
@@ -179,13 +267,17 @@ async def validate(work, the_fog=False, nullrhi=False):
         finally:
             for job, run in reversed(processes):
                 await stop(job, run)
+            if original is not None:
+                assert saved_hashes(vanilla_saved) == original, "The original save tree changed during the private observation"
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--work", type=Path, required=True)
     scenario = ap.add_mutually_exclusive_group()
-    scenario.add_argument("--the-fog", action="store_true", help="exercise the real stock Fog storm and its warning")
+    scenario.add_argument("--the-fog", action="store_true", help="exercise the stock Fog atmosphere and warning")
+    scenario.add_argument("--fog-walkers", action="store_true", help="observe one exact stock FogWalkers squad and weather")
+    ap.add_argument("--vanilla-saved", type=Path, help="hash an original save tree before and after the private trial")
     scenario.add_argument("--nullrhi", action="store_true", help="verify wet rain skips particles with the stock clock and warning active")
     args = ap.parse_args()
-    asyncio.run(validate(args.work.resolve(), args.the_fog, args.nullrhi))
+    asyncio.run(validate(args.work.resolve(), args.the_fog, args.nullrhi, args.fog_walkers, args.vanilla_saved))
