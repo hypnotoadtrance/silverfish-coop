@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
-from tools.silverfish import native_flood_jammer as jammer, native_rewards, party, runtime
+from tools.silverfish import native_board_contract, native_flood_jammer as jammer, native_quest, native_rewards, party, runtime
 
 
 class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
@@ -127,6 +127,39 @@ class FloodJammerObjectiveTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(host.native_checkpoint_unsafe)
                 self.assertEqual(bridge.command.await_count, 4)
                 host.checkpoint_native.assert_not_awaited()
+
+    async def test_observatory_selected_board_scopes_both_native_jammer_calls(self):
+        spec, area, board = jammer.CROSSROADS_JAMMER, jammer.OBSERVATORY, jammer.OBSERVATORY_BOUNTY_BOARD
+        host = self.host(None, spec=spec)
+        host.last_game = {"state": "hosting", "map": area}
+        host.allowed_maps = {area}
+        host.zone_epoch = "d3" * 16
+        pawn = "exact guest pawn"
+
+        def stock(verb, step):
+            return {"state": "hosting", "map": area, spec.key: {
+                "operation": spec.command(verb), "map": area, "pawn": pawn, "board": board, "quest": spec.quest,
+                "step_before": None, "step_after": step, "cash_before": 0, "cash_after": 0, "xp_before": 0, "xp_after": 0,
+                "reputation": {faction: {"before": 0, "after": 0} for faction in spec.factions},
+            }}
+
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=(stock("preflight", None), stock("start", 1))))
+        stale = native_board_contract.menu_target("e3" * 16, board, spec.quest)
+        with self.assertRaisesRegex(party.RuleError, "stale_visit"):
+            await native_quest.action(host, bridge, "guest-character", "native-quest-start", stale)
+        wrong_board = native_board_contract.menu_target(host.zone_epoch, board.removesuffix("_2") + "_9", spec.quest)
+        with self.assertRaisesRegex(party.RuleError, "requires_authored_board"):
+            await native_quest.action(host, bridge, "guest-character", "native-quest-start", wrong_board)
+        bridge.command.assert_not_awaited()
+
+        selected = native_board_contract.menu_target(host.zone_epoch, board, spec.quest)
+        result = await native_quest.action(host, bridge, "guest-character", "native-quest-start", selected)
+        self.assertEqual((result["step"], result[spec.key]["board"]), (1, board))
+        self.assertEqual([call.args for call in bridge.command.await_args_list], [
+            (spec.command("preflight"), pawn, board), (spec.command("start"), pawn, board),
+        ])
+        host.checkpoint_native.assert_not_awaited()
+        self.assertIs(host.pending_host_save, False)
 
     async def test_crossroads_can_adopt_an_authored_objective_accepted_in_an_older_host_save(self):
         spec = jammer.CROSSROADS_JAMMER

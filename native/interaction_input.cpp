@@ -1282,13 +1282,38 @@ namespace
     int take_wire_board_press(const Lua& lua)
     {
         if (!available() || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
+        const auto requested = lua.get_integer();
         auto* board = wire_board.actor.Get();
-        if (!placed_wire_board(scope.world.Get(), board, wire_board.component.Get()) || !stock_board_policy(board)) return 0;
-        const auto accepted = take_interaction_sequence(lua.get_integer(), wire_board);
-        if (!accepted) return 0;
-        lua.set_integer(static_cast<std::int64_t>(accepted));
+        if (wire_board.pending.sequence && placed_wire_board(scope.world.Get(), board, wire_board.component.Get()) &&
+            stock_board_policy(board))
+        {
+            if (const auto accepted = take_interaction_sequence(requested, wire_board))
+            {
+                lua.set_integer(static_cast<std::int64_t>(accepted));
+                lua.set_string(RC::to_string(board->GetPathName()));
+                return 2;
+            }
+        }
+
+        // Simmi's stock dialogue powers its own board without pressing Interact on a box.
+        const auto now = Clock::now();
+        auto* pawn = scope.pawn.Get();
+        if (!pawn || pawn != wire_board.pawn.Get() || address(pawn) != requested || now >= scope.expires ||
+            now >= wire_board.expires || wire_sequence == max_sequence || !standing(pawn)) return 0;
+        auto* menu = top_menu();
+        if (!live(menu) || menu == stock_board_menu.menu.Get() ||
+            menu->GetClassPrivate() != find<Unreal::UClass>(quest_log)) return 0;
+        board = stock_menu_board(menu);
+        if (!board || board->GetPathName() != observatory_jammer_board || !stock_board_policy(board)) return 0;
+
+        wire_board.actor = board;
+        wire_board.component = object_field(board, STR("Box"));
+        stock_board_menu = {board, menu};
+        stock_board_action = {};
+        lua.set_integer(static_cast<std::int64_t>(++wire_sequence));
         lua.set_string(RC::to_string(board->GetPathName()));
-        return 2;
+        lua.set_bool(true);
+        return 3;
     }
 
     int qualify_stock_board_policy(const Lua& lua)

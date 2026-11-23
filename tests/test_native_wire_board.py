@@ -145,6 +145,49 @@ class WireBoardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.command.await_args.args, ("native-wire-board-stock-result", "6", area, pawn, quest, "completed"))
         self.assertIsNone(view.stock_open)
 
+    async def test_observatory_physical_menu_uses_current_visit_and_host_eligible_bounties(self):
+        area = wire.OBSERVATORY
+        board = wire.native_flood_jammer.OBSERVATORY_BOUNTY_BOARD
+        quest, other = wire.CROSSROADS_JAMMER.quest, wire.LAKE_JAMMER.quest
+        visit, pawn = "b4" * 16, "Player_FP_C LocalOwner"
+        bridge = SimpleNamespace(input_namespace=uuid.uuid4(), native_wire_board_requests=Mock(), command=AsyncMock())
+        view = wire.WireBoardView(bridge, Mock())
+        action = AsyncMock()
+        self.assertEqual(wire.catalog_specialists(area, board), {quest, other})
+        self.assertFalse(wire.catalog_specialists(area, board.removesuffix("_2") + "_9"))
+
+        def snapshot(state, sequence, opened, choice):
+            return {"map": area, "pawns": {"local": {"name": pawn}}, "native_wire_board_stock": {
+                "map": area, "pawn": pawn, "board": board, "quest": choice, "state": state,
+                "sequence": sequence, "open": opened,
+            }}
+
+        async def event(kind, sequence, opened, choice):
+            bridge.native_wire_board_requests.return_value = [(sequence, opened, kind, area, pawn, board, choice)]
+            return await view.sync(snapshot(wire.WAITING[kind], sequence, opened, choice), "epoch", True, action, visit=visit)
+
+        async def reopen(sequence, eligible):
+            action.return_value = {native_board_contract.CATALOG_KEY: {
+                "map": area, "pawn": "Player_FP_C AuthorityOwner", "board": board, "offers": eligible, "turnins": [],
+            }}
+            bridge.command.return_value = snapshot("visible", sequence, sequence, "-")
+            await event("stock-view", sequence, sequence, "-")
+            bridge.command.assert_awaited_with("native-wire-board-stock-open", str(sequence), area, pawn,
+                                              ",".join(eligible) or "-", "-", timeout=3)
+            self.assertEqual(view.stock_open.offers, frozenset(eligible))
+
+        await reopen(1, [quest, other])
+        action.return_value = {"quest_id": quest, "step": 1}
+        await event("stock-start", 2, 1, quest)
+        self.assertEqual(action.await_args.args[0::2],
+                         ("native-quest-start", native_board_contract.menu_target(visit, board, quest)))
+        await reopen(3, [other])
+        await event("stock-start", 4, 3, quest)
+        self.assertEqual(action.await_count, 3)
+        await reopen(5, [])
+        await event("stock-start", 6, 5, other)
+        self.assertEqual(action.await_count, 4)
+
     async def test_discovers_real_stock_board_identity_beyond_specialist_placements(self):
         gunsmith = "/Game/Classes/Maps/Maps_SafeZones/Shop_Gunsmith_P"
         gunsmith_board = f"BountyBoard_BP_C {gunsmith}.Shop_Gunsmith_P:PersistentLevel.BountyBoard_BP_C_0"

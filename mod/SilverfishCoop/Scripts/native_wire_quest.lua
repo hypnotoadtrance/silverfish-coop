@@ -1,5 +1,6 @@
 local guest_save = require("guest_save")
 local players = require("players")
+local simmi_jobs = require("native_jammer_profiles").by_tag["native-crossroads-jammer"]
 
 local meet = {
     map = "/Game/Classes/Maps/Maps_SafeZones/Borough",
@@ -422,9 +423,10 @@ function meet.live_stock_board_context(state, phase, name, full_board_name, ques
     if not actor or full_board_name:sub(1, #prefix) ~= prefix or not actor:match("^[A-Za-z0-9_]+$") then
         refused("board_unqualified")
     end
+    local speaker = full_board_name == simmi_jobs.board_name and simmi_jobs.speaker or nil
     return context_for(state, phase, name, false, {map = map, world_path = world,
         board_path = full_board_name:sub(#"BountyBoard_BP_C " + 1), board_name = full_board_name,
-        quest_id = quest, dynamic = true})
+        quest_id = quest, dynamic = true, speaker = speaker})
 end
 meet.stock_board_approach = approach_board
 meet.stock_quest_table = stock_quest_table

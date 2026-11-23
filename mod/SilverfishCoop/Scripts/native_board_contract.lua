@@ -52,6 +52,8 @@ local function board_accepts(board, key, row)
         (redeem == board.TurnIn_ID or redeem == 0 and board.AcceptAllGlobalContracts)
 end
 
+board_contract.board_accepts = board_accepts
+
 local function shape(row)
     local step, final, cash, xp = row[keys.step], row[keys.final], row[keys.cash], row[keys.xp]
     local quantity, consumed = len(row[keys.objective]), row[keys.consumed]
