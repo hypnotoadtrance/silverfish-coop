@@ -5652,7 +5652,7 @@ class Client:
             return
         sequence, area, pawn, guid, item_class = entries[-1]
         view = self.last_game.get("native_guest_inventory_equip_view", {})
-        armor = native_guest_armor.EQUIP_ACTIONS.get(item_class)
+        armor = native_guest_armor.equip_action(item_class)
         throwable = item_class in native_flare.CLASSES
         if (view != {"sequence": sequence, "map": area, "pawn": pawn, "guid": guid, "state": "equipping"}
                 or area != self.last_game.get("map") or pawn != self.last_game.get("pawns", {}).get("local", {}).get("name")

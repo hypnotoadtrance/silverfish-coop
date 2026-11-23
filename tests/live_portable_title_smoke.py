@@ -1079,6 +1079,11 @@ async def verify_stock_unequip(first, second, evidence):
             assert (await portable_probe_command(guest.bridge, probe, f"{equip}\t{guid}")).split(",") == current_worn
             receipt = await witness("native_stock_inventory_action", key, guid)
             assert receipt["stock_inventory_proof"] == f"verified stock equipment slot {slot}", receipt
+            proof = receipt[key]
+            if slot == 8:
+                assert proof["class_path"].endswith("/Helm_Demo.Helm_Demo_C") and proof["voice_filter"], proof
+            else:
+                assert proof["class_path"].endswith("/Armor_LabCoat.Armor_LabCoat_C") and proof["minimum"] == 22, proof
             current_worn[index] = guid
             assert (await portable_probe_command(guest.bridge, probe, "guest-worn-state")).split(",") == current_worn
             authoritative = await submit(guest_run, "native-inventory-list")

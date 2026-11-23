@@ -400,6 +400,71 @@ namespace
             std::basic_string_view<U::TCHAR>{*passive, profile.passive.size()} == profile.passive ? cdo : nullptr;
     }
 
+
+    struct RuntimeGear
+    {
+        std::basic_string<U::TCHAR> path, voice_path;
+        ArmorProfile profile{};
+    };
+
+    // This is the stock stat projection for ordinary clothing and helmets. Gear with
+    // dedicated behavior must have a matching projection before it can be equipped.
+    const ArmorProfile* qualify_profile(U::UObject* item_class, bool head, RuntimeGear& storage)
+    {
+        if (const auto* named = profile_for(item_class)) return named->helmet == head ? named : nullptr;
+        auto* klass = U::Cast<U::UClass>(item_class);
+        auto* base = find<U::UClass>(head ? helmet_base : armor_base);
+        if (!klass || !base || klass == base || !klass->IsChildOf(base)) return nullptr;
+        auto* defaults = klass->GetClassDefaultObject().Get();
+        auto& profile = storage.profile;
+        profile.helmet = head;
+        storage.path = klass->GetPathName();
+        profile.path = storage.path.c_str();
+        auto* value = field<U::FIntProperty>(defaults, STR("Value"));
+        if (!value) return nullptr;
+        profile.value = value->GetPropertyValueInContainer(defaults);
+        const auto read_number = [](U::UObject* owner, const void* data, const U::TCHAR* name, double& result) {
+            auto* property = field<U::FDoubleProperty>(owner, name);
+            if (!property) return false;
+            result = property->GetPropertyValueInContainer(data);
+            return std::isfinite(result);
+        };
+        if (!read_number(defaults, defaults, STR("Weight"), profile.weight) || profile.weight < 0.0 ||
+            !read_number(defaults, defaults, STR("VisibilityMod"), profile.visibility)) return nullptr;
+        if (head)
+        {
+            auto* light = field<U::FByteProperty>(defaults, STR("FlashLightType"));
+            auto* origin = field<U::FStructProperty>(defaults, STR("FlashlightLocation"));
+            auto* vector = find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
+            if (!light || !origin || !vector || origin->GetStruct().Get() != vector) return nullptr;
+            profile.flashlight = light->GetPropertyValueInContainer(defaults);
+            const auto* position = origin->ContainerPtrToValuePtr<void>(defaults);
+            if (!read_number(vector, position, STR("X"), profile.light_origin[0]) ||
+                !read_number(vector, position, STR("Y"), profile.light_origin[1]) ||
+                !read_number(vector, position, STR("Z"), profile.light_origin[2])) return nullptr;
+            if (auto* voice = object(defaults, STR("VoxEffect")))
+            {
+                storage.voice_path = voice->GetPathName();
+                profile.vox = storage.voice_path.c_str();
+            }
+        }
+        else if (!read_number(defaults, defaults, STR("NoiseMod"), profile.noise) ||
+                 !read_number(defaults, defaults, STR("CarryWeight_Bonus"), profile.bonus) ||
+                 20.0 + profile.bonus < 0.0)
+        {
+            return nullptr;
+        }
+
+        auto* resist = field<U::FStructProperty>(defaults, STR("Resistance"));
+        auto* type = find<U::UScriptStruct>(damage_type);
+        if (!resist || !type || resist->GetStruct().Get() != type) return nullptr;
+        const auto* damage = resist->ContainerPtrToValuePtr<void>(defaults);
+        for (std::size_t i = 0; i < damage_fields.size(); ++i)
+            if (!read_number(type, damage, damage_fields[i].name, profile.damage[i]) || profile.damage[i] < 0.0)
+                return nullptr;
+        return &profile;
+    }
+
     bool stock_gear_row(const Inventory& inventory, const void* row, U::UObject* cdo, const ArmorProfile& profile)
     {
         auto* type = inventory.item->GetStruct().Get();
@@ -552,6 +617,7 @@ namespace
             auto* source_light = field<U::FByteProperty>(defaults, STR("FlashLightType"));
             auto* target_light = field<U::FByteProperty>(helm_type, helmet_light);
             auto* hud = field<U::FBoolProperty>(helm_type, helmet_hud);
+            auto* source_hud = field<U::FBoolProperty>(defaults, STR("FullHUD"));
             auto* source_origin = field<U::FStructProperty>(defaults, STR("FlashlightLocation"));
             auto* target_origin = field<U::FStructProperty>(helm_type, helmet_light_origin);
             auto* vector_type = find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
@@ -560,7 +626,7 @@ namespace
             auto* z = field<U::FDoubleProperty>(vector_type, STR("Z"));
             if (!weight || weight->GetPropertyValueInContainer(defaults) != profile.weight || !source_visible || !target_visible ||
                 source_visible->GetPropertyValueInContainer(defaults) != profile.visibility ||
-                !hud || !boolean(defaults, STR("FullHUD"), false) || !source_light || !target_light ||
+                !hud || !source_hud || !source_light || !target_light ||
                 source_light->GetPropertyValueInContainer(defaults) != profile.flashlight ||
                 !source_origin || !target_origin || !vector_type || source_origin->GetStruct().Get() != vector_type ||
                 target_origin->GetStruct().Get() != vector_type || !x || !y || !z) return "native_guest_armor_helmet_stats_unqualified";
@@ -571,7 +637,7 @@ namespace
                 return "native_guest_armor_helmet_light_unqualified";
             helm_weight->SetPropertyValueInContainer(next, profile.weight);
             target_visible->SetPropertyValueInContainer(next, profile.visibility);
-            hud->SetPropertyValueInContainer(next, false);
+            hud->SetPropertyValueInContainer(next, source_hud->GetPropertyValueInContainer(defaults));
             target_light->SetPropertyValueInContainer(next, profile.flashlight);
             target_origin->CopyCompleteValue(target_origin->ContainerPtrToValuePtr<void>(next), origin);
             return copy_resistance(defaults, profile, helm_resist, next);
@@ -665,6 +731,17 @@ namespace
         }
     };
 
+
+    std::string profile_receipt(const ArmorProfile* profile)
+    {
+        if (!profile) return "-";
+        if (!profile->name.empty()) return std::string{profile->name};
+        // The values originate in the host's validated class defaults.
+        return std::format("{},{},{},{},{},{},{}", RC::to_utf8_string(profile->path),
+            profile->weight, profile->damage[slashing], profile->damage[acid], profile->damage[poison],
+            20.0 + profile->bonus, profile->vox ? 1 : 0);
+    }
+
     int report(const Lua& lua, bool ok, std::string_view status, const Report& result = {})
     {
         lua.set_bool(ok);
@@ -676,11 +753,11 @@ namespace
         lua.set_number(result.minimum);
         lua.set_number(result.slash);
         lua.set_number(result.acid);
-        lua.set_string(result.selected ? result.selected->name : "-");
-        lua.set_string(result.previous ? result.previous->name : "-");
+        lua.set_string(profile_receipt(result.selected));
+        lua.set_string(profile_receipt(result.previous));
         lua.set_string(result.replaced == Guid{} ? std::string{"-"} : std::format("{:08X}{:08X}{:08X}{:08X}",
             result.replaced[0], result.replaced[1], result.replaced[2], result.replaced[3]));
-        lua.set_string(result.torso ? result.torso->name : "-");
+        lua.set_string(profile_receipt(result.torso));
         lua.set_number(result.combined[slashing]);
         lua.set_number(result.combined[acid]);
         lua.set_number(result.combined[poison]);
@@ -769,9 +846,11 @@ namespace
             !save_defaults->HasAnyFlags(U::RF_ClassDefaultObject))
             return report(lua, false, "native_guest_armor_stock_defaults_unqualified");
 
-        const auto qualify = [&](const void* row, bool is_helmet) -> const ArmorProfile* {
-            const auto* profile = profile_for(inventory.item_class(row));
-            if (!profile || profile->helmet != is_helmet || inventory.item_guid(row) == Guid{} ||
+        RuntimeGear selected_gear, previous_gear, companion_gear;
+        const auto qualify = [&](const void* row, bool is_helmet, RuntimeGear& storage) -> const ArmorProfile* {
+            if (inventory.item_guid(row) == Guid{}) return nullptr;
+            const auto* profile = qualify_profile(inventory.item_class(row), is_helmet, storage);
+            if (!profile ||
                 inventory.weight->GetPropertyValueInContainer(row) != profile->weight) return nullptr;
             auto* cdo = armor_defaults(*profile);
             return cdo && (!is_helmet || stock_gear_row(inventory, row, cdo, *profile)) ? profile : nullptr;
@@ -788,7 +867,7 @@ namespace
 
         U::FScriptArrayHelper current(inventory.backpack, bag);
         const auto* approved = worn ? active : current.GetRawPtr(index);
-        const auto* selected = qualify(approved, head);
+        const auto* selected = qualify(approved, head, selected_gear);
         if (!selected) return report(lua, false, "native_guest_armor_exact_class_required");
         auto* rounds = remove ? field<U::FIntProperty>(inventory.item->GetStruct().Get(),
             STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788")) : nullptr;
@@ -799,13 +878,13 @@ namespace
         Guid replaced{};
         if (!worn && !empty(slot, active))
         {
-            previous = qualify(active, head);
+            previous = qualify(active, head, previous_gear);
             replaced = inventory.item_guid(active);
-            if (!previous || previous == selected || !exact_worn(replaced, head))
+            if (!previous || inventory.item_class(active) == inventory.item_class(approved) || !exact_worn(replaced, head))
                 return report(lua, false, "native_guest_armor_slot_occupied");
         }
 
-        const auto* other_profile = qualify(other, !head);
+        const auto* other_profile = qualify(other, !head, companion_gear);
         if (other_profile ? !exact_worn(inventory.item_guid(other), !head) : !empty(companion, other))
             return report(lua, false, "native_guest_armor_companion_slot_unqualified");
         if (!isolated_rows(scope, inventory, id, replaced) ||

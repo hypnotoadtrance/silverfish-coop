@@ -169,7 +169,7 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                 receipt = (await client.gameplay_action(action, operation, guid)).get(key)
                 if (not isinstance(receipt, dict) or receipt.get("guid") != guid or receipt.get("map") != area
                         or receipt.get("ok") is not True or receipt.get("action") != "equip"
-                        or native_guest_armor.EQUIP_ACTIONS.get(receipt.get("class_path")) != action):
+                        or native_guest_armor.equip_action(receipt.get("class_path")) != action):
                     raise RuntimeError("The host did not verify the saved stock worn slot")
                 slot, displaced = requested_slot, receipt.get("replaced_guid") or "-"
             else:

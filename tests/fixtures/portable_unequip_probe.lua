@@ -18,8 +18,8 @@ local specs = {
 }
 local worn_fields = {[9] = "PlayerHelmet", [10] = "PlayerArmor"}
 local worn_classes = {
-    "/Game/Classes/Armor_Items/Helm_Basic.Helm_Basic_C",
-    "/Game/Classes/Armor_Items/Armor_HunterJacket.Armor_HunterJacket_C",
+    "/Game/Classes/Armor_Items/Helm_Demo.Helm_Demo_C",
+    "/Game/Classes/Armor_Items/Armor_LabCoat.Armor_LabCoat_C",
 }
 local stored_rounds, live_rounds = 5, 3
 local seed, remote_seed, last
