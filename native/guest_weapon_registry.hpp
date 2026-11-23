@@ -54,6 +54,7 @@ namespace silverfish::guest_weapon_profiles
         Profile{"break-action-50", STR("/Game/Classes/Weapons/Wep_50BMP_BreakAction.Wep_50BMP_BreakAction_C"), true, 1, 1, 0.1, false, &fifty_cal_fmj, true},
         Profile{"army-pistol", STR("/Game/Classes/Weapons/Wep_ArmyPistol.Wep_ArmyPistol_C"), true, 12, 1, 0.08, true, &nine_mm_ball, true},
         Profile{"pistol", STR("/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C"), true, 12, 1, 0.08, true, &nine_mm_ball, true},
+        Profile{"rusty-pistol", STR("/Game/Classes/Weapons/Wep_RustyPistol.Wep_RustyPistol_C"), true, 8, 1, 0.1, true, &nine_mm_ball, true},
         Profile{"pistol-02", STR("/Game/Classes/Weapons/Wep_Pistol02.Wep_Pistol02_C"), true, 12, 1, 0.1, true, &nine_mm_ball, true},
         Profile{"tac-pistol", STR("/Game/Classes/Weapons/Wep_TacPistol.Wep_TacPistol_C"), true, 18, 1, 0.07, true, &nine_mm_ball, true},
         Profile{"1911", STR("/Game/Classes/Weapons/Wep_1911.Wep_1911_C"), true, 8, 1, 0.1, true, &forty_five_ball, true},

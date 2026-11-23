@@ -19,6 +19,7 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
     def test_ordinary_pistol_classes_are_exact(self):
         for kind, blueprint in {
             "army-pistol": "Wep_ArmyPistol", "pistol": "Wep_Pistol",
+            "rusty-pistol": "Wep_RustyPistol",
             "pistol-02": "Wep_Pistol02", "tac-pistol": "Wep_TacPistol", "model-1931": "Wep_Pistol_Long",
         }.items():
             path = f"/Game/Classes/Weapons/{blueprint}.{blueprint}_C"
@@ -93,6 +94,7 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
                       if profile.magazine and profile.magazine.reload_first_stack}
         self.assertEqual(same_stack, {
             "army-pistol", "pistol", "pistol-02", "tac-pistol", "1911", "1911-fancy", "heavy-pistol",
+            "rusty-pistol",
             "sg-71-a", "sg-71-b", "sg-71-a-suppressed", "model-1931", "fennec-57", "black-fox", "break-action-50",
             "revolver-01", "revolver-02", "revolver-03",
         })

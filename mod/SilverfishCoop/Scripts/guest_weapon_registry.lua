@@ -11,6 +11,7 @@ for _, row in ipairs({
     { "break-action-50", "/Game/Classes/Weapons/Wep_50BMP_BreakAction.Wep_50BMP_BreakAction_C", true, "/Game/Classes/Items/Ammo_50Cal_BP.Ammo_50Cal_BP_C", 1 },
     { "army-pistol", "/Game/Classes/Weapons/Wep_ArmyPistol.Wep_ArmyPistol_C", true, nil, 12 },
     { "pistol", "/Game/Classes/Weapons/Wep_Pistol.Wep_Pistol_C", true, nil, 12 },
+    { "rusty-pistol", "/Game/Classes/Weapons/Wep_RustyPistol.Wep_RustyPistol_C", true, nil, 8 },
     { "pistol-02", "/Game/Classes/Weapons/Wep_Pistol02.Wep_Pistol02_C", true, nil, 12 },
     { "tac-pistol", "/Game/Classes/Weapons/Wep_TacPistol.Wep_TacPistol_C", true, nil, 18 },
     { "1911", "/Game/Classes/Weapons/Wep_1911.Wep_1911_C", true, "/Game/Classes/Items/Ammo_Magnum_BP.Ammo_Magnum_BP_C", 8 },

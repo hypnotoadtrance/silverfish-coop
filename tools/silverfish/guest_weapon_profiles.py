@@ -70,6 +70,7 @@ FIREARMS = (
             Magazine(1, 1, 0.1, ammo=FIFTY_CAL_FMJ, reload_first_stack=True)),
     Firearm("army-pistol", "Wep_ArmyPistol", True, Magazine(12, 1, 0.08, True, reload_first_stack=True)),
     Firearm("pistol", "Wep_Pistol", True, Magazine(12, 1, 0.08, True, reload_first_stack=True)),
+    Firearm("rusty-pistol", "Wep_RustyPistol", True, Magazine(8, 1, 0.1, True, reload_first_stack=True)),
     Firearm("pistol-02", "Wep_Pistol02", True, Magazine(12, 1, 0.1, True, reload_first_stack=True)),
     Firearm("tac-pistol", "Wep_TacPistol", True, Magazine(18, 1, 0.07, True, reload_first_stack=True)),
     Firearm("1911", "Wep_1911", True, Magazine(8, 1, 0.1, True, FORTY_FIVE_BALL, reload_first_stack=True)),

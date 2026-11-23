@@ -1272,16 +1272,26 @@ namespace
         const Unreal::FName use_name{STR("Use_Item_Primary")};
         const auto* bolt = stock_bolt(context.weapon);
         const auto* stock_profile = stock_magazine(context.weapon);
-        auto* action = find<Unreal::UFunction>(bolt ? bolt->primary : primary_path);
+        auto* base_action = find<Unreal::UFunction>(bolt ? bolt->primary : primary_path);
+        auto* action = actor->GetFunctionByNameInChain(use_name);
+        // Some registered firearms forward through a Blueprint override. Preserve that
+        // stock dispatch, while checking the function still implements the audited input.
+        const auto descends_from_input = [&] {
+            if (!base_action || !action) return false;
+            if (bolt || !stock_profile) return action == base_action;
+            for (auto* inherited = static_cast<Unreal::UStruct*>(action); inherited; inherited = inherited->GetSuperStruct())
+                if (inherited == base_action) return true;
+            return false;
+        };
         struct Parameters { bool held{}; double variance{}; } parameters;
         auto* held = input<Unreal::FBoolProperty>(action, STR("Held"), offsetof(Parameters, held));
         auto* variance = input<Unreal::FDoubleProperty>(action, STR("VarianceScaler"), offsetof(Parameters, variance));
         auto* proxy = field<Unreal::FObjectProperty>(actor, STR("InputIntercept"));
         if (!held || !variance || !proxy || object(actor, STR("InputIntercept")) ||
-            actor->GetFunctionByNameInChain(use_name) != action || action->GetNumParms() != 2 ||
+            !descends_from_input() || action->GetNumParms() != 2 ||
             action->GetReturnProperty() || action->GetParmsSize() != sizeof(Parameters) ||
-            (bolt && (action->GetOuterPrivate() != context.weapon ||
-                action->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net))))
+            action->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
+            (bolt && action->GetOuterPrivate() != context.weapon))
             return report(false, "stock_guest_weapon_primary_schema_unavailable");
 
         if (!boolean(actor, STR("Action_OnRelease"), bolt != nullptr) || (bolt && (disarm || !stock_bolt_shape(actor, *bolt))) ||

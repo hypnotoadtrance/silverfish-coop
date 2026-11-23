@@ -120,8 +120,11 @@ class GuestInventoryDropTests(unittest.IsolatedAsyncioTestCase):
         envelope = [record.STOCK_ACTION_ROW, MAP, PAWN, client.zone_epoch, "5", "equip", GUID, "1"]
         intent = record.parse_stock_action([*envelope, "8"], client.last_game)
         self.assertEqual((intent["mode"], intent["expected"]), ("equip", 8))
+        for worn in ("9", "10"):
+            intent = record.parse_stock_action([*envelope, worn], client.last_game)
+            self.assertEqual((intent["mode"], intent["expected"]), ("equip", int(worn)))
         with self.assertRaisesRegex(ValueError, "Invalid stock backpack operation"):
-            record.parse_stock_action([*envelope, "9"], client.last_game)
+            record.parse_stock_action([*envelope, "11"], client.last_game)
 
         receipt = {"owner": client.invite["character_id"], "map": MAP, "guid": GUID, "slot": 7, "displaced": "-"}
         client.gameplay_action.side_effect = None
