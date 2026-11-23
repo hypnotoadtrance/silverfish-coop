@@ -51,7 +51,7 @@ from . import native_spratt_fixture
 from . import native_subway_valve
 from . import native_prototype_drill
 from . import native_kill_volume
-from .native_guest_consumable import MEALS, RESULT as CONSUMABLE_RESULT, STARTER_BAG, parse_meal, parse_starter_bag
+from .native_guest_consumable import STOCK_CONSUMABLES, RESULT as CONSUMABLE_RESULT, STARTER_BAG, parse_meal, parse_starter_bag
 from .native_computer_board import PREFIXES as COLLECTION_PREFIXES
 from .native_guest_npc import parse_bandit
 from .enemy_loot_profiles import BY_ACTOR as ENEMY_LOOT_ACTORS
@@ -2099,7 +2099,7 @@ class Bridge:
                                                    "regen_before": _finite(fields[7]), "regen_after": _finite(fields[8]),
                                                    "health_before": _finite(fields[9]), "health_after": _finite(fields[10]),
                                                    "max_health": _finite(fields[11]), "hemophilia": fields[12] == "1"}
-                elif fields[0] in MEALS or fields[0] == STARTER_BAG:
+                elif fields[0] in STOCK_CONSUMABLES or fields[0] == STARTER_BAG:
                     proof = parse_starter_bag(fields) if fields[0] == STARTER_BAG else parse_meal(fields)
                     key = CONSUMABLE_RESULT[fields[0]]
                     if key in data or data.get("state") != "hosting" or data.get("map") != proof["map"]:
@@ -3097,10 +3097,10 @@ class Bridge:
                                                "location": [_finite(axis) for axis in fields[4:7]],
                                                "controller": fields[7],
                                                "max_health": _finite(fields[8]) if len(fields) == 9 else None}
-                elif (fields[0] == "native-guest-vitals" and len(fields) == 4
+                elif (fields[0] == "native-guest-vitals" and len(fields) in (4, 5)
                       and data.get("state") in ("hosting", "connected") and fields[1].startswith("Player_FP_C ")):
-                    food, regen = map(_finite, fields[2:])
-                    data.setdefault("native_guest_vitals", {})[fields[1]] = {"food": food, "regen": regen}
+                    data.setdefault("native_guest_vitals", {})[fields[1]] = dict(
+                        zip(("food", "regen", "stim"), map(_finite, fields[2:])))
                 elif fields[0] == "native-player-avatar" and len(fields) in (5, 8, 10, 11, 14):
                     area, pawn, status, diagnostic = fields[1:5]
                     if area == data.get("map") and status in ("default_body", "stock_body", "unavailable"):

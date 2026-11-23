@@ -16,9 +16,12 @@ namespace silverfish::native_guest_consumable
         int infection{};
         std::string_view entry{};
         int fatigue{};
+        bool medicine{};
+        double instant{}, stim{};
+        bool antibiotic{};
     };
 
-    inline constexpr std::array meals{
+    inline constexpr std::array consumables{
         Consumable{STR("/Game/Classes/Items/Item_MRE.Item_MRE_C"), 25, 0.65, 10.0, 30.0, false, 0, "use-mre"},
         Consumable{STR("/Game/Classes/Items/Item_CannedPeaches.Item_CannedPeaches_C"), 8, 0.4, 0.0, 12.0, false, 0, "use-canned-peaches"},
         Consumable{STR("/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"), 14, 0.4, 0.0, 14.0, true, 0, "use-canned-beans"},
@@ -34,5 +37,11 @@ namespace silverfish::native_guest_consumable
         Consumable{STR("/Game/Classes/Items/Item_PorkRibs.Item_PorkRibs_C"), 70, 0.5, 0.0, 22.0, true, 25, "use-pork-ribs"},
         Consumable{STR("/Game/Classes/Items/Item_Sausage.Item_Sausage_C"), 7, 0.15, 0.0, 10.0, true, 20, "use-sausage"},
         Consumable{STR("/Game/Classes/Items/Item_Venison.Item_Venison_C"), 40, 0.15, 0.0, 13.0, true, 25, "use-venison"},
+        Consumable{STR("/Game/Classes/Items/Item_DirtyBandage.Item_DirtyBandage_C"), 3, 0.05, 45.0, 0.0, false, 5, "use-dirty-bandage", 0, true},
+        Consumable{STR("/Game/Classes/Items/Item_Gauze.Item_Gauze_C"), 30, 0.06, 60.0, 0.0, false, 0, "use-gauze", 0, true, 25.0},
+        Consumable{STR("/Game/Classes/Items/Item_MedSalve.Item_MedSalve_C"), 40, 0.05, 30.0, 0.0, false, -5, "use-medical-salve", 0, true, 20.0, 3.0},
+        Consumable{STR("/Game/Classes/Items/Item_MedKit_Large.Item_MedKit_Large_C"), 100, 0.23, 100.0, 0.0, false, -5, "use-large-medkit", 0, true, 50.0, 4.0},
+        Consumable{STR("/Game/Classes/Items/Item_StimPills.Item_StimPills_C"), 15, 0.01, 0.0, 0.0, false, -5, "use-stim-pills", 0, true, 0.0, 4.0},
+        Consumable{STR("/Game/Classes/Items/Item_Antibiotics.Item_Antibiotics_C"), 100, 0.01, 0.0, 0.0, false, -100, "use-antibiotics", 0, true, 0.0, 0.0, true},
     };
 }

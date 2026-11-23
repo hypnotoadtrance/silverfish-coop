@@ -680,14 +680,14 @@ bool silverfish::native_guest_sickness::food_infection(RC::Unreal::UObject* pawn
                                                       RC::Unreal::UObject* stock, std::int32_t dose,
                                                       std::int32_t& sickness, bool apply)
 {
-    if (!available() || food_infection_scope || dose <= 0 || dose > 120 ||
+    if (!available() || food_infection_scope || dose == 0 || dose < -120 ||
         !silverfish::native_guest_regen::qualifies_detached_guest(pawn, detached, stock)) return false;
     if (!schema_bound) schema_bound = schema.bind();
     Flags guest, host;
     if (!schema_bound || !guest.bind(detached) || !host.bind(stock)) return false;
     const auto before = guest.read(schema.sickness);
-    if (before.value > std::numeric_limits<std::int32_t>::max() - dose ||
-        (!before.found && guest.map->GetMaxIndex() >= max_flags - 1)) return false;
+    if (dose > 0 && (before.value > std::numeric_limits<std::int32_t>::max() - dose ||
+        (!before.found && guest.map->GetMaxIndex() >= max_flags - 1))) return false;
     sickness = before.value;
     if (!apply) return true;
 
@@ -699,10 +699,11 @@ bool silverfish::native_guest_sickness::food_infection(RC::Unreal::UObject* pawn
     auto amount = dose;
     pawn->ProcessEvent(schema.infect, &amount);
     const auto after = guest.read(schema.sickness);
-    if (!current(scope) || scope.proof.quarantined || scope.proof.infect_reads != 1 || scope.proof.infect_writes != 1 ||
-        scope.proof.previous != before || scope.proof.current != after || !after.found ||
-        after.value <= before.value || after.value > before.value + dose || host.read(schema.sickness) != canonical)
+    if (!current(scope) || scope.proof.quarantined || scope.proof.infect_reads != 1 || host.read(schema.sickness) != canonical)
         return false;
+    if (dose < 0 && before.value <= 0) return scope.proof.infect_writes == 0 && after == before;
+    if (scope.proof.infect_writes != 1 || scope.proof.previous != before || scope.proof.current != after || !after.found ||
+        (dose < 0 ? after.value != before.value + dose : after.value <= before.value || after.value > before.value + dose)) return false;
     sickness = after.value;
     return true;
 }

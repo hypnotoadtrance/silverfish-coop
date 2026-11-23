@@ -9,6 +9,7 @@ local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_I
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
+local stock_cases = {"Leftovers", "HoneyEgg", "DirtyBandage", "Gauze", "MedSalve", "MedKit_Large", "StimPills", "Antibiotics"}
 local last
 
 local function valid(value) return value and value:IsValid() end
@@ -18,6 +19,27 @@ local function asset(path)
     if not valid(object) then LoadAsset(path); object = StaticFindObject(path) end
     assert(valid(object), "stock asset unavailable: " .. path)
     return object
+end
+
+local function stock_flag(save, name)
+    local key = FName(name)
+    return save.Flags:Contains(key) and save.Flags:Find(key):get() or 0
+end
+
+local function medical_vitals(save)
+    return ("%.6f,%.6f,%.6f,%d,%d"):format(save.PlayerHealth, save.PlayerRegen, save.PlayerStim,
+        stock_flag(save, "Sickness"), stock_flag(save, "Use_AntiBio"))
+end
+
+local function stock_item(remote, class, quantity)
+    local out = {}
+    asset(factory):MakeItemStack(class, quantity, remote, out)
+    local row = out.Item or out
+    assert(same(row[item_class], class) and row[ammo] == quantity, "stock item constructor returned a different stack")
+    local pack = remote.Save.PlayerBackpack
+    pack[pack:GetArrayNum() + 1] = row
+    local id = row[item_guid]
+    return ("%08X%08X%08X%08X"):format(id.A & 0xffffffff, id.B & 0xffffffff, id.C & 0xffffffff, id.D & 0xffffffff)
 end
 
 local function guest_read(pawn, save, tick)
@@ -47,6 +69,18 @@ local function host_read(pawn, save, world, action)
     if action == "host-read" then
         return ("%.6f,%.6f,%.6f,%.6f"):format(save.PlayerFood, save.PlayerRegen, detached.PlayerFood, detached.PlayerRegen)
     end
+    if action == "host-medical-vitals" then return medical_vitals(save) .. ";" .. medical_vitals(detached) end
+    if action == "seed-use-cases" then
+        local ids = {}
+        for index, name in ipairs(stock_cases) do
+            local path = ("/Game/Classes/Items/Item_%s.Item_%s_C"):format(name, name)
+            ids[index] = stock_item(remote, asset(path), name == "Gauze" and 2 or 1)
+        end
+        detached.PlayerHealth, detached.PlayerRegen, detached.PlayerStim = 100, 110, 0
+        detached.Flags:Add(FName("Sickness"), 35)
+        detached.Flags:Add(FName("Use_AntiBio"), 4)
+        return table.concat(ids, ",")
+    end
     assert(action == "seed", "unknown host food fixture action")
     local food, out = asset(meal_path), {}
     local pack = detached.PlayerBackpack
@@ -73,6 +107,10 @@ local function run(action)
     if action == "guest-read" or action == "guest-tick" then
         assert(not pawn:HasAuthority(), "the guest meal readback requires a joined player")
         return guest_read(pawn, save, action == "guest-tick")
+    end
+    if action == "guest-medical-vitals" then
+        assert(not pawn:HasAuthority(), "the health readback needs an enrolled guest")
+        return medical_vitals(save)
     end
     assert(pawn:HasAuthority(), "the meal fixture must seed the detached save on the host")
     return host_read(pawn, save, world, action)

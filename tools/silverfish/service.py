@@ -5723,7 +5723,7 @@ class Client:
             items = [row for row in page["items"] if row["guid"] == guid and row["source"] == "backpack"]
             item_class = items[0]["class_path"] if len(items) == 1 else None
             action = native_guest_consumable.COMMANDS.get(item_class)
-            if not action or action in native_guest_consumable.MEALS and not self.invite.get("native_guest_mre"):
+            if not action or action in native_guest_consumable.STOCK_CONSUMABLES and not self.invite.get("native_guest_mre"):
                 raise ValueError("The selected stock item is not available to use")
             current = self.bridge.snapshot() or {}
             if ((self.host_session, self.zone_epoch) != epoch or current.get("native_guest_inventory_use_view") != view

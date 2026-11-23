@@ -124,7 +124,7 @@ function scope.guest_vitals(state, phase)
     if phase == "connected" and state.server and guest and valid(state.world) and valid(pawn)
         and same(state.world.OwningGameInstance, guest.instance) and same(guest.instance.SaveSlot_Ref, guest.save)
         and same(pawn.Save, guest.save) then
-        return guest.save.PlayerHealth, guest.save.PlayerFood, guest.save.PlayerRegen
+        return guest.save.PlayerHealth, guest.save.PlayerFood, guest.save.PlayerRegen, guest.save.PlayerStim
     end
 end
 

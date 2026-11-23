@@ -297,9 +297,9 @@ namespace
                 !number_is<Unreal::FIntProperty>(defaults, STR("Value"), profile.value) ||
                 !number_is<Unreal::FDoubleProperty>(defaults, STR("Weight"), profile.weight) ||
                 !number_is<Unreal::FDoubleProperty>(defaults, STR("Regen_Health"), profile.regen_gain) ||
-                !number_is<Unreal::FDoubleProperty>(defaults, STR("Instant_Health"), 0.0) ||
+                !number_is<Unreal::FDoubleProperty>(defaults, STR("Instant_Health"), profile.instant) ||
                 !number_is<Unreal::FDoubleProperty>(defaults, STR("Regen_Boost"), profile.food) ||
-                !number_is<Unreal::FDoubleProperty>(defaults, STR("Regen_SpeedStim"), 0.0) ||
+                !number_is<Unreal::FDoubleProperty>(defaults, STR("Regen_SpeedStim"), profile.stim) ||
                 !number_is<Unreal::FIntProperty>(defaults, STR("Infection"), profile.infection) ||
                 !effect_map || effect_map->ContainerPtrToValuePtr<Unreal::FScriptMap>(defaults)->Num() != 0 ||
                 !default_tag || !matches_payload(default_payload)) return false;
@@ -440,12 +440,22 @@ namespace
             return {};
         }
 
-        Vitals expected(double regen_gain) const
+        Vitals expected(double regen_gain, double instant = 0.0, double over_stim = 0.0) const
         {
             auto result = before;
             const double amount = hemophilia && regen_gain > 0.0 ? regen_gain * 0.6 : regen_gain;
-            result.regen = std::clamp(before.regen + amount, 25.0, max_health);
+            const double instant_gain = hemophilia ? instant * 0.6 : instant;
+            result.health = std::clamp(before.health + instant_gain, 0.0, max_health);
+            result.regen = std::clamp(std::min(before.regen + instant_gain, max_health) + amount, 25.0, max_health);
+            result.stim = std::max(before.stim, over_stim);
             return result;
+        }
+
+        void write_healing(Unreal::UObject* save, const Vitals& vitals) const
+        {
+            health->SetPropertyValueInContainer(save, vitals.health);
+            regen->SetPropertyValueInContainer(save, vitals.regen);
+            stim->SetPropertyValueInContainer(save, vitals.stim);
         }
 
         bool unchanged_except_regen(Unreal::UObject* save) const
@@ -1004,13 +1014,28 @@ namespace
         return 5;
     }
 
+    int stock_antibiotic_roll()
+    {
+        auto* library = find<Unreal::UObject>(STR("/Script/Engine.Default__KismetMathLibrary"));
+        auto* roll = find<Unreal::UFunction>(STR("/Script/Engine.KismetMathLibrary:RandomIntegerInRange"));
+        auto* minimum = field<Unreal::FIntProperty>(roll, STR("Min"));
+        auto* maximum = field<Unreal::FIntProperty>(roll, STR("Max"));
+        auto* result = field<Unreal::FIntProperty>(roll, STR("ReturnValue"));
+        if (!library || !roll || roll->GetOuterPrivate() != library->GetClassPrivate() || roll->GetNumParms() != 3 ||
+            roll->GetParmsSize() != 12 || !minimum || !maximum || !result || result != roll->GetReturnProperty() ||
+            minimum->GetOffset_Internal() != 0 || maximum->GetOffset_Internal() != 4 || result->GetOffset_Internal() != 8) return 0;
+        std::array<std::int32_t, 3> values{1, 3, 0};
+        library->ProcessEvent(roll, values.data());
+        return values[2];
+    }
+
     int use_meal(const Lua& lua)
     {
         if (lua.get_stack_size() != 5 || !lua.is_string(5)) return result(lua, false, "guest_meal_refused_arguments");
         const auto entry = lua.get_string(5);
-        const auto& meals = silverfish::native_guest_consumable::meals;
-        const auto found = std::ranges::find(meals, entry, &Consumable::entry);
-        if (found == meals.end()) return result(lua, false, "guest_meal_refused_profile");
+        const auto& consumables = silverfish::native_guest_consumable::consumables;
+        const auto found = std::ranges::find(consumables, entry, &Consumable::entry);
+        if (found == consumables.end()) return result(lua, false, "guest_meal_refused_profile");
         const auto& profile = *found;
         std::string kind(profile.entry.substr(4));
         std::ranges::replace(kind, '-', '_');
@@ -1081,17 +1106,30 @@ namespace
         const auto sickness_before = personal.read(guest_flags, sickness);
         std::int32_t sickness_after = sickness_before;
         int dose = profile.infection;
-        if (dose)
+        const Unreal::FName resistance{STR("Use_AntiBio"), Unreal::FNAME_Find};
+        int resistance_before{}, resistance_after{};
+        if (profile.antibiotic)
+        {
+            if (resistance.IsNone()) return refuse("antibiotic_schema");
+            resistance_before = personal.read(guest_flags, resistance);
+            if (resistance_before < 0 || resistance_before > INT32_MAX - 3)
+                return refuse("antibiotic_resistance");
+            const auto increase = stock_antibiotic_roll();
+            if (increase < 1 || increase > 3) return refuse("antibiotic_roll");
+            resistance_after = resistance_before + increase;
+            dose += resistance_before;
+        }
+        if (dose > 0)
         {
             std::int32_t iron_gut{};
             if (!silverfish::native_enemy_loot::count_save_passive(
                     scope.guest, Unreal::FName{STR("IronGut"), Unreal::FNAME_Find}, iron_gut))
                 return refuse("infection_passive");
             if (iron_gut) dose = 0;
-            if (dose && (!silverfish::native_guest_sickness::food_infection(
-                    scope.pawn, scope.guest, scope.stock, dose, sickness_after, false) || sickness_after != sickness_before))
-                return refuse("infection_schema");
         }
+        if (dose && (!silverfish::native_guest_sickness::food_infection(
+                scope.pawn, scope.guest, scope.stock, dose, sickness_after, false) || sickness_after != sickness_before))
+            return refuse("infection_schema");
 
         auto* bag = inventory.backpack;
         auto* guest_rows = inventory.bag_data(scope.guest);
@@ -1112,7 +1150,7 @@ namespace
         if (!backup_flags || !expected_flags || !stock_flags || !backup_bag || !expected_bag || !stock_bag || !cache)
             return refuse("snapshot");
 
-        auto expected = health.expected(regen);
+        auto expected = health.expected(regen, profile.instant, profile.stim);
         expected.food = std::clamp(health.before.food + appetite, 0.0, 200.0);
         const int intox_after = std::clamp(intox_before + delta, 0, 100);
         if (!personal.write(static_cast<Unreal::FScriptMap*>(expected_flags.get()), intox_after))
@@ -1137,7 +1175,7 @@ namespace
             if (bag_written) bag->CopyCompleteValue(guest_rows, backup_bag.get());
             personal.map->CopyCompleteValue(guest_flags, backup_flags.get());
             health.food->SetPropertyValueInContainer(scope.guest, health.before.food);
-            health.regen->SetPropertyValueInContainer(scope.guest, health.before.regen);
+            health.write_healing(scope.guest, health.before);
             food_functions.pawn_intox->SetPropertyValueInContainer(scope.pawn, pawn_before);
             return stock_unchanged() && health.read(scope.guest) == health.before && bag->Identical(guest_rows, backup_bag.get()) &&
                 personal.map->Identical(guest_flags, backup_flags.get()) &&
@@ -1155,7 +1193,7 @@ namespace
         only_food.food = expected.food;
         if (receipt.call_count != 1 || !receipt.applied || !prove(backup_bag.get(), only_food))
             return rollback(false, only_food) ? refuse("food_rolled_back") : unverified("food");
-        health.regen->SetPropertyValueInContainer(scope.guest, expected.regen);
+        health.write_healing(scope.guest, expected);
         if (!prove(backup_bag.get(), expected))
             return rollback(false, only_food) ? refuse("regen_rolled_back") : unverified("regen");
         if (dose)
@@ -1163,9 +1201,14 @@ namespace
             // Keep the stock infection roll and update the expected copy used for the atomic readback.
             if (!silverfish::native_guest_sickness::food_infection(
                     scope.pawn, scope.guest, scope.stock, dose, sickness_after, true) ||
-                !personal.write(static_cast<Unreal::FScriptMap*>(expected_flags.get()), sickness, sickness_after) ||
+                (sickness_after != sickness_before &&
+                    !personal.write(static_cast<Unreal::FScriptMap*>(expected_flags.get()), sickness, sickness_after)) ||
                 !prove(backup_bag.get(), expected)) return unverified("infection");
         }
+        if (profile.antibiotic &&
+            (!personal.write(static_cast<Unreal::FScriptMap*>(expected_flags.get()), resistance, resistance_after) ||
+             !personal.write(guest_flags, resistance, resistance_after) || !prove(backup_bag.get(), expected)))
+            return unverified("antibiotic_resistance");
         if (profile.fatigue &&
             (!personal.write(static_cast<Unreal::FScriptMap*>(expected_flags.get()), fatigue, fatigue_after) ||
              !personal.write(guest_flags, fatigue, fatigue_after) || !prove(backup_bag.get(), expected)))
@@ -1192,6 +1235,19 @@ namespace
         lua.set_integer(sickness_before);
         lua.set_integer(sickness_after);
         lua.set_integer(dose);
+        if (profile.medicine)
+        {
+            lua.set_number(expected.health);
+            lua.set_number(health.before.stim);
+            lua.set_number(expected.stim);
+            if (profile.antibiotic)
+            {
+                lua.set_integer(resistance_before);
+                lua.set_integer(resistance_after);
+                return 24;
+            }
+            return 22;
+        }
         if (profile.fatigue)
         {
             lua.set_integer(fatigue_before);
