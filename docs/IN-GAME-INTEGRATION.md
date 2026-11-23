@@ -152,6 +152,8 @@ The host sent a Steam invite and the guest accepted and entered the campaign. Th
 
 A muted two-instance Direct IP trial kept a guest's unsaved crate pickup through a brief outage and through expiration of the guest's original native pawn. The replacement pawn received the same item from the running host. The campaign and Unreal save file hashes stayed identical until an explicit checkpoint saved the item and its ownership together.
 
+A private Ruin Fields trial reached the stock ambient director through the authored routes. The native hook qualified the director and its selected marker through the stock marker array. At about 07:28, the host had three local feral dogs and the guest had three local workers. The trial produced no supported Husk or boar cohort on either seat. The next checks cover the stock squad choice, the guest clock during director startup, and whether a supported cohort appears and replicates.
+
 Supported live guest weapon and inventory actions now keep the detached save in memory. This also covers ordinary melee, flares, mushroom harvesting, door prying, and consumable use. Two guests used stock reload and fired overlapping bursts in a muted trial. Releasing the triggers and losing one client's connection left the campaign files unchanged. An explicit save before stopping preserved each magazine through restart. [Held-fire trial](../tests/live_guest_held_fire_smoke.py)
 
 Stock inventory sorting and both direct and popup stack splitting also leave save files unchanged until a save. A muted two-player test restored the sorted and split inventory after restart. [Inventory trial](../tests/live_inventory_split_smoke.py)
