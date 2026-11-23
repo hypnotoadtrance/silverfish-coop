@@ -1031,8 +1031,7 @@ class Host:
         if self.native_guest:
             view["native_inventory_projected"] = self.native_pickup.projected()
         if view["wipe"] and self.party["wipe"].get("native") and not self.party["wipe"].get("native_committed"):
-            view["wipe"].update(native_inventory_ready=True,
-                                remaining_seconds=max(0, min(30, view["wipe"]["deadline"] - time.time())))
+            view["wipe"].update(native_inventory_ready=True, deadline=None, remaining_seconds=None)
         return view
 
     def act(self, actor: str, operation_id: str, action: str, target: str | None,
@@ -2463,8 +2462,7 @@ class Host:
                         offline_owners=guests - leased,
                     )
                     candidate = party.load_party(self.party)
-                    candidate["wipe"].update(native=frozen, keep_slots=slots, drop_backpacks=drops,
-                                             deadline=time.time() + (30 if slots else 0))
+                    candidate["wipe"].update(native=frozen, keep_slots=slots, drop_backpacks=drops, deadline=None)
                     self.checkpoint(candidate)
                     self.party = candidate
                     draft = self.party["wipe"]
@@ -2473,7 +2471,13 @@ class Host:
                     return
                 finally:
                     self.transitioning = was_transitioning
-        result = wipe.finish_wipe(draft, now)
+        required = None
+        if draft.get("native") and draft["keep_slots"]:
+            # An active or temporarily disconnected guest keeps their turn.
+            # Expired leases stop blocking the party but keep their stock escrow.
+            leased = native_inventory_death.leased_characters(self.store.status())
+            required = {"host"} | (leased & set(draft["roster"]))
+        result = wipe.finish_wipe(draft, now, required=required)
         if result is None:
             return
         checkpoint = result["checkpoint"]

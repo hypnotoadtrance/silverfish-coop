@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from tools.silverfish import native_host_save, native_inventory_death, native_inventory_wipe as native_wipe, party, runtime
+from tools.silverfish import native_host_save, native_inventory_death, native_inventory_wipe as native_wipe, party, runtime, wipe
 from tools.silverfish.service import Host
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
@@ -300,13 +300,18 @@ class NativeInventoryWipeTests(unittest.IsolatedAsyncioTestCase):
             draft = host.party["wipe"]
             self.assertEqual(draft["roster"], sorted(roster))
             self.assertEqual(draft["native"]["frames"][self.guest], self.frames[self.guest])
-            self.assertGreater(draft["deadline"], time.time())
+            self.assertIsNone(draft["deadline"])
             self.assertFalse(host.transitioning)
             host.checkpoint_native.assert_awaited_once_with(None, require_guest_frames=frozenset())
 
-            # A restarted launcher honors an expired selection deadline and retains the frozen roster.
+            # An older persisted native draft keeps waiting for its host even after its old deadline.
             host.party = json.loads(json.dumps(host.party))
             host.party["wipe"]["deadline"] = time.time() - 1
+            await Host.settle_wipe(host, None, None)
+            self.assertNotIn("native_committed", host.party["wipe"])
+            apply.assert_not_awaited()
+            host.party["wipe"] = wipe.select_items(host.party["wipe"], "host", {}, now=time.time())
+
             lease_during_preparation = True
             await Host.settle_wipe(host, None, None)
             self.assertNotIn("native_committed", host.party["wipe"])

@@ -109,8 +109,8 @@ def _validate_schema(wipe: dict) -> None:
         raise WipeError("unsupported_wipe_schema")
 
 
-def _choice_complete(wipe: dict) -> bool:
-    return all(actor in wipe["choices"] for actor in wipe["roster"])
+def _choice_complete(wipe: dict, required: set[str] | None = None) -> bool:
+    return all(actor in wipe["choices"] for actor in (wipe["roster"] if required is None else required))
 
 
 def _validate_now(now: float) -> None:
@@ -119,13 +119,14 @@ def _validate_now(now: float) -> None:
 
 
 def select_items(wipe: dict, actor_id: str, retained: dict[str, int], *, now: float | None = None) -> dict:
-    """Return the updated selection draft. Pass the host clock to reject late input."""
+    """Return a confirmed choice for the active draft."""
     _validate_schema(wipe)
     if not wipe["keep_slots"]:
         raise WipeError("selection_unavailable")
     if now is not None:
         _validate_now(now)
-    if _choice_complete(wipe) or (now is not None and now >= wipe["deadline"]):
+    if (wipe.get("native_committed") or _choice_complete(wipe)
+            or (not wipe.get("native") and now is not None and now >= wipe["deadline"])):
         raise WipeError("selection_closed")
     if actor_id not in wipe["players"]:
         raise WipeError("actor_unavailable")
@@ -151,8 +152,10 @@ def select_items(wipe: dict, actor_id: str, retained: dict[str, int], *, now: fl
     return candidate
 
 
-def finish_wipe(wipe: dict, now: float) -> dict | None:
-    """Compute an idempotent respawn result after all submissions or the deadline.
+def finish_wipe(wipe: dict, now: float, *, required: set[str] | None = None) -> dict | None:
+    """Compute a respawn result once all required owners confirm.
+
+    Standalone prototype drafts can also finish at their selection deadline.
 
     Restore the returned players and merge backpacks by ID in the same durable
     update that clears the draft. Use owner_id to authorize backpack access.
@@ -160,8 +163,9 @@ def finish_wipe(wipe: dict, now: float) -> dict | None:
     """
     _validate_schema(wipe)
     _validate_now(now)
-    if wipe["keep_slots"] and now < wipe["deadline"] and not _choice_complete(wipe):
-        return None
+    if wipe["keep_slots"] and not wipe.get("native_committed") and not _choice_complete(wipe, required):
+        if wipe.get("native") or now < wipe["deadline"]:
+            return None
     players = {}
     backpacks = {}
     namespace = uuid.UUID(hex=wipe["id"])

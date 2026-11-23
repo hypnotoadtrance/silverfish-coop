@@ -93,7 +93,7 @@ end
 local function current_time(current, row)
     if not current or not authority_is_current(current) then return nil, "local player or map changed" end
     if not downed(current) then return nil, "local downed state ended" end
-    if os.time() >= row.deadline then return nil, "the selection deadline passed" end
+    if row.deadline ~= 0 and os.time() >= row.deadline then return nil, "the selection deadline passed" end
     local now = clock(current)
     if now and now >= row.leased_at and now < row.leased_at + lease_seconds then return now end
     return nil, "the draft lease expired"
@@ -325,7 +325,7 @@ function wipe_view.command(fields, state, phase)
         local deadline, limit = integer(fields[7], 9007199254740991), integer(fields[8], 10)
         local locked, offset, total = integer(fields[9], 1), integer(fields[10], max_items), integer(fields[11], max_items)
         local now = clock(current)
-        if not now or not deadline or os.time() >= deadline or not limit or limit == 0
+        if not now or not deadline or (deadline ~= 0 and os.time() >= deadline) or not limit or limit == 0
             or not locked or not offset or not total or locked > total then
             error("The authoritative wipe draft deadline or inventory limits are invalid", 0)
         end

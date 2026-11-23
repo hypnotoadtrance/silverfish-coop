@@ -113,6 +113,7 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
             for directory in (host, guest):
                 await wait(directory, lambda status: status.get("game", {}).get("native_wipe_view", {}).get("state") == "selecting")
             current = (await command("status", *secondary))["game"]["native_wipe_view"]
+            assert current["deadline"] == 0, current
             if current["guid"] != gun:
                 current = await key(secondary, "down")
             assert current["guid"] == gun and current["limit"] == keep_slots and current["total"] == 2, current
@@ -125,6 +126,12 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
                 ready = await key(owner, "submit")
                 assert ready["state"] == "submitting" and ready["sequence"] > 0, ready
                 submitted.append(ready)
+                if owner == secondary:
+                    waiting = await wait(host, lambda status: character in
+                                         ((status.get("gameplay", {}).get("wipe") or {}).get("choices", {})))
+                    assert waiting["game"]["native_wipe_view"]["state"] == "selecting", waiting
+                    assert waiting["gameplay"]["wipe"]["choices"] == {character: {gun: 1}}, waiting
+                    assert waiting["gameplay"]["wipe"]["deadline"] is None, waiting
         elif keep_slots:
             await action(secondary, "keep", "--keep", f"{gun}=1")
             await action(primary, "keep")

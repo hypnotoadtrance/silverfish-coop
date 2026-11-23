@@ -94,6 +94,29 @@ class WipeTests(unittest.TestCase):
         reserved = next(pack for pack in result["backpacks"].values() if pack["owner_id"] == "reserved")
         self.assertEqual(reserved["inventory"], {"medkit": 2})
 
+    def test_stock_wipe_waits_for_active_members_and_can_finish_after_a_lease_expires(self):
+        draft = self.begin()
+        draft["native"] = {"stock": True}
+        draft["choices"] = {"reserved": {}}
+        self.assertIsNone(finish_wipe(draft, NOW + 90, required={"host", "reserved"}))
+        self.assertIsNone(finish_wipe(draft, NOW + 90, required={"host"}))
+        draft["choices"] = {"host": {"key": 1}}
+        self.assertIsNone(finish_wipe(draft, NOW + 90, required={"host", "reserved"}))
+        result = finish_wipe(draft, NOW + 90, required={"host"})
+        self.assertEqual(result["players"]["host"]["inventory"], {"key": 1})
+        bag = next(bag for bag in result["backpacks"].values() if bag["owner_id"] == "reserved")
+        self.assertEqual(bag["inventory"], {"medkit": 2})
+        draft["choices"]["reserved"] = {"medkit": 1}
+        self.assertEqual(finish_wipe(draft, NOW + 90, required={"host", "reserved"})["players"]["reserved"]["inventory"],
+                         {"medkit": 1})
+
+    def test_stock_wipe_resumes_a_previously_committed_respawn(self):
+        draft = self.begin()
+        draft.update(native={"stock": True}, native_committed={"owners": []}, deadline=None)
+        self.assertIsNotNone(finish_wipe(draft, NOW + 90))
+        with self.assertRaisesRegex(WipeError, "selection_closed"):
+            select_items(draft, "host", {}, now=NOW + 90)
+
     def test_skips_selection_with_none_or_zero_slots(self):
         preserve = self.begin(slots=None)
         with self.assertRaisesRegex(WipeError, "selection_unavailable"):

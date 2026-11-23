@@ -35,11 +35,14 @@ class WipeView:
         limit, remaining, identifier = draft["keep_slots"], draft.get("remaining_seconds"), draft["id"]
         pawn = game.get("pawns", {}).get("local", {}).get("name")
         area = game.get("map")
-        if (type(limit) is not int or not 1 <= limit <= 10 or type(remaining) not in (int, float)
-                or not 0 < remaining <= 30 or not isinstance(identifier, str) or not party.REQUEST_ID.fullmatch(identifier)
-                or not area or not pawn):
+        if (type(limit) is not int or not 1 <= limit <= 10
+                or not isinstance(identifier, str) or not party.REQUEST_ID.fullmatch(identifier) or not area or not pawn):
             return None
         owner = identifier, area, pawn, self.owner
+        if draft.get("deadline", 0) is None and remaining is None:
+            return (*owner, "0")
+        if type(remaining) not in (int, float) or not 0 < remaining <= 30:
+            return None
         now = time.time()
         deadline = self.scope[4] if self.scope and self.scope[:4] == owner else str(int(now + remaining))
         return (*owner, deadline) if int(deadline) > now else None
