@@ -12,6 +12,8 @@ local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local text_path = "/Script/UMG.TextBlock"
 local sources = {backpack = "Backpack", equipment = "Equipment", armor = "Armor", helmet = "Helmet"}
+local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
+local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local keys = {up = "PageUp", down = "PageDown", toggle = "SpaceBar", submit = "Home", back = "End"}
 local actions = {"back", "up", "down", "toggle", "submit"}
 local page_size, max_items, lease_seconds = 16, 8194, 2
@@ -158,7 +160,7 @@ local function page(fields, row, offset)
             locked_ordinal = ordinal
         end
         local item = class:match("%.([%w_%-%%]+)_C$"):gsub("_", " ")
-        records[#records + 1] = {guid = guid, policy = policy,
+        records[#records + 1] = {guid = guid, policy = policy, source = source, slot = slot, class = class,
             label = string.format("%s   %d x %s", sources[source], amount, item:sub(1, 52))}
     end
     if row.total == count and (locked_ordinal ~= nil) ~= (row.locked == 1) then
@@ -238,7 +240,42 @@ local function open_guarded_stock_screen(current)
     return screen
 end
 
-local function probe_stock_screen(current)
+local function stock_item_guid(item)
+    local id = item and item[item_guid]
+    if not id then return end
+    local a, b, c, d = math.tointeger(id.A), math.tointeger(id.B), math.tointeger(id.C), math.tointeger(id.D)
+    if not a or not b or not c or not d then return end
+    return ("%08X%08X%08X%08X"):format(a & 0xffffffff, b & 0xffffffff, c & 0xffffffff, d & 0xffffffff)
+end
+
+local function load_stock_preview(screen, current, records)
+    local save = current.pawn.Save
+    if not valid(save) then error("The local stock wipe inventory is unavailable", 0) end
+    for index, record in ipairs(records) do
+        local item
+        if record.source == "armor" then item = save.PlayerArmor
+        elseif record.source == "helmet" then item = save.PlayerHelmet
+        else
+            local slots = record.source == "backpack" and save.PlayerBackpack or save.PlayerEquipment
+            if record.slot < slots:GetArrayNum() then item = slots[record.slot + 1] end
+        end
+        local class = item and item[item_class]
+        if not valid(class) or class:GetFullName():match("^%S+ (.+)$") ~= record.class
+            or stock_item_guid(item) ~= record.guid then
+            error("The local stock item does not match the frozen wipe inventory", 0)
+        end
+        screen.PlayerInventory[index] = item
+        if stock_item_guid(screen.PlayerInventory[index]) ~= record.guid then
+            error("The stock wipe inventory card failed readback", 0)
+        end
+    end
+    screen.InventoryPanel:FullRefresh()
+    if screen.InventoryPanel.Cards:GetArrayNum() ~= #records then
+        error("The stock wipe inventory did not render the frozen items", 0)
+    end
+end
+
+local function probe_stock_screen(current, row)
     local screen = open_guarded_stock_screen(current)
     local address = screen:GetAddress()
     local ok, failure = pcall(function()
@@ -246,6 +283,11 @@ local function probe_stock_screen(current)
             or SilverfishTakeNativeWipeScreenActions(address) & 2 ~= 2
             or screen.PlayerInventory:GetArrayNum() ~= 0 or screen.KeptItemSlots:GetArrayNum() ~= 0 then
             error("Stock wipe construction did not stay isolated", 0)
+        end
+        load_stock_preview(screen, current, row.records)
+        for index = 0, row.limit - 1 do screen:CreateKeepSlot(index) end
+        if screen.KeptItemSlots:GetArrayNum() ~= row.limit then
+            error("The stock wipe keep slots did not render", 0)
         end
         local phase = screen.Phase
         screen:BndEvt__GameOver_RespawnPenalties_Widget_Button_Continue_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
@@ -407,7 +449,7 @@ function wipe_view.command(fields, state, phase)
     end
     if op == "native-wipe-view-key-fixture" and #fields == 7 and headless and fields[7] == "stock-guard"
         and can_choose(view) then
-        probe_stock_screen(current)
+        probe_stock_screen(current, view)
         return "verified guarded stock wipe screen"
     end
     if op == "native-wipe-view-result" and #fields == 7 then
