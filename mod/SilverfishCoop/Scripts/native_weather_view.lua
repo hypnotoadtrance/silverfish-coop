@@ -89,6 +89,52 @@ function view.copy_rain(dst, src)
     dst.rain_intensity, dst.rain_x, dst.rain_y, dst.rain_z = src.rain_intensity, src.rain_x, src.rain_y, src.rain_z
 end
 
+local function local_rain_actor(current_world)
+    local rain = current_world.day.RainController
+    if exact(rain, rain_class) and rain:HasAuthority()
+        and same(rain:GetWorld(), current_world.world) and not rain:IsActorBeingDestroyed() then return rain end
+end
+
+function view.restore_local_rain(current_world, original)
+    if not original or not same(local_rain_actor(current_world), original.actor) then return end
+    local rain, particles = original.actor, original.particles
+    if same(particles, rain.NI_Rain_01) then particles:SetVisibility(original.visible, false) end
+    for _, source in ipairs(original.audio) do
+        if same(source.component, rain[source.field]) then source.component:SetVolumeMultiplier(source.volume) end
+    end
+    rain:SetActorTickEnabled(original.tick)
+end
+
+function view.bind_local_rain(current_world, original)
+    local rain = local_rain_actor(current_world)
+    if not rain then return nil end
+    local particles = rain.NI_Rain_01
+    if not exact(particles, niagara_class) or not same(particles:GetOwner(), rain)
+        or not same(particles.Asset, StaticFindObject(particle_path)) then return nil end
+    if original and same(original.actor, rain) and same(original.particles, particles) then return original end
+    original = {actor = rain, particles = particles, visible = particles:IsVisible(),
+        tick = rain:IsActorTickEnabled(), audio = {}}
+    for _, field in ipairs({"MS_Rain_SFX", "Rain_Storm_Loop_3"}) do
+        local audio = rain[field]
+        if exact(audio, audio_class) and same(audio:GetOwner(), rain) then
+            original.audio[#original.audio + 1] = {field = field, component = audio, volume = audio.VolumeMultiplier}
+        end
+    end
+    return original
+end
+
+function view.suppress_local_rain(original)
+    if not original then return end
+    local rain, particles = original.actor, original.particles
+    -- The locally spawned stock actor can outlive startup on a guest. The
+    -- authoritative rain emitter handles visuals and sound for this visit.
+    if rain:IsActorTickEnabled() then rain:SetActorTickEnabled(false) end
+    if particles:IsVisible() then particles:SetVisibility(false, false) end
+    for _, source in ipairs(original.audio) do
+        if valid(source.component) and source.component.VolumeMultiplier ~= 0 then source.component:SetVolumeMultiplier(0) end
+    end
+end
+
 function view.destroy_rain(lease)
     if not lease then return end
     if valid(lease.audio) then
