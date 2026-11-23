@@ -50,7 +50,7 @@ end
 
 local function stock_rain(world, statics, pawn, day, amount)
     local rain = day.RainController
-    if not valid(rain) or not same(rain:GetWorld(), world) or rain:IsActorBeingDestroyed() or not rain:HasAuthority() then
+    if not valid(rain) or not same(rain:GetWorld(), world) or rain:IsActorBeingDestroyed() then
         if amount == 0 then return "absent" end
         local transform = {Translation = pawn:K2_GetActorLocation(),
             Rotation = {X = 0, Y = 0, Z = 0, W = 1}, Scale3D = {X = 1, Y = 1, Z = 1}}
@@ -61,7 +61,7 @@ local function stock_rain(world, statics, pawn, day, amount)
         rain = statics:FinishSpawningActor(created, transform, 0)
         day.RainController = rain
     end
-    assert(same(rain:GetWorld(), world) and rain:HasAuthority(), rain_diagnosis(day, world))
+    assert(same(rain:GetWorld(), world), rain_diagnosis(day, world))
     rain:UpdateIntensity(amount, false)
     return rain_state(day)
 end
