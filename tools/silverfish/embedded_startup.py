@@ -444,8 +444,10 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
         if creator_requested and mode == "resume":
             raise ValueError("The requested campaign already has a save")
         use_creator = mode != "resume" and (creator_requested or os.environ.get(INSTALLED_ENV) == "1" and not headless)
+        engine = None
 
         async def start():
+            nonlocal engine
             private = runtime.spare_udp_port()
             if private == port:
                 private = runtime.spare_udp_port()
@@ -479,7 +481,7 @@ def _resident_host_plan(work, campaign, mailbox, saved, headless, default_bind, 
             return (type(actual_port) is int and (actual_port == port if port else 0 < actual_port <= 65535)
                     and (use_creator or frame["game"]["map"] == area))
 
-        return SessionPlan(start, status, ready)
+        return SessionPlan(start, status, ready, read_game=lambda: engine.bridge.snapshot() if engine else None)
 
     def resolve(claim):
         if claim.host_settings is None:
@@ -532,8 +534,10 @@ async def _resident_join(work: Path, directory: Path, mailbox: Path, saved: Path
     required = service._embedded_features(work, headless, None, options, resident=True)
     if _current_startup(tuple(required)).environment != required:
         raise ValueError("The resident guest lacks the invitation's staged game features")
+    engine = None
 
     async def start():
+        nonlocal engine
         with _pinned_invite(path, selection.invite_sha256) as invitation:
             engine = EmbeddedEngine(os.getpid(), mailbox, saved, None, session_directory=directory)
             await engine.observe_title()
@@ -544,7 +548,8 @@ async def _resident_join(work: Path, directory: Path, mailbox: Path, saved: Path
         return control_status(directory / "run")
 
     plan = SessionPlan(start, status, lambda frame: frame.get("character_id") == selection.character_id
-                       and frame.get("gameplay_fresh") is True)
+                       and frame.get("gameplay_fresh") is True,
+                       read_game=lambda: engine.bridge.snapshot() if engine else None)
     await _resident_title(mailbox, saved, directory, {"join": plan})
 
 
@@ -589,8 +594,10 @@ def _resident_direct_join_plan(work, directory, mailbox, saved, headless, *, ava
         connection = settings.resolve(claim.generation, draft, character)
         if not isinstance(connection, direct_ip.Connection):
             raise ValueError("Expected an authenticated Direct IP connection")
+        engine = None
 
         async def start():
+            nonlocal engine
             engine = EmbeddedEngine(os.getpid(), mailbox, saved, None, session_directory=directory)
             await engine.observe_title()
             async with AsyncExitStack() as scope:
@@ -600,7 +607,8 @@ def _resident_direct_join_plan(work, directory, mailbox, saved, headless, *, ava
                 await service.join_game(work, directory, connection, headless, character, resident_engine=engine)
 
         return SessionPlan(start, status, lambda frame: frame.get("character_id") == character
-                           and frame.get("gameplay_fresh") is True)
+                           and frame.get("gameplay_fresh") is True,
+                           read_game=lambda: engine.bridge.snapshot() if engine else None)
 
     async def no_selection():
         raise ValueError("A Direct IP character selection is required")
