@@ -7,10 +7,73 @@ local level = "/Game/Classes/Maps/Dreams/TheRook_P.TheRook_P"
 local field_type = "BlueprintGeneratedClass /Game/Classes/Actors/AnomalyField_BP.AnomalyField_BP_C"
 local gravity = "BlueprintGeneratedClass /Game/Classes/Anomalies/GravityAnomaly_BP.GravityAnomaly_BP_C"
 local vortex = "BlueprintGeneratedClass /Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C"
-local last
+local last, vantage
 
 local function valid(object) return object and object:IsValid() end
 local function same(left, right) return valid(left) and valid(right) and left:GetAddress() == right:GetAddress() end
+
+local function distance(a, b)
+    return math.sqrt((a.X-b.X)^2 + (a.Y-b.Y)^2 + (a.Z-b.Z)^2)
+end
+
+local function survey(world, restore)
+    local driver = world.NetDriver
+    assert(seat == "host" and not valid(driver.ServerConnection) and #driver.ClientConnections == 1,
+        "Rook observation requires one isolated guest")
+    local guest = driver.ClientConnections[1].PlayerController.Pawn
+    assert(valid(guest) and same(guest:GetWorld(), world) and guest:HasAuthority() and not guest:IsLocallyControlled(),
+        "Rook observation lost its exact guest")
+    if restore then
+        assert(vantage and same(vantage.guest, guest) and guest:K2_TeleportTo(vantage.origin, vantage.facing),
+            "Rook observation could not restore the arrival point")
+        vantage = nil
+        guest:ForceNetUpdate()
+        return "restored"
+    end
+    assert(not vantage, "Rook observation is already active")
+    local wells, traps = {}, {}
+    for _, family in ipairs({{"GravityAnomaly_BP_C", wells}, {"VortexTrap_BP_C", traps}}) do
+        for _, actor in ipairs(FindAllOf(family[1]) or {}) do
+            if valid(actor) and same(actor:GetWorld(), world) and actor:HasAuthority()
+                and actor:ActorHasTag(FName("Anomaly")) and not actor:IsActorBeingDestroyed() then
+                family[2][#family[2] + 1] = actor:K2_GetActorLocation()
+            end
+        end
+    end
+    local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local half = guest.CapsuleComponent:GetScaledCapsuleHalfHeight()
+    local color = {R=0,G=0,B=0,A=0}
+    local origin, facing = guest:K2_GetActorLocation(), guest:K2_GetActorRotation()
+    table.sort(wells, function(a, b) return distance(a, origin) < distance(b, origin) end)
+    local function nearest(points, position)
+        local limit = math.huge
+        for _, point in ipairs(points) do limit = math.min(limit, distance(point, position)) end
+        return limit
+    end
+    for _, anchor in ipairs(wells) do
+        for _, offset in ipairs({{2000,0},{-2000,0},{0,2000},{0,-2000},
+            {3500,0},{-3500,0},{0,3500},{0,-3500},{2400,2400},{-2400,-2400}}) do
+            local x,y = anchor.X+offset[1], anchor.Y+offset[2]
+            local hit = {}
+            if trace:LineTraceSingle(guest, {X=x,Y=y,Z=anchor.Z+2500}, {X=x,Y=y,Z=anchor.Z-4500}, 0,
+                false, {guest}, 0, hit, true, color, color, 0) then
+                hit = hit.OutHit or hit
+                local component = hit.Component and hit.Component:Get()
+                if valid(component) and component:GetCollisionObjectType() == 0 and hit.ImpactNormal.Z >= .7 then
+                    local position = {X=x,Y=y,Z=hit.ImpactPoint.Z+half+2}
+                    local well, trap = nearest(wells, position), nearest(traps, position)
+                    if well >= 1200 and trap >= 1200 and well <= 5000 and trap <= 5000
+                        and guest:K2_TeleportTo(position, facing) then
+                        vantage = {guest=guest, origin=origin, facing=facing}
+                        guest:ForceNetUpdate()
+                        return ("near\t%.2f\t%.2f"):format(well, trap)
+                    end
+                end
+            end
+        end
+    end
+    error("No safe Rook observation point near both stock hazard types")
+end
 
 local function scan(world, driver)
     local server = driver.ServerConnection
@@ -57,15 +120,21 @@ end
 LoopInGameThreadWithDelay(100, function()
     local input = io.open(mailbox .. "/rook-mixed-field-request", "rb")
     if not input then return end
-    local nonce = input:read(34)
+    local request = input:read(64)
     input:close()
-    if not nonce or not nonce:match("^[a-f0-9]+\n$") or #nonce ~= 33 or nonce == last then return end
+    if not request then return end
+    local nonce, operation = request:match("^([a-f0-9]+)\n([a-z]+)\n$")
+    if not nonce or #nonce ~= 32 or nonce == last then return end
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     if not valid(world) or world:GetFullName() ~= "World " .. level or not valid(world.NetDriver) then return end
     last = nonce
-    local ok, result = pcall(scan, world, world.NetDriver)
+    local ok, result = pcall(function()
+        if operation == "census" then return scan(world, world.NetDriver) end
+        assert(operation == "near" or operation == "restore", "Unknown observation operation")
+        return survey(world, operation == "restore")
+    end)
     local reply = assert(io.open(mailbox .. "/rook-mixed-field-reply", "wb"))
-    reply:write(nonce, ok and "ok\n" or "error\n", result, "\nend\n")
+    reply:write(nonce, ok and "\nok\n" or "\nerror\n", result, "\nend\n")
     reply:close()
 end)

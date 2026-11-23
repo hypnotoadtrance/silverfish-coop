@@ -51,12 +51,12 @@ def parse_census(lines, seat):
     return census
 
 
-async def raw_census(run, seat):
+async def probe(run, seat, operation="census"):
     mailbox, = (run / "game-bridge").iterdir()
     nonce = uuid.uuid4().hex
     request = mailbox / "rook-mixed-field-request"
     pending = request.with_suffix(".pending")
-    pending.write_text(nonce + "\n", encoding="ascii", newline="")
+    pending.write_text(f"{nonce}\n{operation}\n", encoding="ascii", newline="")
     pending.replace(request)
     async with asyncio.timeout(6):
         while True:
@@ -71,7 +71,7 @@ async def raw_census(run, seat):
                 if tag == nonce:
                     if result != "ok":
                         raise RuntimeError(f"Rook {seat} census failed: {rows}")
-                    return parse_census(rows, seat)
+                    return parse_census(rows, seat) if operation == "census" else rows
             await asyncio.sleep(.05)
 
 
@@ -121,11 +121,10 @@ async def verify_rook_mixed_fields(wait, note, host_run, guest_run, *, authority
                 and status.get("link_connected") and status.get("zone_epoch"))
 
     path = host_run / "live-rook-mixed-field-probe.json"
-    # Give ordinary actor replication a bounded warm-up after entering the Rook.
-    for readback in range(5 if authority else 1):
+    async def census():
         host_status, guest_status = await asyncio.gather(wait(host_run, ready), wait(guest_run, ready))
         assert host_status["zone_epoch"] == guest_status["zone_epoch"]
-        host, guest = await asyncio.gather(raw_census(host_run, "host"), raw_census(guest_run, "guest"))
+        host, guest = await asyncio.gather(probe(host_run, "host"), probe(guest_run, "guest"))
         for raw, status in ((host, host_status), (guest, guest_status)):
             assert raw["pawn"] == status["game"]["pawns"]["local"]["name"], raw
             raw["stock_telemetry"] = status["game"].get("native_anomaly_field")
@@ -133,15 +132,33 @@ async def verify_rook_mixed_fields(wait, note, host_run, guest_run, *, authority
         assert host["fields"] == guest["fields"], (host["fields"], guest["fields"])
         result = compare(host, guest)
         errors = authority_errors(host, guest, result) if authority else {}
-        proof = {"map": MAP, "epoch": host_status["zone_epoch"], "host": host, "guest": guest,
-                 **result, "authority_errors": errors}
-        if not any(errors.values()):
-            break
-        if readback < 4:
-            await asyncio.sleep(.35)
+        return {"map": MAP, "epoch": host_status["zone_epoch"], "host": host, "guest": guest,
+                **result, "authority_errors": errors}
+
+    proof = await census()
+    if authority:
+        arrival = proof
+        placement = None
+        try:
+            placement = await probe(host_run, "host", "near")
+            sampled, = placement
+            label, well, trap = sampled.split("\t")
+            assert label == "near" and all(1200 <= float(value) <= 5000 for value in (well, trap)), sampled
+            for attempt in range(8):
+                proof = await census()
+                if not any(proof["authority_errors"].values()):
+                    break
+                if attempt < 7:
+                    await asyncio.sleep(.35)
+        finally:
+            if placement is not None:
+                assert await probe(host_run, "host", "restore") == ["restored"]
+            proof["arrival"] = arrival if proof is not arrival else dict(arrival)
+            path.write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
+        proof["observation_distance_cm"] = [float(well), float(trap)]
     path.write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
-    assert {host["actors"][key]["kind"] for key in result["host_stock"]} == set(KINDS), path
-    assert not any(errors.values()), (errors, path)
-    note("rook_mixed_stock_anomaly_census", {"file": str(path), "fields": len(host["fields"]),
-        "host_stock": len(result["host_stock"]), "guest_local_stock": len(result["guest_local_stock"]),
-        "guest_local_kinds": result["guest_local_kinds"], "guest_replica_kinds": result["guest_replica_kinds"]})
+    assert {proof["host"]["actors"][key]["kind"] for key in proof["host_stock"]} == set(KINDS), path
+    assert not any(proof["authority_errors"].values()), (proof["authority_errors"], path)
+    note("rook_mixed_stock_anomaly_census", {"file": str(path), "fields": len(proof["host"]["fields"]),
+        "host_stock": len(proof["host_stock"]), "guest_local_stock": len(proof["guest_local_stock"]),
+        "guest_local_kinds": proof["guest_local_kinds"], "guest_replica_kinds": proof["guest_replica_kinds"]})

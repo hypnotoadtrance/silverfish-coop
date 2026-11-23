@@ -47,6 +47,8 @@ namespace
     constexpr auto observer_class = STR("/Game/Classes/Anomalies/Observers_BP.Observers_BP_C");
     constexpr auto item_class = STR("/Game/Classes/Items/Item_Master_BP.Item_Master_BP_C");
     constexpr auto crossroads_world = STR("/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P");
+    constexpr auto rook_world = STR("/Game/Classes/Maps/Dreams/TheRook_P.TheRook_P");
+    constexpr auto vortex_class = STR("/Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C");
     constexpr auto roaming_teleport_class = STR("/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C");
     constexpr auto physics_prop = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
     constexpr auto bottle_class = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Bottle_Booze01.Prop_Bottle_Booze01_C");
@@ -63,7 +65,7 @@ namespace
     constexpr std::array<std::wstring_view, 5> replicated_classes{
         STR("/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C"),
         STR("/Game/Classes/Anomalies/BurnerTrap_BP.BurnerTrap_BP_C"),
-        STR("/Game/Classes/Anomalies/VortexTrap_BP.VortexTrap_BP_C"),
+        vortex_class,
         electrode_class,
         roaming_teleport_class,
     };
@@ -444,6 +446,15 @@ namespace
         auto* entry = roster ? U::CastField<U::FClassProperty>(roster->GetInner()) : nullptr;
         if (!entry) return false;
         U::FScriptArrayHelper classes(roster, roster->ContainerPtrToValuePtr<void>(field));
+        if (classes.Num() == 2 && world && world->GetPathName() == rook_world &&
+            field->HasAnyFlags(U::RF_WasLoaded) && field->GetOuterPrivate() == object(world, STR("PersistentLevel")))
+        {
+            auto* first = entry->GetObjectPropertyValue(classes.GetRawPtr(0));
+            auto* second = entry->GetObjectPropertyValue(classes.GetRawPtr(1));
+            if (!first || !second) return false;
+            const auto a = first->GetPathName(), b = second->GetPathName();
+            return (a == gravity_class && b == vortex_class) || (a == vortex_class && b == gravity_class);
+        }
         if (classes.Num() != 1) return false;
         auto* type = entry->GetObjectPropertyValue(classes.GetRawPtr(0));
         if (trap_class(type)) return true;
@@ -661,7 +672,13 @@ namespace
         }
         else if (gravity_well || pyrogeist_body || pyrogeist_jet || shadow_sphere || angler_lamp || observing)
         {
-            if (!world || world->GetPathName() != crossroads_world) return;
+            if (!world) return;
+            const auto path = world->GetPathName();
+            if (path != crossroads_world)
+            {
+                auto* role = property<U::FByteProperty>(actor, STR("Role"));
+                if (!gravity_well || path != rook_world || !role || role->GetPropertyValueInContainer(actor) != 1) return;
+            }
         }
         else if (!canister && !fixed && !roaming && (function->GetNumParms() != 6 || !trap_class(type))) return;
         if (!guest_world(world)) return;
