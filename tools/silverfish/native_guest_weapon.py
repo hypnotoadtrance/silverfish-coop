@@ -80,20 +80,32 @@ async def service_equipment_selection(client, active: bool) -> None:
 
     proof = client.last_game.get("native_guest_equipment_selection", {})
     sequence, area, pawn, guid = (proof.get(key) for key in ("sequence", "map", "pawn", "guid"))
+    visit = client.host_session, client.zone_epoch, pawn
     if (not active or client.stopping or not client.host_session or not client.zone_epoch
-            or type(sequence) is not int or not client.last_equipment_selection < sequence < 2**53
+            or type(sequence) is not int or not 0 < sequence < 2**53
             or area != client.last_game.get("map", "") or (area, pawn) !=
                (client.expected_zone, client.last_game.get("pawns", {}).get("local", {}).get("name"))
             or not native_gold.valid_guid(guid)):
         return
-    client.last_equipment_selection = sequence
-    operation = uuid.uuid5(client.bridge.input_namespace, f"stock-equipment:{client.zone_epoch}:{sequence}").hex
+    selection = visit, sequence
+    if client.last_equipment_selection == selection:
+        return
+    retry, available = client.equipment_selection_retry
+    if retry == selection and time.monotonic() < available:
+        return
+    operation = uuid.uuid5(client.bridge.input_namespace, f"stock-equipment:{visit}:{sequence}").hex
     try:
         result = await client.gameplay_action(SELECT_EQUIPMENT, operation, f"{client.zone_epoch}@{guid}")
     except (OSError, RuntimeError, ValueError) as error:
-        client.control.event("native_guest_equipment_selection_rejected", sequence=sequence, reason=str(error))
+        reason = str(error)
+        if reason in {"native_guest_selection_unavailable", "game_connection_unavailable"}:
+            client.equipment_selection_retry = selection, time.monotonic() + .8
+            return
+        client.control.event("native_guest_equipment_selection_rejected", sequence=sequence, reason=reason)
     else:
         client.control.event("native_guest_equipment_selected", sequence=sequence, **result)
+    client.last_equipment_selection = selection
+    client.equipment_selection_retry = None, 0.0
 
 
 async def perform(host, bridge, character: str, operation_id: str, action: str, guid: str, *, seed_kind=None,
