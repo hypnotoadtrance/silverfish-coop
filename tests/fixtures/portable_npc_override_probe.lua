@@ -1075,6 +1075,12 @@ local function run(action, actor_path)
         assert(actor_path == "" or actor_path == "heavy", "unknown melee fixture item")
         spawn_stock_npc(pawn, world, "state")
         return seed_pipe(world, actor_path == "heavy" and heavy_pipe_path or pipe_path)
+    elseif action == "clear-melee-target" then
+        local actor = melee_target(world, true)
+        assert(host and valid(actor) and same(actor:GetWorld(), world) and not actor.Alive)
+        actor:K2_DestroyActor()
+        shooters.state = nil
+        return "cleared"
     elseif action == "select-pipe" then
         assert(not host, "the guest must pick their test equipment")
         return select_equipment(pawn, function(row) return guid_of(row) == actor_path end)
@@ -1085,6 +1091,7 @@ local function run(action, actor_path)
         assert(not host, "the guest must drive the test swing")
         local angle = heading(pawn.Camera:K2_GetComponentLocation(), position(actor_path))
         pawn.Controller:SetControlRotation(angle)
+        pawn.Camera:K2_SetWorldRotation(angle, false, {}, true)
         return "ready"
     elseif action == "align-melee" then
         assert(host, "the test needs the host's replica camera")

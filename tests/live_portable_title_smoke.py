@@ -889,9 +889,12 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
 
 async def verify_stock_melee_family(host: Seat, guest: Seat, _pawn: str) -> dict:
     before = campaign_save_hashes(host.campaign)
-    proof = await verify_resident_guest_melee(host, guest, heavy=True)
+    heavy_pipe = await verify_resident_guest_melee(host, guest, heavy=True)
+    assert await portable_probe_command(host.bridge, "portable-npc-override", "clear-melee-target") == "cleared"
+    old_pipe = await verify_resident_guest_melee(host, guest)
+    assert heavy_pipe["host_damage"]["stock_damage"] > old_pipe["host_damage"]["stock_damage"]
     assert campaign_save_hashes(host.campaign) == before, "A regular melee attack wrote campaign saves"
-    return {"stock_melee_family": {"heavy_pipe": proof, "campaign_unchanged": True}}
+    return {"stock_melee_family": {"heavy_pipe": heavy_pipe, "old_pipe": old_pipe, "campaign_unchanged": True}}
 
 
 async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict) -> dict:
@@ -3165,9 +3168,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableBoardOfferProbe",
                                                      fixture="portable_board_offer_probe.lua"))
-        if stock_npc_override and resident_weapon_cues:
+        if (stock_npc_override and resident_weapon_cues) or stock_melee_family:
             proof["npc_combat_overlays"] = [probes.enter_context(host_npc_combat_overlay(game)) for game in games]
-        elif stock_host_corpse_carry or stock_npc_rivalry or stock_npc_override or stock_melee_family:
+        elif stock_host_corpse_carry or stock_npc_rivalry or stock_npc_override:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                      fixture="portable_npc_override_probe.lua"))
