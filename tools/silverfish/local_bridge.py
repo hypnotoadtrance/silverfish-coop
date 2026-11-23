@@ -41,6 +41,10 @@ class LocalBridge:
         if self._stock_board_heartbeat is not None:
             self._stock_board_heartbeat.argtypes = [ctypes.c_int64]
             self._stock_board_heartbeat.restype = ctypes.c_int
+        self._host_dig_heartbeat = getattr(library, "SilverfishBridgePublishHostDigHeartbeatV1", None)
+        if self._host_dig_heartbeat is not None:
+            self._host_dig_heartbeat.argtypes = [ctypes.c_int64]
+            self._host_dig_heartbeat.restype = ctypes.c_int
         self._guest_interaction_lease = getattr(library, "SilverfishBridgePublishGuestInteractionLeaseV1", None)
         if self._guest_interaction_lease is not None:
             self._guest_interaction_lease.argtypes = [ctypes.c_int64, ctypes.c_uint32,
@@ -153,6 +157,13 @@ class LocalBridge:
         return self._stock_board_heartbeat is not None and bool(self._stock_board_heartbeat(stamp))
 
     @property
+    def host_dig_heartbeat_available(self) -> bool:
+        return self._host_dig_heartbeat is not None
+
+    def publish_host_dig_heartbeat(self, stamp: int) -> bool:
+        return self._host_dig_heartbeat is not None and bool(self._host_dig_heartbeat(stamp))
+
+    @property
     def guest_interaction_lease_available(self) -> bool:
         return self._guest_interaction_lease is not None
 
@@ -194,5 +205,6 @@ class LocalBridge:
         return records
 
     def close(self):
-        self._native_events_heartbeat = self._stock_board_heartbeat = self._guest_interaction_lease = None
+        self._native_events_heartbeat = self._stock_board_heartbeat = None
+        self._host_dig_heartbeat = self._guest_interaction_lease = None
         self._close()

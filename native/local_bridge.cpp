@@ -42,7 +42,7 @@ namespace
     std::string prop_poses;
     std::string local_avatar_pose;
     std::string remote_avatar_poses;
-    std::int64_t native_events_heartbeat{}, stock_board_heartbeat{};
+    std::int64_t native_events_heartbeat{}, stock_board_heartbeat{}, host_dig_heartbeat{};
 
     struct GuestInteractionLease
     {
@@ -185,6 +185,11 @@ namespace
         return read_heartbeat(lua, stock_board_heartbeat);
     }
 
+    int read_host_dig_heartbeat(const Lua& lua)
+    {
+        return read_heartbeat(lua, host_dig_heartbeat);
+    }
+
     int read_guest_interaction_lease(const Lua& lua)
     {
         if (lua.get_stack_size() != 2 || !lua.is_string(1) || !lua.is_string(2)) return 0;
@@ -209,9 +214,9 @@ namespace
         return 3;
     }
 
-    int publish_heartbeat(std::int64_t stamp, std::int64_t& mailbox)
+    int publish_heartbeat(std::int64_t stamp, std::int64_t& mailbox, bool accept_clear = false)
     {
-        if (stamp <= 0) return 0;
+        if (stamp < 0 || (!stamp && !accept_clear)) return 0;
         std::lock_guard lock(mutex);
         if (!attached) return 0;
         mailbox = stamp;
@@ -274,7 +279,7 @@ extern "C" __declspec(dllexport) void SilverfishBridgeCloseV1()
     prop_poses.clear();
     local_avatar_pose.clear();
     remote_avatar_poses.clear();
-    native_events_heartbeat = stock_board_heartbeat = 0;
+    native_events_heartbeat = stock_board_heartbeat = host_dig_heartbeat = 0;
     guest_interaction_lease = {};
     clear();
 }
@@ -331,6 +336,11 @@ extern "C" __declspec(dllexport) int SilverfishBridgePublishNativeEventsHeartbea
 extern "C" __declspec(dllexport) int SilverfishBridgePublishStockBoardHeartbeatV1(std::int64_t stamp)
 {
     return publish_heartbeat(stamp, stock_board_heartbeat);
+}
+
+extern "C" __declspec(dllexport) int SilverfishBridgePublishHostDigHeartbeatV1(std::int64_t stamp)
+{
+    return publish_heartbeat(stamp, host_dig_heartbeat, true);
 }
 
 extern "C" __declspec(dllexport) int SilverfishBridgePublishGuestInteractionLeaseV1(
@@ -433,6 +443,7 @@ namespace silverfish::local_bridge
         lua.register_function("SilverfishTakeRemoteAvatarPoses", take_avatar_poses);
         lua.register_function("SilverfishReadLocalNativeEventsHeartbeat", read_native_events_heartbeat);
         lua.register_function("SilverfishReadLocalStockBoardHeartbeat", read_stock_board_heartbeat);
+        lua.register_function("SilverfishReadLocalHostDigHeartbeat", read_host_dig_heartbeat);
         lua.register_function("SilverfishReadLocalGuestInteractionLease", read_guest_interaction_lease);
     }
 
@@ -447,7 +458,7 @@ namespace silverfish::local_bridge
         prop_poses.clear();
         local_avatar_pose.clear();
         remote_avatar_poses.clear();
-        native_events_heartbeat = stock_board_heartbeat = 0;
+        native_events_heartbeat = stock_board_heartbeat = host_dig_heartbeat = 0;
         guest_interaction_lease = {};
         clear();
     }

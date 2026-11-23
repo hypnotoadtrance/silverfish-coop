@@ -57,12 +57,14 @@ local role = {map = map, world = world, listening = true, server = false,
 local phase, quest_step, renews, captured = "ready", nil, 0, false
 local material, package_name, package_guid = "", "", ""
 local heartbeat, serial, fail_ack = 100, 0, false
+local file_reads = 0
 local name_registered, arm_failure = false, nil
 local handoffs = 0
 local env = setmetatable({
     os = {getenv = function() return "1" end, time = function() return 100 end},
     io = {open = function(path, mode)
         assert(path == "bridge/native-host-dig-live-heartbeat" and mode == "rb")
+        file_reads = file_reads + 1
         return {read = function() return tostring(heartbeat) end, close = function() end}
     end},
     require = function(name)
@@ -190,3 +192,21 @@ assert(handoff(character) == "stock sealed package handed off " .. owned and han
 role.server = true
 sync()
 assert(not report() and diagnosis()[4] == "listen_host_unavailable" and not pcall(command, "escrow", "4", slot))
+
+role.server, phase, serial, arm_failure = false, "ready", 0, nil
+local attached, stamp, reads, before_renew = true, 100, file_reads, renews
+env.SilverfishReadLocalHostDigHeartbeat = function() return attached, stamp end
+sync()
+assert(renews == before_renew + 1 and diagnosis()[5] == "fresh" and diagnosis()[7] == "armed")
+for _, sample in ipairs({{97, "stale"}, {101, "future_timestamp"}, {false, "invalid_timestamp"}}) do
+    stamp = sample[1]
+    sync()
+    assert(renews == before_renew + 1 and diagnosis()[5] == sample[2])
+end
+stamp = nil
+sync()
+assert(renews == before_renew + 1 and diagnosis()[5] == "missing")
+attached, stamp = false, 100
+sync()
+assert(renews == before_renew + 1 and diagnosis()[5] == "missing" and file_reads == reads)
+print("verified ordinary stock dig custody and its isolated resident lease")

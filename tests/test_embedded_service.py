@@ -89,6 +89,63 @@ class NativeEventHeartbeatTests(unittest.IsolatedAsyncioTestCase):
                         publish.assert_not_called()
 
 
+class NativeHostDigHeartbeatTests(unittest.IsolatedAsyncioTestCase):
+    stamp = 1_800_000_000
+
+    async def test_resident_host_renews_without_guests_and_revokes_on_stale_status_and_cancel(self):
+        with TemporaryDirectory() as temporary:
+            host = SimpleNamespace(stopping=False, wire_board_enabled=False, native_host_dig_live=True,
+                                   should_keep_native_scope=lambda: False)
+            process = Mock(spec=embedded.EmbeddedEngine, poll=Mock(return_value=None))
+            inbox = Mock(host_dig_heartbeat_available=True, publish_host_dig_heartbeat=Mock(return_value=True))
+            cross = {"state": "hosting", "map": service.CROSSROADS, "sequence": 1}
+            bridge = SimpleNamespace(
+                process=process, local_bridge=inbox, directory=Path(temporary),
+                snapshot=Mock(side_effect=(cross, cross, cross | {"map": OBSERVATORY, "sequence": 2},
+                                           cross | {"sequence": 3})),
+            )
+
+            async def poll(delay):
+                self.assertEqual(delay, .4)
+                self.assertEqual(list(bridge.directory.iterdir()), [])
+                if bridge.snapshot.call_count == 4:
+                    raise asyncio.CancelledError
+
+            clock = SimpleNamespace(time=lambda: self.stamp + .8, monotonic=Mock(side_effect=(20, 21.5, 22, 23)))
+            with (patch.object(service, "time", clock), patch.object(service.asyncio, "sleep", side_effect=poll)):
+                with self.assertRaises(asyncio.CancelledError):
+                    await service.Host.renew_native_scope(host, bridge)
+            self.assertEqual([call.args for call in inbox.publish_host_dig_heartbeat.call_args_list],
+                             [(self.stamp,), (0,), (self.stamp,), (0,)])
+            inbox.publish_native_events_heartbeat.assert_not_called()
+            inbox.publish_stock_board_heartbeat.assert_not_called()
+            inbox.publish_guest_interaction_lease.assert_not_called()
+
+    def test_prelistener_escrow_uses_the_same_memory_or_legacy_lease(self):
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            heartbeat = directory / service.native_host_dig_live.HEARTBEAT
+            memory = Mock(host_dig_heartbeat_available=True, publish_host_dig_heartbeat=Mock(return_value=True))
+            old = Mock(host_dig_heartbeat_available=False)
+            for inbox in (memory, old, None):
+                with self.subTest(inbox=inbox):
+                    bridge = SimpleNamespace(directory=directory, local_bridge=inbox)
+                    self.assertTrue(service._set_host_dig_heartbeat(bridge, self.stamp))
+                    if inbox is memory:
+                        self.assertFalse(heartbeat.exists())
+                    else:
+                        self.assertEqual(heartbeat.read_text(encoding="ascii"), f"{self.stamp}\n")
+                    self.assertTrue(service._set_host_dig_heartbeat(bridge, 0))
+                    self.assertFalse(heartbeat.exists())
+            self.assertEqual([call.args for call in memory.publish_host_dig_heartbeat.call_args_list],
+                             [(self.stamp,), (0,)])
+            old.publish_host_dig_heartbeat.assert_not_called()
+            memory.publish_host_dig_heartbeat.return_value = False
+            self.assertFalse(service._set_host_dig_heartbeat(
+                SimpleNamespace(directory=directory, local_bridge=memory), self.stamp))
+            self.assertFalse(heartbeat.exists())
+
+
 class GuestInteractionLeaseTests(unittest.IsolatedAsyncioTestCase):
     timestamp = 1_800_000_000
     shop_file = "native-shop-view-heartbeat"

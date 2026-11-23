@@ -238,6 +238,18 @@ async def project_players(bridge: Bridge, game: dict, public: dict, *, client: b
             await bridge.command(operation, target, expected, timeout=3)
 
 
+def _set_host_dig_heartbeat(bridge: Bridge, timestamp: int) -> bool:
+    inbox = bridge.local_bridge
+    if inbox is not None and inbox.host_dig_heartbeat_available:
+        return inbox.publish_host_dig_heartbeat(timestamp)
+    path = bridge.directory / native_host_dig_live.HEARTBEAT
+    if timestamp:
+        write_text(path, f"{timestamp}\n")
+    else:
+        path.unlink(missing_ok=True)
+    return True
+
+
 class Host:
     def __init__(self, store: CampaignStore, control: Control, game_build: str, identity,
                  bind: str, port: int, fixtures: bool, death_rules: dict | None, *,
@@ -3987,27 +3999,36 @@ class Host:
 
     async def renew_native_scope(self, bridge: Bridge) -> None:
         sequence, seen = None, 0.0
-        while not self.stopping and bridge.process.poll() is None:
-            game = bridge.snapshot()
-            now = time.monotonic()
-            if game and game.get("sequence") != sequence:
-                sequence, seen = game.get("sequence"), now
-            if game and game.get("state") == "hosting" and now - seen < 1.5:
-                timestamp = int(time.time())
-                stamp = f"{timestamp}\n"
-                if self.should_keep_native_scope():
-                    if bridge.local_bridge is not None:
-                        bridge.local_bridge.publish_native_events_heartbeat(timestamp)
-                    elif not isinstance(bridge.process, EmbeddedEngine):
+        dig_armed = False
+        try:
+            while not self.stopping and bridge.process.poll() is None:
+                game = bridge.snapshot()
+                now = time.monotonic()
+                if game and game.get("sequence") != sequence:
+                    sequence, seen = game.get("sequence"), now
+                hosting = game and game.get("state") == "hosting" and now - seen < 1.5
+                timestamp = int(time.time()) if hosting else 0
+                if hosting:
+                    if self.should_keep_native_scope():
+                        if bridge.local_bridge is not None:
+                            bridge.local_bridge.publish_native_events_heartbeat(timestamp)
+                        elif not isinstance(bridge.process, EmbeddedEngine):
+                            with contextlib.suppress(OSError):
+                                write_text(bridge.directory / "native-events-heartbeat", f"{timestamp}\n")
+                    if self.wire_board_enabled and game.get("map") in self.allowed_maps - PLAYTEST_MAPS:
                         with contextlib.suppress(OSError):
-                            write_text(bridge.directory / "native-events-heartbeat", stamp)
-                if self.wire_board_enabled and game.get("map") in self.allowed_maps - PLAYTEST_MAPS:
+                            native_wire_board.renew(bridge, game["map"], timestamp)
+                # The host can use the stock shovel before any guest binds their separate save.
+                dig_eligible = hosting and self.native_host_dig_live and game.get("map") == CROSSROADS
+                if dig_eligible or dig_armed:
                     with contextlib.suppress(OSError):
-                        native_wire_board.renew(bridge, game["map"], timestamp)
-                if self.native_host_dig_live and game.get("map") == CROSSROADS:
-                    with contextlib.suppress(OSError):
-                        write_text(bridge.directory / native_host_dig_live.HEARTBEAT, stamp)
-            await asyncio.sleep(.4)
+                        applied = _set_host_dig_heartbeat(bridge, timestamp if dig_eligible else 0)
+                        dig_armed = bool(dig_eligible and applied)
+                await asyncio.sleep(.4)
+        finally:
+            if dig_armed:
+                with contextlib.suppress(OSError):
+                    _set_host_dig_heartbeat(bridge, 0)
 
     async def run(self, bridge: Bridge, transport) -> None:
         self.relay = transport
@@ -4798,7 +4819,8 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
             elif matrix:
                 await matrix_service.resume(controller, bridge, None, recovery=True)
             if host_dig_live and controller.last_game.get("map") == CROSSROADS and native_host_dig_live.escrow_frames(controller.party):
-                write_text(bridge.directory / native_host_dig_live.HEARTBEAT, f"{int(time.time())}\n")
+                if not _set_host_dig_heartbeat(bridge, int(time.time())):
+                    raise RuntimeError("The local stock dig lease could not start for escrow recovery")
                 controller.last_game = await bridge.wait_for(
                     lambda game: game.get(native_host_dig_live.KEY, {}).get("state") == "ready", timeout=5)
                 controller.last_seen = time.monotonic()

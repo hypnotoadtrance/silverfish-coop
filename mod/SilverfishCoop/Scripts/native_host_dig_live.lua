@@ -30,6 +30,7 @@ for _, name in ipairs({"Dirt", "Debris", "Grass", "MossyDirt", "Mud", "Sand"}) d
 end
 
 local heartbeat, observed, captured, diagnostic
+local memory_heartbeat_seen = false
 
 local function valid(object) return object and object:IsValid() end
 local function same(first, second)
@@ -67,10 +68,20 @@ end
 
 local function fresh()
     if not heartbeat then return false, "not_started" end
-    local file = io.open(heartbeat, "rb")
-    if not file then return false, "missing" end
-    local stamp = math.tointeger(tonumber(file:read("*l")))
-    file:close()
+    local active, stamp
+    if type(SilverfishReadLocalHostDigHeartbeat) == "function" then
+        active, stamp = SilverfishReadLocalHostDigHeartbeat()
+    end
+    if active then
+        memory_heartbeat_seen = true
+        if stamp == nil then return false, "missing" end
+    else
+        if memory_heartbeat_seen then return false, "missing" end
+        local file = io.open(heartbeat, "rb")
+        if not file then return false, "missing" end
+        stamp = math.tointeger(tonumber(file:read("*l")))
+        file:close()
+    end
     if not stamp then return false, "invalid_timestamp" end
     local now = os.time()
     if stamp > now then return false, "future_timestamp" end
