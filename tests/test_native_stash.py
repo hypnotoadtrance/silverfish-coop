@@ -176,6 +176,49 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "stash split"):
             native_stash.parse_view(fields + ["7", "7"], OBSERVATORY, "connected")
 
+    async def test_split_merge_receipt_keeps_the_existing_destination_and_is_idempotent(self):
+        state = party.new_party()
+        party.add_player(state, "host")
+        party.add_player(state, GUEST)
+        source, destination = "D" * 32, "E" * 32
+        operation = uuid.uuid4().hex
+        target = f"{SITE}|split-withdraw|{source}|3|7"
+        game = {"state": "hosting", "map": OBSERVATORY, native_stash.SETTING: True,
+                native_stash.SITES: {SITE: {"map": OBSERVATORY}}, native_stash.LIVE_MOVE: True,
+                native_stash.LIVE_SPLIT: True, native_stash.LIVE_SPLIT_MERGE: True, "native_guest_save_retention": True}
+        host = SimpleNamespace(last_game=game, zone_epoch="zone", native_zones=True, native_profile=Mock(),
+                               stopping=False, transitioning=False, native_checkpoint_unsafe=False,
+                               party=state, smg_holds=None,
+                               native_recipients=lambda: {GUEST: {"pawn": "guest-pawn", "connected": True}},
+                               pending_guest_saves={GUEST: ("guest-pawn", {})}, checkpoint_native=AsyncMock(),
+                               control=Mock())
+        merge = dict(guid=destination, before=8, after=11)
+        bridge = SimpleNamespace(command=AsyncMock(return_value={**game, native_stash.MOVED: dict(
+            map=OBSERVATORY, pawn="guest-pawn", slot="-", site=SITE, guid=source, direction="split-withdraw",
+            combined=True, class_path="/Game/Classes/Items/Test.Test_C", quantity=3, remaining=4, stack_merge=merge)}))
+        response = await native_stash.move(host, bridge, GUEST, target, operation)
+        receipt = response[native_stash.MOVED]
+        self.assertEqual((receipt["guid"], receipt["remaining"], receipt["stack_merge"]), (source, 4, merge))
+        self.assertNotIn("created_guid", receipt)
+        self.assertEqual(await native_stash.move(host, bridge, GUEST, target, operation), response)
+        bridge.command.assert_awaited_once()
+        host.checkpoint_native.assert_not_awaited()
+        self.assertFalse(host.native_checkpoint_unsafe)
+
+        status = runtime.Bridge(Path("unused"), None)
+        base = (f"schema\t1\nseq\t1\nsession\thost\thosting\t{OBSERVATORY}\t1\t0\n"
+                "native-stash-live-move\t1\nnative-stash-live-split\t1\n")
+        capability = "native-stash-live-split-merge\t1\n"
+        row = (f"native-stash-move\t{OBSERVATORY}\tguest-pawn\t-\t{SITE}\t{source}\tsplit-withdraw"
+               "\t1\t/Game/Classes/Items/Test.Test_C\t3\t4")
+        after = f"\t{destination}\t8\t11\n"
+        self.assertIsNone(status._parse_status(base + row + after))
+        self.assertEqual(status._parse_status(base + capability + row + after)[native_stash.MOVED]["stack_merge"], merge)
+        for invalid in ((source, 8, 11), (destination, 0, 3), (destination, 8, 12),
+                        (destination, 2**31 - 3, 2**31)):
+            invalid_row = "\t" + "\t".join(map(str, invalid)) + "\n"
+            self.assertIsNone(status._parse_status(base + capability + row + invalid_row))
+
     async def test_reorder_requires_live_retention_and_returns_exact_anchor(self):
         state = party.new_party()
         party.add_player(state, "host")

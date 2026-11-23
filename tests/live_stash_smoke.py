@@ -4,6 +4,7 @@ import argparse
 import asyncio
 from hashlib import sha256
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -20,7 +21,7 @@ from tools.silverfish.travel import CROSSROADS, DEAD_BRIDGE, OBSERVATORY
 
 
 async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, drag: bool = False, reorder: bool = False,
-                 split_stack: bool = False):
+                 split_stack: bool = False, split_stack_merge: bool = False):
     name = "stash-screen-" + uuid.uuid4().hex[:8]
     run = work / "campaigns" / name / "run"
     guest_run = work / "clients" / name / "run"
@@ -130,13 +131,16 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
         result = await ask(guest_run, native_stash.MOVE, target=target, operation_id=receipt["operation_id"])
         return result[native_stash.MOVED]
 
-    async def stack_quantities(site=None):
+    async def stack_rows(site=None):
         if site:
             page = (await ask(guest_run, native_stash.LIST, target=f"{site}|0"))[native_stash.RESULT]
         else:
             page = (await ask(guest_run, "native-inventory-list"))["native_inventory"]
         assert not page.get("next_offset"), page
-        return {row["guid"]: row["quantity"] for row in page["items"] if row.get("stackable")}
+        return {row["guid"]: row for row in page["items"] if row.get("stackable")}
+
+    async def stack_quantities(site=None):
+        return {guid: row["quantity"] for guid, row in (await stack_rows(site)).items()}
 
     try:
         host = await launch("host", run, *host_args, "--port", "0", "--start-zone", DEAD_BRIDGE)
@@ -150,28 +154,55 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
 
         await ask(run, "native-stash-setting-fixture", target="0")
         await approach("guest", first)
-        if split_stack:
+        if split_stack or split_stack_merge:
             assert state["game"].get(native_stash.LIVE_SPLIT) is True
             source = uuid.uuid4().hex.upper()
             await ask(run, "native-guest-weapon-seed-ammo", target="guest", item_guid=source)
-            source_amount = (await stack_quantities())[source]
-            assert source_amount > 3
+            spare = None
+            if split_stack_merge:
+                assert state["game"].get(native_stash.LIVE_SPLIT_MERGE) is True
+                spare = uuid.uuid4().hex.upper()
+                await ask(run, "native-guest-weapon-seed-ammo", target="guest", item_guid=spare)
+            seeded = await stack_quantities()
+            source_amount = seeded[source]
+            assert source_amount > (5 if spare else 3)
             original = save_hashes()
             deposited = await move_by_screen(first, source, "backpack", "deposit", split=3)
             first_portion = deposited["created_guid"]
             assert deposited["remaining"] == source_amount - 3 and deposited["quantity"] == 3
             assert (await stack_quantities())[source] == source_amount - 3
             assert await stack_quantities(first) == {first_portion: 3}
-            await approach("guest", second)
-            await move_by_screen(second, source, "backpack", "deposit")
-            assert await stack_quantities(second) == {source: source_amount - 3}
-            await approach("guest", first)
-            withdrawn = await move_by_screen(first, first_portion, "stash", "withdraw", split=1)
-            second_portion = withdrawn["created_guid"]
-            assert len({source, first_portion, second_portion}) == 3
-            assert (withdrawn["remaining"], withdrawn["quantity"]) == (2, 1)
-            assert await stack_quantities(first) == {first_portion: 2}
-            assert (await stack_quantities())[second_portion] == 1
+            if spare:
+                await move_by_screen(first, spare, "backpack", "deposit")
+                prior = await stack_rows(first)
+                assert list(prior) == [first_portion, spare]
+                merged_in = await move_by_screen(first, source, "backpack", "deposit", split=2)
+                assert merged_in["stack_merge"] == {"guid": first_portion, "before": 3, "after": 5}
+                assert "created_guid" not in merged_in and merged_in["remaining"] == source_amount - 5
+                after = await stack_rows(first)
+                assert list(after) == list(prior) and after[spare] == prior[spare]
+                assert (after[first_portion]["quantity"], after[first_portion]["ammo"]) == (5, 5)
+                assert after[first_portion]["value"] * 3 == prior[first_portion]["value"] * 5
+                assert math.isclose(after[first_portion]["weight"] * 3, prior[first_portion]["weight"] * 5, abs_tol=1e-9)
+                withdrawn = await move_by_screen(first, first_portion, "stash", "withdraw", split=1)
+                assert withdrawn["stack_merge"] == {"guid": source, "before": source_amount - 5,
+                                                    "after": source_amount - 4}
+                assert "created_guid" not in withdrawn and withdrawn["remaining"] == 4
+                expected_first, expected_second = {first_portion: 4, spare: seeded[spare]}, {}
+                backpack_guid, backpack_amount = source, source_amount - 4
+                evidence["split_merge_deposit"] = merged_in
+            else:
+                await approach("guest", second)
+                await move_by_screen(second, source, "backpack", "deposit")
+                assert await stack_quantities(second) == {source: source_amount - 3}
+                await approach("guest", first)
+                withdrawn = await move_by_screen(first, first_portion, "stash", "withdraw", split=1)
+                backpack_guid, backpack_amount = withdrawn["created_guid"], 1
+                assert len({source, first_portion, backpack_guid}) == 3
+                assert (withdrawn["remaining"], withdrawn["quantity"]) == (2, 1)
+                expected_first, expected_second = {first_portion: 2}, {source: source_amount - 3}
+            assert await stack_quantities(first) == expected_first
+            assert (await stack_quantities())[backpack_guid] == backpack_amount
             await approach("host", first)
             assert await stash_items(run, first) == []
             assert save_hashes() == original, "Partial stash transfers wrote an early save"
@@ -182,10 +213,11 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
             await wait(run, lambda status: status.get("state") == "hosting" and status["generation"] != state["generation"])
             await join(await ask(run, "refresh-invite", target=invite["guest_id"]), "guest-restart")
             await approach("guest", first)
-            assert await stack_quantities(first) == {first_portion: 2}
-            assert (await stack_quantities())[second_portion] == 1
+            restored = await stack_quantities(first)
+            assert restored == expected_first and list(restored) == list(expected_first)
+            assert (await stack_quantities())[backpack_guid] == backpack_amount
             await approach("guest", second)
-            assert await stack_quantities(second) == {source: source_amount - 3}
+            assert await stack_quantities(second) == expected_second
             evidence.update(split_deposit=deposited, split_withdraw=withdrawn, seed_amount=source_amount,
                             stock_split_cancel=True, no_save_on_stash_interaction=True, verified=True)
             return
@@ -297,7 +329,8 @@ if __name__ == "__main__":
     feature = parser.add_mutually_exclusive_group()
     feature.add_argument("--reorder", action="store_true", help="verify the stock same-panel drag order of two weapons")
     feature.add_argument("--split-stack", action="store_true", help="verify stock partial deposit, withdrawal, and cancel")
+    feature.add_argument("--split-stack-merge", action="store_true", help="verify both stock partial directions into existing stacks")
     options = parser.parse_args()
     asyncio.run(verify(options.work.resolve(strict=True), options.vanilla_saved.resolve(strict=True),
                        same_map=options.same_map or options.reorder, drag=options.drag, reorder=options.reorder,
-                       split_stack=options.split_stack))
+                       split_stack=options.split_stack, split_stack_merge=options.split_stack_merge))
