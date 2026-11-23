@@ -88,10 +88,23 @@ local function item_identity(row)
         guid.C & 0xffffffff, guid.D & 0xffffffff)
 end
 
-local function trace_event(event, argument)
+local function trace_event(event, argument, caller, instance_call)
     if not trace_rows or not valid(trace_pawn) or not trace_pawn:IsLocallyControlled()
-        or trace_pawn:HasAuthority() or not same(trace_pawn:GetWorld().OwningGameInstance, trace_instance) then return end
-    local save, equipment, torch = trace_pawn.Save, trace_pawn.EquipedItem, trace_pawn.OffhandEquipment
+        or trace_pawn:HasAuthority() then return end
+    local world = trace_pawn:GetWorld()
+    if not valid(world) or not same(world.OwningGameInstance, trace_instance) then return end
+    local pawn, seat = trace_pawn, "fixture"
+    if instance_call then
+        if not same(caller, trace_instance) then return end
+        seat = "game_instance"
+    elseif caller then
+        if not valid(caller) or not same(caller:GetClass(), trace_pawn:GetClass())
+            or not same(caller:GetWorld(), world) then return end
+        pawn = caller
+        seat = same(caller, trace_pawn) and "local" or "replica"
+    end
+    local save, local_save = pawn.Save, trace_pawn.Save
+    local equipment, torch = pawn.EquipedItem, pawn.OffhandEquipment
     local slots = valid(save) and save.PlayerEquipment
     local offhand_slot = slots and slots:GetArrayNum() >= 5 and slots[5]
     local gear_slot = slots and slots:GetArrayNum() >= 2 and slots[2]
@@ -109,9 +122,11 @@ local function trace_event(event, argument)
         if ok then two_handed = tagged else two_handed = "unavailable" end
     end
     if #trace_rows >= 80 then table.remove(trace_rows, 1) end
-    trace_rows[#trace_rows + 1] = table.concat({event, os.clock(), tostring(argument), named(save),
+    trace_rows[#trace_rows + 1] = table.concat({event, os.clock(), tostring(argument), seat, named(pawn),
+        tostring(pawn:GetLocalRole()), named(save), tostring(same(save, local_save)),
+        tostring(valid(local_save) and local_save.PlayerOffhandingFlashlight),
         tostring(same(save, trace_instance.SaveSlot_Ref)), tostring(valid(save) and save.PlayerOffhandingFlashlight),
-        tostring(trace_pawn.ForceOffhandLower), tostring(valid(save) and save.PlayerEquipIndex), hand_class, item_type,
+        tostring(pawn.ForceOffhandLower), tostring(valid(save) and save.PlayerEquipIndex), hand_class, item_type,
         tostring(two_handed), named(equipment), named(torch), gear_slot and named(gear_slot[item_class]) or "-",
         gear_slot and item_identity(gear_slot) or "-", offhand_slot and named(offhand_slot[item_class]) or "-",
         offhand_slot and item_identity(offhand_slot) or "-"}, "\t")
@@ -120,29 +135,28 @@ end
 local function start_offhand_trace(pawn, instance)
     assert(not trace_rows, "flashlight_probe_trace_already_started")
     trace_pawn, trace_instance, trace_hooks, trace_rows = pawn, instance, {}, {}
-    local function observe(path, object, names)
+    local function observe(path, names, instance_call)
         for name, arg in pairs(names) do
             -- UE4SS runs script UFunction hooks after their Blueprint body.
             local ok, handle = pcall(RegisterHook, path .. ":" .. name, function(context, parameter)
+                if not trace_rows then return end
                 local read_ok, detail = pcall(function()
-                    if same(context:get(), object) then
-                        local value = "-"
-                        if arg then value = parameter:get() end
-                        trace_event(name, value)
-                    end
+                    local value = "-"
+                    if arg then value = parameter:get() end
+                    trace_event(name, value, context:get(), instance_call)
                 end)
                 if not read_ok then trace_hooks[name] = "callback error: " .. tostring(detail):gsub("[%c]", " ") end
             end)
             trace_hooks[name] = ok and "registered" or tostring(handle):gsub("[%c]", " ")
         end
     end
-    observe("/Game/Classes/Player/Player_FP.Player_FP_C", pawn, {
+    observe("/Game/Classes/Player/Player_FP.Player_FP_C", {
         OffhandFlashlight = true, LowerOffhand = true, Equip_NextItem = true,
         CanOffhandFlashlight = true, ReEquipFlashlight = false, PassivesUpdate = false,
     })
-    observe("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C", instance, {
+    observe("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C", {
         Compile_PassiveEffects = false, Calc_CarryWeight = false,
-    })
+    }, true)
     trace_event("fixture_trace_started", "-")
     return tostring(os.clock())
 end

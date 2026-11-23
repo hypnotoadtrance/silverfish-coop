@@ -357,55 +357,65 @@ async def observe_guest_offhand_flashlight(host_run, guest_run):
             item["host_receipt"] = status(host_run).get("game", {}).get(view_key, {}).get(player)
             proof.setdefault("stock_turn_diagnostics", []).append(item)
             record()
+            return item
 
-        async def aligned_source(receipt, since, table):
-            assert receipt["epoch"] == epoch, table
+        def aligned_source(receipt, since, turn):
+            if (receipt is None or (receipt.get("epoch"), receipt.get("profile"), receipt.get("power"),
+                                    receipt.get("visible")) != (epoch, "offhand", True, True)):
+                return None
             identity = [receipt["instance"], receipt["switch"], True, "offhand"]
-            deadline = clock() + 4
-            while clock() < deadline:
-                candidates = [(seq, source) for stamp, seq, source in source_frames if stamp >= since
-                              and source["sample"][:4] == identity]
-                for seq, source in reversed(candidates):
-                    difference = max(abs(math.remainder(a - b, 360))
-                                     for a, b in zip(source["sample"][4:], receipt["aim"], strict=True))
-                    if difference <= 2:
-                        table["guest_source_sequence"] = seq
-                        table["guest_source_aim_error_degrees"] = difference
-                        return source
-                await asyncio.sleep(.1)
-            table["guest_source_candidates"] = [
-                {"sequence": seq, "source": source} for stamp, seq, source in source_frames if stamp >= since
-            ][-8:]
-            raise AssertionError(f"No scoped guest offhand source aligned with the host receipt in {proof_path}")
+            if turn is not None and identity != turn["identity"]:
+                return None
+            for stamp, seq, source in reversed(source_frames):
+                sample = source["sample"]
+                if stamp < since or sample[:4] != identity:
+                    continue
+                if turn is not None and (seq <= turn["sequence"] or math.hypot(*(
+                        math.remainder(a - b, 360)
+                        for a, b in zip(sample[4:], turn["aim"], strict=True))) <= 4):
+                    continue
+                difference = max(abs(math.remainder(a - b, 360))
+                                 for a, b in zip(sample[4:], receipt["aim"], strict=True))
+                if difference <= 2:
+                    return seq, source, difference
+            return None
 
-        async def phase(name, owner, *, since=None, after_aim=None):
+        async def phase(name, owner, *, since=None, turn=None):
             table = proof["phases"][name] = {"owner": owner}
             record()
-            if owner["offhand"]:
-                await wait(host_run, lambda frame: (
-                    (view := frame.get("game", {}).get(view_key, {}).get(player, {})).get("profile") == "offhand"
-                    and view.get("visible") is True and (after_aim is None or math.dist(view["aim"], after_aim) > 4)
-                ), timeout=9)
-            else:
-                await wait(host_run, lambda frame: player not in frame.get("game", {}).get(view_key, {}), timeout=8)
-            async with asyncio.timeout(6):
-                while True:
-                    prior = status(host_run)["game"].get(view_key, {}).get(player)
-                    values = await avatar_probe(host_run, f"observe{player}")
-                    local = status(host_run)["game"]
-                    receipt = local.get(view_key, {}).get(player)
-                    beam = offhand_beam(values[values.index("beam")+1:])
-                    table["host"] = census = flashlight_observer(values[:7])
-                    table["beam"], table["receipt"] = beam, receipt
-                    record()
-                    if not owner["offhand"]:
-                        break
-                    if (beam and receipt and receipt == prior and receipt.get("visible") is True
-                            and (after_aim is None or math.dist(receipt["aim"], after_aim) > 4)
-                            and all(abs(math.remainder(a - b, 360)) <= 5 for a, b in zip(
-                                receipt["aim"], beam["pawn_relative"]["rotation"], strict=True))):
-                        break
-                    await asyncio.sleep(.15)
+            try:
+                async with asyncio.timeout(9 if owner["offhand"] else 8):
+                    while True:
+                        prior = status(host_run).get("game", {}).get(view_key, {}).get(player)
+                        aligned = aligned_source(prior, since, turn) if owner["offhand"] else None
+                        if (owner["offhand"] and not aligned) or (not owner["offhand"] and prior is not None):
+                            await asyncio.sleep(.10)
+                            continue
+                        values = await avatar_probe(host_run, f"observe{player}")
+                        local = status(host_run)["game"]
+                        receipt = local.get(view_key, {}).get(player)
+                        beam = offhand_beam(values[values.index("beam")+1:])
+                        table["host"] = census = flashlight_observer(values[:7])
+                        table["beam"], table["receipt"] = beam, receipt
+                        record()
+                        if not owner["offhand"] and receipt is None and beam is None:
+                            break
+                        if (aligned and beam and receipt == prior
+                                and all(abs(math.remainder(a - b, 360)) <= 5 for a, b in zip(
+                                    receipt["aim"], beam["pawn_relative"]["rotation"], strict=True))):
+                            (table["guest_source_sequence"], table["guest_source"],
+                             table["guest_source_aim_error_degrees"]) = aligned
+                            break
+                        await asyncio.sleep(.15)
+            except TimeoutError:
+                table["last_host_receipt"] = status(host_run).get("game", {}).get(view_key, {}).get(player)
+                if since is not None:
+                    table["guest_source_candidates"] = [
+                        {"sequence": seq, "source": source}
+                        for stamp, seq, source in source_frames if stamp >= since
+                    ][-8:]
+                record()
+                raise AssertionError(f"No aligned stock guest source and observer readback for {name} in {proof_path}") from None
             table["host_primary_meshes"] = local["native_player_avatars"][authority_pawn]["weapon_meshes"]
             guest_status = guest_frame() or {}
             table["guest_source_at_observer_read"] = guest_status.get(source_key)
@@ -419,7 +429,6 @@ async def observe_guest_offhand_flashlight(host_run, guest_run):
             if owner["offhand"]:
                 assert owner["light"]["powered"] and owner["light"]["visible"] and owner["replicates"] is False, table
                 verify_offhand_beam(beam, receipt, table)
-                table["guest_source"] = await aligned_source(receipt, since, table)
             else:
                 assert beam is None and receipt is None, table
                 await wait(guest_run, lambda _: (game := guest_frame()) is not None and source_key not in game, timeout=6)
@@ -429,16 +438,18 @@ async def observe_guest_offhand_flashlight(host_run, guest_run):
         baseline = await phase("primary_only", seeded)
         equipped_at = clock()
         await hold_c("equip", True)
-        active = await phase("offhand_started", offhand_owner(await avatar_probe(guest_run, "readoffhand")), since=equipped_at)
-        turned_at = clock()
-        await diagnose_turn("before_turn", turned_at)
+        await phase("offhand_started", offhand_owner(await avatar_probe(guest_run, "readoffhand")), since=equipped_at)
+        before = await diagnose_turn("before_turn", clock())
+        assert before.get("first_rejected_check", "-") is None and before.get("guest_source"), before
+        turn = {"sequence": before["guest_source_sequence"], "identity": before["guest_source"]["sample"][:4],
+                "aim": [float(before["stock_values"][f"aim_{axis}_raw"]) for axis in ("pitch", "yaw", "roll")]}
         turned_at = clock()
         later = offhand_owner(await avatar_probe(guest_run, "turnoffhand"))
         for delay in (.20, .65):
             await asyncio.sleep(max(0., turned_at + delay - clock()))
             await diagnose_turn("after_turn", turned_at)
         try:
-            await phase("offhand_turned", later, since=turned_at, after_aim=active["receipt"]["aim"])
+            await phase("offhand_turned", later, since=turned_at, turn=turn)
         except (RuntimeError, AssertionError):
             await diagnose_turn("after_observer_failure", turned_at)
             raise
@@ -459,7 +470,8 @@ async def observe_guest_offhand_flashlight(host_run, guest_run):
             try:
                 async with asyncio.timeout(5):
                     count, *values = await avatar_probe(guest_run, "traceoffhandstop")
-                columns = ("event", "lua_time", "argument", "save", "bound_save", "offhand", "force_lower",
+                columns = ("event", "lua_time", "argument", "seat", "pawn", "pawn_role", "save", "shares_local_save",
+                           "local_offhand", "bound_save", "offhand", "force_lower",
                            "equip_index", "held_class", "held_type", "two_handed", "held_actor", "offhand_actor",
                            "pistol_slot_class", "pistol_slot_guid", "torch_slot_class", "torch_slot_guid")
                 end = int(count) * len(columns)
