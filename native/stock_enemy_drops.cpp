@@ -41,6 +41,10 @@ namespace
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto pawn_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C");
     constexpr auto actor_path = STR("/Script/Engine.Actor");
+    constexpr auto prop_path = STR("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C");
+    constexpr auto hole_path = STR("/Game/Assets/StaticMeshes/Mesh_Misc/DigHole_BP.DigHole_BP_C");
+    constexpr auto hole_graph = STR("/Game/Assets/StaticMeshes/Mesh_Misc/DigHole_BP.DigHole_BP_C:ExecuteUbergraph_DigHole_BP");
+    constexpr auto hole_begin = STR("/Game/Assets/StaticMeshes/Mesh_Misc/DigHole_BP.DigHole_BP_C:ReceiveBeginPlay");
     constexpr std::size_t max_roll = 48;
     constexpr std::size_t max_recent_drops = 128;
     constexpr auto max_sequence = (std::uint64_t{1} << 53) - 1;
@@ -60,6 +64,7 @@ namespace
         U::FWeakObjectPtr actor;
         std::uint64_t sequence{}, roll{};
         std::string npc, killer, actor_name, class_path;
+        bool physics_prop{};
     };
 
     Observation observing;
@@ -142,11 +147,40 @@ namespace
         return true;
     }
 
-    void record_drop(U::UObject* actor, const std::string& source, const std::string& killer)
+    void record_drop(U::UObject* actor, const std::string& source, const std::string& killer, bool physics_prop = false)
     {
         if (recent.size() == max_recent_drops) recent.pop_front();
         recent.push_back({actor, ++sequence, roll, source, killer, RC::to_utf8_string(actor->GetFullName()),
-            RC::to_utf8_string(actor->GetClassPrivate()->GetPathName())});
+            RC::to_utf8_string(actor->GetClassPrivate()->GetPathName()), physics_prop});
+    }
+
+    void record_unearthed(U::UObject* receiver, U::FFrame& frame)
+    {
+        auto* hole = find<U::UClass>(hole_path);
+        auto* function = frame.Node();
+        auto* caller = frame.PreviousFrame();
+        if (!hole || !live(receiver) || receiver->GetClassPrivate() != hole || frame.Object() != receiver ||
+            function != find<U::UFunction>(hole_graph) || !caller || caller->Object() != receiver ||
+            caller->Node() != find<U::UFunction>(hole_begin) || !frame.Locals()) return;
+
+        auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
+        if (!listen_instance(world) || !authority_in_level(static_cast<U::AActor*>(receiver), world)) return;
+
+        // Read the exact actor that survived the stock weighted roll and FinishSpawningActor.
+        const auto spawn_local = [&](const U::TCHAR* name) -> U::UObject* {
+            auto* local = field<U::FObjectProperty>(function, name);
+            if (!local || local->HasAnyPropertyFlags(U::CPF_Parm | U::CPF_OutParm | U::CPF_ReturnParm)) return nullptr;
+            return local->GetObjectPropertyValue(local->ContainerPtrToValuePtr<void>(frame.Locals()));
+        };
+        auto* actor = spawn_local(STR("CallFunc_FinishSpawningActor_ReturnValue"));
+        if (!live(actor) || actor != spawn_local(STR("CallFunc_BeginDeferredActorSpawnFromClass_ReturnValue")) ||
+            actor->HasAnyFlags(U::RF_WasLoaded)) return;
+        auto* prop = find<U::UClass>(prop_path);
+        const bool physics_prop = prop && actor->IsA(prop);
+        if (physics_prop ? !authority_in_level(static_cast<U::AActor*>(actor), world) : !item_in_world(actor, world)) return;
+        if (reported_world.Get() == world &&
+            std::ranges::any_of(recent, [actor](const auto& row) { return row.actor.Get() == actor; })) return;
+        if (begin_roll(world)) record_drop(actor, RC::to_utf8_string(receiver->GetFullName()), {}, physics_prop);
     }
 
     void collect(U::UObject* value)
@@ -230,7 +264,11 @@ namespace
 
     void after_spawn(Iteration& call, U::UObject* receiver, U::FFrame& frame, void*)
     {
-        if (!available() || !observing.frame) return;
+        if (!available()) return;
+        static const U::FName dig_graph{STR("ExecuteUbergraph_DigHole_BP")};
+        if (frame.Node() && frame.Node()->GetFName() == dig_graph && !call.OriginalFunctionCallPrevented())
+            record_unearthed(receiver, frame);
+        if (!observing.frame) return;
         if (&frame != observing.frame)
         {
             static const U::FName passive_name{STR("FindPassiveEffect")};
@@ -278,7 +316,7 @@ namespace
         }
     }
 
-    int read(const Lua& lua)
+    int read_drop(const Lua& lua, bool physics_prop)
     {
         if (!available() || lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2)) return 0;
         const auto host = static_cast<Address>(lua.get_integer());
@@ -289,7 +327,16 @@ namespace
         if (!host || address(pawn) != host || !authority_in_level(static_cast<U::AActor*>(pawn), world)) return 0;
         for (const auto& drop : recent)
         {
-            if (drop.sequence <= last) continue;
+            if (drop.sequence <= last || drop.physics_prop != physics_prop) continue;
+            if (physics_prop)
+            {
+                auto* actor = static_cast<U::AActor*>(drop.actor.Get());
+                if (!authority_in_level(actor, world)) continue;
+                lua.set_integer(static_cast<std::int64_t>(drop.sequence));
+                lua.set_string(drop.actor_name);
+                lua.set_string(drop.class_path);
+                return 3;
+            }
             lua.set_integer(static_cast<std::int64_t>(drop.sequence));
             lua.set_integer(static_cast<std::int64_t>(drop.roll));
             lua.set_string(drop.npc);
@@ -301,6 +348,9 @@ namespace
         }
         return 0;
     }
+
+    int read(const Lua& lua) { return read_drop(lua, false); }
+    int read_dig_prop(const Lua& lua) { return read_drop(lua, true); }
 }
 
 namespace silverfish::stock_enemy_drops
@@ -328,7 +378,7 @@ namespace silverfish::stock_enemy_drops
         if (address(pawn) != host ||
             !shared_loot::qualify_stock_drop_capture(world, host, address(stock), context)) return false;
         const auto found = std::ranges::find_if(recent, [requested](const auto& row) { return row.sequence == requested; });
-        if (found == recent.end()) return false;
+        if (found == recent.end() || found->physics_prop) return false;
         auto* candidate = found->actor.Get();
         if (address(candidate) != actor || !item_in_world(candidate, world)) return false;
         drop = candidate;
@@ -363,6 +413,8 @@ namespace silverfish::stock_enemy_drops
 
     void register_lua(Lua& lua)
     {
-        if (enabled()) lua.register_function("SilverfishReadStockEnemyDrop", read);
+        if (!enabled()) return;
+        lua.register_function("SilverfishReadStockEnemyDrop", read);
+        lua.register_function("SilverfishReadStockDigProp", read_dig_prop);
     }
 }
