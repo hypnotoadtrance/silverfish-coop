@@ -519,6 +519,8 @@ namespace
         if constexpr (Reorder)
         {
             if (item.stackable) return result(lua, false, "native_stash_move_reorder_stackable");
+            const auto row_size = storage.contents->GetInner()->GetElementSize();
+            if (row_size <= 0) return result(lua, false, "native_stash_move_reorder_unqualified");
             Unreal::FScriptArrayHelper rows(storage.contents,
                 storage.contents->ContainerPtrToValuePtr<void>(stashes.GetRawPtr(selected)));
             int destination = rows.Num() - 1;
@@ -533,7 +535,10 @@ namespace
             for (int current = stash_index; current != destination;)
             {
                 const int next = current + (current < destination ? 1 : -1);
-                rows.SwapValues(current, next);
+                // Swap complete reflected rows using the same spacing as FScriptArrayHelper.
+                // Its SwapValues implementation calls a memory routine absent from the pinned import library.
+                auto* row = rows.GetRawPtr(current);
+                std::swap_ranges(row, row + row_size, rows.GetRawPtr(next));
                 current = next;
             }
             if (inventory.identity(rows.GetRawPtr(destination)) != id)
