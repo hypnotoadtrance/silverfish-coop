@@ -17,13 +17,16 @@ local assets = {
         "/Game/Assets/Sounds/SoundClasses/Blast_Attenuation.Blast_Attenuation"},
     wandering = {"/Game/Assets/PFX/NI_Singularity_01.NI_Singularity_01",
         "/Game/Assets/Sounds/CUEs/Blast_Cues/Teleport_Cue.Teleport_Cue"},
+    bottle = {"/Game/Assets/PFX/NI_BrokenBottle_WtLiquid.NI_BrokenBottle_WtLiquid",
+        "/Game/Assets/Sounds/CUEs/BulletHit_Cues/Impact_Glass_Liquid_Cue.Impact_Glass_Liquid_Cue",
+        "/Game/Assets/Sounds/SoundClasses/Default_Attenuation.Default_Attenuation"},
 }
 assets.fueldrum = assets.blast
 assets.fixedtank = assets.blast
 assets.powerbox = {assets.electrode[1], assets.electrode[2], assets.blast[3]}
 assets.fixedfire = {assets.blast[1], "/Game/Assets/Sounds/MetaSounds/MS_Blast_Firey.MS_Blast_Firey", assets.blast[3]}
 local audio_range = {charge = 4000, blast = 500100, vortex = 500100, electrode = 8100, canister = 500100, wandering = 500100,
-    powerbox = 500100, fixedtank = 500100, fixedfire = 500100, fueldrum = 500100}
+    powerbox = 500100, fixedtank = 500100, fixedfire = 500100, fueldrum = 500100, bottle = 8000}
 local canister_sounds = {[assets.canister[2]] = "canister", [assets.fueldrum[2]] = "fueldrum"}
 local observer_blasts = {
     [0] = {kind = "observersparks", particle = "NI_Sparks"},
@@ -95,6 +98,16 @@ function effects.observe_charge(entry)
         record("charge", trap.Sphere:K2_GetComponentLocation(), 1)
     end
     entry.charged = charged
+end
+
+function effects.observe_bottle_breaks(world)
+    if type(SilverfishTakeNativeBottleBreakCue) ~= "function" then return end
+    local address = world:GetAddress()
+    for _ = 1, 8 do
+        local x, y, z = SilverfishTakeNativeBottleBreakCue(address)
+        if not x then break end
+        record("bottle", {X = x, Y = y, Z = z}, 1)
+    end
 end
 
 function effects.observe_wandering_teleport(point)
@@ -176,7 +189,10 @@ end
 
 local function play(pawn, origin, kind, point, scale, volume)
     local profile = assets[kind]
-    local particle, sound, attenuation = asset(profile[1]), asset(profile[2]), asset(profile[3])
+    -- The stock bottle loads these assets with its class. Avoid loading a package during a throw.
+    local lookup = kind == "bottle" and StaticFindObject or asset
+    local particle, sound = lookup(profile[1]), lookup(profile[2])
+    local attenuation = profile[3] and lookup(profile[3])
     local niagara = StaticFindObject("/Script/Niagara.Default__NiagaraFunctionLibrary")
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     if not valid(niagara) or not valid(statics) or not valid(particle) or not valid(sound)
@@ -191,8 +207,8 @@ local function play(pawn, origin, kind, point, scale, volume)
             charging[#charging + 1] = {component = component, point = point, expires = os.clock() + 3}
         end
     end
-    if not profile[3] then
-        statics:PlaySoundAtLocation(pawn, sound, point, rotation, volume, 1, 0, nil, nil, nil, nil)
+    if not profile[3] or kind == "bottle" then
+        statics:PlaySoundAtLocation(pawn, sound, point, rotation, volume, 1, 0, attenuation, nil, nil, nil)
     else
         local audio = statics:SpawnSoundAtLocation(pawn, sound, point, rotation, volume, 1, 0, attenuation, nil, true)
         if valid(audio) then
@@ -220,7 +236,7 @@ function effects.command(args, state, phase, animate_vortex)
         if id and #id <= 15 and seen[id] then
             played[#played + 1] = id .. ":already"
         elseif id and #id <= 15 and assets[kind] and x and y and z and scale and scale > 0 and scale <= 10
-            and volume and volume >= 0 and volume <= 10
+            and volume and volume >= 0 and volume <= 10 and (kind ~= "bottle" or scale == 1 and volume == 1)
             and (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= audio_range[kind]^2 then
             local point = {X = x, Y = y, Z = z}
             local accepted, particles = play(pawn, origin, kind, point, scale, volume)

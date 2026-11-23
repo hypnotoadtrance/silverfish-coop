@@ -17,9 +17,10 @@ FIXED_EXPLOSIVES = "native_fixed_explosives"
 FIXED_CUES = ("powerbox", "fixedtank", "fixedfire")
 OBSERVER_CUES = ("observersparks", "observerred", "observergreen", "observerblue", "observerpurple", "observergold")
 KINDS = {"charge": 4000, "blast": 500100, "vortex": 500100, "electrode": 8100, "canister": 500100, "wandering": 500100,
+         "bottle": 8000,
          **dict.fromkeys(("fueldrum", *FIXED_CUES, *OBSERVER_CUES), 500100)}
 CUE_EVENTS = {"vortex": "native_vortex_effect_played", "electrode": "native_electrode_effect_played",
-              "wandering": "native_wandering_teleport_effect_played",
+              "wandering": "native_wandering_teleport_effect_played", "bottle": "native_bottle_break_played",
               "canister": "native_canister_effect_played", "fueldrum": "native_fuel_drum_effect_played",
               **dict.fromkeys(FIXED_CUES, "native_fixed_explosive_effect_played"),
               **dict.fromkeys(OBSERVER_CUES, "native_observer_absorb_played")}
@@ -229,7 +230,8 @@ class Playback:
             if (type(serial) is not int or not 0 < serial < 10**15 or serial in self.seen or serial in selected
                     or type(kind) is not str or kind not in KINDS or not valid_position(position)
                     or type(scale) not in {int, float} or not 0 < scale <= 10
-                    or type(volume) not in {int, float} or not 0 <= volume <= 10):
+                    or type(volume) not in {int, float} or not 0 <= volume <= 10
+                    or kind == "bottle" and (scale, volume) != (1, 1)):
                 continue
             if math.dist(origin, position) > KINDS[kind]:
                 self.seen.append(serial)

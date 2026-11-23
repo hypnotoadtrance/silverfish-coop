@@ -486,6 +486,7 @@ function fields.rows(state, phase, row)
         end
     end
     if phase == "hosting" then
+        effects.observe_bottle_breaks(world)
         for _, cue in ipairs(effects.rows(row)) do rows[#rows + 1] = cue end
         for _, electrode in ipairs(electrodes.retired_rows(row)) do rows[#rows + 1] = electrode end
     else
