@@ -63,6 +63,7 @@ end
 
 local function guard(callback)
     return function(...)
+        if not local_pawn then return end
         local ok, error_message = pcall(callback, ...)
         if not ok then hook_failure = error_message end
     end
@@ -81,6 +82,9 @@ local function run(action)
         end
         local_pawn:Crouch(false)
         return "armed"
+    elseif action == "disarm" then
+        local_pawn, peer, stepping = nil, nil, false
+        return "disarmed"
     elseif action == "ready" then
         return tostring(local_pawn.bIsCrouched == true)
     elseif action == "step" then

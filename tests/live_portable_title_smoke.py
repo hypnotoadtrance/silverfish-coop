@@ -125,6 +125,17 @@ end
                                  + "\nend)(" + project_downed + ")\n")
 
 
+def tutorial_dock_zone_overlay(game: Path):
+    def allow_dock_position(script):
+        gate = 'local fixture_mode = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"'
+        if script.count(gate) != 1:
+            raise ValueError("The private replica lacks the authored exit fixture gate")
+        return script.replace(gate, gate + '\n    or (os.getenv("SILVERFISH_COOP_HEADLESS") == "1"'
+                              + '\n        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")', 1)
+
+    return portable_script_overlay(game, "native_zone.lua", allow_dock_position)
+
+
 def shop_lease_overlay(game: Path):
     def allow_isolated_approach(text):
         gate = 'local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"'
@@ -488,7 +499,7 @@ async def verify_resident_footsteps(host: Seat, guest: Seat) -> list[dict]:
     return receipts
 
 
-async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool = False) -> dict:
+async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool = False, rusty: bool = False) -> dict:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-dry-fire", action)
 
@@ -521,7 +532,7 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
                 await asyncio.sleep(.08)
 
     for seat in (host, guest):
-        assert await command(seat, "arm") == "armed"
+        assert await command(seat, "arm-rusty" if rusty else "arm") == "armed"
     host_guid = await command(host, "seed-local")
     guest_guid = await command(host, "seed-peer")
     assert all(re.fullmatch(r"[0-9A-F]{32}", guid) for guid in (host_guid, guest_guid)) and host_guid != guest_guid
@@ -532,8 +543,9 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
     await wait_for(host, "peer-ready", f"{guest_guid},1,1")
 
     guest_run = guest.client / "run"
+    kind = "rusty-pistol" if rusty else "pistol"
     guest_frame = await wait_resident_status(guest_run, lambda frame: (scope := frame.get("game", {}).get("native_guest_primary_scope", {}))
-                                            and (scope.get("guid"), scope.get("kind")) == (guest_guid, "pistol"), timeout=12)
+                                            and (scope.get("guid"), scope.get("kind")) == (guest_guid, kind), timeout=12)
     tracked = {"native_weapon_shot_played", "native_weapon_dry_fire_played"}
     before = [entry for entry in await resident_events(guest_run, guest_frame) if entry["event"] in tracked]
     for seat in (host, guest):
@@ -580,31 +592,34 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
     reloaded = await submit(guest_run, "native-guest-reload-input-fixture")
     assert reloaded["ok"] and reloaded["native_guest_reload_fixture"]["stock_wrappers"] == 2, reloaded
     reload = await input_result("native_guest_reload_input", reloaded["native_guest_reload_fixture"]["sequence"])
+    loaded = 8 if rusty else 9
+    reserve_left = f"{reserve.split(',')[0]},1" if rusty else ""
     assert (reload["guid"], reload["before"], reload["after"], reload["reserve_before"], reload["reserve_after"]) == (
-        guest_guid, 0, 9, 9, 0), reload
-    await wait_for(host, "peer-ready", f"{guest_guid},9,9")
-    await wait_for(guest, "ready", f"{guest_guid},9,9")
-    await wait_for(guest, "reserve", "")
-    assert await command(host, "peer-reserve") == "" and await command(host, "reserve") == ""
+        guest_guid, 0, loaded, 9, 9 - loaded), reload
+    await wait_for(host, "peer-ready", f"{guest_guid},{loaded},{loaded}")
+    await wait_for(guest, "ready", f"{guest_guid},{loaded},{loaded}")
+    await wait_for(guest, "reserve", reserve_left)
+    assert await command(host, "peer-reserve") == reserve_left and await command(host, "reserve") == ""
     assert await command(host, "ready") == f"{host_guid},0,0"
 
     async def fire_at_drone():
         loaded_press = await submit(guest_run, "native-guest-primary-input-fixture")
         assert loaded_press["ok"], loaded_press
         result = await input_result("native_guest_primary_input", loaded_press["native_guest_primary_fixture"]["sequence"])
-        assert (result["guid"], result["before"], result["after"], result["projectiles"]) == (guest_guid, 9, 8, 1), result
-        await wait_for(host, "peer-ready", f"{guest_guid},8,8")
-        await wait_for(guest, "ready", f"{guest_guid},8,8")
+        assert (result["guid"], result["before"], result["after"], result["projectiles"]) == (
+            guest_guid, loaded, loaded - 1, 1), result
+        await wait_for(host, "peer-ready", f"{guest_guid},{loaded - 1},{loaded - 1}")
+        await wait_for(guest, "ready", f"{guest_guid},{loaded - 1},{loaded - 1}")
         return result
 
     combat = await verify_resident_npc_override(host, guest, fire_guest=fire_at_drone) if guest_combat else {}
-    return {**combat, "host_stock_click": host_click, "guest_heard_host": guest_heard, "guest_primary_input": press,
+    return {**combat, "weapon_kind": kind, "host_stock_click": host_click, "guest_heard_host": guest_heard, "guest_primary_input": press,
             "host_heard_guest": host_heard, "guest_click": guest_click, "guest_cue_receipts": events,
             "guest_live_round": shot, "host_guest_shot_dispatch": {"projectile_calls": host_shot[0],
                 "shot_sounds": host_shot[1], "muzzle_flashes": host_shot[2]},
             "guest_empty_magazine_receipt": guest_input,
             "pistols_still_empty_after_dry_fire": True, "projectiles_spawned": 0, "observers_played_shot_effects": 0,
-            "guest_reload_input": reloaded, "guest_reload": reload, "retired_reserve": reserve,
+            "guest_reload_input": reloaded, "guest_reload": reload, "reserve_before": reserve, "reserve_after": reserve_left,
             "both_games_projected_reloaded_magazine": True, "host_magazine_and_reserve_unchanged": True}
 
 
@@ -750,7 +765,71 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat) -> dict:
     return {"stock_input": tap, "host_damage": proof, "both_peers_dead_and_ragdolled": states}
 
 
-async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool = False) -> dict:
+async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
+    for seat in (host, guest):
+        for probe in ("portable-dry-fire", "portable-footstep"):
+            assert await portable_probe_command(seat.bridge, probe, "disarm") == "disarmed"
+    initial = await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("native_zone", {}).get("state") == "ready")
+    for participant, placement in ((pawn, "near"), ("local", "near"), ("local", "inside")):
+        await host.bridge.command("native-exit-position", participant, placement, "Obs_Dock", "Level_Exit_BP_C_213")
+    arrival = await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == dock
+                                         and frame.get("zone_epoch") != initial["zone_epoch"]
+                                         and not frame.get("awaiting_zone_guest"), timeout=60)
+    async def command(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-npc-override", action)
+
+    def at_dock(frame):
+        return (frame.get("state") == "connected" and frame.get("gameplay_fresh")
+                and frame.get("game", {}).get("map") == dock and frame.get("zone_epoch") == arrival["zone_epoch"])
+
+    await wait_resident_status(guest_run, at_dock, timeout=30)
+    async with asyncio.timeout(8):
+        while await command(guest, "dock-equip") != "selected":
+            await asyncio.sleep(.05)
+    frame = await wait_resident_status(guest_run, lambda frame: at_dock(frame)
+                                      and frame.get("game", {}).get("native_guest_primary_scope", {}).get("kind") == "rusty-pistol",
+                                      timeout=12)
+    seen = await asyncio.gather(*(command(seat, "dock-worker") for seat in (host, guest)))
+    assert all(row.startswith("true;false;0;") for row in seen), seen
+    target = await command(host, "dock-stage")
+    point = tuple(map(float, target.split(",")))
+    async with asyncio.timeout(8):
+        while True:
+            view = await command(guest, "dock-worker")
+            if view != "absent" and math.dist(point, tuple(map(float, view.split(";")[3].split(",")))) <= 5:
+                break
+            await asyncio.sleep(.05)
+    assert await command(guest, f"dock-aim\t{target}") == "ready"
+    await asyncio.sleep(.2)
+    assert await command(host, f"dock-aim\t{target}") == "ready"
+    started = time.time()
+    tap = await submit(guest_run, "native-guest-primary-input-fixture")
+    assert tap["ok"], tap
+    sequence = tap["native_guest_primary_fixture"]["sequence"]
+    async with asyncio.timeout(8):
+        while True:
+            matches = [row for row in await resident_events(guest_run, frame) if row.get("sequence") == sequence
+                       and row["time_unix"] >= started
+                       and row["event"] in ("native_guest_primary_input", "native_guest_primary_input_rejected")]
+            if matches:
+                break
+            await asyncio.sleep(.05)
+    event, = matches
+    assert event["event"] == "native_guest_primary_input", event
+    shot = event["native_guest_weapon"]
+    assert (shot["map"], shot["before"], shot["after"], shot["projectiles"]) == (dock, 7, 6, 1), event
+    async with asyncio.timeout(10):
+        while True:
+            result = await asyncio.gather(*(command(seat, "dock-worker") for seat in (host, guest)))
+            if all(row.startswith("false;true;1;") for row in result):
+                break
+            await asyncio.sleep(.05)
+    return {"tutorial_dock_combat": {"before": seen, "native_shot": shot, "both_peers_dead_and_ragdolled": result}}
+
+
+async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool = False, rusty: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_frame, guest_frame = await asyncio.gather(
         wait_resident_status(host_run, lambda frame: frame.get("local_bridge") == "memory"),
@@ -801,9 +880,9 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
     assert {entry["serial"] for entry in cues} == {prop["serial"]}, (cues, prop)
     visual, = [entry for entry in cues if entry["event"] == event_names[1]]
     assert visual["player_id"] == player_id, visual
-    guest_melee = await verify_resident_guest_melee(host, guest) if guest_combat else {}
+    guest_melee = await verify_resident_guest_melee(host, guest) if guest_combat and not rusty else {}
     footsteps = await verify_resident_footsteps(host, guest)
-    pistol = await verify_resident_pistol(host, guest, guest_combat=guest_combat)
+    pistol = await verify_resident_pistol(host, guest, guest_combat=guest_combat, rusty=rusty)
     npc_shots = await verify_resident_npc_shots(host, guest_run, guest_frame) if guest_combat else []
     npc_kill = await verify_resident_npc_kill(host, guest) if guest_combat else {}
     turret_death = await verify_resident_turret_combat(host, guest, guest_frame) if guest_combat else {}
@@ -2326,6 +2405,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
+                 rusty_pistol: bool = False, tutorial_dock_combat: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
@@ -2377,8 +2457,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_npc_override and not resident_weapon_cues, "stock_npc_override", verify_resident_npc_override),
         (stock_board_offers, "stock_board_offers", verify_resident_board_offers),
         (resident_weapon_cues, "resident_weapon_cues",
-         lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override)),
+         lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override, rusty=rusty_pistol)),
         (stock_food, "stock_food", verify_resident_guest_food),
+        (tutorial_dock_combat, "tutorial_dock_combat", verify_tutorial_dock_combat),
     ) if enabled)
     single_scenario = (bool(resident_checks) or stock_prop_grip or stock_host_prop_observer
                        or stock_crate_ring or guest_world_start
@@ -2412,6 +2493,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 for game in games:
                     probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                          fixture="portable_npc_override_probe.lua"))
+        if tutorial_dock_combat:
+            proof["dock_zone_overlays"] = [probes.enter_context(tutorial_dock_zone_overlay(game)) for game in games]
         if stock_campfire:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableCampfireProbe",
@@ -2551,6 +2634,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         elif resident_checks:
             results = proof["resident_check_results"] = {}
             campaign_started = time.perf_counter()
+            exit_actions = ("prompt", "confirm") if tutorial_dock_combat else ("save_and_quit",)
 
             async def run_resident_checks(host, guest, pawn):
                 proof["join_seconds"] = round(time.perf_counter() - campaign_started, 3)
@@ -2567,7 +2651,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 return gameplay
 
             proof["sessions"].append(await start_pair(first, second, "Gameplay scout", on_join=run_resident_checks,
-                                                      wait_status=wait_resident_status))
+                                                      wait_status=wait_resident_status, host_exit_actions=exit_actions))
             if resident_weapon_cues:
                 assert not weapon_cue_files(first, second), "A legacy weapon cue mailbox appeared before Save and Quit"
         elif compact_world_view:
@@ -2712,6 +2796,10 @@ if __name__ == "__main__":
     parser.add_argument("--memory-status", action="store_true", help="verify both workers consume live frames through memory")
     parser.add_argument("--resident-weapon-cues", action="store_true",
                         help="verify Bandage, footsteps, firing and reload, combinable with campfire and food")
+    parser.add_argument("--rusty-pistol", action="store_true",
+                        help="exercise the stock Rusty Pistol during the resident weapon checks")
+    parser.add_argument("--tutorial-dock-combat", action="store_true",
+                        help="follow the stock exit to Tutorial Dock and dispatch a shot at a placed worker")
     parser.add_argument("--guest-ui-memory", action="store_true",
                         help="verify the resident guest UI refresh on one stock Nearby Items container pickup")
     parser.add_argument("--stock-prop-grip", action="store_true", help="verify default guest carry filtering in one portable lantern session")
@@ -2800,7 +2888,12 @@ if __name__ == "__main__":
             args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory, args.compact_crate_status,
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
-    resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "stock_board_offers", "resident_weapon_cues"}
+    resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "stock_board_offers", "resident_weapon_cues",
+                              "rusty_pistol", "tutorial_dock_combat"}
+    if args.rusty_pistol and not args.resident_weapon_cues:
+        parser.error("Use --rusty-pistol with --resident-weapon-cues")
+    if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
+        parser.error("Use --tutorial-dock-combat with --rusty-pistol and --stock-npc-override")
     if (args.stock_food or args.stock_campfire or args.stock_npc_override or args.stock_board_offers) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
@@ -2843,6 +2936,7 @@ if __name__ == "__main__":
                        stock_npc_override=args.stock_npc_override, stock_board_offers=args.stock_board_offers,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
+                       rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
                        nonmirrored_startup=args.nonmirrored_startup,

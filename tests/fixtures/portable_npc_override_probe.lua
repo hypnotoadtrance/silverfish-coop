@@ -4,6 +4,7 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TI
 
 local prefix = mailbox .. "/portable-npc-override-"
 local map = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
+local dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P.Tut_Dock_P"
 local class_path = "/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C"
 local damage_key = "Kenetic_2_47ECE93447043FC41017B8B98F2C7DE5"
 local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
@@ -81,11 +82,11 @@ local function seed_pipe(world)
     error("stock Old Pipe needs an empty utility slot")
 end
 
-local function select_pipe(pawn, guid)
+local function select_equipment(pawn, matches)
     local equipment = pawn.Save.PlayerEquipment
     for index = 1, equipment:GetArrayNum() do
         local row = equipment[index]
-        if valid(row[item_class]) and guid_of(row) == guid then
+        if valid(row[item_class]) and matches(row) then
             pawn:Equip_NextItem(index - 1, false)
             return "selected"
         end
@@ -393,14 +394,63 @@ local function turret_state(pawn, world, host, action)
         tostring(turret:ActorHasTag(FName("Dead", EFindName.FNAME_Find))))
 end
 
+local function dock_worker(world)
+    for _, actor in ipairs(FindAllOf("NPC_Survivor_Worker_Light_C") or {}) do
+        if valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed()
+            and actor:GetFName():ToString() == "NPC_Survivor_Worker_C_1" then return actor end
+    end
+end
+
+local function dock_combat(pawn, world, host, action)
+    local actor = dock_worker(world)
+    if not valid(actor) then return "absent" end
+    assert(actor.bReplicates and actor:GetLocalRole() == (host and 3 or 1), "the stock Dock worker needs one authority")
+    if action == "dock-stage" then
+        assert(host and actor.Alive and actor.Health > 0, "the test requires the placed, living host worker")
+        local point = gun_target(pawn, world)
+        assert(actor:K2_SetActorLocation(point, false, {}, true), "the worker could not move into the firing lane")
+        actor.CharacterMovement:DisableMovement()
+        actor:SetActorTickEnabled(false)
+        if valid(actor.Controller) then actor.Controller:SetActorTickEnabled(false) end
+        actor.Health = 1
+        actor:ForceNetUpdate()
+        return ("%.7f,%.7f,%.7f"):format(point.X, point.Y, point.Z)
+    end
+    local markers = 0
+    for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
+        if valid(marker) and same(marker:GetOwner(), actor) and marker:GetLocalRole() == (host and 3 or 1) then
+            markers = markers + 1
+        end
+    end
+    local location = actor:K2_GetActorLocation()
+    local eyes = ("%0.7f,%0.7f,%0.7f"):format(location.X, location.Y, location.Z)
+    return ("%s;%s;%d;%s;%s"):format(tostring(actor.Alive), tostring(actor.Mesh:IsAnySimulatingPhysics()), markers,
+        eyes, actor:GetFullName())
+end
+
 local function run(action, actor_path)
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
-    assert(valid(world) and world:GetFullName() == "World " .. map and valid(world.NetDriver),
-        "the test requires Observatory in an isolated co-op pair")
+    local at_dock = action:match("^dock%-") ~= nil
+    assert(valid(world) and world:GetFullName() == "World " .. (at_dock and dock or map) and valid(world.NetDriver),
+        "the test requires the expected world in an isolated co-op pair")
     local pawn = statics:GetPlayerPawn(world, 0)
     assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn:GetWorld(), world), "local stock pawn unavailable")
     local host = pawn:HasAuthority()
+    if action == "dock-equip" then
+        assert(not host, "the guest must select their stock equipment")
+        return select_equipment(pawn, function(row)
+            return row[item_class]:GetFName():ToString() == "Wep_RustyPistol_C"
+        end)
+    elseif action == "dock-aim" then
+        local shooter = host and authoritative_guest(world) or pawn
+        local angle = heading(shooter.Camera:K2_GetComponentLocation(), position(actor_path))
+        shooter.Controller:SetControlRotation(angle)
+        if host then shooter.Camera:K2_SetWorldRotation(angle, false, {}, true) end
+        return "ready"
+    elseif action == "dock-stage" or action == "dock-worker" then
+        return dock_combat(pawn, world, host, action)
+    end
     if action == "fire-npc" then
         assert(host, "NPC shots must start on the host")
         return fire_stock_npc(pawn, world, actor_path)
@@ -415,7 +465,7 @@ local function run(action, actor_path)
         return seed_pipe(world)
     elseif action == "select-pipe" then
         assert(not host, "the guest must pick their test equipment")
-        return select_pipe(pawn, actor_path)
+        return select_equipment(pawn, function(row) return guid_of(row) == actor_path end)
     elseif action == "stage-melee" then
         assert(host, "only the host can stage the stock target")
         return stage_melee(world)

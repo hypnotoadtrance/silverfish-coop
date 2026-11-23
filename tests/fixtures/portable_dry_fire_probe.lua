@@ -14,6 +14,7 @@ local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local payload = "DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"
 local slot = 2
 local last, local_pawn, peer, failure
+local active = false
 local clicks, projectiles, shot_sounds, muzzle_flashes = {}, 0, 0, 0
 
 local function valid(value) return value and value:IsValid() end
@@ -54,7 +55,9 @@ local function arm()
         end
     end
     assert(valid(peer), "expected a remote stock pawn")
+    active = true
     RegisterHook("/Script/Engine.GameplayStatics:PlaySoundAtLocation", function(_, context, sound, location)
+        if not active then return end
         local ok, message = pcall(function()
             local cue = sound:get()
             if not valid(cue) or cue:GetFullName() ~= click then return end
@@ -66,14 +69,17 @@ local function arm()
         if not ok then failure = message end
     end)
     RegisterHook("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:SpawnProjectile", function(context)
+        if not active then return end
         local weapon = context:get()
         if same(weapon, local_pawn.EquipedItem) or same(weapon, peer.EquipedItem) then projectiles = projectiles + 1 end
     end)
     RegisterHook("/Script/Engine.GameplayStatics:SpawnSoundAttached", function(_, sound, attached)
+        if not active then return end
         local weapon = peer_muzzle(attached:get())
         if weapon and same(sound:get(), weapon.FireSound) then shot_sounds = shot_sounds + 1 end
     end)
     RegisterHook("/Script/Niagara.NiagaraFunctionLibrary:SpawnSystemAttached", function(_, effect, attached)
+        if not active then return end
         local weapon = peer_muzzle(attached:get())
         if weapon and same(effect:get(), weapon.MuzzleFlash) then muzzle_flashes = muzzle_flashes + 1 end
     end)
@@ -131,6 +137,14 @@ end
 
 local function run(action)
     if action == "arm" then return arm() end
+    if action == "arm-rusty" then
+        pistol_path = "/Game/Classes/Weapons/Wep_RustyPistol.Wep_RustyPistol_C"
+        return arm()
+    end
+    if action == "disarm" then
+        active, local_pawn, peer = false, nil, nil
+        return "disarmed"
+    end
     if action == "seed-local" then return seed(local_pawn, 0) end
     if action == "seed-peer" then return seed(peer, 1) end
     if action == "projected" then return identify(local_pawn.Save.PlayerEquipment[slot]) end

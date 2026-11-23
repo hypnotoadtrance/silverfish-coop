@@ -100,6 +100,9 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
     paired = await wait_status(host_run, lambda frame: frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
     pawn = paired["game"]["native_guest_save"]["pawn"]
     gameplay = await on_join(host, guest, pawn) if on_join else {}
+    # A scenario can cross a zone boundary and bind the guest to a new pawn.
+    current = await wait_status(host_run, lambda frame: frame.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+    pawn = current["game"]["native_guest_save"]["pawn"]
     assert (await submit(guest_run, "drop-link"))["ok"]
     await wait_status(host_run, lambda frame: any(row["character_id"] == character and row["state"] == "reserved"
                                                 for row in frame.get("campaign", {}).get("leases", ())))
