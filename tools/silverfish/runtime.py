@@ -2470,6 +2470,8 @@ class Bridge:
                     placement["positions"][slot] = transform
                 elif fields[0] == "native-world-loot-capability" and len(fields) == 2 and fields[1] in {"1", "2"}:
                     data[native_world_loot.CAPABILITY] = int(fields[1])
+                elif fields == ["native-world-loot-host-presentation", "1"] and data.get("state") == "hosting":
+                    data[native_world_loot.HOST_PRESENTATION] = True
                 elif fields[0] == native_world_loot.ROW:
                     item = native_world_loot.parse(fields, data.get("state"), data.get("map"))
                     projected = data.setdefault(native_world_loot.KEY, {})

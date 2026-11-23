@@ -22,21 +22,22 @@ local function token(text)
     return text and #text == 32 and text:match("^[0-9a-f]+$")
 end
 
-local function cue_at(path, pawn, point)
-    local class = asset(path)
+local function cue_at(path, pawn, point, loaded_only)
+    local lookup = loaded_only and StaticFindObject or asset
+    local class = lookup(path)
     local item = valid(class) and class:GetCDO()
-    local base = asset(pickup_base)
+    local base = lookup(pickup_base)
     if not valid(item) or not valid(base) or not item:IsA(base) then return false end
     local sound = item.Sound_Inventory
     if not valid(sound) or not sound:IsA(StaticFindObject("/Script/Engine.SoundBase")) then return false end
-    local attenuation = asset(attenuation_path)
+    local attenuation = lookup(attenuation_path)
     local statics = StaticFindObject(statics_path)
     if not valid(attenuation) or not valid(statics) then return false end
     statics:PlaySoundAtLocation(pawn, sound, point, zero_rotation, 1, 1, 0, attenuation, nil, pawn, nil)
     return true
 end
 
-function audio.command(fields, state, phase)
+function audio.command(fields, state, phase, loaded_only)
     if fields[2] ~= "native-sound-pickup" then return end
     local epoch = fields[4]
     local pawn = state.local_pawn and state.local_pawn.pawn
@@ -57,7 +58,7 @@ function audio.command(fields, state, phase)
             heard[#heard + 1] = id
         elseif token(id) and package and package:match("([^/]+)$") == export and x and y and z
             and (origin.X - x)^2 + (origin.Y - y)^2 + (origin.Z - z)^2 <= 1800^2 then
-            local ok, played = pcall(cue_at, path, pawn, { X = x, Y = y, Z = z })
+            local ok, played = pcall(cue_at, path, pawn, { X = x, Y = y, Z = z }, loaded_only)
             if ok and played then
                 seen[id] = true
                 history[#history + 1] = id

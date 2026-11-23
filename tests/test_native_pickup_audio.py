@@ -1,6 +1,7 @@
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
+from tools.silverfish import native_world_loot as loot
 from tools.silverfish.native_pickup_audio import COMMAND, PickupAudio, Playback
 from tools.silverfish.travel import OBSERVATORY
 
@@ -55,3 +56,95 @@ class NativePickupAudioTests(unittest.IsolatedAsyncioTestCase):
             await receiver.sync(bridge, control, game, frame, epoch, "host-session")
         self.assertEqual(bridge.command.await_count, 2)
         self.assertEqual(control.event.call_args.args[0], "native_pickup_sound_played")
+
+
+class HostPickupPresentationTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.projection_epoch = "a" * 32
+        self.identity = "b" * 32
+        self.audio_epoch = "c" * 32
+        self.operation = "d" * 32
+        self.guid = "A" * 32
+        self.item = "/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"
+        self.crate = "the selected stock container"
+        self.game = {"state": "hosting", "map": OBSERVATORY, loot.HOST_PRESENTATION: True,
+                     "pawns": {"local": {"name": "host", "location": [0, 0, 0]}}}
+        self.cues, self.playback, self.control = PickupAudio(), Playback(), Mock(generation="host-session")
+        self.cues.append(self.game, self.audio_epoch, "host", self.operation, self.item)
+        self.host = Mock(last_game=self.game, pickup_audio=self.cues, pickup_playback=self.playback,
+                         control=self.control, zone_epoch=self.audio_epoch)
+        self.projection = loot.Projection()
+        self.projection.epoch = self.projection_epoch
+        self.projection.items[self.identity] = loot.Item(
+            self.identity, self.item, {}, loot.CRATE_CLAIM, f"{self.guid}@{self.crate}", 1)
+        self.result = {"native_loot_claim": {"claimed_by": "host", "class_path": self.item, "guid": self.guid},
+                       "native_loot_crate": self.crate}
+        self.bridge = Mock(local_bridge=object(), command=AsyncMock())
+        self.args = f"{self.operation}|{self.item}|0|0|0"
+        self.played = call("native_pickup_sound_played", operation_id=self.operation, map=OBSERVATORY)
+        self.batch = call(loot.PRESENT_HOST_CLAIM, self.projection_epoch, self.identity, OBSERVATORY,
+                          self.audio_epoch, self.args, timeout=3)
+
+    async def retire(self):
+        self.host.last_game = await self.projection.present_host_claim(
+            self.host, self.bridge, (self.projection_epoch, self.identity), self.operation, self.result)
+        self.assertNotIn(self.identity, self.projection.items)
+        self.assertIn(self.identity, self.projection.retired)
+
+    async def pending_sound(self):
+        game = self.host.last_game
+        await self.playback.sync(self.bridge, self.control, game, self.cues.frame(game, self.audio_epoch),
+                                 self.audio_epoch, self.control.generation)
+
+    async def test_host_batch_preserves_network_cue_and_avoids_local_replay(self):
+        self.bridge.command.return_value = {**self.game, "ack": {"message": f"retired|{self.operation}"}}
+        await self.retire()
+        await self.pending_sound()
+        self.assertEqual(self.bridge.command.await_args_list, [self.batch])
+        self.assertEqual(self.control.event.call_args_list, [self.played])
+        self.assertEqual(self.cues.frame(self.game, self.audio_epoch)["cues"][0][0], self.operation)
+
+    async def test_retirement_failure_still_acknowledges_stock_sound(self):
+        self.bridge.command.return_value = {
+            **self.game, loot.KEY: {self.identity: {}},
+            "ack": {"message": f"world_loot_retirement_pending|{self.operation}"}}
+        await self.retire()
+        await self.pending_sound()
+        self.assertEqual(self.bridge.command.await_args_list, [self.batch])
+        self.assertEqual(self.control.event.call_args_list, [
+            self.played, call("native_world_loot_retirement_deferred", reason="world_loot_retirement_pending")])
+
+    async def test_missing_loaded_sound_uses_regular_playback(self):
+        self.bridge.command.side_effect = [
+            {**self.game, "ack": {"message": "retired|"}},
+            {**self.game, "ack": {"message": self.operation}},
+        ]
+        await self.retire()
+        await self.pending_sound()
+        self.assertEqual(self.bridge.command.await_args_list, [
+            self.batch, call(COMMAND, OBSERVATORY, self.audio_epoch, self.args, timeout=1.5)])
+        self.assertEqual(self.control.event.call_args_list, [self.played])
+
+    async def test_unavailable_bridge_batch_keeps_the_normal_retirement(self):
+        self.bridge.local_bridge = None
+        self.bridge.command.return_value = self.game
+        await self.retire()
+        self.bridge.command.assert_awaited_once_with(loot.RETIRE, self.projection_epoch, self.identity, timeout=3)
+        self.control.event.assert_not_called()
+
+    async def test_unconfirmed_batch_leaves_retirement_and_sound_recoverable(self):
+        self.bridge.command.side_effect = [TimeoutError("receipt timed out"),
+                                           {**self.game, "ack": {"message": self.operation}}]
+        await self.retire()
+        await self.pending_sound()
+        self.assertEqual(self.bridge.command.await_args_list, [
+            self.batch, call(COMMAND, OBSERVATORY, self.audio_epoch, self.args, timeout=1.5)])
+        self.assertEqual(self.control.event.call_args_list, [
+            call("native_world_loot_retirement_deferred", reason="receipt timed out"), self.played])
+
+    async def test_older_lua_keeps_the_normal_retirement(self):
+        del self.game[loot.HOST_PRESENTATION]
+        self.bridge.command.return_value = self.game
+        await self.retire()
+        self.bridge.command.assert_awaited_once_with(loot.RETIRE, self.projection_epoch, self.identity, timeout=3)
+        self.control.event.assert_not_called()

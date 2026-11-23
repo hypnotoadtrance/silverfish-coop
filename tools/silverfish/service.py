@@ -4204,7 +4204,11 @@ class Host:
                                                                defer_save=True)
                         self.control.event("local_interaction", operation_id=operation_id, **result)
                         try:
-                            self.last_game = await self.world_loot.retire_claim(bridge, self.last_game, world_loot)
+                            if action == native_world_loot.CRATE_CLAIM:
+                                self.last_game = await self.world_loot.present_host_claim(
+                                    self, bridge, world_loot, operation_id, result)
+                            else:
+                                self.last_game = await self.world_loot.retire_claim(bridge, self.last_game, world_loot)
                         except (OSError, RuntimeError) as error:
                             self.control.event("native_world_loot_retirement_deferred", reason=str(error))
                     elif stack_drop := native_guest_drop_projection.target_parts(target):

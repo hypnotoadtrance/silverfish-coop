@@ -2,6 +2,7 @@ local projection = {}
 local maps = require("native_guest_drop_maps")
 local drop_items = require("native_guest_drop_items")
 local pickup_fixture = require("native_authored_pickup_input_fixture")
+local pickup_audio = require("native_pickup_audio")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
 local headless = enabled and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
@@ -227,6 +228,7 @@ function projection.rows(state, phase, row)
     local rows, pawn = {}, local_pawn(state, phase)
     if pawn and type(SilverfishSyncNativeWorldLootItem) == "function" then
         rows[#rows + 1] = row("native-world-loot-capability", 2)
+        if phase == "hosting" then rows[#rows + 1] = row("native-world-loot-host-presentation", 1) end
     end
     if current and (current.map ~= state.map or not same(pawn, current.pawn) or not same(state.world, current.world)) then
         current = nil
@@ -388,23 +390,57 @@ local function fixture(pawn, proof_for)
     return "stock drop interaction intercepted"
 end
 
+local function retire(state, phase, epoch, id)
+    local pawn, entry = local_pawn(state, phase), world_items[id]
+    if not pawn or not identifier(epoch) or not identifier(id)
+        or (entry and (entry.epoch ~= epoch or not same(entry.pawn, pawn) or not same(entry.world, state.world))) then
+        error("world_loot_retirement_scope_unavailable", 0)
+    end
+    if entry then
+        if not SilverfishClearNativeGuestDropProjection(entry.slot) then error("world_loot_retirement_pending", 0) end
+        world_items[id] = nil
+        pcall(projection.refresh_stock_inventory, state, phase == "hosting")
+    end
+    return "stock world loot retired"
+end
+
+local function present_host_claim(fields, state, phase)
+    local epoch, id, area, audio_epoch, cue = fields[3], fields[4], fields[5], fields[6], fields[7]
+    local entry, pawn = world_items[id], local_pawn(state, phase)
+    local class = cue and cue:match("^%x+|([^|]+)|")
+    if #fields ~= 7 or phase ~= "hosting" or not pawn or area ~= state.map
+        or not identifier(epoch) or not identifier(id) or not identifier(audio_epoch) or not class then
+        error("world_loot_retirement_scope_unavailable", 0)
+    end
+    local audible = entry and entry.epoch == epoch and same(entry.pawn, pawn) and same(entry.world, state.world)
+        and entry.class == class and not entry.error and not entry.moving
+    if audible then
+        local ok, active, reported_epoch, reported_id = pcall(SilverfishReadNativeGuestDropProjection, entry.slot)
+        audible = ok and active == true and reported_epoch == epoch and reported_id == id
+    end
+    local removed, outcome = pcall(retire, state, phase, epoch, id)
+    local heard = ""
+    if audible then
+        -- A projected item is already loaded. An unresolved audio asset must fall back
+        -- to normal playback outside this game-thread command.
+        local ok, receipt = pcall(pickup_audio.command,
+            {fields[1], "native-sound-pickup", area, audio_epoch, cue}, state, phase, true)
+        if ok then heard = receipt end
+    end
+    local status = removed and "retired" or tostring(outcome):match("^world_loot_retirement_[%l_]+$")
+        or "world_loot_retirement_unverified"
+    return status .. "|" .. heard
+end
+
 function projection.command(fields, state, phase)
     local command = fields[2]
     if command == "native-world-loot-frame" then
         return item_frame(fields, state, phase)
     elseif command == "native-world-loot-retire" then
-        local epoch, id = fields[3], fields[4]
-        local pawn, entry = local_pawn(state, phase), world_items[id]
-        if #fields ~= 4 or not pawn or not identifier(epoch) or not identifier(id)
-            or (entry and (entry.epoch ~= epoch or not same(entry.pawn, pawn) or not same(entry.world, state.world))) then
-            error("world_loot_retirement_scope_unavailable", 0)
-        end
-        if entry then
-            if not SilverfishClearNativeGuestDropProjection(entry.slot) then error("world_loot_retirement_pending", 0) end
-            world_items[id] = nil
-            pcall(projection.refresh_stock_inventory, state, phase == "hosting")
-        end
-        return "stock world loot retired"
+        if #fields ~= 4 then error("world_loot_retirement_scope_unavailable", 0) end
+        return retire(state, phase, fields[3], fields[4])
+    elseif command == "native-world-loot-present-host-claim" then
+        return present_host_claim(fields, state, phase)
     elseif command == "native-world-loot-approach" then
         local id, pawn_name = fields[3], fields[4]
         local item, pawn = world_items[id]

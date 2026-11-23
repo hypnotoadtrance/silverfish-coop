@@ -22,6 +22,8 @@ PHYSICS = "native_world_loot_physics"
 MOVING = "native_world_loot_moving"
 FRAME = "native-world-loot-frame"
 RETIRE = "native-world-loot-retire"
+PRESENT_HOST_CLAIM = "native-world-loot-present-host-claim"
+HOST_PRESENTATION = "native_world_loot_host_presentation"
 FIXTURE = "native-world-loot-fixture"
 APPROACH = "native-world-loot-approach"
 CAPABILITY = "native_world_loot_version"
@@ -370,15 +372,52 @@ class Projection:
                 raise party.RuleError("native_world_loot_intent_stale")
         return item.claim_action, item.claim_target
 
+    def _remember_retirement(self, identity):
+        self.retired.add(identity)
+        self.items.pop(identity, None)
+
     async def retire_claim(self, bridge, game, target):
         epoch, identity = target[:2]
         if epoch != self.epoch:
             return game
-        self.retired.add(identity)
-        self.items.pop(identity, None)
+        self._remember_retirement(identity)
         snapshot = await bridge.command(RETIRE, epoch, identity, timeout=3)
         if identity in snapshot.get(KEY, {}):
             raise RuntimeError("The claimed stock world item did not retire")
+        return snapshot
+
+    async def present_host_claim(self, host, bridge, target, operation, result):
+        game = host.last_game
+        epoch, identity = target[:2]
+        item = self.items.get(identity)
+        claim = result.get("native_loot_claim", {})
+        if (bridge.local_bridge is None or game.get("state") != "hosting"
+                or game.get(HOST_PRESENTATION) is not True or epoch != self.epoch
+                or not item or identity in self.moving or item.claim_action != CRATE_CLAIM
+                or claim.get("claimed_by") != "host" or claim.get("class_path") != item.class_path
+                or f"{claim.get('guid')}@{result.get('native_loot_crate')}" != item.claim_target):
+            return await self.retire_claim(bridge, game, target)
+
+        playback, control, audio_epoch = host.pickup_playback, host.control, host.zone_epoch
+        cue = host.pickup_audio.frame(game, audio_epoch, operation=operation)
+        args, asked = playback.prepare(game, cue, audio_epoch, control.generation)
+        if len(args) != 1 or asked != {operation}:
+            return await self.retire_claim(bridge, game, target)
+
+        self._remember_retirement(identity)
+        area = game["map"]
+        try:
+            snapshot = await bridge.command(PRESENT_HOST_CLAIM, epoch, identity, area, audio_epoch, args[0], timeout=3)
+        except (OSError, RuntimeError, TimeoutError) as error:
+            control.event("native_world_loot_retirement_deferred", reason=str(error))
+            return game
+
+        status, separator, heard = snapshot.get("ack", {}).get("message", "").partition("|")
+        if separator:
+            playback.acknowledge(control, area, asked, heard)
+        if not separator or status != "retired" or identity in snapshot.get(KEY, {}):
+            reason = status if status.startswith("world_loot_retirement_") else "The claimed stock world item did not retire"
+            control.event("native_world_loot_retirement_deferred", reason=reason)
         return snapshot
 
     async def fixture(self, bridge, game, identity):

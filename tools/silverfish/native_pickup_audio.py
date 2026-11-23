@@ -47,12 +47,12 @@ class Playback:
         self.scope = None
         self.seen = deque(maxlen=2 * MAX_CUES)
 
-    async def sync(self, bridge, control, game, frame, epoch, generation):
+    def prepare(self, game, frame, epoch, generation):
         if not isinstance(frame, dict) or game.get("state") not in {"hosting", "connected"}:
-            return game
+            return [], set()
         area = game.get("map")
         if (frame.get("map"), frame.get("epoch")) != (area, epoch) or not valid_id(epoch):
-            return game
+            return [], set()
         scope = generation, epoch
         if scope != self.scope:
             self.scope = scope
@@ -60,7 +60,7 @@ class Playback:
         origin = game.get("pawns", {}).get("local", {}).get("location")
         cues = frame.get("cues")
         if not isinstance(cues, list) or len(cues) > MAX_CUES or not valid_position(origin):
-            return game
+            return [], set()
         args, asked = [], set()
         for cue in cues:
             if not isinstance(cue, list) or len(cue) != 3:
@@ -74,15 +74,22 @@ class Playback:
                 args.append("|".join((operation, class_path, *map(str, location))))
             else:
                 self.seen.append(operation)
+        return args, asked
+
+    def acknowledge(self, control, area, asked, message):
+        for operation in sorted(asked.intersection(message.split(","))):
+            self.seen.append(operation)
+            control.event("native_pickup_sound_played", operation_id=operation, map=area)
+
+    async def sync(self, bridge, control, game, frame, epoch, generation):
+        args, asked = self.prepare(game, frame, epoch, generation)
         if not args:
             return game
+        area = game["map"]
         try:
             snapshot = await bridge.command(COMMAND, area, epoch, *args, timeout=1.5)
         except (OSError, RuntimeError, TimeoutError) as error:
             control.event("native_pickup_sound_unavailable", reason=str(error))
             return game
-        played = snapshot.get("ack", {}).get("message", "").split(",")
-        for operation in sorted(asked.intersection(played)):
-            self.seen.append(operation)
-            control.event("native_pickup_sound_played", operation_id=operation, map=area)
+        self.acknowledge(control, area, asked, snapshot.get("ack", {}).get("message", ""))
         return snapshot
