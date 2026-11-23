@@ -39,6 +39,16 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
 
         game["native_guest_save_retention"] = True
         host.pending_guest_saves[GUEST] = ("guest-pawn", {})
+        bridge.command.side_effect = RuntimeError("native_stash_move_reorder_anchor_unavailable")
+        with self.assertRaisesRegex(party.RuleError, "reorder_anchor_unavailable"):
+            await native_stash.move(host, bridge, GUEST, target, operation)
+        self.assertEqual(host.party["receipts"], {})
+        self.assertFalse(host.stopping)
+        self.assertFalse(host.native_checkpoint_unsafe)
+        host.checkpoint_native.assert_not_awaited()
+
+        bridge.command.reset_mock()
+        bridge.command.side_effect = None
         bridge.command.return_value = {**game, native_stash.MOVED: dict(map=OBSERVATORY, pawn="guest-pawn",
             slot="-", site=SITE, guid=item, direction="reorder", combined=False, before=before,
             class_path="/Game/Classes/Items/Test.Test_C", quantity=1)}
@@ -65,6 +75,7 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
 
         fields = ["native-stash-view", "pending", "1", OBSERVATORY, "guest-pawn", SITE, "stash", "0", item]
         self.assertEqual(native_stash.parse_view(fields + [before], OBSERVATORY, "connected")["before"], before)
+        self.assertEqual(native_stash.parse_view(fields + ["-"], OBSERVATORY, "connected")["before"], "-")
         self.assertNotIn("before", native_stash.parse_view(fields, OBSERVATORY, "connected"))
         with self.assertRaisesRegex(ValueError, "reorder"):
             native_stash.parse_view(fields + [item], OBSERVATORY, "connected")

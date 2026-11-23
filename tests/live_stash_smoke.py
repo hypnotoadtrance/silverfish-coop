@@ -103,11 +103,11 @@ async def verify(work: Path, vanilla_saved: Path, *, same_map: bool = False, dra
 
         opened = await open_screen()
         if drag:
+            original = await stash_items(guest_run, site)
             for gesture in ("cancel", "return"):
                 assert await click(f"{gesture}-{mode}:{item}") == opened
             assert await click(f"close-{mode}:{item}") == 0
-            expected_stash = [item] if direction == "withdraw" else []
-            assert await stash_items(guest_run, site) == expected_stash
+            assert await stash_items(guest_run, site) == original
             opened = await open_screen()
         await click(f"{'drag-' if drag else ''}{mode}:{item}")
         await render(mode, after=opened)
