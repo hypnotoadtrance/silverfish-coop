@@ -585,6 +585,22 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str) -> dict:
 
     await wait_resident_status(guest_run, arrived)
 
+    # Let the installed worker mirror the already committed guest creation
+    # before measuring writes during the interactive stash window.
+    checkpoint = CampaignStore.read_existing(host.campaign / "save", verify_world=service.verify_travel_checkpoint)
+    campaign_hex = uuid.UUID(checkpoint["campaign_id"]).hex
+    backup = host.profile / "Saved/SaveGames" / FOLDER / f"SFCoopBackup-{campaign_hex}.sav"
+    async with asyncio.timeout(25):
+        while True:
+            try:
+                with ZipFile(backup) as archive:
+                    mirrored = json.loads(archive.read("campaign.json"))
+                if (mirrored["campaign_id"], mirrored["revision"]) == (checkpoint["campaign_id"], checkpoint["revision"]):
+                    break
+            except (FileNotFoundError, PermissionError):
+                pass
+            await asyncio.sleep(.15)
+
     def saves():
         roots = ((host.campaign / "save", "campaign*.json"),
                  (host.profile / "Saved/SaveGames", "*.sav"), (guest.profile / "Saved/SaveGames", "*.sav"))
@@ -643,7 +659,10 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str) -> dict:
     assert (await submit(guest_run, "native-stash-view-click-fixture", target="close"))["ok"]
     await wait_resident_status(guest_run, lambda row: native_stash.VIEW not in row.get("game", {}))
     require_no_page_file()
-    assert saves() == before, "The memory-backed stash view or transfer changed a campaign save"
+    after = saves()
+    changed = [(group, path) for group, (start, end) in enumerate(zip(before, after, strict=True))
+               for path in sorted(start.keys() | end.keys()) if start.get(path) != end.get(path)]
+    assert not changed, ("The memory-backed stash view or transfer changed a campaign save", changed)
     return {"stash_actor": authored["actor"], "site": site, "stashed_guid": item["guid"],
             "stock_empty": empty, "stock_filled": filled, "memory_readbacks": [empty_proof, filled_proof],
             "local_bridge": {"host": home["local_bridge"], "guest": joined["local_bridge"]},
