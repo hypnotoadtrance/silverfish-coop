@@ -12,6 +12,7 @@ local response_class = "/Game/Classes/GUI/SubWidgets/PlayerResponce_Widget.Playe
 local dialogue_class = "/Game/Classes/GUI/Dialogue_Widget.Dialogue_Widget_C"
 local log_class = "/Game/Classes/GUI/Menu_QuestLog_Widget.Menu_QuestLog_Widget_C"
 local details_class = "/Game/Classes/GUI/SubWidgets/Quest_DetailsWindow_Widget.Quest_DetailsWindow_Widget_C"
+local turnin_class = "/Game/Classes/GUI/SubWidgets/Quest_TurnIn_Widget.Quest_TurnIn_Widget_C"
 local pistol_class = "/Game/Classes/Weapons/Wep_LightPistol.Wep_LightPistol_C"
 local inventory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
@@ -128,10 +129,10 @@ local function advance_conversation(controller)
     end
 end
 
-local function read_menu(controller)
+local function read_menu(controller, completed)
     local menu = top(controller)
     assert(exact(menu, log_class) and menu.BountyBoard == true and valid(menu.BountyBoard_Ref), "Expected stock board menu")
-    local list = menu.VerticalBox_ContractsList
+    local list = completed and menu.VerticalBox_CompletedList or menu.VerticalBox_ContractsList
     local count, ids = list:GetChildrenCount(), {}
     assert(count >= 0 and count <= 128)
     for i = 0, count - 1 do
@@ -169,6 +170,21 @@ local function accept_lake_quest(state)
     assert(exact(details, details_class) and same(details.QuestLog_MenuRef, menu) and name(details.Quest_ID) == id)
     details:BndEvt__Quest_DetailsWindow_Widget_Button_Clear_Accept_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
     return "clicked"
+end
+
+local function turn_in_crossroads(state)
+    local menu, board = top(state.controller), StaticFindObject(level .. "BountyBoard_BP_C_0")
+    assert(exact(menu, log_class) and same(menu.BountyBoard_Ref, board), "Expected stock Simmi jobs menu")
+    local list = menu.VerticalBox_CompletedList
+    for index = 0, math.min(list:GetChildrenCount(), 128) - 1 do
+        local row = list:GetChildAt(index)
+        if exact(row, turnin_class) and name(row.Quest_IDTag) == "Jmr_CrossRoads" then
+            assert(same(row.QuestLog_MenuRef, menu), "Crossroads redemption belongs to another menu")
+            row:BndEvt__Quest_TurnIn_Widget_Button_K2Node_ComponentBoundEvent_2_OnButtonReleasedEvent__DelegateSignature()
+            return "clicked"
+        end
+    end
+    error("The host Simmi menu has no Crossroads redemption row", 0)
 end
 
 local function seed_pistol(state)
@@ -221,9 +237,11 @@ local function sync(state, phase)
         if portable and phase == "hosting" then
             if operation == "seedpistol" then return seed_pistol(state) end
             if operation == "acceptlake" then return accept_lake_quest(state) end
+            if operation == "turnincrossroads" then return turn_in_crossroads(state) end
         end
         if operation == "host" or operation == "guest" or operation == "board" then return approach(state, phase, operation) end
         if operation == "read" then return read_menu(state.controller) end
+        if operation == "ready" then return read_menu(state.controller, true) end
         if operation == "closesimmi" then
             local board = StaticFindObject(level .. "BountyBoard_BP_C_0")
             for _ = 1, 4 do

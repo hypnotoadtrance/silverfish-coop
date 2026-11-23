@@ -5,6 +5,7 @@ import math
 import time
 
 from live_multi_smoke import campaign_save_hashes
+from portable_guest_world_start import resident_events
 from tools.silverfish import native_inventory
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.control import current_status, submit
@@ -164,6 +165,46 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
         assert weapon["status"] == "equipped" and weapon["actor_ammo"] == ammo, weapon
         return weapon
 
+    async def destroy_jammer(spec, magazine):
+        before = campaign_save_hashes(host.campaign)
+        guest_frame = await state(guest, lambda frame: frame.get("state") == "connected")
+        shots = []
+        for _ in range(3):
+            aimed = await host.bridge.command(spec.command("aim"), pawn, guid, timeout=6)
+            aim = aimed[f"{spec.key}_aim"]
+            assert (aim["map"], aim["pawn"], aim["jammer"], aim["guid"]) == (
+                spec.objective_map, pawn, spec.jammer, guid), aim
+            started = time.time()
+            sequence = await press_primary()
+            async with asyncio.timeout(7):
+                while True:
+                    result = next((row for row in await resident_events(guest_run, guest_frame)
+                                   if row.get("sequence") == sequence and row["time_unix"] >= started
+                                   and row["event"] in ("native_guest_primary_input", "native_guest_primary_input_rejected")), None)
+                    if result:
+                        break
+                    await asyncio.sleep(.1)
+            assert result["event"] == "native_guest_primary_input", result
+            shot = result["native_guest_weapon"]
+            assert (shot["before"], shot["after"], shot["projectiles"]) == (magazine, magazine - 1, 1), shot
+            magazine = shot["after"]
+            shots.append({"aim": aim, "shot": shot})
+            try:
+                async with asyncio.timeout(2.5):
+                    objective = await quest_on(host, spec, 2)
+                break
+            except TimeoutError:
+                continue
+        else:
+            raise AssertionError(f"The stock guest shots did not complete {spec.quest}: {shots}")
+        assert objective["actor"] == guest_frame["character_id"], objective
+        assert objective["objective"]["shooter_role"] == "guest" and objective["objective"]["shooter"] == pawn, objective
+        assert await quest_on(guest, spec, 2) == objective
+        await state(guest, lambda frame: frame.get("game", {}).get(f"{spec.key}_projection", {}).get("state")
+                    in ("hidden", "absent"))
+        assert campaign_save_hashes(host.campaign) == before, "Breaking a jammer wrote a save"
+        return magazine, {"shots": shots, "objective": objective}
+
     outbound = await cross(OBSERVATORY, CROSSROADS, "Obsv_Etr")
     crossroads = await observe_jammer(CROSSROADS_JAMMER)
     async with asyncio.timeout(8):
@@ -176,16 +217,47 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
     # selected in the host's detached pawn and available to the stock input.
     restored = await confirm_weapon(7)
     assert restored["pawn"] != before_travel["pawn"], restored
-    checkpoint = campaign_save_hashes(host.campaign)
-    shot = await press_primary()
-    await state(guest, lambda f: f.get("gameplay", {}).get("native_equipped_weapon", {}).get("rounds") == 6)
-    assert campaign_save_hashes(host.campaign) == checkpoint, "Firing the restored weapon wrote a save"
+    magazine, lake_completion = await destroy_jammer(BLACK_LAKE, 7)
+    await journal("1,2")
     lake_return = await cross(LAKE, CROSSROADS, "Lake_Cave")
+    await observe_jammer(CROSSROADS_JAMMER)
+    await confirm_weapon(magazine)
+    magazine, crossroads_completion = await destroy_jammer(CROSSROADS_JAMMER, magazine)
     final_visit = await cross(CROSSROADS, OBSERVATORY, "Obsv_Etr")
-    await confirm_weapon(6)
+    await confirm_weapon(magazine)
+    completed_journal = await journal("2,2")
+
+    payout_checkpoint = campaign_save_hashes(host.campaign)
+    wallet = (await state(host, lambda frame: type(frame.get("game", {}).get("native_wallet")) is int))["game"]["native_wallet"]
+    guest_id = (await state(guest, lambda frame: frame.get("state") == "connected"))["character_id"]
+    payouts = []
+    for seat, spec, owner in ((host, CROSSROADS_JAMMER, "host"), (guest, BLACK_LAKE, guest_id)):
+        await board(seat)
+        actual_board, _, ready = (await command(seat, "ready")).split(";")
+        assert actual_board == SIMMI_BOARD and spec.quest in ready.split(","), ready
+        if seat is host:
+            assert await command(host, "turnincrossroads") == "clicked"
+        else:
+            pressed = await action(guest, "native-wire-board-stock-fixture", target=f"{spec.quest}|turnin")
+            assert pressed["native_wire_board_stock"]["state"] == "redeeming", pressed
+        paid, guest_paid = await asyncio.gather(*(quest_on(peer, spec, -10) for peer in peers))
+        wallet += spec.cash
+        assert paid == guest_paid and paid["actor"] == owner and set(paid["recipients"]) == {"host", guest_id}, paid
+        assert (paid["cash"], paid["xp"], paid["wallet"]) == (spec.cash, 1, wallet), paid
+        await asyncio.gather(*(state(peer, lambda frame: frame.get("game", {}).get("native_wallet") == wallet) for peer in peers))
+        await close(seat)
+        repeated = await action(guest, "native-quest-turnin", target=spec.quest)
+        assert repeated["effect"] == "native_quest_already_settled" and repeated["wallet"] == wallet, repeated
+        payouts.append(paid)
+    final_journal = await journal("-10,-10")
+    await state(host, lambda frame: all(row.get("quest_xp") == 2 and not row.get("native_quest_xp_pending")
+                     for row in (frame.get("gameplay", {}).get("players", {}).get(role, {}) for role in ("host", "guest"))))
+    assert campaign_save_hashes(host.campaign) == payout_checkpoint, "Stock turn-in wrote a save before the normal checkpoint"
     return {"stock_simmi_jammers": {
         "offered": sorted(offers), "remaining": sorted(remaining), "initial_journals": accepted_journal,
         "crossroads": crossroads, "lake": lake, "visits": [outbound, lake_out, lake_return, final_visit],
         "weapon_before_travel": before_travel, "weapon_after_travel": restored,
-        "restored_weapon_primary_sequence": shot, "campaign_checkpoint_unchanged_during_shot": True,
+        "objective_journals": completed_journal, "paid_journals": final_journal,
+        "lake_completion": lake_completion, "crossroads_completion": crossroads_completion,
+        "payouts": payouts, "shared_wallet": wallet, "no_gameplay_checkpoints": True,
     }}

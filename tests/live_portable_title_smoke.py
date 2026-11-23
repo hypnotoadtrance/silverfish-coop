@@ -140,6 +140,17 @@ def tutorial_dock_zone_overlay(game: Path):
     return portable_script_overlay(game, "native_zone.lua", allow_dock_position)
 
 
+def jammer_aim_overlay(game: Path):
+    def allow_isolated_aim(script):
+        gate = 'local enabled = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"'
+        if script.count(gate) != 1:
+            raise ValueError("The replica lacks the stock jammer aim fixture gate")
+        return script.replace(gate, gate + '\n    or (os.getenv("SILVERFISH_COOP_HEADLESS") == "1"'
+                              + '\n        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")', 1)
+
+    return portable_script_overlay(game, "native_flood_jammer_aim_fixture.lua", allow_isolated_aim)
+
+
 def shop_lease_overlay(game: Path):
     def allow_isolated_approach(text):
         gate = 'local fixtures = os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"'
@@ -3189,6 +3200,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableWeatherTravelProbe",
                                                      fixture="portable_weather_travel_probe.lua"))
         if stock_simmi_jammers:
+            proof["jammer_aim_overlays"] = [probes.enter_context(jammer_aim_overlay(game)) for game in games]
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableSimmiJobsProbe",
                                                      fixture="simmi_jobs_probe.lua"))
