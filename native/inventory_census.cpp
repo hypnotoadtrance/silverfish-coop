@@ -239,7 +239,7 @@ namespace
             const std::int32_t quantity = stock.stackable ? ammo : 1;
             if (quantity <= 0) return "native_inventory_census_invalid_stack_quantity";
 
-            const bool droppable = source == "backpack" && stock.drop_class &&
+            const bool droppable = (source == "backpack" || source == "helmet" || source == "armor") && stock.drop_class &&
                 !inventory.never_drop->GetPropertyValueInContainer(value);
             std::format_to(std::back_inserter(lines), "{:08X}{:08X}{:08X}{:08X}\t{}\t{}\t{}\t{}\t{:d}\t{:d}\t{:d}\t{:d}",
                            identity[0], identity[1], identity[2], identity[3], source, index, stock.path, quantity,

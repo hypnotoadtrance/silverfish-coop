@@ -2016,6 +2016,34 @@ async def verify_stock_unequip(first, second, evidence):
             evidence["guest_worn"].append({"receipt": receipt, "backpack_row": rows[0]})
 
         assert saves() == before, "The guest stock Unequip wrote a save before a checkpoint"
+        evidence["guest_worn_world_drop"] = []
+        for (key, slot, equip, _), guid in zip(worn, worn_guids, strict=True):
+            await portable_probe_command(guest.bridge, probe, f"{equip}\t{guid}")
+            await witness("native_stock_inventory_action", key, guid)
+            action = "guest-drop-helmet" if slot == 8 else "guest-drop-armor"
+            await portable_probe_command(guest.bridge, probe, f"{action}\t{guid}")
+            accepted = await witness("native_stock_inventory_action", native_guest_drop.RESULT, guid)
+            assert accepted["stock_inventory_proof"] == f"verified stock world drop from slot {slot}", accepted
+            receipt = accepted[native_guest_drop.RESULT]
+            identity = native_world_loot.player_drop_identity(receipt["drop_id"])
+            for run in (host_run, guest_run):
+                await wait_resident_status(run, lambda frame: identity in frame.get("game", {}).get(native_world_loot.KEY, {}))
+            assert (await portable_probe_command(guest.bridge, probe, "guest-worn-state")) == "-,-"
+            guest_items = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
+            assert all(row["guid"] != guid for row in guest_items), guest_items
+            approached = await submit(host_run, native_world_loot.APPROACH, target=f"host@{identity}")
+            assert approached["ok"], approached
+            picked = await submit(host_run, native_world_loot.FIXTURE, target=identity)
+            assert picked["ok"], picked
+            for run in (host_run, guest_run):
+                await wait_resident_status(run, lambda frame: identity not in frame.get("game", {}).get(native_world_loot.KEY, {})
+                    and receipt["drop_id"] not in frame.get("gameplay", {}).get("native_guest_stack_drops", {}))
+            host_items = (await submit(host_run, "native-inventory-list"))["native_inventory"]["items"]
+            recovered, = [row for row in host_items if row["guid"] == guid]
+            assert (recovered["source"], recovered["class_path"], recovered["quantity"]) == (
+                "backpack", receipt["class_path"], 1), recovered
+            evidence["guest_worn_world_drop"].append({"receipt": receipt, "host_pickup": recovered})
+        assert saves() == before, "The guest worn drop or host pickup wrote a save before a checkpoint"
         await leaves_stock_open()
         await close_stock()
         return {"selected_and_inactive_slots_checked": True, "guest_duplicate_clicks_rejected": True,

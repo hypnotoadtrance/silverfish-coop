@@ -32,6 +32,7 @@ MAPS = {area: area.rsplit("/", 1)[1] for area in NORMAL_CAMPAIGN_MAPS | AUTHORED
 MAX_DROPS = 128
 MAX_ACTIVE = 4
 MAX_QUANTITY = 200
+WORN_DROP_ENTRIES = ("worn_drop_context_menu", "worn_drop_ctrl_click", "worn_drop_drag_to_floor")
 _RECORD_FIELDS = {"owner", "guid", "quantity", "class_path", "map", "location", "claim_id"}
 _MERGE_FIELDS = {"inventory_guid", "stack_merge"}
 _CLASS = re.compile(r"/Game/Classes/(?:[A-Za-z0-9_-]+/)*([A-Za-z0-9_-]+)\.\1_C\Z")
@@ -51,6 +52,8 @@ def parse_stock_action(fields, game):
     amount, before = int(count), int(expected)
     mode = {"sort": "sort", "split": "split", "take-ammo": "unload", "equip": "equip", "unequip": "unequip",
             "context_menu": "drop", "ctrl_click": "drop"}.get(entry)
+    if entry in WORN_DROP_ENTRIES:
+        mode = "worn-drop"
     if mode is None and entry.startswith("use-") and f"native-guest-{entry[4:]}" in CONSUMABLE_RESULTS:
         mode = "use"
     if (mode is None or (guid != "-" and not valid_guid(guid)) or (guid == "-") != (mode == "sort")
@@ -60,7 +63,8 @@ def parse_stock_action(fields, game):
             or (mode == "unload" and not 1 <= amount == before <= MAX_TAKE_AMMO_ROUNDS)
             or (mode == "equip" and not 0 <= before <= 10)
             or (mode == "unequip" and not 1 <= before <= 10)
-            or (mode not in ("split", "unload", "equip", "unequip") and before != 0)):
+            or (mode == "worn-drop" and (amount != 1 or before not in (9, 10)))
+            or (mode not in ("split", "unload", "equip", "unequip", "worn-drop") and before != 0)):
         raise ValueError("Invalid stock backpack operation")
     return dict(area=area, pawn=pawn, epoch=epoch, sequence=int(sequence), entry=entry, guid=guid,
                 count=amount, expected=before, mode=mode)

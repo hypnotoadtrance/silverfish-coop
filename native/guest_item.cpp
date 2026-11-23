@@ -3091,11 +3091,11 @@ bool silverfish::native_guest_item::take_ammo_supported(Unreal::UObject* item_cl
     return stock_bolt(weapon) && rounds <= bolt_magazine;
 }
 
-std::string_view silverfish::native_guest_item::finish_local_unequip(Unreal::UObject* pawn, Unreal::UObject* save,
+std::string_view silverfish::native_guest_item::finish_local_removal(Unreal::UObject* pawn, Unreal::UObject* save,
                                                                     Unreal::UObject* prior_actor, int slot,
-                                                                    std::string_view identity, int rounds)
+                                                                    std::string_view identity, std::optional<int> rounds)
 {
-    if (!Unreal::IsInGameThreadRaw() || slot < 0 || slot > 9 ||
+    if (!Unreal::IsInGameThreadRaw() || slot < 0 || slot > 9 || (!rounds && slot < quick_slots) ||
         silverfish::native_interaction_input::current_guest_pawn(reinterpret_cast<std::uintptr_t>(pawn)) != pawn ||
         !live(pawn) || !live(save) || object(pawn, STR("Save")) != save) return "unequip_guest_scope_changed";
     Context context;
@@ -3107,8 +3107,12 @@ std::string_view silverfish::native_guest_item::finish_local_unequip(Unreal::UOb
     if (!context.world || object(context.instance, STR("SaveSlot_Ref")) != save) return "unequip_guest_scope_changed";
     Inventory inventory;
     if (const auto error = locate(context, inventory); !error.empty()) return error;
-    if (!inventory.item || inventory.backpack_index < 0) return "unequip_backpack_item_unavailable";
-    if (inventory.ammo->GetPropertyValueInContainer(inventory.item) != rounds) return "unequip_backpack_ammunition_mismatch";
+    if (rounds)
+    {
+        if (!inventory.item || inventory.backpack_index < 0) return "unequip_backpack_item_unavailable";
+        if (inventory.ammo->GetPropertyValueInContainer(inventory.item) != *rounds) return "unequip_backpack_ammunition_mismatch";
+    }
+    else if (inventory.item) return "drop_worn_item_still_owned";
     if (slot >= quick_slots)
     {
         const bool head = slot == 8;

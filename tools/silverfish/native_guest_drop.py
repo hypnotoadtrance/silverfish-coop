@@ -219,16 +219,19 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                 raise RuntimeError("The host did not verify consumption of the selected stock item")
             committed = (str(remaining),)
         else:
-            if entry not in ("context_menu", "ctrl_click") or quantity < 1:
-                raise ValueError("The native action did not select a backpack drop")
+            worn = mode == "worn-drop"
+            if entry not in (record.WORN_DROP_ENTRIES if worn else ("context_menu", "ctrl_click")) or quantity < 1:
+                raise ValueError("The native action did not select an inventory drop")
             key, remaining = RESULT, 0
             receipt = (await client.gameplay_action(DROP, operation, f"{guid}|{quantity}")).get(key)
             if (not isinstance(receipt, dict)
                     or tuple(receipt.get(field) for field in ("state", "drop_id", "owner", "guid", "quantity", "map"))
                     != ("dropped", operation, client.invite["character_id"], guid, quantity, area)
                     or not record.valid_quantity(receipt.get("class_path"), quantity)
+                    or worn and native_guest_armor.equip_action(receipt.get("class_path")) != (
+                        native_guest_armor.HELMET_ACTION if int(expected) == 9 else native_guest_armor.ACTION)
                     or not record.valid_position(receipt.get("location"))):
-                raise RuntimeError("The host did not settle the stock guest backpack drop")
+                raise RuntimeError("The host did not settle the stock guest inventory drop")
             committed = (str(remaining),)
         await client.guest_ui.refresh(client)
         accepted = True
