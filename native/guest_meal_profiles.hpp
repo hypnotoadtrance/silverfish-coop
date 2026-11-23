@@ -15,6 +15,7 @@ namespace silverfish::native_guest_consumable
         bool can_cook{};
         int infection{};
         std::string_view entry{};
+        int fatigue{};
     };
 
     inline constexpr std::array meals{
@@ -23,6 +24,7 @@ namespace silverfish::native_guest_consumable
         Consumable{STR("/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"), 14, 0.4, 0.0, 14.0, true, 0, "use-canned-beans"},
         Consumable{STR("/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C"), 1, 0.05, 0.0, 3.5, true, 0, "use-brown-mushroom"},
         Consumable{STR("/Game/Classes/Items/Item_CannedBeef.Item_CannedBeef_C"), 30, 0.4, 0.0, 16.0, true, 8, "use-canned-beef"},
+        Consumable{STR("/Game/Classes/Items/Item_HoneyEgg.Item_HoneyEgg_C"), 6, 0.05, 0.0, 5.0, true, 0, "use-honey-egg", 5},
         Consumable{STR("/Game/Classes/Items/Item_Leftovers.Item_Leftovers_C"), 5, 0.2, 0.0, 18.0, false, 0, "use-leftovers"},
         Consumable{STR("/Game/Classes/Items/Item_CannedSoup.Item_CannedSoup_C"), 12, 0.4, 0.0, 10.0, true, 3, "use-canned-soup"},
         Consumable{STR("/Game/Classes/Items/Item_CannedTuna.Item_CannedTuna_C"), 9, 0.14, 0.0, 6.0, false, 4, "use-canned-tuna"},

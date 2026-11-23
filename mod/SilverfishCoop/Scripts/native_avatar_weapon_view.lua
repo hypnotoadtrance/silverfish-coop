@@ -216,6 +216,26 @@ local function restore_stock(entry)
     entry.stock_weapon_actor, entry.stock_weapon_masks = nil, nil
 end
 
+local function matches_displayed_mesh(entry, actor)
+    local class = StaticFindObject(mesh_type)
+    if not valid(class) then return false end
+    local components = actor:K2_GetComponentsByClass(class)
+    if not components or #components > 24 then return false end
+    for index = 1, #components do
+        local component = unwrap(components[index])
+        if valid(component) and same(component:GetOwner(), actor) then
+            for _, profile in pairs(kinds) do
+                local component_type = StaticFindObject(profile[1])
+                if valid(component_type) and component:IsA(component_type) then
+                    local mesh = component[profile[2]]
+                    if valid(mesh) and entry.weapon_meshes and entry.weapon_meshes[mesh:GetAddress()] then return true end
+                end
+            end
+        end
+    end
+    return false
+end
+
 local function stock_held_actor(entry)
     local pawn, firearm = entry.pawn, entry.firearm_class
     local base = StaticFindObject(equipment_type)
@@ -228,16 +248,21 @@ local function stock_held_actor(entry)
     end
     if qualifies(pawn.EquipedItem) then return pawn.EquipedItem end
     if qualifies(entry.stock_weapon_actor) then return entry.stock_weapon_actor end
-    -- Unreal can replicate the actor attachment without replicating the
-    -- remote pawn's first-person equipped-item reference.
-    if firearm == "-" then return end
+    -- Unreal can replicate the attachment without the equipped-item reference.
+    -- Non-firearms need a match to a mesh in the current observer's held model.
     local output = {}
     pawn:GetAttachedActors(output, true, false)
     local attached = output.OutActors or output
+    if #attached > 24 then return end
+    local result
     for index = 1, #attached do
         local actor = unwrap(attached[index])
-        if qualifies(actor) then return actor end
+        if qualifies(actor) and (firearm ~= "-" or matches_displayed_mesh(entry, actor)) then
+            if result then return end
+            result = actor
+        end
     end
+    return result
 end
 
 function view.suppress_stock(entry)
@@ -270,7 +295,7 @@ function view.clear(entry)
     end
     if valid(entry.weapon_anchor) and valid(entry.pawn) then entry.weapon_anchor:K2_DestroyComponent(entry.pawn) end
     entry.weapon_parts, entry.weapon_model, entry.weapon_anchor, entry.weapon_rig = nil, nil, nil, nil
-    entry.weapon_shape = nil
+    entry.weapon_shape, entry.weapon_meshes = nil, nil
     entry.weapon_stance = nil
     entry.weapon_slide = nil
 end
@@ -334,6 +359,7 @@ local function attach(entry, parts, lighter_mode)
             {Pitch = p[4], Yaw = p[5], Roll = p[6]}, false, {}, true)
         component:SetRelativeScale3D({X = p[7], Y = p[8], Z = p[9]})
         if part.kind == "s" then component:SetStaticMesh(asset) else component:SetSkeletalMeshAsset(asset) end
+        entry.weapon_meshes[asset:GetAddress()] = true
         if lighter_mode and part.path == lighter.body_path then body = component end
         if lighter_mode and part.path == lighter.lid_path then lid = component end
         if part.path == bat_mesh and part.kind == "s" then align_bat_grip(component, entry.body, socket) end
@@ -370,7 +396,7 @@ function view.apply(entry, model, firearm)
     end
     view.clear(entry)
     entry.firearm_class = firearm
-    entry.weapon_parts = {}
+    entry.weapon_parts, entry.weapon_meshes = {}, {}
     if #parts > 0 then
         local ok, failure = pcall(attach, entry, parts, mode)
         if not ok then

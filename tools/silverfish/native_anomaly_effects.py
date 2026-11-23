@@ -18,8 +18,8 @@ FIXED_CUES = ("powerbox", "fixedtank", "fixedfire")
 OBSERVER_CUES = ("observersparks", "observerred", "observergreen", "observerblue", "observerpurple", "observergold")
 KINDS = {"charge": 4000, "blast": 500100, "vortex": 500100, "electrode": 8100, "canister": 500100, "wandering": 500100,
          "bottle": 8000,
-         **dict.fromkeys(("fueldrum", *FIXED_CUES, *OBSERVER_CUES), 500100)}
-CUE_EVENTS = {"vortex": "native_vortex_effect_played", "electrode": "native_electrode_effect_played",
+         **dict.fromkeys(("fueldrum", "pipebomb", *FIXED_CUES, *OBSERVER_CUES), 500100)}
+CUE_EVENTS = {"pipebomb": "native_pipe_bomb_effect_played", "vortex": "native_vortex_effect_played", "electrode": "native_electrode_effect_played",
               "wandering": "native_wandering_teleport_effect_played", "bottle": "native_bottle_break_played",
               "canister": "native_canister_effect_played", "fueldrum": "native_fuel_drum_effect_played",
               **dict.fromkeys(FIXED_CUES, "native_fixed_explosive_effect_played"),

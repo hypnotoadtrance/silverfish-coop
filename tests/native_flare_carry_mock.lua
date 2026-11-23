@@ -147,6 +147,14 @@ bolt.ReplicatedMovement.bRepPhysics = true
 now = now + 1
 flare.sync(bolt_client, "connected")
 assert(not flare.carry_root(bolt, bolt_client.world) and bolt.collision == false, "bolt was treated as a flare")
+local pipe_path = folder .. "PipeBomb_Projectile_BP.PipeBomb_Projectile_BP_C"
+local pipe, _, pipe_context = projectile(pipe_path, false, client.world)
+pipe.FuseTime = 3
+pre(pipe_context)
+post(pipe_context)
+assert(pipe.FuseTime == 86400 and pipe.collision == false and not pipe.ProjectileMovement.active)
+assert(not flare.carry_root(pipe, client.world), "the bomb replica cannot become a local physics grip")
+
 local grenade, _, grenade_context = projectile(folder .. "GrenadeProjectile_Master_BP.GrenadeProjectile_Master_BP_C", false)
 pre(grenade_context)
 post(grenade_context)

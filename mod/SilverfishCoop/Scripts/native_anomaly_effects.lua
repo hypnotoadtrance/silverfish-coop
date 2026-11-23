@@ -21,6 +21,7 @@ local assets = {
         "/Game/Assets/Sounds/CUEs/BulletHit_Cues/Impact_Glass_Liquid_Cue.Impact_Glass_Liquid_Cue",
         "/Game/Assets/Sounds/SoundClasses/Default_Attenuation.Default_Attenuation"},
 }
+assets.pipebomb = assets.blast
 assets.fueldrum = assets.blast
 assets.fixedtank = assets.blast
 assets.powerbox = {assets.electrode[1], assets.electrode[2], assets.blast[3]}
@@ -41,6 +42,8 @@ for _, spec in pairs(observer_blasts) do
         assets.vortex[2], assets.blast[3]}
     audio_range[spec.kind] = audio_range.blast
 end
+local pipe_bomb = "BlueprintGeneratedClass /Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/PipeBomb_Projectile_BP.PipeBomb_Projectile_BP_C"
+audio_range.pipebomb = audio_range.blast
 local blasts = {starburst = "blast", vortex = "vortex", electrode = "electrode"}
 effects.blast_class = "BlueprintGeneratedClass /Game/Classes/Actors/ExplosionActor_BP.ExplosionActor_BP_C"
 local history, pending, serial, seen, visit = {}, {}, 0, {}, nil
@@ -156,6 +159,12 @@ function effects.observe_blast(actor, active, registered_canister)
     if count < 1 or count > 8 then return end
     for index = 1, count do
         local source = ignored[index]
+        if count == 1 and valid(source) and source:HasAuthority() and source:GetClass():GetFullName() == pipe_bomb
+            and valid(source:GetWorld()) and source:GetWorld():GetAddress() == actor:GetWorld():GetAddress() then
+            effects.observe_fixed_blast("pipebomb", actor:K2_GetActorLocation(), actor.PFX, actor.SFX, actor["PFX Scale"],
+                actor["SFX Vol"], actor["Attenuation Settings"])
+            return
+        end
         local entry = valid(source) and active[source:GetAddress()]
         local cue = entry and blasts[entry.kind]
         if entry and entry.kind == "observer" then

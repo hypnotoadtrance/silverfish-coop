@@ -304,6 +304,7 @@ namespace
                 !effect_map || effect_map->ContainerPtrToValuePtr<Unreal::FScriptMap>(defaults)->Num() != 0 ||
                 !default_tag || !matches_payload(default_payload)) return false;
             if (profile.food > 0.0 && !read_bool(defaults, STR("CanCook"), profile.can_cook)) return false;
+            if (profile.fatigue && !number_is<Unreal::FIntProperty>(defaults, STR("Ammount_Fatigue"), profile.fatigue)) return false;
             return units > 0 && units <= INT32_MAX / profile.value &&
                    weight->GetPropertyValueInContainer(row) == units * profile.weight &&
                    value->GetPropertyValueInContainer(row) == units * profile.value &&
@@ -1062,6 +1063,21 @@ namespace
         auto* host_flags = canonical.data(scope.stock);
         const Unreal::FName sickness{STR("Sickness"), Unreal::FNAME_Find};
         if (sickness.IsNone()) return refuse("sickness_schema");
+        // Honey Egg's stock ApplyItemEffects adds fatigue through the global save.
+        // Apply its audited Add_PlayerFatigue result to this guest's own flag map.
+        const Unreal::FName fatigue{STR("Player_Fatigue"), Unreal::FNAME_Find};
+        int fatigue_before{}, fatigue_after{}, fatigue_minimum{};
+        if (profile.fatigue)
+        {
+            std::int32_t trauma{};
+            if (fatigue.IsNone() || !silverfish::native_enemy_loot::count_save_passive(
+                    scope.guest, Unreal::FName{STR("LingeringTrauma"), Unreal::FNAME_Find}, trauma))
+                return refuse("fatigue_schema");
+            fatigue_before = personal.read(guest_flags, fatigue);
+            if (fatigue_before < 0 || fatigue_before > 100) return refuse("fatigue_value");
+            fatigue_minimum = trauma > 0 ? 15 : 0;
+            fatigue_after = std::clamp(fatigue_before + profile.fatigue, fatigue_minimum, 100);
+        }
         const auto sickness_before = personal.read(guest_flags, sickness);
         std::int32_t sickness_after = sickness_before;
         int dose = profile.infection;
@@ -1150,6 +1166,10 @@ namespace
                 !personal.write(static_cast<Unreal::FScriptMap*>(expected_flags.get()), sickness, sickness_after) ||
                 !prove(backup_bag.get(), expected)) return unverified("infection");
         }
+        if (profile.fatigue &&
+            (!personal.write(static_cast<Unreal::FScriptMap*>(expected_flags.get()), fatigue, fatigue_after) ||
+             !personal.write(guest_flags, fatigue, fatigue_after) || !prove(backup_bag.get(), expected)))
+            return unverified("fatigue");
         bag->CopyCompleteValue(guest_rows, expected_bag.get());
         if (!prove(expected_bag.get(), expected))
             return rollback(true, expected) ? refuse("debit_rolled_back") : unverified("debit");
@@ -1172,6 +1192,13 @@ namespace
         lua.set_integer(sickness_before);
         lua.set_integer(sickness_after);
         lua.set_integer(dose);
+        if (profile.fatigue)
+        {
+            lua.set_integer(fatigue_before);
+            lua.set_integer(fatigue_after);
+            lua.set_integer(fatigue_minimum);
+            return 22;
+        }
         return 19;
     }
 

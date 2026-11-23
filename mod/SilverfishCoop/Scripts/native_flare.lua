@@ -3,7 +3,8 @@ local guest_save = require("guest_save")
 
 local folder = "/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/"
 local bolt = "BlueprintGeneratedClass " .. folder .. "Bolt_Projectile_BP.Bolt_Projectile_BP_C"
-local classes = {[bolt] = "bolt"}
+local pipe_bomb = "BlueprintGeneratedClass " .. folder .. "PipeBomb_Projectile_BP.PipeBomb_Projectile_BP_C"
+local classes = {[bolt] = "bolt", [pipe_bomb] = "pipebomb"}
 for _, name in ipairs({"Flare_Projectile_BP", "Blue_Flare_Projectile_BP", "Yellow_Flare_Projectile_BP"}) do
     classes["BlueprintGeneratedClass " .. folder .. name .. "." .. name .. "_C"] = "flare"
 end
@@ -143,14 +144,24 @@ end
 function flare.start(role)
     if type(RegisterBeginPlayPreHook) ~= "function" or type(RegisterBeginPlayPostHook) ~= "function" then return end
     RegisterBeginPlayPreHook(function(context)
-        if role() ~= "client" then return end
-        local actor, kind = qualified(context, true)
+        local current = role()
+        if current ~= "host" and current ~= "client" then return end
+        local client = current == "client"
+        local actor, kind = qualified(context, client)
         if not actor then return end
-        actor:SetActorEnableCollision(false)
-        if kind == "flare" then
-            -- FuseTime is supplied by the equipped flare and is not replicated.
-            -- The host retires this actor after the real stock fuse and fade.
-            actor.FuseTime = replica_fuse
+        if client then
+            actor:SetActorEnableCollision(false)
+            if kind ~= "bolt" then
+                -- FuseTime is supplied at the throw and is local to each engine.
+                -- Only the authority applies the actual fuse, effects and damage.
+                actor.FuseTime = replica_fuse
+            end
+        elseif kind ~= "flare" then
+            -- These projectiles can hit and disappear on the first bounce.
+            actor.NetUpdateFrequency = 30
+            actor:SetReplicates(true)
+            actor:SetReplicateMovement(true)
+            actor:ForceNetUpdate()
         end
     end)
     RegisterBeginPlayPostHook(function(context)
@@ -168,11 +179,13 @@ function flare.start(role)
             -- A bolt's stock bounce replaces it with a separate ground item.
             if kind == "flare" then replicas[actor:GetAddress()] = {actor = actor} end
         else
-            actor.NetUpdateFrequency = 24
-            actor:SetReplicates(true)
-            actor:SetReplicateMovement(true)
+            if kind == "flare" then
+                actor.NetUpdateFrequency = 24
+                actor:SetReplicates(true)
+                actor:SetReplicateMovement(true)
+                projectiles[actor:GetAddress()] = {actor = actor, root = capsule(actor)}
+            end
             actor:ForceNetUpdate()
-            if kind == "flare" then projectiles[actor:GetAddress()] = {actor = actor, root = capsule(actor)} end
         end
     end)
 end

@@ -7,17 +7,18 @@ local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local headless_test = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local borough = "/Game/Classes/Maps/Maps_SafeZones/Borough.Borough"
 local meals, labels = {}, {}
-local function register_meal(slug, asset, label, food, gain, infection)
+local function register_meal(slug, asset, label, food, gain, infection, fatigue)
     local class = string.format("/Game/Classes/Items/Item_%s.Item_%s_C", asset, asset)
     labels[class] = label
     meals["native-guest-" .. slug] = {kind = slug:gsub("-", "_"), entry = "use-" .. slug,
-        class = class, food = food, gain = gain or 0, infection = infection or 0}
+        class = class, food = food, gain = gain or 0, infection = infection or 0, fatigue = fatigue}
 end
 register_meal("mre", "MRE", "MRE", 30, 10)
 register_meal("canned-peaches", "CannedPeaches", "Canned Peaches", 12)
 register_meal("canned-beans", "CannedBeans", "Canned Beans", 14)
 register_meal("brown-mushroom", "BrownMushroom", "Brown Mushroom", 3.5)
 register_meal("canned-beef", "CannedBeef", "Canned Beef", 16, 0, 8)
+register_meal("honey-egg", "HoneyEgg", "Clyde’s Honey Egg", 5, 0, 0, 5)
 register_meal("leftovers", "Leftovers", "Leftovers", 18)
 register_meal("canned-soup", "CannedSoup", "Canned Soup", 10, 0, 3)
 register_meal("canned-tuna", "CannedTuna", "Canned Tuna", 6, 0, 4)
@@ -127,7 +128,7 @@ function mre.command(fields, state, phase)
     end
     local called, used, status, before, after, food_before, food_after, regen_before, regen_after,
         health, maximum, intox_before, intox_after, host_intox, trait, gourmand, healthy_eating,
-        sickness_before, sickness_after, dose = pcall(use, pawn:GetAddress(), detached:GetAddress(), stock:GetAddress(), guid, meal.entry)
+        sickness_before, sickness_after, dose, fatigue_before, fatigue_after, fatigue_minimum = pcall(use, pawn:GetAddress(), detached:GetAddress(), stock:GetAddress(), guid, meal.entry)
     if not called then error(unverified .. "call", 0) end
     if used == false and type(status) == "string" and (status:match("^" .. refused .. "[a-z0-9_]+$")
         or status:match("^" .. unverified .. "[a-z0-9_]+$")) then error(status, 0) end
@@ -141,6 +142,11 @@ function mre.command(fields, state, phase)
         or (dose == 0 and sickness_after ~= sickness_before)
         or (dose ~= 0 and not bounded(sickness_after - sickness_before, 1, dose)) then
         error(unverified .. "infection_proof", 0)
+    end
+    if meal.fatigue and (math.type(fatigue_before) ~= "integer" or not bounded(fatigue_before, 0, 100)
+        or (fatigue_minimum ~= 0 and fatigue_minimum ~= 15)
+        or fatigue_after ~= math.min(math.max(fatigue_before + meal.fatigue, fatigue_minimum), 100)) then
+        error(unverified .. "fatigue_proof", 0)
     end
     local appetite = meal.food * (1 - gourmand * 0.2)
     local gain = meal.gain + healthy_eating * appetite * 0.3
@@ -160,7 +166,8 @@ function mre.command(fields, state, phase)
         food_before = food_before, food_after = food_after, regen_before = regen_before, regen_after = regen_after,
         health = health, maximum = maximum, intox_before = intox_before, intox_after = intox_after,
         host_intox = host_intox, trait = trait, gourmand = gourmand, healthy_eating = healthy_eating,
-        sickness_before = sickness_before, sickness_after = sickness_after, dose = dose}
+        sickness_before = sickness_before, sickness_after = sickness_after, dose = dose,
+        fatigue_before = fatigue_before, fatigue_after = fatigue_after, fatigue_minimum = fatigue_minimum}
     pcall(use_presentation.consumed, pawn, meal.class, false)
     return "exact stock guest food effects verified"
 end
@@ -178,7 +185,8 @@ function mre.rows(state, phase, status_row)
         rows[#rows + 1] = status_row(row.verb, "used", row.map, row.name, row.guid, row.before, row.after,
             real(row.food_before), real(row.food_after), real(row.regen_before), real(row.regen_after),
             real(row.health), real(row.maximum), row.intox_before, row.intox_after, row.host_intox, row.trait and 1 or 0,
-            row.gourmand, row.healthy_eating, row.sickness_before, row.sickness_after, row.dose)
+            row.gourmand, row.healthy_eating, row.sickness_before, row.sickness_after, row.dose,
+            row.fatigue_before, row.fatigue_after, row.fatigue_minimum)
     end
     return rows
 end
