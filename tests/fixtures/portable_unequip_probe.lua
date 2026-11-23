@@ -163,6 +163,34 @@ local function worn_state(pawn)
     return table.concat(fields, ",")
 end
 
+local function equip_worn(pawn, guid, drag_to_chest)
+    local stack = pawn.Controller.MenuStack
+    local screen = widget_at(stack, stack:GetArrayNum())
+    local manager = valid(screen) and screen.ItemManager
+    assert(valid(manager) and same(manager.ParentScreen, screen), "fixture stock inventory widget not open")
+    local cards, card = screen.BackpackPanel.Cards
+    for index = 1, cards:GetArrayNum() do
+        local candidate = widget_at(cards, index)
+        if valid(candidate) and identity(candidate.Item) == guid then card = candidate; break end
+    end
+    assert(card and same(card.InventoryWidget, screen.BackpackPanel), "fixture wearable card unavailable")
+    if drag_to_chest then
+        manager.HoveredCard = card
+        manager:InitiateItemTake()
+        manager:FinalTakeItem()
+        assert(manager.HoldingItem and identity(manager.HeldItem) == guid, "fixture did not pick up the chest armor")
+        manager:InsertItem(widget_at(manager.EquipSlots, 10), 1)
+        assert(not manager.HoldingItem, "stock chest armor drag did not release the cursor")
+    else
+        manager:OpenContextMenu(card)
+        local menu = manager.ItemContextMenu
+        assert(same(menu["Item Card"], card) and valid(menu.Button_Equip) and menu.Button_Equip:IsVisible(),
+            "fixture stock Equip button is not available")
+        menu:BndEvt__ItemContextMenu_Button_Equip_K2Node_ComponentBoundEvent_3_Pressed__DelegateSignature()
+        if menu:IsVisible() then manager:CloseContextMenu() end
+    end
+end
+
 local function exercise(pawn, ids)
     local save, pistol = pawn.Save, pawn.EquipedItem
     assert(item_actor(pawn, specs[1]) and save.PlayerEquipment[specs[1].index][ammo] == stored_rounds,
@@ -300,6 +328,17 @@ local function run(action, argument)
     elseif action == "guest-worn-state" then
         assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
         return worn_state(pawn)
+    elseif action == "guest-worn-backpack" then
+        assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
+        local pack, result = pawn.Save.PlayerBackpack, {}
+        for index = 1, pack:GetArrayNum() do result[index] = identity(pack[index]) end
+        return table.concat(result, ",")
+    elseif action == "guest-equip-helmet" or action == "guest-equip-armor" then
+        assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
+        local prior = worn_state(pawn)
+        equip_worn(pawn, argument, action == "guest-equip-armor")
+        assert(worn_state(pawn) == prior, "the stock guest equipped a wearable before authority settled")
+        return prior
     elseif action == "guest-remove-helmet" or action == "guest-drag-armor" then
         assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
         local prior = worn_state(pawn)

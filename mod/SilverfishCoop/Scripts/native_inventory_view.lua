@@ -700,7 +700,7 @@ local function finish_stock_drop(fields, current, state, phase)
     local created = #fields == 6 and fields[6]
     local split = pending and pending.split and remaining == pending.expected - pending.split
         and created and #created == 32 and created:match("^[0-9A-F]+$") and created:find("[^0]") and created ~= pending.guid
-    local slot = pending and pending.equip and fields[5] == "equipped" and #fields == 7 and integer(fields[6], 7)
+    local slot = pending and pending.equip and fields[5] == "equipped" and #fields == 7 and integer(fields[6], 9)
     local displaced = slot and fields[7]
     local equipped = slot and (not pending.expected or pending.expected == 0 or slot + 1 == pending.expected)
         and (displaced == "-" or #displaced == 32 and displaced:match("^[0-9A-F]+$")
@@ -748,8 +748,11 @@ local function finish_stock_drop(fields, current, state, phase)
         end
         if equipped then
             local widget = widget_at(pending.screen.ItemManager.EquipSlots, slot + 1)
-            if not finished or status ~= "refreshed" or not valid(widget) or widget.ItemIndex ~= slot
-                or stock_card_guid(widget.ItemCard) ~= pending.guid or stock_item_guid(save.PlayerEquipment[slot + 1]) ~= pending.guid
+            local item = slot < 8 and save.PlayerEquipment[slot + 1] or slot == 8 and save.PlayerHelmet or save.PlayerArmor
+            local index = slot < 8 and slot or slot - 8
+            if not finished or status ~= "refreshed" or not valid(widget) or widget.ItemIndex ~= index
+                or widget.InventoryIndex ~= (slot < 8 and 0 or 1)
+                or stock_card_guid(widget.ItemCard) ~= pending.guid or stock_item_guid(item) ~= pending.guid
                 or not stock_cards(pending.screen, save, pending.guid, 0) then
                 error("The stock equipment slot did not reflect the host's saved item", 0)
             end

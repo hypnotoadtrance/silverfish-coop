@@ -21,7 +21,7 @@ from zipfile import ZipFile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
 from tools.silverfish import (
-    direct_ip, embedded_startup, native_finite_shop, native_guest_armor, native_guest_consumable, native_guest_drop,
+    direct_ip, embedded_startup, native_finite_shop, native_guest_consumable, native_guest_drop,
     native_host_save, native_inventory, native_loose_pickup,
     native_lantern, native_loot, native_prop_carry, native_stash, native_world_loot, runtime,
 )
@@ -1063,22 +1063,31 @@ async def verify_stock_unequip(first, second, evidence):
                                       "host_live_rounds": changed["ammo"], "guest_live_rounds": locally_pressed["ammo"]}
         await close_stock()
 
-        worn = ((native_guest_armor.HELMET_ACTION, 8, "guest-remove-helmet"),
-                (native_guest_armor.ACTION, 9, "guest-drag-armor"))
+        worn = (("native_guest_helmet", 8, "guest-equip-helmet", "guest-remove-helmet"),
+                ("native_guest_armor", 9, "guest-equip-armor", "guest-drag-armor"))
         worn_guids = (await portable_probe_command(host.bridge, probe, f"remote-worn-seed\t{pawn}")).split(",")
         assert len(worn_guids) == len(set(worn_guids)) == 2 and all(re.fullmatch(r"[0-9A-F]{32}", guid) for guid in worn_guids)
-        for (action, _, _), guid in zip(worn, worn_guids, strict=True):
-            equipped = await submit(guest_run, action, target=guid)
-            assert equipped["ok"], equipped
-
-        current_worn = list(worn_guids)
         async with asyncio.timeout(15):
-            while (await portable_probe_command(guest.bridge, probe, "guest-worn-state")).split(",") != current_worn:
+            while not set(worn_guids).issubset(
+                    (await portable_probe_command(guest.bridge, probe, "guest-worn-backpack")).split(",")):
                 await asyncio.sleep(.25)
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
         await leaves_stock_open()
+        current_worn = ["-", "-"]
+        evidence["guest_worn_equip"] = []
+        for index, ((key, slot, equip, _), guid) in enumerate(zip(worn, worn_guids, strict=True)):
+            assert (await portable_probe_command(guest.bridge, probe, f"{equip}\t{guid}")).split(",") == current_worn
+            receipt = await witness("native_stock_inventory_action", key, guid)
+            assert receipt["stock_inventory_proof"] == f"verified stock equipment slot {slot}", receipt
+            current_worn[index] = guid
+            assert (await portable_probe_command(guest.bridge, probe, "guest-worn-state")).split(",") == current_worn
+            authoritative = await submit(guest_run, "native-inventory-list")
+            rows = [row for row in authoritative["native_inventory"]["items"] if row["guid"] == guid]
+            source = "helmet" if slot == 8 else "armor"
+            assert len(rows) == 1 and rows[0]["source"] == source, authoritative
+            evidence["guest_worn_equip"].append({"receipt": receipt, "worn_row": rows[0]})
         evidence["guest_worn"] = []
-        for index, ((_, slot, action), guid) in enumerate(zip(worn, worn_guids, strict=True)):
+        for index, ((_, slot, _, action), guid) in enumerate(zip(worn, worn_guids, strict=True)):
             assert (await portable_probe_command(guest.bridge, probe, f"{action}\t{guid}")).split(",") == current_worn
             receipt = await witness("native_stock_inventory_action", "native_inventory_unequip", guid)
             assert (receipt["native_inventory_unequip"]["slot"], receipt["stock_inventory_proof"]) == (

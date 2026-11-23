@@ -1280,6 +1280,19 @@ namespace
         return unequip_worn_slot(manager, screen, slot);
     }
 
+    [[nodiscard]] std::optional<int> worn_destination(Unreal::UObject* item_class)
+    {
+        auto* type = Unreal::Cast<Unreal::UClass>(item_class);
+        if (!type) return {};
+        const auto inherits = [&](const auto* path) {
+            auto* base = Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(nullptr, nullptr, path);
+            return base && type != base && type->IsChildOf(base);
+        };
+        if (inherits(STR("/Game/Classes/Armor_Items/Item_HelmetMaster_BP.Item_HelmetMaster_BP_C"))) return 8;
+        if (inherits(STR("/Game/Classes/Armor_Items/Item_ArmorMaster_BP.Item_ArmorMaster_BP_C"))) return 9;
+        return {};
+    }
+
     Unreal::UObject* selected_unequip_actor(Unreal::UObject* save, Unreal::UObject* item_class, int slot)
     {
         auto* selected = field<Unreal::FIntProperty>(save, STR("PlayerEquipIndex"));
@@ -1669,8 +1682,11 @@ namespace
         const auto entry = !action.empty() ? action :
             equipped_index ? (from_menu ? "equipped_context_menu" : "equipped_ctrl_click") :
                              (from_menu ? "context_menu" : "ctrl_click");
+        const auto worn = action == "equip" ? worn_destination(item_class) : std::optional<int>{};
+        if (worn && target_slot && worn != target_slot) return;
+        const auto destination = worn ? worn : target_slot;
         host_drop_request = HostDropRequest{guid, count, ++host_drop_sequence, false, now + request_lease, manager,
-            screen, panel, entry, unequipping ? *equipped_index + 1 : target_slot ? *target_slot + 1 : unload ? saved_ammo : 0,
+            screen, panel, entry, unequipping ? *equipped_index + 1 : destination ? *destination + 1 : unload ? saved_ammo : 0,
             prior_held};
     }
 
@@ -2346,16 +2362,19 @@ namespace
             clear_stash_cursor(manager);
             return true;
         }
-        const auto target_slot = drop_equipment_index(manager, target);
+        const auto target_slot = unequip_source_slot(manager, screen, target);
         const bool matches_player = !insert || (target && target == object_field(screen, STR("PlayerCard")) &&
                                                     same_widget_player(target));
         Guid guid{};
         auto* item_class = ready() && (matches_player || target_slot) ? exact_guest_cursor_item(save, item, guid) : nullptr;
-        const auto action = item_class ? (target_slot ? std::string_view{"equip"} : stock_backpack_use(item_class))
-                                       : std::string_view{};
+        const auto worn = worn_destination(item_class);
+        const auto destination = worn ? ((matches_player || target_slot == worn) ? worn : std::nullopt)
+            : (target_slot && *target_slot < 8 ? target_slot : std::nullopt);
+        const auto action = destination ? std::string_view{"equip"}
+            : item_class && matches_player && !worn ? stock_backpack_use(item_class) : std::string_view{};
         if (!action.empty() && guid == guest_use_cursor.held)
             host_drop_request = HostDropRequest{guid, 1, ++host_drop_sequence, false, now + request_lease,
-                                                manager, screen, panel, action, target_slot ? *target_slot + 1 : 0};
+                                                manager, screen, panel, action, destination ? *destination + 1 : 0};
         guest_use_cursor = {};
         clear_stash_cursor(manager);
         return true;
@@ -2875,7 +2894,7 @@ namespace
             if (!slot_property) return finish(false, "refresh_unavailable");
             Unreal::FScriptArrayHelper widgets(slots, slots->ContainerPtrToValuePtr<void>(manager));
             if (widgets.Num() < 8 || widgets.Num() > 16) return finish(false, "refresh_unavailable");
-            const auto last = completed.entry == "unequip" && completed.expected > 8 ? 10 : 8;
+            const auto last = completed.expected > 8 ? 10 : 8;
             if (widgets.Num() < last) return finish(false, "refresh_unavailable");
             for (int index = 0; index < last; ++index)
             {

@@ -58,7 +58,7 @@ def parse_stock_action(fields, game):
             or (mode == "drop" and not 1 <= amount <= MAX_QUANTITY)
             or (mode == "split" and not 0 < amount < before < 2**31)
             or (mode == "unload" and not 1 <= amount == before <= MAX_TAKE_AMMO_ROUNDS)
-            or (mode == "equip" and not 0 <= before <= 8)
+            or (mode == "equip" and not 0 <= before <= 10)
             or (mode == "unequip" and not 1 <= before <= 10)
             or (mode not in ("split", "unload", "equip", "unequip") and before != 0)):
         raise ValueError("Invalid stock backpack operation")
