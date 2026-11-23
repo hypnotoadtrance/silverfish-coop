@@ -61,4 +61,6 @@ for _, row in ipairs({
     profiles.ammo[kind] = ammo
     profiles.magazine_capacity[path] = capacity
 end
+profiles.magazine_capacity["/Game/Classes/Weapons/Wep_Nagant_Scoped.Wep_Nagant_Scoped_C"] = 5
+profiles.magazine_capacity["/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C"] = 5
 return profiles

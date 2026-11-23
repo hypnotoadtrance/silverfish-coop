@@ -27,6 +27,7 @@ from tools.silverfish import (
 )
 from tools.silverfish.authored_loot import GUARANTEED_CRATES
 from tools.silverfish.control import NAME, submit
+from tools.silverfish.guest_weapon_profiles import THIRTY_06_FMJ, THIRTY_06_INCENDIARY
 from tools.silverfish.service import PROTOCOL, menu_host_checkpoint
 from tools.silverfish.steam_cloud import FOLDER
 from tools.silverfish.win_job import GameProcess
@@ -1246,7 +1247,9 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str) -> dict:
     guest_frame = await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected")
     proofs = []
 
-    for kind, source in (("revolver-9mm", "backpack"), ("break-action-50", "stored_equipment"), ("revolver-9mm", "equipped")):
+    cases = (("revolver-9mm", "backpack"), ("break-action-50", "stored_equipment"),
+             ("obrez", "backpack"), ("obrez", "equipped"))
+    for kind, source in cases:
         seed_started = time.time()
         seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, kind)
         guid = seeded["ack"]["message"]
@@ -1278,6 +1281,9 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str) -> dict:
                                   and entry.get("native_guest_weapon", {}).get("guid") == guid
                                   for entry in await resident_events(guest_run, guest_frame)):
                         await asyncio.sleep(.1)
+                if kind == "obrez":
+                    changed = await host.bridge.command("fixture-stock-take-ammo-incendiary", pawn, guid)
+                    assert changed["ack"]["message"] == "stock incendiary ammo loaded"
             else:
                 assert await read_loadout() == f"{before['stored_ammo']},stored"
         assert (await submit(guest_run, "native-inventory-view-fixture"))["ok"]
@@ -1293,6 +1299,9 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str) -> dict:
                 await asyncio.sleep(.1)
         unloaded, = matches
         assert unloaded["remaining"] == 0 and unloaded["split"] == before["stored_ammo"], unloaded
+        if kind == "obrez":
+            expected = THIRTY_06_INCENDIARY if source == "equipped" else THIRTY_06_FMJ
+            assert unloaded["class_path"] == expected.item_path, unloaded
         inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]
         ammo, = [row for row in inventory["items"] if row["guid"] == unloaded["new_guid"]]
         assert (ammo["source"], ammo["class_path"], ammo["quantity"]) == ("backpack", unloaded["class_path"], unloaded["split"]), ammo
