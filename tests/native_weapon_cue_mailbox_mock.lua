@@ -115,28 +115,37 @@ flush()
 assert(files[2] == area .. "\n" .. record(48) .. "\n")
 -- The shooter uses their live first-person muzzle, while observers keep the host pose.
 local weapon_path = "/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C"
-local local_muzzle = {X = 152, Y = 225, Z = 325}
+local muzzle_location = {X = 152, Y = 225, Z = 325}
 local projected = {}
 local weapon_base = object({})
 local muzzle_flash = object({})
+local first_person_flash = object({})
 local defaults = object({IsA = function(_, other) return other == weapon_base end, MuzzleFlash = muzzle_flash})
 local weapon_class = object({
     GetFullName = function() return "BlueprintGeneratedClass " .. weapon_path end,
     GetCDO = function() return defaults end,
 })
-local held = object({User = pawn, GetWorld = function() return state.world end, GetClass = function() return weapon_class end})
+local held = object({User = pawn, MuzzleFlash = first_person_flash,
+    GetWorld = function() return state.world end, GetClass = function() return weapon_class end})
 held.Arrow_Muzzle = object({
     GetOwner = function() return held end,
-    K2_GetComponentLocation = function() return local_muzzle end,
+    K2_GetComponentLocation = function() return muzzle_location end,
     K2_GetComponentRotation = function() return {Pitch = 0, Yaw = 66, Roll = 0} end,
 })
 local niagara = object({
+    SpawnSystemAttached = function(_, effect, muzzle, socket, point, rotation, attachment)
+        assert(effect == first_person_flash and muzzle == held.Arrow_Muzzle and socket == "None" and attachment == 0)
+        assert(point.X == 0 and point.Y == 0 and point.Z == 0 and rotation.Yaw == 0)
+        projected[#projected + 1] = {muzzle = muzzle}
+        return object({SetWorldScale3D = function(_, scale) assert(scale.X == 1 and scale.Y == 1 and scale.Z == 1) end})
+    end,
     SpawnSystemAtLocation = function(_, _, effect, point, rotation)
         assert(effect == muzzle_flash)
         projected[#projected + 1] = {point = point, yaw = rotation.Yaw}
         return object({})
     end,
 })
+FName = function(name) return name end
 local resolve = StaticFindObject
 StaticFindObject = function(path)
     if path == weapon_path then return weapon_class end
@@ -151,7 +160,7 @@ local function shot(id, shooter)
     return ("%d|%s|100|200|300|0|15|0|1|0|0|%d"):format(id, weapon_path, shooter)
 end
 view.command({"-", "native-weapon-play-shots", area, ("1"):rep(32), shot(1, 17), shot(2, 18)}, state, "connected", avatar)
-assert(#projected == 2 and projected[1].point == local_muzzle and projected[1].yaw == 66)
+assert(#projected == 2 and projected[1].muzzle == held.Arrow_Muzzle)
 assert(projected[2].point.X == 100 and projected[2].yaw == 15)
 pawn.EquipedItem = nil
 view.command({"-", "native-weapon-play-shots", area, ("1"):rep(32), shot(3, 17)}, state, "connected", avatar)

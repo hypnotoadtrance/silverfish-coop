@@ -145,6 +145,18 @@ local function project_magazine(fields, state, phase)
     return "stock co-op magazine projected"
 end
 
+local function play_reload(fields, state, phase)
+    local area, name, guid, previous = fields[3], fields[4], fields[5], tonumber(fields[6])
+    local save, pawn = save_scope.bind_guest(state, phase)
+    if #fields ~= 6 or not save or state.map ~= area or pawn:GetFullName() ~= name or pawn.Dead ~= false then return "" end
+    local selected, kind = equipped_guid(pawn, save)
+    local held = pawn.EquipedItem
+    if not weapon_profiles.paths[kind] or selected ~= guid or not same(held:GetWorld(), state.world)
+        or not same(held.User, pawn) or not same(held.Player_Ref, pawn)
+        or held:IsActorBeingDestroyed() or not valid_rounds(held, previous) or previous >= held.MagSize then return "" end
+    return require("native_avatar_weapon_view").local_reload(pawn, state.world, held, previous) or ""
+end
+
 function guest_weapon.preserve_magazine(pawn, save, projected, selected_slot)
     if save.PlayerEquipIndex ~= selected_slot then return end
     local guid, kind, row = equipped_guid(pawn, save)
@@ -162,6 +174,7 @@ end
 
 function guest_weapon.command(fields, state, phase)
     if fields[2] == "native-guest-weapon-magazine" then return project_magazine(fields, state, phase) end
+    if fields[2] == "native-guest-weapon-reload-view" then return play_reload(fields, state, phase) end
     local action = fields[2]:match("^native%-guest%-weapon%-([a-z%-]+)$")
     if not action then return end
     local operations = {

@@ -5410,6 +5410,19 @@ class Client:
         if not reply.get("ok"):
             raise ValueError(reply.get("error", "interaction_refused"))
         if (self.last_game.get("map"), self.zone_epoch) == (area, epoch) and epoch:
+            if action == "native-guest-weapon-reload" and isinstance(weapon := reply.get("native_guest_weapon"), dict):
+                pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
+                guid, previous = weapon.get("guid"), weapon.get("before")
+                if (pawn and weapon.get("map") == area and isinstance(guid, str)
+                        and native_guest_weapon.GUID.fullmatch(guid) and type(previous) is int):
+                    try:
+                        local_view = await self.bridge.command("native-guest-weapon-reload-view",
+                                                               area, pawn, guid, str(previous), timeout=1.5)
+                    except (OSError, RuntimeError, TimeoutError) as error:
+                        self.control.event("native_guest_reload_view_unavailable", reason=str(error))
+                    else:
+                        if clip := local_view.get("ack", {}).get("message"):
+                            self.control.event("native_guest_reload_view_played", operation_id=operation_id, clip=clip)
             # Feed the confirmed roll or pickup to the normal projection before
             # the next periodic host snapshot.
             roll = reply.get("native_loot_roll")

@@ -549,41 +549,54 @@ end
 local local_reload
 
 local function clear_local_reload()
-    local current = local_reload and active_cycle[local_reload]
-    if current and valid(local_reload.weapon_rig) then
-        local_reload.weapon_rig.VisibilityBasedAnimTickOption = current.previous_tick
+    if local_reload and valid(local_reload.rig) then
+        local_reload.rig.VisibilityBasedAnimTickOption = local_reload.previous_tick
     end
-    if local_reload then active_cycle[local_reload] = nil end
     local_reload = nil
 end
 
-function view.local_reload(pawn, world, weapon, serial, path)
-    local held = pawn.EquipedItem
-    if not valid(held) or not same(held.User, pawn) or not same(held:GetWorld(), world)
-        or held:GetClass():GetFullName() ~= "BlueprintGeneratedClass " .. weapon then return false end
-    local rig, clip = held.Wep_Skeli, StaticFindObject(path)
-    if not valid(rig) or not same(rig:GetOwner(), held) or not valid(clip)
-        or not (same(clip, held.Reload_Wet_Anim) or same(clip, held.Reload_Dry_Anim)) then return false end
-    if local_reload and not same(local_reload.weapon_rig, rig) then clear_local_reload() end
-    local_reload = local_reload or {pawn = pawn, weapon_rig = rig, firearm_class = weapon}
-    return view.cycle(local_reload, world, weapon, serial, path)
+function view.reload_clip(weapon, previous_ammo)
+    if previous_ammo > 0 and weapon.SingleReload ~= true then return weapon.Reload_Wet_Anim end
+    return weapon.Reload_Dry_Anim
+end
+
+function view.local_reload(pawn, world, held, previous_ammo)
+    local rig, clip = held.Wep_Skeli, view.reload_clip(held, previous_ammo)
+    local clock = StaticFindObject(statics_type)
+    if not valid(rig) or not same(rig:GetOwner(), held) or not valid(clip) or not valid(clock)
+        or not clip:IsA(StaticFindObject("/Script/Engine.AnimSequence")) then return end
+    local mesh = rig.SkinnedAsset
+    local length = clip:GetPlayLength()
+    if not valid(mesh) or not same(clip.Skeleton, mesh.Skeleton) or length <= 0 or length > 5 then return end
+    clear_local_reload()
+    if held.Reload_CancelsScope == true and pawn.Aiming == true then pawn:CancelScope() end
+    local_reload = {pawn = pawn, world = world, held = held, rig = rig,
+        previous_tick = rig.VisibilityBasedAnimTickOption, expires = clock:GetRealTimeSeconds(world) + length}
+    rig.VisibilityBasedAnimTickOption = 0
+    -- Let the owning weapon advance its stock animation and dispatch its notifies.
+    rig:PlayAnimation(clip, false)
+    if rig:IsPlaying() then return clip:GetFullName():match("^AnimSequence (.+)$") end
+    clear_local_reload()
 end
 
 function view.animate_cycle(get_world)
-    if not next(active_cycle) then return end
+    if not local_reload and not next(active_cycle) then return end
     local world, clock = get_world(), StaticFindObject(statics_type)
+    if local_reload and (not same(world, local_reload.world) or not valid(local_reload.pawn)
+        or not same(local_reload.pawn.EquipedItem, local_reload.held) or not valid(local_reload.rig)
+        or not local_reload.rig:IsPlaying()
+        or valid(clock) and clock:GetRealTimeSeconds(world) >= local_reload.expires) then
+        clear_local_reload()
+    end
     if not valid(world) or not valid(clock) then return end
     local now, scope = clock:GetRealTimeSeconds(world), world:GetAddress()
     for entry, cycle in pairs(active_cycle) do
         local rig = entry.weapon_rig
-        local local_view = entry == local_reload
-        if not valid(rig) or scope ~= cycle.world
-            or local_view and (not valid(entry.pawn) or not same(entry.pawn.EquipedItem, rig:GetOwner())) then
-            if local_view then clear_local_reload() else active_cycle[entry] = nil end
+        if not valid(rig) or scope ~= cycle.world then
+            active_cycle[entry] = nil
         elseif cycle.finished then
             rig.VisibilityBasedAnimTickOption = cycle.previous_tick
             active_cycle[entry] = nil
-            if local_view then local_reload = nil end
         else
             if cycle.rest then
                 local point = mechanism_position(rig, entry.weapon_slide, cycle.bone)
