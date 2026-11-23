@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bootstrap import install_stage
 from tools.silverfish import (
     direct_ip, embedded_startup, native_guest_consumable, native_guest_drop, native_host_save, native_inventory, native_loose_pickup,
-    native_loot, native_world_loot, runtime,
+    native_lantern, native_loot, native_prop_carry, native_world_loot, runtime,
 )
 from tools.silverfish.authored_loot import GUARANTEED_CRATES
 from tools.silverfish.control import NAME, submit
@@ -136,6 +136,81 @@ async def discover_mailbox(root: Path, process: GameProcess) -> Path:
         if process.poll() is not None:
             raise RuntimeError(f"The shipping executable exited before creating its portable mailbox ({process.returncode})")
         return await native_mailbox(root, process)
+
+
+async def portable_lantern_command(bridge, action, pawn):
+    mailbox = bridge.directory
+    ticket = uuid.uuid4().hex
+    runtime.write_text(mailbox / "portable-lantern-command.tsv", f"{ticket}\t{action}\t{pawn}")
+    reply = mailbox / "portable-lantern-reply.tsv"
+    async with asyncio.timeout(8):
+        while bridge.process.poll() is None:
+            try:
+                fields = reply.read_text(encoding="utf-8").split("\t", 2)
+            except (FileNotFoundError, PermissionError):
+                fields = ()
+            if len(fields) == 3 and fields[0] == ticket:
+                assert fields[1] == "ok", fields[2]
+                return fields[2]
+            await asyncio.sleep(.05)
+    raise RuntimeError(f"The portable lantern host exited during {action}")
+
+
+async def verify_stock_prop_grip(host: Seat, guest: Seat, pawn: str) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    host_status, guest_status = await asyncio.gather(
+        wait(host_run, lambda state: state.get("local_bridge") == "memory"),
+        wait(guest_run, lambda state: state.get("local_bridge") == "memory"
+             and state.get("game", {}).get(native_prop_carry.FILTER_READY) is True),
+    )
+    approach = [float(value) for value in (await portable_lantern_command(host.bridge, "approach", pawn)).split()]
+    await wait(guest_run, lambda state: (point := state.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
+               and math.dist(point, approach) < 100)
+    await asyncio.sleep(1.25)
+    lantern_class = "/Game/Assets/StaticMeshes/Mesh_Props/Prop_Lantern_01.Prop_Lantern_01_C"
+    grabbed = await submit(guest_run, native_prop_carry.FIXTURE, target=f"pickup@{lantern_class}|{native_lantern.ACTOR}")
+    assert grabbed["ok"], grabbed
+
+    async def edge(name, lease=None):
+        observed = await wait(host_run, lambda state: (row := state.get("game", {}).get(native_prop_carry.PROOF, {}))
+                              and row["edge"] == name and row["actor"] == native_lantern.ACTOR and row["pawn"] == pawn
+                              and (lease is None or row["lease"] == lease))
+        return observed["game"][native_prop_carry.PROOF]
+
+    async def sample():
+        held, *position = (await portable_lantern_command(host.bridge, "sample", pawn)).split()
+        return held == "1", [float(value) for value in position]
+
+    grab = await edge("grab")
+
+    def active_counters(state):
+        counters = state.get("game", {}).get(native_prop_carry.FILTER, {})
+        return counters if counters.get("lease") == grab["lease"] else {}
+
+    holding_state = await wait(guest_run, lambda state: (row := active_counters(state))
+                               and row["active"] and row["suppressed"] > 0)
+    held_filter = active_counters(holding_state)
+    held, held_position = await sample()
+    assert held, held_position
+    dropped = await submit(guest_run, native_prop_carry.FIXTURE, target="drop")
+    assert dropped["ok"], dropped
+    drop = await edge("drop", grab["lease"])
+    assert drop["sequence"] > grab["sequence"] and drop.get("release_pose_applied") is True, drop
+    resumed_state = await wait(guest_run, lambda state: (row := active_counters(state))
+                               and not row["active"] and row["passed"] > held_filter["passed"])
+    async with asyncio.timeout(8):
+        while True:
+            held, released_position = await sample()
+            if not held and math.dist(held_position, released_position) > 25:
+                break
+            await asyncio.sleep(.1)
+    assert not (host.bridge.directory / "native-prop-carry-poses").exists()
+    return {
+        "local_bridge": {"host": host_status["local_bridge"], "guest": guest_status["local_bridge"]},
+        "authored_prop": native_lantern.ACTOR, "grab": grab, "drop": drop,
+        "filter_while_held": held_filter, "filter_after_drop": active_counters(resumed_state),
+        "held_position": held_position, "released_position": released_position,
+    }
 
 
 async def verify_gameplay(host: Seat, guest: Seat, pawn: str, *, stock_drop: bool = False,
@@ -648,7 +723,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False,
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
-                 stock_use: bool = False, memory_status: bool = False) -> None:
+                 stock_use: bool = False, memory_status: bool = False, stock_prop_grip: bool = False) -> None:
     roots = (work, first_game, second_game, original)
     if second_legacy_work is not None:
         roots += (second_legacy_work,)
@@ -677,6 +752,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     probes = ExitStack()
 
     try:
+        if stock_prop_grip:
+            probes.enter_context(installed_probe(first_game, mod="SilverfishPortableLanternProbe",
+                                                 fixture="portable_lantern_probe.lua"))
         if stock_use or stock_drop or stock_split or stock_equip or stock_nearby or container_nearby:
             for game in games:
                 probes.enter_context(installed_probe(game))
@@ -732,14 +810,17 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             if container_nearby:
                 evidence["guest_stock_nearby_container_pickup"] = await verify_container_pickup(host, guest, pawn)
             return evidence
-        create = create_stock_split_character if stock_split or stock_equip else create_stock_drop_character if stock_drop else None
-        proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
-                                                  create_character=create_stock_bag_character if stock_use else create))
-        proof["sessions"].append(await start_pair(second, first, "First portable scout", on_join=check_gameplay,
-                                                  create_character=create_stock_drop_character if stock_use else create))
-        assert proof["sessions"][0]["host_pid"] == proof["sessions"][1]["guest_pid"]
-        assert proof["sessions"][0]["guest_pid"] == proof["sessions"][1]["host_pid"]
-        assert len({leg["campaign_id"] for leg in proof["sessions"]}) == 2
+        if stock_prop_grip:
+            proof["sessions"].append(await start_pair(first, second, "Lantern scout", on_join=verify_stock_prop_grip))
+        else:
+            create = create_stock_split_character if stock_split or stock_equip else create_stock_drop_character if stock_drop else None
+            proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
+                                                      create_character=create_stock_bag_character if stock_use else create))
+            proof["sessions"].append(await start_pair(second, first, "First portable scout", on_join=check_gameplay,
+                                                      create_character=create_stock_drop_character if stock_use else create))
+            assert proof["sessions"][0]["host_pid"] == proof["sessions"][1]["guest_pid"]
+            assert proof["sessions"][0]["guest_pid"] == proof["sessions"][1]["host_pid"]
+            assert len({leg["campaign_id"] for leg in proof["sessions"]}) == 2
         if steam_cloud:
             proof["steam_cloud"] = await verify_cloud_restore(first, second, proof["sessions"][0], second_game, processes)
         for seat, (hashes, preferences) in zip(seats, baselines, strict=True):
@@ -753,12 +834,15 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             assert observed == hashes and await stock_profile(seat.bridge) == preferences
             assert seat.bridge.process.poll() is None
         proof.update(verified=True, solo_slots_and_settings_preserved=True,
-                     both_titles_reused=True, launched_without_coop_environment=True)
+                     both_titles_reused=not stock_prop_grip, launched_without_coop_environment=True)
     finally:
         proof["native_boot_states"] = {str(game): boot_states(game) for game, _ in processes}
         for _, process in reversed(processes):
             if process.poll() is None:
                 await runtime.stop_game(process)
+        if stock_prop_grip:
+            proof["processes_closed"] = len(processes) == 2 and all(process.poll() is not None for _, process in processes)
+            proof["verified"] &= proof["processes_closed"]
         probes.close()
         proof["original_saves_verified"] = saved_hashes(original) == before
         proof["portable_files_and_existing_activation_preserved"] = all(
@@ -786,6 +870,7 @@ if __name__ == "__main__":
     parser.add_argument("--steam-cloud", action="store_true", help="test a copied cloud backup through Host Load Game")
     parser.add_argument("--memory-bridge", action="store_true", help="verify both embedded workers use the native bridge")
     parser.add_argument("--memory-status", action="store_true", help="verify both workers consume live frames through memory")
+    parser.add_argument("--stock-prop-grip", action="store_true", help="verify default guest carry filtering in one portable lantern session")
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
@@ -793,10 +878,13 @@ if __name__ == "__main__":
         parser.error("Use --projected-nearby with either --stock-drop or --stock-split and without --stock-nearby")
     if args.stock_use and (args.stock_drop or args.stock_split or args.stock_equip):
         parser.error("Use --stock-use without other stock backpack character fixtures")
+    if args.stock_prop_grip and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
+                                    args.projected_nearby, args.container_nearby, args.stock_use, args.steam_cloud)):
+        parser.error("Use --stock-prop-grip without other gameplay fixtures")
     legacy = args.second_legacy_work.resolve(strict=True) if args.second_legacy_work else None
     asyncio.run(verify(args.work.resolve(strict=True), args.first_game.resolve(strict=True),
                        args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy,
                        stock_drop=args.stock_drop, stock_split=args.stock_split, stock_equip=args.stock_equip,
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
-                       stock_use=args.stock_use, memory_status=args.memory_status))
+                       stock_use=args.stock_use, memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip))

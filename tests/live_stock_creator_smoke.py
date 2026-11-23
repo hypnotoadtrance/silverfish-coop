@@ -31,15 +31,15 @@ MOD = "SilverfishStockCreatorProbe"
 
 
 @contextmanager
-def installed_probe(game: Path):
+def installed_probe(game: Path, *, mod: str = MOD, fixture: str = "stock_creator_probe.lua"):
     mods = game / runtime.SHIPPING.parent / "ue4ss" / "Mods"
     if mods.resolve(strict=True) != mods:
         raise ValueError("Use a private mod directory with its own path")
-    directory = mods / MOD
+    directory = mods / mod
     directory.mkdir()
     scripts = directory / "Scripts"
     enabled = directory / "enabled.txt"
-    source = Path(__file__).with_name("fixtures") / "stock_creator_probe.lua"
+    source = Path(__file__).with_name("fixtures") / fixture
     script = scripts / "main.lua"
     try:
         scripts.mkdir()
