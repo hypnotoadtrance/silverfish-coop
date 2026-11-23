@@ -16,7 +16,7 @@ Project Silverfish Co-op is a proof of concept under active development. This li
 | Area | Known issue |
 | --- | --- |
 | Guest inventory and medical items | Guests can fail to equip or remove armor, or to use a medical item to restore health. Exact behavior varies by item and slot. |
-| Downed controls | A player downed while aiming can stay zoomed in while the downed state forces them to crouch. |
+| Downed controls | In published builds, a player downed while aiming can stay zoomed in. The development fix calls the game's aim-cancel routine. An isolated two-player test verified that the guest stopped aiming and crouched when downed. |
 | Held items and animations | Rifle aiming can show an incorrect grip or muzzle angle. Eating a mushroom is visible and audible to the other player, but the hand motion can appear near the hips. Some weapon and equipment effects still need coverage. |
 | Roaming NPC barter | Dedicated traders worked in the reported session. Ordinary talkable NPCs can reject guest exchanges or leave the guest looking at stale stock after a host purchase. |
 | Warehouse doors, props, and switches | Breakable doorway boards can remain in one player's way after the other breaks them. The office switch and lights can disagree, and a locally broken bottle can remain intact on the host. |
