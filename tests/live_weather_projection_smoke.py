@@ -33,7 +33,7 @@ def staged_probe(work):
         probe.rmdir()
 
 
-async def validate(work, the_fog=False):
+async def validate(work, the_fog=False, nullrhi=False):
     name = "weather-proof-" + uuid.uuid4().hex[:8]
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
@@ -43,9 +43,14 @@ async def validate(work, the_fog=False):
     processes = []
 
     async def spawn(run, *args):
+        env = dict(os.environ)
+        if nullrhi:
+            env.pop("SILVERFISH_COOP_RENDER_CAPTURE", None)
+        else:
+            env["SILVERFISH_COOP_RENDER_CAPTURE"] = "guest"
         with (host / f"{args[0]}.txt").open("wb") as stream:
             process = await asyncio.create_subprocess_exec(*cli, *args, stdout=stream,
-                stderr=stream, creationflags=flags, env={**os.environ, "SILVERFISH_COOP_RENDER_CAPTURE": "guest"})
+                stderr=stream, creationflags=flags, env=env)
         processes.append((process, run))
 
     async def command(*args):
@@ -78,8 +83,10 @@ async def validate(work, the_fog=False):
 
     def applied(row, intensity):
         frame = row.get("game", {}).get("native_world_view", {})
+        skipped = nullrhi and intensity > 0
         return (row.get("state") == "connected" and frame.get("mode") == "applied"
-                and frame.get("rain_verified") is True and frame.get("save_unchanged") is True
+                and frame.get("rain_verified") is (not skipped) and bool(frame.get("rain_skipped_nullrhi")) is skipped
+                and frame.get("save_unchanged") is True and frame.get("weather_verified") is True
                 and math.isclose(frame.get("rain_intensity", -1), intensity, abs_tol=.002))
 
     async def stop(process, run):
@@ -136,13 +143,21 @@ async def validate(work, the_fog=False):
             assert float(amount) > 0 and replicated == "false", (amount, siren, replicated)
             wet = await wait(guest, lambda row: applied(row, float(amount)))
             wet_actors = await probe(guest, "check")
-            assert wet_actors == ["0", "1"], wet_actors
+            assert wet_actors == ["0", "0" if nullrhi else "1"], wet_actors
+            if nullrhi:
+                clock = await wait(guest, lambda row: (
+                    row.get("game", {}).get("native_guest_clock", {}).get("epoch") == wet["zone_epoch"]
+                    and row.get("game", {}).get("native_world_view", {}).get("rain_skipped_nullrhi") is True))
+                assert clock["game"]["native_guest_clock"]["map"] == CROSSROADS
             async with asyncio.timeout(8):
                 while not lines(guest_box / "guest-siren"):
                     await asyncio.sleep(.1)
             await asyncio.sleep(2)
             visual = lines(guest_box / "guest-rain")
-            assert any(math.isclose(float(value), float(amount), abs_tol=.002) for value in visual), visual
+            if nullrhi:
+                assert not visual, visual
+            else:
+                assert any(math.isclose(float(value), float(amount), abs_tol=.002) for value in visual), visual
             horn, = lines(guest_box / "guest-siren")
             assert siren == horn.split("|")[0] and "StormSiren_03_Cue" in horn, horn
             assert await probe(host, "dry") == ["0.0"]
@@ -156,6 +171,8 @@ async def validate(work, the_fog=False):
                     json.loads(line) for line in lines(guest / "events.jsonl") if "native_weather_siren_" in line
                 ],
             }
+            if nullrhi:
+                evidence["guest_clock_during_wet_rain"] = clock["game"]["native_guest_clock"]
             target = host / "live-weather-projection.json"
             target.write_text(json.dumps(evidence, indent=2), encoding="utf-8")
             print(target)
@@ -167,6 +184,8 @@ async def validate(work, the_fog=False):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--work", type=Path, required=True)
-    ap.add_argument("--the-fog", action="store_true", help="exercise the real stock Fog storm and its warning")
+    scenario = ap.add_mutually_exclusive_group()
+    scenario.add_argument("--the-fog", action="store_true", help="exercise the real stock Fog storm and its warning")
+    scenario.add_argument("--nullrhi", action="store_true", help="verify wet rain skips particles with the stock clock and warning active")
     args = ap.parse_args()
-    asyncio.run(validate(args.work.resolve(), args.the_fog))
+    asyncio.run(validate(args.work.resolve(), args.the_fog, args.nullrhi))

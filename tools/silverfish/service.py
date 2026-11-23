@@ -5796,11 +5796,13 @@ class Client:
             *("-" if value is None else str(value) for value in sky), *weather_args, *rain_args, timeout=3,
         )
         proof = snapshot.get("native_world_view", {})
+        rain_skipped = (rain_present and rain[0] > 0 and proof.get("rain_verified") is False
+                        and proof.get("rain_skipped_nullrhi") is True)
         if (proof.get("map") != area or proof.get("actor") != expected_actor
                 or proof.get("mode") != "applied" or proof.get("epoch") != self.zone_epoch
                 or proof.get("sequence") != frame["sequence"] or proof.get("save_unchanged") is not True
                 or weather_present and proof.get("weather_verified") is not True
-                or rain_present and proof.get("rain_verified") is not True):
+                or rain_present and not (proof.get("rain_verified") is True or rain_skipped)):
             raise RuntimeError("The connected guest did not verify the host's rendered world frame")
         self.last_game = snapshot
 

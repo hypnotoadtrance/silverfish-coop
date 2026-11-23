@@ -2421,6 +2421,8 @@ class Bridge:
                         if native_weather_view.valid_rain(rain):
                             row.update(zip(native_weather_view.RAIN_FIELDS, rain))
                             row["rain_verified"] = fields[31] == "1"
+                            if fields[31] == "nullrhi" and fields[1] == "applied" and rain[0] > 0 and data.get("state") == "connected":
+                                row["rain_skipped_nullrhi"] = True
                     data["native_world_view"] = row
                 elif fields == ["native-loot-special-memory", "1"] and data.get("state") == "hosting":
                     data[native_loot.SPECIAL_MEMORY_CAPABILITY] = True

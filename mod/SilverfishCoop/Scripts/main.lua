@@ -1205,7 +1205,7 @@ local function world_view_row(mode, view)
         view.fog_density or "-", view.fog_falloff or "-", view.cloud_bottom_km or "-", view.cloud_height_km or "-",
         view.cloud_density_offset or "-", view.weather_verified and 1 or 0,
         view.rain_intensity or "-", view.rain_x or "-", view.rain_y or "-", view.rain_z or "-",
-        view.rain_verified and 1 or 0)
+        view.rain_verified and 1 or mode == "applied" and view.rain_skipped_nullrhi and "nullrhi" or 0)
 end
 
 local function write_status(state, current_phase, failure, fields, pending)

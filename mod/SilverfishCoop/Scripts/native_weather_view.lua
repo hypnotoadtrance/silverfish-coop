@@ -6,6 +6,9 @@ local rain_sound = "/Game/Assets/Sounds/MetaSounds/MS_Rain_SFX.MS_Rain_SFX"
 local niagara_path = "/Script/Niagara.Default__NiagaraFunctionLibrary"
 local niagara_class = "Class /Script/Niagara.NiagaraComponent"
 local audio_class = "Class /Script/Engine.AudioComponent"
+local system_library = "/Script/Engine.Default__KismetSystemLibrary"
+local headless_fixture = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
+local nullrhi
 local siren_class = "BlueprintGeneratedClass /Game/Classes/Actors/AlarmSiren_BP.AlarmSiren_BP_C"
 local siren_function = "/Game/Classes/Actors/AlarmSiren_BP.AlarmSiren_BP_C:StormSiren"
 local siren_cues = {}
@@ -50,6 +53,23 @@ end
 function view.valid_rain(report)
     return bounded(report.rain_intensity, 0, 20) and bounded(report.rain_x, -1.01, 1.01)
         and bounded(report.rain_y, -1.01, 1.01) and bounded(report.rain_z, 0.99, 1.01)
+end
+
+function view.skip_wet_rain(frame)
+    if not headless_fixture or not frame.rain_intensity or frame.rain_intensity <= 0 then return false end
+    if nullrhi == nil then
+        -- Some muted fixtures use a real renderer for particle readback.
+        local ok, result = pcall(function()
+            local system = StaticFindObject(system_library)
+            if not valid(system) then return nil end
+            local command_line = system:GetCommandLine()
+            if type(command_line) == "userdata" then command_line = command_line:ToString() end
+            if type(command_line) ~= "string" then return nil end
+            return system:ParseParam(command_line, "nullrhi")
+        end)
+        if ok and type(result) == "boolean" then nullrhi = result end
+    end
+    return nullrhi == true
 end
 
 function view.read_rain(current_world)

@@ -181,6 +181,46 @@ class WorldWeatherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(applied["fog_density"], source["fog_density"])
 
 
+    async def test_wet_rain_keeps_raw_verification_distinct_from_the_local_nullrhi_skip(self):
+        area = "/Game/Classes/Maps/Maps_OverWorld/RuinFeilds_P"
+        actor = service.WORLD_VIEW_ACTORS[area]
+        epoch = uuid.uuid4().hex
+
+        def status(role, state, mode, marker, intensity):
+            phase_epoch = epoch if mode == "applied" else "-"
+            fields = ("native-world-view", mode, area, actor, phase_epoch, "3", "27000",
+                      "20", "40", "0", "0", "0", "1", "1", "5",
+                      "0.3", "0.4", "0.5", "07:30", "1", "1",
+                      "0.2", "0.7", "2", "3", "0.1", "1", intensity, "0", "0", "1", marker)
+            return (f"schema\t1\nseq\t8\nsession\t{role}\t{state}\t{area}\t1\t1\n"
+                    + "\t".join(fields) + "\n")
+
+        bridge = runtime.Bridge(Path("unused"), None)
+        source = bridge._parse_status(status("host", "hosting", "sample", "nullrhi", "0.55"))["native_world_view"]
+        self.assertNotIn("rain_skipped_nullrhi", source)
+        self.assertEqual(source["rain_intensity"], .55)
+        for marker, wet, accepted in (("1", True, True), ("nullrhi", True, True), ("0", True, False),
+                                      ("nullrhi", False, False), ("unexpected", True, False), ("1", False, True)):
+            with self.subTest(marker=marker, wet=wet):
+                intensity = .55 if wet else 0
+                reply = bridge._parse_status(status("client", "connected", "applied", marker, str(intensity)))
+                proof = reply["native_world_view"]
+                self.assertEqual(proof["rain_verified"], marker == "1")
+                self.assertEqual(proof.get("rain_skipped_nullrhi", False), wet and marker == "nullrhi")
+                client = SimpleNamespace(bridge=SimpleNamespace(command=AsyncMock(return_value=reply)), zone_epoch=epoch,
+                                         last_game={"state": "connected", "map": area}, gameplay_seen=service.time.monotonic(),
+                                         gameplay={"host_world": {"native_world_view": {**source, "rain_intensity": intensity}}})
+                if accepted:
+                    await service.Client.project_world_view(client)
+                    applied = client.last_game["native_world_view"]
+                    self.assertTrue(applied["weather_verified"])
+                    self.assertTrue(applied["save_unchanged"])
+                    self.assertEqual(applied["rain_intensity"], intensity)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "did not verify"):
+                        await service.Client.project_world_view(client)
+
+
 class StageBackendTests(unittest.TestCase):
     def setUp(self):
         temporary = TemporaryDirectory()

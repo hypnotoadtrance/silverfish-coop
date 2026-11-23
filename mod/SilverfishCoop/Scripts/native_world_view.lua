@@ -425,7 +425,8 @@ local function readback(current, frame, saved_seconds)
     end
     if weather_view.has_rain(frame) then
         weather_view.copy_rain(report, frame)
-        report.rain_verified = weather_view.rain_verified(lease.rain, frame)
+        report.rain_skipped_nullrhi = lease.rain_skipped_nullrhi
+        report.rain_verified = not report.rain_skipped_nullrhi and weather_view.rain_verified(lease.rain, frame)
     end
     return report
 end
@@ -464,7 +465,8 @@ function view.apply(state, phase, frame)
             restore_weather(lease)
             lease.weather, lease.original_weather = nil, nil
         end
-        if weather_view.has_rain(frame) then
+        lease.rain_skipped_nullrhi = weather_view.skip_wet_rain(frame)
+        if weather_view.has_rain(frame) and not lease.rain_skipped_nullrhi then
             lease.rain = weather_view.apply_rain(current, frame, lease.rain)
         elseif lease.rain then
             weather_view.destroy_rain(lease.rain)
@@ -474,7 +476,7 @@ function view.apply(state, phase, frame)
         if current.day.UpdateInRealTime ~= false or not actual.save_unchanged or not matches_sun(actual, frame)
             or frame.sky_r ~= nil and actual.sky_r ~= nil and not actual.sky_verified
             or has_weather(frame) and not actual.weather_verified
-            or weather_view.has_rain(frame) and not actual.rain_verified then
+            or weather_view.has_rain(frame) and not (actual.rain_verified or actual.rain_skipped_nullrhi) then
             error("native_world_projection_readback_mismatch", 0)
         end
         return actual
