@@ -138,11 +138,11 @@ async def discover_mailbox(root: Path, process: GameProcess) -> Path:
         return await native_mailbox(root, process)
 
 
-async def portable_lantern_command(bridge, action, pawn):
+async def portable_probe_command(bridge, prefix, request):
     mailbox = bridge.directory
     ticket = uuid.uuid4().hex
-    runtime.write_text(mailbox / "portable-lantern-command.tsv", f"{ticket}\t{action}\t{pawn}")
-    reply = mailbox / "portable-lantern-reply.tsv"
+    runtime.write_text(mailbox / f"{prefix}-command.tsv", f"{ticket}\t{request}")
+    reply = mailbox / f"{prefix}-reply.tsv"
     async with asyncio.timeout(8):
         while bridge.process.poll() is None:
             try:
@@ -153,7 +153,7 @@ async def portable_lantern_command(bridge, action, pawn):
                 assert fields[1] == "ok", fields[2]
                 return fields[2]
             await asyncio.sleep(.05)
-    raise RuntimeError(f"The portable lantern host exited during {action}")
+    raise RuntimeError(f"The {prefix} process exited before replying")
 
 
 async def verify_stock_prop_grip(host: Seat, guest: Seat, pawn: str) -> dict:
@@ -163,7 +163,8 @@ async def verify_stock_prop_grip(host: Seat, guest: Seat, pawn: str) -> dict:
         wait(guest_run, lambda state: state.get("local_bridge") == "memory"
              and state.get("game", {}).get(native_prop_carry.FILTER_READY) is True),
     )
-    approach = [float(value) for value in (await portable_lantern_command(host.bridge, "approach", pawn)).split()]
+    approach = [float(value) for value in (await portable_probe_command(
+        host.bridge, "portable-lantern", f"approach\t{pawn}")).split()]
     await wait(guest_run, lambda state: (point := state.get("game", {}).get("pawns", {}).get("local", {}).get("location"))
                and math.dist(point, approach) < 100)
     await asyncio.sleep(1.25)
@@ -178,7 +179,7 @@ async def verify_stock_prop_grip(host: Seat, guest: Seat, pawn: str) -> dict:
         return observed["game"][native_prop_carry.PROOF]
 
     async def sample():
-        held, *position = (await portable_lantern_command(host.bridge, "sample", pawn)).split()
+        held, *position = (await portable_probe_command(host.bridge, "portable-lantern", f"sample\t{pawn}")).split()
         return held == "1", [float(value) for value in position]
 
     grab = await edge("grab")
@@ -210,6 +211,46 @@ async def verify_stock_prop_grip(host: Seat, guest: Seat, pawn: str) -> dict:
         "authored_prop": native_lantern.ACTOR, "grab": grab, "drop": drop,
         "filter_while_held": held_filter, "filter_after_drop": active_counters(resumed_state),
         "held_position": held_position, "released_position": released_position,
+    }
+
+
+async def verify_stock_crate_ring(host: Seat, guest: Seat, pawn: str) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    host_state, guest_state = await asyncio.gather(
+        wait(host_run, lambda state: state.get("local_bridge") == "memory"),
+        wait(guest_run, lambda state: state.get("local_bridge") == "memory"),
+    )
+    area = host_state["game"]["map"]
+    crate, = [name for name in GUARANTEED_CRATES if native_loot.CRATES[name] == area
+              and name.endswith(":PersistentLevel.LootCrate_Small_BP_C_1")]
+    approached = await host.bridge.command("native-loot-approach", pawn, crate, timeout=5)
+    position, = [row["location"] for row in approached["pawns"].values() if row["name"] == pawn]
+    await guest.bridge.wait_for(lambda state: math.dist(state["pawns"]["local"]["location"], position) < 50)
+    save_roots = (host.campaign / "save", host.profile / "Saved/SaveGames")
+    before = [saved_hashes(path) for path in save_roots]
+    assert all(before)
+    request_at = time.monotonic()
+    assert await portable_probe_command(guest.bridge, "portable-crate", "press") == crate
+    pressed_at = time.monotonic()
+    opened = await wait(guest_run, lambda state: crate in state.get("gameplay", {}).get(native_loot.STATE_KEY, {}))
+    visible_at = time.monotonic()
+    roll = opened["gameplay"][native_loot.STATE_KEY][crate]
+    await asyncio.sleep(.65)  # Let the compatible status copies arrive after the ring receipt.
+
+    def events(run, name):
+        rows = (run / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        return [row for line in rows if (row := json.loads(line))["event"] == name and row.get("crate") == crate]
+
+    received, = events(guest_run, "native_stock_crate_interaction")
+    applied, = events(host_run, "native_loot_roll_accepted")
+    assert received["input_source"] == "memory_input" and received["operation_id"] == applied["id"] == roll["id"]
+    assert [saved_hashes(path) for path in save_roots] == before
+    return {
+        "local_bridge": {"host": host_state["local_bridge"], "guest": guest_state["local_bridge"]},
+        "stock_crate": crate, "input_source": received["input_source"], "sequence": received["sequence"],
+        "roll_id": roll["id"], "roll_count": 1, "saves_unchanged_after_open": True,
+        "probe_request_to_press_reply_ms": round(1000 * (pressed_at - request_at), 2),
+        "probe_request_to_visible_roll_ms": round(1000 * (visible_at - request_at), 2),
     }
 
 
@@ -723,7 +764,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False,
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
-                 stock_use: bool = False, memory_status: bool = False, stock_prop_grip: bool = False) -> None:
+                 stock_use: bool = False, memory_status: bool = False, stock_prop_grip: bool = False,
+                 stock_crate_ring: bool = False) -> None:
     roots = (work, first_game, second_game, original)
     if second_legacy_work is not None:
         roots += (second_legacy_work,)
@@ -755,6 +797,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_prop_grip:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableLanternProbe",
                                                  fixture="portable_lantern_probe.lua"))
+        if stock_crate_ring:
+            probes.enter_context(installed_probe(second_game, mod="SilverfishPortableCrateProbe",
+                                                 fixture="portable_crate_input_probe.lua"))
         if stock_use or stock_drop or stock_split or stock_equip or stock_nearby or container_nearby:
             for game in games:
                 probes.enter_context(installed_probe(game))
@@ -812,6 +857,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             return evidence
         if stock_prop_grip:
             proof["sessions"].append(await start_pair(first, second, "Lantern scout", on_join=verify_stock_prop_grip))
+        elif stock_crate_ring:
+            proof["sessions"].append(await start_pair(first, second, "Crate scout", on_join=verify_stock_crate_ring))
         else:
             create = create_stock_split_character if stock_split or stock_equip else create_stock_drop_character if stock_drop else None
             proof["sessions"].append(await start_pair(first, second, "Second portable scout", on_join=check_gameplay,
@@ -834,13 +881,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             assert observed == hashes and await stock_profile(seat.bridge) == preferences
             assert seat.bridge.process.poll() is None
         proof.update(verified=True, solo_slots_and_settings_preserved=True,
-                     both_titles_reused=not stock_prop_grip, launched_without_coop_environment=True)
+                     both_titles_reused=not (stock_prop_grip or stock_crate_ring), launched_without_coop_environment=True)
     finally:
         proof["native_boot_states"] = {str(game): boot_states(game) for game, _ in processes}
         for _, process in reversed(processes):
             if process.poll() is None:
                 await runtime.stop_game(process)
-        if stock_prop_grip:
+        if stock_prop_grip or stock_crate_ring:
             proof["processes_closed"] = len(processes) == 2 and all(process.poll() is not None for _, process in processes)
             proof["verified"] &= proof["processes_closed"]
         probes.close()
@@ -871,6 +918,7 @@ if __name__ == "__main__":
     parser.add_argument("--memory-bridge", action="store_true", help="verify both embedded workers use the native bridge")
     parser.add_argument("--memory-status", action="store_true", help="verify both workers consume live frames through memory")
     parser.add_argument("--stock-prop-grip", action="store_true", help="verify default guest carry filtering in one portable lantern session")
+    parser.add_argument("--stock-crate-ring", action="store_true", help="verify one guest stock F crate open through the in-process ring")
     parser.add_argument("--second-legacy-work", type=Path,
                         help="Unused isolated workspace from the second replica's retained legacy descriptor")
     args = parser.parse_args()
@@ -879,12 +927,18 @@ if __name__ == "__main__":
     if args.stock_use and (args.stock_drop or args.stock_split or args.stock_equip):
         parser.error("Use --stock-use without other stock backpack character fixtures")
     if args.stock_prop_grip and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
-                                    args.projected_nearby, args.container_nearby, args.stock_use, args.steam_cloud)):
+                                    args.projected_nearby, args.container_nearby, args.stock_use, args.steam_cloud,
+                                    args.stock_crate_ring)):
         parser.error("Use --stock-prop-grip without other gameplay fixtures")
+    if args.stock_crate_ring and any((args.stock_drop, args.stock_split, args.stock_equip, args.stock_nearby,
+                                     args.projected_nearby, args.container_nearby, args.stock_use, args.steam_cloud,
+                                     args.second_legacy_work)):
+        parser.error("Use --stock-crate-ring with two fresh private replicas and no other gameplay fixtures")
     legacy = args.second_legacy_work.resolve(strict=True) if args.second_legacy_work else None
     asyncio.run(verify(args.work.resolve(strict=True), args.first_game.resolve(strict=True),
                        args.second_game.resolve(strict=True), args.vanilla_saved.resolve(strict=True), legacy,
                        stock_drop=args.stock_drop, stock_split=args.stock_split, stock_equip=args.stock_equip,
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
-                       stock_use=args.stock_use, memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip))
+                       stock_use=args.stock_use, memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
+                       stock_crate_ring=args.stock_crate_ring))
