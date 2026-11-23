@@ -192,7 +192,8 @@ end
 
 local function present_turret(mirror, actor, pawn)
     local marker = mirror.marker
-    local phase = rotation_byte(marker:K2_GetActorRotation().Pitch)
+    -- UE4SS SpawnActor and K2_SetActorRotation can deliver opposite pitch signs.
+    local phase = rotation_byte(math.abs(marker:K2_GetActorRotation().Pitch))
     if phase ~= blast_phase and phase ~= smoke_phase then
         retire_smoke(mirror)
         return true
@@ -201,13 +202,14 @@ local function present_turret(mirror, actor, pawn)
         local ok, played = pcall(effects.play_turret_blast, pawn, marker:K2_GetActorLocation())
         mirror.played_blast = ok and played
     end
-    if valid(mirror.smoke) then return end
+    if mirror.smoke_started then return end
     local gun = actor.Turret_Gun
     local niagara = StaticFindObject("/Script/Niagara.Default__NiagaraFunctionLibrary")
     local asset = StaticFindObject(turret_smoke)
     if not valid(gun) or not same(gun:GetOwner(), actor) or not valid(niagara) or not valid(asset) then return end
     mirror.smoke = niagara:SpawnSystemAttached(asset, gun, FName("None"),
         {X = 0, Y = 0, Z = 0}, {Pitch = 0, Yaw = 0, Roll = 0}, 0, true, true, 0, false)
+    mirror.smoke_started = true
 end
 
 local function apply(marker, world)
@@ -294,7 +296,7 @@ local function publish_positions(world, now)
             -- the same visit see the remaining smoke without a second blast.
             local phase = now < timer.blast_until and blast_phase
                 or clock:GetTimeSeconds(world) < timer.smoke_until and smoke_phase or 0
-            if rotation_byte(rotation.Pitch) ~= phase then
+            if rotation_byte(math.abs(rotation.Pitch)) ~= phase then
                 rotation.Pitch = phase * byte_angle
                 marker:K2_SetActorRotation(rotation, true)
                 marker:ForceNetUpdate()
