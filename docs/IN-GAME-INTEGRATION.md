@@ -312,6 +312,23 @@ On RC 8676316, the placed PlaytestMap sludge dealt two stock 20-point acid pulse
 
 Ordinary authored zone travel gives the host and guest the stock fade widget and transition sound before loading. The guest keeps an opaque cover through the intermediate title world. A muted Observatory–Crossroads round trip observed one stock cue dispatch per seat on each crossing, checked the guest's cover during the title handoff, and verified that both covers cleared on arrival. An authenticated changed visit now gives the guest the remainder of the source fade before the title handoff. Initial joins and same-visit reconnects keep their original timing. A muted Crossroads-to-Cistern trial verified the stock door, one cue dispatch per seat, the opaque guest cover, and cleanup after arrival. Foreground sound and first-frame presentation still need a two-PC check. [Authored route trial](../tests/live_authored_route_matrix_smoke.py)
 
+### Latest warehouse and two-PC follow-up
+
+| Report | Verification needed |
+| --- | --- |
+| A guest can eat a mushroom and gains food. The host sees and hears the use, but the item and hand motion sit near the guest's hips | Keep the stock use receipt and audio. Align the item and motion just in front of the player's upper body, following their facing on the observer. |
+| Guest damage now reduces current health and the amount that can regenerate | Confirmed by both players. Keep the installed campfire check as a representative regression test. |
+| The guest cannot use a medical item to restore health | Use a stock medical item from the guest Backpack with missing health. Confirm the stock effect and consumption once, with the host's health and items unaffected. Check the reported item class as well as Bandage. |
+| The guest can aim but the host sees and hears no shots. The guest can locally destroy a bottle, then ammo returns. Pressing R still fails | Exercise the stock fire and reload inputs on the actual rifle. On the host, require one shot receipt with muzzle effects, a persistent magazine debit, and the real bottle collision. Both seats should see the same break, and the guest should be able to reload from owned ammunition. Verify with the installed UI and the same transport as the two-PC report. |
+| Guest rifle ADS looks wrong while host pistol ADS looks right | Verify the rifle's grip, support hand, stock, and barrel alignment in the observer's aimed pose using the screenshot's rifle or the exact reported item class. |
+| Guest shots and melee leave the Intro warehouse robots unharmed. Host kills work | Identify the normal warehouse encounter and the actor classes there. Use real guest melee and ranged input. Verify host-resolved damage, one death on both seats, and that a dead robot stops attacking. |
+| The warehouse office doorway planks and the wall light switch disagree across seats | Break the same stock barricade from both seats and compare the doorway collision. Toggle the original office switch and check both the lever state and the lights it controls, including after joining. |
+| The guest cannot pick up a hopping frog | Use stock Interact on the same live frog. Confirm the authoritative pickup removes it from both worlds and transfers it once to the guest. |
+| Both players heard the siren and saw the storm | Confirmed by both players. Retain as a live weather pass for the tested storm. |
+| Dedicated traders worked. Bartering with ordinary talkable NPCs does not sync. The guest can offer items, but the exchange fails. A host purchase leaves the guest viewing stale stock | Exercise guest buy and sell and a host purchase through the same roaming NPC's stock barter UI. Verify one exchange, the shared wallet change, and refreshed offers on both open menus. |
+
+Installed RC `6012314` extends the guest damage guard to the flying Drone and Turret Blueprint families, which have separate stock roots. In a muted Observatory fixture the host spawned one stock flying Drone. A guest-local hit dealt zero damage and left it at 100 HP. A host lethal hit produced the same host-owned corpse marker and a simulating ragdoll on both seats. Campaign files stayed unchanged before the normal checkpoint. The fixture called stock damage directly. Normal guest trigger, melee, rifle reload, the warehouse encounter, and turret effects still need separate coverage. [Stock drone authority test](../tests/live_portable_title_smoke.py)
+
 ### Steam hosting options
 
 - The in-game Host flow offers a transport choice. Direct IP uses the configured port and address. Steam Networking opens a Steam lobby when the campaign is ready.
