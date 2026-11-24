@@ -56,6 +56,7 @@ namespace
     constexpr auto bottle_sound =
         STR("/Game/Assets/Sounds/CUEs/BulletHit_Cues/Impact_Glass_Liquid_Cue.Impact_Glass_Liquid_Cue");
     constexpr auto fixed_prop = STR("/Game/Assets/StaticMeshes/Destructable/Explosive_Prop_Master_BP.Explosive_Prop_Master_BP_C");
+    constexpr auto destructible = STR("/Game/Assets/StaticMeshes/Destructable/Static_DestructableObject_Master_BP.Static_DestructableObject_Master_BP_C");
     constexpr auto drum_fire_class = STR("/Game/Classes/Anomalies/Fire_Molotov.Fire_Molotov_C");
     constexpr std::array<std::wstring_view, 3> canister_classes{
         STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_PropaneTank_Small.Prop_PropaneTank_Small_C"),
@@ -93,6 +94,8 @@ namespace
     std::array<U::FName, 16> canister_events;
     U::FName fuel_drum, fuel_drum_graph, prop_broken, receive_tick, drum_fire_name, bottle_name;
     std::array<U::FName, 5> fixed_prop_events;
+    U::FName destructible_name;
+    std::array<U::FName, 8> destructible_events;
     thread_local bool guest_session{};
     thread_local U::FWeakObjectPtr observed_world;
     thread_local std::int64_t skipped{}, blocked_triggers{}, blocked_canister_calls{}, blocked_fixed_prop_calls{};
@@ -440,6 +443,12 @@ namespace
         return type && base && static_cast<U::UClass*>(type)->IsChildOf(base);
     }
 
+    bool destructible_class(U::UObject* type)
+    {
+        auto* base = U::UObjectGlobals::StaticFindObject<U::UClass*>(nullptr, nullptr, destructible);
+        return type && base && static_cast<U::UClass*>(type)->IsChildOf(base);
+    }
+
     bool replicated_field(U::UObject* field, U::UWorld* world)
     {
         auto* roster = property<U::FArrayProperty>(field, STR("Anomalies"));
@@ -617,9 +626,11 @@ namespace
         const bool observer_event = observer_enabled && std::ranges::find(observer_events, name) != observer_events.end();
         const bool prop_event = name == receive_tick || std::ranges::find(canister_events, name) != canister_events.end();
         const bool fixed_event = !field && std::find(fixed_prop_events.begin(), fixed_prop_events.end(), name) != fixed_prop_events.end();
+        const bool destructible_event = !field && std::ranges::find(destructible_events, name) != destructible_events.end();
         const bool patch_event = std::ranges::find(patch_events, name) != patch_events.end();
         if ((!field && !trap && !roaming_event && !gravity_event && !pyrogeist_event && !fire_event &&
-            !shadow_event && !angler_event && !observer_event && !prop_event && !fixed_event && !patch_event) || !U::IsInGameThreadRaw() ||
+            !shadow_event && !angler_event && !observer_event && !prop_event && !fixed_event && !destructible_event &&
+            !patch_event) || !U::IsInGameThreadRaw() ||
             call.OriginalFunctionCallPrevented() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)) return;
         auto* type = actor->GetClassPrivate();
         if (!type) return;
@@ -644,6 +655,17 @@ namespace
         const bool roaming = roaming_event && class_name == roaming_teleport && type->GetPathName() == roaming_teleport_class;
         const bool gravity_well = gravity_event && class_name == gravity && type->GetPathName() == gravity_class;
         auto* binding = function->GetOuterPrivate();
+        if (destructible_event && binding && binding->GetFName() == destructible_name &&
+            binding->GetPathName() == destructible && type->IsChildOf(static_cast<U::UClass*>(binding)) &&
+            actor->HasAnyFlags(U::RF_WasLoaded))
+        {
+            auto* replicates = property<U::FBoolProperty>(actor, STR("bReplicates"));
+            auto* world = static_cast<U::AActor*>(actor)->GetWorld();
+            if (replicates && !replicates->GetPropertyValueInContainer(actor) &&
+                guest_world(world) && actor->GetOuterPrivate() == object(world, STR("PersistentLevel")))
+                call.PreventOriginalFunctionCall();
+            return;
+        }
         const bool pyrogeist_body = pyrogeist_event && class_name == pyrogeist && type->GetPathName() == pyrogeist_class;
         const bool pyrogeist_jet = fire_event && passive_directed_jet(actor, type, binding);
         const bool shadow_sphere = shadow_event && class_name == shadow && type->GetPathName() == shadow_class;
@@ -862,6 +884,17 @@ namespace silverfish::native_anomaly_fields
             U::FName{STR("ReceiveBeginPlay"), U::FNAME_Add},
             U::FName{STR("ExecuteUbergraph_Explosive_Prop_Master_BP"), U::FNAME_Add},
         };
+        destructible_name = U::FName{STR("Static_DestructableObject_Master_BP_C"), U::FNAME_Add};
+        destructible_events = {
+            U::FName{STR("DealDamage"), U::FNAME_Add},
+            U::FName{STR("Damage_Feedback"), U::FNAME_Add},
+            U::FName{STR("PryOpen"), U::FNAME_Add},
+            U::FName{STR("Ignite"), U::FNAME_Add},
+            U::FName{STR("SetOnFire"), U::FNAME_Add},
+            U::FName{STR("PersistantDeath"), U::FNAME_Add},
+            U::FName{STR("ReceiveBeginPlay"), U::FNAME_Add},
+            U::FName{STR("InstantKill"), U::FNAME_Add},
+        };
         const auto script = [](Iteration& call, U::UObject* actor, U::FFrame& frame, void*) {
             intercept(call, actor, frame.Node());
             begin_observer_check(call, actor, frame);
@@ -987,5 +1020,7 @@ namespace silverfish::native_anomaly_fields
             [](const Lua& current) { return qualify_placed(current, canister_class); });
         lua.register_function("SilverfishQualifyNativePlacedFixedExplosive",
             [](const Lua& current) { return qualify_placed(current, fixed_prop_class); });
+        lua.register_function("SilverfishQualifyNativePlacedDestructible",
+            [](const Lua& current) { return qualify_placed(current, destructible_class); });
     }
 }

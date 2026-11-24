@@ -42,6 +42,7 @@ from . import native_weapon_fire_view
 from . import native_damage_feedback, native_guest_clock, native_weather_view
 from . import native_voice
 from . import native_anomaly_effects
+from . import native_destructibles
 from . import native_drum_fire
 from .native_guest_creator import valid_profile
 from . import native_host_stack_drop
@@ -2775,6 +2776,14 @@ class Bridge:
                     count = int(fields[1])
                     if data.get("state") == state and count >= 0:
                         data[fields[0].replace("-", "_")] = count
+                elif fields[0] == "native-destructible-roster" and len(fields) == 3 and data.get("state") == "hosting":
+                    area, roster = fields[1:]
+                    ids = [] if roster == "-" else roster.split("|")
+                    if area == data.get("map") and native_destructibles.valid_roster(ids):
+                        data[native_destructibles.KEY] = ids
+                elif fields[0] == "native-destructible-view" and len(fields) == 3 and data.get("state") == "connected":
+                    if fields[1] == data.get("map"):
+                        data["native_destructible_view"] = {"map": fields[1], "epoch": fields[2]}
                 elif fields[0] == "native-fixed-explosive" and len(fields) == 6 and data.get("state") in {"hosting", "connected"}:
                     props = data.setdefault(native_anomaly_effects.FIXED_EXPLOSIVES, {})
                     area = data.get("map", "")
