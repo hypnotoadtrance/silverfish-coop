@@ -6510,7 +6510,6 @@ class Client:
         finally:
             await self.cancel_gameplay_snapshot()
             await self.guest_ui.close()
-            await native_guest_weapon.service_fire_modes(self, active)
             if pause_exit is not None:
                 pause_exit.close()
             if self.mindcore_carry:
@@ -6567,6 +6566,7 @@ class Client:
             if active and shots and self.last_game.get("map") == self.expected_zone:
                 self.last_game = await self.weapon_shot_playback.sync(
                     self.bridge, self.control, self.last_game, shots, self.zone_epoch)
+            await native_guest_weapon.service_fire_modes(self, active)
             if pause_exit is not None:
                 pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
                 can_leave = (active and self.transport.game_access and self.host_session and self.zone_epoch
