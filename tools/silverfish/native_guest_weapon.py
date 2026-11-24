@@ -39,6 +39,10 @@ PROJECTILES_PER_ROUND = {
     if firearm.magazine
 }
 
+def valid_mounted_ammo(kind: str, ammo: str | None) -> bool:
+    return isinstance(ammo, str) and ammo in guest_weapon_profiles.AMMO_BY_KIND.get(kind, ())
+
+
 def valid_shot_direction(value: str) -> bool:
     return (isinstance(value, str) and SHOT_DIRECTION.fullmatch(value) is not None
             and abs(sum(float(axis) ** 2 for axis in value.split(",")) - 1.0) <= .002)

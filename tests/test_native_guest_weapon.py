@@ -42,6 +42,13 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
         self.assertEqual(firearms["revolver-01"], ("Wep_Revolver_01", 6, 1))
         self.assertEqual(firearms["revolver-snub"], ("Wep_Revolver_SnubNose", 6, 1))
 
+    def test_alternate_round_stays_with_compatible_receivers(self):
+        alternate = guest_weapon_profiles.FORTY_FIVE_HOLLOW_POINT.item_path
+        ball = guest_weapon_profiles.FORTY_FIVE_BALL.item_path
+        self.assertTrue(native_guest_weapon.valid_mounted_ammo("1911", alternate))
+        self.assertTrue(native_guest_weapon.valid_mounted_ammo("heavy-pistol-silenced", ball))
+        self.assertFalse(native_guest_weapon.valid_mounted_ammo("rusty-pistol", alternate))
+
     def test_9mm_revolver_uses_the_stock_seven_round_ball_magazine(self):
         path = "/Game/Classes/Weapons/Wep_Revolver_9mm.Wep_Revolver_9mm_C"
         self.assertEqual(native_guest_weapon.FIRE_CLASSES["revolver-9mm"], path)

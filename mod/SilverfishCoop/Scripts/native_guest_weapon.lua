@@ -244,6 +244,17 @@ local function valid_rounds(weapon, amount)
         and 0 <= amount and amount <= weapon.MagSize and weapon.MagSize <= 4096
 end
 
+local ammo_item_field = "Ammo_Item_9_DC1291D94AB26C3244B369B14FA38582"
+
+local function mounted_ammo_path(held)
+    local class = held.AmmoType[ammo_item_field]
+    return class and class:IsValid() and class:GetFullName():match("^%S+ (%S+)$")
+end
+
+local function allowed_ammo(kind, path)
+    return path and weapon_profiles.ammo_options[kind] and weapon_profiles.ammo_options[kind][path]
+end
+
 local function write_magazine(held, row, rounds)
     if held.Ammo ~= rounds then
         held.Ammo = rounds
@@ -268,7 +279,7 @@ end
 local function project_magazine(fields, state, phase)
     local area, name, guid, kind, rounds = fields[3], fields[4], fields[5], fields[6], tonumber(fields[7])
     local save, pawn = save_scope.bind_guest(state, phase)
-    if #fields ~= 7 or not save or state.map ~= area or pawn:GetFullName() ~= name then
+    if (#fields ~= 7 and #fields ~= 8) or not save or state.map ~= area or pawn:GetFullName() ~= name then
         error("The co-op magazine belongs to another guest or visit", 0)
     end
     local selected, actual_kind, row = equipped_guid(pawn, save)
@@ -277,6 +288,23 @@ local function project_magazine(fields, state, phase)
         or not same(held:GetWorld(), state.world) or not same(held.User, pawn) or not same(held.Player_Ref, pawn)
         or held:IsActorBeingDestroyed() or not valid_rounds(held, rounds) then
         error("The co-op magazine no longer matches the selected weapon", 0)
+    end
+    local ammo_path = fields[8]
+    if ammo_path then
+        if not allowed_ammo(kind, ammo_path) then error("The co-op round does not match the receiver", 0) end
+        if mounted_ammo_path(held) ~= ammo_path then
+            local class = StaticFindObject(ammo_path)
+            if not class or not class:IsValid() then
+                LoadAsset(ammo_path)
+                class = StaticFindObject(ammo_path)
+            end
+            if not class or not class:IsValid() then error("The co-op round is not loaded", 0) end
+            held:ChangeAmmoType(class:GetCDO().AmmoType)
+            row = selected_row(save)
+            if not same(pawn.EquipedItem, held) or item_identity(row) ~= guid or mounted_ammo_path(held) ~= ammo_path then
+                error("The stock co-op ammo change failed readback", 0)
+            end
+        end
     end
     write_magazine(held, row, rounds)
     return "stock co-op magazine projected"
@@ -447,7 +475,7 @@ function guest_weapon.rows(state, phase, status_row)
     end
     if not enabled or phase ~= "hosting" then return rows end
     for _, detail in ipairs(state.guests) do
-        local ok, guid, kind, rounds, mode = pcall(function()
+        local ok, guid, kind, rounds, mode, ammo_path = pcall(function()
             local pawn, save = guest_save.exact_item_context(state, phase, detail.name)
             if not pawn or not save then return end
             local id, profile, row = equipped_guid(pawn, save, state.world, state.map)
@@ -456,12 +484,14 @@ function guest_weapon.rows(state, phase, status_row)
             if held and weapon_profiles.paths[profile] and amount == held.Ammo and valid_rounds(held, amount) then
                 local mode = weapon_profiles.held_fire[profile] and held.HasSelectFire == true
                     and saved_mode(save, id, row[class_field])
-                return id, profile, amount, mode
+                local path = mounted_ammo_path(held)
+                return id, profile, amount, mode, allowed_ammo(profile, path) and path or nil
             end
             return id, profile
         end)
         if ok and guid and kind then
-            rows[#rows + 1] = status_row("native-guest-equipped-weapon", detail.name, guid, kind, rounds or "-", mode or "-")
+            rows[#rows + 1] = status_row("native-guest-equipped-weapon", detail.name, guid, kind,
+                rounds or "-", mode or "-", ammo_path or "-")
         end
     end
     local row = observation

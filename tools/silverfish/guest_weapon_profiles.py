@@ -184,3 +184,11 @@ BOLT_ACTION_UNLOAD_CAPACITY = 5
 BOLT_ACTION_UNLOADS = frozenset(weapon.path for weapon in FIREARMS if weapon.kind in {"nagant-scoped", "obrez"})
 BOLT_ACTION_AMMO = frozenset(ammo.item_path for ammo in (THIRTY_06_FMJ, THIRTY_06_INCENDIARY))
 MAX_TAKE_AMMO_ROUNDS = max(magazine.capacity for magazine in TAKE_AMMO_MAGAZINES.values())
+AMMO_BY_PATH = {ammo.item_path: ammo for ammo in STOCK_AMMO}
+AMMO_BY_KIND = {
+    firearm.kind: frozenset(ammo.item_path for ammo in STOCK_AMMO
+                            if ammo.caliber == firearm.magazine.ammo.caliber
+                            and ammo.projectile_count == firearm.magazine.ammo.projectile_count)
+    if firearm.magazine else BOLT_ACTION_AMMO
+    for firearm in FIREARMS if firearm.magazine or firearm.path in BOLT_ACTION_UNLOADS
+}

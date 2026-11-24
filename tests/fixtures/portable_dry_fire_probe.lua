@@ -13,6 +13,8 @@ local arm_profiles = {
     ["arm-rusty"] = {"/Game/Classes/Weapons/Wep_RustyPistol.Wep_RustyPistol_C", reserve_9mm, 9, 2},
     ["arm-light-ar"] = {"/Game/Classes/Weapons/Wep_LightAR_01.Wep_LightAR_01_C",
         "/Game/Classes/Items/Ammo_IntrRifle_BP.Ammo_IntrRifle_BP_C", 7, 3},
+    ["arm-alternate"] = {"/Game/Classes/Weapons/Wep_1911.Wep_1911_C",
+        "/Game/Classes/Items/Ammo_Magnum_HollowPoint_BP.Ammo_Magnum_HollowPoint_BP_C", 18, 4},
     ["arm-nagant"] = {"/Game/Classes/Weapons/Wep_Nagant_01.Wep_Nagant_01_C", reserve_9mm, 0, 6},
     ["arm-obrez"] = {"/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C", reserve_9mm, 0, 7},
 }
@@ -20,6 +22,7 @@ local weapon_path, reserve_path, reserve_units, slot
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
+local ammo_item = "Ammo_Item_9_DC1291D94AB26C3244B369B14FA38582"
 local payload = "DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59"
 local skeletal_tail = "/Game/Classes/NPCs/NPC_Assets/NPC_Tails/SK_Tail_01.SK_Tail_01"
 local last, local_pawn, peer, failure, world_address
@@ -313,6 +316,7 @@ local function run(action, argument)
     end
     if action == "seed-local" then return seed(local_pawn, 0) end
     if action == "seed-peer" then return seed(peer, 1) end
+    if action == "seed-peer-empty" then return seed(peer, 0) end
     if action == "seed-dock-light-ar" then
         assert(observing() and local_pawn:GetWorld():GetFullName() == dock_map
             and weapon_path == arm_profiles["arm-light-ar"][1])
@@ -331,6 +335,12 @@ local function run(action, argument)
     end
     if action == "ready" then return ready(local_pawn) end
     if action == "peer-ready" then return ready(peer) end
+    if action == "round" or action == "peer-round" then
+        local pawn = action == "round" and local_pawn or peer
+        if ready(pawn) == "waiting" then return "waiting" end
+        local round = pawn.EquipedItem.AmmoType[ammo_item]
+        return valid(round) and round:GetFullName():match("^%S+ (%S+)$") or "waiting"
+    end
     if action == "rifle-grip" then return rifle_grip(argument) end
     if action == "rifle-witness" then
         assert(observing() and ready(local_pawn) ~= "waiting")

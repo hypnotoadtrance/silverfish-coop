@@ -36,6 +36,17 @@ namespace silverfish::guest_weapon_profiles
         STR("/Game/Classes/Items/Ammo_FullRifle_BP.Ammo_FullRifle_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_Rifle_Heavy.Projectile_Rifle_Heavy_C"), 5, 1};
     inline constexpr StockAmmo thirty_06_incendiary{3, STR("30-06_Incendiary"),
         STR("/Game/Classes/Items/Ammo_30-06_Incendiary_BP.Ammo_30-06_Incendiary_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_30-06_Incendiary.Projectile_30-06_Incendiary_C"), 5, 1};
+    inline constexpr std::array stock_ammo{
+        &nine_mm_ball,
+        &forty_five_ball,
+        &forty_five_hollow_point,
+        &five_six_fmj,
+        &twelve_gauge_buck,
+        &five_seven_ap,
+        &fifty_cal_fmj,
+        &thirty_06_fmj,
+        &thirty_06_incendiary,
+    };
 
     struct Profile
     {

@@ -59,7 +59,7 @@ from .native_guest_npc import parse_bandit
 from .enemy_loot_profiles import BY_ACTOR as ENEMY_LOOT_ACTORS
 from .native_host_save import SLOT
 from . import native_smg_hold
-from .native_guest_weapon import FIRE_CLASSES, PRIMARY_KINDS, valid_shot_view
+from .native_guest_weapon import FIRE_CLASSES, PRIMARY_KINDS, valid_mounted_ammo, valid_shot_view
 from .native_guest_armor import parse as parse_guest_armor
 from .native_guest_armor import DISGUISE_PROBE, parse_recognition
 from . import native_guest_melee
@@ -2097,12 +2097,14 @@ class Bridge:
                       and data.get("state") == "connected" and fields[1] == data.get("map") and len(fields[2]) <= 512):
                     data.setdefault("native_guest_fire_modes", []).append(
                         (sequence, fields[1], fields[2], fields[4], fields[5]))
-                elif fields[0] == "native-guest-equipped-weapon" and len(fields) in (4, 5, 6) and fields[3] in PRIMARY_KINDS:
+                elif fields[0] == "native-guest-equipped-weapon" and len(fields) in (4, 5, 6, 7) and fields[3] in PRIMARY_KINDS:
                     equipped = {"guid": fields[2], "kind": fields[3]}
                     if len(fields) >= 5 and re.fullmatch(r"[0-9]{1,4}", fields[4]) and int(fields[4]) <= 4096:
                         equipped["rounds"] = int(fields[4])
-                    if len(fields) == 6 and fields[3] in native_smg_hold.HOLD_KINDS and fields[5] in ("semi", "auto"):
+                    if len(fields) >= 6 and fields[3] in native_smg_hold.HOLD_KINDS and fields[5] in ("semi", "auto"):
                         equipped["fire_mode"] = fields[5]
+                    if len(fields) == 7 and valid_mounted_ammo(fields[3], fields[6]):
+                        equipped["ammo_class"] = fields[6]
                     data.setdefault("native_guest_equipped_weapons", {})[fields[1]] = equipped
                 elif fields[0] == "native-guest-primary-fixture" and len(fields) == 6:
                     data["native_guest_primary_fixture"] = {"map": fields[1], "pawn": fields[2], "guid": fields[3],

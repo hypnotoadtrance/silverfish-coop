@@ -638,25 +638,88 @@ namespace
             name->GetPropertyValueInContainer(row) == expected;
     }
 
+    bool compatible_magazine_round(const profiles::StockAmmo& base, const profiles::StockAmmo& ammo)
+    {
+        return base.caliber == ammo.caliber && base.projectile_count == ammo.projectile_count;
+    }
+
+    const profiles::StockAmmo* magazine_round(const profiles::Profile& profile, Unreal::UClass* ammo)
+    {
+        if (!profile.ammo || !ammo) return nullptr;
+        const auto path = ammo->GetPathName();
+        const auto match = std::ranges::find_if(profiles::stock_ammo, [&](const profiles::StockAmmo* candidate) {
+            return compatible_magazine_round(*profile.ammo, *candidate) && path == candidate->item;
+        });
+        return match == profiles::stock_ammo.end() ? nullptr : *match;
+    }
+
+    struct WeaponDataView
+    {
+        const Unreal::UScriptStruct* type;
+        const void* data;
+    };
+
+    const profiles::StockAmmo* saved_magazine_round(const profiles::Profile& profile, Unreal::UClass* weapon,
+                                                    const Inventory& inventory)
+    {
+        if (!profile.ammo || !weapon) return nullptr;
+        auto* defaults = weapon->GetClassDefaultObject().Get();
+        if (mounted_payload_matches(defaults, inventory)) return profile.ammo;
+        auto* reference = field<Unreal::FStructProperty>(defaults, STR("DataStruct"));
+        auto* saved = field<Unreal::FStructProperty>(inventory.type->GetStruct().Get(), payload_name);
+        auto* instanced = find<Unreal::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct"));
+        auto* weapon_data = find<Unreal::UScriptStruct>(
+            STR("/Game/Classes/Libraries/Structs/WeaponData_Struct.WeaponData_Struct"));
+        if (!defaults || !reference || !saved || !instanced || !weapon_data ||
+            reference->GetStruct().Get() != instanced || saved->GetStruct().Get() != instanced ||
+            reference->GetSize() != sizeof(WeaponDataView) || saved->GetSize() != sizeof(WeaponDataView))
+            return nullptr;
+        // The qualified cooked x64 build stores the InstancedStruct type and data as two
+        // pointers. Verify both instances' exact struct before reading reflected members.
+        WeaponDataView stock{}, loaded{};
+        std::memcpy(&stock, reference->ContainerPtrToValuePtr<void>(defaults), sizeof(stock));
+        std::memcpy(&loaded, saved->ContainerPtrToValuePtr<void>(inventory.item), sizeof(loaded));
+        if (stock.type != weapon_data || loaded.type != weapon_data || !stock.data || !loaded.data)
+            return nullptr;
+        auto* selected = field<Unreal::FStructProperty>(
+            weapon_data, STR("AmmoType_2_039B4A454BFB079ACA16C3836A743543"));
+        auto* handle = find<Unreal::UScriptStruct>(STR("/Script/Engine.DataTableRowHandle"));
+        auto* table = field<Unreal::FObjectProperty>(handle, STR("DataTable"));
+        auto* name = field<Unreal::FNameProperty>(handle, STR("RowName"));
+        auto* ammo_table = stock_ammo_table();
+        if (!selected || !handle || selected->GetStruct().Get() != handle || !table || !name || !ammo_table)
+            return nullptr;
+        for (Unreal::TFieldIterator<Unreal::FProperty> member(weapon_data); member; ++member)
+        {
+            if (*member != selected && !member->Identical_InContainer(stock.data, loaded.data)) return nullptr;
+        }
+        const auto* row = selected->ContainerPtrToValuePtr<void>(loaded.data);
+        if (table->GetObjectPropertyValue(table->ContainerPtrToValuePtr<void>(row)) != ammo_table) return nullptr;
+        const auto selected_name = name->GetPropertyValueInContainer(row);
+        const auto match = std::ranges::find_if(profiles::stock_ammo, [&](const profiles::StockAmmo* candidate) {
+            return compatible_magazine_round(*profile.ammo, *candidate) &&
+                selected_name == Unreal::FName(candidate->row, Unreal::FNAME_Find);
+        });
+        return match == profiles::stock_ammo.end() || selected_name.IsNone() ? nullptr : *match;
+    }
+
     bool ordinary_magazine_payload(const profiles::Profile* profile, const Context& context, const Inventory& inventory,
-                               Unreal::UObject* actor = nullptr)
+                                    Unreal::UObject* actor = nullptr)
     {
         if (!profile || !profile->require_default_payload) return true;
-        auto* defaults = context.weapon->GetClassDefaultObject().Get();
-        if (!mounted_payload_matches(defaults, inventory)) return false;
-        if (!actor) return true;
-        // The approved receiver's own WeaponData_Struct contains the exact row handle
-        // without underbarrel data. SetAmmoType resolves it only after the actor is equipped.
+        const auto* selected = saved_magazine_round(*profile, context.weapon, inventory);
+        if (!selected || !actor) return selected != nullptr;
         auto* ammo = field<Unreal::FStructProperty>(actor, STR("AmmoType"));
         auto* type = find<Unreal::UScriptStruct>(ammo_type_path);
-        if (!profile->ammo || !type || !ammo || ammo->GetStruct().Get() != type ||
-            !mounted_payload_matches(actor, inventory)) return false;
-        const void* expected = ammo->ContainerPtrToValuePtr<void>(defaults);
-        if (profile->ammo != &profiles::nine_mm_ball)
+        if (!type || !ammo || ammo->GetStruct().Get() != type || !mounted_payload_matches(actor, inventory)) return false;
+        const void* expected = nullptr;
+        if (selected == &profiles::nine_mm_ball)
+            expected = ammo->ContainerPtrToValuePtr<void>(context.weapon->GetClassDefaultObject().Get());
+        else
         {
             auto* table = stock_ammo_table();
-            const Unreal::FName row{profile->ammo->row, Unreal::FNAME_Find};
-            expected = table && !row.IsNone() ? table->FindRowUnchecked(row) : nullptr;
+            const Unreal::FName row{selected->row, Unreal::FNAME_Find};
+            if (table && !row.IsNone()) expected = table->FindRowUnchecked(row);
         }
         return expected && ammo->Identical(ammo->ContainerPtrToValuePtr<void>(actor), expected);
     }
@@ -1538,7 +1601,8 @@ namespace
         if (!disarm && (before != stored || before < minimum || before > magazine->GetPropertyValueInContainer(actor) ||
                         shot_cost->GetPropertyValueInContainer(actor) != 1 || !projectile ||
                         (bolt && !bolt_round(actor, mounted_ammo(actor), projectile)) ||
-                        (stock_profile && !stock_round_matches(actor, mounted_ammo(actor), projectile, stock_profile->ammo))))
+                        (stock_profile && !stock_round_matches(actor, mounted_ammo(actor), projectile,
+                            magazine_round(*stock_profile, mounted_ammo(actor))))))
             return report(false, "guest_weapon_preloaded_magazine_required");
 
         Unreal::FWeakObjectPtr held_actor;
@@ -1628,31 +1692,21 @@ namespace
         });
     }
 
-    bool select_incendiary(Unreal::UObject* actor, const Inventory& inventory, Unreal::UClass* ammo)
+    bool select_stock_round(Unreal::UObject* actor, const Inventory& inventory, Unreal::UClass* ammo,
+                            const profiles::StockAmmo& selected)
     {
         auto* fn = find<Unreal::UFunction>(change_ammo_path);
         auto* handle = input<Unreal::FStructProperty>(fn, STR("InputPin"), 0);
         auto* handle_type = find<Unreal::UScriptStruct>(STR("/Script/Engine.DataTableRowHandle"));
-        auto* defaults = ammo->GetClassDefaultObject().Get();
-        auto* ammo_handle = field<Unreal::FStructProperty>(defaults, STR("AmmoType"));
-        auto* caliber = field<Unreal::FByteProperty>(defaults, STR("Caliber"));
-        auto* table = field<Unreal::FObjectProperty>(handle_type, STR("DataTable"));
-        auto* name = field<Unreal::FNameProperty>(handle_type, STR("RowName"));
-        auto* expected_table = find<Unreal::UObject>(ammo_table_path);
         const Unreal::FName change_name{STR("ChangeAmmoType")};
-        const Unreal::FName incendiary{STR("30-06_Incendiary"), Unreal::FNAME_Find};
         if (!fn || fn->GetOuterPrivate() != find<Unreal::UClass>(weapon_base_path) ||
             actor->GetFunctionByNameInChain(change_name) != fn || fn->GetNumParms() != 1 || fn->GetReturnProperty() ||
             fn->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
             !handle || !handle_type || handle->GetStruct().Get() != handle_type || fn->GetParmsSize() != handle->GetSize() ||
-            !defaults || defaults->GetClassPrivate() != ammo || !defaults->HasAnyFlags(Unreal::RF_ClassDefaultObject) ||
-            !ammo_handle || ammo_handle->GetStruct().Get() != handle_type || !caliber ||
-            caliber->GetPropertyValueInContainer(defaults) != rifle_caliber || !table || !name || !live(expected_table) ||
-            incendiary.IsNone() || incendiary.ToString() != STR("30-06_Incendiary") ||
-            !mounted_payload_matches(actor, inventory)) return false;
+            !ammo_item_row_matches(ammo, selected) || !mounted_payload_matches(actor, inventory)) return false;
+        auto* defaults = ammo->GetClassDefaultObject().Get();
+        auto* ammo_handle = field<Unreal::FStructProperty>(defaults, STR("AmmoType"));
         const auto* row = ammo_handle->ContainerPtrToValuePtr<void>(defaults);
-        if (table->GetObjectPropertyValue(table->ContainerPtrToValuePtr<void>(row)) != expected_table ||
-            name->GetPropertyValueInContainer(row) != incendiary) return false;
         // Stock ChangeAmmoType writes only the held weapon and its owning pawn's selected equipment row.
         auto* params = handle->AllocateAndInitializeValue();
         if (!params) return false;
@@ -1692,7 +1746,7 @@ namespace
         if (!stack_schema.read(ammo_class, inventory) ||
             (bolt && !bolt_round(actor, ammo_class, stock_projectile(actor))) ||
             (stock_profile && !stock_round_matches(actor, ammo_class,
-                stock_projectile(actor, stock_profile->ammo->projectile_count), stock_profile->ammo)))
+                stock_projectile(actor, stock_profile->ammo->projectile_count), magazine_round(*stock_profile, ammo_class))))
             return reload_proof(lua, false, "stock_guest_weapon_reserve_schema_unavailable");
 
         const auto before = rounds->GetPropertyValueInContainer(actor);
@@ -1706,22 +1760,26 @@ namespace
             return reload_proof(lua, false, "guest_weapon_reserve_unqualified", before, before);
         if (before == cap)
             return reload_proof(lua, false, "magazine_full", before, before, reserve_before, reserve_before);
-        bool change_to_incendiary = false;
-        if (bolt && before == 0 && reserve_before == 0 && ammo_class == find<Unreal::UClass>(rifle_fmj_path))
+        const profiles::StockAmmo* changed_round = nullptr;
+        if (before == 0 && reserve_before == 0)
         {
-            auto* incendiary_class = find<Unreal::UClass>(rifle_incendiary_path);
-            if (incendiary_class && find<Unreal::UClass>(rifle_incendiary_projectile))
+            for (const auto* candidate : profiles::stock_ammo)
             {
-                if (!snapshot_reserve(context, inventory, incendiary_class, stacks, reserve_before))
+                const bool compatible = bolt
+                    ? candidate == &profiles::thirty_06_incendiary && ammo_class == find<Unreal::UClass>(rifle_fmj_path)
+                    : stock_profile && compatible_magazine_round(*stock_profile->ammo, *candidate);
+                if (!compatible) continue;
+                auto* alternative = find<Unreal::UClass>(candidate->item);
+                if (!alternative || alternative == ammo_class || !find<Unreal::UClass>(candidate->projectile)) continue;
+                if (!snapshot_reserve(context, inventory, alternative, stacks, reserve_before))
                     return reload_proof(lua, false, "guest_weapon_reserve_unqualified", before, before);
-                if (reserve_before > 0)
-                {
-                    if (!stack_schema.read(incendiary_class, inventory) || stack_schema.unit_value != 12 ||
-                        stack_schema.unit_weight != 0.014)
-                        return reload_proof(lua, false, "stock_guest_weapon_reserve_schema_unavailable", before, before);
-                    ammo_class = incendiary_class;
-                    change_to_incendiary = true;
-                }
+                if (reserve_before == 0) continue;
+                if (!ammo_item_row_matches(alternative, *candidate) || !stack_schema.read(alternative, inventory) ||
+                    (bolt && (stack_schema.unit_value != 12 || stack_schema.unit_weight != 0.014)))
+                    return reload_proof(lua, false, "stock_guest_weapon_reserve_schema_unavailable", before, before);
+                ammo_class = alternative;
+                changed_round = candidate;
+                break;
             }
         }
         if (reserve_before == 0)
@@ -1741,10 +1799,10 @@ namespace
         if (needed != 0 || !ownership_current(context))
             return reload_proof(lua, false, "guest_weapon_reload_precondition_changed", before, before, reserve_before, reserve_before);
 
-        if (change_to_incendiary)
+        if (changed_round)
         {
             const Unreal::FWeakObjectPtr held_actor{actor};
-            if (!select_incendiary(actor, inventory, ammo_class))
+            if (!select_stock_round(actor, inventory, ammo_class, *changed_round))
                 return reload_proof(lua, false, "stock_guest_weapon_ammo_switch_unqualified", before, before, reserve_before);
             Inventory selected;
             std::vector<ReserveStack> selected_stacks;
@@ -1752,7 +1810,11 @@ namespace
             if (held_actor.Get() != actor || !ownership_current(context) || !locate(context, selected).empty() ||
                 equipped(context, selected) != actor || rounds->GetPropertyValueInContainer(actor) != before ||
                 selected.ammo->GetPropertyValueInContainer(selected.item) != before ||
-                mounted_ammo(actor) != ammo_class || !bolt_round(actor, ammo_class, stock_projectile(actor)) ||
+                mounted_ammo(actor) != ammo_class ||
+                (bolt ? !bolt_round(actor, ammo_class, stock_projectile(actor))
+                      : !stock_round_matches(actor, ammo_class, stock_projectile(actor, changed_round->projectile_count),
+                                             changed_round) ||
+                        !ordinary_magazine_payload(stock_profile, context, selected, actor)) ||
                 !mounted_payload_matches(actor, selected) ||
                 !snapshot_reserve(context, selected, ammo_class, selected_stacks, selected_total) || selected_total != reserve_before ||
                 !std::ranges::equal(stacks, selected_stacks, [](const ReserveStack& first, const ReserveStack& second) {
@@ -1793,7 +1855,7 @@ namespace
         std::vector<ReserveStack> remaining_stacks;
         if (observed != refilled || after.ammo->GetPropertyValueInContainer(after.item) != observed ||
             !ordinary_magazine_payload(stock_profile, context, after, actor) ||
-            (bolt && (mounted_ammo(actor) != ammo_class || !mounted_payload_matches(actor, after))) ||
+            ((bolt || changed_round) && (mounted_ammo(actor) != ammo_class || !mounted_payload_matches(actor, after))) ||
             !snapshot_reserve(context, after, ammo_class, remaining_stacks, reserve_after) ||
             reserve_after != reserve_before - transferred)
             return reload_proof(lua, false, "mutation_unverified_guest_weapon_reload_commit", before, observed, reserve_before);
@@ -2139,7 +2201,7 @@ namespace
             !(boolean(actor, STR("HasSelectFire"), false) ||
               (boolean(actor, STR("HasSelectFire"), true) && boolean(actor, STR("SemiAutoSelected"), false))) ||
             !stock_magazine_shape(actor, *profile) ||
-            !stock_round_matches(actor, mounted_ammo(actor), projectile, profile->ammo) ||
+            !stock_round_matches(actor, mounted_ammo(actor), projectile, magazine_round(*profile, mounted_ammo(actor))) ||
             loaded < 1 || loaded > profile->capacity || loaded != inventory.ammo->GetPropertyValueInContainer(inventory.item))
             return hold_result(lua, false, "native_guest_smg_hold_ineligible");
 
@@ -3078,7 +3140,7 @@ namespace
 
     const profiles::StockAmmo* unloaded_ammo(const profiles::Profile* profile, const BoltProfile* bolt, Unreal::UClass* ammo)
     {
-        if (profile) return ammo == find<Unreal::UClass>(profile->ammo->item) ? profile->ammo : nullptr;
+        if (profile) return magazine_round(*profile, ammo);
         if (!bolt) return nullptr;
         if (ammo == find<Unreal::UClass>(rifle_fmj_path)) return &profiles::thirty_06_fmj;
         if (ammo == find<Unreal::UClass>(rifle_incendiary_path)) return &profiles::thirty_06_incendiary;
@@ -3175,7 +3237,7 @@ namespace
         if (!defaults || !row_type || !weight ||
             !silverfish::native_guest_item::take_ammo_supported(weapon, selection.expected) ||
             inventory.ammo->GetPropertyValueInContainer(inventory.item) != selection.expected ||
-            (bolt ? !stock_bolt_shape(defaults, *bolt) : !mounted_payload_matches(defaults, inventory)))
+            (bolt ? !stock_bolt_shape(defaults, *bolt) : !profile || !saved_magazine_round(*profile, weapon, inventory)))
             return refuse("native_inventory_take_ammo_refused_loaded_state");
 
         context.weapon = weapon;
@@ -3249,7 +3311,7 @@ namespace
         // The stock split reads the exact saved ammo row, including a bolt-action's alternate load.
         if (!did_split || !ammo_class || !ammo || !ammo_item_row_matches(ammo_class, *ammo) ||
             !stock_ammo.read(ammo_class, inventory) || !stock_ammo.qualifies(selection.expected) ||
-            (held && bolt && (mounted_ammo(held) != ammo_class || !bolt_round(held, ammo_class, stock_projectile(held))))
+            (held && (mounted_ammo(held) != ammo_class || (bolt && !bolt_round(held, ammo_class, stock_projectile(held)))))
             || inventory.identity(extracted) == Guid{} || inventory.identity(extracted) == context.guid
             || inventory.row_class(unloaded) != weapon
             || inventory.ammo->GetPropertyValueInContainer(extracted) != selection.expected

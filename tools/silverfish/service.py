@@ -5597,12 +5597,16 @@ class Client:
         elif scope == self.primary_scope and kind in native_guest_weapon.FIRE_CLASSES:
             rounds = equipment.get("rounds")
             if type(rounds) is int and 0 <= rounds <= 4096:
-                magazine = self.host_session, self.zone_epoch, scope, rounds
+                ammo = equipment.get("ammo_class")
+                if not native_guest_weapon.valid_mounted_ammo(kind, ammo):
+                    ammo = None
+                magazine = self.host_session, self.zone_epoch, scope, rounds, ammo
                 attempt = magazine, self.gameplay_seen
                 if self.primary_magazine != magazine and self.primary_magazine_attempt != attempt:
                     self.primary_magazine_attempt = attempt
                     try:
-                        self.last_game = await self.bridge.command("native-guest-weapon-magazine", *scope, str(rounds), timeout=2)
+                        payload = (str(rounds), ammo) if ammo else (str(rounds),)
+                        self.last_game = await self.bridge.command("native-guest-weapon-magazine", *scope, *payload, timeout=2)
                         self.primary_magazine = magazine
                     except (OSError, RuntimeError) as error:
                         self.control.event("native_guest_magazine_projection_deferred", reason=str(error))

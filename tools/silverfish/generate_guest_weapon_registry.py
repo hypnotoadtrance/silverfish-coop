@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from .guest_weapon_profiles import (
-    BOLT_ACTION_UNLOAD_CAPACITY, BOLT_ACTION_UNLOADS, FIREARMS, MAX_HELD_FIRE_ROUNDS, MAX_TAKE_AMMO_ROUNDS,
+    AMMO_BY_KIND, BOLT_ACTION_UNLOAD_CAPACITY, BOLT_ACTION_UNLOADS, FIREARMS, MAX_HELD_FIRE_ROUNDS, MAX_TAKE_AMMO_ROUNDS,
     NINE_MM_BALL, STOCK_AMMO, STOCK_HELD_FIRE_MAGAZINES,
 )
 
@@ -29,7 +29,11 @@ def outputs() -> dict[str, str]:
         header.append(f'    inline constexpr StockAmmo {ammo.symbol}{{{ammo.caliber}, STR("{ammo.row}"),')
         header.append(f'        STR("{ammo.item_path}"), STR("{ammo.projectile_path}"), '
                       f'{ammo.fixture_units}, {ammo.projectile_count}}};')
+    header.append("    inline constexpr std::array stock_ammo{")
+    for ammo in STOCK_AMMO:
+        header.append(f"        &{ammo.symbol},")
     header.extend([
+        "    };",
         "",
         "    struct Profile", "    {",
         "        std::string_view kind;",
@@ -89,7 +93,11 @@ def outputs() -> dict[str, str]:
         lua.append(f'profiles.magazine_capacity["{path}"] = {BOLT_ACTION_UNLOAD_CAPACITY}')
     for kind in STOCK_HELD_FIRE_MAGAZINES:
         lua.append(f'profiles.held_fire["{kind}"] = true')
-    lua.extend(("return profiles", ""))
+    lua.append("profiles.ammo_options = {")
+    for kind, options in AMMO_BY_KIND.items():
+        choices = ", ".join(f'["{path}"] = true' for path in sorted(options))
+        lua.append(f'    ["{kind}"] = {{ {choices} }},')
+    lua.extend(("}", "return profiles", ""))
     return {
         "native/guest_weapon_registry.hpp": "\n".join(header),
         "mod/SilverfishCoop/Scripts/guest_weapon_registry.lua": "\n".join(lua),

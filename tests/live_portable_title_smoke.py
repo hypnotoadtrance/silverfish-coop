@@ -50,6 +50,7 @@ from portable_held_mask import verify_stock_held_mask
 from portable_eye_board import verify_stock_eye_stacks
 from portable_guest_world_start import GuestWorldStartProof, resident_events, wait_resident_status
 from portable_acid_pool import acid_pool_overlay, verify_acid_pool
+from portable_alternate_ammo import verify_alternate_ammo
 from portable_light_ar import verify_fire_mode_reopen, verify_stock_light_ar
 from portable_lingering_teleport import lingering_overlay, verify_stock_lingering_teleport
 from portable_personal_consumable import verify_personal_consumable_reconnect, verify_stock_personal_consumable
@@ -4783,7 +4784,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  tutorial_dock_shot_view: bool = False,
                  stock_bandage_revisit: bool = False, stock_shovel: bool = False, stock_shovel_loot: bool = False,
                  stock_shovel_quest: bool = False,
-                 stock_take_ammo: bool = False, stock_light_ar: bool = False, stock_fire_mode_reopen: bool = False,
+                 stock_take_ammo: bool = False, stock_alternate_ammo: bool = False, stock_light_ar: bool = False, stock_fire_mode_reopen: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
                  compact_crate_status: bool = False, compact_world_view: bool = False,
@@ -4883,6 +4884,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_wipe_chooser, "wipe_chooser", "stock_wipe_chooser",
          lambda host, guest, pawn: verify_stock_wipe_chooser(host, guest, pawn, portable_probe_command)),
         (stock_take_ammo, "observatory", "stock_take_ammo", verify_stock_take_ammo),
+        (stock_alternate_ammo, "observatory", "stock_alternate_ammo",
+         lambda host, guest, pawn: verify_alternate_ammo(host, guest, pawn, portable_probe_command)),
         (stock_roaming_barter, "observatory", "stock_roaming_barter", verify_roaming_barter),
         (stock_crate_ring and crossroads_profile, "crossroads", "stock_crate_ring",
          lambda host, guest, pawn: verify_stock_crate_ring(host, guest, pawn, memory_positions=True, cold=True)),
@@ -5088,7 +5091,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableFootstepProbe",
                                                      fixture="portable_footstep_probe.lua"))
-        if resident_weapon_cues or stock_light_ar or stock_fire_mode_reopen:
+        if resident_weapon_cues or stock_light_ar or stock_fire_mode_reopen or stock_alternate_ammo:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableDryFireProbe",
                                                      fixture="portable_dry_fire_probe.lua"))
@@ -5517,6 +5520,8 @@ if __name__ == "__main__":
                         help="replay a prior stock inventory view after switching to the SMG")
     parser.add_argument("--rusty-pistol", action="store_true",
                         help="exercise the stock Rusty Pistol during the resident weapon checks")
+    parser.add_argument("--stock-alternate-ammo", action="store_true",
+                        help="verify guest stock .45 hollow point reload, fire, and Take Ammo")
     parser.add_argument("--stock-light-ar", action="store_true",
                         help="verify one guest stock LightAR tap and R reload with rifle FMJ")
     parser.add_argument("--stock-fire-mode-reopen", action="store_true",
@@ -5678,7 +5683,7 @@ if __name__ == "__main__":
                               "stock_storm_ambience",
                               "stock_melee_family", "stock_melee_edges", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
                               "stock_roaming_barter", "stock_critters", "stock_placed_item", "stock_mushrooms", "stock_throwables", "stock_eye_stacks",
-                              "stock_lingering_teleport", "stock_light_ar", "stock_acid_pool"}
+                              "stock_lingering_teleport", "stock_light_ar", "stock_acid_pool", "stock_alternate_ammo"}
     if args.resident_held_queue and not args.resident_weapon_cues:
         parser.error("Use --resident-held-queue with --resident-weapon-cues")
     if args.stock_fire_mode_reopen and (args.second_legacy_work or args.resident_cabinet_archive
@@ -5791,7 +5796,7 @@ if __name__ == "__main__":
                        stock_shovel=args.stock_shovel,
                        stock_shovel_loot=args.stock_shovel_loot,
                        stock_shovel_quest=args.stock_shovel_quest,
-                       stock_take_ammo=args.stock_take_ammo, stock_light_ar=args.stock_light_ar,
+                       stock_take_ammo=args.stock_take_ammo, stock_alternate_ammo=args.stock_alternate_ammo, stock_light_ar=args.stock_light_ar,
                        stock_fire_mode_reopen=args.stock_fire_mode_reopen,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
