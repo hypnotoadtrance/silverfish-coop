@@ -4125,6 +4125,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_npc_rivalry: bool = False, stock_throwables: str | None = None,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
+                 resident_held_queue: bool = False,
                  rusty_pistol: bool = False, tutorial_dock_combat: bool = False, tutorial_dock_retaliation: bool = False,
                  tutorial_dock_melee: bool = False, tutorial_dock_pursuit: bool = False,
                  tutorial_dock_held_mask: bool = False, tutorial_dock_gait: bool = False,
@@ -4180,6 +4181,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     resident_campaigns = {}
     storm_trial = StockStormTrial(portable_probe_command) if stock_storm_ambience else None
     weapon_campaign = "tutorial_dock_combat" if tutorial_dock_combat else "observatory"
+    if resident_held_queue:
+        from portable_held_queue import verify_stock_held_queue
+    else:
+        verify_stock_held_queue = None
     dock_combat_check = ("stock_held_mask" if tutorial_dock_held_mask else
                          "tutorial_dock_pursuit" if tutorial_dock_pursuit else
                          "tutorial_dock_retaliation" if tutorial_dock_retaliation else "tutorial_dock_combat")
@@ -4197,6 +4202,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (resident_weapon_cues, weapon_campaign, "resident_weapon_cues",
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override,
                                                                rusty=rusty_pistol, npc_rivalry=stock_npc_rivalry)),
+        (resident_held_queue, weapon_campaign, "stock_held_queue", verify_stock_held_queue),
         (stock_food, "observatory", "stock_food", verify_resident_guest_food),
         (stock_personal_consumable, "personal_consumable", "stock_personal_consumable",
          lambda host, guest, pawn: verify_stock_personal_consumable(host, guest, pawn, portable_probe_command)),
@@ -4741,6 +4747,8 @@ if __name__ == "__main__":
     parser.add_argument("--memory-status", action="store_true", help="verify both workers consume live frames through memory")
     parser.add_argument("--resident-weapon-cues", action="store_true",
                         help="verify Bandage, footsteps, firing and reload, combinable with campfire and food")
+    parser.add_argument("--resident-held-queue", action="store_true",
+                        help="verify a stock SMG hold through the resident in-memory input queue")
     parser.add_argument("--rusty-pistol", action="store_true",
                         help="exercise the stock Rusty Pistol during the resident weapon checks")
     parser.add_argument("--tutorial-dock-combat", action="store_true",
@@ -4882,7 +4890,7 @@ if __name__ == "__main__":
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"stock_food", "stock_personal_consumable", "stock_wipe_chooser", "stock_campfire", "stock_npc_override",
-                              "stock_board_offers", "resident_weapon_cues",
+                              "stock_board_offers", "resident_weapon_cues", "resident_held_queue",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "tutorial_dock_pursuit",
                               "tutorial_dock_held_mask", "tutorial_dock_gait",
                               "tutorial_dock_melee", "stock_npc_rivalry",
@@ -4892,6 +4900,8 @@ if __name__ == "__main__":
                               "stock_melee_family", "stock_melee_edges", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
                               "stock_roaming_barter", "stock_critters", "stock_placed_item", "stock_throwables", "stock_eye_stacks",
                               "stock_lingering_teleport"}
+    if args.resident_held_queue and not args.resident_weapon_cues:
+        parser.error("Use --resident-held-queue with --resident-weapon-cues")
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
     if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
@@ -4975,6 +4985,7 @@ if __name__ == "__main__":
                        stock_throwables=args.stock_throwables,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
+                       resident_held_queue=args.resident_held_queue,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
                        tutorial_dock_melee=args.tutorial_dock_melee, tutorial_dock_pursuit=args.tutorial_dock_pursuit,
                        tutorial_dock_held_mask=args.tutorial_dock_held_mask, tutorial_dock_gait=args.tutorial_dock_gait,
