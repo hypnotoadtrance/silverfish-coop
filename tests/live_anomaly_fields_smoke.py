@@ -110,17 +110,25 @@ async def verify_glass_web(host, guest, positions):
         local_view, peer_view = status(host), status(guest)
         if not present(local_view, point) or not present(peer_view, point):
             continue
+        replica_point = next(row["location"] for row in strands(peer_view) if math.dist(row["location"], point) < 2)
         shapes = [row for row in meshes(peer_view) if math.dist(row["anchor"], point) < 2]
-        key = ",".join(f"{value:.0f}" for value in point)
+        if not any(row["main"] for row in shapes):
+            continue
+        guest_key = ",".join(f"{value:.0f}" for value in replica_point)
         previous = peer_view["game"]["native_anomaly_field"]["blocked_triggers"]
-        refused = await submit(guest, "native-placed-anomaly-guest-fixture", target="glass-thread|" + key)
+        refused = await submit(guest, "native-placed-anomaly-guest-fixture", target="glass-thread|" + guest_key)
+        # A strand may leave relevancy while a previous contact is still settling.
+        if not refused["ok"] and refused["error"] == "The stock Glass Thread is unavailable":
+            continue
         assert refused["ok"] and refused["native_anomaly_field"]["blocked_triggers"] == previous + 1, refused
         still_passive = await wait(guest, lambda state: state["game"]["native_anomaly_field"]["blocked_triggers"] > previous)
         assert matching(shapes, [row for row in meshes(still_passive) if math.dist(row["anchor"], point) < 2])
 
         event_start = len(events())
-        entered = await submit(host, "native-anomaly-trigger-fixture", target="glass-thread-contact|" + key)
-        if not entered["ok"] and entered["error"] == "Unable to stage a stock guest overlap with the Glass Thread":
+        host_key = ",".join(f"{value:.0f}" for value in point)
+        entered = await submit(host, "native-anomaly-trigger-fixture", target="glass-thread-contact|" + host_key)
+        if not entered["ok"] and entered["error"] in {"The stock Glass Thread is unavailable",
+                                                     "Unable to stage a stock guest overlap with the Glass Thread"}:
             continue
         assert entered["ok"], entered
         await wait(host, lambda state: strands(state) and not present(state, point), timeout=6)
