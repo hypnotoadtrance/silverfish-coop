@@ -21,11 +21,42 @@ SPADE = CROSSROADS + ".CrossRoads_P:PersistentLevel.MeleeWep_Spade_C_3"
 NUGGET = "/Game/Classes/Items/Item_GoldNugget.Item_GoldNugget_C"
 
 
+async def stock_inventory(run, *, guest=False):
+    items, offset, total = [], 0, None
+    while offset is not None:
+        page_request = {"target": str(offset)} if guest else {"amount": offset}
+        reply = await submit(run, "native-inventory-list", **page_request)
+        assert reply["ok"], reply
+        page = reply["native_inventory"]
+        assert page["offset"] == offset and (total is None or page["total"] == total), page
+        total = page["total"]
+        items.extend(page["items"])
+        offset = page["next_offset"]
+    assert len(items) == total and len({row["guid"] for row in items}) == total, items
+    return items
+
+
+def sealed_packages(items):
+    return [row for row in items if row["class_path"] == native_host_dig.PACKAGE_CLASS]
+
+
+async def verify_stock_shovel_reconnect(guest, evidence):
+    guest_run = guest.client / "run"
+    await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected"
+                               and frame.get("gameplay_fresh") is True
+                               and frame.get("character_id") == evidence["collector"]
+                               and frame.get("game", {}).get("map") == CROSSROADS, timeout=20)
+    packages = sealed_packages(await stock_inventory(guest_run, guest=True))
+    assert packages == [evidence["guest_inventory_item"]], packages
+    evidence["same_guest_inventory_item_after_reconnect"] = True
+
+
 async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
-    await wait_resident_status(host_run, lambda f: f.get("game", {}).get("native_zone", {}).get("state") == "ready")
-    for participant, placement in ((pawn, "near"), ("local", "near"), ("local", "inside")):
-        await host.bridge.command("native-exit-position", participant, placement, "Obsv_Etr", "Level_Exit_BP_C_1")
+    current = await wait_resident_status(host_run, lambda f: f.get("game", {}).get("native_zone", {}).get("state") == "ready")
+    if current["game"].get("map") != CROSSROADS:
+        for participant, placement in ((pawn, "near"), ("local", "near"), ("local", "inside")):
+            await host.bridge.command("native-exit-position", participant, placement, "Obsv_Etr", "Level_Exit_BP_C_1")
     arrived = await wait_resident_status(host_run, lambda f: f.get("game", {}).get("map") == CROSSROADS
                                         and not f.get("awaiting_zone_guest")
                                         and f["game"].get("native_guest_save", {}).get("state") == "bound", timeout=60)
@@ -128,21 +159,46 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False, quest=False):
         assert (package["spade_guid"], custody["spade_guid"]) == (item["guid"], item["guid"])
         assert (custody["source"], custody["flag_value"], custody["package_guid"]) == (
             native_host_dig.SOURCE, 1, package["escrow_guid"])
+        identity = dig.package_identity(custody["package_guid"])
+
+        def projected(frame):
+            return frame.get("game", {}).get(native_world_loot.KEY, {}).get(identity)
+
+        shown = await wait_resident_status(guest_run, projected, timeout=12)
+        replica = projected(shown)
         raw_packages = await asyncio.gather(*(observe(seat, "quest-packages") for seat in (host, guest)))
-        assert raw_packages[0] == package["actor"], raw_packages
-        await observe(host, "quest-approach", "local")
-        assert await observe(host, "quest-collect", "local") == "stock_started"
+        assert raw_packages == [package["actor"], replica["actor"]], raw_packages
+        assert (replica["map"], replica["class_path"]) == (CROSSROADS, native_host_dig.PACKAGE_CLASS), replica
+        host_before = await stock_inventory(host_run)
+        guest_before = await stock_inventory(guest_run, guest=True)
+        assert not sealed_packages(host_before) and not sealed_packages(guest_before)
+        press = await submit(guest_run, native_world_loot.FIXTURE, target=identity)
+        if not press["ok"]:
+            sight = await observe(guest, "sight", replica["actor"].split(" ", 1)[1])
+            raise AssertionError((press, sight))
+        assert press[native_world_loot.KEY][identity]["sequence"] > replica["sequence"], press
         collected = await wait_resident_status(host_run, lambda f: f.get("game", {}).get(dig.KEY, {}).get("state") == "owned")
         owned = collected["game"][dig.KEY]
-        assert owned["escrow_guid"] == package["escrow_guid"] and owned["spade_guid"] == item["guid"], owned
+        assert (owned["escrow_guid"], owned["spade_guid"], owned["collector"]) == (
+            package["escrow_guid"], item["guid"], pawn), owned
         saved = runtime.read_json(host.campaign / "save" / "campaign.json")
         owner = saved["world"]["party"][dig.CUSTODY]
-        assert owner["state"] == "owned" and owner["package_guid"] == owned["package_guid"], owner
-        # The native owned receipt already verifies retirement. FindAllOf can
-        # enumerate the old UObject until Unreal garbage-collects it.
+        collector = shown["character_id"]
+        assert (owner["state"], owner["package_guid"], owner["owner"]) == ("owned", owned["package_guid"], collector), owner
+        await wait_resident_status(guest_run, lambda frame: not projected(frame), timeout=10)
+        repeated = await submit(guest_run, native_world_loot.FIXTURE, target=identity)
+        assert not repeated["ok"], repeated
+        host_after = await stock_inventory(host_run)
+        guest_after = await stock_inventory(guest_run, guest=True)
+        assert host_after == host_before, (host_before, host_after)
+        guest_package, = sealed_packages(guest_after)
+        assert (guest_package["guid"], guest_package["source"], guest_package["quantity"]) == (
+            owned["package_guid"], "backpack", 1), guest_package
         return {"stock_shovel": ordinary, "stock_host_shovel": host_dig,
                 "stock_missing_contact_guest_dig": {**result, "package": package, "custody": custody,
-                                                     "world_actors_before_pickup": raw_packages, "host_pickup": owned}}
+                                                     "world_actors_before_pickup": raw_packages, "guest_pickup": owned,
+                                                     "collector": collector, "guest_inventory_item": guest_package,
+                                                     "host_inventory_preserved": True, "second_pickup_refused": True}}
 
     if not loot:
         return {"stock_shovel": await dig_once(), "stock_host_shovel": await verify_host_dig()}

@@ -67,6 +67,7 @@ _CHECKPOINT_ACTION_TIMEOUTS = {
     "native-authored-pickup-claim": 20.0,
     "native-loose-pickup-claim": 24.0,
     "native-mushroom-claim": 24.0,
+    "native-missing-contact-collect": 28.0,
     "native-finite-shop-list": 15.0,
     "native-finite-shop-buy": 15.0,
     "native-finite-shop-sale-quote": 15.0,

@@ -106,6 +106,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_lantern.EXTINGUISH,
                         *native_guest_weapon.GUEST_ACTIONS, native_guest_weapon.SELECT_EQUIPMENT,
                         *native_guest_consumable.RESULT, native_guest_melee.SWING, native_host_dig_live.GUEST_ACTION,
+                        native_host_dig_live.COLLECT,
                         native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION)
 TRANSPORT_FIXTURES = ("stardust", "fruiting-stardust", "green", "blue", "red", "gold", "purple", "teleport-cube")
 CUBE_RESULTS = {"inspect": ("present", "absent"), "debit": ("removed", "absent"),
@@ -980,6 +981,8 @@ class Host:
             view[native_loose_pickup.STATE] = self.loose_pickups.hidden(self)
         if mushrooms := native_mushrooms.frame(self.last_game, self.zone_epoch):
             view[native_mushrooms.KEY] = mushrooms
+        if package := native_host_dig_live.package_frame(self):
+            view[native_host_dig_live.PACKAGE_FRAME] = package
         if dead_drop := native_dead_drop.frame(self):
             view[native_dead_drop.FRAME] = dead_drop
         if cabinet := native_dust_cabinet.frame(self):
@@ -2201,6 +2204,8 @@ class Host:
                     result = await native_guest_melee.perform(self, bridge, action, character, guid, request["operation_id"])
             elif action == native_host_dig_live.GUEST_ACTION:
                 result = await native_host_dig_live.guest_dig(self, bridge, character, target, request["operation_id"])
+            elif action == native_host_dig_live.COLLECT:
+                result = await native_host_dig_live.collect(self, bridge, character, target, request["operation_id"])
             elif action in (native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION):
                 result = await native_guest_armor.perform(self, bridge, character, request["operation_id"], action, target)
             elif action in native_guest_consumable.RESULT:
@@ -5413,7 +5418,8 @@ class Client:
         elif action in (native_guest_melee.SWING, native_host_dig_live.GUEST_ACTION):
             target = native_guest_melee.request_target(target, self.zone_epoch)
         elif (action in native_loot.PRY_TOOL_ACTIONS.values()
-              or action in (native_stock_door.ACTION, native_stock_switch.ACTION, native_critters.ACTION)
+              or action in (native_stock_door.ACTION, native_stock_switch.ACTION, native_critters.ACTION,
+                            native_host_dig_live.COLLECT)
               or action in native_stock_door.PRY_ACTIONS.values()):
             target = f"{self.zone_epoch}@{target}"
         request = {"action": action, "operation_id": operation_id, "target": target}
@@ -6642,6 +6648,7 @@ class Client:
                         carried=self.gameplay.get(native_world_loot.MOVING),
                         player_drops=self.gameplay.get(native_guest_drop_record.STATE) if shared_pickups else None,
                         mushroom_frame=self.gameplay.get(native_mushrooms.KEY),
+                        quest_package=self.gameplay.get(native_host_dig_live.PACKAGE_FRAME),
                     )
                 except (OSError, RuntimeError) as error:
                     if self.world_loot.last_error != str(error):

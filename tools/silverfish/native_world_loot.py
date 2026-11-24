@@ -7,7 +7,8 @@ import uuid
 from dataclasses import dataclass, replace
 from itertools import chain
 
-from . import native_enemy_shells, native_guest_drop_record, native_loot, native_mushrooms, native_stock_enemy_drops, party
+from . import (native_enemy_shells, native_guest_drop_record, native_host_dig_live, native_loot,
+               native_mushrooms, native_stock_enemy_drops, party)
 from .authored_loot import valid_item_transform
 from .native_gold import valid_guid
 from .native_guest_drop_record import valid_position
@@ -215,8 +216,20 @@ def _mushroom_items(frame, area, zone):
                    identity, _display_count(row.get("amount")))
 
 
+def _quest_package(frame, area, zone):
+    if not isinstance(frame, dict) or (frame.get("map"), frame.get("epoch")) != (area, zone):
+        return
+    guid, contact = frame.get("guid"), frame.get("contact")
+    dig = native_host_dig_live
+    if area != dig.CROSSROADS or not valid_guid(guid) or not dig._valid_contact(contact, frame.get("material")):
+        return
+    x, y, z = contact
+    transform = {"position": [x, y, z + 10], "rotation": [0, 0, 0], "scale": [1, 1, 1]}
+    yield Item(dig.package_identity(guid), dig.stock.PACKAGE_CLASS, transform, dig.COLLECT, guid, 0)
+
+
 def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drops=None, stock_enemy_drops=None,
-           mushroom_frame=None, enemy_motion=None, carried=None, pinned=()):
+           mushroom_frame=None, enemy_motion=None, carried=None, quest_package=None, pinned=()):
     area = game.get("map")
     pawn = game.get("pawns", {}).get("local", {})
     origin = pawn.get("location")
@@ -230,7 +243,7 @@ def nearby(game, rolls, zone, *, enemy_frame=None, enemy_rolls=None, player_drop
         isinstance(carried, list) and len(carried) <= _MAX_VISIBLE) else set()
     for item in chain(_crate_items(rolls, area), _enemy_items(enemy_frame, enemy_rolls or {}, area, zone),
                       _player_items(player_drops or {}, area), _stock_enemy_items(stock_enemy_drops, area),
-                      _mushroom_items(mushroom_frame, area, zone), moves.values()):
+                      _mushroom_items(mushroom_frame, area, zone), _quest_package(quest_package, area, zone), moves.values()):
         if item.carryable and item.identity in carried_ids:
             latest = moves.get(item.identity)
             transform = latest.transform if latest and latest.carried_motion and latest.class_path == item.class_path else item.transform
@@ -302,7 +315,8 @@ class Projection:
         return True
 
     async def sync(self, bridge, game, rolls, generation, zone, *, active, enemy_frame=None, enemy_rolls=None,
-                   player_drops=None, stock_enemy_drops=None, mushroom_frame=None, enemy_motion=None, carried=None):
+                   player_drops=None, stock_enemy_drops=None, mushroom_frame=None, enemy_motion=None, carried=None,
+                   quest_package=None):
         phase = game.get("state")
         if phase not in {"hosting", "connected"} or not isinstance(zone, str):
             self.previous = None
@@ -320,6 +334,7 @@ class Projection:
         self.items = nearby(game, rolls, zone, enemy_frame=enemy_frame, enemy_rolls=enemy_rolls,
                             player_drops=player_drops, stock_enemy_drops=stock_enemy_drops,
                             mushroom_frame=mushroom_frame, enemy_motion=enemy_motion, carried=carried,
+                            quest_package=quest_package if phase == "connected" else None,
                             pinned=self.moving) if active else {}
         for identity in self.retired:
             self.items.pop(identity, None)
