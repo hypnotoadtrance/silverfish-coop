@@ -829,7 +829,7 @@ local function dock_combat(pawn, world, host, action, name)
         eyes, actor:GetFullName())
 end
 
-local garage_view
+local garage_view, garage_door, garage_aim
 local garage_path = dock .. ":PersistentLevel.StaticMeshActor_347"
 
 local function stock_garage(world)
@@ -851,6 +851,31 @@ local function point_string(point)
     return ("%.3f,%.3f,%.3f"):format(point.X, point.Y, point.Z)
 end
 
+local function open_garage_for_test(world)
+    local _, mesh = stock_garage(world)
+    assert(not garage_door)
+    local point = mesh:K2_GetComponentLocation()
+    garage_door = {mesh=mesh, point={X=point.X,Y=point.Y,Z=point.Z}}
+    mesh:SetMobility(2)
+    mesh:K2_SetWorldLocation({X=point.X,Y=point.Y,Z=point.Z+165}, false, {}, true)
+    assert(math.abs(mesh:K2_GetComponentLocation().Z - garage_door.point.Z - 165) < 1, "could not raise the staged garage door")
+    return "raised"
+end
+
+local function restore_garage_fixture()
+    if garage_aim then
+        local camera, muzzle = garage_aim.camera, garage_aim.muzzle
+        if valid(camera) then camera:K2_SetRelativeLocation(garage_aim.camera_location, false, {}, true) end
+        if valid(muzzle) then muzzle:K2_SetRelativeLocation(garage_aim.muzzle_location, false, {}, true) end
+    end
+    if garage_door and valid(garage_door.mesh) then
+        garage_door.mesh:K2_SetWorldLocation(garage_door.point, false, {}, true)
+        garage_door.mesh:SetMobility(0)
+    end
+    garage_view, garage_door, garage_aim = nil, nil, nil
+    return "restored"
+end
+
 local function stage_garage_shot(host, world)
     local _, mesh = stock_garage(world)
     local worker = dock_worker(world, "NPC_Survivor_Worker_C_2")
@@ -866,7 +891,7 @@ local function stage_garage_shot(host, world)
         for _, gap in ipairs({25, 45, 65, 15}) do
             local low_z = center.Z - extent.Z - gap
             local near, far = {X=center.X,Y=center.Y,Z=low_z}, {X=center.X,Y=center.Y,Z=low_z}
-            near[axis], far[axis] = center[axis] - 140*sign, center[axis] + 250*sign
+            near[axis], far[axis] = center[axis] - 310*sign, center[axis] + 250*sign
             local blocked = {X=near.X,Y=near.Y,Z=center.Z - extent.Z + 45}
             local high_target = {X=far.X,Y=far.Y,Z=blocked.Z}
             local obstruction = line_hit(shooter, blocked, high_target, ignored)
@@ -907,6 +932,11 @@ local function set_garage_aim(pawn, world, host, specification)
     assert(valid(worker) and valid(weapon) and valid(weapon.Arrow_Muzzle))
     local aim = heading(from, to)
     assert(not host or (garage_view and same(garage_view.shooter, shooter)))
+    if not garage_aim then
+        local camera, muzzle = shooter.Camera.RelativeLocation, weapon.Arrow_Muzzle.RelativeLocation
+        garage_aim = {camera=shooter.Camera, muzzle=weapon.Arrow_Muzzle,
+            camera_location={X=camera.X,Y=camera.Y,Z=camera.Z}, muzzle_location={X=muzzle.X,Y=muzzle.Y,Z=muzzle.Z}}
+    end
     shooter.Controller:SetControlRotation(aim)
     shooter.Camera:K2_SetWorldLocation(from, false, {}, true)
     shooter.Camera:K2_SetWorldRotation(aim, false, {}, true)
@@ -1344,11 +1374,24 @@ local function run(action, actor_path)
     elseif action == "dock-garage-stage" then
         assert(host)
         return stage_garage_shot(pawn, world)
+    elseif action == "dock-garage-open" then
+        return open_garage_for_test(world)
+    elseif action == "dock-garage-restore" then
+        return restore_garage_fixture()
     elseif action == "dock-garage-aim" then
         return set_garage_aim(pawn, world, host, actor_path)
     elseif action == "dock-garage-health" then
         assert(host and garage_view and valid(garage_view.worker))
         return ("%.6f"):format(garage_view.worker.Health)
+    elseif action == "dock-garage-blockers" then
+        local shooter = host and authoritative_guest(world) or pawn
+        local blockers = {}
+        if shooter.Controller.Loading == true then blockers[#blockers + 1] = "Loading" end
+        for _, field in ipairs({"Dead", "IsWeaponBlocked", "UsingItem", "Reloading", "IsChangingAmmo",
+            "Speaking", "HeadUnderWater", "Wep_HeldAside", "OnLadder"}) do
+            if shooter[field] ~= false then blockers[#blockers + 1] = field end
+        end
+        return #blockers > 0 and table.concat(blockers, ",") or "ready"
     elseif action == "dock-arm-swing" or action == "dock-play-swing" or action == "dock-read-swing" then
         return dock_swing(world, host, action)
     elseif action == "dock-disarm-swing" then

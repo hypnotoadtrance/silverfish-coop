@@ -2158,6 +2158,17 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
                                      "stock_swing": {"host": source, "guest": observer, "received": received}}}
 
 async def verify_dock_garage_shots(host: Seat, guest: Seat, frame: dict, command) -> dict:
+    try:
+        assert await asyncio.gather(*(command(seat, "dock-garage-open") for seat in (host, guest))) == ["raised", "raised"]
+        evidence = await compare_dock_garage_shots(host, guest, frame, command)
+    finally:
+        restored = await asyncio.gather(*(command(seat, "dock-garage-restore") for seat in (host, guest)),
+                                         return_exceptions=True)
+    assert restored == ["restored", "restored"], restored
+    return evidence
+
+
+async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, command) -> dict:
     guest_run = guest.client / "run"
     low, worker, high, obstruction, health = (await command(host, "dock-garage-stage")).split(";")
     health = float(health)
@@ -2166,8 +2177,18 @@ async def verify_dock_garage_shots(host: Seat, guest: Seat, frame: dict, command
 
     async def shoot(expected_health, *, should_hit):
         started = time.time()
-        tap = await submit(guest_run, "native-guest-primary-input-fixture")
-        assert tap["ok"], tap
+        blockers = "unavailable"
+        try:
+            async with asyncio.timeout(4):
+                while True:
+                    tap = await submit(guest_run, "native-guest-primary-input-fixture")
+                    if tap["ok"]:
+                        break
+                    assert "native_guest_primary_fixture_scope_unavailable" in tap.get("error", ""), tap
+                    blockers = await asyncio.gather(*(command(seat, "dock-garage-blockers") for seat in (host, guest)))
+                    await asyncio.sleep(.06)
+        except TimeoutError as error:
+            raise AssertionError(dict(stock_pose_blockers=blockers, shot=should_hit)) from error
         sequence = tap["native_guest_primary_fixture"]["sequence"]
         async with asyncio.timeout(8):
             while not (events := [row for row in await resident_events(guest_run, frame)
@@ -2190,9 +2211,13 @@ async def verify_dock_garage_shots(host: Seat, guest: Seat, frame: dict, command
             assert observed == expected_health, dict(roof_contact_damaged_worker=observed, event=event)
         return event, observed
 
-    async with asyncio.timeout(7):
-        while await command(guest, below) != "worker":
-            await asyncio.sleep(.05)
+    seen = "unavailable"
+    try:
+        async with asyncio.timeout(7):
+            while (seen := await command(guest, below)) != "worker":
+                await asyncio.sleep(.05)
+    except TimeoutError as error:
+        raise AssertionError(dict(guest_low_trace=seen, origin=low, target=worker)) from error
     assert await command(host, above) == "blocked"
     assert await command(guest, above) == "blocked"
     blocked, after_blocked = await shoot(health, should_hit=False)
