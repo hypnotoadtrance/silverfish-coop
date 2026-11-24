@@ -24,6 +24,7 @@ local skeletal_tail = "/Game/Classes/NPCs/NPC_Assets/NPC_Tails/SK_Tail_01.SK_Tai
 local last, local_pawn, peer, failure, world_address
 local hooked = false
 local clicks, projectiles, shot_sounds, muzzle_flashes = {}, 0, 0, 0
+local burst_directions
 local local_flashes, local_reload = 0, nil
 local retire_projectile, projectile_retired
 
@@ -101,7 +102,13 @@ local function arm()
     RegisterHook("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:SpawnProjectile", function(context)
         if not observing() then return end
         local weapon = context:get()
-        if same(weapon, local_pawn.EquipedItem) or same(weapon, peer.EquipedItem) then projectiles = projectiles + 1 end
+        if same(weapon, local_pawn.EquipedItem) or same(weapon, peer.EquipedItem) then
+            projectiles = projectiles + 1
+            if burst_directions and same(weapon, peer.EquipedItem) and valid(weapon.Arrow_Muzzle) then
+                local rotation = weapon.Arrow_Muzzle:K2_GetComponentRotation()
+                burst_directions[#burst_directions + 1] = ("%.3f"):format(rotation.Yaw)
+            end
+        end
     end)
     RegisterHook("/Script/Engine.GameplayStatics:SpawnSoundAttached", function(_, sound, attached)
         if not observing() then return end
@@ -377,9 +384,22 @@ local function run(action, argument)
         local_pawn.Controller:SetControlRotation({Pitch = 35, Yaw = math.deg(math.atan(from.Y - other.Y, from.X - other.X)), Roll = 0})
         return "turned"
     end
+    if action == "burst-watch" then
+        assert(observing() and local_pawn:HasAuthority())
+        burst_directions = {}
+        return "watching"
+    end
+    if action == "burst-read" then return table.concat(burst_directions, ",") end
+    if action == "burst-aim-first" or action == "burst-aim-second" then
+        assert(observing() and not local_pawn:HasAuthority())
+        local yaw = action == "burst-aim-first" and 90 or -45
+        local_pawn.Controller:SetControlRotation({Pitch = 65, Yaw = yaw, Roll = 0})
+        return tostring(yaw)
+    end
     if action == "clear" then
         clicks, projectiles, shot_sounds, muzzle_flashes, failure = {}, 0, 0, 0, nil
         local_flashes, local_reload = 0, nil
+        burst_directions = nil
         return "clear"
     end
     if action == "shot-read" then return ("%d,%d,%d,%d"):format(projectiles, shot_sounds, muzzle_flashes, #clicks) end

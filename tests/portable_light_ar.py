@@ -45,9 +45,14 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
                 await asyncio.sleep(.08)
 
     async def stock_burst(frame, guid):
-        pressed = await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="press", milliseconds=350)
+        assert await command(host, "burst-watch") == "watching"
+        first = float(await command(guest, "burst-aim-first"))
+        # Allow the local camera to settle before invoking the stock input.
+        await asyncio.sleep(.12)
+        pressed = await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="press", milliseconds=500)
         assert pressed["ok"], pressed
         stroke = pressed["native_guest_held_fire_fixture"]
+        second = float(await command(guest, "burst-aim-second"))
         async with asyncio.timeout(8):
             while True:
                 guest_rows, host_rows = await asyncio.gather(
@@ -58,7 +63,11 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
                 terminal = next((row for row in host_rows if row["event"] == "native_guest_smg_hold_accepted"
                                  and row.get("guid") == guid), None)
                 if terminal and [row["edge"] for row in edges] == ["press", "release"]:
-                    return terminal
+                    angles = list(map(float, (await command(host, "burst-read")).split(",")))
+                    delta = lambda left, right: abs((left - right + 180) % 360 - 180)
+                    assert len(angles) == terminal["rounds"] and delta(angles[0], first) < 40, (angles, terminal)
+                    assert delta(angles[-1], second) < 40, (angles, terminal)
+                    return terminal, angles
                 await asyncio.sleep(.06)
 
     async def persisted_mode(guid, mode):
@@ -140,7 +149,7 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
         assert await command(guest, "light-ar-auto") == "light-ar-auto"
         await persisted_mode(guid, "auto")
         assert await command(host, "clear") == "clear"
-        burst = await stock_burst(guest_frame, guid)
+        burst, burst_directions = await stock_burst(guest_frame, guid)
         assert (burst["status"], burst["before"], burst["pawn"]) == ("released", units, pawn), burst
         assert 1 < burst["rounds"] == burst["projectiles"] == units - burst["after"] < units, burst
         for seat, action in ((host, "peer-ready"), (guest, "ready")):
@@ -183,7 +192,7 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
     return {"stock_light_ar": {"weapon": profile.path, "ammo": FIVE_SIX_FMJ.item_path, "shot": shot,
                                "stock_projectile_calls": projectile_calls, "stock_fire_sounds": shot_sounds,
                                "stock_muzzle_flashes": muzzle_flashes, "reload": reloaded,
-                               "semi_hold_blocked": True, "automatic_burst": burst,
+                               "semi_hold_blocked": True, "automatic_burst": burst, "burst_muzzle_yaws": burst_directions,
                                "host_stored_both_modes": True, "semi_after_re_equip": re_equip,
                                "observer_idle_grip": grip, "stock_switch_while_aiming": re_equip,
                                "guest_observes_host_nagant_grip": nagant_grip, "obrez_to_pistol_while_aiming": obrez_switch,

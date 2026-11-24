@@ -237,12 +237,19 @@ namespace
     enum class HeldEdge { press, release, cancel };
     enum class HeldProof { none, mapped_key, edge_window, stock_melee_edges, fixture };
     enum class FixtureDispatch { none, tap, held };
-    struct HeldReceipt { Receipt receipt{}; std::uint64_t stroke{}; HeldEdge edge{}; std::int64_t duration_ms{}; };
+    struct HeldReceipt
+    {
+        Receipt receipt{};
+        std::uint64_t stroke{};
+        HeldEdge edge{};
+        std::int64_t duration_ms{};
+        silverfish::native_guest_item::ShotView view{};
+    };
     struct HeldStroke
     {
         std::uint64_t id{};
         HeldProof proof{};
-        Clock::time_point started{}, expires{}, next_probe{};
+        Clock::time_point started{}, expires{}, next_probe{}, next_view{};
     };
     Scope scope;
     CapturedPress press;
@@ -739,8 +746,10 @@ namespace
     {
         discard_held(now);
         if (held_count == receipt_limit || held_sequence == max_sequence) return false;
-        held_receipts[(held_head + held_count) % receipt_limit] = {{++held_sequence, now + receipt_lifetime},
-                                                                  stroke, edge, duration_ms};
+        auto& receipt = held_receipts[(held_head + held_count) % receipt_limit];
+        receipt = {{++held_sequence, now + receipt_lifetime}, stroke, edge, duration_ms};
+        if (edge == HeldEdge::press && scoped_held_fire())
+            receipt.view = silverfish::native_guest_item::capture_shot_view(scope.seat.pawn.Get(), scope.seat.held.Get());
         ++held_count;
         return true;
     }
@@ -968,6 +977,18 @@ namespace
         return result(lua, true, scope.seat.mirrored ? "stock_held" : "host_equipped");
     }
 
+    int push_shot_view(const Lua& lua, const silverfish::native_guest_item::ShotView& view)
+    {
+        if (view.direction == silverfish::native_guest_item::ShotVector{}) return 0;
+        for (const auto axis : view.direction) lua.set_number(axis);
+        if (!view.eye || !view.target) return 3;
+        for (const auto axis : *view.eye) lua.set_number(axis);
+        for (const auto axis : *view.target) lua.set_number(axis);
+        if (!view.muzzle) return 9;
+        for (const auto axis : *view.muzzle) lua.set_number(axis);
+        return 12;
+    }
+
     int take(const Lua& lua, bool host, bool peek = false)
     {
         if (!available() || scope.seat.host != host || !count || lua.get_stack_size() != 1 || !lua.is_integer(1)) return 0;
@@ -987,24 +1008,7 @@ namespace
         lua.set_integer(pawn);
         lua.set_string(scope.text);
         lua.set_string(scope.item->kind);
-        int fields = 4;
-        const auto& view = receipt.view;
-        if (view.direction != silverfish::native_guest_item::ShotVector{})
-        {
-            for (const auto axis : view.direction) lua.set_number(axis);
-            fields += 3;
-            if (view.eye && view.target)
-            {
-                for (const auto axis : *view.eye) lua.set_number(axis);
-                for (const auto axis : *view.target) lua.set_number(axis);
-                fields += 6;
-                if (view.muzzle)
-                {
-                    for (const auto axis : *view.muzzle) lua.set_number(axis);
-                    fields += 3;
-                }
-            }
-        }
+        const int fields = 4 + push_shot_view(lua, receipt.view);
         if (!peek)
         {
             head = (head + 1) % receipt_limit;
@@ -1041,12 +1045,13 @@ namespace
         lua.set_string(event.edge == HeldEdge::press ? "press" : event.edge == HeldEdge::release ? "release" : "cancel");
         lua.set_integer(static_cast<std::int64_t>(event.stroke));
         if (melee_edges) lua.set_integer(event.duration_ms);
+        const int fields = melee_edges ? 6 : 5 + push_shot_view(lua, event.view);
         if (!peek)
         {
             held_head = (held_head + 1) % receipt_limit;
             --held_count;
         }
-        return melee_edges ? 6 : 5;
+        return fields;
     }
 
     int commit_guest_input(const Lua& lua)
@@ -1090,6 +1095,21 @@ namespace
         lua.set_string(held.proof == HeldProof::mapped_key ? "mapped-key" :
             held.proof == HeldProof::edge_window ? "edge-window" : "headless-fixture");
         return 4;
+    }
+
+    int sample_held_view(const Lua& lua)
+    {
+        if (!available() || !scoped_held_fire() || !held.id || lua.get_stack_size() != 1 ||
+            !lua.is_integer(1) || lua.get_integer() != address(scope.seat.pawn.Get())) return 0;
+        const auto now = Clock::now();
+        if (now < held.next_view) return 0;
+        check_held(now);
+        if (!held.id) return 0;
+        held.next_view = now + std::chrono::milliseconds{80};
+        const auto view = silverfish::native_guest_item::capture_shot_view(scope.seat.pawn.Get(), scope.seat.held.Get());
+        if (view.direction == silverfish::native_guest_item::ShotVector{}) return 0;
+        lua.set_integer(static_cast<std::int64_t>(held.id));
+        return 1 + push_shot_view(lua, view);
     }
 
     int clear(bool host)
@@ -1444,6 +1464,7 @@ namespace silverfish::native_guest_primary_input
                 lua.register_function("SilverfishTakeNativeGuestHeldFireIntent", [](const Lua& lua) { return take_held(lua, false); });
                 lua.register_function("SilverfishPeekNativeGuestHeldFireIntent", [](const Lua& lua) { return take_held(lua, false, true); });
                 lua.register_function("SilverfishReadNativeGuestHeldFire", read_held);
+                lua.register_function("SilverfishSampleNativeGuestHeldAim", sample_held_view);
                 if (fixtures(false))
                     lua.register_function("SilverfishProbeNativeGuestHeldFire", [](const Lua& lua) { return probe_held(lua, false); });
             }

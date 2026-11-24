@@ -740,6 +740,7 @@ class Bridge:
         self._local_melee_records = deque(maxlen=64)
         self._local_primary_records = deque(maxlen=64)
         self._local_held_fire_records = deque(maxlen=64)
+        self._local_held_aim = None
         self.status_source = "file"
         self._local_status = None
         self._file_command_lock = asyncio.Lock()
@@ -803,6 +804,10 @@ class Bridge:
                     self._local_primary_records.append(record)
                 elif record.startswith(b"native-guest-held-fire-intent\t"):
                     self._local_held_fire_records.append(record)
+                elif record.startswith(b"native-guest-held-aim\t"):
+                    fields = record.decode("utf-8", errors="replace").split("\t")
+                    if len(fields) == 6 and valid_shot_view(fields[5]):
+                        self._local_held_aim = (*fields[1:4], _held_input_sequence(fields[4]), fields[5])
                 else:
                     self._local_interaction_records.append(record)
         records = list(pending)
@@ -917,23 +922,28 @@ class Bridge:
             events.append((sequence, *fields[2:]))
         return events
 
-    def guest_held_fire_requests(self) -> list[tuple[int, str, str, str, str, int]]:
+    def take_guest_held_aim(self):
+        sample, self._local_held_aim = self._local_held_aim, None
+        return sample
+
+    def guest_held_fire_requests(self) -> list[tuple]:
         """Read ordered exact SMG edges without consuming an incomplete row."""
         rows = self._native_guest_input_records(self._local_held_fire_records, "native-guest-held-fire-events", "held_fire_offset")
         events = []
         for raw in rows:
             fields = raw.decode("utf-8", errors="replace").split("\t")
-            if len(fields) != 7 or fields[0] != "native-guest-held-fire-intent":
+            if len(fields) not in (7, 8) or fields[0] != "native-guest-held-fire-intent":
                 continue
-            number, area, pawn, guid, edge, stroke_text = fields[1:]
+            number, area, pawn, guid, edge, stroke_text, *view = fields[1:]
             sequence, stroke = _held_input_sequence(number), _held_input_sequence(stroke_text)
             if (sequence <= self.held_fire_sequence or not stroke or not valid_guid(guid)
                     or not area.startswith("/Game/Classes/Maps/") or len(area) > 256
                     or not pawn.startswith("Player_FP_C ") or len(pawn) > 512
-                    or not (edge == "press" and stroke == sequence or edge in ("release", "cancel") and stroke < sequence)):
+                    or not (edge == "press" and stroke == sequence or edge in ("release", "cancel") and stroke < sequence)
+                    or view and (edge != "press" or not valid_shot_view(view[0]))):
                 continue
             self.held_fire_sequence = sequence
-            events.append((sequence, area, pawn, guid, edge, stroke))
+            events.append((sequence, area, pawn, guid, edge, stroke, *view))
         return events
 
     def native_host_camera_requests(self) -> list[tuple[int, str, str, str]]:
@@ -3523,7 +3533,7 @@ class Bridge:
 
     async def held_fire_command(self, operation: str, *arguments: str) -> dict:
         """Use the game-thread input lane without replacing campaign commands."""
-        if operation not in {"start", "observe", "stop", "renew"} or any(
+        if operation not in {"start", "observe", "stop", "renew", "aim"} or any(
             len(value) > 512 or any(character in value for character in "\t\r\n") for value in arguments
         ):
             raise ValueError("Invalid stock held-fire command")
@@ -3531,11 +3541,15 @@ class Bridge:
         fields = (nonce, f"native-guest-smg-hold-{operation}", *arguments)
         request = "\t".join(fields) + "\n"
         if self.local_bridge is not None:
-            raw = await self.local_bridge.command(request.encode("utf-8"), 1.2)
+            payload = request.encode("utf-8")
+            raw = (await self.local_bridge.command(payload, .2, skip_if_busy=True) if operation == "aim"
+                   else await self.local_bridge.command(payload, 1.2))
             frame = self._held_fire_reply(raw, nonce)
             if frame is None:
                 raise RuntimeError("The local stock held fire receipt did not match the request")
             return frame
+        if operation == "aim":
+            raise RuntimeError("The stock held aim requires the resident bridge")
         command = self.directory / "held-fire-command.tsv"
         write_text(command, request)
         reply = self.directory / "held-fire-reply.tsv"

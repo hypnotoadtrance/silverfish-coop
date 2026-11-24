@@ -6,12 +6,14 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 import uuid
 
-from tools.silverfish.native_smg_hold import ACTION, ALL, KEY, GuestInput
+from tools.silverfish.native_smg_hold import ACTION, AIM_ACTION, ALL, KEY, GuestInput
 from tools.silverfish.runtime import Bridge, MAP
 
 
 PAWN = f"Player_FP_C {MAP}.PlaytestMap_01:PersistentLevel.Player_FP_C_1"
 GUID = "A" * 32
+VIEW = "1.000000,0.000000,0.000000"
+TURNED = "0.000000,1.000000,0.000000"
 
 
 class GuestHeldInputBridgeTests(unittest.TestCase):
@@ -74,6 +76,16 @@ class GuestHeldInputBridgeTests(unittest.TestCase):
         self.assertEqual(self.bridge.guest_held_fire_requests(), [(seq, MAP, PAWN, GUID, "press", seq) for seq in range(1, 65)])
         self.assertEqual(self.bridge.native_primary_input_requests(), [(8, MAP, PAWN, GUID, "rusty-pistol")])
         self.bridge.local_bridge.read_input.assert_called_once_with(64)
+
+    def test_memory_preserves_trigger_edges_and_keeps_only_the_latest_aim(self):
+        aim = f"native-guest-held-aim\t{MAP}\t{PAWN}\t{GUID}\t1\t"
+        rows = [self.row(1, "press", 1) + "\t" + VIEW, aim + VIEW, aim + TURNED, self.row(2, "release", 1)]
+        self.bridge.local_bridge = Mock(read_input=Mock(return_value=[row.encode() for row in rows]))
+        self.assertEqual(self.bridge.guest_held_fire_requests(), [
+            (1, MAP, PAWN, GUID, "press", 1, VIEW), (2, MAP, PAWN, GUID, "release", 1),
+        ])
+        self.assertEqual(self.bridge.take_guest_held_aim(), (MAP, PAWN, GUID, 1, TURNED))
+        self.assertIsNone(self.bridge.take_guest_held_aim())
 
     def test_snapshot_accepts_only_active_exact_standard_smg_scope(self):
         status = self.directory / "status.tsv"
@@ -155,11 +167,36 @@ class GuestHeldInputRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(controller.stroke)
 
     async def test_press_and_release_in_one_frame_is_one_stock_tap(self):
-        client, controller = self.guest([(1, MAP, PAWN, GUID, "press", 1), (2, MAP, PAWN, GUID, "release", 1)])
+        client, controller = self.guest([(1, MAP, PAWN, GUID, "press", 1, VIEW), (2, MAP, PAWN, GUID, "release", 1)])
         await controller.service(True)
         client.gameplay_action.assert_awaited_once()
         action, _, target = client.gameplay_action.await_args.args
-        self.assertEqual((action, target), ("native-guest-weapon-fire", GUID))
+        self.assertEqual((action, target), ("native-guest-weapon-fire", f"{GUID}@{client.zone_epoch}@{VIEW}"))
+
+    async def test_release_does_not_wait_for_a_pending_aim_reply(self):
+        client, controller = self.guest([(1, MAP, PAWN, GUID, "press", 1, VIEW)], [], [(2, MAP, PAWN, GUID, "release", 1)])
+        waiting = asyncio.Event()
+
+        async def aim(request, *, timeout):
+            self.assertEqual(request["action"], AIM_ACTION)
+            self.assertTrue(request["target"].endswith("@" + TURNED))
+            await waiting.wait()
+            return {"ok": True}
+
+        client.transport = SimpleNamespace(request=aim)
+        client.bridge.take_guest_held_aim.return_value = (MAP, PAWN, GUID, 1, TURNED)
+        client.last_game["native_guest_held_fire"] = dict(state="held", map=MAP, pawn=PAWN, guid=GUID, stroke=1)
+        await controller.service(True)
+        await controller.service(True)
+        try:
+            await asyncio.sleep(0)
+            self.assertFalse(controller.aim_task.done())
+            await controller.service(True)
+            self.assertTrue(client.gameplay_action.await_args.args[-1].endswith("@release"))
+            self.assertIsNone(controller.stroke)
+        finally:
+            waiting.set()
+            await controller.aim_task
 
     async def test_authority_lane_ignores_stale_ack_and_leaves_campaign_command(self):
         with TemporaryDirectory() as temporary:

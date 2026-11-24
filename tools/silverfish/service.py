@@ -2156,11 +2156,13 @@ class Host:
             if carry.edge == "drop":
                 return self.mindcore_carry.release_authenticated(character, carry)
             return self.enqueue_native_request(guest_id, request)
-        if action == native_smg_hold.ACTION and self.smg_holds and set(request) == {"action", "operation_id", "target"}:
+        if (action in (native_smg_hold.ACTION, native_smg_hold.AIM_ACTION)
+                and self.smg_holds and set(request) == {"action", "operation_id", "target"}):
             operation = request.get("operation_id")
             if not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation):
                 return {"ok": False, "error": "invalid_operation_id"}
-            return self.smg_holds.authenticated(guest_id, request["target"])
+            handler = self.smg_holds.aim if action == native_smg_hold.AIM_ACTION else self.smg_holds.authenticated
+            return handler(guest_id, request["target"])
         if action in GUEST_NATIVE_ACTIONS and set(request) == {"action", "operation_id", "target"}:
             return self.enqueue_native_request(guest_id, request)
         if action not in ("interact", "buy", "keep") or set(request) - {"action", "operation_id", "target", "retained"}:

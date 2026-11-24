@@ -1674,6 +1674,12 @@ local function observe_session()
 end
 
 local function tick(fields, pending, periodic)
+    if fields and pending and fields[2] == "native-guest-smg-hold-aim" then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        SilverfishPublishLocalBridgeReply(pending.ticket, native_guest_smg_hold.command_reply(fields, nil, nil, status_row))
+        return true
+    end
     local state, current_phase = observe_session()
     if not state then return end
     if fields and pending and native_guest_smg_hold.is_command(fields[2]) then

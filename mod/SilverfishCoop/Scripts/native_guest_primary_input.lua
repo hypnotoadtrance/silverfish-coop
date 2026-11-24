@@ -2,6 +2,7 @@ local primary = {}
 local loot = require("native_loot")
 local native_stock_door = require("native_stock_door")
 local weapon_profiles = require("guest_weapon_registry")
+local shot_view = require("guest_shot_view")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_PRIMARY_INPUT") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_ZONE") == "1"
@@ -102,16 +103,29 @@ local function drain_held(current, address)
     end
     local emitted, last = 0, nil
     for _ = 1, 8 do
-        local sequence, owner, guid, edge, stroke = take(address)
+        local sequence, owner, guid, edge, stroke, x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz = take(address)
         if not valid_sequence(sequence) or not valid_sequence(stroke) or owner ~= address or guid ~= binding.guid
             or not held_edges[edge] or (edge == "press" and stroke ~= sequence)
             or (edge ~= "press" and stroke >= sequence) then break end
+        local view = shot_view.format(x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz)
         if not publish("held", held_event_path, current, address, sequence,
             {"native-guest-held-fire-intent", sequence, current.map, current.name,
-            guid, edge, stroke}) then break end
+            guid, edge, stroke, view}) then break end
         emitted, last = emitted + 1, sequence
     end
     return emitted, last
+end
+
+local function sample_held_view(current, address)
+    if not embedded or not held_enabled or not weapon_profiles.automatic[current.kind]
+        or type(SilverfishSampleNativeGuestHeldAim) ~= "function" then return end
+    local stroke, x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz = SilverfishSampleNativeGuestHeldAim(address)
+    if not valid_sequence(stroke) then return end
+    local view = shot_view.format(x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz)
+    if view and (current.view_stroke ~= stroke or current.shot_view ~= view)
+        and emit(nil, {"native-guest-held-aim", current.map, current.name, current.guid, stroke, view}) then
+        current.view_stroke, current.shot_view = stroke, view
+    end
 end
 
 local function drain_melee(current, address)
@@ -188,9 +202,7 @@ local function drain_taps(current, address)
             shovel_intent = {sequence = sequence, expires = os.clock() + 1.5}
             commit("tap", address, sequence)
         else
-            local view = x and ("%.6f,%.6f,%.6f"):format(x, y, z) or nil
-            if ex then view = view .. (";%.3f,%.3f,%.3f;%.3f,%.3f,%.3f"):format(ex, ey, ez, tx, ty, tz) end
-            if mx then view = view .. (";%.3f,%.3f,%.3f"):format(mx, my, mz) end
+            local view = shot_view.format(x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz)
             if not publish("tap", event_path, current, address, sequence,
                 {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind, view}) then break end
         end
@@ -368,6 +380,7 @@ function primary.command(fields, state, phase)
         error(tostring(status or "stock_guest_primary_scope_unavailable"), 0)
     end
     current.guid, current.kind, current.mode = guid, kind, status
+    if binding then current.view_stroke, current.shot_view = binding.view_stroke, binding.shot_view end
     binding = current
     return "stock guest primary scope refreshed"
 end
@@ -424,6 +437,10 @@ function primary.start(bridge, downed)
             local address = current.pawn:GetAddress()
             drain_melee(current, address)
             drain_taps(current, address)
+            if embedded and binding == current then
+                drain_held(current, address)
+                sample_held_view(current, address)
+            end
         end)
         if not ok then
             primary.reset()

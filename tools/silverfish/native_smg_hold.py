@@ -9,6 +9,7 @@ import uuid
 from . import native_inventory, party
 from .guest_weapon_profiles import STOCK_SELECTABLE_AUTOMATIC_KINDS as HOLD_KINDS
 from .native_gold import valid_guid
+from .native_guest_weapon import valid_shot_view
 from .travel import OBSERVATORY
 
 
@@ -16,6 +17,7 @@ FIXTURE = "native-guest-smg-hold-fixture"
 KEY = "native_guest_smg_hold"
 ALL = "native_guest_smg_holds"
 ACTION = "native-guest-held-fire"
+AIM_ACTION = "native-guest-held-aim"
 LEASE_MS = 1800
 LIVE = {"active", "closing"}
 FINISHED = {"released", "expired", "empty", "ineligible"}
@@ -70,7 +72,8 @@ class Authority:
     async def authenticated(self, guest_id: str, target: str | None) -> dict:
         async with self.lock:
             identity = self.host.authenticated_guest(guest_id)
-            ending = isinstance(target, str) and target.rpartition("@")[2] in {"release", "cancel"}
+            parts = target.split("@", 4) if isinstance(target, str) else []
+            ending = len(parts) == 4 and parts[3] in {"release", "cancel"}
             if (not identity or not self.bridge or self.host.stopping
                     or self.host.native_checkpoint_unsafe and not ending):
                 return {"ok": False, "error": "native_guest_held_fire_scope_unavailable"}
@@ -82,6 +85,26 @@ class Authority:
             except (OSError, RuntimeError, ValueError) as error:
                 return {"ok": False, "error": str(error)}
             return {"ok": True, **reply}
+
+    async def aim(self, guest_id: str, target: str | None) -> dict:
+        """Replace the aim for an active stroke without taking the trigger edge lock."""
+        identity = self.host.authenticated_guest(guest_id)
+        parts = target.split("@", 4) if isinstance(target, str) else []
+        if not identity or not self.bridge or self.bridge.local_bridge is None or len(parts) != 5:
+            return {"ok": False, "error": "native_guest_held_aim_unavailable"}
+        epoch, guid, token, sequence, view = parts
+        character = identity[1]
+        stroke = self.strokes.get(character)
+        if (epoch != self.host.zone_epoch or not stroke or (guid, token) != (stroke.guid, stroke.token)
+                or not sequence.isascii() or not sequence.isdigit() or not 1 <= len(sequence) <= 16
+                or not 0 < int(sequence) < 2**53 or not valid_shot_view(view)
+                or not self._eligible(character, stroke.area, stroke.pawn, guid)):
+            return {"ok": False, "error": "native_guest_held_aim_unavailable"}
+        try:
+            await self.bridge.held_fire_command("aim", str(stroke.serial), sequence, view)
+        except (OSError, RuntimeError, ValueError):
+            return {"ok": False, "error": "native_guest_held_aim_unavailable"}
+        return {"ok": True}
 
     def _update(self, stroke: Stroke, snapshot: dict) -> dict:
         proof = stroke.receipt(snapshot)
@@ -111,12 +134,13 @@ class Authority:
         self.host.native_checkpoint_unsafe = self.host.stopping = True
 
     async def request(self, character: str, target: str | None) -> dict:
-        parts = target.split("@") if isinstance(target, str) else []
-        if len(parts) != 4:
+        parts = target.split("@", 4) if isinstance(target, str) else []
+        if len(parts) not in (4, 5):
             raise party.RuleError("native_guest_held_fire_exact_stroke_required")
-        epoch, guid, token, edge = parts
+        epoch, guid, token, edge, *view = parts
         if (epoch != self.host.zone_epoch or not valid_guid(guid) or not TOKEN.fullmatch(token)
-                or edge not in {"press", "renew", "release", "cancel"}):
+                or edge not in {"press", "renew", "release", "cancel"}
+                or view and (edge != "press" or not valid_shot_view(view[0]))):
             raise party.RuleError("native_guest_held_fire_exact_stroke_required")
         current = self.strokes.get(character)
         if edge == "press":
@@ -131,7 +155,7 @@ class Authority:
             melee_input = getattr(self.host, "melee_input", None)
             if (not current and token not in self.used and pawn and not (melee_input and melee_input.scope)
                     and self._eligible(character, area, pawn, guid)):
-                return {KEY: await self._start(character, area, pawn, guid, token)}
+                return {KEY: await self._start(character, area, pawn, guid, token, *view)}
             raise party.RuleError("native_guest_held_fire_scope_unavailable")
         if not current or (current.guid, current.token) != (guid, token):
             if edge in {"release", "cancel"} or token in self.used:
@@ -150,16 +174,16 @@ class Authority:
             raise
 
 
-    async def _start(self, character, area, pawn, guid, token) -> dict:
+    async def _start(self, character, area, pawn, guid, token, *view) -> dict:
         deferred = await native_inventory.retain_guest_save(self.host, self.bridge, character, pawn)
         try:
-            snapshot = await self.bridge.held_fire_command("start", pawn, guid, str(LEASE_MS))
+            snapshot = await self.bridge.held_fire_command("start", pawn, guid, str(LEASE_MS), *view)
         except RuntimeError as error:
             if str(error) in {"authoritative_guest_pawn_required", "detached_guest_save_required",
                               "authenticated_guest_detached_save_required", "native_guest_smg_hold_ineligible",
                               "native_guest_smg_hold_busy", "native_guest_smg_hold_exact_owner_required",
                               "native_guest_smg_hold_exact_weapon_required", "native_guest_smg_hold_scope_unavailable",
-                              "native_guest_smg_hold_fast_scope_unavailable"}:
+                              "native_guest_smg_hold_fast_scope_unavailable", "guest_weapon_view_unqualified"}:
                 raise party.RuleError(str(error)) from error
             self._fail_closed()
             raise
@@ -229,15 +253,20 @@ class GuestInput:
         self.last_sequence = 0
         self.stroke = None
         self.renew_at = 0.0
+        self.aim_task = None
+        self.aim_sequence = 0
+        self.last_aim = None
+        self.pending_aim = None
 
-    async def _send(self, stroke: LocalStroke, edge: str, sequence: int) -> dict:
+    async def _send(self, stroke: LocalStroke, edge: str, sequence: int, *view: str) -> dict:
         client = self.client
         operation = uuid.uuid5(client.bridge.input_namespace, f"held:{stroke.token}:{edge}:{sequence}").hex
         try:
             if edge == "tap":
-                reply = await client.gameplay_action("native-guest-weapon-fire", operation, stroke.guid)
+                target = "@".join((stroke.guid, stroke.epoch, *view)) if view else stroke.guid
+                reply = await client.gameplay_action("native-guest-weapon-fire", operation, target)
             else:
-                target = "@".join((stroke.epoch, stroke.guid, stroke.token, edge))
+                target = "@".join((stroke.epoch, stroke.guid, stroke.token, edge, *view))
                 reply = await client.gameplay_action(ACTION, operation, target)
             if edge != "renew":
                 client.control.event("native_guest_held_fire_input", edge=edge, stroke=stroke.number,
@@ -247,6 +276,28 @@ class GuestInput:
             client.control.event("native_guest_held_fire_input_rejected", edge=edge, stroke=stroke.number,
                                  operation_id=operation, reason=str(error))
             return {}
+
+    async def _send_aim(self, stroke: LocalStroke, sequence: int, view: str) -> None:
+        operation = uuid.uuid5(self.client.bridge.input_namespace, f"held-aim:{stroke.token}:{sequence}").hex
+        target = "@".join((stroke.epoch, stroke.guid, stroke.token, str(sequence), view))
+        try:
+            reply = await self.client.transport.request(
+                {"action": AIM_ACTION, "operation_id": operation, "target": target}, timeout=.5)
+        except (OSError, RuntimeError, ValueError):
+            return
+        if reply.get("ok") and self.stroke == stroke:
+            self.last_aim = view
+
+    def _refresh_aim(self) -> None:
+        if self.client.bridge.local_bridge is None:
+            return
+        sample = self.client.bridge.take_guest_held_aim()
+        if sample and self.stroke.matches(*sample[:4]):
+            self.pending_aim = sample[4]
+        if not self.pending_aim or self.pending_aim == self.last_aim or self.aim_task and not self.aim_task.done():
+            return
+        self.aim_sequence += 1
+        self.aim_task = asyncio.create_task(self._send_aim(self.stroke, self.aim_sequence, self.pending_aim))
 
     def _eligible(self, active: bool, game: dict):
         client = self.client
@@ -265,12 +316,17 @@ class GuestInput:
 
     async def run(self) -> None:
         client = self.client
-        while not client.stopping:
-            game = client.bridge.snapshot() or client.last_game
-            active = (client.transport.connected and game.get("state") == "connected"
-                      and not client.needs_travel and not client.server_transitioning)
-            await self.service(active, game)
-            await asyncio.sleep(.075)
+        try:
+            while not client.stopping:
+                game = client.bridge.snapshot() or client.last_game
+                active = (client.transport.connected and game.get("state") == "connected"
+                          and not client.needs_travel and not client.server_transitioning)
+                await self.service(active, game)
+                await asyncio.sleep(.075)
+        finally:
+            if self.aim_task is not None:
+                self.aim_task.cancel()
+                await asyncio.gather(self.aim_task, return_exceptions=True)
 
     async def service(self, active: bool, game: dict | None = None) -> None:
         client = self.client
@@ -286,21 +342,23 @@ class GuestInput:
         events = [row for row in client.bridge.guest_held_fire_requests() if row[0] > self.last_sequence]
         if events:
             self.last_sequence = events[-1][0]
-        terminals = {row[1:4] + row[5:]: row[4] for row in events if row[4] != "press"}
+        terminals = {row[1:4] + row[5:6]: row[4] for row in events if row[4] != "press"}
         frame = game.get(LOCAL, {})
         held = tuple(frame.get(key) for key in ("map", "pawn", "guid", "stroke"))
         started = False
-        for sequence, area, pawn, guid, edge, number in events:
+        for sequence, area, pawn, guid, edge, number, *view in events:
             if edge == "press" and not self.stroke and eligible == (area, pawn, guid):
                 token = uuid.uuid5(client.bridge.input_namespace, f"{client.host_session}:{client.zone_epoch}:{number}").hex
                 stroke = LocalStroke(client.host_session, client.zone_epoch, area, pawn, guid, number, token)
                 terminal = terminals.get((area, pawn, guid, number))
                 if terminal == "release":
-                    await self._send(stroke, "tap", sequence)
+                    await self._send(stroke, "tap", sequence, *view)
                 elif terminal is None:
-                    result = await self._send(stroke, "press", sequence)
+                    result = await self._send(stroke, "press", sequence, *view)
                     self.stroke = stroke if result.get("status") in LIVE else None
                     started = self.stroke is not None
+                    self.last_aim = view[0] if view else None
+                    self.pending_aim = None
                     self.renew_at = time.monotonic() + .55
             elif edge == "press":
                 client.control.event("native_guest_held_fire_scope_refused", stroke=number, map=area, pawn=pawn,
@@ -313,7 +371,9 @@ class GuestInput:
         if frame.get("state") != "held" or not self.stroke.matches(*held):
             abandoned, self.stroke = self.stroke, None
             await self._send(abandoned, "cancel", self.last_sequence)
-        elif (frame.get("proof") in {"mapped-key", "headless-fixture"} and time.monotonic() >= self.renew_at
+            return
+        self._refresh_aim()
+        if (frame.get("proof") in {"mapped-key", "headless-fixture"} and time.monotonic() >= self.renew_at
               and time.monotonic() - client.gameplay_seen < 3):
             frame = await self._send(self.stroke, "renew", self.last_sequence)
             self.renew_at = time.monotonic() + .55

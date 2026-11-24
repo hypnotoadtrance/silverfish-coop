@@ -334,6 +334,34 @@ namespace
         return {};
     }
 
+    bool read_shot_view(const Lua& lua, int fields, ShotView& view)
+    {
+        for (auto& axis : view.direction) axis = lua.get_number();
+        const auto length = std::hypot(view.direction[0], view.direction[1], view.direction[2]);
+        if (!std::isfinite(length) || std::abs(length - 1.0) > .001) return false;
+        for (auto& axis : view.direction) axis /= length;
+        const auto position = [&]() -> std::optional<AimVector> {
+            AimVector axes{};
+            for (auto& axis : axes) axis = lua.get_number();
+            if (!std::ranges::all_of(axes, [](double value) {
+                return std::isfinite(value) && std::abs(value) <= 2000000;
+            })) return {};
+            return axes;
+        };
+        if (fields >= 9)
+        {
+            view.eye = position();
+            view.target = position();
+            if (!view.eye || !view.target) return false;
+        }
+        if (fields == 12)
+        {
+            view.muzzle = position();
+            if (!view.muzzle) return false;
+        }
+        return true;
+    }
+
     std::string_view resolve(const Lua& lua, Context& context, SeedSelection* seed_selection,
                              std::int64_t* hold_duration = nullptr, StackSplit* split = nullptr, bool full_split = false,
                              int* requested_slot = nullptr, ShotView* shot_view = nullptr)
@@ -341,45 +369,29 @@ namespace
         if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE")) return "native_guest_weapon_scope_disabled";
         const auto count = lua.get_stack_size();
         const bool split_fields = split && count == 6 && lua.is_string(4) && lua.is_integer(5) && lua.is_integer(6);
-        const bool shot_fields = shot_view && (count == 6 || count == 12 || count == 15);
+        const int first_view = hold_duration ? 5 : 4;
+        const int view_fields = count - first_view + 1;
+        const bool shot_fields = shot_view && (view_fields == 3 || view_fields == 9 || view_fields == 12);
         if (shot_fields)
-            for (int index = 4; index <= count; ++index)
+            for (int index = first_view; index <= count; ++index)
                 if (!lua.is_number(index)) return "guest_weapon_view_unqualified";
         const bool legacy_fields = count == 3 || (count == 4 && ((seed_selection && lua.is_string(4)) ||
             ((hold_duration || requested_slot) && lua.is_integer(4))));
         if (!Unreal::IsInGameThreadRaw() || (split ? !split_fields : !legacy_fields && !shot_fields) ||
-            (hold_duration && count != 4) ||
+            (hold_duration && (!lua.is_integer(4) || (count != 4 && !shot_fields))) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3)) return "guest_pawn_save_and_guid_required";
         const auto pawn_address = lua.get_integer();
         const auto save_address = lua.get_integer();
         if (pawn_address <= 0 || save_address <= 0 || !parse_guid(lua.get_string(), context.guid))
             return "guest_pawn_save_and_guid_required";
+        if (hold_duration)
+        {
+            *hold_duration = lua.get_integer();
+            if (*hold_duration < 250 || *hold_duration > 2400) return "native_guest_smg_hold_duration_unqualified";
+        }
         if (shot_fields)
         {
-            auto& direction = shot_view->direction;
-            for (auto& axis : direction) axis = lua.get_number();
-            const auto length = std::hypot(direction[0], direction[1], direction[2]);
-            if (!std::isfinite(length) || std::abs(length - 1.0) > .001)
-                return "guest_weapon_view_unqualified";
-            for (auto& axis : direction) axis /= length;
-            const auto position = [&]() -> std::optional<AimVector> {
-                AimVector axes{};
-                for (auto& axis : axes) axis = lua.get_number();
-                if (!std::ranges::all_of(axes, [](double value) { return std::isfinite(value) && std::abs(value) <= 2000000; }))
-                    return {};
-                return axes;
-            };
-            if (count >= 12)
-            {
-                shot_view->eye = position();
-                shot_view->target = position();
-                if (!shot_view->eye || !shot_view->target) return "guest_weapon_view_unqualified";
-            }
-            if (count == 15)
-            {
-                shot_view->muzzle = position();
-                if (!shot_view->muzzle) return "guest_weapon_view_unqualified";
-            }
+            if (!read_shot_view(lua, view_fields, *shot_view)) return "guest_weapon_view_unqualified";
         }
         else if (split)
         {
@@ -392,18 +404,13 @@ namespace
             split->take = static_cast<std::int32_t>(take);
             split->expected = static_cast<std::int32_t>(expected);
         }
-        else if (hold_duration)
-        {
-            *hold_duration = lua.get_integer();
-            if (*hold_duration < 250 || *hold_duration > 2400) return "native_guest_smg_hold_duration_unqualified";
-        }
         else if (requested_slot && count == 4)
         {
             const auto slot = lua.get_integer();
             if (slot < 0 || slot >= 8) return "native_inventory_equip_refused_slot";
             *requested_slot = static_cast<int>(slot);
         }
-        else if (count == 4)
+        else if (count == 4 && !hold_duration)
         {
             if (!env("SILVERFISH_COOP_HEADLESS")) return "stock_guest_weapon_fixture_profile_unqualified";
             const auto kind = lua.get_string();
@@ -1274,6 +1281,7 @@ namespace
 
         bool apply(Unreal::UObject* pawn, Unreal::UObject* weapon, const ShotView& view = {})
         {
+            previous_location.reset();
             auto* camera = shot_component(pawn, STR("Camera"), camera_component);
             auto* muzzle = shot_component(weapon, STR("Arrow_Muzzle"), muzzle_component);
             if (!camera || !muzzle) return false;
@@ -1694,11 +1702,13 @@ namespace
     struct SmgHold
     {
         Unreal::FWeakObjectPtr pawn, save, stock, instance, controller, connection, world, weapon;
-        Unreal::FWeakObjectPtr receiver, primary, fire, end_cycle, projectile, birth;
+        Unreal::FWeakObjectPtr receiver, primary, fire, end_cycle, projectile;
         Guid guid{};
         HoldClock::time_point deadline{};
         profiles::Profile profile{};
         GuestMuzzleAim aim;
+        ShotView view;
+        std::int64_t view_sequence{};
         std::string_view status{"inactive"};
         std::int64_t serial{};
         int before{-1}, after{-1}, shot_before{-1}, rounds{}, projectiles{}, shot_births{};
@@ -1816,15 +1826,14 @@ namespace
                 ammo->GetPropertyValueInContainer(receiver) != smg_hold.after ||
                 inventory.ammo->GetPropertyValueInContainer(inventory.item) != smg_hold.after)
                 hold_stop(smg_hold, "mutation_unverified_guest_smg_hold_shot_scope", true);
-            else if (!smg_hold.aim.apply(context.pawn, receiver))
-                hold_stop(smg_hold, "guest_weapon_aim_unavailable");
+            else if (!smg_hold.aim.apply(context.pawn, receiver, smg_hold.view))
+                hold_stop(smg_hold, "ineligible");
             else
             {
                 shot_hold = &smg_hold;
                 smg_hold.shot_before = smg_hold.after;
                 smg_hold.shot_births = 0;
                 smg_hold.owned_birth = true;
-                smg_hold.birth.Reset();
             }
         }
         if (!smg_hold.active && !iteration.OriginalFunctionCallPrevented()) iteration.PreventOriginalFunctionCall();
@@ -1840,7 +1849,6 @@ namespace
         auto* pawn = smg_hold.pawn.Get();
         smg_hold.owned_birth = smg_hold.owned_birth && pawn && authority(actor) &&
             object(actor, STR("Owner")) == pawn && object(actor, STR("Instigator")) == pawn;
-        if (smg_hold.shot_births == 1) smg_hold.birth = actor;
     }
 
     void hold_post(HoldHook&, Unreal::UObject* receiver, Unreal::FFrame& frame, void*)
@@ -1855,7 +1863,7 @@ namespace
         Context context;
         Inventory inventory;
         auto* ammo = field<Unreal::FIntProperty>(receiver, STR("Ammo"));
-        if (!smg_hold.aim.restore() || smg_hold.shot_births != 1 || !smg_hold.owned_birth || !smg_hold.birth.Get() || !ammo ||
+        if (!smg_hold.aim.restore() || smg_hold.shot_births != 1 || !smg_hold.owned_birth || !ammo ||
             !hold_locate(smg_hold, receiver, context, inventory) || ammo->GetPropertyValueInContainer(receiver) != remaining ||
             inventory.ammo->GetPropertyValueInContainer(inventory.item) != remaining)
         {
@@ -1954,7 +1962,8 @@ namespace
         if (!hold_enabled()) return hold_result(lua, false, "native_guest_smg_hold_disabled");
         Context context;
         std::int64_t duration{};
-        if (const auto error = resolve(lua, context, nullptr, &duration); !error.empty())
+        ShotView view;
+        if (const auto error = resolve(lua, context, nullptr, &duration, nullptr, false, nullptr, &view); !error.empty())
             return hold_result(lua, false, error);
         auto seat = std::ranges::find_if(smg_holds, [&](const SmgHold& hold) { return hold.pawn.Get() == context.pawn; });
         if (seat == smg_holds.end())
@@ -2018,12 +2027,18 @@ namespace
         smg_hold.projectile = projectile;
         smg_hold.guid = context.guid;
         smg_hold.profile = strict;
+        smg_hold.view = view;
         smg_hold.serial = ++smg_hold_serial;
         smg_hold.before = smg_hold.after = loaded;
         smg_hold.status = "active";
         smg_hold.active = smg_hold.fenced = true;
         smg_hold.deadline = HoldClock::now() + std::chrono::milliseconds{duration};
         hold_primary(actor, action, true);
+        if (smg_hold.rounds == 0 && !smg_hold.dirty && smg_hold.status == "ineligible")
+        {
+            hold_release(smg_hold);
+            return hold_result(lua, false, "native_guest_smg_hold_ineligible");
+        }
         if (smg_hold.rounds != 1)
         {
             if (shot_hold == &smg_hold)
@@ -2036,6 +2051,25 @@ namespace
             hold_release(smg_hold);
         }
         return hold_result(lua, !smg_hold.dirty, smg_hold.closing && !smg_hold.dirty ? "closing" : smg_hold.status, &smg_hold);
+    }
+
+    int update_hold_view(const Lua& lua)
+    {
+        const auto fields = lua.get_stack_size() - 2;
+        if (!Unreal::IsInGameThreadRaw() || !hold_enabled() || (fields != 3 && fields != 9 && fields != 12)
+            || !lua.is_integer(1) || !lua.is_integer(2)) return 0;
+        for (int index = 3; index <= fields + 2; ++index)
+            if (!lua.is_number(index)) return 0;
+        const auto serial = lua.get_integer();
+        const auto sequence = lua.get_integer();
+        const auto seat = std::ranges::find(smg_holds, serial, &SmgHold::serial);
+        if (serial < 1 || seat == smg_holds.end() || !seat->active || sequence <= seat->view_sequence) return 0;
+        ShotView view;
+        if (!read_shot_view(lua, fields, view)) return 0;
+        seat->view = view;
+        seat->view_sequence = sequence;
+        lua.set_bool(true);
+        return 1;
     }
 
     enum class HoldAction { observe, stop, renew };
@@ -3356,6 +3390,7 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
         lua.register_function("SilverfishReadNativeGuestSmgHold", read_hold<HoldAction::observe>);
         lua.register_function("SilverfishStopNativeGuestSmgHold", read_hold<HoldAction::stop>);
         lua.register_function("SilverfishRenewNativeGuestSmgHold", read_hold<HoldAction::renew>);
+        lua.register_function("SilverfishUpdateNativeGuestSmgAim", update_hold_view);
     }
 }
 

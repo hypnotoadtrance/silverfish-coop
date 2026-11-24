@@ -1,5 +1,6 @@
 local canary = {}
 local guest_save = require("guest_save")
+local shot_view = require("guest_shot_view")
 
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local native_scope = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
@@ -13,6 +14,7 @@ local actions = {
     ["native-guest-smg-hold-observe"] = true,
     ["native-guest-smg-hold-stop"] = true,
     ["native-guest-smg-hold-renew"] = true,
+    ["native-guest-smg-hold-aim"] = true,
 }
 local states = { active = true, closing = true, released = true, expired = true, empty = true, ineligible = true }
 
@@ -44,14 +46,15 @@ function canary.command(fields, state, phase)
     end
     if action == "native-guest-smg-hold-start" then
         local name, guid, duration = fields[3], fields[4], math.tointeger(fields[5])
-        if #fields ~= 5 or type(guid) ~= "string" or #guid ~= 32 or guid:find("[^0-9A-F]") or not guid:find("[^0]")
+        local view = #fields == 6 and shot_view.parse(fields[6])
+        if (#fields ~= 5 and not view) or type(guid) ~= "string" or #guid ~= 32 or guid:find("[^0-9A-F]") or not guid:find("[^0]")
             or not duration or duration < 250 or duration > 2400 then
             error("native_guest_smg_hold_exact_weapon_required", 0)
         end
         local qualified, pawn, save = pcall(guest_save.exact_item_context, state, phase, name)
         if not qualified or not pawn or not save then error("native_guest_smg_hold_exact_owner_required", 0) end
         local ok, status, serial, before, after, rounds, projectiles =
-            SilverfishStartNativeGuestSmgHold(pawn:GetAddress(), save:GetAddress(), guid, duration)
+            SilverfishStartNativeGuestSmgHold(pawn:GetAddress(), save:GetAddress(), guid, duration, table.unpack(view or {}))
         if ok ~= true and serial == 0 and type(status) == "string"
             and not status:match("^mutation_unverified") then error(status, 0) end
         local observation = check(ok, status, serial, before, after, rounds, projectiles)
@@ -73,6 +76,16 @@ function canary.command(fields, state, phase)
     end
     local serial = math.tointeger(fields[3])
     local scope = scopes[serial]
+    if action == "native-guest-smg-hold-aim" then
+        local sequence, view = math.tointeger(fields[4]), shot_view.parse(fields[5])
+        if #fields ~= 5 or not scope or scope.map ~= state.map or not same(scope.world, state.world)
+            or not same(scope.driver, state.world.NetDriver) or not sequence or sequence < 1 or sequence >= 2 ^ 53
+            or not view or type(SilverfishUpdateNativeGuestSmgAim) ~= "function"
+            or SilverfishUpdateNativeGuestSmgAim(serial, sequence, table.unpack(view)) ~= true then
+            error("native_guest_smg_hold_aim_unavailable", 0)
+        end
+        return "stock guest SMG aim observed"
+    end
     local renew = action == "native-guest-smg-hold-renew"
     local duration = renew and math.tointeger(fields[4])
     if #fields ~= (renew and 4 or 3) or not scope or scope.map ~= state.map
@@ -116,7 +129,7 @@ end
 local fast_context
 
 function canary.cache_context(state, phase)
-    if not fast_enabled then return end
+    if not held_fire_enabled then return end
     fast_context = nil
     if phase ~= "hosting" or not state or state.listening ~= true or state.server ~= false or not valid(state.world) then return end
     local driver = state.world.NetDriver
@@ -140,9 +153,10 @@ local function parse_fast_command(content)
     for value in (line .. "\t"):gmatch("([^\t]*)\t") do
         if #value > 512 or value:find("%c") then return nonce end
         fields[#fields + 1] = value
-        if #fields > 5 then return nonce end
+        if #fields > 6 then return nonce end
     end
-    if field_counts[fields[2]] ~= #fields then return nonce end
+    if field_counts[fields[2]] ~= #fields
+        and not (fields[2] == "native-guest-smg-hold-start" and #fields == 6) then return nonce end
     return nonce, fields
 end
 
@@ -171,8 +185,18 @@ end
 
 function canary.command_reply(fields, state, phase, status_row)
     local nonce = fields[1]
+    if not state then
+        local cached, now = fast_context, os.time()
+        if fields[2] ~= "native-guest-smg-hold-aim" or not cached or now < cached.seen or now - cached.seen > 1
+            or not valid(cached.state.world) or not same(cached.state.world.NetDriver, cached.driver)
+            or not same(cached.driver.World, cached.state.world) or valid(cached.driver.ServerConnection) then
+            return reply(status_row, nonce, false, "-", "native_guest_smg_hold_fast_scope_unavailable")
+        end
+        state, phase = cached.state, "hosting"
+    end
     local accepted, message = pcall(canary.command, fields, state, phase)
     if not accepted then return reply(status_row, nonce, false, state.map, message) end
+    if fields[2] == "native-guest-smg-hold-aim" then return reply(status_row, nonce, true, state.map, message) end
     local reported, rows = pcall(canary.rows, state, phase, status_row, state.world.NetDriver)
     if not reported then return reply(status_row, nonce, false, state.map, "mutation_unverified_guest_smg_hold_readback") end
     return reply(status_row, nonce, true, state.map, message, rows)

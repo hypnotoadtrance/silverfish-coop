@@ -331,19 +331,7 @@ function guest_weapon.command(fields, state, phase)
     local fixture_kind = fields[5] == "smg-standard-full" and "smg-standard" or fields[5]
     local seed_profile = action == "seed" and #fields == 5 and fixtures and headless
         and (pry_tool_paths[fixture_kind] or weapon_profiles.seeds[fixture_kind] or flare_fixture_paths[fixture_kind])
-    local shot_view
-    if action == "fire" and #fields == 5 then
-        local vectors, values = {}, {}
-        for vector in fields[5]:gmatch("[^;]+") do
-            local x, y, z = vector:match("^(%-?%d+%.%d+),(%-?%d+%.%d+),(%-?%d+%.%d+)$")
-            if not x or #vectors == 4 then break end
-            vectors[#vectors + 1] = vector
-            values[#values + 1], values[#values + 2], values[#values + 3] = tonumber(x), tonumber(y), tonumber(z)
-        end
-        if (#vectors == 1 or #vectors == 3 or #vectors == 4) and table.concat(vectors, ";") == fields[5] then
-            shot_view = values
-        end
-    end
+    local shot_view = action == "fire" and #fields == 5 and require("guest_shot_view").parse(fields[5])
     local equipped_target = action == "reload" and guid == "equipped"
     observation = nil
     if not enabled or (#fields ~= 4 and not seed_profile and not shot_view) or phase ~= "hosting"

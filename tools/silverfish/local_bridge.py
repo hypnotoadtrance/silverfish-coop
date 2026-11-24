@@ -157,7 +157,9 @@ class LocalBridge:
                 self._status_frame = None
         return self._status_frame
 
-    async def command(self, payload: bytes, timeout: float) -> str:
+    async def command(self, payload: bytes, timeout: float, *, skip_if_busy: bool = False) -> str:
+        if skip_if_busy and self._lock.locked():
+            raise RuntimeError("The local co-op command lane is busy")
         async with self._lock:
             ticket = self._submit(payload, len(payload))
             if not ticket:
