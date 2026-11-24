@@ -63,6 +63,7 @@ namespace
     constexpr auto shop_actor_path = STR("/Game/Classes/Actors/Shop_BP.Shop_BP_C");
     constexpr auto item_path = STR("/Game/Classes/Libraries/Structs/InventoryItem_Struct.InventoryItem_Struct");
     constexpr auto consumable_path = STR("/Game/Classes/Items/Consumable_Master_BP.Consumable_Master_BP_C");
+    constexpr auto health_item_path = STR("/Game/Classes/Items/HealthItem_Master_BP.HealthItem_Master_BP_C");
     constexpr auto save_path = STR("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C");
     constexpr auto instance_path = STR("/Game/Classes/Global/GameInstance_FP.GameInstance_FP_C");
     constexpr auto guid_path = STR("/Script/CoreUObject.Guid");
@@ -186,6 +187,7 @@ namespace
         Unreal::FName teleport{STR("Teleport")};
         Unreal::FName matrix_script{STR("ExecuteUbergraph_Art_TeleportCube")};
         Unreal::FName apply_effects{STR("ApplyItemEffects")};
+        Unreal::FName begin_play{STR("ReceiveBeginPlay")};
         std::array<Unreal::FName, 8> guarded_inventory_actions{
             Unreal::FName{STR("ActionUnequip")}, Unreal::FName{STR("PickUpAction")},
             Unreal::FName{STR("InitiateItemTake")}, Unreal::FName{STR("FinalTakeItem")},
@@ -280,6 +282,10 @@ namespace
         Unreal::UObject* manager;
         Unreal::UClass* item_class;
         Unreal::UObject* pawn;
+        Unreal::UWorld* world;
+        Unreal::UFunction* stock_begin;
+        Unreal::UFunction* item_begin;
+        Unreal::FWeakObjectPtr actor;
         bool applied{};
     };
 
@@ -2416,12 +2422,30 @@ namespace
         const auto name = function->GetNamePrivate();
         if (personal_preview)
         {
-            if (context == personal_preview->manager) return;
-            if (name == entries->apply_effects && context->GetClassPrivate() == personal_preview->item_class &&
-                object_field(context, STR("Player_Ref")) == personal_preview->pawn &&
-                object_field(context, STR("Owner")) == personal_preview->pawn &&
-                object_field(context, STR("Instigator")) == personal_preview->pawn)
-                personal_preview->applied = true;
+            auto& preview = *personal_preview;
+            if (context == preview.manager) return;
+            if ((name == entries->begin_play || name == entries->apply_effects) && live(context) &&
+                context->GetClassPrivate() == preview.item_class && !context->HasAnyFlags(Unreal::RF_WasLoaded) &&
+                static_cast<Unreal::AActor*>(context)->GetWorld() == preview.world &&
+                object_field(context, STR("Owner")) == preview.pawn && object_field(context, STR("Instigator")) == preview.pawn)
+            {
+                if (name == entries->begin_play && function == preview.item_begin && function != preview.stock_begin)
+                {
+                    // The native deferred spawn sets Owner and Instigator before
+                    // Blueprint BeginPlay. Keep derived world setup out of the
+                    // temporary item while preserving the stock initializer.
+                    iteration.PreventOriginalFunctionCall();
+                    if (iteration.OriginalFunctionCallPrevented() && !preview.actor.Get())
+                    {
+                        preview.actor = context;
+                        context->ProcessEvent(preview.stock_begin, nullptr);
+                    }
+                    return;
+                }
+                if (name == entries->apply_effects && object_field(context, STR("Player_Ref")) == preview.pawn &&
+                    (preview.stock_begin == preview.item_begin || preview.actor.Get() == context))
+                    preview.applied = true;
+            }
         }
         if (intercept_stash(iteration, context, function, name, parameters)) return;
         const auto guarded_inventory = [&] {
@@ -2855,6 +2879,67 @@ namespace
         return live(args.result) && args.result->GetClassPrivate() == save_class ? args.result : nullptr;
     }
 
+    bool personal_use_has_no_quest_confirmation(Unreal::UObject* save, Unreal::FMapProperty* map, Unreal::UClass* item)
+    {
+        auto* key = map ? Unreal::CastField<Unreal::FNameProperty>(map->GetKeyProp()) : nullptr;
+        auto* row = map ? Unreal::CastField<Unreal::FStructProperty>(map->GetValueProp()) : nullptr;
+        auto* type = row ? row->GetStruct().Get() : nullptr;
+        auto* objectives = field<Unreal::FArrayProperty>(type, STR("Objective_Items_56_9FD46BE9431873A188AED4B08F0AF083"));
+        auto* objective = objectives ? Unreal::CastField<Unreal::FClassProperty>(objectives->GetInner()) : nullptr;
+        if (!key || !row || !objective || key->GetOffset_Internal() != 0 || objective->GetOffset_Internal() != 0)
+            return false;
+        const auto layout = Unreal::FScriptMap::GetScriptLayout(
+            key->GetSize(), key->GetMinAlignment(), row->GetSize(), row->GetMinAlignment());
+        if (row->GetOffset_Internal() != layout.ValueOffset) return false;
+        const auto* quests = map->ContainerPtrToValuePtr<Unreal::FScriptMap>(save);
+        const int extent = quests->GetMaxIndex();
+        if (quests->Num() < 0 || quests->Num() > extent || extent > inventory_limit) return false;
+        for (int index = 0; index < extent; ++index)
+        {
+            if (!quests->IsValidIndex(index)) continue;
+            const auto* entry = quests->GetData(index, layout);
+            if (!entry) return false;
+            const auto* quest = row->ContainerPtrToValuePtr<void>(entry);
+            Unreal::FScriptArrayHelper requested(objectives, objectives->ContainerPtrToValuePtr<void>(quest));
+            if (requested.Num() < 0 || requested.Num() > inventory_limit) return false;
+            for (int position = 0; position < requested.Num(); ++position)
+                if (objective->GetObjectPropertyValue(requested.GetRawPtr(position)) == item) return false;
+        }
+        return true;
+    }
+
+    bool personal_preview_flags_match(Unreal::FMapProperty* flags, Unreal::UObject* save, Unreal::UObject* scratch)
+    {
+        auto* before = flags->ContainerPtrToValuePtr<Unreal::FScriptMap>(save);
+        auto* after = flags->ContainerPtrToValuePtr<Unreal::FScriptMap>(scratch);
+        if (flags->Identical(before, after)) return true;
+        auto* key = Unreal::CastField<Unreal::FNameProperty>(flags->GetKeyProp());
+        auto* number = Unreal::CastField<Unreal::FIntProperty>(flags->GetValueProp());
+        if (!key || !number || key->GetOffset_Internal() != 0 || !key->HasAnyPropertyFlags(Unreal::CPF_HasGetValueTypeHash) ||
+            before->Num() < 0 || after->Num() != before->Num() + 1 || after->GetMaxIndex() > inventory_limit)
+            return false;
+        const auto layout = Unreal::FScriptMap::GetScriptLayout(
+            key->GetSize(), key->GetMinAlignment(), number->GetSize(), number->GetMinAlignment());
+        if (number->GetOffset_Internal() != layout.ValueOffset) return false;
+        const Unreal::FName intox{STR("Player_Intox")};
+        for (int index = 0; index < after->GetMaxIndex(); ++index)
+        {
+            if (!after->IsValidIndex(index)) continue;
+            const auto* entry = after->GetData(index, layout);
+            if (!entry) return false;
+            const auto name = key->GetPropertyValue(entry);
+            const auto current = number->GetPropertyValueInContainer(entry);
+            const auto* previous = before->FindValue(&name, layout,
+                [&](const void* value) { return key->GetValueTypeHash(value); },
+                [&](const void* first, const void* second) { return key->Identical(first, second); });
+            if (previous ? current != number->GetPropertyValue(previous) : name != intox || current != 0)
+                return false;
+        }
+        // Stock food writes this flag even when its intoxication difference is
+        // zero. A missing flag and an explicit zero have the same meaning.
+        return true;
+    }
+
     int lua_preview_personal_consumable(const Lua& lua)
     {
         const auto refuse = [&](std::string_view status) { return probe_result(lua, false, status); };
@@ -2922,10 +3007,13 @@ namespace
             field<Unreal::FDoubleProperty>(save, STR("PlayerFood")), field<Unreal::FDoubleProperty>(save, STR("PlayerHealth")),
             field<Unreal::FDoubleProperty>(save, STR("PlayerRegen")), field<Unreal::FDoubleProperty>(save, STR("PlayerStim")),
         };
-        const std::array<Unreal::FProperty*, 7> unchanged{flags, quests, equipment, helmet, armor, character, timed_effects};
-        if (!pawn_slot || !instance_slot || !backpack || !known || !passives || !weight || !intox ||
+        const std::array<Unreal::FProperty*, 6> unchanged{quests, equipment, helmet, armor, character, timed_effects};
+        if (!pawn_slot || !instance_slot || !backpack || !flags || !known || !passives || !weight || !intox ||
             std::ranges::find(unchanged, nullptr) != unchanged.end() || std::ranges::find(vitals, nullptr) != vitals.end())
             return refuse("personal_preview_schema");
+        // This stock branch opens a later ConfirmUseItem action instead of
+        // applying the effect on the current stack. Leave it outside this preview.
+        if (!personal_use_has_no_quest_confirmation(save, quests, type)) return refuse("personal_preview_quest_objective");
 
         auto* scratch = make_personal_preview_save(save->GetClassPrivate());
         if (!scratch || scratch == save) return refuse("personal_preview_save");
@@ -2936,6 +3024,7 @@ namespace
         for (auto* property : unchanged) copy(property);
         for (auto* property : vitals) copy(property);
         copy(backpack);
+        copy(flags);
         copy(known);
         auto* passive_cache = passives->ContainerPtrToValuePtr<void>(instance);
         const auto free_passives = [passives](void* value) { passives->DestroyAndFreeValue(value); };
@@ -2943,7 +3032,11 @@ namespace
         if (!saved_passives) return refuse("personal_preview_passives");
         passives->CopyCompleteValue(saved_passives.get(), passive_cache);
 
-        PersonalPreview preview{manager, type, pawn};
+        auto* health_item = Unreal::UObjectGlobals::StaticFindObject<Unreal::UClass*>(nullptr, nullptr, health_item_path);
+        auto* stock_begin = health_item ? health_item->GetFunctionByNameInChain(entries->begin_play) : nullptr;
+        auto* item_begin = type->GetFunctionByNameInChain(entries->begin_play);
+        if (!stock_begin || !item_begin) return refuse("personal_preview_begin_play");
+        PersonalPreview preview{manager, type, pawn, static_cast<Unreal::UWorld*>(scope.world.Get()), stock_begin, item_begin, {}};
         request.previewed = true;
         {
             // Stock TakeCard and the inherited effect run synchronously. Confine
@@ -2982,6 +3075,7 @@ namespace
         if (canonical_host_save() != save || !drop_argument(address, epoch, false))
             return refuse("personal_preview_restore");
         if (!preview.applied) return refuse("personal_preview_no_effect");
+        if (!personal_preview_flags_match(flags, save, scratch)) return refuse("personal_preview_unhandled_flags");
         for (auto* property : unchanged)
             if (!property->Identical(property->ContainerPtrToValuePtr<void>(save), property->ContainerPtrToValuePtr<void>(scratch)))
                 return refuse("personal_preview_unhandled_effect");

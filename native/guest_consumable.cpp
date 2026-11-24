@@ -122,7 +122,7 @@ namespace
 
         constexpr std::array inherited{
             STR("Use_Item_Primary"), STR("ApplyItemEffects"), STR("ApplyTempEffects"),
-            STR("GetFoodAmmount"), STR("ReceiveBeginPlay"),
+            STR("GetFoodAmmount"),
         };
         for (const auto* name : inherited)
         {
@@ -136,6 +136,15 @@ namespace
             if (!entry.IsNone() && type->GetFunctionByNameInChain(entry) != base->GetFunctionByNameInChain(entry))
                 return nullptr;
         }
+        const Unreal::FName begin_play{STR("ReceiveBeginPlay"), Unreal::FNAME_Find};
+        const auto valid_begin = [](Unreal::UFunction* function) {
+            return function && function->GetNumParms() == 0 && function->GetParmsSize() == 0 &&
+                !function->GetReturnProperty() && !function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net);
+        };
+        // The guest preview runs the inherited initializer when a derived
+        // consumable overrides BeginPlay. The host never spawns this actor.
+        if (!valid_begin(base->GetFunctionByNameInChain(begin_play)) ||
+            !valid_begin(type->GetFunctionByNameInChain(begin_play))) return nullptr;
 
         auto* defaults = type->GetClassDefaultObject().Get();
         auto* timed = field<Unreal::FMapProperty>(defaults, STR("TempEffects/Hours"));
