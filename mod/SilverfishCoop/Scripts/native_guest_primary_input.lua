@@ -103,11 +103,11 @@ local function drain_held(current, address)
     end
     local emitted, last = 0, nil
     for _ = 1, 8 do
-        local sequence, owner, guid, edge, stroke, x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz = take(address)
+        local sequence, owner, guid, edge, stroke, x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz, actor, hx, hy, hz = take(address)
         if not valid_sequence(sequence) or not valid_sequence(stroke) or owner ~= address or guid ~= binding.guid
             or not held_edges[edge] or (edge == "press" and stroke ~= sequence)
             or (edge ~= "press" and stroke >= sequence) then break end
-        local view = shot_view.format(x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz)
+        local view = shot_view.format(x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz, actor, hx, hy, hz)
         if not publish("held", held_event_path, current, address, sequence,
             {"native-guest-held-fire-intent", sequence, current.map, current.name,
             guid, edge, stroke, view}) then break end
@@ -119,9 +119,9 @@ end
 local function sample_held_view(current, address)
     if not embedded or not held_enabled or not weapon_profiles.automatic[current.kind]
         or type(SilverfishSampleNativeGuestHeldAim) ~= "function" then return end
-    local stroke, x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz = SilverfishSampleNativeGuestHeldAim(address)
+    local stroke, x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz, actor, hx, hy, hz = SilverfishSampleNativeGuestHeldAim(address)
     if not valid_sequence(stroke) then return end
-    local view = shot_view.format(x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz)
+    local view = shot_view.format(x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz, actor, hx, hy, hz)
     if view and (current.view_stroke ~= stroke or current.shot_view ~= view)
         and emit(nil, {"native-guest-held-aim", current.map, current.name, current.guid, stroke, view}) then
         current.view_stroke, current.shot_view = stroke, view
@@ -182,7 +182,7 @@ local function drain_taps(current, address)
     local take = embedded and SilverfishPeekNativeGuestPrimaryIntent or SilverfishTakeNativeGuestPrimaryIntent
     local emitted = 0
     for _ = 1, 8 do
-        local sequence, owner, guid, kind, x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz = take(address)
+        local sequence, owner, guid, kind, x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz, actor, hx, hy, hz = take(address)
         if not valid_sequence(sequence) or owner ~= address or guid ~= binding.guid or kind ~= binding.kind then break end
         if not can_use(current) then break end
         if kind == "blowtorch" or kind == "crowbar" then
@@ -202,7 +202,7 @@ local function drain_taps(current, address)
             shovel_intent = {sequence = sequence, expires = os.clock() + 1.5}
             commit("tap", address, sequence)
         else
-            local view = shot_view.format(x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz)
+            local view = shot_view.format(x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz, actor, hx, hy, hz)
             if not publish("tap", event_path, current, address, sequence,
                 {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind, view}) then break end
         end

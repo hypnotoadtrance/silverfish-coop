@@ -986,7 +986,10 @@ namespace
         for (const auto axis : *view.target) lua.set_number(axis);
         if (!view.muzzle) return 9;
         for (const auto axis : *view.muzzle) lua.set_number(axis);
-        return 12;
+        if (!view.contact || view.contact_actor.empty()) return 12;
+        lua.set_string(view.contact_actor);
+        for (const auto axis : *view.contact) lua.set_number(axis);
+        return 16;
     }
 
     int take(const Lua& lua, bool host, bool peek = false)

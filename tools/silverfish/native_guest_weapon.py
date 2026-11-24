@@ -11,6 +11,7 @@ GUEST_ACTIONS = ("native-guest-weapon-inspect", "native-guest-weapon-equip", "na
 GUID = re.compile(r"[0-9A-F]{32}\Z")
 SHOT_DIRECTION = re.compile(r"-?[01]\.[0-9]{6}(?:,-?[01]\.[0-9]{6}){2}")
 SHOT_POSITION = re.compile(r"-?[0-9]{1,7}\.[0-9]{3}(?:,-?[0-9]{1,7}\.[0-9]{3}){2}")
+SHOT_ACTOR_PATH = re.compile(r"/Game/Classes/Maps/[A-Za-z0-9_/.]+:PersistentLevel\.[A-Za-z0-9_.]+")
 SELECT_EQUIPMENT = "native-guest-weapon-select"
 SET_FIRE_MODE = "native-guest-weapon-mode-store"
 FIRE_MODES = ("auto", "semi")
@@ -43,11 +44,18 @@ def valid_shot_direction(value: str) -> bool:
             and abs(sum(float(axis) ** 2 for axis in value.split(",")) - 1.0) <= .002)
 
 def valid_shot_view(value: str) -> bool:
-    if not isinstance(value, str) or len(value) > 160:
+    if not isinstance(value, str) or len(value) > 460:
         return False
-    direction, *positions = value.split(";")
-    return (valid_shot_direction(direction) and len(positions) in (0, 2, 3)
-            and all(SHOT_POSITION.fullmatch(point)
+    geometry, *contact = value.split("|")
+    direction, *positions = geometry.split(";")
+    if len(positions) not in (0, 2, 3):
+        return False
+    if contact:
+        if (len(contact) != 2 or len(positions) != 3 or len(contact[0]) > 256
+                or not SHOT_ACTOR_PATH.fullmatch(contact[0])):
+            return False
+        positions.append(contact[1])
+    return (valid_shot_direction(direction) and all(SHOT_POSITION.fullmatch(point)
                     and all(abs(float(axis)) <= 2000000 for axis in point.split(",")) for point in positions))
 
 
@@ -322,11 +330,15 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
         host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {"native_guest_weapon": dict(proof, kind="camera", class_path=CAMERA_PATH) if camera else proof}
         if shot_view is not None:
-            direction, has_geometry, geometry = shot_view.partition(";")
+            geometry, _, contact = shot_view.partition("|")
+            direction, has_geometry, points = geometry.partition(";")
             result["native_guest_trigger_direction"] = direction
             if has_geometry:
-                eye, target, *muzzle = geometry.split(";")
+                eye, target, *muzzle = points.split(";")
                 result["native_guest_trigger_view"] = {"eye": eye, "target": target, **({"muzzle": muzzle[0]} if muzzle else {})}
+            if contact:
+                actor, point = contact.split("|")
+                result["native_guest_trigger_view"]["contact"] = {"actor": actor, "point": point}
         if old_pipe:
             result["native_guest_weapon"] = dict(proof, kind=native_guest_melee.KIND, class_path=OLD_PIPE)
         if blowtorch:

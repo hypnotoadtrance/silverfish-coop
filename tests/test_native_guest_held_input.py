@@ -79,12 +79,15 @@ class GuestHeldInputBridgeTests(unittest.TestCase):
 
     def test_memory_preserves_trigger_edges_and_keeps_only_the_latest_aim(self):
         aim = f"native-guest-held-aim\t{MAP}\t{PAWN}\t{GUID}\t1\t"
-        rows = [self.row(1, "press", 1) + "\t" + VIEW, aim + VIEW, aim + TURNED, self.row(2, "release", 1)]
+        contact_view = f"{TURNED};0.000,0.000,0.000;0.000,400.000,0.000;0.000,1.000,0.000"
+        contact_view += f"|{MAP}.PlaytestMap_01:PersistentLevel.NPC_1|0.000,398.000,0.000"
+        rows = [self.row(1, "press", 1) + "\t" + VIEW, aim + VIEW, aim + contact_view,
+                aim + contact_view.replace(":PersistentLevel.", ":BadLevel."), self.row(2, "release", 1)]
         self.bridge.local_bridge = Mock(read_input=Mock(return_value=[row.encode() for row in rows]))
         self.assertEqual(self.bridge.guest_held_fire_requests(), [
             (1, MAP, PAWN, GUID, "press", 1, VIEW), (2, MAP, PAWN, GUID, "release", 1),
         ])
-        self.assertEqual(self.bridge.take_guest_held_aim(), (MAP, PAWN, GUID, 1, TURNED))
+        self.assertEqual(self.bridge.take_guest_held_aim(), (MAP, PAWN, GUID, 1, contact_view))
         self.assertIsNone(self.bridge.take_guest_held_aim())
 
     def test_snapshot_accepts_only_active_exact_standard_smg_scope(self):

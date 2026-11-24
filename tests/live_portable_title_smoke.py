@@ -2206,13 +2206,12 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         async with asyncio.timeout(6):
             while True:
                 observed = float(await command(host, "dock-garage-health"))
-                if should_hit is not True or observed < expected_health:
+                if not should_hit or observed < expected_health:
                     break
                 await asyncio.sleep(.05)
-        if should_hit is not True:
+        if not should_hit:
             await asyncio.sleep(.35)
             observed = float(await command(host, "dock-garage-health"))
-        if should_hit is False:
             assert observed == expected_health, dict(roof_contact_damaged_worker=observed, event=event)
         return event, observed
 
@@ -2238,7 +2237,9 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         assert await command(host, "dock-garage-lower-host") == "lowered"
         assert await command(host, below) == "blocked"
         assert await command(guest, below) == "worker"
-        receipt, after_disagreement = await shoot(after_clear, should_hit=None)
+        receipt, after_disagreement = await shoot(after_clear, should_hit=True)
+        contact = receipt["native_guest_trigger_view"]["contact"]
+        assert contact["actor"].endswith(":PersistentLevel.NPC_Survivor_Worker_C_2"), contact
         evidence["tutorial_dock_world_collision_mismatch"] = {
             "same_low_aim": True, "host_world_line": "blocked", "guest_world_line": "worker",
             "health": [after_clear, after_disagreement], "accepted_shot": receipt,

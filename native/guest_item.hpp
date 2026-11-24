@@ -2,6 +2,7 @@
 
 #include <array>
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace RC::LuaMadeSimple
@@ -22,6 +23,8 @@ namespace silverfish::native_guest_item
     {
         ShotVector direction{};
         std::optional<ShotVector> eye, target, muzzle;
+        std::string contact_actor;
+        std::optional<ShotVector> contact;
     };
 
     ShotView capture_shot_view(RC::Unreal::UObject* pawn, RC::Unreal::UObject* held);

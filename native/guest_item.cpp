@@ -334,6 +334,28 @@ namespace
         return {};
     }
 
+    bool valid_contact_path(std::string_view path)
+    {
+        constexpr std::string_view prefix = "/Game/Classes/Maps/";
+        constexpr std::string_view level = ":PersistentLevel.";
+        if (!path.starts_with(prefix) || path.size() > 256) return false;
+        const auto separator = path.find(level, prefix.size());
+        if (separator == std::string_view::npos || separator == prefix.size() ||
+            separator + level.size() == path.size()) return false;
+        constexpr auto path_characters = "._ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        return path.substr(prefix.size(), separator - prefix.size()).find_first_not_of(
+                "/._ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789") == std::string_view::npos &&
+            path.substr(separator + level.size()).find_first_not_of(path_characters) == std::string_view::npos;
+    }
+
+    bool shot_view_fields(const Lua& lua, int first, int count)
+    {
+        if (count != 3 && count != 9 && count != 12 && count != 16) return false;
+        for (int index = 0; index < count; ++index)
+            if (index == 12 ? !lua.is_string(first + index) : !lua.is_number(first + index)) return false;
+        return true;
+    }
+
     bool read_shot_view(const Lua& lua, int fields, ShotView& view)
     {
         for (auto& axis : view.direction) axis = lua.get_number();
@@ -354,10 +376,17 @@ namespace
             view.target = position();
             if (!view.eye || !view.target) return false;
         }
-        if (fields == 12)
+        if (fields >= 12)
         {
             view.muzzle = position();
             if (!view.muzzle) return false;
+        }
+        if (fields == 16)
+        {
+            view.contact_actor = lua.get_string();
+            if (!valid_contact_path(view.contact_actor)) return false;
+            view.contact = position();
+            if (!view.contact) return false;
         }
         return true;
     }
@@ -371,10 +400,8 @@ namespace
         const bool split_fields = split && count == 6 && lua.is_string(4) && lua.is_integer(5) && lua.is_integer(6);
         const int first_view = hold_duration ? 5 : 4;
         const int view_fields = count - first_view + 1;
-        const bool shot_fields = shot_view && (view_fields == 3 || view_fields == 9 || view_fields == 12);
-        if (shot_fields)
-            for (int index = first_view; index <= count; ++index)
-                if (!lua.is_number(index)) return "guest_weapon_view_unqualified";
+        const bool shot_fields = shot_view && view_fields > 0 && !split && !seed_selection && !requested_slot;
+        if (shot_fields && !shot_view_fields(lua, first_view, view_fields)) return "guest_weapon_view_unqualified";
         const bool legacy_fields = count == 3 || (count == 4 && ((seed_selection && lua.is_string(4)) ||
             ((hold_duration || requested_slot) && lua.is_integer(4))));
         if (!Unreal::IsInGameThreadRaw() || (split ? !split_fields : !legacy_fields && !shot_fields) ||
@@ -1099,11 +1126,14 @@ namespace
 
     // A round can hit and destroy its projectile during the same Blueprint call.
     // Count the exact actor when it starts play, before stock impact processing.
+    void reconcile_projectile_contact(Unreal::AActor* projectile, Unreal::UObject* pawn, const ShotView& view);
+
     struct TapBirths
     {
         Unreal::UWorld* world;
         Unreal::UObject* pawn;
         Unreal::UClass* projectile;
+        const ShotView* view;
         int count{};
         bool owned{true};
     };
@@ -1119,7 +1149,8 @@ namespace
         TapBirths* previous;
     };
 
-    void count_guest_projectile(Unreal::AActor* actor, Unreal::UObject* pawn, int& count, bool& owned)
+    void count_guest_projectile(Unreal::AActor* actor, Unreal::UObject* pawn, int& count, bool& owned,
+                                const ShotView* view)
     {
         if (!pawn) return;
         const auto* owner = object(actor, STR("Owner"));
@@ -1129,6 +1160,7 @@ namespace
         if (owner != pawn && instigator != pawn) return;
         ++count;
         owned = owned && authority(actor) && owner == pawn && instigator == pawn;
+        if (owned && view && view->contact) reconcile_projectile_contact(actor, pawn, *view);
     }
 
     bool install_tap_birth_hook()
@@ -1138,7 +1170,7 @@ namespace
             [](Hook::TCallbackIterationData<void>&, Unreal::AActor* actor) {
                 auto* shot = active_tap;
                 if (!shot || !actor || actor->GetClassPrivate() != shot->projectile || actor->GetWorld() != shot->world) return;
-                count_guest_projectile(actor, shot->pawn, shot->count, shot->owned);
+                count_guest_projectile(actor, shot->pawn, shot->count, shot->owned, shot->view);
             }, {false, false, STR("SilverfishCoopNative"), STR("Count stock guest tap projectiles before impact")});
         return tap_birth_hook != Hook::ERROR_ID;
     }
@@ -1162,7 +1194,7 @@ namespace
         return result;
     }
 
-    std::optional<AimVector> component_aim_vector(Unreal::UObject* component, const Unreal::TCHAR* path)
+    std::optional<AimVector> actor_aim_vector(Unreal::UObject* object, const Unreal::TCHAR* path)
     {
         auto* fn = find<Unreal::UFunction>(path);
         auto* result = fn ? Unreal::CastField<Unreal::FStructProperty>(fn->GetReturnProperty()) : nullptr;
@@ -1170,7 +1202,7 @@ namespace
             fn->GetParmsSize() != sizeof(AimVector) || !aim_vector_field(result, aim_vector_type) ||
             result->GetOffset_Internal() != 0) return {};
         AimVector storage{};
-        component->ProcessEvent(fn, storage.data());
+        object->ProcessEvent(fn, storage.data());
         return read_aim_vector(result, storage.data());
     }
 
@@ -1204,13 +1236,20 @@ namespace
         }
     };
 
-    std::optional<AimVector> guest_aim_point(Unreal::UObject* pawn, Unreal::UObject* weapon,
-                                            const AimVector& eye, const AimVector& forward)
+    struct AimContact
+    {
+        AimVector point;
+        Unreal::UObject* actor{};
+        bool hit{};
+    };
+
+    std::optional<AimContact> trace_shot(Unreal::UObject* context_object, const AimVector& origin,
+                                        const AimVector& destination, std::uint8_t trace_channel,
+                                        std::initializer_list<Unreal::UObject*> exclusions)
     {
         auto* library = find<Unreal::UObject>(STR("/Script/Engine.Default__KismetSystemLibrary"));
         auto* fn = find<Unreal::UFunction>(STR("/Script/Engine.KismetSystemLibrary:LineTraceSingle"));
-        auto* range = field<Unreal::FDoubleProperty>(pawn, STR("SightRange"));
-        if (!library || !fn || !range || fn->GetOuterPrivate() != library->GetClassPrivate() ||
+        if (!library || !fn || fn->GetOuterPrivate() != library->GetClassPrivate() ||
             !fn->HasAnyFunctionFlags(Unreal::FUNC_Native) || fn->GetNumParms() != 13 ||
             fn->GetParmsSize() > sizeof(AimParameters::data)) return {};
         auto* context = input<Unreal::FObjectProperty>(fn, STR("WorldContextObject"), 0);
@@ -1225,29 +1264,111 @@ namespace
         auto* impact = field<Unreal::FStructProperty>(hit_type, STR("ImpactPoint"));
         auto* ignore_self = field<Unreal::FBoolProperty>(fn, STR("bIgnoreSelf"));
         auto* found = Unreal::CastField<Unreal::FBoolProperty>(fn->GetReturnProperty());
-        const double distance = range->GetPropertyValueInContainer(pawn);
+        auto* hit_component = field<Unreal::FWeakObjectProperty>(hit_type, STR("Component"));
         if (!context || !aim_vector_field(start, aim_vector_type) || !aim_vector_field(end, aim_vector_type) ||
             !channel || !complex || !actor || actor->GetOffset_Internal() != 0 ||
             !hit || !hit_type || hit->GetStruct().Get() != hit_type || !hit->HasAnyPropertyFlags(Unreal::CPF_OutParm) ||
             !aim_vector_field(impact, STR("/Script/Engine.Vector_NetQuantize")) ||
-            !ignore_self || !found || !std::isfinite(distance) || distance <= 0.0) return {};
-        AimVector destination{eye[0] + forward[0] * distance, eye[1] + forward[1] * distance, eye[2] + forward[2] * distance};
+            !ignore_self || !found) return {};
 
         AimParameters arguments;
         arguments.initialize(ignored);
         arguments.initialize(hit);
         auto* data = arguments.data.data();
         Unreal::FScriptArrayHelper actors(ignored, ignored->ContainerPtrToValuePtr<void>(data));
-        if (weapon) actor->SetObjectPropertyValue(actors.GetRawPtr(actors.AddValue()), weapon);
-        context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(data), pawn);
-        std::memcpy(start->ContainerPtrToValuePtr<void>(data), eye.data(), sizeof(eye));
+        for (auto* exclusion : exclusions)
+            if (exclusion) actor->SetObjectPropertyValue(actors.GetRawPtr(actors.AddValue()), exclusion);
+        context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(data), context_object);
+        std::memcpy(start->ContainerPtrToValuePtr<void>(data), origin.data(), sizeof(origin));
         std::memcpy(end->ContainerPtrToValuePtr<void>(data), destination.data(), sizeof(destination));
-        channel->SetPropertyValueInContainer(data, 1); // Stock LookTrace visibility channel.
+        channel->SetPropertyValueInContainer(data, trace_channel);
         complex->SetPropertyValueInContainer(data, true);
         ignore_self->SetPropertyValueInContainer(data, true);
         library->ProcessEvent(fn, data);
-        return found->GetPropertyValueInContainer(data)
-            ? read_aim_vector(impact, hit->ContainerPtrToValuePtr<void>(data)) : std::optional{destination};
+        if (!found->GetPropertyValueInContainer(data)) return AimContact{destination};
+        const auto* result = hit->ContainerPtrToValuePtr<void>(data);
+        const auto point = read_aim_vector(impact, result);
+        if (!point) return {};
+        auto* component = hit_component ? hit_component->GetPropertyValueInContainer(result).Get() : nullptr;
+        return AimContact{*point, live(component) ? component->GetOuterPrivate() : nullptr, true};
+    }
+
+    constexpr std::uint8_t visibility_trace = 1;
+    constexpr std::uint8_t projectile_trace = 2; // Stock projectile MovementUpdate.
+    constexpr double contact_trace_range = 5000.0;
+
+    AimVector difference(const AimVector& left, const AimVector& right)
+    {
+        return {left[0] - right[0], left[1] - right[1], left[2] - right[2]};
+    }
+
+    AimVector ahead(const AimVector& point, const AimVector& forward, double distance)
+    {
+        return {point[0] + forward[0] * distance, point[1] + forward[1] * distance, point[2] + forward[2] * distance};
+    }
+
+    double squared_length(const AimVector& vector)
+    {
+        return vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2];
+    }
+
+    std::optional<AimVector> guest_aim_point(Unreal::UObject* pawn, Unreal::UObject* weapon,
+                                            const AimVector& eye, const AimVector& forward)
+    {
+        auto* range = field<Unreal::FDoubleProperty>(pawn, STR("SightRange"));
+        const double distance = range ? range->GetPropertyValueInContainer(pawn) : 0.0;
+        if (!std::isfinite(distance) || distance <= 0.0) return {};
+        const auto aim = trace_shot(pawn, eye, ahead(eye, forward, distance), visibility_trace, {weapon});
+        return aim ? std::optional{aim->point} : std::nullopt;
+    }
+
+    bool living_combat_target(Unreal::UObject* actor, Unreal::UWorld* world)
+    {
+        auto* base = find<Unreal::UClass>(STR("/Script/Engine.Actor"));
+        auto* player = find<Unreal::UClass>(pawn_path);
+        return live(actor) && base && actor->IsA(base) && player && !actor->IsA(player) &&
+            static_cast<Unreal::AActor*>(actor)->GetWorld() == world && boolean(actor, STR("Alive"), true);
+    }
+
+    void reconcile_projectile_contact(Unreal::AActor* projectile, Unreal::UObject* pawn, const ShotView& view)
+    {
+        if (!view.contact || view.contact_actor.empty()) return;
+        const auto path = RC::to_generic_string(view.contact_actor);
+        auto* target = find<Unreal::UObject>(path.c_str());
+        auto* world = projectile->GetWorld();
+        if (!living_combat_target(target, world) || !authority(target)) return;
+        auto* health = field<Unreal::FDoubleProperty>(target, STR("Health"));
+        auto* velocity_field = field<Unreal::FStructProperty>(projectile, STR("Velocity"));
+        if (!health || !std::isfinite(health->GetPropertyValueInContainer(target)) ||
+            health->GetPropertyValueInContainer(target) <= 0 || !aim_vector_field(velocity_field, aim_vector_type)) return;
+        const auto origin = actor_aim_vector(projectile, STR("/Script/Engine.Actor:K2_GetActorLocation"));
+        const auto velocity = read_aim_vector(velocity_field, projectile);
+        if (!origin || !velocity) return;
+        const double speed = std::sqrt(squared_length(*velocity));
+        const double distance = std::sqrt(squared_length(difference(*view.contact, *origin)));
+        if (!std::isfinite(speed) || speed < 1 || distance < 1 || distance > contact_trace_range) return;
+        const AimVector direction{(*velocity)[0] / speed, (*velocity)[1] / speed, (*velocity)[2] / speed};
+        if (squared_length(difference(ahead(*origin, direction, distance), *view.contact)) > 75 * 75) return;
+
+        auto* weapon = object(pawn, STR("EquipedItem"));
+        const auto end = ahead(*origin, direction, distance + 100);
+        const auto first = trace_shot(projectile, *origin, end, projectile_trace, {pawn, weapon});
+        auto* barrier = first && first->hit ? first->actor : nullptr;
+        if (!live(barrier) || barrier == target || !authority(barrier) ||
+            barrier->GetFunctionByNameInChain(Unreal::FName{STR("DealDamage"), Unreal::FNAME_Find})) return;
+
+        // Only bypass one disagreeing surface when the same stock collision query still reaches
+        // the reported living actor on the actual projectile path and near the reported contact.
+        const auto retry = trace_shot(projectile, *origin, end, projectile_trace, {pawn, weapon, barrier});
+        if (!retry || retry->actor != target || squared_length(difference(retry->point, *view.contact)) > 100 * 100) return;
+
+        auto* ignored = field<Unreal::FArrayProperty>(projectile, STR("Actors to Ignore"));
+        auto* actor = ignored ? Unreal::CastField<Unreal::FObjectProperty>(ignored->GetInner()) : nullptr;
+        if (!actor || actor->GetOffset_Internal() != 0) return;
+        Unreal::FScriptArrayHelper actors(ignored, ignored->ContainerPtrToValuePtr<void>(projectile));
+        for (int index = 0; index < actors.Num(); ++index)
+            if (actor->GetObjectPropertyValue(actors.GetRawPtr(index)) == barrier) return;
+        actor->SetObjectPropertyValue(actors.GetRawPtr(actors.AddValue()), barrier);
     }
 
     struct GuestMuzzleAim
@@ -1298,10 +1419,10 @@ namespace
             auto* relative = field<Unreal::FStructProperty>(muzzle, STR("RelativeRotation"));
             if (!aim_vector_field(relative, aim_rotator_type)) return false;
             const auto old = read_aim_vector(relative, muzzle);
-            const auto origin = component_aim_vector(muzzle, component_location);
-            const auto eye = component_aim_vector(camera, component_location);
+            const auto origin = actor_aim_vector(muzzle, component_location);
+            const auto eye = actor_aim_vector(camera, component_location);
             const auto direction = view.direction != AimVector{} ? std::optional{view.direction}
-                : component_aim_vector(camera, component_forward);
+                : actor_aim_vector(camera, component_forward);
             if (!old || !origin || !eye || !direction ||
                 std::abs(std::hypot((*direction)[0], (*direction)[1], (*direction)[2]) - 1.0) > 0.001) return false;
             const auto target = view.target ? view.target : guest_aim_point(pawn, weapon, *eye, *direction);
@@ -1414,7 +1535,7 @@ namespace
 
         Unreal::FWeakObjectPtr held_actor;
         held_actor = actor;
-        TapBirths projectiles{context.world, context.pawn, projectile};
+        TapBirths projectiles{context.world, context.pawn, projectile, expected_projectiles == 1 ? &shot_view : nullptr};
         // Pose the authoritative muzzle for the stock launch. The remote pawn's first-person
         // weapon animation does not run on this seat.
         GuestMuzzleAim aim;
@@ -1855,7 +1976,7 @@ namespace
         auto& smg_hold = *shot_hold;
         if (smg_hold.shot_before < 0 ||
             actor->GetClassPrivate() != smg_hold.projectile.Get() || actor->GetWorld() != smg_hold.world.Get()) return;
-        count_guest_projectile(actor, smg_hold.pawn.Get(), smg_hold.shot_births, smg_hold.owned_birth);
+        count_guest_projectile(actor, smg_hold.pawn.Get(), smg_hold.shot_births, smg_hold.owned_birth, &smg_hold.view);
     }
 
     void hold_post(HoldHook&, Unreal::UObject* receiver, Unreal::FFrame& frame, void*)
@@ -2063,10 +2184,8 @@ namespace
     int update_hold_view(const Lua& lua)
     {
         const auto fields = lua.get_stack_size() - 2;
-        if (!Unreal::IsInGameThreadRaw() || !hold_enabled() || (fields != 3 && fields != 9 && fields != 12)
+        if (!Unreal::IsInGameThreadRaw() || !hold_enabled() || !shot_view_fields(lua, 3, fields)
             || !lua.is_integer(1) || !lua.is_integer(2)) return 0;
-        for (int index = 3; index <= fields + 2; ++index)
-            if (!lua.is_number(index)) return 0;
         const auto serial = lua.get_integer();
         const auto sequence = lua.get_integer();
         const auto seat = std::ranges::find(smg_holds, serial, &SmgHold::serial);
@@ -3255,18 +3374,38 @@ silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_s
     ShotView view;
     auto* camera = shot_component(pawn, STR("Camera"), camera_component);
     if (!camera) return view;
-    const auto direction = component_aim_vector(camera, component_forward);
+    const auto direction = actor_aim_vector(camera, component_forward);
     if (!direction || std::abs(std::hypot((*direction)[0], (*direction)[1], (*direction)[2]) - 1.0) > 0.001)
         return view;
     view.direction = *direction;
-    if (const auto eye = component_aim_vector(camera, component_location))
+    if (const auto eye = actor_aim_vector(camera, component_location))
     {
         if (const auto target = guest_aim_point(pawn, held, *eye, view.direction))
         {
             view.eye = eye;
             view.target = target;
             if (auto* muzzle = shot_component(held, STR("Arrow_Muzzle"), muzzle_component))
-                view.muzzle = component_aim_vector(muzzle, component_location);
+                view.muzzle = actor_aim_vector(muzzle, component_location);
+            if (view.muzzle)
+            {
+                const auto ray = difference(*target, *view.muzzle);
+                const double span = std::sqrt(squared_length(ray));
+                // Reuse the stock aim point to trace from the actual muzzle on the projectile channel.
+                if (std::isfinite(span) && span > 1 && span <= contact_trace_range)
+                {
+                    const auto end = ahead(*target, ray, 10.0 / span);
+                    const auto hit = trace_shot(pawn, *view.muzzle, end, projectile_trace, {held});
+                    if (hit && hit->hit && living_combat_target(hit->actor, static_cast<Unreal::AActor*>(pawn)->GetWorld()))
+                    {
+                        auto path = RC::to_utf8_string(hit->actor->GetPathName());
+                        if (valid_contact_path(path))
+                        {
+                            view.contact_actor = std::move(path);
+                            view.contact = hit->point;
+                        }
+                    }
+                }
+            }
         }
     }
     return view;
