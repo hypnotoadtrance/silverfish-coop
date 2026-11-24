@@ -13,6 +13,7 @@ from portable_guest_world_start import resident_events
 MINIMUM_CLEARANCE_CM = 175
 NATIVE_TAP_LIFETIME = 1.5  # native/guest_primary_input.cpp receipt_lifetime
 STRAFE_MILLISECONDS = 450
+HOST_HIT_OBSERVATION_SECONDS = .7
 
 
 def coordinates(value):
@@ -249,7 +250,7 @@ async def verify_dock_pursuit(host, guest, frame, command):
             remaining = view["round"]["after"]
             moved = moved or all(math.dist(history[0][seat]["seat"], view[seat]["seat"]) > 45 for seat in ("host", "guest"))
             before = current["health"]
-            deadline = time.monotonic() + 1.5
+            deadline = time.monotonic() + HOST_HIT_OBSERVATION_SECONDS
             while True:
                 current = await observe()
                 if current["health"] < before or not current["alive"] or time.monotonic() >= deadline:

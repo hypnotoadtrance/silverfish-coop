@@ -4777,7 +4777,6 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     else:
         verify_stock_held_queue = None
     dock_combat_check = ("stock_held_mask" if tutorial_dock_held_mask else
-                         "tutorial_dock_shot_view" if tutorial_dock_shot_view else
                          "tutorial_dock_pursuit" if tutorial_dock_pursuit else
                          "tutorial_dock_retaliation" if tutorial_dock_retaliation else
                          "stock_grounded_gait" if tutorial_dock_gait else "tutorial_dock_combat")
@@ -4839,12 +4838,14 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_bandage_revisit, "tutorial_dock", "stock_bandage_revisit", verify_tutorial_bandage_revisit),
         (stock_warehouse_board, "tutorial_dock", "stock_warehouse_board", verify_warehouse_board),
         (stock_bottle, "tutorial_dock", "stock_bottle", verify_stock_bottle),
-        (tutorial_dock_combat, "tutorial_dock_combat", dock_combat_check,
+        (tutorial_dock_combat and (not tutorial_dock_shot_view or tutorial_dock_pursuit),
+         "tutorial_dock_combat", dock_combat_check,
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, retaliation=tutorial_dock_retaliation,
                                                                pursuit=tutorial_dock_pursuit,
                                                                held_mask=tutorial_dock_held_mask,
-                                                               grounded_gait=tutorial_dock_gait,
-                                                               shot_view=tutorial_dock_shot_view)),
+                                                               grounded_gait=tutorial_dock_gait)),
+        (tutorial_dock_shot_view, "tutorial_dock_shot_view", "tutorial_dock_shot_view",
+         lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, shot_view=True)),
         (tutorial_dock_melee, "tutorial_dock_melee", "tutorial_dock_melee", verify_tutorial_dock_melee),
         (stock_eye_stacks, "shopkeep", "stock_eye_stacks", verify_stock_eye_stacks),
     ):
@@ -5212,7 +5213,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                         finish_check("stock_storm_ambience_reconnect", started)
 
                 exit_actions = ("prompt", "confirm") if campaign in {
-                    "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_melee", "crossroads", "crossroads_anomaly",
+                    "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_melee",
+                    "crossroads", "crossroads_anomaly",
                     "lab_east_wing_acid", "shopkeep"
                 } else ("save_and_quit",)
                 after_reconnect = None
@@ -5618,8 +5620,8 @@ if __name__ == "__main__":
     if args.tutorial_dock_pursuit and (not args.tutorial_dock_combat or args.tutorial_dock_retaliation):
         parser.error("Use --tutorial-dock-pursuit with --tutorial-dock-combat and without --tutorial-dock-retaliation")
     if args.tutorial_dock_shot_view and (not args.tutorial_dock_combat or not args.stock_npc_override or any(
-            (args.tutorial_dock_retaliation, args.tutorial_dock_pursuit, args.tutorial_dock_gait, args.tutorial_dock_held_mask))):
-        parser.error("Use --tutorial-dock-shot-view with --tutorial-dock-combat and --stock-npc-override as the Dock trial")
+            (args.tutorial_dock_retaliation, args.tutorial_dock_gait, args.tutorial_dock_held_mask))):
+        parser.error("Use --tutorial-dock-shot-view with --tutorial-dock-combat and --stock-npc-override")
     if args.stock_shovel_loot and not args.stock_shovel:
         parser.error("Use --stock-shovel-loot with --stock-shovel")
     if args.stock_shovel_quest and (not args.stock_shovel or args.stock_shovel_loot):
