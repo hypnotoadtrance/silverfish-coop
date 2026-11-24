@@ -3262,13 +3262,13 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
         lua.register_function("SilverfishSeedNativeGuestWeapon", run<Operation::Seed>);
         lua.register_function("SilverfishSeedNativeGuestAmmo", run<Operation::SeedAmmo>);
         lua.register_function("SilverfishDisarmNativeGuestWeapon", run<Operation::Disarm>);
-        if (hold_enabled())
-        {
-            lua.register_function("SilverfishStartNativeGuestSmgHold", start_hold);
-            lua.register_function("SilverfishReadNativeGuestSmgHold", read_hold<HoldAction::observe>);
-            lua.register_function("SilverfishStopNativeGuestSmgHold", read_hold<HoldAction::stop>);
-            lua.register_function("SilverfishRenewNativeGuestSmgHold", read_hold<HoldAction::renew>);
-        }
+    }
+    if (hold_enabled())
+    {
+        lua.register_function("SilverfishStartNativeGuestSmgHold", start_hold);
+        lua.register_function("SilverfishReadNativeGuestSmgHold", read_hold<HoldAction::observe>);
+        lua.register_function("SilverfishStopNativeGuestSmgHold", read_hold<HoldAction::stop>);
+        lua.register_function("SilverfishRenewNativeGuestSmgHold", read_hold<HoldAction::renew>);
     }
 }
 
