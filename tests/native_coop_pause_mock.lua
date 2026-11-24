@@ -245,6 +245,15 @@ end
 embedded, fixture_enabled = true, true
 local gated = assert(loadfile(script, "t", env))()
 gated.start(prefix)
+controller.MenuStack = {GetArrayNum = function(self) return #self end}
+controller.OpenMenu = function(self, class, created)
+    assert(class == pause_class)
+    self.MenuStack[1], created.CreatedMenu = menu, menu
+end
+descriptor(third, "guest", 109)
+gated.command({first, "native-coop-pause-fixture", "open"}, state, "connected")
+gated.sync(state, "connected")
+assert(gated.rows(state, "connected", row)[2] == row("native-coop-pause-fixture", "guest", "open"))
 gated.command = function(fields, observed, phase)
     assert(fields[2] == "native-coop-pause-fixture" and fields[3] == "open" and observed == state and phase == "connected")
     count = count + 1
