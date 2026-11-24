@@ -4371,8 +4371,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     raise ValueError("The replica lacks the stock guest inventory projection entry point")
                 return script.replace(marker, marker + fixture, 1)
 
-            proof["stale_quick_slot_overlay"] = probes.enter_context(portable_script_overlay(
-                second_game, "native_guest_ui.lua", add_stale_quick_slot_witness))
+            proof["stale_quick_slot_overlays"] = [
+                probes.enter_context(portable_script_overlay(game, "native_guest_ui.lua", add_stale_quick_slot_witness))
+                for game in games
+            ]
         if resident_weapon_cues:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableWeaponCueProbe",
                                                  fixture="avatar_presentation_probe.lua"))
