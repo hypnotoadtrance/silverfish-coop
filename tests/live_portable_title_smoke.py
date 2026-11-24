@@ -3071,6 +3071,7 @@ async def verify_stock_unequip(first, second, evidence):
             await wait_resident_status(run, lambda frame: marker in frame.get("game", {}).get(native_world_loot.KEY, {}))
         evidence["host_face_mask_drop"] = dropped
         assert saves() == before, "The worn Face Mask drop wrote a save before a checkpoint"
+        assert await portable_probe_command(host.bridge, probe, "host-close-inventory") == "closed"
         await leaves_stock_open()
         await close_stock()
         return {"selected_and_inactive_slots_checked": True, "guest_duplicate_clicks_rejected": True,

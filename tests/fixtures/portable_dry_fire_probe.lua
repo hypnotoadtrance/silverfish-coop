@@ -174,6 +174,20 @@ local function seed_reserve(extra)
     return read_reserve(peer)
 end
 
+local function meshes(actor)
+    local items = {}
+    local static = asset("/Script/Engine.StaticMeshComponent")
+    local skeletal = asset("/Script/Engine.SkeletalMeshComponent")
+    for _, part in ipairs(actor:K2_GetComponentsByClass(asset("/Script/Engine.MeshComponent"))) do
+        if type(part) == "userdata" and part:type() == "RemoteUnrealParam" then part = part:get() end
+        if valid(part) and part:IsVisible() and not part.bHiddenInGame then
+            local mesh = part:IsA(static) and part.StaticMesh or part:IsA(skeletal) and part.SkinnedAsset
+            if valid(mesh) then items[#items + 1] = {component = part, path = mesh:GetFullName()} end
+        end
+    end
+    return items
+end
+
 local function rifle_grip(argument)
     assert(observing())
     local weapon = peer.EquipedItem
@@ -183,7 +197,7 @@ local function rifle_grip(argument)
     local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
     local stock_mesh, grip
     if argument and argument ~= "" then
-        local path, x, y, z = argument:match("^(StaticMesh /Game/[%w_./%-]+);([%-%.%d]+),([%-%.%d]+),([%-%.%d]+)$")
+        local path, x, y, z = argument:match("^(%a+ /Game/[%w_./%-]+);([%-%.%d]+),([%-%.%d]+),([%-%.%d]+)$")
         assert(path and tonumber(x) and tonumber(y) and tonumber(z))
         stock_mesh, grip = path, {X = tonumber(x), Y = tonumber(y), Z = tonumber(z)}
     else
@@ -194,9 +208,9 @@ local function rifle_grip(argument)
         grip = math_api:InverseTransformLocation(root:K2_GetComponentToWorld(), marker:K2_GetComponentLocation())
     end
     local witness = "waiting:frame"
-    for _, part in ipairs(peer:K2_GetComponentsByClass(asset("/Script/Engine.StaticMeshComponent"))) do
-        if type(part) == "userdata" and part:type() == "RemoteUnrealParam" then part = part:get() end
-        if valid(part.StaticMesh) and part.StaticMesh:GetFullName() == stock_mesh and part:IsVisible() then
+    for _, item in ipairs(meshes(peer)) do
+        if item.path == stock_mesh then
+            local part = item.component
             local anchor = part:GetAttachParent()
             local pivot = valid(anchor) and anchor:GetAttachParent()
             for _ = 1, 3 do
@@ -257,7 +271,9 @@ local function run(action, argument)
         local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
         local grip = math_api:InverseTransformLocation(weapon.RootComponent:K2_GetComponentToWorld(),
             weapon.Arrow_Forgrip:K2_GetComponentLocation())
-        return ("%s;%.4f,%.4f,%.4f"):format(weapon.Mesh_Frame.StaticMesh:GetFullName(), grip.X, grip.Y, grip.Z)
+        local parts = meshes(weapon)
+        assert(parts[1], "the rifle has no visible stock mesh")
+        return ("%s;%.4f,%.4f,%.4f"):format(parts[1].path, grip.X, grip.Y, grip.Z)
     end
     if action == "host-tail" then
         assert(observing() and local_pawn:HasAuthority()

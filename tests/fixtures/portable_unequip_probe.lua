@@ -282,6 +282,11 @@ local function run(action, argument)
             remote_seed.pistol.Ammo = live_rounds
         end
         return settled(remote, remote_seed)
+    elseif action == "host-close-inventory" then
+        assert(not guest and control.MenuStack:GetArrayNum() == 1, "fixture expected the host's stock inventory")
+        control:CloseMenu({})
+        assert(control.MenuStack:GetArrayNum() == 0, "fixture host inventory did not close")
+        return "closed"
     elseif action == "host-wear-mask" or action == "host-drop-mask" then
         assert(not guest and #driver.ClientConnections == 1, "fixture expected a co-op host")
         if action == "host-wear-mask" then
