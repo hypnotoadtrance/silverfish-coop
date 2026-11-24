@@ -1347,11 +1347,14 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
     async def observe(seat, kind, role, *, retired=False, must_render=False):
         deadline = asyncio.get_running_loop().time() + 8
         while asyncio.get_running_loop().time() < deadline:
+            if kind == "bolt" and must_render and int(await probe(seat, "visual", kind)) > 0:
+                return {"role": role, "short_flight_visual": True}
             status = await probe(seat, "shot", kind)
             if status != "absent":
                 name, actual_role, active, peak, fuse, visible, game_seconds, display = status.split(",")
                 assert int(actual_role) == role, status
-                if (active == "false" if retired else float(peak) > 8 and (not must_render or int(visible) > 0)):
+                in_view = float(peak) > 8 and (not must_render or int(visible) > 0)
+                if (active == "false" if retired else in_view or kind == "bolt" and not must_render):
                     return {"actor": name, "role": role, "active": active == "true", "travel_cm": float(peak),
                             "fuse_seconds": float(fuse), "visible_samples": int(visible),
                             "game_seconds": float(game_seconds), "display": display}
@@ -1408,6 +1411,7 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
                     await asyncio.sleep(.05)
         verified[f"{side}_{kind}"] = record
     assert campaign_save_hashes(host.campaign) == checkpoint
+    assert not weapon_cue_files(host, guest)
     return {"stock_throwables": verified}
 
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 import re
 import time
 
@@ -97,6 +98,13 @@ def valid_dry_fire(cue):
             and cue[1] == "dry" and valid_position(cue[2:]))
 
 
+def valid_bolt_flight(cue):
+    return (type(cue) is list and len(cue) == 11 and type(cue[0]) is int and 0 < cue[0] < 10**15
+            and cue[1] == "bolt-flight" and valid_position(cue[2:5]) and valid_position(cue[5:8])
+            and math.dist(cue[2:5], cue[5:8]) <= 600
+            and all(type(value) in (int, float) and -180 <= value <= 180 for value in cue[8:]))
+
+
 def _captured(data):
     lines = data.splitlines()
     if not data.endswith("\n") or not 1 < len(lines) <= LIMIT + 1:
@@ -147,7 +155,7 @@ def _captured(data):
                 cue.extend([int(fields[11]), *map(float, fields[12:])])
         except ValueError:
             continue
-        if valid_shot(cue):
+        if valid_shot(cue) or valid_bolt_flight(cue):
             cues.append(cue)
     return area, cues
 
@@ -231,7 +239,8 @@ class Playback:
             if type(decoded) is list and len(decoded) == 3 and decoded[:2] == scope:
                 cue = decoded[2]
                 if (valid_cycle(cue) or valid_melee(cue) or valid_npc_melee(cue) or valid_npc_impact(cue)
-                        or valid_use(cue) or valid_dry_fire(cue) or valid_shot(cue)) and cue[0] > self.last_played:
+                        or valid_use(cue) or valid_dry_fire(cue) or valid_bolt_flight(cue)
+                        or valid_shot(cue)) and cue[0] > self.last_played:
                     selected[cue[0]] = cue[1:]
         if not selected:
             return game
@@ -266,6 +275,9 @@ class Playback:
                               weapon=source[2], clip=source[3])
                 continue
             hit = re.fullmatch(r"([0-9]{1,15}):([A-Za-z_]+)", receipt)
+            if hit and hit[2] == "bolt_flight" and (source := selected.get(int(hit[1]))) and source[0] == "bolt-flight":
+                control.event("native_short_bolt_flight_played", serial=int(hit[1]), origin=source[1:4], finish=source[4:7])
+                continue
             if hit and hit[2] == "npc_melee" and (source := selected.get(int(hit[1]))) and source[0] == "npc-melee":
                 control.event("native_npc_melee_received", serial=int(hit[1]), actor_id=source[1], clip=source[2])
                 continue
