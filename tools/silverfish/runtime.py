@@ -827,6 +827,7 @@ class Bridge:
                     and not native_world_loot.target_parts(decoded)
                     and not native_stock_door.target_actor(decoded) and not native_stock_switch.target_actor(decoded)
                     and not native_loose_pickup.target_path(decoded)
+                    and not native_critters.target_id(decoded)
                     and (len(target) != 32 or any(digit not in b"0123456789abcdef" for digit in target))):
                 continue
             identity = uuid.uuid5(self.input_namespace, fields[1].decode("ascii")).hex
