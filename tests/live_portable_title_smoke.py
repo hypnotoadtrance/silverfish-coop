@@ -3607,12 +3607,14 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
                     await asyncio.sleep(.1)
             result, = shot
             assert result["event"] == "native_guest_primary_input", result
+            assert result.get("native_guest_trigger_view", {}).get("contact", {}).get("actor") == target, result
             debit = result["native_guest_weapon"]
             assert (debit["guid"], debit["before"], debit["after"], debit["projectiles"]) == (guid, magazine, magazine - 1, 1)
             magazine -= 1
             fired.append(debit["after"])
             try:
-                destroyed = await wait_resident_status(host_run, wreck, timeout=2.7)
+                async with asyncio.timeout(2.7):
+                    destroyed = await wait_resident_status(host_run, wreck)
                 break
             except TimeoutError:
                 continue

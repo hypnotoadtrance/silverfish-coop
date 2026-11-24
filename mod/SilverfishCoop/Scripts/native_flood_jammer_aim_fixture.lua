@@ -64,6 +64,41 @@ local function trace(context, first, last, channel, complex, ignored)
         hit, true, color, color, 0) == true then return hit.OutHit or hit end
 end
 
+-- Match the stock weapon capture: complex visibility from the camera, then
+-- stock projectile collision from the muzzle through the camera's impact.
+function fixture.fixed_contact(pawn, weapon, camera, mesh, center)
+    local library = StaticFindObject(trace_path)
+    local muzzle_component = weapon.Arrow_Muzzle
+    if not valid(library) or not component(muzzle_component, weapon, "ArrowComponent") then return end
+    local context = {trace = library, pawn = pawn}
+    local ignored = {pawn, weapon}
+    local eye = camera:K2_GetComponentLocation()
+    for _, height in ipairs({0, 8, -8, 16, -16, 25, 45, 65, -35, -55, 90}) do
+        local target = {X = center.X, Y = center.Y, Z = center.Z + height}
+        local view, range = look(eye, target)
+        if range > 1 and range <= 550 then
+            local reach = (range + 100) / range
+            local finish = {X = eye.X + (target.X - eye.X) * reach, Y = eye.Y + (target.Y - eye.Y) * reach,
+                Z = eye.Z + (target.Z - eye.Z) * reach}
+            local sight = trace(context, eye, finish, 1, true, ignored)
+            if sight and vector(sight.ImpactPoint) and sight.Component and same(sight.Component:Get(), mesh) then
+                local muzzle = muzzle_component:K2_GetComponentLocation()
+                local point = sight.ImpactPoint
+                local angle, distance = look(muzzle, point)
+                if distance >= 75 and math.abs(angle.Pitch) < 56 then
+                    local span = (distance + 100) / distance
+                    local end_point = {X = muzzle.X + (point.X - muzzle.X) * span,
+                        Y = muzzle.Y + (point.Y - muzzle.Y) * span, Z = muzzle.Z + (point.Z - muzzle.Z) * span}
+                    local hit = trace(context, muzzle, end_point, 2, true, ignored)
+                    if hit and hit.Component and same(hit.Component:Get(), mesh) then
+                        return view, distance, angle
+                    end
+                end
+            end
+        end
+    end
+end
+
 local function floor_at(context, center, x, y, radius, height)
     local top, bottom = {X = x, Y = y, Z = center.Z + 115}, {X = x, Y = y, Z = center.Z - context.floor_depth}
     local floor = trace(context, top, bottom, 0, false, context.ignored)
@@ -77,6 +112,15 @@ local function floor_at(context, center, x, y, radius, height)
 end
 
 local function align(context, center)
+    if context.fixed then
+        local view, distance, aim = fixture.fixed_contact(context.pawn, context.weapon, context.camera,
+            context.target_mesh, center)
+        if not view then return end
+        context.controller:SetControlRotation(view)
+        context.camera:K2_SetWorldRotation(view, false, {}, true)
+        context.muzzle:K2_SetWorldRotation(aim, false, {}, true)
+        return distance, context.target_mesh:GetFullName()
+    end
     local eye = context.camera:K2_GetComponentLocation()
     if not vector(eye) then return end
     local view = look(eye, center)
@@ -122,6 +166,7 @@ function fixture.aim_target(state, phase, name, guid, tag, actor, target_capsule
 
     local context = equipped(state, phase, name, guid, tag)
     context.trace, context.target_capsule, context.target_mesh = StaticFindObject(trace_path), target_capsule, target_mesh
+    context.fixed = fixed
     context.ignored = {context.pawn, context.weapon, actor}
     local rooftop = tag == "native-crossroads-jammer"
     context.floor_depth, context.aim_range, context.aim_pitch = rooftop and 1800 or 330, rooftop and 1600 or 550, rooftop and 70 or 56

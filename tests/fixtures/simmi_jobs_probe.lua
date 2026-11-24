@@ -234,6 +234,11 @@ local function aim_objective(state, tank)
         local bounds = {}
         trace:GetComponentBounds(component, bounds, {}, {})
         center = bounds.Origin or bounds
+        local view = require("native_flood_jammer_aim_fixture").fixed_contact(pawn, weapon, camera, component, center)
+        if not view then return "waiting" end
+        state.controller:SetControlRotation(view)
+        camera:K2_SetWorldRotation(view, false, {}, true)
+        return "the guest crosshair is on the tank"
     end
     local color, ignored = {R=0, G=0, B=0, A=0}, {pawn, weapon}
     for _, height in ipairs({0, 8, -8, 16, -16, 25}) do
@@ -251,7 +256,7 @@ local function aim_objective(state, tank)
                         Yaw=math.deg(math.atan(dy, dx)), Roll=0}
                     state.controller:SetControlRotation(rotation)
                     camera:K2_SetWorldRotation(rotation, false, {}, true)
-                    return tank and "the guest crosshair is on the tank" or "the guest crosshair is on the jammer"
+                    return "the guest crosshair is on the jammer"
                 end
             end
         end
