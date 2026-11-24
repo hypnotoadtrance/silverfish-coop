@@ -86,4 +86,5 @@ LoopInGameThreadWithDelay(50, function()
     output:close()
 end)
 
+SilverfishProfileCrossroadsCall = probe.call
 return probe

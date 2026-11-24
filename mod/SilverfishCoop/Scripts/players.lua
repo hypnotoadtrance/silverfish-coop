@@ -44,6 +44,7 @@ local location_markers = {}
 local local_player
 local guest_sprints = {}
 local local_input_status
+local standing_mapping
 local restoring_gate
 local walking
 local walk_frame_action, walk_frame_clock, last_walk_frame
@@ -332,15 +333,11 @@ local function remove_mapping_gate(gate)
     return contexts:Contains(gate.original) and not contexts:Contains(gate.clone)
 end
 
-local function observe_mapping(controller, gate)
-    local original = StaticFindObject(gameplay_input_path)
-    local player_input = controller.PlayerInput
-    if not valid(original) or not valid(player_input) then return end
-    local contexts, mappings = player_input.AppliedInputContexts, player_input.EnhancedActionMappings
-    if #mappings > 512 then return end
+local function observe_mapping(mappings, count, stock, reduced)
+    if count > 512 then return end
     local active, flags = {}, {}
     for _, name in ipairs(input_fields) do flags[name] = false end
-    for index = 1, #mappings do
+    for index = 1, count do
         local action = mappings[index].Action
         if valid(action) then
             active[action:GetAddress()] = true
@@ -349,8 +346,7 @@ local function observe_mapping(controller, gate)
             if label then flags[label] = true end
         end
     end
-    return { stock = contexts:Contains(original), reduced = gate ~= nil and contexts:Contains(gate.clone),
-        flags = flags, active = active }
+    return {stock = stock, reduced = reduced, flags = flags, active = active}
 end
 
 local function verified_mapping(observed, gate, downed)
@@ -367,6 +363,33 @@ local function verified_mapping(observed, gate, downed)
         if label ~= "look" and label ~= "move" and observed.flags[label] then return false end
     end
     return true
+end
+
+local function read_local_mapping(controller, pawn, gate, downed)
+    local original, player_input = StaticFindObject(gameplay_input_path), controller.PlayerInput
+    if not valid(original) or not valid(player_input) then
+        standing_mapping = nil
+        return nil, false
+    end
+    local contexts, mappings = player_input.AppliedInputContexts, player_input.EnhancedActionMappings
+    local stock, reduced = contexts:Contains(original), gate ~= nil and contexts:Contains(gate.clone)
+    local count = #mappings
+    local now, cached = os.clock(), standing_mapping
+
+    -- The standing readback is diagnostic. Refresh it periodically for in-place key
+    -- changes, and sample every time the downed gate is applied or being restored.
+    if not downed and not gate and stock and cached and now < cached.refresh
+        and count == cached.count and same(pawn, cached.pawn) and same(player_input, cached.player_input) then
+        return cached.observed, true
+    end
+    standing_mapping = nil
+    local observed = observe_mapping(mappings, count, stock, reduced)
+    local verified = verified_mapping(observed, gate, downed)
+    if verified and not downed and not gate then
+        standing_mapping = {pawn = pawn, player_input = player_input, count = count, observed = observed,
+            refresh = now + 1}
+    end
+    return observed, verified
 end
 
 local function host_inventory_state(controller, pawn, record)
@@ -439,7 +462,10 @@ local function sync_local_input(state, phase)
     local_input_status = nil
     local details = local_player
     local controller, pawn = local_input_controller(state, phase, details)
-    if not controller then return end
+    if not controller then
+        standing_mapping = nil
+        return
+    end
     local record, downed_request = applied[details.name], desired[details.name]
     local downed = downed_request ~= nil
     if record then
@@ -456,9 +482,11 @@ local function sync_local_input(state, phase)
         end
     end
     local gate = record and record.gate or restoring_gate
-    local ok, observed = pcall(observe_mapping, controller, gate)
-    if not ok then observed = nil end
-    local verified = verified_mapping(observed, gate, downed)
+    local ok, observed, verified = pcall(read_local_mapping, controller, pawn, gate, downed)
+    if not ok then
+        standing_mapping = nil
+        observed, verified = nil, false
+    end
     if record then record.input_verified = verified end
     local inventory = "not_applicable"
     if phase == "hosting" and state.server == false and controller:HasAuthority() and pawn:HasAuthority() then

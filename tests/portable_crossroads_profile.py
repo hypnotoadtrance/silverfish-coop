@@ -34,6 +34,19 @@ def instrument_profile(source):
     return before + "status_publication.profile = (function()\n" + code + "\nend)()\n\n" + anchor + rest
 
 
+def instrument_input_mappings(source):
+    original = "local function observe_mapping("
+    anchor = "local function verified_mapping("
+    if source.count(original) != 1 or source.count(anchor) != 1:
+        raise ValueError("The input mapping timing anchors changed")
+    wrapper = (
+        "local function observe_mapping(...)\n"
+        '    return SilverfishProfileCrossroadsCall("players.observe_mapping", collect_mapping, ...)\n'
+        "end\n\n"
+    )
+    return source.replace(original, "local function collect_mapping(").replace(anchor, wrapper + anchor)
+
+
 def read_comparison(raw):
     summary, slow_frame = raw.split("!")
     duration, *sections = summary.split(";")

@@ -84,8 +84,9 @@ function bolt.play(world, pawn, origin, finish, rotation)
     return valid(component.StaticMesh) and component:IsVisible()
 end
 
-function bolt.animate(world)
+function bolt.animate(get_world)
     if #replicas == 0 and #visuals == 0 then return end
+    local world = get_world and get_world()
     local clock = StaticFindObject(statics_path)
     local scope = valid(world) and world:GetAddress()
     local now = scope and valid(clock) and clock:GetRealTimeSeconds(world)

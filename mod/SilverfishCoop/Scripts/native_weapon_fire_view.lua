@@ -120,7 +120,7 @@ function view.short_bolt(world, origin, finish, rotation, from_guest)
 end
 
 function view.animate_bolts(get_world)
-    bolt_view.animate(get_world and get_world())
+    bolt_view.animate(get_world)
 end
 
 local function record_npc_melee(now, id, path, rate, blend_in, blend_out)
