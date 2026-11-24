@@ -22,12 +22,15 @@ FIXED_CUES = ("powerbox", "fixedtank", "fixedfire")
 OBSERVER_CUES = ("observersparks", "observerred", "observergreen", "observerblue", "observerpurple", "observergold")
 OTHER_PROP_BREAKS = ("ceramic", "platestand", "glass", "paper", "cardboard", "wood", "woodchips", "woodsplinters")
 PROP_BREAK_CUES = ("bottle", *OTHER_PROP_BREAKS)
+GLASS_THREAD = "glassthread"
+FIXED_BREAK_CUES = (*PROP_BREAK_CUES, GLASS_THREAD)
 KINDS = {"charge": 4000, "blast": 500100, "vortex": 500100, "electrode": 8100, "canister": 500100, "wandering": 500100,
-         **dict.fromkeys(PROP_BREAK_CUES, 8000),
+         **dict.fromkeys(FIXED_BREAK_CUES, 8000),
          **dict.fromkeys(("fueldrum", "pipebomb", *FIXED_CUES, *OBSERVER_CUES), 500100)}
 CUE_EVENTS = {"pipebomb": "native_pipe_bomb_effect_played", "vortex": "native_vortex_effect_played", "electrode": "native_electrode_effect_played",
               "wandering": "native_wandering_teleport_effect_played", "bottle": "native_bottle_break_played",
               "canister": "native_canister_effect_played", "fueldrum": "native_fuel_drum_effect_played",
+              GLASS_THREAD: "native_glass_thread_snap_played",
               **dict.fromkeys(OTHER_PROP_BREAKS, "native_prop_break_played"),
               **dict.fromkeys(FIXED_CUES, "native_fixed_explosive_effect_played"),
               **dict.fromkeys(OBSERVER_CUES, "native_observer_absorb_played")}
@@ -286,6 +289,12 @@ async def project_fixed_explosives(bridge, game, frame, epoch):
     return await bridge.command("native-fixed-explosives-apply", area, epoch, *arguments, timeout=1.5)
 
 
+def valid_glass_shape(shape):
+    return (isinstance(shape, list) and len(shape) == 7
+            and all(type(angle) in (int, float) and abs(angle) <= 360 for angle in shape[:3])
+            and type(shape[3]) in (int, float) and 0 < shape[3] <= 4096 and valid_position(shape[4:]))
+
+
 class Playback:
     def __init__(self):
         self.scope = None
@@ -307,21 +316,23 @@ class Playback:
             self.seen.clear()
         arguments, selected = [], {}
         for cue in cues:
-            if not isinstance(cue, list) or len(cue) not in {4, 5}:
+            if not isinstance(cue, list) or len(cue) not in {4, 5, 6}:
                 continue
             serial, kind, position, scale = cue[:4]
-            volume = cue[4] if len(cue) == 5 else 1
+            volume = cue[4] if len(cue) >= 5 else 1
+            shape = cue[5] if len(cue) == 6 else None
             if (type(serial) is not int or not 0 < serial < 10**15 or serial in self.seen or serial in selected
                     or type(kind) is not str or kind not in KINDS or not valid_position(position)
                     or type(scale) not in {int, float} or not 0 < scale <= 10
                     or type(volume) not in {int, float} or not 0 <= volume <= 10
-                    or kind in PROP_BREAK_CUES and (scale, volume) != (1, 1)):
+                    or kind in FIXED_BREAK_CUES and (scale, volume) != (1, 1)
+                    or (not valid_glass_shape(shape) if kind == GLASS_THREAD else len(cue) == 6)):
                 continue
             if math.dist(origin, position) > KINDS[kind]:
                 self.seen.append(serial)
                 continue
-            selected[serial] = kind, position, scale, volume
-            arguments.append("|".join(map(str, (serial, kind, *position, scale, volume))))
+            selected[serial] = kind, position, scale, volume, shape
+            arguments.append("|".join(map(str, (serial, kind, *position, scale, volume, *(shape or ())))))
         if not arguments:
             return game
         try:
@@ -341,9 +352,10 @@ class Playback:
                 selected.pop(serial)
             elif len(result) == 2 and set(result) <= {"0", "1"}:
                 self.seen.append(serial)
-                kind, position, scale, volume = selected.pop(serial)
+                kind, position, scale, volume, shape = selected.pop(serial)
                 particles, animated = result
                 control.event(CUE_EVENTS.get(kind, "native_starburst_effect_played"),
                               cue=kind, serial=serial, location=position, map=area, particles=particles == "1",
-                              animated=animated == "1", scale=scale, volume=volume)
+                              animated=animated == "1", scale=scale, volume=volume,
+                              **({"length": shape[3], "break_point": shape[4:]} if shape else {}))
         return snapshot

@@ -36,7 +36,7 @@ local rook = "/Game/Classes/Maps/Dreams/TheRook_P"
 local pending, active, pending_fires, fires, fixtures = {}, {}, {}, {}, {}
 local wandering_hooks, wandering_retry = {}, {}
 local world, world_map, fixture_kind, wandering_probe
-local recovery
+local recovery, glass_break_hook
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -209,6 +209,20 @@ local function share_glass_meshes(actor)
     local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
     local mesh_class = StaticFindObject("/Script/Engine.StaticMeshComponent")
     if not valid(math_api) or not valid(mesh_class) then return false end
+    if not glass_break_hook and type(RegisterHook) == "function" then
+        local path = classes["glass-thread"] .. ":Break"
+        if valid(StaticFindObject(path)) then
+            RegisterHook(path, function(context)
+                local thread = context:get()
+                if not in_world(thread, world) or not thread:HasAuthority() then return end
+                local entry = active[thread:GetAddress()]
+                if entry and entry.kind == "glass-thread" and same(entry.actor, thread) then
+                    entry.break_requested = true
+                end
+            end)
+            glass_break_hook = true
+        end
+    end
     actor.NetUpdateFrequency = math.min(actor.NetUpdateFrequency, 5)
     actor:SetReplicates(true)
     main:SetIsReplicated(true)
@@ -347,6 +361,8 @@ function fields.start(role)
             local destroyed = reason:get() == 0
             if seat == "host" and entry and entry.kind == "electrode" and destroyed then
                 electrodes.retire(entry)
+            elseif seat == "host" and entry and entry.kind == "glass-thread" and entry.break_requested and destroyed then
+                effects.observe_glass_break(actor)
             end
             active[address], pending[address], fires[address], pending_fires[address] = nil, nil, nil, nil
             pyrogeist.ended(address)
@@ -399,9 +415,10 @@ function fields.command(args, state, phase)
         wandering_probe = nil
         return "The test guest returned to the party"
     end
-    local glass_point = type(args[3]) == "string" and args[3]:match("^glass%-thread|([0-9.,%-]+)$")
+    local glass_contact = type(args[3]) == "string" and args[3]:match("^glass%-thread%-contact|([0-9.,%-]+)$")
+    local glass_point = glass_contact or type(args[3]) == "string" and args[3]:match("^glass%-thread|([0-9.,%-]+)$")
     if headless and #args == 3 and glass_point
-        and (args[2] == "native-placed-anomaly-guest-fixture" and phase == "connected"
+        and (args[2] == "native-placed-anomaly-guest-fixture" and phase == "connected" and not glass_contact
             or args[2] == "native-anomaly-trigger-fixture" and phase == "hosting" and host_fixture) then
         for _, entry in pairs(active) do
             local actor = entry.actor
@@ -409,6 +426,15 @@ function fields.command(args, state, phase)
                 and (phase == "hosting" and actor:HasAuthority() or phase == "connected" and replica(actor)) then
                 local point = actor:K2_GetActorLocation()
                 if ("%.0f,%.0f,%.0f"):format(point.X, point.Y, point.Z) == glass_point then
+                    if glass_contact then
+                        local guest = #state.guests == 1 and state.guests[1].pawn
+                        if not in_world(guest, world) or not guest:HasAuthority() or guest:IsLocallyControlled()
+                            or not guest:K2_TeleportTo(point, guest:K2_GetActorRotation()) then
+                            error("Unable to stage a stock guest overlap with the Glass Thread", 0)
+                        end
+                        guest:ForceNetUpdate()
+                        return "The stock guest entered the Glass Thread overlap"
+                    end
                     actor:Break()
                     return "Invoked the stock Glass Thread break"
                 end

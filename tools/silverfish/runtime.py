@@ -2856,17 +2856,20 @@ class Bridge:
                             and collision in {"0", "1"} and role in {"0", "1", "3"}):
                         placed[path] = {"kind": kind, "location": [_finite(axis) for axis in (x, y, z)],
                                         "collision": collision == "1", "role": int(role)}
-                elif fields[0] == "native-anomaly-cue" and len(fields) in {7, 8} and data.get("state") == "hosting":
+                elif fields[0] == "native-anomaly-cue" and len(fields) in {7, 8, 15} and data.get("state") == "hosting":
                     cues = data.setdefault(native_anomaly_effects.KEY, [])
                     serial, kind, *components = fields[1:]
                     location = [_finite(axis) for axis in components[:3]]
                     scale = _finite(components[3])
-                    volume = _finite(components[4]) if len(components) == 5 else 1
-                    if (len(cues) < native_anomaly_effects.MAX_CUES and serial.isascii() and serial.isdecimal()
+                    volume = _finite(components[4]) if len(components) >= 5 else 1
+                    shape = [_finite(axis) for axis in components[5:]]
+                    valid_shape = (native_anomaly_effects.valid_glass_shape(shape)
+                                   if kind == native_anomaly_effects.GLASS_THREAD else not shape)
+                    if (valid_shape and len(cues) < native_anomaly_effects.MAX_CUES and serial.isascii() and serial.isdecimal()
                             and 0 < len(serial) <= 15 and 0 < int(serial) and kind in native_anomaly_effects.KINDS
                             and None not in location and scale is not None and 0 < scale <= 10
                             and volume is not None and 0 <= volume <= 10):
-                        cues.append([int(serial), kind, location, scale, volume])
+                        cues.append([int(serial), kind, location, scale, volume, *([shape] if shape else [])])
                 elif fields[0] == "native-anomaly-capture" and len(fields) in {4, 5, 6, 7} and data.get("state") == "hosting":
                     charge, blast, vortex = map(int, fields[1:4])
                     electrode = int(fields[4]) if len(fields) >= 5 else 0

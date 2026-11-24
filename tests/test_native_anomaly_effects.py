@@ -120,6 +120,28 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_with("native-guest-hurt-play", "Crossroads", epoch, "GuestPawn",
                                            "13", "38", "72.5", "-24", "8", "4", timeout=1.5)
 
+    async def test_glass_thread_snap_requires_stock_geometry_and_plays_once(self):
+        playback = Playback()
+        epoch = "a" * 32
+        area = "/Game/Classes/Maps/Maps_Dungeons/Funnel_01_P"
+        game = {"state": "connected", "map": area, "pawns": {"local": {"location": [0, 0, 0]}}}
+        shape = [30, -60, 0, 430, 108, 25, 4]
+        frame = {"map": area, "epoch": epoch, "cues": [
+            [1, "glassthread", [100, 25, 4], 1, 1],
+            [2, "glassthread", [100, 25, 4], 1, 1, [*shape[:3], 5000, *shape[4:]]],
+            [3, "bottle", [100, 25, 4], 1, 1, shape],
+            [4, "glassthread", [100, 25, 4], 1, 1, shape],
+        ]}
+        bridge = Mock(command=AsyncMock(return_value={**game, "ack": {"message": "4:1:0"}}))
+        control = Mock()
+        for _ in range(2):
+            await playback.sync(bridge, control, game, frame, epoch, "host")
+        bridge.command.assert_awaited_once_with("native-anomaly-play-cues", area, epoch,
+                                                "4|glassthread|100|25|4|1|1|30|-60|0|430|108|25|4", timeout=1.5)
+        self.assertEqual(control.event.call_args.args[0], "native_glass_thread_snap_played")
+        self.assertEqual(control.event.call_args.kwargs["length"], 430)
+        self.assertEqual(control.event.call_args.kwargs["break_point"], [108, 25, 4])
+
     async def test_spatial_cues_play_once_per_authenticated_visit(self):
         playback = Playback()
         epoch = "a" * 32

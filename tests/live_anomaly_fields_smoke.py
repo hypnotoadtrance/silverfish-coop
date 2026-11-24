@@ -10,7 +10,7 @@ import subprocess
 import sys
 import uuid
 
-from live_ai_smoke import wait
+from live_ai_smoke import status, wait
 from live_multi_smoke import saved_hashes
 
 REPO = Path(__file__).resolve().parents[1]
@@ -51,43 +51,111 @@ async def verify_glass_web(host, guest, positions):
                 return False
         return True
 
-    initial = await wait(host, lambda status: strands(status) and any(not row["main"] for row in meshes(status)))
-    original = meshes(initial)
-    host_strands = strands(initial)
-    assert all(row["collision"] for row in host_strands), host_strands
+    def by_strand(shapes):
+        result = {}
+        for shape in shapes:
+            anchor = tuple(round(value) for value in shape["anchor"])
+            result.setdefault(anchor, []).append(shape)
+        return result
 
-    def host_shapes_near_replica(status):
-        return [shape for shape in original if any(math.dist(shape["anchor"], row["location"]) < 2 for row in strands(status))]
+    initial = {}
+
+    def geometry_matches(client):
+        nonlocal initial
+        observed = status(host)
+        host_shapes = by_strand(meshes(observed))
+        guest_shapes = by_strand(meshes(client))
+        if any(not row["main"] for row in meshes(client)) and all(
+            matching(host_shapes.get(anchor, []), shapes) for anchor, shapes in guest_shapes.items()
+        ):
+            initial = observed
+            return True
+        return False
 
     try:
-        passive = await wait(guest, lambda status: any(not row["main"] for row in meshes(status))
-                             and matching(host_shapes_near_replica(status), meshes(status)))
+        passive = await wait(guest, geometry_matches)
     except RuntimeError:
         raise AssertionError("The guest did not receive the host geometry for the relevant Glass Threads") from None
+    host_strands = strands(initial)
     guest_strands = strands(passive)
-    assert all(not row["collision"] and any(math.dist(row["location"], host["location"]) < 2 for host in host_strands)
-               for row in guest_strands), guest_strands
-    anchor = next(row["anchor"] for row in meshes(passive) if not row["main"])
-    nearest = min(host_strands, key=lambda row: math.dist(row["location"], anchor))["location"]
-    key = "glass-thread|" + ",".join(f"{value:.0f}" for value in nearest)
+    assert host_strands and all(row["collision"] for row in host_strands), host_strands
+    assert guest_strands and all(not row["collision"] and any(
+        math.dist(row["location"], host_strand["location"]) < 2 for host_strand in host_strands
+    ) for row in guest_strands), guest_strands
+    hazards = [row["location"] for row in positions(initial) if row["kind"] != "glass-thread"]
+    branches = {tuple(row["anchor"]) for row in meshes(passive) if not row["main"]}
+    candidates = sorted((row["location"] for row in host_strands
+                         if tuple(round(value) for value in row["location"]) in branches),
+                        key=lambda point: min(math.dist(point, hazard) for hazard in hazards), reverse=True)
+    # Sampling across the web avoids spending the entire trial on strands around one wall.
+    candidates = candidates[::max(1, len(candidates) // 10)]
 
-    def nearby_meshes(status):
-        return [row for row in meshes(status) if math.dist(row["anchor"], nearest) < 2]
+    def events():
+        path = guest / "events.jsonl"
+        if not path.is_file():
+            return []
+        lines = path.read_text(encoding="utf-8")
+        return [json.loads(line) for line in lines[:lines.rfind("\n")].splitlines()]
 
-    count = len(nearby_meshes(passive))
-    refused = await submit(guest, "native-placed-anomaly-guest-fixture", target=key)
-    prev = passive["game"]["native_anomaly_field"]["blocked_triggers"]
-    assert refused["ok"] and refused["native_anomaly_field"]["blocked_triggers"] == prev + 1, refused
-    still_passive = await wait(guest, lambda status: status["game"]["native_anomaly_field"]["blocked_triggers"] > prev)
-    assert matching(nearby_meshes(passive), nearby_meshes(still_passive)), nearby_meshes(still_passive)
+    def present(state, point):
+        return any(math.dist(row["location"], point) < 2 for row in strands(state))
 
-    broken = await submit(host, "native-anomaly-trigger-fixture", target=key)
-    assert broken["ok"], broken
-    await wait(host, lambda status: not any(math.dist(row["location"], nearest) < 2 for row in strands(status)))
-    synced = await wait(guest, lambda status: not any(math.dist(row["location"], nearest) < 2 for row in strands(status)))
-    assert all(not row["collision"] for row in strands(synced)), strands(synced)
-    return {"host_strands": len(host_strands), "guest_relevant_strands": len(guest_strands),
-            "guest_relevant_meshes": len(meshes(passive)), "destroyed_meshes": count, "guest_passive": True}
+    baseline = await wait(host, lambda state: (pawns := state.get("game", {}).get("pawns", {}))
+                          and all(pawns.get(seat, {}).get("health") for seat in ("local", "guest")))
+    health = baseline["game"]["pawns"]
+    observed = []
+
+    # Other pawn components can start the stock break without taking damage.
+    for point in candidates[:10]:
+        local_view, peer_view = status(host), status(guest)
+        if not present(local_view, point) or not present(peer_view, point):
+            continue
+        shapes = [row for row in meshes(peer_view) if math.dist(row["anchor"], point) < 2]
+        key = ",".join(f"{value:.0f}" for value in point)
+        previous = peer_view["game"]["native_anomaly_field"]["blocked_triggers"]
+        refused = await submit(guest, "native-placed-anomaly-guest-fixture", target="glass-thread|" + key)
+        assert refused["ok"] and refused["native_anomaly_field"]["blocked_triggers"] == previous + 1, refused
+        still_passive = await wait(guest, lambda state: state["game"]["native_anomaly_field"]["blocked_triggers"] > previous)
+        assert matching(shapes, [row for row in meshes(still_passive) if math.dist(row["anchor"], point) < 2])
+
+        event_start = len(events())
+        entered = await submit(host, "native-anomaly-trigger-fixture", target="glass-thread-contact|" + key)
+        if not entered["ok"] and entered["error"] == "Unable to stage a stock guest overlap with the Glass Thread":
+            continue
+        assert entered["ok"], entered
+        await wait(host, lambda state: strands(state) and not present(state, point), timeout=6)
+
+        def snap_events():
+            return [row for row in events()[event_start:] if row["event"] == "native_glass_thread_snap_played"
+                    and math.dist(row["location"], point) < 2]
+
+        await wait(guest, lambda state: strands(state) and not present(state, point) and snap_events(), timeout=8)
+        cue, = snap_events()
+        assert cue["particles"] and abs(cue["length"] - 100 * next(
+            row["scale"][0] for row in shapes if row["main"])) < 1, cue
+        assert math.dist(cue["break_point"], point) < cue["length"], cue
+        observed.append({"destroyed_meshes": len(shapes), "snap": cue})
+
+        def received_cut(state):
+            host_hp = status(host).get("game", {}).get("pawns", {}).get("guest", {}).get("health")
+            guest_hp = state.get("game", {}).get("pawns", {}).get("local", {}).get("health") or 0
+            return (host_hp is not None and 0 < guest_hp < health["guest"]["health"]
+                    and abs(guest_hp - host_hp) < 1
+                    and any(row["event"] == "native_guest_hurt_played" and row["damage"] == 25
+                            and abs(cue["time_unix"] - row["time_unix"]) < 1
+                            for row in events()[event_start:]))
+
+        try:
+            synced = await wait(guest, received_cut, timeout=5)
+        except RuntimeError:
+            continue
+        assert status(host)["game"]["pawns"]["local"]["health"] == health["local"]["health"]
+        assert all(not row["collision"] for row in strands(synced)), strands(synced)
+        return {"host_strands": len(host_strands), "guest_relevant_strands": len(guest_strands),
+                "guest_relevant_meshes": len(meshes(passive)), "guest_passive": True,
+                "contacts": observed,
+                "guest_health": [health["guest"]["health"], synced["game"]["pawns"]["local"]["health"]]}
+    raise AssertionError(f"No contact produced the stock 25-point cut after {len(observed)} verified snaps")
 
 
 async def verify(work, vanilla, activate, placed, generated, glass_web=False):
@@ -107,7 +175,7 @@ async def verify(work, vanilla, activate, placed, generated, glass_web=False):
 
     async def launch(run, label, *arguments):
         env = dict(os.environ)
-        if activate and label == "guest":
+        if (activate or glass_web) and label == "guest":
             env["SILVERFISH_COOP_RENDER_CAPTURE"] = "guest"
         with (host / f"{label}.log").open("wb") as log:
             job = await asyncio.create_subprocess_exec(*cli, *arguments, stdout=log, stderr=log, cwd=REPO,
