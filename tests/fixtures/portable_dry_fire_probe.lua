@@ -64,6 +64,7 @@ local function arm()
     local statics = asset("/Script/Engine.Default__GameplayStatics")
     local_pawn = statics:GetPlayerPawn(world, 0)
     assert(valid(local_pawn) and local_pawn:IsLocallyControlled() and same(local_pawn:GetWorld(), world), "expected local stock pawn")
+    peer = nil
     for _, pawn in ipairs(FindAllOf("Player_FP_C") or {}) do
         if valid(pawn) and same(pawn:GetWorld(), world) and not pawn:IsActorBeingDestroyed() and not pawn:IsLocallyControlled() then
             assert(not peer, "duplicate remote stock pawn")

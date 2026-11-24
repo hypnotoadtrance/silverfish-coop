@@ -79,6 +79,11 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
         except TimeoutError as error:
             raise AssertionError(f"The observer had no settled stock foregrip: {reading}") from error
 
+    async def observing_pose(*clips):
+        return await wait_resident_status(
+            host_run, lambda frame: (avatar := frame.get("game", {}).get("native_player_avatars", {}).get(pawn, {}))
+            and avatar.get("pose_clip") in clips and (avatar.get("weapon_socket_height") or 0) > 0)
+
     try:
         host_armed, guest_armed = await asyncio.gather(command(host, "arm-light-ar"), command(guest, "arm-light-ar"))
         assert host_armed == guest_armed == "armed", (host_armed, guest_armed)
@@ -152,8 +157,10 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
             assert await command(guest, "equip") == "selected"
             await wait_readback(host, "peer-ready", f"{obrez},1,1")
             await wait_readback(guest, "aim", "aiming")
+            await observing_pose("Rifle_Aiming_Idle")
             assert await command(guest, "put-away") == "changing"
             await wait_readback(guest, "other-ready", "other")
+            await observing_pose("HandGun_Idle_2", "Rifle_Aiming_Low_Close1")
             obrez_switch = True
         assert campaign_save_hashes(host.campaign) == before
     finally:
