@@ -957,48 +957,58 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
         def observer(state):
             return state.get("game", {}).get("native_avatar_melee", {}).get(actor, {})
 
-        prior_serial = observer(host_frame).get("serial", 0)
-    center, name = (await command(host, "stage-melee")).split(";", 1)
-    async with asyncio.timeout(6):
-        while not (await command(guest, f"melee-state\t{center}")).startswith("true;false;"):
-            await asyncio.sleep(.05)
-    assert await command(guest, f"face-melee\t{center}") == "ready"
-    await asyncio.sleep(.25)
-    assert await command(host, f"align-melee\t{center}") == "true"
-    before = await command(host, f"melee-state\t{center}")
-    assert before == f"true;false;7.000;{name}", before
-    tap = await submit(guest_run, "native-guest-primary-input-fixture")
-    assert tap["ok"], tap
-    sequence = tap["native_guest_primary_fixture"]["sequence"]
-    async with asyncio.timeout(8):
-        while True:
-            events = await resident_events(guest_run, frame)
-            event = next((row for row in events if row.get("sequence") == sequence
-                          and row["event"] in {"native_guest_melee_input", "native_guest_melee_input_rejected"}), None)
-            if event:
-                break
-            await asyncio.sleep(.05)
-    assert event["event"] == "native_guest_melee_input", event
-    proof = event[native_guest_melee.SWING_KEY]
-    contact = await command(host, "melee-contact")
-    after = await command(host, f"melee-state\t{center}")
-    result = {"stock_input": tap, "host_damage": proof}
-    if verify_observer:
-        assert proof["pawn"] == actor
-        try:
-            async with asyncio.timeout(5):
-                while True:
-                    host_frame = await current_status(host_run)
-                    pose = observer(host_frame)
-                    if pose.get("serial", 0) > prior_serial and not pose["active"] and pose["weapon_hand_motion_cm"] > 10:
-                        result["host_observer_swing"] = pose
-                        break
-                    await asyncio.sleep(.15)
-        except TimeoutError as error:
-            avatar = host_frame["game"].get("native_player_avatars", {}).get(actor)
-            raise AssertionError(f"Guest swing did not animate for host: {observer(host_frame)}, {avatar}, {proof}") from error
+    misses = []
+    # The unattended client camera can settle after the fixture aligns the swing.
+    # Retry only a verified stock miss that left the staged target untouched.
+    for _ in range(3 if verify_observer else 1):
+        if verify_observer:
+            prior_serial = observer(await current_status(host_run)).get("serial", 0)
+        center, name = (await command(host, "stage-melee")).split(";", 1)
+        async with asyncio.timeout(6):
+            while not (await command(guest, f"melee-state\t{center}")).startswith("true;false;"):
+                await asyncio.sleep(.05)
+        assert await command(guest, f"face-melee\t{center}") == "ready"
+        await asyncio.sleep(.25)
+        assert await command(host, f"align-melee\t{center}") == "true"
+        before = await command(host, f"melee-state\t{center}")
+        assert before == f"true;false;7.000;{name}", before
+        tap = await submit(guest_run, "native-guest-primary-input-fixture")
+        assert tap["ok"], tap
+        sequence = tap["native_guest_primary_fixture"]["sequence"]
+        async with asyncio.timeout(8):
+            while True:
+                events = await resident_events(guest_run, frame)
+                event = next((row for row in events if row.get("sequence") == sequence
+                              and row["event"] in {"native_guest_melee_input", "native_guest_melee_input_rejected"}), None)
+                if event:
+                    break
+                await asyncio.sleep(.05)
+        assert event["event"] == "native_guest_melee_input", event
+        proof = event[native_guest_melee.SWING_KEY]
+        contact = await command(host, "melee-contact")
+        after = await command(host, f"melee-state\t{center}")
+        result = {"stock_input": tap, "host_damage": proof}
+        if verify_observer:
+            assert proof["pawn"] == actor
+            try:
+                async with asyncio.timeout(5):
+                    while True:
+                        host_frame = await current_status(host_run)
+                        pose = observer(host_frame)
+                        if pose.get("serial", 0) > prior_serial and not pose["active"] and pose["weapon_hand_motion_cm"] > 10:
+                            result["host_observer_swing"] = pose
+                            break
+                        await asyncio.sleep(.15)
+            except TimeoutError as error:
+                avatar = host_frame["game"].get("native_player_avatars", {}).get(actor)
+                raise AssertionError(f"Guest swing did not animate for host: {observer(host_frame)}, {avatar}, {proof}") from error
+        if not (native_guest_melee.verified_miss(proof) and after == before and contact == "sphere_empty"):
+            break
+        misses.append({"stock_input": tap, "host_receipt": proof, "contact": contact})
     assert proof["target"] == name and proof["enemy_health_after"] <= 0 and native_guest_melee.verified_damage(proof), (
         proof, contact, before, after, result.get("host_observer_swing"))
+    if misses:
+        result["fixture_misses"] = misses
     async with asyncio.timeout(8):
         while True:
             states = await asyncio.gather(*(command(seat, f"melee-state\t{center}") for seat in (host, guest)))
