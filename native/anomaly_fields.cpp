@@ -38,6 +38,8 @@ namespace
     constexpr auto day_cycle_class = STR("/Game/Classes/Actors/DayCycle_SunControler_BP.DayCycle_SunControler_BP_C");
     constexpr auto mushroom_patch = STR("/Game/Assets/PCG_Brushes/MushroomPatch_BP.MushroomPatch_BP_C");
     constexpr auto trap_overlap = STR("BndEvt__Starburst_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature");
+    constexpr auto glass_web_class = STR("/Game/Classes/Anomalies/GlassWeb_BP.GlassWeb_BP_C");
+    constexpr auto glass_thread_class = STR("/Game/Classes/Anomalies/GlassThread_BP.GlassThread_BP_C");
     constexpr auto electrode_class = STR("/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C");
     constexpr auto acid_pool_class = STR("/Game/Classes/Anomalies/AcidPool_BP.AcidPool_BP_C");
     constexpr auto acid_dot_class = STR("/Game/Classes/Actors/StatusEffect_Actors/DotVolume.DotVolume_C");
@@ -70,16 +72,18 @@ namespace
         STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_FuelDrum.Prop_FuelDrum_C"),
         standing_tank_class,
     };
-    constexpr std::array<std::wstring_view, 5> replicated_classes{
+    constexpr std::array<std::wstring_view, 6> replicated_classes{
         STR("/Game/Classes/Anomalies/Starburst_BP.Starburst_BP_C"),
         STR("/Game/Classes/Anomalies/BurnerTrap_BP.BurnerTrap_BP_C"),
         vortex_class,
         electrode_class,
         roaming_teleport_class,
+        glass_web_class,
     };
     std::array<H::GlobalCallbackId, 5> hooks{H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID};
     U::FName spawn_field, overlap, electrode, roaming_teleport, fixed_prop_name, update_storm_track;
     U::FName gravity, gravity_graph, gravity_add_actors;
+    U::FName glass_web, glass_thread, glass_generate, glass_overlap, glass_break;
     U::FName pyrogeist, pyrogeist_graph, directed_jet, fire_graph, fire_damage;
     U::FName shadow, shadow_graph;
     U::FName angler;
@@ -894,6 +898,34 @@ namespace
             }
             return;
         }
+        if (name == glass_generate || name == glass_overlap || name == glass_break)
+        {
+            auto* type = actor->GetClassPrivate();
+            if (!U::IsInGameThreadRaw() || !type || type != function->GetOuterPrivate() || actor->IsUnreachable() ||
+                function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) ||
+                call.OriginalFunctionCallPrevented()) return;
+            const bool generator = name == glass_generate && type->GetFName() == glass_web &&
+                type->GetPathName() == glass_web_class && function->GetNumParms() == 0;
+            const bool strand = (name == glass_overlap || name == glass_break) && type->GetFName() == glass_thread &&
+                type->GetPathName() == glass_thread_class && function->GetNumParms() == (name == glass_break ? 0 : 6);
+            if (generator || strand)
+            {
+                auto* world = static_cast<U::AActor*>(actor)->GetWorld();
+                if (!guest_world(world)) return;
+                call.PreventOriginalFunctionCall();
+                if (!call.OriginalFunctionCallPrevented()) return;
+                if (observed_world.Get() != world)
+                {
+                    observed_world = world;
+                    skipped = 0;
+                    blocked_triggers = 0;
+                    blocked_canister_calls = 0;
+                    blocked_fixed_prop_calls = 0;
+                }
+                ++blocked_triggers;
+                return;
+            }
+        }
         const bool field = name == spawn_field;
         const bool trap = name == overlap ||
             std::find(electrode_events.begin(), electrode_events.end(), name) != electrode_events.end();
@@ -1073,6 +1105,11 @@ namespace silverfish::native_anomaly_fields
         if (installed()) return;
         spawn_field = U::FName{STR("SpawnField"), U::FNAME_Add};
         update_storm_track = U::FName{STR("UpdateStormTrack"), U::FNAME_Add};
+        glass_web = U::FName{STR("GlassWeb_BP_C"), U::FNAME_Add};
+        glass_thread = U::FName{STR("GlassThread_BP_C"), U::FNAME_Add};
+        glass_generate = U::FName{STR("GenerateWeb"), U::FNAME_Add};
+        glass_overlap = U::FName{STR("BndEvt__GlassThread_BP_StaticMesh_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature"), U::FNAME_Add};
+        glass_break = U::FName{STR("Break"), U::FNAME_Add};
         gravity = U::FName{STR("GravityAnomaly_BP_C"), U::FNAME_Add};
         gravity_graph = U::FName{STR("ExecuteUbergraph_GravityAnomaly_BP"), U::FNAME_Add};
         gravity_add_actors = U::FName{STR("AddActors"), U::FNAME_Add};

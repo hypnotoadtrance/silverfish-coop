@@ -27,7 +27,70 @@ PLACED = {
 }
 
 
-async def verify(work, vanilla, activate, placed, generated):
+async def verify_glass_web(host, guest, positions):
+    def strands(status):
+        return [row for row in positions(status) if row["kind"] == "glass-thread"]
+
+    def meshes(status):
+        return status.get("game", {}).get("native_glass_thread_meshes", [])
+
+    def matching(reference, remote):
+        if len(reference) != len(remote):
+            return False
+        unmatched = remote.copy()
+        for wanted in reference:
+            for index, found in enumerate(unmatched):
+                if (found["main"] == wanted["main"] and math.dist(found["anchor"], wanted["anchor"]) < 2
+                        and math.dist(found["location"], wanted["location"]) < (2 if wanted["main"] else .1)
+                        and math.dist(found["scale"], wanted["scale"]) < .05
+                        and all(abs((a - b + 180) % 360 - 180) < (1.5 if wanted["main"] else .1)
+                                for a, b in zip(found["rotation"], wanted["rotation"]))):
+                    unmatched.pop(index)
+                    break
+            else:
+                return False
+        return True
+
+    initial = await wait(host, lambda status: strands(status) and any(not row["main"] for row in meshes(status)))
+    original = meshes(initial)
+    host_strands = strands(initial)
+    assert all(row["collision"] for row in host_strands), host_strands
+
+    def host_shapes_near_replica(status):
+        return [shape for shape in original if any(math.dist(shape["anchor"], row["location"]) < 2 for row in strands(status))]
+
+    try:
+        passive = await wait(guest, lambda status: any(not row["main"] for row in meshes(status))
+                             and matching(host_shapes_near_replica(status), meshes(status)))
+    except RuntimeError:
+        raise AssertionError("The guest did not receive the host geometry for the relevant Glass Threads") from None
+    guest_strands = strands(passive)
+    assert all(not row["collision"] and any(math.dist(row["location"], host["location"]) < 2 for host in host_strands)
+               for row in guest_strands), guest_strands
+    anchor = next(row["anchor"] for row in meshes(passive) if not row["main"])
+    nearest = min(host_strands, key=lambda row: math.dist(row["location"], anchor))["location"]
+    key = "glass-thread|" + ",".join(f"{value:.0f}" for value in nearest)
+
+    def nearby_meshes(status):
+        return [row for row in meshes(status) if math.dist(row["anchor"], nearest) < 2]
+
+    count = len(nearby_meshes(passive))
+    refused = await submit(guest, "native-placed-anomaly-guest-fixture", target=key)
+    prev = passive["game"]["native_anomaly_field"]["blocked_triggers"]
+    assert refused["ok"] and refused["native_anomaly_field"]["blocked_triggers"] == prev + 1, refused
+    still_passive = await wait(guest, lambda status: status["game"]["native_anomaly_field"]["blocked_triggers"] > prev)
+    assert matching(nearby_meshes(passive), nearby_meshes(still_passive)), nearby_meshes(still_passive)
+
+    broken = await submit(host, "native-anomaly-trigger-fixture", target=key)
+    assert broken["ok"], broken
+    await wait(host, lambda status: not any(math.dist(row["location"], nearest) < 2 for row in strands(status)))
+    synced = await wait(guest, lambda status: not any(math.dist(row["location"], nearest) < 2 for row in strands(status)))
+    assert all(not row["collision"] for row in strands(synced)), strands(synced)
+    return {"host_strands": len(host_strands), "guest_relevant_strands": len(guest_strands),
+            "guest_relevant_meshes": len(meshes(passive)), "destroyed_meshes": count, "guest_passive": True}
+
+
+async def verify(work, vanilla, activate, placed, generated, glass_web=False):
     name = f"anomaly-field-{uuid.uuid4().hex[:8]}"
     host = work / "campaigns" / name / "run"
     guest = work / "clients" / name / "run"
@@ -192,6 +255,8 @@ async def verify(work, vanilla, activate, placed, generated):
             rejoined = await wait(guest, matching_vortex)
         assert all(not projected(rejoined, trap)["collision"] for trap in traps.values()), rejoined
         proof["reconnect"] = True
+        if glass_web:
+            proof["glass_web"] = await verify_glass_web(host, guest, positions)
         if activate:
             first = await wait(host, lambda row: row.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
             health = first["game"]["pawns"]["local"]["health"]
@@ -289,8 +354,10 @@ if __name__ == "__main__":
     parser.add_argument("--activate", action="store_true")
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--placed", choices=PLACED)
+    selection.add_argument("--glass-web", action="store_true", help="verify the Funnel's stock Glass Webs and Vortices")
     selection.add_argument("--generated-vortex", action="store_true")
     selection.add_argument("--generated-electrode", action="store_true")
     args = parser.parse_args()
     generated = "vortex" if args.generated_vortex else "electrode" if args.generated_electrode else None
-    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), args.activate, args.placed, generated))
+    placed = "funnel" if args.glass_web else args.placed
+    asyncio.run(verify(args.work.resolve(), args.vanilla_saved.resolve(), args.activate, placed, generated, args.glass_web))

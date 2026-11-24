@@ -20,6 +20,7 @@ local classes = {
     electrode = "/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C",
     ["wandering-teleport"] = "/Game/Classes/Anomalies/Wandering_Teleport_BP.Wandering_Teleport_BP_C",
     ["lingering-teleport"] = "/Game/Classes/Anomalies/Lingering_Teleport_BP1.Lingering_Teleport_BP1_C",
+    ["glass-thread"] = "/Game/Classes/Anomalies/GlassThread_BP.GlassThread_BP_C",
 }
 local gravity = "BlueprintGeneratedClass /Game/Classes/Anomalies/GravityAnomaly_BP.GravityAnomaly_BP_C"
 local kinds = {}
@@ -186,6 +187,58 @@ local function project_placed_sensors(args, state, phase)
     return "Applied host placements to the passive Vortex sensors"
 end
 
+local function glass_meshes(actor)
+    local mesh_class = StaticFindObject("/Script/Engine.StaticMeshComponent")
+    if not valid(mesh_class) then return {} end
+    local meshes = {}
+    for _, value in ipairs(actor:K2_GetComponentsByClass(mesh_class) or {}) do
+        local mesh = value
+        if type(mesh) == "userdata" and type(mesh.type) == "function" and mesh:type() == "RemoteUnrealParam" then
+            mesh = mesh:get()
+        end
+        if not valid(mesh) or not same(mesh:GetOwner(), actor) then return {} end
+        meshes[#meshes + 1] = mesh
+    end
+    return meshes
+end
+
+local function share_glass_meshes(actor)
+    local meshes = glass_meshes(actor)
+    local main, root = actor.StaticMesh, actor.RootComponent
+    if #meshes < 1 or #meshes > 7 or not valid(main) or not valid(root) then return false end
+    local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+    local mesh_class = StaticFindObject("/Script/Engine.StaticMeshComponent")
+    if not valid(math_api) or not valid(mesh_class) then return false end
+    actor.NetUpdateFrequency = math.min(actor.NetUpdateFrequency, 5)
+    actor:SetReplicates(true)
+    main:SetIsReplicated(true)
+    for _, mesh in ipairs(meshes) do
+        if not same(mesh, main) and valid(mesh.StaticMesh) and mesh:GetCollisionEnabled() == 0 then
+            -- The stock construction script creates random, cosmetic branches as
+            -- named subobjects. Net-created instances can reach a guest that did
+            -- not run that random branch construction.
+            local relative = math_api:MakeRelativeTransform(mesh:K2_GetComponentToWorld(), root:K2_GetComponentToWorld())
+            local branch = actor:AddComponentByClass(mesh_class, true, relative, true)
+            if valid(branch) then
+                branch:SetCollisionEnabled(0)
+                branch:SetGenerateOverlapEvents(false)
+                branch:SetMobility(2)
+                branch:SetStaticMesh(mesh.StaticMesh)
+                actor:FinishAddComponent(branch, true, relative)
+                if same(branch.StaticMesh, mesh.StaticMesh)
+                    and branch:K2_AttachToComponent(root, FName("None"), 0, 0, 0, false) then
+                    branch:K2_SetRelativeTransform(relative, false, {}, true)
+                    branch:SetIsReplicated(true)
+                    mesh:K2_DestroyComponent(actor)
+                else
+                    branch:K2_DestroyComponent(actor)
+                end
+            end
+        end
+    end
+    return true
+end
+
 local function burner_source(actor)
     local point, source = actor:K2_GetActorLocation(), nil
     local duration = actor.BurnTime
@@ -226,6 +279,8 @@ function fields.start(role)
                 actor:SetActorEnableCollision(false)
                 actor:SetActorTickEnabled(false)
             end
+        elseif class == "BlueprintGeneratedClass " .. classes["glass-thread"] then
+            actor:SetActorEnableCollision(false)
         elseif trap_kind(actor, class) or class == fire_jet then
             local _, local_copy = placement(actor)
             if local_copy or replica(actor) then actor:SetActorEnableCollision(false) end
@@ -263,7 +318,7 @@ function fields.start(role)
         if kind then placed, local_copy = placement(actor) end
         if seat == "host" and not actor:HasAuthority() then return end
         if seat == "client" and not local_copy and not replica(actor) then
-            if disables_replica_tick(kind) and actor:GetLocalRole() == 1 then
+            if (kind == "glass-thread" or disables_replica_tick(kind)) and actor:GetLocalRole() == 1 then
                 pending[actor:GetAddress()] = {actor = actor, kind = kind}
             end
             return
@@ -344,6 +399,23 @@ function fields.command(args, state, phase)
         wandering_probe = nil
         return "The test guest returned to the party"
     end
+    local glass_point = type(args[3]) == "string" and args[3]:match("^glass%-thread|([0-9.,%-]+)$")
+    if headless and #args == 3 and glass_point
+        and (args[2] == "native-placed-anomaly-guest-fixture" and phase == "connected"
+            or args[2] == "native-anomaly-trigger-fixture" and phase == "hosting" and host_fixture) then
+        for _, entry in pairs(active) do
+            local actor = entry.actor
+            if entry.kind == "glass-thread" and in_world(actor, state.world)
+                and (phase == "hosting" and actor:HasAuthority() or phase == "connected" and replica(actor)) then
+                local point = actor:K2_GetActorLocation()
+                if ("%.0f,%.0f,%.0f"):format(point.X, point.Y, point.Z) == glass_point then
+                    actor:Break()
+                    return "Invoked the stock Glass Thread break"
+                end
+            end
+        end
+        error("The stock Glass Thread is unavailable", 0)
+    end
     if args[2] == "native-anomaly-trigger-fixture" or args[2] == "native-placed-anomaly-guest-fixture"
         or args[2] == "native-electrode-retire-fixture" then
         local guest_probe = args[2] == "native-placed-anomaly-guest-fixture"
@@ -399,7 +471,7 @@ function fields.command(args, state, phase)
     end
     if args[2] ~= "native-anomaly-field-fixture" then return end
     local path = classes[args[3]]
-    if #args ~= 3 or not path or args[3] == "lingering-teleport" or state.map ~= crossroads or not valid(state.world) or not headless
+    if #args ~= 3 or not path or args[3] == "lingering-teleport" or args[3] == "glass-thread" or state.map ~= crossroads or not valid(state.world) or not headless
         or (phase ~= "connected" and (phase ~= "hosting" or not host_fixture)) then
         error("The stock trap probe requires a muted Crossroads session", 0)
     end
@@ -480,7 +552,13 @@ function fields.rows(state, phase, row)
                     actor:SetActorEnableCollision(false)
                     if disables_replica_tick(entry.kind) then actor:SetActorTickEnabled(false) end
                 end
-                if actor:GetActorEnableCollision() == false then active[address] = entry end
+                if actor:GetActorEnableCollision() == false and (entry.kind ~= "glass-thread" or replica(actor)) then
+                    active[address] = entry
+                end
+            elseif entry.kind == "glass-thread" and share_glass_meshes(actor) then
+                actor:SetReplicateMovement(true)
+                actor:ForceNetUpdate()
+                active[address] = entry
             elseif entry.placed or entry.travel_source or actor:ActorHasTag(FName("Anomaly")) then
                 -- SpawnField applies its stock tag after finishing the spawned actor's BeginPlay.
                 actor.NetUpdateFrequency = math.min(actor.NetUpdateFrequency, 5)
@@ -532,10 +610,24 @@ function fields.rows(state, phase, row)
             if phase == "connected" and entry.placed and actor:GetActorEnableCollision() then
                 actor:SetActorEnableCollision(false)
             end
-            live = live + 1
+            if entry.kind ~= "glass-thread" then live = live + 1 end
             local position = actor:K2_GetActorLocation()
             local collision = actor:GetActorEnableCollision() and 1 or 0
-            rows[#rows + 1] = row("native-anomaly-position", entry.kind, position.X, position.Y, position.Z, collision)
+            if entry.kind ~= "glass-thread" or headless then
+                rows[#rows + 1] = row("native-anomaly-position", entry.kind, position.X, position.Y, position.Z, collision)
+            end
+            if headless and entry.kind == "glass-thread" then
+                for _, mesh in ipairs(glass_meshes(actor)) do
+                    local root = same(mesh, actor.StaticMesh) and 1 or 0
+                    -- Compare branch geometry in actor space so stock movement
+                    -- quantization of the actor pose does not amplify at the ends.
+                    local location = root == 1 and mesh:K2_GetComponentLocation() or mesh.RelativeLocation
+                    local rotation = root == 1 and mesh:K2_GetComponentRotation() or mesh.RelativeRotation
+                    local scale = mesh.RelativeScale3D
+                    rows[#rows + 1] = row("native-glass-thread-mesh", position.X, position.Y, position.Z, root,
+                        location.X, location.Y, location.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, scale.X, scale.Y, scale.Z)
+                end
+            end
             if entry.placed then
                 rows[#rows + 1] = row("native-placed-anomaly", entry.placed, entry.kind, position.X, position.Y, position.Z,
                     collision, actor:GetLocalRole())

@@ -2986,11 +2986,18 @@ class Bridge:
                     row = [values[:3], *values[3:]]
                     if len(observers) < native_anomaly_effects.MAX_ANGLER_LAMPS and native_anomaly_effects.valid_observer_opacity(row):
                         observers.append(row)
+                elif fields[0] == "native-glass-thread-mesh" and len(fields) == 14:
+                    meshes = data.setdefault("native_glass_thread_meshes", [])
+                    if len(meshes) < 2048 and fields[4] in {"0", "1"}:
+                        meshes.append({"anchor": [_finite(axis) for axis in fields[1:4]], "main": fields[4] == "1",
+                                       "location": [_finite(axis) for axis in fields[5:8]],
+                                       "rotation": [_finite(axis) for axis in fields[8:11]],
+                                       "scale": [_finite(axis) for axis in fields[11:14]]})
                 elif fields[0] == "native-anomaly-position" and len(fields) == 6:
                     positions = data.setdefault("native_anomaly_positions", [])
                     if (len(positions) < 1024 and fields[1] in {
                             "starburst", "burner", "vortex", "electrode", "wandering-teleport", "lingering-teleport", "gravity",
-                            "pyrogeist", "shadow-sphere", "angler-lamp", "observer",
+                            "pyrogeist", "shadow-sphere", "angler-lamp", "observer", "glass-thread",
                         }
                             and fields[5] in {"0", "1"}):
                         positions.append({"kind": fields[1], "location": [_finite(value) for value in fields[2:5]],
