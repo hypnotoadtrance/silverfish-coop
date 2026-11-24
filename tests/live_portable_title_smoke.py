@@ -1930,7 +1930,7 @@ async def verify_tutorial_dock_melee(host: Seat, guest: Seat, pawn: str) -> dict
 
 
 async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, retaliation: bool = False,
-                                     pursuit: bool = False) -> dict:
+                                     pursuit: bool = False, held_mask: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     for seat in (host, guest):
         for probe in ("portable-dry-fire", "portable-footstep"):
@@ -1948,6 +1948,8 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
         frame.get("zone_epoch") == arrival["zone_epoch"] and frame.get("state") == "connected"
         and frame.get("gameplay_fresh") and frame.get("game", {}).get("map") == dock
         and frame["game"].get("native_guest_primary_scope", {}).get("kind") == "rusty-pistol"), timeout=12)
+    if held_mask:
+        return await verify_stock_held_mask(host, guest, portable_probe_command)
     if pursuit:
         presentation = {}
         try:
@@ -4076,6 +4078,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
                  rusty_pistol: bool = False, tutorial_dock_combat: bool = False, tutorial_dock_retaliation: bool = False,
                  tutorial_dock_melee: bool = False, tutorial_dock_pursuit: bool = False,
+                 tutorial_dock_held_mask: bool = False,
                  stock_bandage_revisit: bool = False, stock_shovel: bool = False, stock_shovel_loot: bool = False,
                  stock_shovel_quest: bool = False,
                  stock_take_ammo: bool = False,
@@ -4128,7 +4131,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
     resident_campaigns = {}
     storm_trial = StockStormTrial(portable_probe_command) if stock_storm_ambience else None
     weapon_campaign = "tutorial_dock_combat" if tutorial_dock_combat else "observatory"
-    dock_combat_check = ("tutorial_dock_pursuit" if tutorial_dock_pursuit else
+    dock_combat_check = ("stock_held_mask" if tutorial_dock_held_mask else
+                         "tutorial_dock_pursuit" if tutorial_dock_pursuit else
                          "tutorial_dock_retaliation" if tutorial_dock_retaliation else "tutorial_dock_combat")
     for enabled, campaign, name, check in (
         (stock_campfire, "observatory", "stock_campfire", verify_resident_campfire),
@@ -4171,7 +4175,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_bottle, "tutorial_dock", "stock_bottle", verify_stock_bottle),
         (tutorial_dock_combat, "tutorial_dock_combat", dock_combat_check,
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, retaliation=tutorial_dock_retaliation,
-                                                               pursuit=tutorial_dock_pursuit)),
+                                                               pursuit=tutorial_dock_pursuit,
+                                                               held_mask=tutorial_dock_held_mask)),
         (tutorial_dock_melee, "tutorial_dock_melee", "tutorial_dock_melee", verify_tutorial_dock_melee),
         (stock_eye_stacks, "shopkeep", "stock_eye_stacks", verify_stock_eye_stacks),
     ):
@@ -4280,7 +4285,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableCampfireProbe",
                                                      fixture="portable_campfire_probe.lua"))
-        if tutorial_dock_pursuit:
+        if tutorial_dock_pursuit or tutorial_dock_held_mask:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableHeldMaskProbe",
                                                      fixture="portable_held_mask_probe.lua"))
@@ -4685,6 +4690,8 @@ if __name__ == "__main__":
                         help="follow the stock exit to Tutorial Dock and dispatch a shot at a placed worker")
     parser.add_argument("--tutorial-dock-retaliation", action="store_true",
                         help="observe the stock AI's response to a nonlethal guest shot at a placed worker")
+    parser.add_argument("--tutorial-dock-held-mask", action="store_true",
+                        help="check observer-only masking of a late held mesh")
     parser.add_argument("--tutorial-dock-pursuit", action="store_true",
                         help="fight the live warehouse worker with local guest aiming and movement through death")
     parser.add_argument("--tutorial-dock-melee", action="store_true",
@@ -4818,6 +4825,7 @@ if __name__ == "__main__":
     resident_check_options = {"stock_food", "stock_personal_consumable", "stock_wipe_chooser", "stock_campfire", "stock_npc_override",
                               "stock_board_offers", "resident_weapon_cues",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "tutorial_dock_pursuit",
+                              "tutorial_dock_held_mask",
                               "tutorial_dock_melee", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_shovel_quest", "stock_take_ammo",
                               "stock_host_corpse_carry", "stock_flashlights", "stock_simmi_jammers", "stock_weather_travel", "stock_lightning",
@@ -4831,6 +4839,9 @@ if __name__ == "__main__":
         parser.error("Use --tutorial-dock-combat with --rusty-pistol and --stock-npc-override")
     if args.tutorial_dock_retaliation and not args.tutorial_dock_combat:
         parser.error("Use --tutorial-dock-retaliation with --tutorial-dock-combat")
+    if args.tutorial_dock_held_mask and (not args.tutorial_dock_combat or args.tutorial_dock_pursuit
+                                         or args.tutorial_dock_retaliation):
+        parser.error("Use --tutorial-dock-held-mask with --tutorial-dock-combat and without another Dock fight")
     if args.tutorial_dock_pursuit and (not args.tutorial_dock_combat or args.tutorial_dock_retaliation):
         parser.error("Use --tutorial-dock-pursuit with --tutorial-dock-combat and without --tutorial-dock-retaliation")
     if args.stock_shovel_loot and not args.stock_shovel:
@@ -4905,6 +4916,7 @@ if __name__ == "__main__":
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
                        tutorial_dock_melee=args.tutorial_dock_melee, tutorial_dock_pursuit=args.tutorial_dock_pursuit,
+                       tutorial_dock_held_mask=args.tutorial_dock_held_mask,
                        tutorial_dock_retaliation=args.tutorial_dock_retaliation, stock_bandage_revisit=args.stock_bandage_revisit,
                        stock_shovel=args.stock_shovel,
                        stock_shovel_loot=args.stock_shovel_loot,
