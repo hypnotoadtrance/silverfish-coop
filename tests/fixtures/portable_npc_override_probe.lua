@@ -872,7 +872,7 @@ local function dock_combat(pawn, world, host, action, name)
         eyes, actor:GetFullName())
 end
 
-local garage_view, garage_door, garage_aim, garage_plank
+local garage_view, garage_door, garage_aim, garage_plank, garage_worker_scale
 local garage_shot_hook
 local garage_path = dock .. ":PersistentLevel.StaticMeshActor_347"
 
@@ -950,7 +950,10 @@ local function restore_garage_fixture()
         mesh:SetRelativeScale3D(garage_plank.scale)
         mesh:SetMobility(garage_plank.mobility)
     end
-    garage_view, garage_door, garage_aim, garage_plank = nil, nil, nil, nil
+    if garage_worker_scale and valid(garage_worker_scale.actor) then
+        garage_worker_scale.actor:SetActorScale3D(garage_worker_scale.original)
+    end
+    garage_view, garage_door, garage_aim, garage_plank, garage_worker_scale = nil, nil, nil, nil, nil
     return "restored"
 end
 
@@ -978,6 +981,14 @@ end
 
 local function relocate_garage_barrier(world, destination, clear)
     assert(garage_door)
+    if not garage_worker_scale then
+        -- Keep the distant contact test independent of the stock pistol's random spread.
+        local worker = dock_worker(world, "NPC_Survivor_Worker_C_2")
+        assert(valid(worker))
+        local scale = worker:GetActorScale3D()
+        garage_worker_scale = {actor=worker, original={X=scale.X,Y=scale.Y,Z=scale.Z}}
+        worker:SetActorScale3D({X=scale.X*1.8,Y=scale.Y*1.8,Z=scale.Z*1.8})
+    end
     local _, mesh = stock_garage(world)
     local point = position(destination)
     if clear then point.Z = point.Z + 1000 end

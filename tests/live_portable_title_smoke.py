@@ -2873,6 +2873,7 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         assert contact.get("actor", "").endswith(f":PersistentLevel.{board}"), accepted
         exclusions = (await command(host, "dock-garage-shot-witness")).rsplit(";", 1)[-1].split(",")
         assert host_collision in exclusions and board not in exclusions, (exclusions, accepted)
+        await asyncio.sleep(.35)
         evidence["tutorial_dock_damageable_contact"] = {
             "camera_target": "NPC_Survivor_Worker_C_2", "muzzle_target": board,
             "blocked_shot": refused, "accepted_shot": accepted,

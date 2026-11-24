@@ -1476,10 +1476,13 @@ namespace
         return trace_shot(pawn, eye, ahead(eye, forward, distance), visibility_trace, std::array{weapon});
     }
 
-    bool living_combat_target(Unreal::UObject* actor, Unreal::UWorld* world)
+    bool available_projectile_target(Unreal::UObject* actor, Unreal::UWorld* world)
     {
         auto* target = live(actor) ? Unreal::Cast<Unreal::AActor>(actor) : nullptr;
-        if (!target || target->GetWorld() != world || !boolean(target, STR("Alive"), true)) return false;
+        if (!target || target->GetWorld() != world) return false;
+        // Characters expose Alive. Stock destructible props only expose Health.
+        auto* alive = field<Unreal::FBoolProperty>(target, STR("Alive"));
+        if (alive && !alive->GetPropertyValueInContainer(target)) return false;
         static const Unreal::FName player_name{STR("Player_FP_C")};
         for (const Unreal::UStruct* type = target->GetClassPrivate(); type; type = type->GetSuperStruct())
             if (type->GetFName() == player_name && type->GetPathName() == pawn_path) return false;
@@ -1529,7 +1532,7 @@ namespace
             if (actor->GetPathName() == reported_actor)
             {
                 if (count == 2 || !damageable || squared_length(difference(hit->point, *view.contact)) > 100 * 100 ||
-                    !living_combat_target(actor, projectile->GetWorld())) return;
+                    !available_projectile_target(actor, projectile->GetWorld())) return;
                 target = actor;
                 break;
             }
@@ -3722,7 +3725,7 @@ silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_s
                     const auto end = ahead(aim->point, ray, 100.0 / span);
                     const auto hit = trace_shot(pawn, *view.muzzle, end, projectile_trace, std::array{held});
                     const auto world = static_cast<Unreal::AActor*>(pawn)->GetWorld();
-                    if (hit && hit->hit && living_combat_target(hit->actor, world) && takes_projectile_damage(hit->actor))
+                    if (hit && hit->hit && available_projectile_target(hit->actor, world) && takes_projectile_damage(hit->actor))
                     {
                         auto path = RC::to_utf8_string(hit->actor->GetPathName());
                         if (valid_contact_path(path))
