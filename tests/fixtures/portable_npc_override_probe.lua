@@ -928,6 +928,7 @@ local function open_garage_for_test(world)
 end
 
 local function restore_garage_fixture()
+    if garage_view and valid(garage_view.extra_barrier) then garage_view.extra_barrier:K2_DestroyActor() end
     if garage_aim then
         local camera, muzzle = garage_aim.camera, garage_aim.muzzle
         if valid(camera) then camera:K2_SetRelativeLocation(garage_aim.camera_location, false, {}, true) end
@@ -939,6 +940,39 @@ local function restore_garage_fixture()
     end
     garage_view, garage_door, garage_aim = nil, nil, nil
     return "restored"
+end
+
+local function stage_second_garage_barrier(world, specification)
+    assert(garage_view and not valid(garage_view.extra_barrier))
+    local from_text, to_text = specification:match("^([^;]+);([^;]+)$")
+    local from, to = position(from_text), position(to_text)
+    local stock, source = stock_garage(world)
+    local shift = {X=to.X-from.X, Y=to.Y-from.Y, Z=to.Z-from.Z}
+    local scale = 85 / math.sqrt(shift.X^2 + shift.Y^2 + shift.Z^2)
+    local point = source:K2_GetComponentLocation()
+    local origin = {X=point.X+scale*shift.X, Y=point.Y+scale*shift.Y, Z=point.Z+scale*shift.Z}
+    local extra = world:SpawnActor(stock:GetClass(), origin, source:K2_GetComponentRotation())
+    assert(valid(extra) and extra:HasAuthority())
+    garage_view.extra_barrier = extra
+    extra:SetReplicates(false)
+    local mesh = extra.StaticMeshComponent
+    mesh:SetMobility(2)
+    mesh:SetStaticMesh(source.StaticMesh)
+    mesh:SetWorldScale3D(source.RelativeScale3D)
+    mesh:SetCollisionProfileName(source:GetCollisionProfileName(), false)
+    mesh:SetCollisionEnabled(3)
+    local shooter = garage_view.shooter
+    local ignored = {shooter, shooter.EquipedItem}
+    local first = line_hit(shooter, from, to, ignored, 2)
+    assert(first and same(first.Component:Get(), source), "the original garage door must be the first collision")
+    ignored[#ignored + 1] = stock
+    local second = line_hit(shooter, from, to, ignored, 2)
+    assert(second and same(second.Component:Get(), mesh), "the second garage barrier must be the next collision")
+    ignored[#ignored + 1] = extra
+    local last = line_hit(shooter, from, to, ignored, 2)
+    local component = last and last.Component and last.Component:Get()
+    assert(valid(component) and same(component:GetOwner(), garage_view.worker), "the host trace must reach the worker")
+    return extra:GetFName():ToString()
 end
 
 local function stage_garage_shot(host, world)
@@ -1529,6 +1563,9 @@ local function run(action, actor_path)
         assert(host and garage_door and valid(garage_door.mesh))
         garage_door.mesh:K2_SetWorldLocation(garage_door.point, false, {}, true)
         return "lowered"
+    elseif action == "dock-garage-second-barrier" then
+        assert(host and garage_door)
+        return stage_second_garage_barrier(world, actor_path)
     elseif action == "dock-garage-restore" then
         return restore_garage_fixture()
     elseif action == "dock-garage-aim" then

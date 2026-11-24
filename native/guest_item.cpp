@@ -18,6 +18,7 @@
 #include <numbers>
 #include <optional>
 #include <ranges>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -1309,7 +1310,7 @@ namespace
 
     std::optional<AimContact> trace_shot(Unreal::UObject* context_object, const AimVector& origin,
                                         const AimVector& destination, std::uint8_t trace_channel,
-                                        std::initializer_list<Unreal::UObject*> exclusions)
+                                        std::span<Unreal::UObject* const> exclusions)
     {
         auto* library = find<Unreal::UObject>(STR("/Script/Engine.Default__KismetSystemLibrary"));
         auto* fn = find<Unreal::UFunction>(STR("/Script/Engine.KismetSystemLibrary:LineTraceSingle"));
@@ -1360,6 +1361,7 @@ namespace
     constexpr std::uint8_t visibility_trace = 1;
     constexpr std::uint8_t projectile_trace = 2; // Stock projectile MovementUpdate.
     constexpr double contact_trace_range = 5000.0;
+    constexpr std::size_t max_contact_barriers = 3;
 
     AimVector difference(const AimVector& left, const AimVector& right)
     {
@@ -1382,7 +1384,7 @@ namespace
         auto* range = field<Unreal::FDoubleProperty>(pawn, STR("SightRange"));
         const double distance = range ? range->GetPropertyValueInContainer(pawn) : 0.0;
         if (!std::isfinite(distance) || distance <= 0.0) return {};
-        return trace_shot(pawn, eye, ahead(eye, forward, distance), visibility_trace, {weapon});
+        return trace_shot(pawn, eye, ahead(eye, forward, distance), visibility_trace, std::array{weapon});
     }
 
     bool living_combat_target(Unreal::UObject* actor, Unreal::UWorld* world)
@@ -1409,22 +1411,33 @@ namespace
         const AimVector direction{(*velocity)[0] / speed, (*velocity)[1] / speed, (*velocity)[2] / speed};
         if (squared_length(difference(ahead(*origin, direction, distance), *view.contact)) > 75 * 75) return;
 
-        auto* weapon = object(pawn, STR("EquipedItem"));
         const auto end = ahead(*origin, direction, distance + 100);
-        const auto first = trace_shot(projectile, *origin, end, projectile_trace, {pawn, weapon});
-        auto* barrier = first && first->hit ? first->actor : nullptr;
-        if (!live(barrier) || !authority(barrier) ||
-            barrier->GetFunctionByNameInChain(Unreal::FName{STR("DealDamage"), Unreal::FNAME_Find})) return;
-
-        // Only bypass one disagreeing surface when the same stock collision query still reaches
-        // the reported living actor on the actual projectile path and near the reported contact.
-        // Resolve the actor from the host trace. A delayed report can name an actor that is
-        // already gone, so avoid a global object lookup from the projectile's BeginPlay hook.
-        const auto retry = trace_shot(projectile, *origin, end, projectile_trace, {pawn, weapon, barrier});
-        if (!retry || !retry->hit || squared_length(difference(retry->point, *view.contact)) > 100 * 100) return;
-        auto* target = retry->actor;
-        if (!living_combat_target(target, projectile->GetWorld()) || !authority(target) ||
-            target->GetPathName() != RC::to_generic_string(view.contact_actor)) return;
+        std::array<Unreal::UObject*, 2 + max_contact_barriers> exclusions{pawn, object(pawn, STR("EquipedItem"))};
+        auto excluded = std::span{exclusions};
+        std::size_t count = 2;
+        Unreal::UObject* target{};
+        const auto reported_actor = RC::to_generic_string(view.contact_actor);
+        const Unreal::FName damage_function{STR("DealDamage"), Unreal::FNAME_Find};
+        // Use the actors returned by the stock trace. Commit exclusions only if the trace
+        // reaches the reported living target without crossing a damageable actor.
+        while (const auto hit = trace_shot(projectile, *origin, end, projectile_trace, excluded.first(count)))
+        {
+            auto* actor = hit->actor;
+            if (!hit->hit || !live(actor) || !authority(actor)) return;
+            const bool damageable = actor->GetFunctionByNameInChain(damage_function) != nullptr;
+            if (count == 2 && damageable) return;
+            if (actor->GetPathName() == reported_actor)
+            {
+                if (count == 2 || squared_length(difference(hit->point, *view.contact)) > 100 * 100 ||
+                    !living_combat_target(actor, projectile->GetWorld())) return;
+                target = actor;
+                break;
+            }
+            if (count == exclusions.size() || damageable ||
+                std::ranges::find(excluded.first(count), actor) != excluded.first(count).end()) return;
+            exclusions[count++] = actor;
+        }
+        if (!target) return;
         auto* health = field<Unreal::FDoubleProperty>(target, STR("Health"));
         const auto current_health = health ? health->GetPropertyValueInContainer(target) : 0.0;
         if (!std::isfinite(current_health) || current_health <= 0) return;
@@ -1433,9 +1446,13 @@ namespace
         auto* actor = ignored ? Unreal::CastField<Unreal::FObjectProperty>(ignored->GetInner()) : nullptr;
         if (!actor || actor->GetOffset_Internal() != 0) return;
         Unreal::FScriptArrayHelper actors(ignored, ignored->ContainerPtrToValuePtr<void>(projectile));
-        for (int index = 0; index < actors.Num(); ++index)
-            if (actor->GetObjectPropertyValue(actors.GetRawPtr(index)) == barrier) return;
-        actor->SetObjectPropertyValue(actors.GetRawPtr(actors.AddValue()), barrier);
+        for (auto* barrier : excluded.subspan(2, count - 2))
+        {
+            bool present = false;
+            for (int index = 0; index < actors.Num() && !present; ++index)
+                present = actor->GetObjectPropertyValue(actors.GetRawPtr(index)) == barrier;
+            if (!present) actor->SetObjectPropertyValue(actors.GetRawPtr(actors.AddValue()), barrier);
+        }
     }
 
     struct GuestMuzzleAim
@@ -3470,7 +3487,7 @@ silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_s
                 {
                     // Visibility can first hit the capsule, in front of the projectile's hit on the mesh.
                     const auto end = ahead(aim->point, ray, 100.0 / span);
-                    const auto hit = trace_shot(pawn, *view.muzzle, end, projectile_trace, {held});
+                    const auto hit = trace_shot(pawn, *view.muzzle, end, projectile_trace, std::array{held});
                     if (hit && hit->actor == aim->actor)
                     {
                         auto path = RC::to_utf8_string(hit->actor->GetPathName());

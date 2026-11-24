@@ -2422,6 +2422,7 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
     assert await command(host, "dock-garage-lower-host") == "lowered"
     assert await command(host, below) == "blocked"
     assert await command(guest, below) == "worker"
+    second_barrier = await command(host, f"dock-garage-second-barrier\t{low};{worker}") if pellets == 1 else None
     guest_collision = await command(guest, f"dock-garage-projectile-trace\t{low};{worker}")
     host_collision = await command(host, f"dock-garage-projectile-trace\t{low};{worker}")
     assert guest_collision == "NPC_Survivor_Worker_C_2" and host_collision == "StaticMeshActor_347", (
@@ -2432,6 +2433,11 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         "same_low_aim": True, "host_world_line": "blocked", "guest_world_line": "worker",
         "health": [before_mismatch, after_disagreement], "blocked_shot": blocked, "accepted_shot": receipt,
     }
+    if second_barrier:
+        witness = await command(host, "dock-garage-shot-witness")
+        exclusions = witness.rsplit(";", 1)[-1].split(",")
+        assert second_barrier in exclusions and host_collision in exclusions, (second_barrier, witness)
+        evidence[key]["host_only_barriers"] = [host_collision, second_barrier]
     return evidence
 
 
