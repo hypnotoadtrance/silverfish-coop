@@ -1,8 +1,9 @@
-"""Consume an exact supported item from the authenticated guest's own save."""
+"""Settle stock and personal consumable use in an authenticated guest's own save."""
 
 import asyncio
 from dataclasses import dataclass
 import math
+import re
 import time
 
 from . import party
@@ -20,6 +21,16 @@ CANNED_BEANS_CLASS = "/Game/Classes/Items/Item_CannedBeans.Item_CannedBeans_C"
 BROWN_MUSHROOM = "native-guest-brown-mushroom"
 BROWN_MUSHROOM_CLASS = "/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C"
 STARTER_BAG = "native-guest-starter-bag"
+PERSONAL = "native-guest-personal-consumable"
+PERSONAL_KEY = "native_guest_personal_consumable"
+PERSONAL_ENTRY = "use-personal-consumable"
+PERSONAL_PREVIEW = "native-guest-personal-consumable-preview"
+PERSONAL_PREVIEW_KEY = "native_guest_personal_consumable_preview"
+PERSONAL_PREVIEW_COMMAND = "native-inventory-stock-personal-preview"
+PERSONAL_VITALS = ("food", "health", "regen", "stim")
+_PERSONAL_LIMITS = (200, 1_000_000, 1_000_000, 1_000_000)
+_GENERATED_CLASS = re.compile(r"/[A-Za-z0-9_/-]+\.[A-Za-z0-9_-]+_C\Z")
+_DECIMAL = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?\Z", re.ASCII)
 STARTER_BAGS = {
     "random": "/Game/Classes/Items/Random_GearBag_Starter.Random_GearBag_Starter_C",
     "hyperrandom": "/Game/Classes/Items/HyperRandom_GearBag_Starter.HyperRandom_GearBag_Starter_C",
@@ -76,7 +87,148 @@ MEDICINE = {
 STOCK_CONSUMABLES = MEALS | MEDICINE
 COMMANDS = {BANDAGE_CLASS: ACTION, **{profile.class_path: action for action, profile in STOCK_CONSUMABLES.items()},
             **dict.fromkeys(STARTER_BAGS.values(), STARTER_BAG)}
-RESULT = {action: action.replace("-", "_") for action in COMMANDS.values()}
+RESULT = {**{action: action.replace("-", "_") for action in COMMANDS.values()}, PERSONAL: PERSONAL_KEY}
+
+
+def _personal_identity(guid, item_class, quantity):
+    if (not valid_guid(guid) or not isinstance(item_class, str) or len(item_class) > 256
+            or _GENERATED_CLASS.fullmatch(item_class) is None or item_class in COMMANDS
+            or not isinstance(quantity, str) or not 1 <= len(quantity) <= 10
+            or not quantity.isascii() or not quantity.isdecimal()
+            or not 1 <= int(quantity) < 2**31 or str(int(quantity)) != quantity):
+        raise ValueError("Invalid personal consumable item")
+    return int(quantity)
+
+
+def _personal_values(values, *, delta):
+    if (len(values) != len(PERSONAL_VITALS)
+            or any(not 1 <= len(value) <= 25 or _DECIMAL.fullmatch(value) is None for value in values)):
+        raise ValueError("Invalid personal consumable vitals")
+    parsed = tuple(map(float, values))
+    if any(not math.isfinite(value) or not (-limit if delta else 0) <= value <= limit
+           for value, limit in zip(parsed, _PERSONAL_LIMITS, strict=True)):
+        raise ValueError("Personal consumable vitals exceeded their bounds")
+    if not delta and parsed[1] <= 0:
+        raise ValueError("Personal consumable health is not positive")
+    return parsed
+
+
+def parse_personal(fields, *, preview=False):
+    if preview:
+        if len(fields) != 11 or fields[0] != PERSONAL_PREVIEW:
+            raise ValueError("Invalid personal consumable preview")
+        _, area, pawn, guid, item_class, before, after, *values = fields
+    else:
+        if len(fields) != 12 or fields[:2] != [PERSONAL, "used"]:
+            raise ValueError("Invalid personal consumable receipt")
+        _, _, area, pawn, guid, item_class, before, after, *values = fields
+    count = _personal_identity(guid, item_class, before)
+    if len(pawn) > 512 or not pawn.startswith("Player_FP_C " + area + ".") or after != str(count - 1):
+        raise ValueError("The exact personal consumable did not debit one owned unit")
+    return {"state": "previewed" if preview else "used", "map": area, "pawn": pawn,
+            "guid": guid, "class_path": item_class, "quantity_before": count, "quantity_after": count - 1,
+            "deltas" if preview else "vitals": dict(zip(PERSONAL_VITALS, _personal_values(values, delta=preview), strict=True))}
+
+
+def personal_target(epoch, preview):
+    deltas = ",".join(format(preview["deltas"][key], ".17g") for key in PERSONAL_VITALS)
+    return f'{epoch}@{preview["guid"]}|{preview["class_path"]}|{preview["quantity_before"]}|{deltas}'
+
+
+async def settle_personal_preview(client, area, epoch, operation, guid, sequence):
+    game = client.last_game
+    pawn = game.get("pawns", {}).get("local", {}).get("name")
+    session = client.host_session
+    snapshot = await client.bridge.command(PERSONAL_PREVIEW_COMMAND, epoch, str(sequence), timeout=4)
+    preview = snapshot.get(PERSONAL_PREVIEW_KEY, {})
+    if (not session or not pawn or client.host_session != session or client.zone_epoch != epoch
+            or not client.transport.game_access or client.suspended or client.needs_travel or client.server_transitioning
+            or (snapshot.get("state"), snapshot.get("map"), snapshot.get("pawns", {}).get("local", {}).get("name"))
+                != ("connected", area, pawn)
+            or tuple(preview.get(field) for field in ("state", "map", "pawn", "guid")) != ("previewed", area, pawn, guid)):
+        raise ValueError("The personal consumable preview is no longer current")
+    result = await client.gameplay_action(PERSONAL, operation, personal_target(epoch, preview))
+    receipt = result[PERSONAL_KEY]
+    if ((receipt.get("owner"), receipt.get("epoch")) != (client.invite["character_id"], epoch)
+            or any(receipt.get(field) != preview[field] for field in ("class_path", "quantity_before", "quantity_after"))):
+        raise ValueError("The host did not verify the exact personal consumable")
+    return receipt
+
+
+async def use_personal(host, bridge, character, target, operation_id):
+    from .native_inventory import retain_guest_save
+
+    if not isinstance(target, str) or len(target) > 512 or not isinstance(operation_id, str) or not party.REQUEST_ID.fullmatch(operation_id):
+        raise party.RuleError("invalid_personal_consumable_request")
+    epoch, separator, payload = target.partition("@")
+    if (not separator or not party.REQUEST_ID.fullmatch(epoch) or epoch != host.zone_epoch):
+        raise party.RuleError("personal_consumable_visit_changed")
+    try:
+        guid, item_class, count, raw_deltas = payload.split("|")
+        before = _personal_identity(guid, item_class, count)
+        deltas = _personal_values(raw_deltas.split(","), delta=True)
+    except ValueError as error:
+        raise party.RuleError("invalid_personal_consumable_request") from error
+    game = host.last_game
+    if (not host.native_guest or host.native_profile is None or host.stopping or host.transitioning
+            or host.native_checkpoint_unsafe or game.get("state") != "hosting" or time.monotonic() - host.last_seen > 3):
+        raise party.RuleError("native_guest_personal_consumable_unavailable")
+    owner = host.native_recipients().get(character)
+    player = host.party["players"].get(character)
+    if not owner or not owner.get("connected") or not owner.get("pawn") or not player:
+        raise party.RuleError("guest_not_active")
+
+    fingerprint = [PERSONAL, target, None]
+    for receipt in host.party["receipts"].get(character, ()):
+        if receipt["id"] == operation_id:
+            if receipt["request"] != fingerprint:
+                raise party.RuleError("operation_id_conflict")
+            return receipt["result"]
+    if player["downed"] or host.party["wipe"] is not None or character in host.party["pending_spawns"]:
+        raise party.RuleError("guest_personal_consumable_refused_downed_or_respawning")
+    area, pawn = game["map"], owner["pawn"]
+    if not await retain_guest_save(host, bridge, character, pawn):
+        raise party.RuleError("guest_personal_consumable_refused_working_save_unavailable")
+    current_owner = host.native_recipients().get(character, {})
+    if (epoch != host.zone_epoch or host.last_game.get("map") != area
+            or not current_owner.get("connected") or current_owner.get("pawn") != pawn):
+        raise party.RuleError("personal_consumable_visit_changed")
+
+    host.native_checkpoint_unsafe = True
+    try:
+        try:
+            snapshot = await bridge.command(PERSONAL, pawn, guid, item_class, count,
+                                            *(format(value, ".17g") for value in deltas), timeout=6)
+        except RuntimeError as error:
+            if str(error).startswith("guest_personal_consumable_refused_"):
+                host.native_checkpoint_unsafe = False
+                raise party.RuleError(str(error)) from error
+            raise
+        proof = snapshot.get(PERSONAL_KEY, {})
+        if ((snapshot.get("state"), snapshot.get("map")) != ("hosting", area)
+                or tuple(proof.get(key) for key in ("state", "map", "pawn", "guid", "class_path",
+                                                    "quantity_before", "quantity_after"))
+                != ("used", area, pawn, guid, item_class, before, before - 1)
+                or not isinstance(proof.get("vitals"), dict) or proof["vitals"].keys() != set(PERSONAL_VITALS)):
+            raise RuntimeError("The host did not verify one exact personal consumable debit")
+        host.last_game, host.last_seen = snapshot, time.monotonic()
+        candidate = party.load_party(host.party)
+        if before == 1:
+            candidate["players"][character].get("native_inventory", {}).pop(guid, None)
+        result = {PERSONAL_KEY: dict(proof, owner=character, epoch=epoch)}
+        recent = candidate["receipts"].setdefault(character, [])
+        recent.append({"id": operation_id, "request": fingerprint, "result": result})
+        del recent[:-party.RECENT_ACTIONS]
+    except (OSError, RuntimeError, ValueError, asyncio.CancelledError):
+        if host.native_checkpoint_unsafe:
+            host.stopping = True
+        raise
+    host.party, host.native_checkpoint_unsafe = candidate, False
+    if before == 1:
+        host.native_pickup.forget_committed_row(character, guid)
+    host.control.event("native_guest_personal_consumable_accepted", character_id=character, operation_id=operation_id,
+                       item_class=item_class, guid=guid, quantity=before - 1, vitals=proof["vitals"])
+    return result
 
 
 def parse_meal(fields: list[str]) -> dict:

@@ -206,7 +206,10 @@ async def settle_stock_action(client, area, epoch, operation, mode, entry, guid,
                     or meal is not None and not client.invite.get("native_guest_mre")):
                 raise ValueError("The selected stock item has no host-authoritative Use action")
             key = native_guest_consumable.RESULT[action]
-            receipt = (await client.gameplay_action(action, operation, guid)).get(key)
+            if action == native_guest_consumable.PERSONAL:
+                receipt = await native_guest_consumable.settle_personal_preview(client, area, epoch, operation, guid, sequence)
+            else:
+                receipt = (await client.gameplay_action(action, operation, guid)).get(key)
             if not isinstance(receipt, dict):
                 raise RuntimeError("The host did not return a stock consumable receipt")
             remaining, before = receipt.get("quantity_after"), receipt.get("quantity_before")

@@ -4,6 +4,7 @@ local use_presentation = require("native_weapon_fire_view")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local starter_bag = "native-guest-starter-bag"
+local personal_consumable = "native-guest-personal-consumable"
 local observation
 
 local function valid(value)
@@ -18,19 +19,42 @@ local function finite(value)
     return type(value) == "number" and value == value and value > -math.huge and value < math.huge
 end
 
+local function settle_personal(fields, state, pawn, detached, stock)
+    local class, quantity = fields[5], math.tointeger(tonumber(fields[6]))
+    local food, health, regen, stim = tonumber(fields[7]), tonumber(fields[8]), tonumber(fields[9]), tonumber(fields[10])
+    if type(SilverfishSettleNativeGuestPersonalConsumable) ~= "function" or type(class) ~= "string"
+        or #class > 256 or not class:match("^/[%w_/%-]+%.[%w_%-]+_C$")
+        or not quantity or quantity < 1 or quantity >= 2^31 or tostring(quantity) ~= fields[6]
+        or not finite(food) or not finite(health) or not finite(regen) or not finite(stim) then
+        error("guest_personal_consumable_refused_arguments", 0)
+    end
+    local called, used, status, before, after, remaining_food, remaining_health, remaining_regen, remaining_stim =
+        pcall(SilverfishSettleNativeGuestPersonalConsumable, pawn:GetAddress(), detached:GetAddress(),
+            stock:GetAddress(), fields[4], class, quantity, food, health, regen, stim)
+    if called and used == false and type(status) == "string"
+        and (status:match("^guest_personal_consumable_refused_[a-z0-9_]+$")
+            or status:match("^mutation_unverified_guest_personal_consumable_[a-z0-9_]+$")) then error(status, 0) end
+    if not called or used ~= true or status ~= "used" or before ~= quantity or after ~= quantity - 1
+        or not finite(remaining_food) or not finite(remaining_health) or not finite(remaining_regen) or not finite(remaining_stim) then
+        error("mutation_unverified_guest_personal_consumable_proof", 0)
+    end
+    observation = {map = state.map, pawn = fields[3], guid = fields[4], before = before, after = after,
+        personal_class = class, food = remaining_food, health = remaining_health, regen = remaining_regen, stim = remaining_stim}
+    pcall(use_presentation.consumed, pawn, class, false)
+    return "native guest personal consumable used"
+end
+
 function consumable.command(fields, state, phase)
     local action = fields[2]
-    if action ~= "native-guest-bandage" and action ~= starter_bag then return end
+    if action ~= "native-guest-bandage" and action ~= starter_bag and action ~= personal_consumable then return end
     observation = nil
     local name, guid = fields[3], fields[4]
     local bag = action == starter_bag
-    local prefix = bag and "guest_starter_bag_refused_" or "guest_bandage_refused_"
-    if not enabled or #fields ~= 4 or phase ~= "hosting" or not state.listening or not exact_guid(guid) then
+    local personal = action == personal_consumable
+    local prefix = personal and "guest_personal_consumable_refused_"
+        or bag and "guest_starter_bag_refused_" or "guest_bandage_refused_"
+    if not enabled or #fields ~= (personal and 10 or 4) or phase ~= "hosting" or not state.listening or not exact_guid(guid) then
         error(prefix .. "scope", 0)
-    end
-    local native_use = bag and SilverfishOpenNativeGuestStarterBag or SilverfishUseNativeGuestBandage
-    if type(native_use) ~= "function" or bag and native_use ~= SilverfishOpenNativeGuestStarterBag then
-        error(prefix .. "addon_unavailable", 0)
     end
 
     local qualified, pawn, detached = pcall(guest_save.exact_item_context, state, phase, name)
@@ -40,7 +64,12 @@ function consumable.command(fields, state, phase)
         or detached:GetAddress() == stock:GetAddress() then
         error(prefix .. "exact_detached_save", 0)
     end
+    if personal then return settle_personal(fields, state, pawn, detached, stock) end
 
+    local native_use = bag and SilverfishOpenNativeGuestStarterBag or SilverfishUseNativeGuestBandage
+    if type(native_use) ~= "function" or bag and native_use ~= SilverfishOpenNativeGuestStarterBag then
+        error(prefix .. "addon_unavailable", 0)
+    end
     local called, used, status, before, after, regen_before, regen_after, hp_before, hp_after, maximum, trait =
         pcall(native_use, pawn:GetAddress(), detached:GetAddress(), stock:GetAddress(), guid)
     if bag then
@@ -90,6 +119,11 @@ end
 function consumable.rows(state, phase, status_row)
     local row = observation
     if not enabled or phase ~= "hosting" or not state.listening or not row or row.map ~= state.map then return {} end
+    if row.personal_class then
+        return {status_row(personal_consumable, "used", row.map, row.pawn, row.guid, row.personal_class, row.before, row.after,
+            string.format("%.17g", row.food), string.format("%.17g", row.health),
+            string.format("%.17g", row.regen), string.format("%.17g", row.stim))}
+    end
     if row.kind then
         return {status_row(starter_bag, "used", row.map, row.pawn, row.guid, row.kind, row.awards)}
     end

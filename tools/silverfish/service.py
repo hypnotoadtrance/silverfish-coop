@@ -2240,6 +2240,8 @@ class Host:
                 result = await native_host_dig_live.collect(self, bridge, character, target, request["operation_id"])
             elif action in (native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION):
                 result = await native_guest_armor.perform(self, bridge, character, request["operation_id"], action, target)
+            elif action == native_guest_consumable.PERSONAL:
+                result = await native_guest_consumable.use_personal(self, bridge, character, target, request["operation_id"])
             elif action in native_guest_consumable.RESULT:
                 result = await native_guest_consumable.use(self, bridge, character, target, request["operation_id"], action=action)
             elif action in ("native-loot-inspect", "native-loot-open", "native-loot-claim"):
