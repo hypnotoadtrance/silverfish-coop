@@ -6,6 +6,7 @@ import math
 from live_multi_smoke import campaign_save_hashes
 from portable_guest_world_start import resident_events, wait_resident_status
 from tools.silverfish import (
+    native_board_contract,
     native_computer_board as board,
     native_guest_weapon,
     native_host_dig,
@@ -91,8 +92,11 @@ async def verify_stock_shovel_reconnect(host, guest, evidence):
             and entry.get("board") == board_actor and entry.get("state") == "visible")
 
     async def press(verb, state):
-        result = (await action(guest_run, native_wire_board.STOCK_FIXTURE,
-                               target=f"{contract.quest_id}|{verb}"))["native_wire_board_stock"]
+        pressed = await submit(guest_run, native_wire_board.STOCK_FIXTURE, target=f"{contract.quest_id}|{verb}")
+        if not pressed["ok"]:
+            catalog = await submit(guest_run, native_board_contract.CATALOG, target=board_actor)
+            raise AssertionError((verb, pressed, catalog))
+        result = pressed["native_wire_board_stock"]
         assert (result["board"], result["quest"], result["state"]) == (board_actor, contract.quest_id, state), result
 
     def quest(frame):

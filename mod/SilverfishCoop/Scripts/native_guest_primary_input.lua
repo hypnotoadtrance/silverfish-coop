@@ -99,12 +99,13 @@ local function drain_melee(current, address)
         or type(SilverfishEnqueueLocalBridgeInput) ~= "function" then return end
     local emitted, last = 0, nil
     for _ = 1, 8 do
-        local sequence, owner, guid, edge, stroke = SilverfishTakeNativeGuestMeleeInput(address)
+        local sequence, owner, guid, edge, stroke, duration = SilverfishTakeNativeGuestMeleeInput(address)
         if not valid_sequence(sequence) or not valid_sequence(stroke) or owner ~= address or guid ~= current.guid
             or not held_edges[edge] or (edge == "press" and stroke ~= sequence)
-            or (edge ~= "press" and stroke >= sequence) then break end
+            or (edge ~= "press" and stroke >= sequence) or math.type(duration) ~= "integer"
+            or duration < 0 or duration > 9000 or (edge == "press" and duration ~= 0) then break end
         local record = table.concat({"native-guest-melee-edge", sequence, current.map, current.name, guid,
-            current.kind, edge, stroke}, "\t") .. "\n"
+            current.kind, edge, stroke, duration}, "\t") .. "\n"
         if not SilverfishEnqueueLocalBridgeInput(record) then break end
         emitted, last = emitted + 1, sequence
     end

@@ -1312,11 +1312,11 @@ class Bridge:
                         data[native_guest_melee.INPUT_KEY] = row
                 elif fields[0] == native_guest_melee.INPUT_FIXTURE and len(fields) == 7:
                     _, area, pawn, guid, sequence, stroke, edge = fields
-                    record = "\t".join((native_guest_melee.INPUT_RECORD, sequence, area, pawn, guid, "melee", edge, stroke))
+                    record = "\t".join((native_guest_melee.INPUT_RECORD, sequence, area, pawn, guid, "melee", edge, stroke, "0"))
                     if (row := native_guest_melee.input_record(record.encode())) and (
                             data.get("state"), data.get("map")) == ("connected", area):
                         data[native_guest_melee.INPUT_FIXTURE_KEY] = dict(
-                            sequence=row[0], map=area, pawn=pawn, guid=guid, edge=edge, stroke=row[-1])
+                            sequence=row[0], map=area, pawn=pawn, guid=guid, edge=edge, stroke=row[6])
                 elif fields[0] == "native-guest-smg-hold" and len(fields) == 10:
                     with contextlib.suppress(ValueError):
                         row = native_smg_hold.parse(fields)

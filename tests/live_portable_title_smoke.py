@@ -1222,10 +1222,15 @@ async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict)
             local_point = None
             try:
                 async with asyncio.timeout(6):
+                    retry_at = time.monotonic() + .4
+                    retried = False
                     while True:
                         local_point = await command(guest, "dock-natural-seat")
                         if math.dist(retreat, tuple(map(float, local_point.split(",")))) < 80:
                             break
+                        if not retried and time.monotonic() >= retry_at:
+                            assert await command(guest, f"dock-natural-arrive\t{destination}") == "ready"
+                            retried = True
                         await asyncio.sleep(.05)
             except TimeoutError as error:
                 raise AssertionError(f"The guest did not reach the warehouse retreat {retreat} from {local_point}. "

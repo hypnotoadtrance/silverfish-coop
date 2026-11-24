@@ -37,6 +37,8 @@ CONTACT_STAGES = frozenset({"awaiting_contact", "camera_identity", "camera_vecto
                             "sphere_empty", "sphere_bounds", "sphere_contact", "sphere_other_actor",
                             "target_health", "target_identity", "selected_contact"})
 EDGES = frozenset({"press", "release", "cancel"})
+TAP = "tap"
+MAX_TAP_MS = 120
 TERMINAL = frozenset({"settled", "cancelled"})
 DIRTY = "mutation_unverified_guest_melee_"
 
@@ -66,17 +68,18 @@ def pawn_in_map(area, pawn) -> bool:
 
 def input_record(raw: bytes):
     try:
-        marker, sequence, area, pawn, guid, kind, edge, stroke = raw.decode("utf-8").split("\t")
+        marker, sequence, area, pawn, guid, kind, edge, stroke, duration = raw.decode("utf-8").split("\t")
     except (UnicodeError, ValueError):
         return None
     if (marker != INPUT_RECORD or not pawn_in_map(area, pawn) or not valid_guid(guid) or kind not in KINDS
             or edge not in EDGES or any(not (number.isascii() and number.isdecimal() and len(number) <= 16)
-                                       for number in (sequence, stroke))):
+                                       for number in (sequence, stroke, duration))):
         return None
-    sequence, stroke = int(sequence), int(stroke)
-    if not 0 < stroke <= sequence < 2**53 or (edge == "press") != (sequence == stroke):
+    sequence, stroke, duration = int(sequence), int(stroke), int(duration)
+    if (not 0 < stroke <= sequence < 2**53 or (edge == "press") != (sequence == stroke)
+            or not 0 <= duration <= 9000 or edge == "press" and duration != 0):
         return None
-    return sequence, area, pawn, guid, kind, edge, stroke
+    return sequence, area, pawn, guid, kind, edge, stroke, duration
 
 
 def parse_input_state(fields):
@@ -250,7 +253,7 @@ class AuthorityInput:
             raise party.RuleError("native_guest_melee_exact_edge_required")
         epoch, guid, stroke, edge = parts
         host = self.host
-        if (not epoch or epoch != host.zone_epoch or not valid_guid(guid) or edge not in EDGES
+        if (not epoch or epoch != host.zone_epoch or not valid_guid(guid) or edge not in {*EDGES, TAP}
                 or not party.REQUEST_ID.fullmatch(stroke)
                 or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation)):
             raise party.RuleError("native_guest_melee_exact_edge_required")
@@ -267,21 +270,25 @@ class AuthorityInput:
             raise party.RuleError("native_guest_melee_combat_busy")
         if not host.native_guest_controls or host.stopping or host.native_checkpoint_unsafe or not pawn:
             raise party.RuleError("native_guest_melee_swing_unavailable")
-        if edge == "press":
+        starting = edge in ("press", TAP)
+        if starting:
             equipped = host.last_game.get("native_guest_equipped_weapons", {}).get(pawn)
             if (host.transitioning or host.party.get("wipe") is not None or not owner.get("connected")
                     or host.party["players"].get(character, {}).get("downed")
                     or character in host.party["pending_spawns"] or host.last_game.get("state") != "hosting"
                     or time.monotonic() - host.last_seen > 3 or not is_equipped(equipped, area, guid)
                     or scope and scope.held or host.smg_holds and host.smg_holds.strokes
-                    or any(receipt[:4] + (terminal,) in self.receipts for terminal in ("release", "cancel"))):
+                    or any(receipt[:4] + (previous,) in self.receipts for previous in (*EDGES, TAP))):
                 raise party.RuleError("native_guest_melee_combat_busy")
             if scope is None and not await native_inventory.retain_guest_save(host, bridge, character, pawn):
                 raise party.RuleError("native_guest_melee_save_retention_unavailable")
         elif not scope or scope.held != stroke:
             raise party.RuleError("native_guest_melee_exact_edge_required")
         prior_presses, prior_releases = (scope.frame["presses"], scope.frame["releases"]) if scope else (0, 0)
-        command = (INPUT + "-edge", str(scope.frame["serial"]), edge) if scope else (INPUT + "-start", pawn, guid)
+        if scope:
+            command = INPUT + "-edge", str(scope.frame["serial"]), edge
+        else:
+            command = (INPUT + "-start", pawn, guid, TAP) if edge == TAP else (INPUT + "-start", pawn, guid)
         try:
             snapshot = await bridge.command(*command, timeout=3)
         except RuntimeError as error:
@@ -294,7 +301,7 @@ class AuthorityInput:
         if (snapshot.get("state"), snapshot.get("map"), frame.get("map"), frame.get("pawn"), frame.get("guid")) != (
                 "hosting", area, area, pawn, guid) or (scope is not None and not scope.observes(frame)):
             self._fail("The stock melee edge did not report its exact owner")
-        if (frame.get("presses"), frame.get("releases")) != (prior_presses + (edge == "press"),
+        if (frame.get("presses"), frame.get("releases")) != (prior_presses + starting,
                                                          prior_releases + (edge != "press")):
             self._fail("The stock melee input did not execute the exact edge")
         if scope is None:
@@ -315,9 +322,16 @@ class GuestInput:
     async def service(self, scope) -> None:
         client = self.client
         session, epoch = client.host_session, client.zone_epoch
-        for sequence, area, pawn, guid, kind, edge, number in client.bridge.native_melee_input_requests():
+        inputs = client.bridge.native_melee_input_requests()
+        for index, (sequence, area, pawn, guid, kind, edge, number, _) in enumerate(inputs):
             if sequence <= self.sequence:
                 continue
+            if edge == "press" and index + 1 < len(inputs):
+                following = inputs[index + 1]
+                # The native clock measures the actual input interval. A stalled
+                # worker can drain a long hold and its release together.
+                if following[:7] == (sequence + 1, area, pawn, guid, kind, "release", number) and following[7] <= MAX_TAP_MS:
+                    sequence, edge = following[0], TAP
             self.sequence = sequence
             if not session or not epoch or (area, pawn, guid, kind) != scope or (
                     client.host_session, client.zone_epoch) != (session, epoch):

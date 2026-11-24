@@ -77,19 +77,25 @@ local function command_input(fields, state, phase, standing)
     end
     if fields[2] == input_start then
         local name, guid = fields[3], fields[4]
-        if #fields ~= 4 or not valid_guid(guid) then error("native_guest_melee_exact_guid_required", 0) end
+        local tap = #fields == 5 and fields[5] == "tap"
+        if (#fields ~= 4 and not tap) or not valid_guid(guid) then error("native_guest_melee_exact_guid_required", 0) end
         local pawn, save = exact_guest(state, phase, name, standing)
         if not pawn then error("native_guest_melee_exact_owner_required", 0) end
-        local proof = melee_input_proof(SilverfishStartNativeGuestMeleeInput(pawn:GetAddress(), save:GetAddress(), guid))
+        local proof
+        if tap then
+            proof = melee_input_proof(SilverfishStartNativeGuestMeleeInput(pawn:GetAddress(), save:GetAddress(), guid, "tap"))
+        else
+            proof = melee_input_proof(SilverfishStartNativeGuestMeleeInput(pawn:GetAddress(), save:GetAddress(), guid))
+        end
         latest = nil
         input_scope = {map = state.map, pawn = name, guid = guid, proof = proof}
     else
         local serial, edge = math.tointeger(fields[3]), fields[4]
         if #fields ~= 4 or not input_scope or input_scope.map ~= state.map or serial ~= input_scope.proof.serial
-            or (edge ~= "press" and edge ~= "release" and edge ~= "cancel") then
+            or (edge ~= "press" and edge ~= "release" and edge ~= "cancel" and edge ~= "tap") then
             error("native_guest_melee_exact_edge_required", 0)
         end
-        if edge == "press" and not exact_guest(state, phase, input_scope.pawn, standing) then
+        if (edge == "press" or edge == "tap") and not exact_guest(state, phase, input_scope.pawn, standing) then
             error("native_guest_melee_exact_owner_required", 0)
         end
         local proof = melee_input_proof(SilverfishApplyNativeGuestMeleeInputEdge(serial, edge))

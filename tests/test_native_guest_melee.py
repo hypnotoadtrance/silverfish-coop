@@ -247,20 +247,71 @@ class NativeGuestMeleeTests(unittest.IsolatedAsyncioTestCase):
     def test_stock_edges_are_consumed_once_from_the_resident_memory_queue(self):
         pawn = f"Player_FP_C {CROSSROADS}.CrossRoads_P:PersistentLevel.Player_FP_C_42"
         valid_rows = [
-            ("12", "press", "12"),
-            ("13", "release", "12"),
-            ("18", "press", "18"),
-            ("19", "cancel", "18"),
+            ("12", "press", "12", "0"),
+            ("13", "release", "12", "80"),
+            ("18", "press", "18", "0"),
+            ("19", "cancel", "18", "340"),
         ]
-        rows = valid_rows + [("20", "release", "20"), ("21", "press", "20"), ("9", "release", "14")]
-        records = ["\t".join((melee.INPUT_RECORD, sequence, CROSSROADS, pawn, GUID, "old-pipe", edge, stroke)).encode()
-                   for sequence, edge, stroke in rows]
+        rows = valid_rows + [("20", "release", "20", "0"), ("21", "press", "20", "0"), ("9", "release", "14", "0"),
+                             ("21", "press", "21", "10"), ("25", "release", "22", "9001")]
+        records = ["\t".join((melee.INPUT_RECORD, sequence, CROSSROADS, pawn, GUID, "old-pipe", edge, stroke, ms)).encode()
+                   for sequence, edge, stroke, ms in rows]
         bridge = Bridge(None, Mock())
         bridge.local_bridge = Mock(input_ready=Mock(side_effect=[True, False]), read_input=Mock(return_value=records))
         self.assertEqual(bridge.native_melee_input_requests(),
-                         [(int(sequence), CROSSROADS, pawn, GUID, "old-pipe", edge, int(stroke))
-                          for sequence, edge, stroke in valid_rows])
+                         [(int(sequence), CROSSROADS, pawn, GUID, "old-pipe", edge, int(stroke), int(ms))
+                          for sequence, edge, stroke, ms in valid_rows])
         self.assertEqual(bridge.native_melee_input_requests(), [])
+
+    async def test_only_adjacent_short_edges_in_the_same_drain_become_a_stock_tap(self):
+        scope = CROSSROADS, "local pawn", GUID, "old-pipe"
+        batches = [
+            [(1, *scope, "press", 1, 0), (2, *scope, "release", 1, 48)],
+            [(3, *scope, "press", 3, 0), (4, *scope, "release", 3, 610)],
+            [(5, *scope, "press", 5, 0)],
+            [(6, *scope, "release", 5, 49)],
+            [(7, *scope, "press", 7, 0), (8, *scope, "cancel", 7, 2)],
+        ]
+        bridge = Mock(input_namespace=uuid.uuid4(), native_melee_input_requests=Mock(side_effect=batches))
+        client = SimpleNamespace(host_session="session", zone_epoch="epoch", bridge=bridge,
+                                 gameplay_action=AsyncMock(return_value={}), control=Mock())
+        controller = melee.GuestInput(client)
+        for _ in batches:
+            await controller.service(scope)
+        edges = [call.args[2].rsplit("@", 1)[1] for call in client.gameplay_action.await_args_list]
+        self.assertEqual(edges, ["tap", "press", "release", "press", "release", "press", "cancel"])
+        events = [(call.kwargs["sequence"], call.kwargs["edge"]) for call in client.control.event.call_args_list]
+        self.assertEqual(events, list(zip((2, 3, 4, 5, 6, 7, 8), edges)))
+
+    async def test_atomic_native_taps_use_both_edges_and_do_not_reuse_one_stroke(self):
+        host = self.host()
+        host.zone_epoch, host.control = "epoch", Mock()
+        host.last_game["native_guest_equipped_weapons"] = {"exact pawn": {"kind": "old-pipe", "guid": GUID}}
+        handler = melee.AuthorityInput(host)
+
+        def snapshot(edges):
+            return dict(host.last_game, **{melee.INPUT_KEY: dict(
+                map=CROSSROADS, pawn="exact pawn", guid=GUID, serial=3, status="pending", presses=edges,
+                releases=edges, contacts=0, hits=0, charged=0, combo=0)})
+
+        bridge = SimpleNamespace(command=AsyncMock(side_effect=[snapshot(1), snapshot(2)]))
+        first = f"epoch@{GUID}@{'1' * 32}"
+        second = f"epoch@{GUID}@{'2' * 32}"
+        with patch.object(melee.native_inventory, "retain_guest_save", new=AsyncMock(return_value=True)):
+            receipt = await handler.request(bridge, "guest", first + "@tap", OPERATION)
+            self.assertEqual(receipt, await handler.request(bridge, "guest", first + "@tap", OPERATION))
+            with self.assertRaisesRegex(party.RuleError, "combat_busy"):
+                await handler.request(bridge, "guest", first + "@press", OPERATION)
+            with self.assertRaisesRegex(party.RuleError, "exact_edge_required"):
+                await handler.request(bridge, "guest", first + "@release", OPERATION)
+            combo = await handler.request(bridge, "guest", second + "@tap", OPERATION)
+        self.assertEqual(combo[melee.INPUT_KEY]["releases"], 2)
+        self.assertIsNone(handler.scope.held)
+        self.assertEqual([call.args for call in bridge.command.await_args_list], [
+            (melee.INPUT + "-start", "exact pawn", GUID, "tap"),
+            (melee.INPUT + "-edge", "3", "tap"),
+        ])
+        host.checkpoint_native.assert_not_awaited()
 
     async def test_exact_stroke_remains_bound_across_stock_combo_edges_without_checkpoint(self):
         host = self.host()
