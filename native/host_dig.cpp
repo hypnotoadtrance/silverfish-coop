@@ -426,6 +426,7 @@ namespace
         Clock::time_point expires{};
         U::FFrame* frame{};
         Point relative{};
+        std::string guid;
     };
 
     std::array<GuestDigAttempt, 8> guest_digs;
@@ -516,7 +517,7 @@ namespace
         if (!exact(camera, STR("/Script/Engine.CameraComponent")) || camera->GetOuterPrivate() != pawn ||
             !silverfish::native_guest_melee::apply_stock_control_rotation(camera, object(pawn, STR("Controller")), relative))
             return result(lua, false, "stock_guest_dig_camera_unavailable");
-        *found = {pawn, save, spade, camera, now + std::chrono::seconds(2)};
+        *found = {pawn, save, spade, camera, now + std::chrono::seconds(2), nullptr, {}, std::move(guid)};
         std::uint8_t args{};
         spade->ProcessEvent(primary, &args);
         silverfish::native_guest_melee::restore_stock_camera_rotation(camera, relative);
@@ -613,15 +614,29 @@ namespace
         }
         if (!qualified_source(ctx, source)) return;
         auto* caller = frame.PreviousFrame();
-        const auto standing = bound_live(true, true);
-        // This exact stock source enters an authenticated campaign only via
-        // the canonical listen host's actual, scoped Spade input.
-        if (live_dig.state != LiveState::Arming || now >= live_dig.press_until ||
-            !standing.world || standing.spade != live_dig.held.Get() || !live_dig.spade_called ||
-            !caller || caller->Object() != standing.spade || caller->Node() != find<U::UFunction>(spade_graph))
+        if (live_dig.state != LiveState::Arming || !caller || !guest_dig_graph(caller->Object(), *caller))
         {
             call.PreventOriginalFunctionCall();
             return;
+        }
+        const auto standing = bound_live(true, true);
+        const bool host_pressed = standing.world && standing.spade == caller->Object() &&
+            standing.spade == live_dig.held.Get() && now < live_dig.press_until && live_dig.spade_called;
+        auto* dig_save = ctx.save;
+        if (!host_pressed)
+        {
+            const auto guest = std::ranges::find_if(guest_digs, [&](const auto& attempt) {
+                return attempt.frame == caller && attempt.spade.Get() == caller->Object() && now < attempt.expires;
+            });
+            if (guest == guest_digs.end() || live_serial >= (std::int64_t{1} << 53) - 1 ||
+                !silverfish::native_guest_regen::qualifies_detached_guest(guest->pawn.Get(), guest->save.Get(), ctx.save))
+            {
+                call.PreventOriginalFunctionCall();
+                return;
+            }
+            dig_save = guest->save.Get();
+            live_dig.serial = ++live_serial;
+            live_dig.spade_guid = guest->guid;
         }
         auto* input = field<U::FStructProperty>(function, STR("DigLocation"));
         auto* vector = find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"));
@@ -645,7 +660,7 @@ namespace
         stock_wallet::Wallet flags;
         std::string now_spade, owned;
         if (!flags.bind(ctx.instance) || flags.flag_value(ctx.instance, buried_flag).second ||
-            !loot_escrow::stock_spade_guid(ctx.save, now_spade) || now_spade != live_dig.spade_guid ||
+            !loot_escrow::stock_spade_guid(dig_save, now_spade) || now_spade != live_dig.spade_guid ||
             !loot_escrow::sealed_package_guid(ctx.save, owned) || !owned.empty())
         {
             fail_live("stock_live_dig_contact_ownership_unverified");

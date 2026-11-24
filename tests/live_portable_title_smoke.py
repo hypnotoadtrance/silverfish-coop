@@ -3754,6 +3754,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
                  rusty_pistol: bool = False, tutorial_dock_combat: bool = False, tutorial_dock_retaliation: bool = False,
                  stock_bandage_revisit: bool = False, stock_shovel: bool = False, stock_shovel_loot: bool = False,
+                 stock_shovel_quest: bool = False,
                  stock_take_ammo: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
@@ -3826,7 +3827,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_bottle, "stock_bottle", verify_stock_bottle),
         (stock_bandage_revisit, "stock_bandage_revisit", verify_tutorial_bandage_revisit),
         (stock_critters, "stock_critters", verify_stock_critters),
-        (stock_shovel, "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(host, guest, pawn, loot=stock_shovel_loot)),
+        (stock_shovel, "stock_shovel", lambda host, guest, pawn: verify_stock_shovel(
+            host, guest, pawn, loot=stock_shovel_loot, quest=stock_shovel_quest)),
         (tutorial_dock_combat, "tutorial_dock_retaliation" if tutorial_dock_retaliation else "tutorial_dock_combat",
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, retaliation=tutorial_dock_retaliation)),
     ) if enabled)
@@ -4232,6 +4234,8 @@ if __name__ == "__main__":
                         help="verify stock shovel digs from both co-op seats")
     parser.add_argument("--stock-shovel-loot", action="store_true",
                         help="also verify stock unearthed loot and props during the shovel check")
+    parser.add_argument("--stock-shovel-quest", action="store_true",
+                        help="verify stock guest excavation of the buried Missing Contact package")
     parser.add_argument("--stock-take-ammo", action="store_true",
                         help="unload guest firearms through the normal stock context menu")
     parser.add_argument("--stock-npc-rivalry", action="store_true",
@@ -4330,7 +4334,7 @@ if __name__ == "__main__":
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"stock_food", "stock_campfire", "stock_npc_override", "stock_board_offers", "resident_weapon_cues",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "stock_npc_rivalry",
-                              "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_take_ammo",
+                              "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_shovel_quest", "stock_take_ammo",
                               "stock_host_corpse_carry", "stock_flashlights", "stock_simmi_jammers", "stock_weather_travel",
                               "stock_melee_family", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
                               "stock_roaming_barter", "stock_critters", "stock_throwables"}
@@ -4344,6 +4348,8 @@ if __name__ == "__main__":
         parser.error("Use separate sessions for the Crossroads shovel and Tutorial Dock checks")
     if args.stock_shovel_loot and not args.stock_shovel:
         parser.error("Use --stock-shovel-loot with --stock-shovel")
+    if args.stock_shovel_quest and (not args.stock_shovel or args.stock_shovel_loot):
+        parser.error("Use --stock-shovel-quest with --stock-shovel alone")
     if any((args.stock_food, args.stock_campfire, args.stock_npc_override, args.stock_board_offers,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
@@ -4404,6 +4410,7 @@ if __name__ == "__main__":
                        tutorial_dock_retaliation=args.tutorial_dock_retaliation, stock_bandage_revisit=args.stock_bandage_revisit,
                        stock_shovel=args.stock_shovel,
                        stock_shovel_loot=args.stock_shovel_loot,
+                       stock_shovel_quest=args.stock_shovel_quest,
                        stock_take_ammo=args.stock_take_ammo,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,
                        guest_world_start_travel=args.guest_world_start_travel, guest_ui_memory=args.guest_ui_memory,
