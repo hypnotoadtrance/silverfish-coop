@@ -4,6 +4,7 @@ local guest_save = require("guest_save")
 local folder = "/Game/Classes/Equipment/Equipment_Assets/Equimpents_Projectiles/"
 local bolt = "BlueprintGeneratedClass " .. folder .. "Bolt_Projectile_BP.Bolt_Projectile_BP_C"
 local pipe_bomb = "BlueprintGeneratedClass " .. folder .. "PipeBomb_Projectile_BP.PipeBomb_Projectile_BP_C"
+local gameplay_statics = "/Script/Engine.Default__GameplayStatics"
 local classes = {[bolt] = "bolt", [pipe_bomb] = "pipebomb"}
 for _, name in ipairs({"Flare_Projectile_BP", "Blue_Flare_Projectile_BP", "Yellow_Flare_Projectile_BP"}) do
     classes["BlueprintGeneratedClass " .. folder .. name .. "." .. name .. "_C"] = "flare"
@@ -65,6 +66,13 @@ function flare.carry_root(actor, world)
     if not entry or not same(entry.actor, actor) or not valid(entry.root) or actor:IsActorBeingDestroyed()
         or not same(actor:GetWorld(), world) or actor.bReplicateMovement ~= true then return end
     if same(actor.RootComponent, entry.root) and same(entry.root:GetOwner(), actor) then return entry.root end
+end
+
+function flare.retire_detonated_bomb(actor)
+    local statics = StaticFindObject(gameplay_statics)
+    if valid(actor) and actor:HasAuthority() and valid(statics) and actor:GetClass():GetFullName() == pipe_bomb then
+        projectiles[actor:GetAddress()] = {actor = actor, retire_at = statics:GetTimeSeconds(actor) + .1}
+    end
 end
 
 local function enable_grip(actor, root)
@@ -177,6 +185,15 @@ function flare.start(role)
             local spin = actor.RotatingMovement
             if valid(spin) then spin:Deactivate() end
             -- A bolt's stock bounce replaces it with a separate ground item.
+            if kind == "bolt" then
+                local mesh = actor.DisplayMesh
+                if valid(mesh) and same(mesh:GetOwner(), actor) then
+                    mesh:SetOnlyOwnerSee(false)
+                    mesh:SetOwnerNoSee(false)
+                    mesh:SetVisibility(true, false)
+                    mesh:SetHiddenInGame(false, false)
+                end
+            end
             if kind == "flare" then replicas[actor:GetAddress()] = {actor = actor} end
         else
             if kind == "flare" then
@@ -194,15 +211,25 @@ local function faded(light)
     return not valid(light) or type(light.Intensity) == "number" and light.Intensity <= .001
 end
 
-local function retire_spent(state)
+local function update_host_projectiles(state)
     if not valid(state.world) or not state.listening or state.server ~= false or not next(projectiles) then return end
     local now = os.clock()
     if now < next_flare_check then return end
     next_flare_check = now + .25
+    local game_time
     for key, entry in pairs(projectiles) do
         local actor = entry.actor
         if not valid(actor) or actor:IsActorBeingDestroyed() or not same(actor:GetWorld(), state.world) then
             projectiles[key] = nil
+        elseif entry.retire_at then
+            if game_time == nil then
+                local statics = StaticFindObject(gameplay_statics)
+                game_time = valid(statics) and statics:GetTimeSeconds(state.world)
+            end
+            if game_time and game_time >= entry.retire_at then
+                projectiles[key] = nil
+                actor:K2_DestroyActor()
+            end
         elseif actor.Lit == false and faded(actor.PointLight) and faded(actor.PointLight1) then
             -- A newly replicated stock actor starts its own burn timer in BeginPlay.
             -- Keep the stock fade and remove the spent projectile from the network.
@@ -213,7 +240,7 @@ local function retire_spent(state)
 end
 
 function flare.sync(state, phase)
-    if phase == "hosting" then retire_spent(state) end
+    if phase == "hosting" then update_host_projectiles(state) end
     update_replica_grips(state, phase)
     if phase ~= "connected" or not state.server or not state.listening or type(SilverfishTakeLocalGuestFlare) ~= "function" then
         intent = nil
