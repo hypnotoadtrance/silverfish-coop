@@ -49,6 +49,7 @@ from . import native_damage_feedback, native_weather_view
 from . import native_voice
 from . import native_footsteps
 from . import native_anomaly_effects
+from . import native_destructibles
 from . import native_drum_fire
 from . import native_weapon_fire_view
 from . import native_loose_pickup
@@ -1990,6 +1991,11 @@ class Host:
             if fixed:
                 gameplay[native_anomaly_effects.FIXED_EXPLOSIVES] = {
                     "map": self.last_game["map"], "epoch": self.zone_epoch, "props": fixed,
+                }
+            if native_destructibles.KEY in self.last_game:
+                gameplay[native_destructibles.KEY] = {
+                    "map": self.last_game["map"], "epoch": self.zone_epoch,
+                    "actors": self.last_game[native_destructibles.KEY],
                 }
             equipped = self.last_game.get("native_guest_equipped_weapons", {}).get(pawn, {})
             kind = equipped.get("kind")
@@ -5081,6 +5087,7 @@ class Client:
         self.hurt_playback = native_damage_feedback.Playback()
         self.weather_sirens = native_weather_view.SirenPlayback()
         self.anomaly_playback = native_anomaly_effects.Playback()
+        self.destructible_playback = native_destructibles.Playback()
         self.weapon_shot_playback = native_weapon_fire_view.Playback()
         self.loot_motion_playback = native_stock_enemy_drops.MotionPlayback()
         self.snapshot_request: asyncio.Task[tuple[dict, float]] | None = None
@@ -6010,6 +6017,8 @@ class Client:
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.CANISTERS), self.zone_epoch)
                     self.last_game = await native_anomaly_effects.project_fixed_explosives(
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.FIXED_EXPLOSIVES), self.zone_epoch)
+                    self.last_game = await self.destructible_playback.project(
+                        self.bridge, self.last_game, self.gameplay.get(native_destructibles.KEY), self.zone_epoch)
                     self.last_game = await self.pickup_playback.sync(
                         self.bridge, self.control, self.last_game, self.gameplay.get(native_pickup_audio.KEY),
                         self.zone_epoch, self.host_session)
