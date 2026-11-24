@@ -124,8 +124,8 @@ end)
 local function run(action, kind, arg)
     local profile = assert(profiles[kind], "unknown throwable kind")
     if action == "blasts" then return #blasts .. ":" .. table.concat(blasts, ";") end
+    if action == "visual" then return short_bolt_samples or 0 end
     if action == "shot" then
-        if kind == "bolt" and (short_bolt_samples or 0) > 0 then return "visual," .. short_bolt_samples end
         local shot = shots[kind]
         if not shot then return "absent" end
         local active, result = false, {}
