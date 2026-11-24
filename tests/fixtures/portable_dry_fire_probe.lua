@@ -189,6 +189,26 @@ local function run(action)
     end
     if action == "ready" then return ready(local_pawn) end
     if action == "peer-ready" then return ready(peer) end
+    if action == "light-ar-read-mode" then
+        local held = local_pawn.EquipedItem
+        if not valid(held) or not same(held:GetClass(), asset(weapon_path)) then return "waiting" end
+        return held.SemiAutoSelected and "semi" or "auto"
+    end
+    if action == "light-ar-put-away" or action == "light-ar-other-ready" then
+        local other_slot = arm_profiles["arm-rusty"][4]
+        local row = local_pawn.Save.PlayerEquipment[other_slot]
+        local class = asset(arm_profiles["arm-rusty"][1])
+        assert(observing() and not local_pawn:HasAuthority() and weapon_path == arm_profiles["arm-light-ar"][1]
+            and same(row[item_class], class), "the paired LightAR and Rusty Pistol slots are required")
+        if action == "light-ar-put-away" then
+            local_pawn:Equip_NextItem(other_slot - 1, false)
+            return "changing"
+        end
+        local held = local_pawn.EquipedItem
+        if local_pawn.Save.PlayerEquipIndex == other_slot - 1 and valid(held) and same(held:GetClass(), class)
+            and same(held:GetOwner(), local_pawn) then return "other" end
+        return "waiting"
+    end
     if action == "light-ar-semi" or action == "light-ar-auto" then
         assert(observing() and not local_pawn:HasAuthority() and weapon_path == arm_profiles["arm-light-ar"][1]
             and ready(local_pawn) ~= "waiting", "the guest LightAR must be selected")

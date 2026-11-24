@@ -11,7 +11,7 @@ from tools.silverfish.guest_weapon_profiles import FIREARMS, FIVE_SIX_FMJ
 from tools.silverfish.travel import OBSERVATORY
 
 
-async def verify_stock_light_ar(host, guest, pawn, probe):
+async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
     profile = next(weapon for weapon in FIREARMS if weapon.kind == "light-ar-01")
     assert profile.magazine.ammo == FIVE_SIX_FMJ
     units = FIVE_SIX_FMJ.fixture_units
@@ -60,6 +60,11 @@ async def verify_stock_light_ar(host, guest, pawn, probe):
                     return terminal
                 await asyncio.sleep(.06)
 
+    async def persisted_mode(guid, mode):
+        await wait_resident_status(
+            host_run, lambda status: (weapon := status.get("game", {}).get("native_guest_equipped_weapons", {}).get(pawn, {}))
+            and (weapon.get("guid"), weapon.get("fire_mode")) == (guid, mode))
+
     try:
         host_armed, guest_armed = await asyncio.gather(command(host, "arm-light-ar"), command(guest, "arm-light-ar"))
         assert host_armed == guest_armed == "armed", (host_armed, guest_armed)
@@ -77,6 +82,13 @@ async def verify_stock_light_ar(host, guest, pawn, probe):
         assert await command(guest, "face-away") == "turned"
         assert await command(host, "clear") == "clear"
         assert await command(guest, "light-ar-semi") == "light-ar-semi"
+        await persisted_mode(guid, "semi")
+        if re_equip:
+            assert await command(guest, "light-ar-put-away") == "changing"
+            await wait_readback(guest, "light-ar-other-ready", "other")
+            assert await command(guest, "equip") == "selected"
+            await persisted_mode(guid, "semi")
+            await wait_readback(guest, "light-ar-read-mode", "semi")
         denied = await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="press")
         if denied["ok"]:
             await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="release")
@@ -99,6 +111,7 @@ async def verify_stock_light_ar(host, guest, pawn, probe):
         await wait_readback(guest, "reserve", "")
         assert await command(host, "peer-reserve") == "" and await command(host, "reserve") == host_reserve
         assert await command(guest, "light-ar-auto") == "light-ar-auto"
+        await persisted_mode(guid, "auto")
         assert await command(host, "clear") == "clear"
         burst = await stock_burst(guest_frame, guid)
         assert (burst["status"], burst["before"], burst["pawn"]) == ("released", units, pawn), burst
@@ -116,5 +129,6 @@ async def verify_stock_light_ar(host, guest, pawn, probe):
                                "stock_projectile_calls": projectile_calls, "stock_fire_sounds": shot_sounds,
                                "stock_muzzle_flashes": muzzle_flashes, "reload": reloaded,
                                "semi_hold_blocked": True, "automatic_burst": burst,
+                               "host_stored_both_modes": True, "semi_after_re_equip": re_equip,
                                "both_magazines_verified": True, "host_reserve_unchanged": True,
                                "campaign_unchanged": True, "observer_scopes_disarmed": True}}

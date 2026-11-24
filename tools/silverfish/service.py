@@ -105,6 +105,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_prop_carry.ACTION, native_flare.ACTION,
                         native_lantern.EXTINGUISH,
                         *native_guest_weapon.GUEST_ACTIONS, native_guest_weapon.SELECT_EQUIPMENT,
+                        native_guest_weapon.SET_FIRE_MODE,
                         *native_guest_consumable.RESULT, native_guest_melee.SWING, native_guest_melee.INPUT,
                         native_host_dig_live.GUEST_ACTION,
                         native_host_dig_live.COLLECT,
@@ -2235,6 +2236,8 @@ class Host:
             elif action == native_guest_weapon.SELECT_EQUIPMENT:
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
                     result = await native_guest_weapon.select_equipment(self, bridge, character, target)
+            elif action == native_guest_weapon.SET_FIRE_MODE:
+                result = await native_guest_weapon.store_fire_mode(self, bridge, character, target)
             elif action in native_guest_weapon.GUEST_ACTIONS:
                 result = await native_guest_weapon.perform(self, bridge, character, request["operation_id"], action, target)
             elif action == native_guest_melee.SWING:
@@ -5564,6 +5567,8 @@ class Client:
                 command = ("native-guest-primary-scope", *scope) if scope else ("native-guest-primary-clear",)
                 if scope and camera:
                     command += (native_turret_photo.QUEST_ID,)
+                elif scope and kind in native_smg_hold.HOLD_KINDS and equipment.get("fire_mode") in native_guest_weapon.FIRE_MODES:
+                    command += (equipment["fire_mode"],)
                 self.last_game = await self.bridge.command(*command, timeout=2)
                 observed = self.last_game.get("native_guest_primary_scope", {})
                 if scope and tuple(observed.get(key) for key in ("map", "pawn", "guid", "kind")) != scope:
@@ -6505,6 +6510,7 @@ class Client:
         finally:
             await self.cancel_gameplay_snapshot()
             await self.guest_ui.close()
+            await native_guest_weapon.service_fire_modes(self, active)
             if pause_exit is not None:
                 pause_exit.close()
             if self.mindcore_carry:
