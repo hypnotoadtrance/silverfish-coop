@@ -2696,6 +2696,9 @@ class Bridge:
                     sites[fields[2]] = dict(map=fields[1], actor=fields[3], location=location)
                 elif fields == ["native-stash-live-census", "1"] and data.get("state") == "hosting":
                     data[native_stash.LIVE_CENSUS] = True
+                elif (fields == ["native-stash-census-snapshot", "1"] and data.get("state") == "hosting"
+                        and data.get(native_stash.LIVE_CENSUS) is True):
+                    data[native_stash.CENSUS_SNAPSHOT] = True
                 elif fields == ["native-stash-live-move", "1"] and data.get("state") == "hosting":
                     data[native_stash.LIVE_MOVE] = True
                 elif fields == ["native-stash-live-reorder", "1"] and data.get("state") == "hosting":

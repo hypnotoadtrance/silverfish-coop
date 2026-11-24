@@ -3338,6 +3338,7 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str, *, large
         item, = [row for row in listed["native_inventory"]["items"]
                  if row["source"] == "backpack" and row["class_path"] == native_guest_consumable.STARTER_BAGS["hyperrandom"]]
 
+    opened_at = time.perf_counter()
     opened = await submit(guest_run, "native-stash-view-fixture", target=site)
     assert opened["ok"], opened
     pending = opened[native_stash.VIEW]
@@ -3345,6 +3346,7 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str, *, large
         "pending", local_pawn, site, "stash", None)
     if large:
         rendered = await wait_for_stash_render(pending)
+        open_seconds = round(time.perf_counter() - opened_at, 3)
         receipt = await guest.bridge.command("portable-stash-memory-proof", str(pending["sequence"]), site, "large")
         matched = re.fullmatch(rf"portable large stash memory {pending['sequence']} 384 (\d+) ([0-9A-F,]+)",
                                receipt["ack"]["message"])
@@ -3359,6 +3361,8 @@ async def verify_guest_stash_memory(host: Seat, guest: Seat, pawn: str, *, large
         require_unchanged_saves(before)
         return {"stash_actor": authored["actor"], "site": site, "stock_view": rendered, "large_native_ticket": True,
                 "memory_payload_bytes": payload_bytes, "stock_card_count": len(guids),
+                "stash_open_seconds": open_seconds,
+                "census_snapshot": home["game"].get(native_stash.CENSUS_SNAPSHOT) is True,
                 "first_guid": guids[0], "last_guid": guids[-1], "ordered_card_guids": guids,
                 "local_bridge": {"host": home["local_bridge"], "guest": joined["local_bridge"]},
                 "stash_page_files_seen": False, "saves_unchanged_before_checkpoint": True,

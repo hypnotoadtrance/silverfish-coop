@@ -322,15 +322,37 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
                       ammo=7, value=29, weight=0.25, never_drop=False) for index in range(17)]
 
         def page(action, operation, target):
-            assert action == native_stash.LIST and target.startswith(f"{SITE}|")
-            offset = int(target.rsplit("|", 1)[1])
-            return {native_stash.RESULT: dict(site=SITE, owner=GUEST, combined=False, offset=offset,
-                    total=len(stock), items=stock[offset:offset + 16], next_offset=16 if offset == 0 else None)}
+            site, raw_offset, *token = target.split("|")
+            assert action == native_stash.LIST and site == SITE
+            offset = int(raw_offset)
+            result = dict(site=SITE, owner=GUEST, combined=False, offset=offset, total=len(stock),
+                          items=stock[offset:offset + 16], next_offset=16 if offset == 0 else None)
+            if token:
+                result["snapshot"], = token
+            return {native_stash.RESULT: result}
 
-        client = SimpleNamespace(invite={"character_id": GUEST}, gameplay_action=AsyncMock(side_effect=page))
+        client = SimpleNamespace(invite={"character_id": GUEST}, gameplay={},
+                                 gameplay_action=AsyncMock(side_effect=page))
         rows = await native_stash._stock_rows(client, SITE, uuid.uuid4())
         self.assertEqual(len(rows), 17)
         self.assertEqual(rows[-1].split("\t"), [stock[-1]["guid"], stock[-1]["class_path"], "7", "0.25", "29", "0\n"])
+
+        client.gameplay[native_stash.CENSUS_SNAPSHOT] = True
+        client.gameplay_action.reset_mock()
+        generation = uuid.uuid4()
+        self.assertEqual(await native_stash._stock_rows(client, SITE, generation), rows)
+        self.assertEqual([call.args[2] for call in client.gameplay_action.await_args_list],
+                         [f"{SITE}|{offset}|{generation.hex}" for offset in (0, 16)])
+
+        def wrong_token(*args):
+            result = page(*args)
+            if result[native_stash.RESULT]["offset"]:
+                result[native_stash.RESULT]["snapshot"] = uuid.uuid4().hex
+            return result
+
+        client.gameplay_action.side_effect = wrong_token
+        with self.assertRaisesRegex(ValueError, "exact stash"):
+            await native_stash._stock_rows(client, SITE, generation)
 
         def wrong_owner(*args):
             result = page(*args)
@@ -400,6 +422,14 @@ class NativeStashTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((live_view["owner"], live_view["items"]), (GUEST, [row]))
         bridge.command.assert_awaited_with(native_stash.CENSUS, "guest-pawn", "-", SITE, "0", timeout=5)
         host.checkpoint_native.assert_not_awaited()
+
+        generation = uuid.uuid4().hex
+        with self.assertRaisesRegex(party.RuleError, "snapshot_unavailable"):
+            await native_stash.inspect(host, bridge, GUEST, f"{SITE}|0|{generation}")
+        game[native_stash.CENSUS_SNAPSHOT] = True
+        scoped = (await native_stash.inspect(host, bridge, GUEST, f"{SITE}|0|{generation}"))[native_stash.RESULT]
+        self.assertEqual(scoped, {**live_view, "snapshot": generation})
+        bridge.command.assert_awaited_with(native_stash.CENSUS, "guest-pawn", "-", SITE, "0", generation, timeout=5)
 
         bridge.command.return_value["native_stash_census"]["pawn"] = "host-pawn"
         with self.assertRaisesRegex(RuntimeError, "exact character"):

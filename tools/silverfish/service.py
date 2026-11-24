@@ -957,6 +957,8 @@ class Host:
         if type(self.last_game.get(native_stash.SETTING)) is bool:
             view[native_stash.SETTING] = self.last_game[native_stash.SETTING]
             view[native_stash.SITES] = self.last_game.get(native_stash.SITES, {})
+            if self.last_game.get(native_stash.CENSUS_SNAPSHOT) is True:
+                view[native_stash.CENSUS_SNAPSHOT] = True
         if native_mindcore._ready(self.last_game, 2) and native_mosby_tape.instructions_download_unlocked(self.party):
             view["host_world"][native_mosby_station_view.DOWNLOAD_READY] = True
         carry = getattr(self, "mindcore_carry", None)
