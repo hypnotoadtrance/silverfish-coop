@@ -26,7 +26,7 @@ local last, local_pawn, peer, failure, world_address
 local hooked = false
 local clicks, projectiles, shot_sounds, muzzle_flashes = {}, 0, 0, 0
 local burst_directions
-local crossfire
+local crossfire, crossfire_host_class, crossfire_guest_class, crossfire_projectile
 local local_flashes, local_reload = 0, nil
 local retire_projectile, projectile_retired
 
@@ -94,8 +94,21 @@ local function arm()
         if not ok then failure = message end
     end)
     RegisterBeginPlayPostHook(function(context)
-        if not retire_projectile or not observing() then return end
+        if not (retire_projectile or crossfire) or not observing() then return end
         local actor = context:get()
+        if (crossfire == "armed" or crossfire == "pending") and valid(actor)
+            and crossfire_projectile and actor:IsA(crossfire_projectile) and actor:HasAuthority()
+            and same(actor:GetWorld(), local_pawn:GetWorld()) then
+            if crossfire == "pending" and same(actor:GetOwner(), local_pawn) and same(actor.Instigator, local_pawn) then
+                crossfire_host_class = actor:GetClass()
+            elseif same(actor:GetOwner(), peer) and same(actor.Instigator, peer) then
+                crossfire_guest_class = actor:GetClass()
+            end
+            if crossfire_host_class and crossfire_guest_class then
+                crossfire = same(crossfire_host_class, crossfire_guest_class) and "fired" or "different-class"
+            end
+        end
+        if not retire_projectile then return end
         if not valid(actor) or not actor:IsA(retire_projectile) or not actor:HasAuthority()
             or not same(actor:GetWorld(), local_pawn:GetWorld())
             or not same(actor:GetOwner(), peer) or not same(actor.Instigator, peer) then return end
@@ -114,11 +127,7 @@ local function arm()
             end
             if crossfire == "armed" and same(weapon, peer.EquipedItem) then
                 crossfire = "pending"
-                local own = local_pawn.EquipedItem
-                own:Use_Item_Primary(true)
-                own:Use_Item_Primary(false)
-            elseif crossfire == "pending" and same(weapon, local_pawn.EquipedItem) then
-                crossfire = "fired"
+                local_pawn.EquipedItem:SpawnProjectile()
             end
         end
     end)
@@ -283,7 +292,7 @@ local function run(action, argument)
     if action == "disarm" then
         world_address, local_pawn, peer, local_reload = nil, nil, nil, nil
         retire_projectile, projectile_retired = nil, nil
-        crossfire = nil
+        crossfire, crossfire_host_class, crossfire_guest_class, crossfire_projectile = nil, nil, nil, nil
         return "disarmed"
     end
     if action == "retire-peer-projectile" then
@@ -312,7 +321,7 @@ local function run(action, argument)
     if action == "seed-crossfire" then
         assert(observing() and local_pawn:HasAuthority()
             and weapon_path == arm_profiles["arm-light-ar"][1] and local_pawn:GetWorld():GetFullName() == map)
-        return seed(local_pawn, 2)
+        return seed(local_pawn, 1)
     end
     if action == "projected" then return identify(local_pawn.Save.PlayerEquipment[slot]) end
     if action == "equip" then
@@ -415,7 +424,8 @@ local function run(action, argument)
     if action == "burst-read" then return table.concat(burst_directions, ",") end
     if action == "crossfire-arm" then
         assert(observing() and local_pawn:HasAuthority() and ready(local_pawn) ~= "waiting")
-        crossfire = "armed"
+        crossfire, crossfire_host_class, crossfire_guest_class = "armed", nil, nil
+        crossfire_projectile = asset("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C")
         return crossfire
     end
     if action == "crossfire-read" then return crossfire or "unarmed" end

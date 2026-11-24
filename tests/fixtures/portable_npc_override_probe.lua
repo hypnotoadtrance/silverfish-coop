@@ -1376,6 +1376,10 @@ local function run(action, actor_path)
         return stage_garage_shot(pawn, world)
     elseif action == "dock-garage-open" then
         return open_garage_for_test(world)
+    elseif action == "dock-garage-lower-host" then
+        assert(host and garage_door and valid(garage_door.mesh))
+        garage_door.mesh:K2_SetWorldLocation(garage_door.point, false, {}, true)
+        return "lowered"
     elseif action == "dock-garage-restore" then
         return restore_garage_fixture()
     elseif action == "dock-garage-aim" then
