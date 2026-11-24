@@ -1831,12 +1831,9 @@ async def verify_stock_critters(host: Seat, guest: Seat, pawn: str) -> dict:
                                "removed_on_both_peers": True, "checkpoint_unchanged": True}}
 
 
-async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, retaliation: bool = False) -> dict:
+async def travel_pair_to_dock(host: Seat, guest: Seat, pawn: str) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
-    for seat in (host, guest):
-        for probe in ("portable-dry-fire", "portable-footstep"):
-            assert await portable_probe_command(seat.bridge, probe, "disarm") == "disarmed"
     initial = await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("native_zone", {}).get("state") == "ready")
     if initial["game"].get("map") == dock:
         arrival = initial
@@ -1846,20 +1843,93 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
         arrival = await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == dock
                                              and frame.get("zone_epoch") != initial["zone_epoch"]
                                              and not frame.get("awaiting_zone_guest"), timeout=60)
-    async def command(seat, action):
-        return await portable_probe_command(seat.bridge, "portable-npc-override", action)
-
     def at_dock(frame):
         return (frame.get("state") == "connected" and frame.get("gameplay_fresh")
                 and frame.get("game", {}).get("map") == dock and frame.get("zone_epoch") == arrival["zone_epoch"])
 
-    await wait_resident_status(guest_run, at_dock, timeout=30)
+    return await wait_resident_status(guest_run, at_dock, timeout=30)
+
+
+async def verify_tutorial_dock_melee(host: Seat, guest: Seat, pawn: str) -> dict:
+    guest_run = guest.client / "run"
+
+    async def command(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-npc-override", action)
+
+    inventory = await equip_stock_guest_melee(host, guest, "seed-pipe\theavy", "melee")
+    guid = inventory["game"]["native_guest_primary_scope"]["guid"]
+    arrival = await travel_pair_to_dock(host, guest, pawn)
+    async with asyncio.timeout(8):
+        while await command(guest, f"dock-melee-equip\t{guid}") != "selected":
+            await asyncio.sleep(.05)
+    frame = await wait_resident_status(guest_run, lambda snapshot: (
+        snapshot.get("zone_epoch") == arrival["zone_epoch"]
+        and (scope := snapshot.get("game", {}).get("native_guest_primary_scope", {})).get("guid") == guid
+        and scope["kind"] == "melee"), timeout=12)
+    host_frame = await current_status(host.campaign / "run")
+    actor = host_frame["game"]["native_guest_save"]["pawn"]
+    saves = campaign_save_hashes(host.campaign)
+    starting_host, starting_guest = await asyncio.gather(*(command(seat, "dock-natural-state") for seat in (host, guest)))
+    assert all(value.startswith("true;false;0;") for value in (starting_host, starting_guest)), (starting_host, starting_guest)
+    assert starting_host.split(";")[4] == starting_guest.split(";")[4], (starting_host, starting_guest)
+    worker = starting_host.split(";")[4]
+
+    try:
+        _, guest_point = (await command(host, "dock-melee-stage")).split(";")
+        assert await command(guest, f"dock-natural-arrive\t{guest_point}") == "ready"
+        destination = tuple(map(float, guest_point.split(",")))
+        async with asyncio.timeout(6):
+            while math.dist(destination, tuple(map(float, (await command(guest, "dock-natural-seat")).split(",")))) > 30:
+                await asyncio.sleep(.05)
+        baseline = (await command(host, "dock-natural-sample")).split(";")
+        assert baseline[:4] == ["true", "false", "120.000", "120.000"], baseline
+
+        for seat in (guest, host):
+            assert await command(seat, "dock-melee-aim") == "ready"
+        tap = await submit(guest_run, "native-guest-primary-input-fixture")
+        assert tap["ok"], tap
+        sequence = tap["native_guest_primary_fixture"]["sequence"]
+        async with asyncio.timeout(8):
+            while True:
+                event = next((row for row in await resident_events(guest_run, frame) if row.get("sequence") == sequence
+                              and row["event"] in {"native_guest_melee_input", "native_guest_melee_input_rejected"}), None)
+                if event:
+                    break
+                await asyncio.sleep(.05)
+        assert event["event"] == "native_guest_melee_input", event
+        proof = event[native_guest_melee.SWING_KEY]
+        after = (await command(host, "dock-natural-sample")).split(";")
+        assert (proof["map"], proof["pawn"], proof["guid"], proof["target"]) == (
+            arrival["game"]["map"], actor, guid, worker), (proof, after)
+        assert native_guest_melee.verified_damage(proof), (proof, after)
+        assert math.isclose(proof["enemy_health_before"], float(baseline[3]), abs_tol=.001), (proof, baseline)
+        assert after[1] == "true" and math.isclose(proof["enemy_health_after"], float(after[3]), abs_tol=.001), (proof, after)
+        assert campaign_save_hashes(host.campaign) == saves, "A warehouse melee hit wrote campaign saves"
+        return {"tutorial_dock_melee": {"stock_input": tap, "authority_damage": proof, "baseline": baseline, "after": after}}
+    finally:
+        for seat in (host, guest):
+            assert await command(seat, "clear-melee-aim") == "cleared"
+        assert await command(host, "dock-natural-stop") == "stopped"
+
+
+async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, retaliation: bool = False) -> dict:
+    host_run, guest_run = host.campaign / "run", guest.client / "run"
+    for seat in (host, guest):
+        for probe in ("portable-dry-fire", "portable-footstep"):
+            assert await portable_probe_command(seat.bridge, probe, "disarm") == "disarmed"
+    arrival = await travel_pair_to_dock(host, guest, pawn)
+    dock = arrival["game"]["map"]
+
+    async def command(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-npc-override", action)
+
     async with asyncio.timeout(8):
         while await command(guest, "dock-equip") != "selected":
             await asyncio.sleep(.05)
-    frame = await wait_resident_status(guest_run, lambda frame: at_dock(frame)
-                                      and frame.get("game", {}).get("native_guest_primary_scope", {}).get("kind") == "rusty-pistol",
-                                      timeout=12)
+    frame = await wait_resident_status(guest_run, lambda frame: (
+        frame.get("zone_epoch") == arrival["zone_epoch"] and frame.get("state") == "connected"
+        and frame.get("gameplay_fresh") and frame.get("game", {}).get("map") == dock
+        and frame["game"].get("native_guest_primary_scope", {}).get("kind") == "rusty-pistol"), timeout=12)
     if retaliation:
         return {"tutorial_dock_retaliation": await verify_tutorial_dock_retaliation(host, guest, frame)}
     seen = await asyncio.gather(*(command(seat, "dock-worker") for seat in (host, guest)))
@@ -3964,6 +4034,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
                  rusty_pistol: bool = False, tutorial_dock_combat: bool = False, tutorial_dock_retaliation: bool = False,
+                 tutorial_dock_melee: bool = False,
                  stock_bandage_revisit: bool = False, stock_shovel: bool = False, stock_shovel_loot: bool = False,
                  stock_shovel_quest: bool = False,
                  stock_take_ammo: bool = False,
@@ -4049,6 +4120,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_bottle, "tutorial_dock", "stock_bottle", verify_stock_bottle),
         (tutorial_dock_combat, "tutorial_dock_combat", "tutorial_dock_retaliation" if tutorial_dock_retaliation else "tutorial_dock_combat",
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, retaliation=tutorial_dock_retaliation)),
+        (tutorial_dock_melee, "tutorial_dock_melee", "tutorial_dock_melee", verify_tutorial_dock_melee),
         (stock_eye_stacks, "shopkeep", "stock_eye_stacks", verify_stock_eye_stacks),
     ):
         if enabled:
@@ -4125,11 +4197,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                      fixture="portable_board_offer_probe.lua"))
         if (stock_npc_override and resident_weapon_cues) or stock_melee_family:
             proof["npc_combat_overlays"] = [probes.enter_context(host_npc_combat_overlay(game)) for game in games]
-        elif stock_host_corpse_carry or stock_npc_rivalry or stock_npc_override or stock_melee_edges:
+        elif stock_host_corpse_carry or stock_npc_rivalry or stock_npc_override or stock_melee_edges or tutorial_dock_melee:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                      fixture="portable_npc_override_probe.lua"))
-        if (tutorial_dock_combat or stock_bandage_revisit or stock_shovel or stock_simmi_jammers or stock_weather_travel
+        if (tutorial_dock_combat or tutorial_dock_melee or stock_bandage_revisit or stock_shovel or stock_simmi_jammers or stock_weather_travel
                 or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_critters
                 or stock_eye_stacks or stock_lingering_teleport):
             overlay_key = ("weather_zone_overlays" if stock_weather_travel else
@@ -4337,7 +4409,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                         finish_check("stock_personal_consumable_reconnect", started)
 
                 exit_actions = ("prompt", "confirm") if campaign in {
-                    "tutorial_dock", "tutorial_dock_combat", "crossroads", "crossroads_anomaly", "shopkeep"
+                    "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_melee", "crossroads", "crossroads_anomaly", "shopkeep"
                 } else ("save_and_quit",)
                 after_reconnect = None
                 if campaign == "crossroads" and stock_shovel_quest:
@@ -4526,6 +4598,8 @@ if __name__ == "__main__":
                         help="follow the stock exit to Tutorial Dock and dispatch a shot at a placed worker")
     parser.add_argument("--tutorial-dock-retaliation", action="store_true",
                         help="observe the stock AI's response to a nonlethal guest shot at a placed worker")
+    parser.add_argument("--tutorial-dock-melee", action="store_true",
+                        help="verify the stock guest melee input damages a live, full-health warehouse worker")
     parser.add_argument("--stock-bandage-revisit", action="store_true",
                         help="collect the Tutorial Dock bandage and verify both views after revisiting the map")
     parser.add_argument("--stock-warehouse-switch", action="store_true",
@@ -4646,7 +4720,7 @@ if __name__ == "__main__":
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"stock_food", "stock_personal_consumable", "stock_campfire", "stock_npc_override",
                               "stock_board_offers", "resident_weapon_cues",
-                              "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "stock_npc_rivalry",
+                              "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "tutorial_dock_melee", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_shovel_quest", "stock_take_ammo",
                               "stock_host_corpse_carry", "stock_flashlights", "stock_simmi_jammers", "stock_weather_travel",
                               "stock_melee_family", "stock_melee_edges", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
@@ -4663,6 +4737,7 @@ if __name__ == "__main__":
     if args.stock_shovel_quest and (not args.stock_shovel or args.stock_shovel_loot):
         parser.error("Use --stock-shovel-quest with --stock-shovel alone")
     if any((args.stock_food, args.stock_personal_consumable, args.stock_campfire, args.stock_npc_override, args.stock_board_offers,
+            args.tutorial_dock_melee,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
             args.stock_melee_family, args.stock_melee_edges, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
@@ -4723,6 +4798,7 @@ if __name__ == "__main__":
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
+                       tutorial_dock_melee=args.tutorial_dock_melee,
                        tutorial_dock_retaliation=args.tutorial_dock_retaliation, stock_bandage_revisit=args.stock_bandage_revisit,
                        stock_shovel=args.stock_shovel,
                        stock_shovel_loot=args.stock_shovel_loot,
