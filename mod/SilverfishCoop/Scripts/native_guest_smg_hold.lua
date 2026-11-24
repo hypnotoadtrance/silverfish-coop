@@ -75,7 +75,8 @@ function canary.command(fields, state, phase)
     local scope = scopes[serial]
     local renew = action == "native-guest-smg-hold-renew"
     local duration = renew and math.tointeger(fields[4])
-    if #fields ~= (renew and 4 or 3) or not scope or scope.map ~= state.map or
+    if #fields ~= (renew and 4 or 3) or not scope or scope.map ~= state.map
+        or not same(scope.world, state.world) or not same(scope.driver, state.world.NetDriver) or
         (renew and (not duration or duration < 250 or duration > 2400)) then
         error("native_guest_smg_hold_exact_serial_required", 0)
     end
@@ -158,21 +159,34 @@ local function replace_reply(path, content)
     return os.rename(temporary, path) ~= nil
 end
 
+function canary.is_command(action)
+    return actions[action] == true
+end
+
+local function reply(status_row, nonce, accepted, area, message, rows)
+    local lines = {status_row("held-fire-ack", nonce, accepted and "accepted" or "rejected", area, tostring(message):sub(1, 512))}
+    for _, row in ipairs(rows or {}) do lines[#lines + 1] = row end
+    return table.concat(lines, "\n") .. "\n"
+end
+
+function canary.command_reply(fields, state, phase, status_row)
+    local nonce = fields[1]
+    local accepted, message = pcall(canary.command, fields, state, phase)
+    if not accepted then return reply(status_row, nonce, false, state.map, message) end
+    local reported, rows = pcall(canary.rows, state, phase, status_row, state.world.NetDriver)
+    if not reported then return reply(status_row, nonce, false, state.map, "mutation_unverified_guest_smg_hold_readback") end
+    return reply(status_row, nonce, true, state.map, message, rows)
+end
+
 function canary.start_fast(bridge, status_row, still_current)
     if not fast_enabled then return end
     local command_path, reply_path = bridge .. "/held-fire-command.tsv", bridge .. "/held-fire-reply.tsv"
     local seen, previous_content, pending_reply = {}, nil, nil
 
-    local function reply(nonce, accepted, area, message, rows)
-        local lines = {status_row("held-fire-ack", nonce, accepted and "accepted" or "rejected", area, tostring(message):sub(1, 512))}
-        for _, row in ipairs(rows or {}) do lines[#lines + 1] = row end
-        return table.concat(lines, "\n") .. "\n"
-    end
-
     local function handle(nonce, fields)
-        if seen[nonce] then return reply(nonce, false, "-", "native_guest_smg_hold_duplicate_nonce") end
+        if seen[nonce] then return reply(status_row, nonce, false, "-", "native_guest_smg_hold_duplicate_nonce") end
         seen[nonce] = true
-        if not fields then return reply(nonce, false, "-", "native_guest_smg_hold_fast_command_unqualified") end
+        if not fields then return reply(status_row, nonce, false, "-", "native_guest_smg_hold_fast_command_unqualified") end
         local cached, now = fast_context, os.time()
         local current, state = pcall(function()
             if not cached or now < cached.seen or now - cached.seen > 1 or not valid(cached.state.world)
@@ -180,18 +194,10 @@ function canary.start_fast(bridge, status_row, still_current)
                 or valid(cached.driver.ServerConnection) or not still_current(cached.state) then return end
             return cached.state
         end)
-        if not current or not state then return reply(nonce, false, "-", "native_guest_smg_hold_fast_scope_unavailable") end
-        if fields[2] ~= "native-guest-smg-hold-start" then
-            local previous = scopes[math.tointeger(fields[3])]
-            if not previous or previous.map ~= state.map or not same(previous.world, state.world) or not same(previous.driver, cached.driver) then
-                return reply(nonce, false, state.map, "native_guest_smg_hold_exact_serial_required")
-            end
+        if not current or not state then
+            return reply(status_row, nonce, false, "-", "native_guest_smg_hold_fast_scope_unavailable")
         end
-        local accepted, message = pcall(canary.command, fields, state, "hosting")
-        if not accepted then return reply(nonce, false, state.map, message) end
-        local reported, rows = pcall(canary.rows, state, "hosting", status_row, cached.driver)
-        if not reported then return reply(nonce, false, state.map, "mutation_unverified_guest_smg_hold_fast_readback") end
-        return reply(nonce, true, state.map, message, rows)
+        return canary.command_reply(fields, state, "hosting", status_row)
     end
 
     LoopInGameThreadWithDelay(50, function()
@@ -208,7 +214,7 @@ function canary.start_fast(bridge, status_row, still_current)
         local nonce, fields = parse_fast_command(content)
         if not nonce then return end
         local checked, result = pcall(handle, nonce, fields)
-        pending_reply = checked and result or reply(nonce, false, "-", "mutation_unverified_guest_smg_hold_fast_handler")
+        pending_reply = checked and result or reply(status_row, nonce, false, "-", "mutation_unverified_guest_smg_hold_fast_handler")
         if replace_reply(reply_path, pending_reply) then pending_reply = nil end
     end)
 end

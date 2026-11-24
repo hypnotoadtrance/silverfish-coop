@@ -1676,6 +1676,12 @@ end
 local function tick(fields, pending, periodic)
     local state, current_phase = observe_session()
     if not state then return end
+    if fields and pending and native_guest_smg_hold.is_command(fields[2]) then
+        if not SilverfishClaimLocalBridgeCommand(pending.ticket) then return true end
+        pending.dispatched = true
+        SilverfishPublishLocalBridgeReply(pending.ticket, native_guest_smg_hold.command_reply(fields, state, current_phase, status_row))
+        return true
+    end
     if fields and pending and fields[2] == "native-world-view-apply-local" and not periodic and current_phase == "connected"
         and world_view_enabled and status_publication.compact() and status_publication.steady(state, current_phase)
         and os.clock() < status_publication.next_frame then

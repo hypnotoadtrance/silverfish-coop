@@ -830,7 +830,7 @@ local attack_probe_hooked = false
 local dock_attacker = "NPC_Survivor_Worker_C_0"
 local montage_probe, montage_probe_hooked
 local live_worker = "NPC_Survivor_Worker_C_2"
-local live_probe, live_probe_hooked
+local live_probe, live_probe_hooked, pursuit_launch_hooked
 local weapon_block_pawn, weapon_block_hooked
 
 local function dock_fight_position(pawn, actor, ignored, distance, shot_lane, contact)
@@ -886,6 +886,22 @@ local function stage_live_worker(pawn, world, distance, keep_host_at_arrival)
     end
     live_probe = {actor = actor, guest = guest, host = pawn, enemy_health = actor.Health,
         guest_health = guest.Save.PlayerHealth, guest_attacks = 0, host_attacks = 0}
+    if keep_host_at_arrival then live_probe.launches = {} end
+    if keep_host_at_arrival and not pursuit_launch_hooked then
+        RegisterHook("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:SpawnProjectile", function(context)
+            local probe = live_probe
+            local weapon = context:get()
+            if not probe or not probe.launches or not valid(probe.guest) or not valid(probe.actor)
+                or not same(weapon, probe.guest.EquipedItem) or not valid(weapon.Arrow_Muzzle) then return end
+            local origin = weapon.Arrow_Muzzle:K2_GetComponentLocation()
+            local rotation = weapon.Arrow_Muzzle:K2_GetComponentRotation()
+            local target = heading(origin, probe.actor:K2_GetActorLocation())
+            local camera = probe.guest.Camera:K2_GetComponentRotation()
+            probe.launches[#probe.launches + 1] = ("%.3f,%.3f;%.3f,%.3f;%.3f,%.3f")
+                :format(rotation.Yaw, rotation.Pitch, target.Yaw, target.Pitch, camera.Yaw, camera.Pitch)
+        end)
+        pursuit_launch_hooked = true
+    end
     if not live_probe_hooked then
         RegisterHook("/Game/Classes/Player/Player_FP.Player_FP_C:DealDamage", function(context, _, _, instigator)
             if not live_probe or not same(instigator:get(), live_probe.actor) then return end
@@ -944,8 +960,14 @@ local function pursuit_frame(pawn, world, host, aim)
     local function angles(value)
         return ("%.3f,%.3f"):format(value.Yaw, value.Pitch)
     end
+    local blockers = {}
+    if controller.Loading then blockers[#blockers + 1] = "Loading" end
+    for _, field in ipairs({"Dead", "IsWeaponBlocked", "UsingItem", "Reloading", "IsChangingAmmo",
+        "Speaking", "HeadUnderWater", "Wep_HeldAside", "OnLadder"}) do
+        if shooter[field] ~= false then blockers[#blockers + 1] = field end
+    end
     return table.concat({vector(point), vector(target), angles(desired), angles(controller:GetControlRotation()),
-        angles(camera:K2_GetComponentRotation()), angles(barrel), tostring(shooter.IsWeaponBlocked)}, ";")
+        angles(camera:K2_GetComponentRotation()), angles(barrel), table.concat(blockers, ",")}, ";")
 end
 
 local function dock_swing(world, host, action)
@@ -1154,6 +1176,9 @@ local function run(action, actor_path)
         return live_worker_position(world)
     elseif action == "dock-pursuit-view" or action == "dock-pursuit-aim" then
         return pursuit_frame(pawn, world, host, action == "dock-pursuit-aim")
+    elseif action == "dock-pursuit-launches" then
+        local launches = host and live_probe and live_probe.launches
+        return launches and #launches > 0 and table.concat(launches, "|") or "absent"
     elseif action == "dock-pursuit-stop" then
         assert(host, "only the host owns the combat observer")
         live_probe = nil

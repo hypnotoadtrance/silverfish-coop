@@ -57,6 +57,24 @@ local function selected_row(save)
     end
 end
 
+local function owned_hold(pawn, save, held)
+    return held and held:IsValid() and same(pawn.Save, save) and held:HasAuthority()
+        and not held:IsActorBeingDestroyed() and same(held:GetWorld(), pawn:GetWorld())
+        and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
+        and same(held.User, pawn) and held.HeldByPlayer == true
+end
+
+function guest_weapon.local_projected_selection(pawn, save, projected)
+    local held = pawn.EquipedItem
+    if not owned_hold(pawn, save, held) then return end
+    local row = selected_row(save)
+    local guid = item_identity(row)
+    local index = save.PlayerEquipIndex
+    local incoming = guid and index < projected:GetArrayNum() and projected[index + 1]
+    if incoming and item_identity(incoming) == guid and same(held:GetClass(), row[class_field])
+        and same(incoming[class_field], row[class_field]) then return index end
+end
+
 local function equipped_guid(pawn, save, world, area)
     local held = pawn.EquipedItem
     if not held or not held:IsValid() then return nil end
@@ -93,11 +111,9 @@ end
 
 function guest_weapon.clear_empty_slot_hold(pawn, save)
     local held, row = pawn.EquipedItem, selected_row(save)
-    if not held or not held:IsValid() or not row or item_identity(row)
+    if not row or item_identity(row)
         or (row[class_field] and row[class_field]:IsValid()) then return end
-    if not same(pawn.Save, save) or not held:HasAuthority() or held:IsActorBeingDestroyed()
-        or not same(held:GetWorld(), pawn:GetWorld()) or not same(held:GetOwner(), pawn)
-        or not same(held.Instigator, pawn) or not same(held.User, pawn) or held.HeldByPlayer ~= true then return end
+    if not owned_hold(pawn, save, held) then return end
     if pawn.Aiming then pawn:CancelScope() end
     if same(pawn.EquipedItem, held) then pawn.EquipedItem = nil end
     held:K2_DestroyActor()

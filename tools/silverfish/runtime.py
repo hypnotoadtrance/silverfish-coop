@@ -3485,19 +3485,36 @@ class Bridge:
         self._local_status = state
         return state, body
 
+    @staticmethod
+    def _held_fire_reply(raw: str, nonce: str) -> dict | None:
+        if not 0 < len(raw) <= 8192 or not raw.endswith("\n"):
+            return None
+        head, *rows = [line.split("\t") for line in raw.splitlines()]
+        if len(head) != 5 or head[:2] != ["held-fire-ack", nonce]:
+            return None
+        _, _, result, area, message = head
+        if result != "accepted":
+            raise RuntimeError(message or "Stock held fire was refused")
+        proof = [native_smg_hold.parse(row) for row in rows if row[0] == "native-guest-smg-hold"]
+        return {"state": "hosting", "map": area, native_smg_hold.ALL: {row["pawn"]: row for row in proof}}
+
     async def held_fire_command(self, operation: str, *arguments: str) -> dict:
         """Use the game-thread input lane without replacing campaign commands."""
         if operation not in {"start", "observe", "stop", "renew"} or any(
             len(value) > 512 or any(character in value for character in "\t\r\n") for value in arguments
         ):
             raise ValueError("Invalid stock held-fire command")
-        action = f"native-guest-smg-hold-{operation}"
-        if self.local_bridge is not None:
-            return await self.command(action, *arguments, timeout=1.2, update_status=False)
         nonce = uuid.uuid4().hex
-        fields = (nonce, action, *arguments)
+        fields = (nonce, f"native-guest-smg-hold-{operation}", *arguments)
+        request = "\t".join(fields) + "\n"
+        if self.local_bridge is not None:
+            raw = await self.local_bridge.command(request.encode("utf-8"), 1.2)
+            frame = self._held_fire_reply(raw, nonce)
+            if frame is None:
+                raise RuntimeError("The local stock held fire receipt did not match the request")
+            return frame
         command = self.directory / "held-fire-command.tsv"
-        write_text(command, "\t".join(fields) + "\n")
+        write_text(command, request)
         reply = self.directory / "held-fire-reply.tsv"
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 1.2
@@ -3510,14 +3527,9 @@ class Bridge:
                         raw = stream.read(8193)
                 except (FileNotFoundError, PermissionError):
                     raw = ""
-                if 0 < len(raw) <= 8192 and raw.endswith("\n"):
-                    head, *rows = [line.split("\t") for line in raw.splitlines()]
-                    if len(head) == 5 and head[:2] == ["held-fire-ack", nonce]:
-                        _, _, result, area, message = head
-                        if result != "accepted":
-                            raise RuntimeError(message or "Stock held fire was refused")
-                        proof = [native_smg_hold.parse(row) for row in rows if row[0] == "native-guest-smg-hold"]
-                        return {"state": "hosting", "map": area, native_smg_hold.ALL: {row["pawn"]: row for row in proof}}
+                frame = self._held_fire_reply(raw, nonce)
+                if frame is not None:
+                    return frame
                 await asyncio.sleep(.025)
             raise TimeoutError("The native game did not acknowledge stock held fire")
         finally:

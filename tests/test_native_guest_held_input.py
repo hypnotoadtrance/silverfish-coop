@@ -177,3 +177,21 @@ class GuestHeldInputRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await pending)[ALL][PAWN]["projectiles"], 2)
             self.assertFalse(command.exists())
             self.assertEqual(ordinary.read_text(encoding="utf-8"), "checkpoint\n")
+
+    async def test_resident_authority_uses_matched_compact_receipt_without_mailboxes(self):
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            bridge = Bridge(directory, Mock())
+
+            async def command(payload, timeout):
+                nonce, action, serial = payload.decode().strip().split("\t")
+                self.assertEqual((action, serial, timeout), ("native-guest-smg-hold-stop", "1", 1.2))
+                return (f"held-fire-ack\t{nonce}\taccepted\t{MAP}\tverified\n"
+                        f"native-guest-smg-hold\t{MAP}\t{PAWN}\t{GUID}\t1\treleased\t5\t3\t2\t2\n")
+
+            bridge.local_bridge = SimpleNamespace(command=command)
+            self.assertEqual((await bridge.held_fire_command("stop", "1"))[ALL][PAWN]["projectiles"], 2)
+            self.assertEqual(list(directory.iterdir()), [])
+            bridge.local_bridge.command = AsyncMock(return_value=f"held-fire-ack\t{'a' * 32}\taccepted\t{MAP}\twrong\n")
+            with self.assertRaisesRegex(RuntimeError, "did not match"):
+                await bridge.held_fire_command("stop", "1")
