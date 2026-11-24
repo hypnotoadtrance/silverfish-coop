@@ -4177,6 +4177,8 @@ class Host:
         try:
             await self.run_session(bridge, transport, invites, pause_exit=pause_exit)
         finally:
+            if self.smg_holds:
+                await self.smg_holds.close()
             self.prop_carry_bridge = None
             if pose_link:
                 transport.set_prop_pose_handler(None)
@@ -4980,7 +4982,9 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                 await controller.run(bridge, transport)
         except (Exception, asyncio.CancelledError) as error:
             result = "stopped" if isinstance(error, asyncio.CancelledError) else "failed"
-            control.event("host_stopping", outcome=result, error_type=type(error).__name__)
+            stop_reason = "host_cancelled" if result == "stopped" else "host_session_failed"
+            reason = controller.session_stop_reason if controller else None
+            control.event("host_stopping", outcome=result, error_type=type(error).__name__, reason=reason or stop_reason)
             raise
         finally:
             try:
@@ -4997,8 +5001,11 @@ async def host_game(work: Path, directory: Path, bind: str, port: int, headless:
                 control.event("host_cleanup_failed", error_type=type(error).__name__)
                 raise
             finally:
+                reason = controller.session_stop_reason if controller else None
+                if not reason and controller and controller.native_checkpoint_unsafe:
+                    reason = "native_checkpoint_unsafe"
                 control.status(active=False, role="host", state=result, campaign=store.status(),
-                               stop_reason=controller.session_stop_reason if controller else stop_reason)
+                               stop_reason=reason or stop_reason)
 
 
 async def probe_transport(bridge: Bridge, item: str) -> dict:

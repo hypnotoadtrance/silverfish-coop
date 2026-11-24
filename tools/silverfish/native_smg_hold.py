@@ -65,32 +65,52 @@ class Authority:
         self.host = host
         self.bridge = None
         self.lock = asyncio.Lock()
+        self.edge_task = None
+        self.closing = False
         self.strokes: dict[str, Stroke] = {}
         self.frames: dict[int, dict] = {}
         self.used: dict[str, None] = {}
 
     async def authenticated(self, guest_id: str, target: str | None) -> dict:
-        async with self.lock:
+        await self.lock.acquire()
+        edge = None
+        try:
             identity = self.host.authenticated_guest(guest_id)
             parts = target.split("@", 4) if isinstance(target, str) else []
             ending = len(parts) == 4 and parts[3] in {"release", "cancel"}
-            if (not identity or not self.bridge or self.host.stopping
+            if (not identity or not self.bridge or self.closing or self.host.stopping
                     or self.host.native_checkpoint_unsafe and not ending):
                 return {"ok": False, "error": "native_guest_held_fire_scope_unavailable"}
-            try:
-                reply = await self.request(identity[1], target)
-            except asyncio.CancelledError:
-                self._fail_closed()
-                raise
-            except (OSError, RuntimeError, ValueError) as error:
-                return {"ok": False, "error": str(error)}
-            return {"ok": True, **reply}
+            # A lost or timed-out reply must leave the host's native receipt readable.
+            # The task owns the edge lock until the game has acknowledged the command.
+            self.edge_task = edge = asyncio.create_task(self._execute_edge(identity[1], target))
+        finally:
+            if edge is None:
+                self.lock.release()
+        return await asyncio.shield(edge)
+
+    async def _execute_edge(self, character: str, target: str | None) -> dict:
+        try:
+            return {"ok": True, **await self.request(character, target)}
+        except asyncio.CancelledError:
+            self._fail_closed()
+            raise
+        except (OSError, RuntimeError, ValueError) as error:
+            return {"ok": False, "error": str(error)}
+        finally:
+            self.edge_task = None
+            self.lock.release()
+
+    async def close(self) -> None:
+        self.closing = True
+        if self.edge_task is not None:
+            await asyncio.shield(self.edge_task)
 
     async def aim(self, guest_id: str, target: str | None) -> dict:
         """Replace the aim for an active stroke without taking the trigger edge lock."""
         identity = self.host.authenticated_guest(guest_id)
         parts = target.split("@", 4) if isinstance(target, str) else []
-        if not identity or not self.bridge or self.bridge.local_bridge is None or len(parts) != 5:
+        if self.closing or not identity or not self.bridge or self.bridge.local_bridge is None or len(parts) != 5:
             return {"ok": False, "error": "native_guest_held_aim_unavailable"}
         epoch, guid, token, sequence, view = parts
         character = identity[1]
@@ -132,6 +152,8 @@ class Authority:
 
     def _fail_closed(self):
         self.host.native_checkpoint_unsafe = self.host.stopping = True
+        if not self.host.session_stop_reason:
+            self.host.session_stop_reason = "native_guest_held_fire_verification_failed"
 
     async def request(self, character: str, target: str | None) -> dict:
         parts = target.split("@", 4) if isinstance(target, str) else []
@@ -176,6 +198,8 @@ class Authority:
 
     async def _start(self, character, area, pawn, guid, token, *view) -> dict:
         deferred = await native_inventory.retain_guest_save(self.host, self.bridge, character, pawn)
+        if self.closing or not self._eligible(character, area, pawn, guid):
+            raise party.RuleError("native_guest_held_fire_scope_unavailable")
         try:
             snapshot = await self.bridge.held_fire_command("start", pawn, guid, str(LEASE_MS), *view)
         except RuntimeError as error:
@@ -206,11 +230,15 @@ class Authority:
         return proof
 
     async def settle(self, bridge, *, stop_all: bool = False) -> None:
-        if not self.strokes or self.host.native_checkpoint_unsafe:
+        if not stop_all and (not self.strokes or self.host.native_checkpoint_unsafe):
             return
         finished = {}
         try:
             async with self.lock:
+                if self.host.native_checkpoint_unsafe:
+                    if stop_all:
+                        raise RuntimeError("Stock held fire is unverified at a campaign checkpoint")
+                    return
                 for character, stroke in self.strokes.items():
                     frame = self._observed(stroke)
                     if frame["status"] in LIVE and (stop_all or not self._eligible(character, stroke.area, stroke.pawn, stroke.guid)):

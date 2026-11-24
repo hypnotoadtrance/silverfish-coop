@@ -3,10 +3,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 import uuid
 
-from tools.silverfish.native_smg_hold import ACTION, AIM_ACTION, ALL, KEY, GuestInput
+from tools.silverfish.native_smg_hold import ACTION, AIM_ACTION, ALL, KEY, Authority, GuestInput
 from tools.silverfish.runtime import Bridge, MAP
 
 
@@ -140,6 +140,59 @@ class GuestHeldInputBridgeTests(unittest.TestCase):
         scope = scope.replace(GUID, other)
         status.write_text(base + scope + "smg-standard\tstock_held\n" + row + "held\t5\tmemory\n", encoding="utf-8")
         self.assertNotIn("native_guest_primary_publication", self.bridge.snapshot())
+
+
+class HeldFireAuthorityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelled_network_reply_keeps_the_host_trigger_receipt(self):
+        epoch, token = "d" * 32, "e" * 32
+        member = {"connected": True, "pawn": PAWN}
+        host = SimpleNamespace(
+            authenticated_guest=lambda _: ("guest-id", "guest-character"),
+            native_recipients=lambda: {"guest-character": member},
+            stopping=False, transitioning=False, native_checkpoint_unsafe=False, session_stop_reason=None,
+            zone_epoch=epoch, allowed_maps={MAP}, party={"wipe": None, "players": {}},
+            last_game={"state": "hosting", "map": MAP,
+                       "native_guest_equipped_weapons": {PAWN: {"guid": GUID, "kind": "light-ar-01"}}},
+            control=Mock(), checkpoint_native=AsyncMock(),
+        )
+        authority = Authority(host)
+        started = asyncio.Event()
+        acknowledge = asyncio.Event()
+
+        async def held_fire_command(operation, *args):
+            if operation == "start":
+                started.set()
+                await acknowledge.wait()
+            else:
+                self.assertEqual((operation, args), ("stop", ("1",)))
+            proof = {"map": MAP, "pawn": PAWN, "serial": 1, "guid": GUID, "rounds": 1,
+                     "projectiles": 1, "before": 3, "after": 2,
+                     "status": "active" if operation == "start" else "released"}
+            return {"map": MAP, ALL: {PAWN: proof}}
+
+        authority.bridge = SimpleNamespace(held_fire_command=AsyncMock(side_effect=held_fire_command))
+        target = "@".join((epoch, GUID, token, "press"))
+        with patch("tools.silverfish.native_smg_hold.native_inventory.retain_guest_save",
+                   new_callable=AsyncMock, return_value=True):
+            request = asyncio.create_task(authority.authenticated("guest-id", target))
+            async with asyncio.timeout(2):
+                await started.wait()
+            edge = authority.edge_task
+            request.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await request
+            self.assertFalse(host.stopping)
+            self.assertTrue(authority.lock.locked())
+            member["connected"] = False
+            acknowledge.set()
+            self.assertTrue((await edge)["ok"])
+
+        await authority.settle(authority.bridge)
+        self.assertEqual([call.args[0] for call in authority.bridge.held_fire_command.await_args_list], ["start", "stop"])
+        self.assertEqual(authority.strokes, {})
+        self.assertFalse(host.stopping)
+        self.assertFalse(host.native_checkpoint_unsafe)
+        host.checkpoint_native.assert_not_awaited()
 
 
 class GuestHeldInputRoutingTests(unittest.IsolatedAsyncioTestCase):
