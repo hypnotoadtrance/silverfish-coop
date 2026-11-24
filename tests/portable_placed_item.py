@@ -52,6 +52,7 @@ async def verify_stock_placed_item(host, guest, pawn):
     _, path = name.split(" ", 1)
     item_class = selected["class_path"]
     current_pawn = census["game"]["native_guest_save"]["pawn"]
+    host_pawn = census["game"]["pawns"]["local"]["name"]
 
     async def fixture(seat, action, target=""):
         return (await seat.bridge.command(carry.FIXTURE, action, target, timeout=6))["ack"]["message"]
@@ -101,7 +102,7 @@ async def verify_stock_placed_item(host, guest, pawn):
                                and not frame["game"][carry.FIXTURE].get("held"), timeout=10)
     host_pose, guest_pose = await shared_pose()
 
-    for participant in (current_pawn, "local"):
+    for participant in (host_pawn, current_pawn):
         await host.bridge.command(loose.APPROACH, path, participant, timeout=5)
     target = f"loose:{path}"
     taken = await submit(guest_run, loose.FIXTURE, target=target)
