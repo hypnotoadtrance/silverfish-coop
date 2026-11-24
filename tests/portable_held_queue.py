@@ -2,8 +2,9 @@
 
 import asyncio
 import re
+import uuid
 
-from tools.silverfish import native_smg_hold
+from tools.silverfish import native_guest_ui, native_smg_hold, runtime
 from tools.silverfish.control import submit
 from tools.silverfish.travel import OBSERVATORY
 
@@ -18,7 +19,38 @@ TERMINAL = "native_guest_smg_hold_accepted"
 GUEST_EDGE = "native_guest_held_fire_input"
 
 
-async def verify_stock_held_queue(host, guest, pawn, probe):
+async def capture_prior_selection(host, pawn, character, old_guid, new_guid):
+    nonce = uuid.uuid4().hex
+    path = host.bridge.directory / f"native-guest-ui-{nonce}.tsv"
+    try:
+        await host.bridge.command(native_guest_ui.ACTION, pawn, nonce, timeout=4)
+        contents = native_guest_ui.validate(path.read_bytes(), OBSERVATORY, character)
+    finally:
+        path.unlink(missing_ok=True)
+    rows = [line.split("\t") for line in contents.splitlines()]
+    assert rows[1][0] == "inventory-layout", rows[1]
+    source_slot = int(rows[1][3])
+    slots = {"".join(f"{int(word) & 0xffffffff:08X}" for word in row[8:12]): (int(row[2]) - 1, int(row[4]))
+             for row in rows if row[:2] == ["item", "equipment"]}
+    assert slots[old_guid][0] == source_slot and slots[new_guid][0] != source_slot and slots[new_guid][1] == ROUNDS, slots
+    return contents, source_slot, slots[new_guid][0]
+
+
+async def replay_prior_selection(guest, character, pawn, guid, contents, source_slot, target_slot):
+    nonce = uuid.uuid4().hex
+    path = guest.bridge.directory / f"native-guest-ui-{nonce}.tsv"
+    try:
+        runtime.write_text(path, contents, newline="")
+        frame = await guest.bridge.command("portable-stale-quick-slot-reply", character, nonce, pawn, guid,
+                                           str(target_slot), timeout=4)
+    finally:
+        path.unlink(missing_ok=True)
+    receipt = frame["ack"]["message"]
+    assert receipt == f"preserved selected slot {target_slot} with GUID {guid} and {ROUNDS} rounds", receipt
+    return {"captured_slot": source_slot, "selected_slot": target_slot, "held_guid": guid, "receipt": receipt}
+
+
+async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=False):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_frame = await wait_resident_status(host_run, lambda status:
         status.get("local_bridge") == "memory" and status.get("game", {}).get("map") == OBSERVATORY)
@@ -78,9 +110,13 @@ async def verify_stock_held_queue(host, guest, pawn, probe):
 
     guid = await probe(host.bridge, "portable-held-queue", f"seed\t{pawn}\t")
     assert re.fullmatch(r"[0-9A-F]{32}", guid), guid
+    prior = await capture_prior_selection(host, pawn, character, previous["guid"], guid) if stale_quick_slot else None
 
     try:
         selected = await stock_select(guid)
+        stale_reply = None
+        if prior:
+            stale_reply = await replay_prior_selection(guest, character, previous["pawn"], guid, *prior)
         equipped = await accepted_selection(guid)
         assert (equipped["guid"], equipped["pawn"], equipped["actor_ammo"], equipped["stored_ammo"]) == (guid, pawn, ROUNDS, ROUNDS), equipped
         await scoped(guid, KIND)
@@ -112,9 +148,12 @@ async def verify_stock_held_queue(host, guest, pawn, probe):
                 assert not (seat.bridge.directory / filename).exists(), filename
         # The press fixture returns only after publishing its exact sequence. The accepted host edge and
         # absent mailbox files prove that press used the same in-process bridge as the release receipt.
-        return {"stock_held_queue": {"press": pressed, "release": released, "release_publication": expected,
-                                     "guest_selection": selected, "host_selection": equipped,
-                                     "guest_edges": edges, "host_terminal": terminal}}
+        proof = {"press": pressed, "release": released, "release_publication": expected,
+                 "guest_selection": selected, "host_selection": equipped, "guest_edges": edges,
+                 "host_terminal": terminal}
+        if stale_reply:
+            proof["stale_quick_slot_reply"] = stale_reply
+        return {"stock_held_queue": proof}
     finally:
         await stock_select(previous["guid"])
         await scoped(previous["guid"], previous["kind"])

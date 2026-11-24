@@ -4131,7 +4131,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_npc_rivalry: bool = False, stock_throwables: str | None = None,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
-                 resident_held_queue: bool = False,
+                 resident_held_queue: bool = False, resident_stale_quick_slot: bool = False,
                  rusty_pistol: bool = False, tutorial_dock_combat: bool = False, tutorial_dock_retaliation: bool = False,
                  tutorial_dock_melee: bool = False, tutorial_dock_pursuit: bool = False,
                  tutorial_dock_held_mask: bool = False, tutorial_dock_gait: bool = False,
@@ -4210,7 +4210,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                                rusty=rusty_pistol, npc_rivalry=stock_npc_rivalry,
                                                                memory_queue=resident_held_queue)),
         (resident_held_queue, weapon_campaign, "stock_held_queue",
-         lambda host, guest, pawn: verify_stock_held_queue(host, guest, pawn, portable_probe_command)),
+         lambda host, guest, pawn: verify_stock_held_queue(host, guest, pawn, portable_probe_command,
+                                                           stale_quick_slot=resident_stale_quick_slot)),
         (stock_food, "observatory", "stock_food", verify_resident_guest_food),
         (stock_personal_consumable, "personal_consumable", "stock_personal_consumable",
          lambda host, guest, pawn: verify_stock_personal_consumable(host, guest, pawn, portable_probe_command)),
@@ -4361,6 +4362,17 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableHeldQueueProbe",
                                                      fixture="portable_held_queue_probe.lua"))
+        if resident_stale_quick_slot:
+            fixture = (Path(__file__).with_name("fixtures") / "portable_stale_quick_slot_reply.lua").read_text(encoding="utf-8")
+
+            def add_stale_quick_slot_witness(script):
+                marker = "function guest_ui.command(fields, state, phase, bridge)\n"
+                if script.count(marker) != 1:
+                    raise ValueError("The replica lacks the stock guest inventory projection entry point")
+                return script.replace(marker, marker + fixture, 1)
+
+            proof["stale_quick_slot_overlay"] = probes.enter_context(portable_script_overlay(
+                second_game, "native_guest_ui.lua", add_stale_quick_slot_witness))
         if resident_weapon_cues:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableWeaponCueProbe",
                                                  fixture="avatar_presentation_probe.lua"))
@@ -4761,6 +4773,8 @@ if __name__ == "__main__":
                         help="verify Bandage, footsteps, firing and reload, combinable with campfire and food")
     parser.add_argument("--resident-held-queue", action="store_true",
                         help="verify a stock SMG hold through the resident in-memory input queue")
+    parser.add_argument("--resident-stale-quick-slot", action="store_true",
+                        help="replay a prior stock inventory view after switching to the SMG")
     parser.add_argument("--rusty-pistol", action="store_true",
                         help="exercise the stock Rusty Pistol during the resident weapon checks")
     parser.add_argument("--tutorial-dock-combat", action="store_true",
@@ -4902,7 +4916,7 @@ if __name__ == "__main__":
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
     resident_check_options = {"stock_food", "stock_personal_consumable", "stock_wipe_chooser", "stock_campfire", "stock_npc_override",
-                              "stock_board_offers", "resident_weapon_cues", "resident_held_queue",
+                              "stock_board_offers", "resident_weapon_cues", "resident_held_queue", "resident_stale_quick_slot",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "tutorial_dock_pursuit",
                               "tutorial_dock_held_mask", "tutorial_dock_gait",
                               "tutorial_dock_melee", "stock_npc_rivalry",
@@ -4914,6 +4928,8 @@ if __name__ == "__main__":
                               "stock_lingering_teleport"}
     if args.resident_held_queue and not args.resident_weapon_cues:
         parser.error("Use --resident-held-queue with --resident-weapon-cues")
+    if args.resident_stale_quick_slot and not args.resident_held_queue:
+        parser.error("Use --resident-stale-quick-slot with --resident-held-queue")
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
     if args.tutorial_dock_combat and not (args.rusty_pistol and args.stock_npc_override):
@@ -4997,7 +5013,7 @@ if __name__ == "__main__":
                        stock_throwables=args.stock_throwables,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
-                       resident_held_queue=args.resident_held_queue,
+                       resident_held_queue=args.resident_held_queue, resident_stale_quick_slot=args.resident_stale_quick_slot,
                        rusty_pistol=args.rusty_pistol, tutorial_dock_combat=args.tutorial_dock_combat,
                        tutorial_dock_melee=args.tutorial_dock_melee, tutorial_dock_pursuit=args.tutorial_dock_pursuit,
                        tutorial_dock_held_mask=args.tutorial_dock_held_mask, tutorial_dock_gait=args.tutorial_dock_gait,
