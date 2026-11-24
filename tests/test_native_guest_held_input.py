@@ -110,13 +110,17 @@ class GuestHeldInputBridgeTests(unittest.TestCase):
         base = f"schema\t1\nsession\tclient\tconnected\t{MAP}\t0\t1\n"
         scope = f"native-guest-primary-scope\t{MAP}\t{PAWN}\t{GUID}\t"
         row = f"native-guest-primary-publication\t{MAP}\t{PAWN}\t{GUID}\t"
-        for kind, lane in (("smg-standard", "memory"), ("rusty-pistol", "file")):
+        fixture = f"native-guest-held-fire-fixture\t{MAP}\t{PAWN}\t{GUID}\t5\t4\trelease\n"
+        for kind, lane, automatic in (("smg-standard", "memory", True), ("light-ar-01", "memory", True),
+                                      ("rusty-pistol", "file", False)):
             with self.subTest(kind=kind, lane=lane):
                 status.write_text(base + scope + kind + "\tstock_held\n" + row + f"tap\t4\t{lane}\n"
-                                  + row + f"held\t5\t{lane}\n", encoding="utf-8")
-                result = self.bridge.snapshot()["native_guest_primary_publication"]
+                                  + row + f"held\t5\t{lane}\n" + fixture, encoding="utf-8")
+                snapshot = self.bridge.snapshot()
+                result = snapshot["native_guest_primary_publication"]
                 self.assertEqual(result["tap"], dict(map=MAP, pawn=PAWN, guid=GUID, sequence=4, lane=lane))
-                self.assertEqual("held" in result, kind == "smg-standard")
+                self.assertEqual("held" in result, automatic)
+                self.assertEqual("native_guest_held_fire_fixture" in snapshot, automatic)
         other = "B" * 32
         scope = scope.replace(GUID, other)
         status.write_text(base + scope + "smg-standard\tstock_held\n" + row + "held\t5\tmemory\n", encoding="utf-8")

@@ -173,8 +173,7 @@ FIREARMS = (
 
 # Registered ordinary magazines use the stock primary-ammunition transaction.
 TAKE_AMMO_MAGAZINES = {weapon.path: weapon.magazine for weapon in FIREARMS if weapon.magazine}
-# These exact receivers have stock selectable automatic fire. This records their
-# cooked capability and does not authorize the multiplayer hold path.
+# These exact receivers use the stock selectable automatic trigger and held-fire path.
 STOCK_SELECTABLE_AUTOMATIC_KINDS = (
     "smg-standard", "light-ar-01", "light-ar-02", "light-ar-03", "light-ar-cqc", "light-ar-silenced",
 )

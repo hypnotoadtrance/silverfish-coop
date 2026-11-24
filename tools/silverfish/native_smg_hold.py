@@ -1,4 +1,4 @@
-"""Exercise bounded stock SMG fire in an isolated headless campaign."""
+"""Relay bounded stock automatic fire on the resident input bridge."""
 
 import asyncio
 from dataclasses import dataclass
@@ -7,6 +7,7 @@ import time
 import uuid
 
 from . import native_inventory, party
+from .guest_weapon_profiles import STOCK_SELECTABLE_AUTOMATIC_KINDS as HOLD_KINDS
 from .native_gold import valid_guid
 from .travel import OBSERVATORY
 
@@ -32,7 +33,7 @@ def parse(row: list[str]) -> dict:
             or not 0 < serial < 2**53 or not 0 <= after <= before <= 30 or before == 0
             or rounds != before - after or projectiles != rounds
             or not (status in LIVE or status in FINISHED or status.startswith(DIRTY))):
-        raise ValueError("Invalid stock SMG hold status")
+        raise ValueError("Invalid stock automatic hold status")
     return {"map": area, "pawn": pawn, "guid": guid, "serial": serial, "status": status,
             "before": before, "after": after, "rounds": rounds, "projectiles": projectiles}
 
@@ -104,7 +105,7 @@ class Authority:
                     and not host.party["wipe"] and not host.party["players"].get(character, {}).get("downed")
                     and member.get("connected") and member.get("pawn") == pawn
                     and (host.last_game.get("state"), host.last_game.get("map")) == ("hosting", area)
-                    and area in host.allowed_maps and (equipped.get("kind"), equipped.get("guid")) == ("smg-standard", guid))
+                    and area in host.allowed_maps and equipped.get("kind") in HOLD_KINDS and equipped.get("guid") == guid)
 
     def _fail_closed(self):
         self.host.native_checkpoint_unsafe = self.host.stopping = True
@@ -259,7 +260,7 @@ class GuestInput:
                 and game.get("state") == "connected"
                 and member.get("character_id") == client.invite["character_id"] and member.get("downed") is False
                 and party_game.get("wipe") is None and pawn and valid_guid(guid)
-                and (weapon.get("map"), weapon.get("kind")) == (area, "smg-standard")):
+                and weapon.get("map") == area and weapon.get("kind") in HOLD_KINDS):
             return area, pawn, guid
 
     async def run(self) -> None:

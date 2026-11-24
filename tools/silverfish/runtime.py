@@ -3296,9 +3296,10 @@ class Bridge:
                         "connected", station["map"], station["pawn"]):
                     del data[native_mosby_station_view.KEY]
                 primary = data.get("native_guest_primary_scope", {})
+                held_kind = primary.get("kind") in native_smg_hold.HOLD_KINDS
                 for name in ("native_guest_held_fire", "native_guest_held_fire_fixture"):
                     held_input = data.get(name)
-                    if held_input and (data["state"] != "connected" or primary.get("kind") != "smg-standard"
+                    if held_input and (data["state"] != "connected" or not held_kind
                             or data.get("map") != held_input["map"]
                             or any(held_input[field] != primary.get(field) for field in ("map", "pawn", "guid"))):
                         del data[name]
@@ -3306,7 +3307,7 @@ class Bridge:
                 if published and data["state"] == "connected":
                     current = {channel: entry for channel, entry in published.items()
                                if entry["map"] == data.get("map")
-                               and (channel == "tap" or primary.get("kind") == "smg-standard")
+                               and (channel == "tap" or held_kind)
                                and all(entry[field] == primary.get(field) for field in ("map", "pawn", "guid"))}
                     if current:
                         data["native_guest_primary_publication"] = current

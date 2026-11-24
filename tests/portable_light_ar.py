@@ -1,10 +1,11 @@
-"""Exercise one installed guest LightAR trigger and reload through stock input."""
+"""Exercise stock LightAR select-fire, reload, and sustained fire in the installed pair."""
 
 import asyncio
 import re
 
 from live_multi_smoke import campaign_save_hashes
 from portable_guest_world_start import resident_events, wait_resident_status
+from tools.silverfish import native_smg_hold
 from tools.silverfish.control import submit
 from tools.silverfish.guest_weapon_profiles import FIREARMS, FIVE_SIX_FMJ
 from tools.silverfish.travel import OBSERVATORY
@@ -42,6 +43,23 @@ async def verify_stock_light_ar(host, guest, pawn, probe):
                         return row["native_guest_weapon"]
                 await asyncio.sleep(.08)
 
+    async def stock_burst(frame, guid):
+        pressed = await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="press", milliseconds=350)
+        assert pressed["ok"], pressed
+        stroke = pressed["native_guest_held_fire_fixture"]
+        async with asyncio.timeout(8):
+            while True:
+                guest_rows, host_rows = await asyncio.gather(
+                    resident_events(guest_run, frame), resident_events(host_run, host_frame))
+                edges = [row for row in guest_rows if row.get("stroke") == stroke["stroke"]
+                         and row["event"].startswith("native_guest_held_fire_input")]
+                assert all(row["event"] == "native_guest_held_fire_input" for row in edges), edges
+                terminal = next((row for row in host_rows if row["event"] == "native_guest_smg_hold_accepted"
+                                 and row.get("guid") == guid), None)
+                if terminal and [row["edge"] for row in edges] == ["press", "release"]:
+                    return terminal
+                await asyncio.sleep(.06)
+
     try:
         host_armed, guest_armed = await asyncio.gather(command(host, "arm-light-ar"), command(guest, "arm-light-ar"))
         assert host_armed == guest_armed == "armed", (host_armed, guest_armed)
@@ -58,6 +76,11 @@ async def verify_stock_light_ar(host, guest, pawn, probe):
             and (scope.get("guid"), scope.get("kind")) == (guid, profile.kind))
         assert await command(guest, "face-away") == "turned"
         assert await command(host, "clear") == "clear"
+        assert await command(guest, "light-ar-semi") == "light-ar-semi"
+        denied = await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="press")
+        if denied["ok"]:
+            await submit(guest_run, native_smg_hold.LOCAL_FIXTURE, target="release")
+        assert denied["ok"] is False and "native_guest_held_fire_fixture_requires_automatic_mode" in denied["error"], denied
         shot = await stock_input("primary", guest_frame, guid)
         assert (shot["before"], shot["after"], shot["projectiles"]) == (1, 0, 1), shot
         await wait_readback(host, "peer-ready", f"{guid},0,0")
@@ -75,6 +98,16 @@ async def verify_stock_light_ar(host, guest, pawn, probe):
         await wait_readback(guest, "ready", f"{guid},{units},{units}")
         await wait_readback(guest, "reserve", "")
         assert await command(host, "peer-reserve") == "" and await command(host, "reserve") == host_reserve
+        assert await command(guest, "light-ar-auto") == "light-ar-auto"
+        assert await command(host, "clear") == "clear"
+        burst = await stock_burst(guest_frame, guid)
+        assert (burst["status"], burst["before"], burst["pawn"]) == ("released", units, pawn), burst
+        assert 1 < burst["rounds"] == burst["projectiles"] == units - burst["after"] < units, burst
+        for seat, action in ((host, "peer-ready"), (guest, "ready")):
+            await wait_readback(seat, action, f"{guid},{burst['after']},{burst['after']}")
+        await asyncio.sleep(.35)
+        calls, *_ = (await command(host, "shot-read")).split(",")
+        assert int(calls) == burst["projectiles"], (calls, burst)
         assert campaign_save_hashes(host.campaign) == before
     finally:
         disarmed = await asyncio.gather(command(host, "disarm"), command(guest, "disarm"))
@@ -82,5 +115,6 @@ async def verify_stock_light_ar(host, guest, pawn, probe):
     return {"stock_light_ar": {"weapon": profile.path, "ammo": FIVE_SIX_FMJ.item_path, "shot": shot,
                                "stock_projectile_calls": projectile_calls, "stock_fire_sounds": shot_sounds,
                                "stock_muzzle_flashes": muzzle_flashes, "reload": reloaded,
+                               "semi_hold_blocked": True, "automatic_burst": burst,
                                "both_magazines_verified": True, "host_reserve_unchanged": True,
                                "campaign_unchanged": True, "observer_scopes_disarmed": True}}
