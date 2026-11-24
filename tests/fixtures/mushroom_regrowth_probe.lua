@@ -1,9 +1,11 @@
 -- Accelerate the stock delay on one private host patch and observe its real grow graph.
 local bridge = os.getenv("SILVERFISH_COOP_BRIDGE")
-if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_MUSHROOM_REGROWTH_PROBE") ~= "1"
-    or not bridge or not bridge:match("[/\\]mushroom%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$") then
-    return
-end
+if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or not bridge then return end
+local standalone = os.getenv("SILVERFISH_COOP_MUSHROOM_REGROWTH_PROBE") == "1"
+    and bridge:match("[/\\]mushroom%-%x+[/\\]run[/\\]game%-bridge[/\\]%x+$")
+local portable = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
+    and bridge:match("[/\\]portable%-title%-%x+[/\\]first[/\\]titles[/\\]local[/\\]run[/\\]game%-bridge[/\\]%x+$")
+if not standalone and not portable then return end
 
 local world_name = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P"
 local patch_prefix = world_name .. ":PersistentLevel.MushroomPatch_BP_C_"

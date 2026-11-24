@@ -4858,6 +4858,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_placed_item_overlays"] = [
                 probes.enter_context(placed_item_overlay(game, portable_script_overlay)) for game in games
             ]
+        if stock_mushrooms:
+            probes.enter_context(installed_probe(first_game, mod="SilverfishPortableMushroomRegrowthProbe",
+                                                 fixture="mushroom_regrowth_probe.lua"))
         if stock_lingering_teleport:
             proof["lingering_teleport_overlays"] = [
                 probes.enter_context(lingering_overlay(game, portable_script_overlay)) for game in games

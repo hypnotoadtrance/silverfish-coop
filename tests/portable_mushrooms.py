@@ -3,6 +3,7 @@
 import math
 
 from live_multi_smoke import campaign_save_hashes
+from live_native_mushrooms_smoke import stock_regrowth
 from portable_guest_world_start import resident_events, wait_resident_status
 from portable_stock_shovel import stock_inventory
 from portable_weather_travel import enter_crossroads
@@ -64,8 +65,25 @@ async def verify_stock_mushrooms(host, guest, pawn):
     assert claim["patch_guid"] == rows[guest_pick]["patch_guid"] and claim["revision"] is None, claim
     assert any(item["guid"] == claim.get("inventory_guid", claim["guid"]) and item["class_path"] == claim["class_path"]
                for item in await stock_inventory(guest_run, guest=True)), claim
+
+    patch = claim["patch"]
+    removed = {host_pick, guest_pick}
+    growth = await stock_regrowth(host.bridge.directory, patch)
+    count = growth["children_after"] - growth["children_before"]
+
+    def fresh_children(frame):
+        return {key for key, item in frame["game"].get(mushrooms.KEY, {}).items()
+                if item["patch"] == patch and key not in rows}
+
+    regrown = await wait_resident_status(host_run, lambda frame: len(fresh_children(frame)) >= count, timeout=12)
+    new_ids = fresh_children(regrown)
+    assert not removed & regrown["game"][mushrooms.KEY].keys()
+    await wait_resident_status(guest_run, lambda frame: new_ids <= frame["game"].get(loot.KEY, {}).keys()
+                               and not removed & frame["game"].get(loot.KEY, {}).keys(), timeout=12)
+    growth["replicated_new_ids"] = sorted(new_ids)
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_mushrooms": {"host_pick": host_pick, "guest_claim": claim,
                                "guest_stock_spawn_suppression": joined["game"][mushrooms.SUPPRESSION],
                                "guest_roster_host": joined["game"]["pawns"]["guest"]["name"],
-                               "both_removed_for_both_players": True, "checkpoint_unchanged": True}}
+                               "both_removed_for_both_players": True, "stock_regrowth": growth,
+                               "checkpoint_unchanged": True}}

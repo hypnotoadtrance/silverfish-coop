@@ -419,6 +419,10 @@ function fields.command(args, state, phase)
     return "Stock anomaly field invoked"
 end
 
+function fields.update_destructibles(current_world)
+    destructibles.update(current_world)
+end
+
 function fields.rows(state, phase, row)
     if phase ~= "hosting" and phase ~= "connected" or not valid(state.world) then
         recovery = nil

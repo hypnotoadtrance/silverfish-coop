@@ -10,7 +10,7 @@ local saved_child_guid = "ID_7_18CBAA0D44A4F0AA53DF3C9CF2E59420"
 local saved_child_class = "Class_6_B3FAD7924D55642D659E8C891A0A53C6"
 local saved_child_transform = "Transform_8_BD0C0F504E8E7DC44D04E59C402D9537"
 local guid_words = {"A", "B", "C", "D"}
-local world, patches, samples, proof, next_sample
+local world, patches, samples, proof, next_sample, sweep
 local title_fixtures = os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and
     (title_fixtures or os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1")
@@ -138,49 +138,92 @@ local function census(state)
     patches = found
 end
 
-local function sample(state, radius)
+local function begin_sample(state, radius)
     local base = StaticFindObject(item_class)
     if not valid(base) then return end
     local roster = {}
     for _, member in ipairs(state.pawns) do
         if valid(member.pawn) and member.pawn.Dead == false then
-            roster[#roster + 1] = member.pawn:K2_GetActorLocation()
+            roster[#roster + 1] = {X = member.x, Y = member.y, Z = member.z}
         end
     end
-    local values, radius_squared = {}, radius^2
-    local function collect(path, child, guid)
+    return {state = state, base = base, roster = roster, radius_squared = radius^2, values = {}}
+end
+
+local function sample_patch(search, path, patch)
+    if not valid(patch) or patch:IsActorBeingDestroyed() then return end
+
+    local function collect(child, guid)
         local position = child:K2_GetActorLocation()
         local distance = math.huge
-        for _, point in ipairs(roster) do
+        for _, point in ipairs(search.roster) do
             distance = math.min(distance, (position.X - point.X)^2 + (position.Y - point.Y)^2 + (position.Z - point.Z)^2)
         end
-        if distance > radius_squared then return end
+        if distance > search.radius_squared then return end
         local class = child:GetClass():GetFullName():match("^%S+ (/Game/Classes/[%w_./%-]+)$")
         local child_path = actor_path(child)
         if not class or not child_path then return end
         local rotation, scale = child:K2_GetActorRotation(), child:GetActorScale3D()
-        values[#values + 1] = {distance, path, guid, child_path, class, child.Ammo,
-            position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, scale.X, scale.Y, scale.Z}
+        search.values[#search.values + 1] = {distance, path, guid, child_path, class, child.Ammo,
+            position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, scale.X, scale.Y, scale.Z,
+            actor = child}
     end
-    for path, patch in pairs(patches or {}) do
-        if valid(patch) and not patch:IsActorBeingDestroyed() then
-            local pending, used = {}, {}
-            patch_children(patch, function(child, guid, id)
-                if guid then used[guid] = true end
-                if not qualified(state, child, base, false) then return end
-                if guid then
-                    collect(path, child, guid)
-                elseif id and id.A == 0 and id.B == 0 and id.C == 0 and id.D == 0 then
-                    pending[#pending + 1] = {item = child, live_id = id}
-                end
-            end)
-            if #pending > 0 and assign_patch_ids(state, patch, pending, used) then
-                for _, entry in ipairs(pending) do collect(path, entry.item, entry.hex) end
-            end
+
+    local pending, used = {}, {}
+    patch_children(patch, function(child, guid, id)
+        if guid then used[guid] = true end
+        if not qualified(search.state, child, search.base, false) then return end
+        if guid then
+            collect(child, guid)
+        elseif id and id.A == 0 and id.B == 0 and id.C == 0 and id.D == 0 then
+            pending[#pending + 1] = {item = child, live_id = id}
         end
+    end)
+    if #pending > 0 and assign_patch_ids(search.state, patch, pending, used) then
+        for _, entry in ipairs(pending) do collect(entry.item, entry.hex) end
     end
-    table.sort(values, function(left, right) return left[1] < right[1] end)
-    samples = values
+end
+
+local function publish_sample(search)
+    table.sort(search.values, function(left, right) return left[1] < right[1] end)
+    samples = search.values
+end
+
+local function sample_fixture(state)
+    local search = begin_sample(state, 2e7)
+    if not search then return end
+    sweep = nil
+    for path, patch in pairs(patches or {}) do sample_patch(search, path, patch) end
+    publish_sample(search)
+end
+
+function mushrooms.update(current_world)
+    local search = sweep
+    if not search then return end
+    if not same(world, current_world()) then
+        sweep = nil
+        return
+    end
+    local started = os.clock()
+    for _ = 1, 8 do
+        local path, patch = next(patches, search.cursor)
+        if not path then
+            publish_sample(search)
+            sweep = nil
+            return
+        end
+        search.cursor = path
+        sample_patch(search, path, patch)
+        if os.clock() - started >= 0.002 then break end
+    end
+end
+
+local function remove_from_sample(path, guid)
+    sweep = nil
+    for index = #samples, 1, -1 do
+        local entry = samples[index]
+        if entry[2] == path and entry[3] == guid then table.remove(samples, index) end
+    end
 end
 
 function mushrooms.rows(state, phase, row)
@@ -188,19 +231,26 @@ function mushrooms.rows(state, phase, row)
     if phase == "connected" and state.server == true and type(SilverfishReadNativeMushroomSkips) == "function" then
         return {row("native-mushroom-suppression", SilverfishReadNativeMushroomSkips(state.world:GetAddress()))}
     end
-    if phase ~= "hosting" or state.server ~= false or type(SilverfishCaptureNativeMushroom) ~= "function" then return {} end
+    if phase ~= "hosting" or state.server ~= false or type(SilverfishCaptureNativeMushroom) ~= "function" then
+        sweep = nil
+        return {}
+    end
     if not same(world, state.world) then
-        world, patches, samples, proof, next_sample = state.world, nil, {}, nil, 0
+        world, patches, samples, proof, next_sample, sweep = state.world, nil, {}, nil, 0, nil
     end
     local rows = {row("native-mushroom-capability", 1)}
     local now = os.clock()
-    if now >= next_sample then
+    if now >= next_sample and not sweep then
         if not patches then census(state) end
-        sample(state, 2300)
+        if patches and next(patches) then sweep = begin_sample(state, 2300) end
         next_sample = now + 0.3
     end
-    for index = 1, math.min(#samples, 128) do
-        rows[#rows + 1] = row("native-mushroom", state.map, table.unpack(samples[index], 2))
+    for _, entry in ipairs(samples) do
+        -- Stock pickup can destroy an actor while the next sample is assembling.
+        if valid(entry.actor) and not entry.actor:IsActorBeingDestroyed() then
+            rows[#rows + 1] = row("native-mushroom", state.map, table.unpack(entry, 2))
+            if #rows == 129 then break end
+        end
     end
     if proof then rows[#rows + 1] = row("native-mushroom-claim", state.map, table.unpack(proof)) end
     return rows
@@ -250,6 +300,7 @@ local function claim(fields, state, phase)
     end
     proof = {path, guid, requested, child_path, item_guid, units, outcome, amount or 0, before or 0, after or 0,
         inventory_guid or "-"}
+    remove_from_sample(path, guid)
     next_sample = 0
     return "stock mushroom harvested from the host patch"
 end
@@ -272,6 +323,7 @@ local function fixture(fields, state, phase)
     return input.press_world_loot(state, pawn, source, source.Box, function()
         local ok, status = SilverfishProbeNativeInteractInput(pawn:GetAddress(), true)
         if exact_source(state, path, guid) or saved(patch, guid) ~= 0 then error(name .. ":" .. tostring(status), 0) end
+        remove_from_sample(path, guid)
         next_sample = 0
         return "stock player harvested the exact mushroom"
     end)
@@ -308,7 +360,7 @@ local function stage_empty_patch(state, pawn)
             patch[field] = original
             if not ok then error(failure, 0) end
             stock_grown = stock_grown + patch.PatchData[saved_children]:GetArrayNum()
-            sample(state, 2e7)
+            sample_fixture(state)
             if #samples >= 3 then return end
         end
     end
@@ -334,7 +386,7 @@ function mushrooms.command(fields, state, phase)
         if #fields ~= 2 or not fixtures or not fresh or not host or not same(world, state.world) then
             error("native_mushroom_fixture_unavailable", 0)
         end
-        sample(state, 2e7)
+        sample_fixture(state)
         local detail = #samples == 0 and stage_empty_patch(state, host.pawn)
         local paths = {}
         for path in pairs(patches or {}) do paths[#paths + 1] = path end

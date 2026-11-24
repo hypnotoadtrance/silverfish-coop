@@ -33,7 +33,7 @@ end
 
 local function census(state, phase)
     if visit and same(visit.world, state.world) and visit.map == state.map and visit.phase == phase then
-        return visit
+        return visit.ready and visit or nil
     end
     -- Discard outgoing actors on travel, when the engine owns their teardown.
     if visit and same(visit.world, state.world) then props.clear() else visit = nil end
@@ -43,28 +43,48 @@ local function census(state, phase)
     if not valid(statics) or not valid(class) then return end
     local output = {}
     statics:GetAllActorsOfClass(state.world, class, output)
-    local actors, addresses, ids = {}, {}, {}
-    for _, actor in ipairs(output.OutActors or output) do
+    visit = {actors = {}, addresses = {}, ids = {}, phase = phase, world = state.world, map = state.map,
+        statics = statics, pending = output.OutActors or output, cursor = 1}
+end
+
+function props.update(current_world)
+    local current = visit
+    if not current or not current.pending then return end
+    if not same(current.world, current_world()) then
+        visit = nil
+        return
+    end
+    local started = os.clock()
+    local guest = current.phase == "connected"
+    for _ = 1, 16 do
+        if current.cursor > #current.pending then
+            table.sort(current.ids)
+            current.pending, current.ready = nil, true
+            return
+        end
+        local actor = current.pending[current.cursor]
+        current.cursor = current.cursor + 1
         if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
         -- Client copies of authored non-replicating actors can have a simulated role.
-        if live(actor) and actor.bReplicates == false and (phase == "connected" or actor:HasAuthority()) then
+        if live(actor) and actor.bReplicates == false and (guest or actor:HasAuthority()) then
             local path = actor:GetFullName():match("^%S+ (.+)$")
-            local placed, guest
-            if path then placed, guest = SilverfishQualifyNativePlacedDestructible(path) end
-            if placed and guest == (phase == "connected") then
+            local placed, remote
+            if path then placed, remote = SilverfishQualifyNativePlacedDestructible(path) end
+            if placed and remote == guest then
                 local id = path:match(":PersistentLevel%.([^%.]+)$")
-                -- A truncated or ambiguous census must never retire guest obstacles.
-                if not actor_id(id) or actors[id] or #ids == max_actors then return end
-                actors[id] = {actor = actor, hidden = actor.bHidden == true,
+                -- Publish only after the entire roster is qualified.
+                if not actor_id(id) or current.actors[id] or #current.ids == max_actors then
+                    current.pending = nil
+                    return
+                end
+                local entry = {actor = actor, hidden = actor.bHidden == true,
                     collision = actor:GetActorEnableCollision(), ticking = actor:IsActorTickEnabled()}
-                addresses[actor:GetAddress()] = actors[id]
-                ids[#ids + 1] = id
+                current.actors[id], current.addresses[actor:GetAddress()] = entry, entry
+                current.ids[#current.ids + 1] = id
             end
         end
+        if os.clock() - started >= 0.002 then break end
     end
-    table.sort(ids)
-    visit = {actors = actors, addresses = addresses, ids = ids, phase = phase, world = state.world, map = state.map, statics = statics}
-    return visit
 end
 
 function props.ended(address, destroyed)

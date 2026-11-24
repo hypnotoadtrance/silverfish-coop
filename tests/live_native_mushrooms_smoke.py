@@ -20,8 +20,7 @@ from tools.silverfish import native_mushrooms as mushrooms, native_world_loot as
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
-async def stock_regrowth(run: Path, patch: str) -> dict:
-    bridge, = (run / "game-bridge").iterdir()
+async def stock_regrowth(bridge: Path, patch: str) -> dict:
     ticket = uuid.uuid4().hex
     request = bridge / "mushroom-regrow-command.tsv"
     reply = bridge / "mushroom-regrow-reply.tsv"
@@ -146,7 +145,8 @@ async def verify(work: Path, unchanged: Path, area: str, *, regrowth: bool = Fal
             assert dropped["link_connected"] is False, dropped
             await wait(hrun, lambda state: state.get("link_connected") is False
                        and game_seconds(state) >= game_seconds(harvested) + 2)
-            growth = await stock_regrowth(hrun, patch)
+            bridge, = (hrun / "game-bridge").iterdir()
+            growth = await stock_regrowth(bridge, patch)
 
             def new_patch_rows(state):
                 return {key: row for key, row in active(state).items()
