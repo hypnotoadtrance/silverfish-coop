@@ -92,7 +92,7 @@ local function stock_active_track(save, variant, operation)
     for quarter = 1, 64 do
         local time = quarter / 4
         if curve:GetVectorValue(time).Z > .5 and curve:GetVectorValue(time + .25).Z > .5 then
-            alpha = time
+            alpha = time + .125
             break
         end
     end
@@ -100,14 +100,21 @@ local function stock_active_track(save, variant, operation)
     local maths = find("/Script/Engine.Default__KismetMathLibrary")
     local track = save.StormTrack
     local old_class, old_curve, old_rate, old_active = track[field_class], track[field_curve], track[field_rate], track[field_active]
-    local old_time = maths:Add_TimespanTimespan(track[field_time], maths:FromHours(0))
-    track[field_class], track[field_curve], track[field_rate], track[field_active] = storm_class, curve, 1, false
-    track[field_time] = maths:Subtract_TimespanTimespan(save.GameTime, maths:FromHours(alpha))
-    assert(same(track[field_class], storm_class) and same(track[field_curve], curve)
-        and track[field_rate] == 1 and track[field_active] == false)
-    local ok, report = pcall(operation, track, storm_class)
+    -- Read native FTimespan fields in place. UE4SS turns an FTimespan return value into a table
+    -- with no reflected fields, so it cannot be copied back into the private save.
+    local hours = maths:GetTotalHours(save.GameTime) - maths:GetTotalHours(track[field_time])
+    assert(math.abs(hours) > .0001, "the stock storm schedule starts at the current fixture clock")
+    local rate = alpha / hours
+    local ok, report = pcall(function()
+        track[field_class], track[field_curve], track[field_rate], track[field_active] = storm_class, curve, rate, false
+        local sample = curve:GetVectorValue(hours * track[field_rate]).Z
+        assert(same(track[field_class], storm_class) and same(track[field_curve], curve)
+            and math.abs(track[field_rate] - rate) < .00001 and track[field_active] == false and sample > .5,
+            "the private save did not retain the active stock storm schedule")
+        return operation(track, storm_class)
+    end)
     track[field_class], track[field_curve], track[field_rate] = old_class, old_curve, old_rate
-    track[field_time], track[field_active] = old_time, old_active
+    track[field_active] = old_active
     assert(ok, report)
     return report
 end
@@ -127,8 +134,13 @@ local function start_host(world, statics, pawn, day, instance, action)
     return stock_active_track(instance.SaveSlot_Ref, variant, function(_, expected)
         day:UpdateStormTrack()
         local active = day.LocalStorm
-        assert(valid(active) and same(active:GetClass(), expected) and same(active.DayControler_Ref, day)
-            and active.StormLevel == 1 and active.FirstActivation and day.Storming, "stock storm activation failed")
+        assert(valid(active), ("stock storm actor absent (storming=%s, day_level=%s)"):format(
+            tostring(day.Storming), day.StormLevel))
+        assert(same(active:GetClass(), expected) and same(active.DayControler_Ref, day)
+            and active.StormLevel == 1 and active.FirstActivation and day.Storming,
+            ("stock storm activation mismatch (%s, day_bound=%s, level=%s, first=%s, storming=%s)"):format(
+            path(active:GetClass()), tostring(same(active.DayControler_Ref, day)), active.StormLevel,
+            tostring(active.FirstActivation), tostring(day.Storming)))
         return path(active:GetClass()) .. ";" .. tostring(active:GetAddress())
     end)
 end
