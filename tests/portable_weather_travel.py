@@ -6,6 +6,7 @@ import math
 from live_multi_smoke import campaign_save_hashes
 from portable_guest_world_start import wait_resident_status
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
+from tools.silverfish.control import current_status
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
@@ -41,9 +42,17 @@ async def verify_weather_travel(host, guest, pawn, probe):
         try:
             return (await wait_resident_status(guest_run, matches, timeout=18))["game"]["native_world_view"]
         except RuntimeError:
-            authority = await weather(host, "diagnose")
-            local = await weather(guest, "diagnose")
-            raise RuntimeError(f"Guest missed the {intensity} rain update. Host {authority}. Guest stock {local}.") from None
+            authority, local, host_frame, guest_frame = await asyncio.gather(
+                weather(host, "diagnose"), weather(guest, "diagnose"),
+                current_status(host_run), current_status(guest_run))
+            fields = ("mode", "map", "sequence", "weather_verified", "rain_intensity", "rain_verified",
+                      "rain_skipped_nullrhi")
+            host_view, guest_view = (
+                {key: view.get(key) for key in fields}
+                for view in (frame.get("game", {}).get("native_world_view", {}) for frame in (host_frame, guest_frame))
+            )
+            raise RuntimeError(f"Guest missed the {intensity} rain update. Host actor {authority}, view {host_view}. "
+                               f"Guest actor {local}, view {guest_view}.") from None
 
     await wait_resident_status(host_run, lambda f: f["game"]["map"] == CROSSROADS
                                and not f.get("awaiting_zone_guest")

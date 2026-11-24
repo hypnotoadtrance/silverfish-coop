@@ -102,7 +102,17 @@ LoopInGameThreadWithDelay(100, function()
         end
         assert(not guest and valid(world.NetDriver.ClientConnections[1]))
         day.UpdateInRealTime = false
-        if action == "dry" then return stock_rain(world, statics, pawn, day, 0) end
+        if action == "dry" then
+            local rain = day.RainController
+            if valid(rain) and same(rain:GetWorld(), world) and not rain:IsActorBeingDestroyed() then
+                rain:KillRain()
+            end
+            -- The stock graph fades the actor before destruction. Test the
+            -- DayCycle dropping its controller without depending on that timer.
+            day.RainController = nil
+            assert(not valid(day.RainController))
+            return "absent"
+        end
         assert(action == "wet")
         local report = stock_rain(world, statics, pawn, day, .55)
         for _, horn in ipairs(FindAllOf("AlarmSiren_BP_C") or {}) do

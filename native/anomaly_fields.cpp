@@ -35,6 +35,7 @@ namespace
 
     constexpr auto owner = STR("SilverfishCoopNative");
     constexpr auto field_class = STR("/Game/Classes/Actors/AnomalyField_BP.AnomalyField_BP_C");
+    constexpr auto day_cycle_class = STR("/Game/Classes/Actors/DayCycle_SunControler_BP.DayCycle_SunControler_BP_C");
     constexpr auto mushroom_patch = STR("/Game/Assets/PCG_Brushes/MushroomPatch_BP.MushroomPatch_BP_C");
     constexpr auto trap_overlap = STR("BndEvt__Starburst_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature");
     constexpr auto electrode_class = STR("/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C");
@@ -74,7 +75,7 @@ namespace
         roaming_teleport_class,
     };
     std::array<H::GlobalCallbackId, 5> hooks{H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID, H::ERROR_ID};
-    U::FName spawn_field, overlap, electrode, roaming_teleport, fixed_prop_name;
+    U::FName spawn_field, overlap, electrode, roaming_teleport, fixed_prop_name, update_storm_track;
     U::FName gravity, gravity_graph, gravity_add_actors;
     U::FName pyrogeist, pyrogeist_graph, directed_jet, fire_graph, fire_damage;
     U::FName shadow, shadow_graph;
@@ -105,6 +106,8 @@ namespace
     thread_local std::int64_t skipped{}, blocked_triggers{}, blocked_canister_calls{}, blocked_fixed_prop_calls{};
     thread_local U::FWeakObjectPtr patch_world;
     thread_local std::int64_t blocked_patches{};
+    thread_local U::FWeakObjectPtr storm_world;
+    thread_local std::int64_t blocked_storm_updates{};
 
     struct PendingLoad
     {
@@ -699,6 +702,30 @@ namespace
     {
         if (!guest_session || !actor || !function) return;
         const auto name = function->GetFName();
+        if (name == update_storm_track)
+        {
+            auto* day = actor->GetClassPrivate();
+            if (!U::IsInGameThreadRaw() || !day || day != function->GetOuterPrivate() || day->GetPathName() != day_cycle_class ||
+                !actor->HasAnyFlags(U::RF_WasLoaded) || actor->IsUnreachable() || function->GetNumParms() != 0 ||
+                function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) ||
+                call.OriginalFunctionCallPrevented()) return;
+            auto* world = static_cast<U::AActor*>(actor)->GetWorld();
+            if (!guest_world(world) || actor->GetOuterPrivate() != object(world, STR("PersistentLevel")) ||
+                object(actor, STR("Game Instance")) != object(world, STR("OwningGameInstance"))) return;
+            // The pending guest driver already scopes map startup even before
+            // the world publishes NetDriver or the host's first weather frame.
+            call.PreventOriginalFunctionCall();
+            if (call.OriginalFunctionCallPrevented())
+            {
+                if (storm_world.Get() != world)
+                {
+                    storm_world = world;
+                    blocked_storm_updates = 0;
+                }
+                ++blocked_storm_updates;
+            }
+            return;
+        }
         const bool field = name == spawn_field;
         const bool trap = name == overlap ||
             std::find(electrode_events.begin(), electrode_events.end(), name) != electrode_events.end();
@@ -839,6 +866,8 @@ namespace
                 blocked_fixed_prop_calls = 0;
                 patch_world = U::FWeakObjectPtr{};
                 blocked_patches = 0;
+                storm_world.Reset();
+                blocked_storm_updates = 0;
                 loading = {};
                 drum_fires = {};
                 drum_breaks = {};
@@ -874,6 +903,7 @@ namespace silverfish::native_anomaly_fields
     {
         if (installed()) return;
         spawn_field = U::FName{STR("SpawnField"), U::FNAME_Add};
+        update_storm_track = U::FName{STR("UpdateStormTrack"), U::FNAME_Add};
         gravity = U::FName{STR("GravityAnomaly_BP_C"), U::FNAME_Add};
         gravity_graph = U::FName{STR("ExecuteUbergraph_GravityAnomaly_BP"), U::FNAME_Add};
         gravity_add_actors = U::FName{STR("AddActors"), U::FNAME_Add};
@@ -1097,6 +1127,14 @@ namespace silverfish::native_anomaly_fields
         lua.register_function("SilverfishSetNativeAnomalyGuest", set_guest);
         lua.register_function("SilverfishTakeNativeBottleBreakCue", take_bottle_cue);
         lua.register_function("SilverfishReadNativeAnomalySkips", count);
+        lua.register_function("SilverfishReadNativeGuestStormGuard", [](const Lua& current) {
+            if (!U::IsInGameThreadRaw() || !guest_session || current.get_stack_size() != 0) return 0;
+            auto* world = storm_world.Get();
+            if (!world) return 0;
+            current.set_integer(reinterpret_cast<std::uintptr_t>(world));
+            current.set_integer(blocked_storm_updates);
+            return 2;
+        });
         if (stock_actor_begin != H::ERROR_ID &&
             (stock_event_post != H::ERROR_ID || stock_script_post != H::ERROR_ID || stock_internal_post != H::ERROR_ID))
         {

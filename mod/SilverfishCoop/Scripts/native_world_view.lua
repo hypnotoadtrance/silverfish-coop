@@ -1,5 +1,6 @@
 local view = {}
 local lightning_guest = require("native_weather_lightning_guest")
+local ambience_guest = require("native_storm_ambience_guest")
 local lightning_context, local_lightning_gate
 
 local day_class = "/Game/Classes/Actors/DayCycle_SunControler_BP.DayCycle_SunControler_BP_C"
@@ -33,6 +34,7 @@ local weather_fields = {
 local profiles = require("authored_world_view")
 local weather_view = require("native_weather_view")
 local lightning_host = require("native_weather_lightning_host")
+local storm_ambience = require("native_storm_ambience_host")
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -228,6 +230,8 @@ function view.observe(state, phase)
     if ok and weather then copy_weather(report, weather) end
     local rain_ok, rain = pcall(weather_view.read_rain, current)
     if rain_ok and rain then weather_view.copy_rain(report, rain) end
+    local storm_ok, storm = pcall(storm_ambience.capture, current)
+    if storm_ok then report.storm_ambience = storm end
     return report
 end
 
@@ -372,6 +376,7 @@ end
 
 function view.clear()
     lightning_guest.clear()
+    ambience_guest.clear()
     local previous = lease
     lease = nil
     if not previous then return true end
@@ -413,6 +418,7 @@ function view.sync(state, phase)
     if not lease then return true end
     local ok, current = pcall(lease_current, state, phase)
     if not ok or not current then return view.clear() end
+    ambience_guest.sync(lease.context, lease.frame.epoch)
     return true
 end
 
@@ -511,9 +517,10 @@ function view.status(state, phase)
     return ok and report or nil
 end
 
-function view.weather_cue_rows(state, phase, row)
+function view.weather_cue_rows(state, phase, row, host_report)
     local rows = weather_view.siren_rows(state, phase, row)
     for _, strike in ipairs(lightning_host.rows(state, phase, row)) do rows[#rows + 1] = strike end
+    if host_report then storm_ambience.append(rows, host_report.storm_ambience, row) end
     return rows
 end
 
@@ -563,6 +570,15 @@ function view.lightning_rows(row)
     if not lease then return {} end
     return lightning_guest.rows(lease.context, lease.frame.epoch, row)
 end
+
+function view.apply_ambience(state, phase, epoch, report)
+    if not lease or lease.frame.epoch ~= epoch or not lease_current(state, phase) then
+        error("guest_weather_ambience_scope_unavailable", 0)
+    end
+    return ambience_guest.apply(lease.context, epoch, report)
+end
+
+view.ambience_rows = ambience_guest.rows
 
 view.animate_lightning = lightning_guest.animate
 

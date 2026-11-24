@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish.native_anomaly_effects import (
     ANGLER_COLORS, ANGLER_MAP, CANISTERS, ELECTRODE_PHASES, FIXED_EXPLOSIVES, OBSERVER_OPACITY, Playback, VORTEX_SENSORS,
@@ -203,7 +203,13 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
             {**game, "ack": {"message": "weather siren already played"}},
         ]))
         control = Mock()
-        for _ in range(3):
+        with patch("tools.silverfish.native_weather_view.time") as clock:
+            clock.monotonic.return_value = 100
+            await playback.sync(bridge, control, game, warnings, epoch)
+            clock.monotonic.return_value = 100.1
+            await playback.sync(bridge, control, game, warnings, epoch)
+            self.assertEqual(bridge.command.await_count, 2)
+            clock.monotonic.return_value = 100.5
             await playback.sync(bridge, control, game, warnings, epoch)
         self.assertEqual([call.args[2:5] for call in bridge.command.await_args_list],
                          [("3", first, "2"), ("2", second, "3"), ("3", first, "2")])

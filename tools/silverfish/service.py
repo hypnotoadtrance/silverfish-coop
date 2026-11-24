@@ -45,7 +45,7 @@ from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lif
 from . import native_flashlight, native_lantern, native_stock_door, native_stock_switch
 from . import native_player_avatar
 from . import native_pickup_audio
-from . import native_damage_feedback, native_weather_view
+from . import native_damage_feedback, native_storm_ambience, native_weather_view
 from . import native_voice
 from . import native_footsteps
 from . import native_anomaly_effects
@@ -998,6 +998,8 @@ class Host:
             view["host_world"]["native_world_view"] = world_view
             if sirens := native_weather_view.siren_frame(self.last_game, area):
                 view["host_world"][native_weather_view.KEY] = sirens
+            if time.monotonic() - self.last_seen < 2 and (ambience := self.last_game.get(native_storm_ambience.KEY)):
+                view["host_world"][native_storm_ambience.KEY] = {**ambience, "map": area, "epoch": self.zone_epoch}
             if strikes := native_weather_view.lightning_frame(self.last_game, area, time.monotonic() - self.last_seen):
                 view["host_world"][native_weather_view.LIGHTNING] = strikes
         view["native_quests"] = self.party.get("native_quests", {})
@@ -5132,6 +5134,7 @@ class Client:
         self.hurt_playback = native_damage_feedback.Playback()
         self.weather_sirens = native_weather_view.SirenPlayback()
         self.weather_lightning = native_weather_view.LightningPlayback()
+        self.storm_ambience = native_storm_ambience.Projection()
         self.anomaly_playback = native_anomaly_effects.Playback()
         self.destructible_playback = native_destructibles.Playback()
         self.weapon_shot_playback = native_weapon_fire_view.Playback()
@@ -6106,6 +6109,11 @@ class Client:
                     self.bridge, self.control, self.last_game,
                     self.gameplay.get("host_world", {}).get(native_weather_view.LIGHTNING), self.zone_epoch,
                     snapshot_age=time.monotonic() - self.gameplay_seen,
+                )
+                self.last_game = await self.storm_ambience.sync(
+                    self.bridge, self.control, self.last_game,
+                    self.gameplay.get("host_world", {}).get(native_storm_ambience.KEY), self.zone_epoch,
+                    time.monotonic() - self.gameplay_seen,
                 )
                 self.last_game = await self.weather_sirens.sync(
                     self.bridge, self.control, self.last_game,

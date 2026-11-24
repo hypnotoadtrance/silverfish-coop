@@ -20,6 +20,7 @@ end
 local zero = {X = 0, Y = 0, Z = 0}
 local rotation = {Pitch = 0, Yaw = 0, Roll = 0}
 local current, installed, retry_at, serial, sirens = nil, false, 0, 0, {}
+local siren_reset_delay = 4
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -81,10 +82,10 @@ end
 function view.read_rain(current_world)
     local rain = stock_rain_actor(current_world)
     if not rain or rain.Intensity == 0 then return {rain_intensity = 0, rain_x = 0, rain_y = 0, rain_z = 1} end
-    local particles, direction, amount = rain.NI_Rain_01, rain.RainVector, rain.Intensity
-    if not exact(particles, niagara_class) or not same(particles:GetOwner(), rain)
-        or not same(particles.Asset, StaticFindObject(particle_path)) or not bounded(amount, 0, 20) then return nil end
-    local report = {rain_intensity = amount, rain_x = direction.X, rain_y = direction.Y, rain_z = direction.Z}
+    -- The scoped DayCycle owns the rain state. Its Niagara component can be
+    -- unavailable while the stock rain controller still has valid weather.
+    local direction = rain.RainVector
+    local report = {rain_intensity = rain.Intensity, rain_x = direction.X, rain_y = direction.Y, rain_z = direction.Z}
     return view.valid_rain(report) and report or nil
 end
 
@@ -250,17 +251,26 @@ end
 local function capture(actor, sound, duration)
     if not current or not valid(actor) or not valid(sound) or not bounded(duration, 0.25, 120) or not actor:HasAuthority() then return end
     local source = siren_actor(actor, current.world)
-    if not source then return end
+    -- Blueprint RegisterHook runs after StormSiren. Its stock DoOnce can ignore
+    -- a different warning while this horn still owns the previous sound.
+    if not source or not same(actor.Audio.Sound, sound) then return end
+    local clock = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    if not valid(clock) then return end
+    local now = clock:GetTimeSeconds(current.world)
+    if type(now) ~= "number" then return end
     for cue, path in ipairs(siren_cues) do
         if sound:GetFullName() == "SoundCue " .. path then
-            serial = serial + 1
             for index, previous in ipairs(sirens) do
                 if previous.source == source then
+                    -- Stock keeps the cue assigned through its four-second reset delay.
+                    if previous.cue == cue and now < previous.reset_at then return end
                     table.remove(sirens, index)
                     break
                 end
             end
-            sirens[#sirens + 1] = {id = serial, source = source, cue = cue, until_time = os.time() + duration}
+            serial = serial + 1
+            sirens[#sirens + 1] = {id = serial, source = source, cue = cue, until_time = os.time() + duration,
+                reset_at = now + duration + siren_reset_delay}
             if #sirens > 4 then table.remove(sirens, 1) end
             return
         end
@@ -300,7 +310,7 @@ function view.play_siren(current_world, source, cue, remaining)
     local actor = StaticFindObject(source)
     if siren_actor(actor, current_world.world) ~= source then return false end
     local sound = asset(siren_cues[cue])
-    if not valid(sound) then return false end
+    if not valid(sound) or same(actor.Audio.Sound, sound) then return false end
     actor:StormSiren(sound, remaining)
     return same(actor.Audio.Sound, sound)
 end

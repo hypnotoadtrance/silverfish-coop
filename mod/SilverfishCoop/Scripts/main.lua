@@ -976,6 +976,18 @@ local function run_command(fields, state, current_phase)
         return native_world_view.play_lightning(state, current_phase, fields[3], tonumber(fields[4]),
             {X = tonumber(fields[5]), Y = tonumber(fields[6]), Z = tonumber(fields[7])},
             {Pitch = tonumber(fields[8]), Yaw = tonumber(fields[9]), Roll = tonumber(fields[10])})
+    elseif command == "native-weather-ambience-apply" then
+        if not world_view_enabled or current_phase ~= "connected" or role ~= "client"
+            or (fields[4] == "idle" and #fields ~= 4)
+            or (fields[4] ~= "idle" and #fields ~= 11 and #fields ~= 18) then
+            error("Weather ambience requires the authenticated client and a complete snapshot", 0)
+        end
+        return native_world_view.apply_ambience(state, current_phase, fields[3], {
+            phase = fields[4], variant = fields[5], level = tonumber(fields[6]), blend = tonumber(fields[7]),
+            fade = tonumber(fields[8]), particle = fields[9], sound = fields[10], volume = tonumber(fields[11]),
+            fog = #fields == 18 and {material = fields[12], density = tonumber(fields[13]), start = tonumber(fields[14]),
+                r = tonumber(fields[15]), g = tonumber(fields[16]), b = tonumber(fields[17]), a = tonumber(fields[18])} or nil,
+        })
     elseif command == "native-world-view-apply" or command == "native-world-view-apply-local" then
         if not world_view_enabled or (#fields ~= 18 and #fields ~= 23 and #fields ~= 27)
             or current_phase ~= "connected" or role ~= "client" then
@@ -1310,6 +1322,12 @@ local function write_status(state, current_phase, failure, fields, pending, crat
     if current_phase == "connected" and world_view_enabled and compact_crates then
         rows[#rows + 1] = status_row("native-world-view-apply-local", 1)
     end
+    if current_phase == "connected" and world_view_enabled and type(SilverfishReadNativeGuestStormGuard) == "function" then
+        local guarded, denied = SilverfishReadNativeGuestStormGuard()
+        if guarded == state.world:GetAddress() and math.type(denied) == "integer" then
+            rows[#rows + 1] = status_row("native-weather-storm-guard", denied)
+        end
+    end
     for _, row in ipairs(native_stock_creator.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
     if role == "host" and party_travel_guard_available() then
         rows[#rows + 1] = status_row("native-zone-party-guard", 1)
@@ -1328,7 +1346,7 @@ local function write_status(state, current_phase, failure, fields, pending, crat
             if host_world_view then host_world_view.sequence = sequence end
         end
         if host_world_view then rows[#rows + 1] = world_view_row("sample", host_world_view) end
-        for _, row in ipairs(native_world_view.weather_cue_rows(state, current_phase, status_row)) do
+        for _, row in ipairs(native_world_view.weather_cue_rows(state, current_phase, status_row, host_world_view)) do
             rows[#rows + 1] = row
         end
     elseif world_view_enabled and current_phase == "connected" then
@@ -1337,6 +1355,7 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         if seen then
             rows[#rows + 1] = world_view_row("applied", seen)
             for _, row in ipairs(native_world_view.lightning_rows(status_row)) do rows[#rows + 1] = row end
+            for _, row in ipairs(native_world_view.ambience_rows(status_row)) do rows[#rows + 1] = row end
         end
     end
     local viewed_health, viewed_food, viewed_regen, viewed_stim = native_save_scope.guest_vitals(state, current_phase)
