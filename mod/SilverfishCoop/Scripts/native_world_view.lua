@@ -1,4 +1,6 @@
 local view = {}
+local lightning_guest = require("native_weather_lightning_guest")
+local lightning_context, local_lightning_gate
 
 local day_class = "/Game/Classes/Actors/DayCycle_SunControler_BP.DayCycle_SunControler_BP_C"
 local sky_class = "/Game/Assets/StaticMeshes/Mesh_SkyBox/BP_Sky_Sphere_Custom.BP_Sky_Sphere_Custom_C"
@@ -369,6 +371,7 @@ local function components_current(current)
 end
 
 function view.clear()
+    lightning_guest.clear()
     local previous = lease
     lease = nil
     if not previous then return true end
@@ -530,5 +533,37 @@ function view.play_siren(state, phase, epoch, sequence, source, cue, remaining)
     warning_receipts.sources[source] = sequence
     return "stock weather siren played"
 end
+
+function view.sync_lightning(state, phase)
+    local current = lease and lease.context or lightning_context
+    if phase ~= "connected" or state.server ~= true or not state.listening then
+        current = nil
+    elseif not current or state.map ~= current.profile.map or not same(state.world, current.world)
+        or not state.local_pawn or not same(state.local_pawn.pawn, current.pawn)
+        or not same(current.world.NetDriver, current.driver) or not same(current.driver.ServerConnection, current.connection) then
+        local ok, scope = pcall(context, state, phase)
+        current = ok and scope or nil
+    end
+    lightning_context = current
+    local_lightning_gate = weather_view.gate_local_lightning(current, local_lightning_gate)
+end
+
+function view.play_lightning(state, phase, epoch, serial, position, rotation)
+    if not lease or lease.frame.epoch ~= epoch or not lease_current(state, phase)
+        or not math.tointeger(serial) or serial < 1 or serial >= 2^53
+        or not bounded(position.X, -10000000, 10000000) or not bounded(position.Y, -10000000, 10000000)
+        or not bounded(position.Z, -10000000, 10000000) or not bounded(rotation.Pitch, -360, 360)
+        or not bounded(rotation.Yaw, -360, 360) or not bounded(rotation.Roll, -360, 360) then
+        error("guest_weather_lightning_scope_unavailable", 0)
+    end
+    return lightning_guest.play(lease.context, epoch, serial, position, rotation)
+end
+
+function view.lightning_rows(row)
+    if not lease then return {} end
+    return lightning_guest.rows(lease.context, lease.frame.epoch, row)
+end
+
+view.animate_lightning = lightning_guest.animate
 
 return view

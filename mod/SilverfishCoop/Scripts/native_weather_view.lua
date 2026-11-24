@@ -97,6 +97,28 @@ local function local_rain_actor(current_world)
     if rain and rain:HasAuthority() then return rain end
 end
 
+function view.gate_local_lightning(current_world, previous)
+    local rain = current_world and local_rain_actor(current_world)
+    if previous and not same(previous.actor, rain) then
+        local actor = previous.actor
+        if valid(actor) and not actor:IsActorBeingDestroyed() and same(actor:GetWorld(), previous.world) then
+            actor.CanSpawnLightning = previous.allowed
+            actor.Max_LightningChance = previous.chance
+        end
+        previous = nil
+    end
+    if not rain or type(rain.CanSpawnLightning) ~= "boolean" or not bounded(rain.Max_LightningChance, 0, 1) then
+        return previous
+    end
+    previous = previous or {actor = rain, world = current_world.world,
+        allowed = rain.CanSpawnLightning, chance = rain.Max_LightningChance}
+    -- Rain's latent startup can set CanSpawnLightning again independently of
+    -- actor tick. Keep the probability zero even through that stock update.
+    if rain.CanSpawnLightning then rain.CanSpawnLightning = false end
+    if rain.Max_LightningChance ~= 0 then rain.Max_LightningChance = 0 end
+    return previous
+end
+
 function view.restore_local_rain(current_world, original)
     if not original or not same(local_rain_actor(current_world), original.actor) then return end
     local rain, particles = original.actor, original.particles
