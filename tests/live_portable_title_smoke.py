@@ -3174,17 +3174,19 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
     guest_frame = await wait_resident_status(guest_run, lambda frame: frame.get("state") == "connected")
     proofs = []
 
-    async def stock_input(name):
+    async def stock_input(name, count=1):
         event = f"native_guest_{name}_input"
         requested = await submit(guest_run, f"native-guest-{name}-input-fixture")
         assert requested["ok"], requested
         sequence = requested[f"native_guest_{name}_fixture"]["sequence"]
         async with asyncio.timeout(10):
             while True:
-                for row in await resident_events(guest_run, guest_frame):
-                    if row.get("sequence") == sequence and row["event"] in (event, f"{event}_rejected"):
-                        assert row["event"] == event, row
-                        return row["native_guest_weapon"]
+                rows = [row for row in await resident_events(guest_run, guest_frame)
+                        if row.get("sequence") == sequence and row["event"] in (event, f"{event}_rejected")]
+                assert all(row["event"] == event for row in rows), rows
+                if len(rows) == count:
+                    return [row["native_guest_weapon"] for row in rows]
+                assert len(rows) < count, rows
                 await asyncio.sleep(.1)
 
     profiles = {profile.kind: profile.magazine for profile in FIREARMS}
@@ -3193,12 +3195,14 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
              ("revolver-9mm", "equipped", None), ("heavy-pistol-silenced", "equipped", None),
              ("rifle-50-semi", "equipped", None), ("type33-scoped", "equipped", None))
     if shotguns:
-        kinds = ("sg-71-a", "sawn-off-shotgun", "sg-71-b", "bolt-action-shotgun-suppressed",
-                 "bolt-action-shotgun", "sg-71-a-suppressed")
+        kinds = ("pump-shotgun", "sawn-off-shotgun", "sg-71-b", "bolt-action-shotgun-suppressed",
+                 "bolt-action-shotgun", "cult-shotgun")
         cases = tuple((kind, "equipped", alternate) for kind, alternate in zip(kinds, (None, *SHOTGUN_AMMO[1:]), strict=True))
     for kind, source, alternate in cases:
         seed_started = time.time()
-        seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, kind)
+        tube = profiles[kind] and profiles[kind].single_reload
+        starting_rounds = 3 if tube else 1
+        seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, kind, str(starting_rounds))
         guid = seeded["ack"]["message"]
         assert re.fullmatch(r"[0-9A-F]{32}", guid), seeded["ack"]
         before = (await submit(guest_run, "native-guest-weapon-inspect", target=guid))["native_guest_weapon"]
@@ -3271,20 +3275,26 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns
         await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_inventory_view", {}).get("state") == "closed")
         proof = {"source": source, "kind": kind, **unloaded}
         if source == "equipped":
-            magazine = await stock_input("reload")
-            assert (magazine["guid"], magazine["before"], magazine["after"]) == (guid, 0, 1), magazine
+            reloads = await stock_input("reload", starting_rounds)
+            assert [(row["guid"], row["before"], row["after"]) for row in reloads] == [
+                (guid, count, count + 1) for count in range(starting_rounds)], reloads
+            if tube:
+                assert [(row["reserve_before"], row["reserve_after"]) for row in reloads] == [
+                    (count, count - 1) for count in range(starting_rounds, 0, -1)], reloads
+                proof["shell_reloads"] = reloads
             async with asyncio.timeout(10):
-                while await read_loadout() != "1,1":
+                while await read_loadout() != f"{starting_rounds},{starting_rounds}":
                     await asyncio.sleep(.15)
                 while await read_loadout("ammo") != expected.item_path:
                     await asyncio.sleep(.15)
-            proof["reload"] = magazine
-            shot = await stock_input("primary")
+            proof["reload"] = reloads[-1]
+            shot, = await stock_input("primary")
+            remaining = starting_rounds - 1
             assert (shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (
-                guid, 1, 0, expected.projectile_count,
+                guid, starting_rounds, remaining, expected.projectile_count,
             ), shot
             async with asyncio.timeout(8):
-                while await read_loadout() != "0,0":
+                while await read_loadout() != f"{remaining},{remaining}":
                     await asyncio.sleep(.15)
             proof["shot"] = shot
         proofs.append(proof)

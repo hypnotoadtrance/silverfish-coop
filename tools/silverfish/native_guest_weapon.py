@@ -220,9 +220,9 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
             raise party.RuleError("native_guest_weapon_view_unqualified")
     elif action == "native-guest-weapon-reload" and isinstance(guid, str) and "@" in guid:
         parts = guid.split("@")
-        if len(parts) != 3 or parts[1:] != [host.zone_epoch, "loki"]:
+        if len(parts) not in (2, 3) or parts[1] != host.zone_epoch or parts[2:] not in ([], ["loki"]):
             raise party.RuleError("native_guest_weapon_view_unqualified")
-        guid, underbarrel = parts[0], True
+        guid, underbarrel = parts[0], len(parts) == 3
     fixture = bandit_fixture is not None or action in ("native-guest-weapon-seed", "native-guest-weapon-seed-ammo")
     if (not host.native_guest or (fixture and not host.fixtures) or host.native_profile is None
             or host.transitioning or host.stopping or host.native_checkpoint_unsafe

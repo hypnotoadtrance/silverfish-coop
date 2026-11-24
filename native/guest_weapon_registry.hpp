@@ -127,6 +127,7 @@ namespace silverfish::guest_weapon_profiles
         bool reload_first_stack;
         bool action_on_release{};
         const RC::CharType* underbarrel_mount{};
+        bool single_reload{};
     };
 
     inline constexpr std::array firearms{
@@ -287,6 +288,12 @@ namespace silverfish::guest_weapon_profiles
         Profile{"sniper-04", STR("/Game/Classes/Weapons/Wep_Sniper_04.Wep_Sniper_04_C"), true, 10, 1, 1.4, true, &magnum_338_fmj, true, true},
         Profile{"sniper-05", STR("/Game/Classes/Weapons/Wep_Sniper_05.Wep_Sniper_05_C"), true, 10, 1, 1.4, true, &magnum_338_fmj, true, true},
         Profile{"sniper-night-vision", STR("/Game/Classes/Weapons/Wep_Sniper_NightVis.Wep_Sniper_NightVis_C"), true, 10, 1, 1.4, true, &magnum_338_fmj, true, true},
+        Profile{"short-pump-shotgun", STR("/Game/Classes/Weapons/Wep_ShortBerral_ShotGun.Wep_ShortBerral_ShotGun_C"), true, 4, 1, 0.7, true, &twelve_gauge_buck, false, true, nullptr, true},
+        Profile{"pump-shotgun", STR("/Game/Classes/Weapons/Wep_ShotGun_01.Wep_ShotGun_01_C"), true, 6, 1, 0.7, true, &twelve_gauge_buck, false, true, nullptr, true},
+        Profile{"pump-shotgun-04", STR("/Game/Classes/Weapons/Wep_ShotGun_04.Wep_ShotGun_04_C"), true, 8, 1, 0.2, true, &twelve_gauge_buck, false, true, nullptr, true},
+        Profile{"pump-shotgun-05", STR("/Game/Classes/Weapons/Wep_ShotGun_05.Wep_ShotGun_05_C"), true, 8, 1, 0.2, true, &twelve_gauge_buck, false, true, nullptr, true},
+        Profile{"army-shotgun", STR("/Game/Classes/Weapons/Wep_ShotGun_Army.Wep_ShotGun_Army_C"), true, 6, 1, 0.7, true, &twelve_gauge_buck, false, true, nullptr, true},
+        Profile{"cult-shotgun", STR("/Game/Classes/Weapons/Wep_ShotGun_Cult.Wep_ShotGun_Cult_C"), true, 6, 1, 0.7, true, &twelve_gauge_hyperball, false, true, nullptr, true},
     };
     inline constexpr std::array stock_held_fire_kinds{
         std::string_view{"smg-standard"},

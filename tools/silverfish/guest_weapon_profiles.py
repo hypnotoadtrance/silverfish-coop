@@ -104,6 +104,7 @@ class Magazine:
     ammo: StockAmmo = NINE_MM_BALL
     reload_first_stack: bool = False
     action_on_release: bool = False
+    single_reload: bool = False
 
 
 @dataclass(frozen=True)
@@ -251,6 +252,15 @@ RELEASE_RIFLES = (
     ("sniper-night-vision", "Wep_Sniper_NightVis", 10, MAGNUM_338_FMJ),
 )
 
+PUMP_SHOTGUNS = (
+    ("short-pump-shotgun", "Wep_ShortBerral_ShotGun", 4, 0.7, TWELVE_GAUGE_BUCK),
+    ("pump-shotgun", "Wep_ShotGun_01", 6, 0.7, TWELVE_GAUGE_BUCK),
+    ("pump-shotgun-04", "Wep_ShotGun_04", 8, 0.2, TWELVE_GAUGE_BUCK),
+    ("pump-shotgun-05", "Wep_ShotGun_05", 8, 0.2, TWELVE_GAUGE_BUCK),
+    ("army-shotgun", "Wep_ShotGun_Army", 6, 0.7, TWELVE_GAUGE_BUCK),
+    ("cult-shotgun", "Wep_ShotGun_Cult", 6, 0.7, TWELVE_GAUGE_HYPERBALL),
+)
+
 LOKI_RECEIVERS = (
     Firearm("bolt-action-shotgun-loki", "Wep_BoltAction_Shotgun_Loki", True,
             Magazine(4, 1, 1.3, True, TWELVE_GAUGE_BUCK, reload_first_stack=True, action_on_release=True), "ChildActor1"),
@@ -313,6 +323,8 @@ FIREARMS = (
       for kind, blueprint, capacity, burst, rate, ammo in ORDINARY_WEAPONS),
     *(Firearm(kind, blueprint, True, Magazine(capacity, 1, 1.4, True, ammo, reload_first_stack=True, action_on_release=True))
       for kind, blueprint, capacity, ammo in RELEASE_RIFLES),
+    *(Firearm(kind, blueprint, True, Magazine(capacity, 1, rate, True, ammo, action_on_release=True, single_reload=True))
+      for kind, blueprint, capacity, rate, ammo in PUMP_SHOTGUNS),
 )
 
 # Registered ordinary magazines use the stock primary-ammunition transaction.
@@ -324,6 +336,8 @@ STOCK_HELD_FIRE_MAGAZINES = {
     if (magazine := weapon.magazine) and not magazine.action_on_release
     and magazine.burst_length != 1
 }
+SINGLE_RELOAD_MAGAZINES = {weapon.kind: weapon.magazine for weapon in FIREARMS
+                           if weapon.magazine and weapon.magazine.single_reload}
 MAX_HELD_FIRE_ROUNDS = max(magazine.capacity for magazine in STOCK_HELD_FIRE_MAGAZINES.values())
 BOLT_ACTION_UNLOAD_CAPACITY = 5
 BOLT_ACTION_UNLOADS = frozenset(weapon.path for weapon in FIREARMS if weapon.kind in {"nagant-scoped", "obrez"})

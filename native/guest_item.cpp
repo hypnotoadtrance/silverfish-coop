@@ -118,7 +118,7 @@ namespace
     constexpr auto loki_change_ammo =
         STR("/Game/Classes/Weapons/Weapon_UnderBarrel_BP.Weapon_UnderBarrel_BP_C:ChangeAmmoType");
     constexpr profiles::Profile loki_magazine{
-        "loki-underbarrel", loki_path, false, 4, 1, 1.0, true, &profiles::twelve_gauge_buck, true};
+        "loki-underbarrel", loki_path, false, 4, 1, 1.0, true, &profiles::twelve_gauge_buck, true, false, nullptr, true};
     constexpr auto equip_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Equip_NextItem");
     constexpr auto converter_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:ItemActorToStruct");
     constexpr auto sort_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:SortItemArray");
@@ -633,7 +633,7 @@ namespace
         return match == profiles::firearms.end() ? nullptr : &*match;
     }
 
-    bool stock_magazine_shape(Unreal::UObject* weapon, const profiles::Profile& profile, bool single_reload = false)
+    bool stock_magazine_shape(Unreal::UObject* weapon, const profiles::Profile& profile)
     {
         auto* magazine = field<Unreal::FIntProperty>(weapon, STR("MagSize"));
         auto* burst = field<Unreal::FIntProperty>(weapon, STR("BurstLength"));
@@ -647,7 +647,7 @@ namespace
             rate && rate->GetPropertyValueInContainer(weapon) == profile.fire_rate &&
             field<Unreal::FObjectProperty>(weapon, STR("InputIntercept")) && !object(weapon, STR("InputIntercept")) &&
             boolean(weapon, STR("Action_OnRelease"), profile.action_on_release) &&
-            boolean(weapon, STR("SingleReload"), single_reload) &&
+            boolean(weapon, STR("SingleReload"), profile.single_reload) &&
             boolean(weapon, STR("UseEatherAsAmmo"), false);
     }
 
@@ -1756,7 +1756,7 @@ namespace
         const bool fires_on_release = bolt || (stock_profile && stock_profile->action_on_release);
         if (!boolean(actor, STR("Action_OnRelease"), fires_on_release) || (disarm && fires_on_release) ||
             (bolt && !stock_bolt_shape(actor, *bolt)) ||
-            (stock_profile && !stock_magazine_shape(actor, *stock_profile, underbarrel)))
+            (stock_profile && !stock_magazine_shape(actor, *stock_profile)))
             return report(false, "guest_weapon_release_mode_unqualified");
         if (bolt && (!field<Unreal::FObjectProperty>(context.pawn, STR("OffhandEquipment")) ||
             live(object(context.pawn, STR("OffhandEquipment"))) || !boolean(actor, STR("ReloadInput"), false) ||
@@ -1946,7 +1946,7 @@ namespace
         const Unreal::FName name{round.row, Unreal::FNAME_Find};
         const auto* stock_row = table && !name.IsNone() ? table->FindRowUnchecked(name) : nullptr;
         auto* live_round = field<Unreal::FStructProperty>(child, STR("AmmoType"));
-        if (!child || !ammo || !stock_magazine_shape(child, loki_magazine, true) || !stock_row ||
+        if (!child || !ammo || !stock_magazine_shape(child, loki_magazine) || !stock_row ||
             !live_round || live_round->GetStruct().Get() != table->GetRowStruct().Get() ||
             !ammo_item_row_matches(ammo, round))
             return result(lua, false, refusal);
@@ -2004,12 +2004,13 @@ namespace
         const auto* stock_profile = underbarrel ? &loki_magazine : receiver_profile;
         if (!ordinary_magazine_payload(receiver_profile, context, inventory, receiver))
             return reload_proof(lua, false, "guest_weapon_payload_unqualified");
+        const bool single_reload = bolt || (stock_profile && stock_profile->single_reload);
         if (!ready_pawn(context) || !boolean(context.pawn, STR("Wep_HeldAside"), false) ||
             !boolean(actor, STR("Reloading"), false) || !boolean(actor, STR("IsCycling"), false) ||
             !boolean(actor, STR("Holding_Primary"), false) || !boolean(actor, STR("IsSeerOpen"), false) ||
-            !boolean(actor, STR("SingleReload"), bolt != nullptr || underbarrel) ||
+            !boolean(actor, STR("SingleReload"), single_reload) ||
             !boolean(actor, STR("UseEatherAsAmmo"), false) ||
-            (stock_profile && !stock_magazine_shape(actor, *stock_profile, underbarrel)) ||
+            (stock_profile && !stock_magazine_shape(actor, *stock_profile)) ||
             (bolt && (!stock_bolt_shape(actor, *bolt) || !boolean(actor, STR("ReloadInput"), false) ||
                 !mounted_payload_matches(actor, inventory))))
             return reload_proof(lua, false, "guest_weapon_reload_ineligible");
@@ -2081,7 +2082,7 @@ namespace
 
         // These stock magazine reloads exit after debiting the first matching Backpack stack.
         const auto available = stock_profile && stock_profile->reload_first_stack ? stacks.front().units : reserve_before;
-        const auto transferred = bolt || underbarrel ? 1 : std::min(cap - before, available);
+        const auto transferred = single_reload ? 1 : std::min(cap - before, available);
         auto needed = transferred;
         for (auto& stack : stacks)
         {

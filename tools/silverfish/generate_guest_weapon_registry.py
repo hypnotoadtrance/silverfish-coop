@@ -47,6 +47,7 @@ def outputs() -> dict[str, str]:
         "        bool reload_first_stack;",
         "        bool action_on_release{};",
         "        const RC::CharType* underbarrel_mount{};",
+        "        bool single_reload{};",
         "    };", "",
         "    inline constexpr std::array firearms{",
     ])
@@ -66,10 +67,12 @@ def outputs() -> dict[str, str]:
                  f"{str(magazine.require_default_payload).lower()}, &{magazine.ammo.symbol}, "
                  f"{str(magazine.reload_first_stack).lower()}"
                  if magazine else "0, 0, 0.0, false, nullptr, false")
-        if magazine and (magazine.action_on_release or firearm.underbarrel_mount):
+        if magazine and (magazine.action_on_release or magazine.single_reload or firearm.underbarrel_mount):
             shape += f", {str(magazine.action_on_release).lower()}"
         if firearm.underbarrel_mount:
             shape += f', STR("{firearm.underbarrel_mount}")'
+        if magazine and magazine.single_reload:
+            shape += ", true" if firearm.underbarrel_mount else ", nullptr, true"
         ammo = f'"{magazine.ammo.item_path}"' if magazine and magazine.ammo != NINE_MM_BALL else "nil"
         lua_magazine = f", {ammo}, {magazine.capacity}" if magazine else ""
         header.append(f'        Profile{{"{firearm.kind}", STR("{firearm.path}"), {headless}, {shape}}},')

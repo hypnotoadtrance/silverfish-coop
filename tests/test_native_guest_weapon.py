@@ -1,11 +1,12 @@
 from pathlib import Path
+import uuid
 import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock
 
 from tools.silverfish import (
-    generate_guest_weapon_registry, guest_weapon_profiles, native_guest_consumable, native_guest_weapon, party,
+    generate_guest_weapon_registry, guest_weapon_profiles, native_guest_consumable, native_guest_weapon, party, service,
 )
 
 
@@ -124,8 +125,13 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
                           ("bolt-action-shotgun", "Wep_BoltAction_Shotgun", 4, 1, 1.3, True),
                           ("bolt-action-shotgun-suppressed", "Wep_BoltAction_Shotgun_Suppressed", 4, 1, 1.3, True),
                           ("sawn-off-shotgun", "Wep_SawnOff_ShotGun", 2, 1, 0.1, False),
-                          ("bolt-action-shotgun-loki", "Wep_BoltAction_Shotgun_Loki", 4, 1, 1.3, True)])
-        self.assertTrue(all(p.magazine.require_default_payload and p.magazine.reload_first_stack for p in profiles))
+                          ("bolt-action-shotgun-loki", "Wep_BoltAction_Shotgun_Loki", 4, 1, 1.3, True),
+                          *((kind, bp, capacity, 1, rate, True)
+                            for kind, bp, capacity, rate, base in guest_weapon_profiles.PUMP_SHOTGUNS if base == ammo)])
+        self.assertTrue(all(p.magazine.require_default_payload
+                            and p.magazine.reload_first_stack != p.magazine.single_reload for p in profiles))
+        self.assertEqual(set(guest_weapon_profiles.SINGLE_RELOAD_MAGAZINES),
+                         {kind for kind, *_ in guest_weapon_profiles.PUMP_SHOTGUNS})
         self.assertEqual(native_guest_weapon.LOKI_KINDS, {"bolt-action-shotgun-loki", "hcr-loki", "ar-08"})
         self.assertFalse({p.kind for p in profiles} & guest_weapon_profiles.STOCK_HELD_FIRE_MAGAZINES.keys())
 
@@ -213,6 +219,37 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
 
 
 class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pump_reload_continues_on_the_same_scoped_item(self):
+        guid = "A" * 32
+        area = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
+        kind = "pump-shotgun"
+        client = SimpleNamespace(
+            last_reload_intent=0, tube_reload=None, stopping=False, host_session="host", zone_epoch="epoch",
+            primary_scope=(area, "guest", guid, kind), viewer_role="guest", gameplay_seen=time.monotonic(),
+            bridge=SimpleNamespace(input_namespace=uuid.uuid4()), control=Mock(),
+            last_game={"map": area, "pawns": {"local": {"name": "guest"}},
+                       "native_guest_reload_intent": {"map": area, "pawn": "guest", "sequence": 1}},
+            gameplay={"native_equipped_weapon": {"kind": kind, "guid": guid}},
+            gameplay_action=AsyncMock(return_value={"native_guest_weapon": {"guid": guid, "after": 1, "reserve_after": 2}}),
+        )
+        await service.Client.service_reload_input(client, True)
+        scope, sequence, step, due = client.tube_reload
+        self.assertEqual((sequence, step), (1, 1))
+        self.assertGreater(due, time.monotonic())
+        self.assertEqual(client.gameplay_action.await_args.args[2], f"{guid}@epoch")
+        await service.Client.service_reload_input(client, True)
+        self.assertEqual(client.gameplay_action.await_count, 1)
+
+        client.tube_reload = scope, sequence, step, time.monotonic() - 1
+        await service.Client.service_reload_input(client, True)
+        calls = client.gameplay_action.await_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertNotEqual(calls[0].args[1], calls[1].args[1])
+        client.zone_epoch = "next"
+        await service.Client.service_reload_input(client, True)
+        self.assertIsNone(client.tube_reload)
+        self.assertEqual(client.gameplay_action.await_count, 2)
+
     def host(self):
         player_party = party.new_party()
         party.add_player(player_party, "character")

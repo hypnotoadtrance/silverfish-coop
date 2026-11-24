@@ -15,7 +15,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
-from . import native_board_contract
+from . import guest_weapon_profiles, native_board_contract
 from . import (direct_ip, link, matrix_service, native_authored_pickup, native_blue, native_broker, native_computer_board, native_dialogue, native_downed_markers,
                native_dream, native_enemy_loot, native_enemy_shells, native_finite_shop, native_flood_jammer, native_lenny,
                native_gold, native_green, native_guest_armor, native_guest_clock, native_guest_consumable, native_guest_npc, native_guest_stack_drop,
@@ -5184,6 +5184,7 @@ class Client:
         self.empty_zone_retry = native_zone_rejoin.EmptyZoneRetry()
         self.game_visit: tuple[str, str, str] | None = None
         self.last_reload_intent = 0
+        self.tube_reload = None
         self.last_equipment_selection = None
         self.equipment_selection_retry = None, 0.0
         self.last_flare_intent = 0
@@ -5547,21 +5548,60 @@ class Client:
 
     async def service_reload_input(self, active: bool) -> None:
         intent = self.last_game.get("native_guest_reload_intent", {})
-        sequence, pawn = intent.get("sequence"), intent.get("pawn")
-        if type(sequence) is not int or not self.last_reload_intent < sequence < 2**53:
+        sequence = intent.get("sequence")
+        fresh = type(sequence) is int and self.last_reload_intent < sequence < 2**53
+        if fresh:
+            self.last_reload_intent = sequence
+            self.tube_reload = None
+        elif self.tube_reload is None:
             return
-        self.last_reload_intent = sequence
-        if (not active or self.stopping or not self.host_session or intent.get("map") != self.last_game.get("map")
-                or not pawn or self.last_game.get("pawns", {}).get("local", {}).get("name") != pawn):
+
+        area = self.last_game.get("map")
+        pawn = self.last_game.get("pawns", {}).get("local", {}).get("name")
+        if not active or self.stopping or not self.host_session or not self.zone_epoch or not pawn:
+            self.tube_reload = None
             return
-        operation = uuid.uuid5(self.bridge.input_namespace, f"{self.host_session}:{self.zone_epoch}:{pawn}:reload:{sequence}").hex
-        guid = intent.get("underbarrel_guid")
-        target = f"{guid}@{self.zone_epoch}@loki" if guid else "equipped"
+        if fresh and (intent.get("map"), intent.get("pawn")) != (area, pawn):
+            return
+
+        equipment = self.gameplay.get("native_equipped_weapon", {})
+        kind, receiver = equipment.get("kind"), equipment.get("guid")
+        underbarrel = intent.get("underbarrel_guid") if fresh else None
+        magazine = guest_weapon_profiles.SINGLE_RELOAD_MAGAZINES.get(kind) if not underbarrel else None
+        scope = self.host_session, self.zone_epoch, area, pawn, receiver
+        if magazine and (not native_gold.valid_guid(receiver) or self.primary_scope != (area, pawn, receiver, kind)
+                         or self.gameplay.get("players", {}).get(self.viewer_role, {}).get("downed")
+                         or self.last_game.get("native_inventory_view", {}).get("state") == "stock"):
+            self.tube_reload = None
+            return
+
+        step = 0
+        if not fresh:
+            saved_scope, sequence, step, due = self.tube_reload
+            if not magazine or saved_scope != scope or time.monotonic() - self.gameplay_seen >= 2:
+                self.tube_reload = None
+                return
+            if time.monotonic() < due:
+                return
+        self.tube_reload = None
+
+        operation_key = f"{self.host_session}:{self.zone_epoch}:{pawn}:reload:{sequence}"
+        if step:
+            operation_key += f":{step}"
+        operation = uuid.uuid5(self.bridge.input_namespace, operation_key).hex
+        target = f"{underbarrel}@{self.zone_epoch}@loki" if underbarrel else (
+            f"{receiver}@{self.zone_epoch}" if magazine else "equipped")
         try:
             result = await self.gameplay_action("native-guest-weapon-reload", operation, target)
             self.control.event("native_guest_reload_input", operation_id=operation, sequence=sequence, **result)
         except (ValueError, OSError, RuntimeError) as error:
             self.control.event("native_guest_reload_input_rejected", operation_id=operation, sequence=sequence, reason=str(error))
+            return
+        proof = result.get("native_guest_weapon", {})
+        if magazine and proof.get("guid") == receiver and proof["after"] < magazine.capacity and proof["reserve_after"] > 0:
+            # The stock pump graph uses a half-second insert cadence and stops
+            # when either the tube fills or the matching reserve is exhausted.
+            self.tube_reload = scope, sequence, step + 1, time.monotonic() + 0.5
 
     async def service_primary_input(self, active: bool) -> None:
         if not self.guest_primary_input:
@@ -5641,6 +5681,7 @@ class Client:
             self.last_primary_intent = sequence
             if self.primary_scope != (event_area, event_pawn, event_guid, event_kind) or not eligible:
                 continue
+            self.tube_reload = None
             operation = uuid.uuid5(self.bridge.input_namespace, f"{self.host_session}:{self.zone_epoch}:{event_pawn}:primary:{sequence}").hex
             if event_kind in native_guest_melee.KINDS:
                 action, event = native_guest_melee.SWING, "native_guest_melee_input"
@@ -6620,11 +6661,11 @@ class Client:
                 if self.stopping:
                     break
             await native_guest_weapon.service_equipment_selection(self, active)
-            await self.service_reload_input(active)
             if self.mindcore_carry:
                 await self.mindcore_carry.poll(active)
             self.prop_carry.poll(active)
             await self.service_primary_input(active)
+            await self.service_reload_input(active)
             await self.service_crate_interaction(active)
             interactions = self.bridge.interactions()
             if active and not self.stopping:
