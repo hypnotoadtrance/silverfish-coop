@@ -9,6 +9,14 @@ local barrel_types = {
     Prop_PlasticBarrel = {"Prop_PlasticBarrel"},
     Prop_FuelDrum = {"Prop_FuelDrum", "Prop_FeulDrum"},
 }
+local wood_debris = {}
+for _, name in ipairs({"ChairGib_Wood_01_BP", "CrateGib_Wood_01_BP", "PalleteGib_Wood_01_BP1"}) do
+    wood_debris["BlueprintGeneratedClass /Game/Assets/StaticMeshes/Destructable/" .. name .. "." .. name .. "_C"] = true
+end
+local wood_parts = {}
+for _, name in ipairs({"Prop_ScrapWood", "Prop_ScrapWood_Post"}) do
+    wood_parts["BlueprintGeneratedClass /Game/Assets/StaticMeshes/Mesh_Props/" .. name .. "." .. name .. "_C"] = true
+end
 local fuel_maps = {
     ["/Game/Classes/Maps/Maps_OverWorld/DeadEnd_01_P"] = true,
     ["/Game/Classes/Maps/Maps_OverWorld/Quarry_01_P"] = true,
@@ -16,6 +24,7 @@ local fuel_maps = {
 }
 local world, spawner_class, container_class, prop_class, hooked
 local placed, placed_props, dig_props
+local pending_debris = {}
 local core_class_path = "/Game/Classes/Actors/MindCore_BP.MindCore_BP_C"
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
     and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
@@ -48,6 +57,31 @@ local function publish_motion(actor)
     if actor.bReplicateMovement ~= true then actor:SetReplicateMovement(true) end
     actor:ForceNetUpdate()
     return actor.bReplicates == true and actor.bReplicateMovement == true
+end
+
+function props.debris_created(actor, class, seat)
+    if seat ~= "host" or not wood_debris[class] or not valid(world) or not same(actor:GetWorld(), world)
+        or not actor:HasAuthority() or actor:HasAnyFlags(EObjectFlags.RF_WasLoaded) then return end
+    if #pending_debris < 32 then pending_debris[#pending_debris + 1] = actor end
+    return actor:K2_GetActorLocation()
+end
+
+local function enroll_debris(wrapper)
+    local child_class = StaticFindObject("/Script/Engine.ChildActorComponent")
+    if not valid(child_class) then return end
+    for _, mount in ipairs(wrapper:K2_GetComponentsByClass(child_class) or {}) do
+        if mount and type(mount.type) == "function" and mount:type() == "RemoteUnrealParam" then mount = mount:get() end
+        local actor = valid(mount) and same(mount:GetOwner(), wrapper) and mount.ChildActor
+        if valid(actor) and not actor:IsActorBeingDestroyed() and actor:HasAuthority() and same(actor:GetWorld(), world)
+            and same(actor:GetParentComponent(), mount) and wood_parts[actor:GetClass():GetFullName()] then
+            local mesh = root_mesh(actor)
+            if mesh and mesh:IsSimulatingPhysics(FName("None", EFindName.FNAME_Find)) then
+                if valid(mesh:GetAttachParent()) then actor:K2_DetachFromActor(1, 1, 1) end
+                mesh:SetIsReplicated(true)
+                if publish_motion(actor) then carry.enroll(actor) end
+            end
+        end
+    end
 end
 
 local function publish(spawner, actor)
@@ -220,7 +254,15 @@ end
 function props.sync(state, phase)
     placed_tanks(state, phase)
     enroll_placed_props(state, phase)
-    world = phase == "hosting" and state.listening and not state.server and state.world or nil
+    local current = phase == "hosting" and state.listening and not state.server and state.world or nil
+    if not same(world, current) then pending_debris = {} end
+    world = current
+    for _ = 1, math.min(3, #pending_debris) do
+        local wrapper = table.remove(pending_debris, 1)
+        if valid(wrapper) and not wrapper:IsActorBeingDestroyed() and same(wrapper:GetWorld(), world) then
+            enroll_debris(wrapper)
+        end
+    end
     enroll_unearthed_props(state)
     if hooked or not valid(world) or type(RegisterHook) ~= "function" then return end
     local spawn = spawner_path .. ":SpawnLoot"

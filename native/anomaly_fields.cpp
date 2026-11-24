@@ -683,7 +683,16 @@ namespace
     {
         std::string_view kind;
         std::wstring_view particle, sound;
+        bool spawns_wood_debris{};
     };
+
+    constexpr std::array<std::wstring_view, 3> wood_debris_classes{
+        STR("/Game/Assets/StaticMeshes/Destructable/ChairGib_Wood_01_BP.ChairGib_Wood_01_BP_C"),
+        STR("/Game/Assets/StaticMeshes/Destructable/CrateGib_Wood_01_BP.CrateGib_Wood_01_BP_C"),
+        STR("/Game/Assets/StaticMeshes/Destructable/PalleteGib_Wood_01_BP1.PalleteGib_Wood_01_BP1_C"),
+    };
+    constexpr auto wood_break_sound =
+        STR("/Game/Assets/Sounds/CUEs/PhysImpact_Cues/Destruction_Wood_Cue.Destruction_Wood_Cue");
 
     constexpr std::array prop_break_media{
         PropBreakMedia{"bottle", STR("/Game/Assets/PFX/NI_BrokenBottle_WtLiquid.NI_BrokenBottle_WtLiquid"),
@@ -698,6 +707,8 @@ namespace
             STR("/Game/Assets/Sounds/CUEs/BulletHit_Cues/BHit_Paper_Cue.BHit_Paper_Cue")},
         PropBreakMedia{"cardboard", STR("/Game/Assets/PFX/NI_CardboardBox_Break.NI_CardboardBox_Break"),
             STR("/Game/Assets/Sounds/CUEs/BulletHit_Cues/Break_CardboardBox.Break_CardboardBox")},
+        PropBreakMedia{"wood", {}, wood_break_sound, true},
+        PropBreakMedia{"woodchips", STR("/Game/Assets/PFX/NI_BHit_Wood.NI_BHit_Wood"), wood_break_sound, true},
     };
 
     struct PropBreak
@@ -743,12 +754,16 @@ namespace
         auto* destroys = property<U::FBoolProperty>(actor, STR("DestroyIfBroken"));
         auto* particle = object(actor, STR("Break_PFX"));
         auto* sound = object(actor, STR("Break_SFX"));
-        if (!role || !destroys || !destroys->GetPropertyValueInContainer(actor) || !particle || !sound ||
-            object(actor, STR("FireRef")) || object(actor, STR("Break_IntoActor"))) return;
-        const auto particle_path = particle->GetPathName();
+        auto* debris = object(actor, STR("Break_IntoActor"));
+        if (!role || !destroys || !destroys->GetPropertyValueInContainer(actor) || !sound ||
+            object(actor, STR("FireRef"))) return;
+        if (debris && std::ranges::find(wood_debris_classes, debris->GetPathName()) == wood_debris_classes.end())
+            return;
+        const auto particle_path = particle ? particle->GetPathName() : std::wstring{};
         const auto sound_path = sound->GetPathName();
         const auto media = std::ranges::find_if(prop_break_media, [&](const PropBreakMedia& effect) {
-            return effect.particle == particle_path && effect.sound == sound_path;
+            return effect.spawns_wood_debris == (debris != nullptr) && effect.particle == particle_path &&
+                   effect.sound == sound_path;
         });
         if (media == prop_break_media.end()) return;
 

@@ -20,7 +20,7 @@ ACID_POOLS = "native_acid_pools"
 ACID_POOL_VIEW = "native_acid_pool_view"
 FIXED_CUES = ("powerbox", "fixedtank", "fixedfire")
 OBSERVER_CUES = ("observersparks", "observerred", "observergreen", "observerblue", "observerpurple", "observergold")
-OTHER_PROP_BREAKS = ("ceramic", "platestand", "glass", "paper", "cardboard")
+OTHER_PROP_BREAKS = ("ceramic", "platestand", "glass", "paper", "cardboard", "wood", "woodchips", "woodsplinters")
 PROP_BREAK_CUES = ("bottle", *OTHER_PROP_BREAKS)
 KINDS = {"charge": 4000, "blast": 500100, "vortex": 500100, "electrode": 8100, "canister": 500100, "wandering": 500100,
          **dict.fromkeys(PROP_BREAK_CUES, 8000),

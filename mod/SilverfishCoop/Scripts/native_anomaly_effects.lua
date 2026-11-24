@@ -32,12 +32,15 @@ local prop_breaks = {
     glass = {"NI_BHit_Glass", "BulletHit_Cues", "Impact_Glass_Cue"},
     paper = {"NI_PaperScatter_Omni", "BulletHit_Cues", "BHit_Paper_Cue"},
     cardboard = {"NI_CardboardBox_Break", "BulletHit_Cues", "Break_CardboardBox"},
+    wood = {false, "PhysImpact_Cues", "Destruction_Wood_Cue"},
+    woodchips = {"NI_BHit_Wood", "PhysImpact_Cues", "Destruction_Wood_Cue"},
+    woodsplinters = {"NI_Destruction_WoodDoor"},
 }
 for kind, spec in pairs(prop_breaks) do
     local particle, folder, sound = table.unpack(spec)
-    assets[kind] = {"/Game/Assets/PFX/" .. particle .. "." .. particle,
-        "/Game/Assets/Sounds/CUEs/" .. folder .. "/" .. sound .. "." .. sound,
-        "/Game/Assets/Sounds/SoundClasses/Default_Attenuation.Default_Attenuation"}
+    assets[kind] = {particle and "/Game/Assets/PFX/" .. particle .. "." .. particle,
+        sound and "/Game/Assets/Sounds/CUEs/" .. folder .. "/" .. sound .. "." .. sound,
+        sound and "/Game/Assets/Sounds/SoundClasses/Default_Attenuation.Default_Attenuation"}
     audio_range[kind] = 8000
 end
 local canister_sounds = {[assets.canister[2]] = "canister", [assets.fueldrum[2]] = "fueldrum"}
@@ -123,6 +126,10 @@ function effects.observe_prop_breaks(world)
         if not kind then break end
         if prop_breaks[kind] then record(kind, {X = x, Y = y, Z = z}, 1) end
     end
+end
+
+function effects.observe_wood_debris(point)
+    record("woodsplinters", point, 1)
 end
 
 function effects.observe_wandering_teleport(point)
@@ -222,25 +229,29 @@ local function play(pawn, origin, kind, point, scale, volume)
     local profile = assets[kind]
     -- Stock props load these assets with their class. Avoid loading a package during a throw.
     local lookup = prop_breaks[kind] and StaticFindObject or asset
-    local particle, sound = lookup(profile[1]), lookup(profile[2])
+    local particle, sound = profile[1] and lookup(profile[1]), profile[2] and lookup(profile[2])
     local attenuation = profile[3] and lookup(profile[3])
     local niagara = StaticFindObject("/Script/Niagara.Default__NiagaraFunctionLibrary")
     local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-    if not valid(niagara) or not valid(statics) or not valid(particle) or not valid(sound)
+    if profile[1] and (not valid(niagara) or not valid(particle))
+        or profile[2] and (not valid(statics) or not valid(sound))
         or profile[3] and not valid(attenuation) then return false end
     if kind == "charge" or kind == "blast" then effects.retire_charges(point) end
     local rotation = {Pitch = 0, Yaw = 0, Roll = 0}
-    local component = niagara:SpawnSystemAtLocation(pawn, particle, point, rotation,
-        {X = scale, Y = scale, Z = scale}, true, true, 0, true)
+    local component
+    if particle then
+        component = niagara:SpawnSystemAtLocation(pawn, particle, point, rotation,
+            {X = scale, Y = scale, Z = scale}, true, true, 0, true)
+    end
     if kind == "charge" then
         if valid(component) then
             if #charging >= 12 then remove_charge(1) end
             charging[#charging + 1] = {component = component, point = point, expires = os.clock() + 3}
         end
     end
-    if not profile[3] or prop_breaks[kind] then
+    if sound and (not profile[3] or prop_breaks[kind]) then
         statics:PlaySoundAtLocation(pawn, sound, point, rotation, volume, 1, 0, attenuation, nil, nil, nil)
-    else
+    elseif sound then
         local audio = statics:SpawnSoundAtLocation(pawn, sound, point, rotation, volume, 1, 0, attenuation, nil, true)
         if valid(audio) then
             audio:SetFloatParameter(FName("Distance"), math.sqrt(distance_squared(origin, point)))

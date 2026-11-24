@@ -77,7 +77,7 @@ INDEPENDENT_RESIDENT_MAPS = {
     "stock_placed_item": {CROSSROADS}, "stock_weather_travel": {OBSERVATORY},
     "stock_warehouse_switch": {OBSERVATORY, WAREHOUSE_DOCK}, "stock_warehouse_radio": {OBSERVATORY, WAREHOUSE_DOCK},
     "stock_bottle": {OBSERVATORY, WAREHOUSE_DOCK},
-    "stock_prop_breaks": {WAREHOUSE_DOCK}, "stock_acid_bottle": {WAREHOUSE_DOCK},
+    "stock_prop_breaks": {WAREHOUSE_DOCK}, "stock_acid_bottle": {WAREHOUSE_DOCK}, "stock_wood_debris": {WAREHOUSE_DOCK},
 }
 
 
@@ -1844,8 +1844,8 @@ async def verify_stock_bottle(host: Seat, guest: Seat, pawn: str) -> dict:
                              "checkpoint_unchanged": True}}
 
 
-async def stage_warehouse_prop(host, guest, stock_class):
-    path, position = (await warehouse_prop_probe(host, "spawn-prop", stock_class)).split(";")
+async def stage_warehouse_prop(host, guest, stock_class, placement=""):
+    path, position = (await warehouse_prop_probe(host, "spawn-prop", stock_class, placement)).split(";")
     async with asyncio.timeout(8):
         while (replica := await warehouse_prop_probe(guest, "locate-prop", stock_class, position)) == "waiting":
             await asyncio.sleep(.08)
@@ -1922,6 +1922,86 @@ async def verify_stock_acid_bottle(host: Seat, guest: Seat, _pawn: str) -> dict:
     return {"stock_acid_bottle": {"cue": cue, "host_pool": authority, "guest_pool": projected, "extinguished": expired,
                                   "guest_local_break_veto": True, "removed_on_both_seats": True,
                                   "checkpoint_unchanged": True}}
+
+
+async def verify_stock_wood_debris(host: Seat, guest: Seat, _pawn: str) -> dict:
+    checkpoint = campaign_save_hashes(host.campaign)
+    guest_run = guest.client / "run"
+    frame = await wait_resident_status(guest_run, lambda row: row.get("game", {}).get("map") == WAREHOUSE_DOCK)
+
+    async def pieces(seat, position):
+        raw = await warehouse_prop_probe(seat, "wood-pieces", position)
+        result = {}
+        for row in raw.split(";") if raw else ():
+            name, kind, mesh, role, *center = row.split(",")
+            result[name] = {"kind": kind, "mesh": mesh, "role": int(role), "center": list(map(float, center))}
+        return result
+
+    async def check(stock_class, kind, count):
+        path, replica, position = await stage_warehouse_prop(host, guest, stock_class, "floor-physics")
+        before = await asyncio.gather(*(pieces(seat, position) for seat in (host, guest)))
+        await warehouse_prop_probe(guest, "local-break", replica)
+        assert await warehouse_prop_probe(guest, "inspect", replica) == "1,false"
+        assert await pieces(guest, position) == before[1]
+        started = time.time()
+        hit = list(map(float, (await warehouse_prop_probe(host, "impact", path)).split(",")))
+        impact = await wait_stock_prop_break(host, guest, frame, path, started, hit, guest_path=replica, kind=kind)
+
+        async def new_pair():
+            pair = await asyncio.gather(*(pieces(seat, position) for seat in (host, guest)))
+            return [{name: row for name, row in current.items() if name not in existing}
+                    for current, existing in zip(pair, before, strict=True)]
+
+        authority, remote = {}, {}
+        try:
+            async with asyncio.timeout(7):
+                while True:
+                    authority, remote = await new_pair()
+                    if len(authority) == len(remote) == count:
+                        break
+                    await asyncio.sleep(.08)
+        except TimeoutError as error:
+            raise AssertionError({"host_pieces": authority, "guest_pieces": remote, "expected": count}) from error
+        assert all(row["role"] == 3 for row in authority.values()) and all(row["role"] == 1 for row in remote.values())
+        assert sorted((row["kind"], row["mesh"]) for row in authority.values()) == sorted(
+            (row["kind"], row["mesh"]) for row in remote.values())
+
+        selected, original = next(iter(authority.items()))
+        assert await warehouse_prop_probe(host, "wood-nudge", selected) == "moved"
+        raised = None
+        async with asyncio.timeout(6):
+            while True:
+                actual, view = await new_pair()
+                target = actual.get(selected, {}).get("center")
+                if target and target[2] > original["center"][2] + 40:
+                    raised = target
+                if raised and any(row["mesh"] == original["mesh"] and row["kind"] == original["kind"]
+                                  and row["center"][2] > original["center"][2] + 35
+                                  and math.dist(row["center"], raised) < 65 for row in view.values()):
+                    break
+                await asyncio.sleep(.03)
+
+        cues = [row for row in await resident_events(guest_run, frame)
+                if row["time_unix"] >= started and row["event"] == "native_prop_break_played"
+                and row["cue"] == "woodsplinters"]
+        assert len(cues) == 1 and math.dist(cues[0]["location"], hit) < 150, cues
+        assert await warehouse_prop_probe(host, "wood-remove", selected) == "removed"
+        async with asyncio.timeout(8):
+            while any(await new_pair()):
+                await asyncio.sleep(.09)
+        return {"host_pieces": authority, "guest_pieces": remote, "nudge": raised,
+                "impact": impact, "splinters": cues[0], "removed_on_both": True}
+
+    results, failures = {}, {}
+    for stock_class, kind, count in (("Prop_Chair_Wood", "woodchips", 5), ("Prop_WoodCrate_Med_01", "wood", 5),
+                                     ("Prop_WoodPallet", "woodchips", 6)):
+        try:
+            results[stock_class] = await check(stock_class, kind, count)
+        except (AssertionError, RuntimeError, TimeoutError) as error:
+            failures[stock_class] = f"{type(error).__name__}: {error}"
+    assert not failures, (list(results), failures)
+    assert campaign_save_hashes(host.campaign) == checkpoint
+    return {"stock_wood_debris": results}
 
 
 async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str) -> dict:
@@ -5149,6 +5229,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_bottle, "tutorial_dock", "stock_bottle", verify_stock_bottle),
         (stock_bottle, "tutorial_dock", "stock_prop_breaks", verify_stock_prop_breaks),
         (stock_bottle, "tutorial_dock", "stock_acid_bottle", verify_stock_acid_bottle),
+        (stock_bottle, "tutorial_dock", "stock_wood_debris", verify_stock_wood_debris),
         (tutorial_dock_combat and (not tutorial_dock_shot_view or tutorial_dock_pursuit),
          "tutorial_dock_combat", dock_combat_check,
          lambda host, guest, pawn: verify_tutorial_dock_combat(host, guest, pawn, retaliation=tutorial_dock_retaliation,
@@ -5797,7 +5878,7 @@ if __name__ == "__main__":
     parser.add_argument("--stock-warehouse-board", action="store_true",
                         help="verify both peers see the Tutorial Dock warehouse board break")
     parser.add_argument("--stock-bottle", action="store_true",
-                        help="verify stock bottle throws, prop break cues, and acid bottle pools on both peers")
+                        help="verify stock bottle throws, prop break cues, acid pools, and wooden debris on both peers")
     parser.add_argument("--stock-throwables", choices=("all", "pipebomb", "bolt", "ground"), nargs="?", const="all",
                         help="verify host and guest bolt flight, a stock host pipe bomb detonation, or both")
     parser.add_argument("--stock-roaming-barter", action="store_true",

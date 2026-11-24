@@ -22,7 +22,7 @@
                 if result.ImpactNormal.Z > .9 then return result.ImpactPoint end
             end
         end
-        local function clear_acid_floor(origin)
+        local function clear_stock_floor(origin)
             for step = 0, 7 do
                 local angle = step * math.pi / 4
                 local floor = floor_under({X=origin.X+600*math.cos(angle),Y=origin.Y+600*math.sin(angle),Z=origin.Z+60}, {pawn})
@@ -35,6 +35,41 @@
                     if clear then return {X=floor.X,Y=floor.Y,Z=floor.Z+24} end
                 end
             end
+        end
+        if mode == "wood-pieces" then
+            local x, y, z = args[4]:match("^([^,]+),([^,]+),([^,]+)$")
+            local rows = {}
+            for _, class in ipairs({"Prop_ScrapWood_C", "Prop_ScrapWood_Post_C"}) do
+                for _, part in ipairs(FindAllOf(class) or {}) do
+                    if current(part) then
+                        local point = part:K2_GetActorLocation()
+                        if (point.X-tonumber(x))^2 + (point.Y-tonumber(y))^2 + (point.Z-tonumber(z))^2 <= 400^2 then
+                            local mesh = part.PropMesh.StaticMesh
+                            rows[#rows + 1] = ("%s,%s,%s,%d,%.3f,%.3f,%.3f"):format(part:GetFName():ToString(),
+                                class, valid(mesh) and mesh:GetFName():ToString() or "-", part:GetLocalRole(),
+                                point.X, point.Y, point.Z)
+                        end
+                    end
+                end
+            end
+            return table.concat(rows, ";")
+        end
+        if mode == "wood-nudge" or mode == "wood-remove" then
+            assert(phase == "hosting" and args[4]:match("^[%w_]+$"))
+            local part = StaticFindObject(dock .. ".Tut_Dock_P:PersistentLevel." .. args[4])
+            local class = valid(part) and part:GetClass():GetFName():ToString()
+            assert(current(part) and part:HasAuthority() and (class == "Prop_ScrapWood_C" or class == "Prop_ScrapWood_Post_C"))
+            local mount = part:GetParentComponent()
+            local wrapper = valid(mount) and mount:GetOwner()
+            assert(current(wrapper) and wrapper:GetClass():GetFName():ToString():match("Gib_Wood_01_BP[1]?_C$"))
+            if mode == "wood-remove" then
+                wrapper:K2_DestroyActor()
+                return "removed"
+            end
+            local point, angles = part:K2_GetActorLocation(), part:K2_GetActorRotation()
+            assert(part:K2_SetActorLocationAndRotation({X=point.X,Y=point.Y,Z=point.Z+125}, angles, false, {}, true))
+            part:ForceNetUpdate()
+            return "moved"
         end
         if mode == "pool-near" or mode == "pool-remove" then
             local found
@@ -66,8 +101,9 @@
                 if not valid(class) then LoadAsset(base); class = StaticFindObject(base) end
                 assert(valid(class), "could not load the stock " .. stem .. " class")
                 local point = {X=location.X+105, Y=location.Y+60, Z=location.Z+90}
-                if stem == "Prop_AcidBottle" then
-                    point = assert(clear_acid_floor(location), "no stock floor far enough from both pawns")
+                local simulate = args[5] == "floor-physics"
+                if stem == "Prop_AcidBottle" or simulate then
+                    point = assert(clear_stock_floor(location), "no stock floor far enough from both pawns")
                 end
                 local candidate = state.world:SpawnActor(class, point, {Pitch=0,Yaw=0,Roll=0})
                 assert(current(candidate), "could not spawn " .. stem .. " in the warehouse")
@@ -76,7 +112,7 @@
                 -- Authored and crate props are enrolled by the corresponding gameplay path.
                 candidate:SetReplicates(true)
                 candidate:SetReplicateMovement(true)
-                candidate.PropMesh:SetSimulatePhysics(false)
+                if not simulate then candidate.PropMesh:SetSimulatePhysics(false) end
                 candidate:ForceNetUpdate()
                 point = candidate:K2_GetActorLocation()
                 return ("%s;%.3f,%.3f,%.3f"):format(candidate:GetFullName():match("^%S+ (.+)$"), point.X, point.Y, point.Z)
@@ -251,7 +287,7 @@
             end
             local total, lethal = {}, {}
             local before = actor.Health
-            actor:DealDamage({BluntForce_6_6923B3964740DE281BD773BCCAAC2772 = 500},
+            actor:DealDamage({BluntForce_6_6923B3964740DE281BD773BCCAAC2772 = 800},
                 {Location = point, ImpactPoint = point}, pawn, {X = 0, Y = 0, Z = 0}, true, total, lethal)
             if current(actor) and not actor.Broken then
                 error(("Stock prop survived the staged impact: %s health=%s->%s damage=%s lethal=%s"):format(path,
