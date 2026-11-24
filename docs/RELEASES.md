@@ -6,6 +6,7 @@ Candidates are listed by when they were published, newest first.
 
 | Published (UTC) | Release notes | ZIP |
 | --- | --- | --- |
+| 2026-11-24 11:19:24 | [`rc-570ddde`](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-570ddde) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/rc-570ddde/Silverfish-Coop-RC-570ddde.zip) |
 | 2026-11-24 11:01:16 | [`rc-ca2d0d1`](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-ca2d0d1) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/rc-ca2d0d1/Silverfish-Coop-RC-ca2d0d1.zip) |
 | 2026-11-24 10:44:33 | [`rc-f1cd44a`](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-f1cd44a) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/rc-f1cd44a/Silverfish-Coop-RC-f1cd44a.zip) |
 | 2026-11-24 09:43:58 | [`rc-f9b6971`](https://github.com/hypnotoadtrance/silverfish-coop/releases/tag/rc-f9b6971) | [Download](https://github.com/hypnotoadtrance/silverfish-coop/releases/download/rc-f9b6971/Silverfish-Coop-RC-f9b6971.zip) |
