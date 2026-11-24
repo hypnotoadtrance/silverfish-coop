@@ -2095,19 +2095,35 @@ async def verify_tutorial_dock_melee(host: Seat, guest: Seat, pawn: str) -> dict
         assert await command(host, "dock-natural-stop") == "stopped"
 
 
+async def verify_solo_combat(seat: Seat, slot: str) -> dict:
+    bridge, probe = seat.bridge, "portable-npc-override"
+    assert await portable_probe_command(bridge, probe, f"solo-load\t{slot}") == "loading stock save"
+    await bridge.wait_for(lambda frame: frame["state"] == "ready"
+                          and frame.get("pawns", {}).get("local"), timeout=30)
+    async with asyncio.timeout(12):
+        while (result := await portable_probe_command(bridge, probe, f"solo-combat\t{slot}")) == "loading":
+            await asyncio.sleep(.1)
+    assert result.startswith("stock inventory and lethal drone damage "), result
+    assert bridge.process.poll() is None
+    return {"save_slot": slot, "stock_result": result, "pid": bridge.process.pid}
+
+
 async def verify_dock_enemy_drop(host: Seat, guest: Seat, arrival: dict) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     scope = native_stock_enemy_drops
     checkpoint = campaign_save_hashes(host.campaign)
     owner = arrival["character_id"]
 
-    def exact_drops(frame):
-        return [row for row in frame.get("gameplay", {}).get(scope.STATE, {}).values()
-                if row.get("source", "").endswith(".NPC_Survivor_Worker_C_2")
-                and row.get("killer") == owner and row.get("claimed_by") is None]
+    authority = await wait_resident_status(host_run, lambda frame: frame["state"] == "hosting")
+    async def banked_drop():
+        return next((row for row in await resident_events(host_run, authority)
+                     if row["event"] == "native_stock_enemy_loot_banked"
+                     and row.get("source", "").endswith(".NPC_Survivor_Worker_C_2")
+                     and row.get("killer") == owner and row.get("settled")), None)
 
-    authority = await wait_resident_status(host_run, lambda frame: any(row.get("settled") for row in exact_drops(frame)))
-    item = next(row for row in exact_drops(authority) if row.get("settled"))
+    async with asyncio.timeout(12):
+        while (item := await banked_drop()) is None:
+            await asyncio.sleep(.1)
     guid = item["guid"]
     identity = native_world_loot.stock_enemy_identity(guid, item.get("visual_id"))
     pawn = authority["game"]["native_guest_save"]["pawn"]
@@ -2119,8 +2135,11 @@ async def verify_dock_enemy_drop(host: Seat, guest: Seat, arrival: dict) -> dict
     picked = await guest.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
     assert picked["ack"]["message"] == "stock world loot interaction intercepted", picked["ack"]
     for run in (host_run, guest_run):
-        await wait_resident_status(run, lambda frame: frame["gameplay"].get(scope.STATE, {}).get(guid, {}).get("claimed_by") == owner
+        await wait_resident_status(run, lambda frame: guid not in frame.get("gameplay", {}).get(scope.STATE, {})
                                    and identity not in frame["game"].get(native_world_loot.KEY, {}))
+    receipt, = [row for row in await resident_events(host_run, authority)
+                if row["event"] == "native_stock_enemy_loot_claimed" and row.get("guid") == guid]
+    assert receipt["claimed_by"] == owner and receipt["revision"] is None, receipt
     inventory = (await submit(guest_run, "native-inventory-list"))["native_inventory"]["items"]
     assert any(row["guid"] == guid and row["class_path"] == item["class_path"] for row in inventory), inventory
     refused = await submit(host_run, scope.CLAIM, target=guid)
@@ -5318,15 +5337,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if tutorial_dock_pursuit:
             slot = max((source for source in stock_slots if source.stem != "Config"),
                        key=lambda source: source.stat().st_mtime).stem
-            assert await portable_probe_command(first.bridge, "portable-npc-override", f"solo-load\t{slot}") == "loading stock save"
-            await first.bridge.wait_for(lambda frame: frame["state"] == "ready"
-                                        and frame.get("pawns", {}).get("local"), timeout=30)
-            async with asyncio.timeout(12):
-                while (solo := await portable_probe_command(first.bridge, "portable-npc-override",
-                                                             f"solo-combat\t{slot}")) == "loading":
-                    await asyncio.sleep(.1)
-            assert solo.startswith("stock inventory and lethal drone damage "), solo
-            proof["singleplayer_after_coop"] = {"save_slot": slot, "stock_result": solo, "pid": first.bridge.process.pid}
+            proof["singleplayer_after_coop"] = await verify_solo_combat(first, slot)
         proof.update(verified=True, solo_slots_and_settings_preserved=True,
                      both_titles_reused=len(proof["sessions"]) > 1,
                      launched_without_coop_environment=True)

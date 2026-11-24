@@ -1325,7 +1325,7 @@ local function solo_combat(world, action, slot)
         assert(world:GetFullName() == "World /Game/Classes/Maps/MainMenu_P.MainMenu_P"
             and valid(instance) and slot:match("^%d+%-%d+$") and statics:DoesSaveGameExist(slot, 0),
             "the singleplayer check needs its copied stock save")
-        instance:Load_GameState(slot)
+        instance:Load_GameState(slot, false)
         return "loading stock save"
     end
     local pawn = statics:GetPlayerPawn(world, 0)
