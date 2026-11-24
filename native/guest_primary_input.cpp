@@ -232,6 +232,7 @@ namespace
     };
 
     struct Receipt { std::uint64_t sequence{}; Clock::time_point expires{}; };
+    struct TapReceipt : Receipt { std::array<double, 3> direction{}; };
     enum class HeldEdge { press, release, cancel };
     enum class HeldProof { none, mapped_key, edge_window, stock_melee_edges, fixture };
     enum class FixtureDispatch { none, tap, held };
@@ -244,7 +245,7 @@ namespace
     };
     Scope scope;
     CapturedPress press;
-    std::array<Receipt, receipt_limit> receipts{};
+    std::array<TapReceipt, receipt_limit> receipts{};
     std::size_t head{}, count{};
     std::uint64_t sequence{};
     HeldStroke held;
@@ -836,12 +837,32 @@ namespace
     static_assert(select_started_route(true, false) == StartedRoute::authorized);
     static_assert(select_started_route(true, true) == StartedRoute::authorized);
 
+    std::array<double, 3> tap_direction(U::UObject* pawn)
+    {
+        auto* camera = object_field(pawn, STR("Camera"));
+        auto* function = find<U::UFunction>(STR("/Script/Engine.SceneComponent:GetForwardVector"));
+        auto* value = function ? U::CastField<U::FStructProperty>(function->GetReturnProperty()) : nullptr;
+        std::array<double, 3> direction{};
+        if (!live(camera) || camera->GetOuterPrivate() != pawn ||
+            camera->GetClassPrivate() != find<U::UClass>(STR("/Script/Engine.CameraComponent")) ||
+            !function || !function->HasAnyFunctionFlags(U::FUNC_Native) || function->GetNumParms() != 1 ||
+            function->GetParmsSize() != sizeof(direction) || !value || value->GetOffset_Internal() != 0 ||
+            value->GetStruct().Get() != find<U::UScriptStruct>(STR("/Script/CoreUObject.Vector"))) return {};
+        camera->ProcessEvent(function, direction.data());
+        const auto length = std::hypot(direction[0], direction[1], direction[2]);
+        return std::isfinite(length) && std::abs(length - 1.0) < .001 ? direction : std::array<double, 3>{};
+    }
+
     void queue_tap(Clock::time_point now)
     {
         if (sequence == max_sequence) return;
         discard_expired(now);
         if (count == receipt_limit) return;
-        receipts[(head + count) % receipt_limit] = {++sequence, now + receipt_lifetime};
+        auto& receipt = receipts[(head + count) % receipt_limit];
+        receipt = {{++sequence, now + receipt_lifetime}, {}};
+        if (std::ranges::find(silverfish::guest_weapon_profiles::firearms, scope.item->kind, &Equipment::kind)
+            != silverfish::guest_weapon_profiles::firearms.end())
+            receipt.direction = tap_direction(scope.seat.pawn.Get());
         ++count;
     }
 
@@ -976,16 +997,23 @@ namespace
         }
         discard_expired(now);
         if (!count) return 0;
-        lua.set_integer(static_cast<std::int64_t>(receipts[head].sequence));
+        const auto& receipt = receipts[head];
+        lua.set_integer(static_cast<std::int64_t>(receipt.sequence));
         lua.set_integer(pawn);
         lua.set_string(scope.text);
         lua.set_string(scope.item->kind);
+        int fields = 4;
+        if (receipt.direction != std::array<double, 3>{})
+        {
+            for (const auto axis : receipt.direction) lua.set_number(axis);
+            fields += 3;
+        }
         if (!peek)
         {
             head = (head + 1) % receipt_limit;
             --count;
         }
-        return 4;
+        return fields;
     }
 
     int read_aim(const Lua& lua)

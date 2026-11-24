@@ -5621,7 +5621,10 @@ class Client:
             else:
                 action, event = "native-guest-weapon-fire", "native_guest_primary_input"
             try:
-                selection = f"{event_guid}@{extra[0]}" if extra else event_guid
+                if extra and event_kind in native_guest_weapon.FIRE_CLASSES:
+                    selection = f"{event_guid}@{self.zone_epoch}@{extra[0]}"
+                else:
+                    selection = f"{event_guid}@{extra[0]}" if extra else event_guid
                 result = await self.gameplay_action(action, operation, selection)
                 self.control.event(event, operation_id=operation, sequence=sequence, **result)
             except (ValueError, OSError, RuntimeError) as error:

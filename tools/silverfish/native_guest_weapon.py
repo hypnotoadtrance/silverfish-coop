@@ -9,6 +9,7 @@ from . import guest_weapon_profiles, native_guest_melee, native_inventory, party
 GUEST_ACTIONS = ("native-guest-weapon-inspect", "native-guest-weapon-equip", "native-guest-weapon-fire",
                  "native-guest-weapon-reload")
 GUID = re.compile(r"[0-9A-F]{32}\Z")
+SHOT_DIRECTION = re.compile(r"-?[01]\.[0-9]{6}(?:,-?[01]\.[0-9]{6}){2}")
 SELECT_EQUIPMENT = "native-guest-weapon-select"
 SET_FIRE_MODE = "native-guest-weapon-mode-store"
 FIRE_MODES = ("auto", "semi")
@@ -35,6 +36,10 @@ PROJECTILES_PER_ROUND = {
     for firearm in guest_weapon_profiles.FIREARMS
     if firearm.magazine
 }
+
+def valid_shot_direction(value: str) -> bool:
+    return (isinstance(value, str) and SHOT_DIRECTION.fullmatch(value) is not None
+            and abs(sum(float(axis) ** 2 for axis in value.split(",")) - 1.0) <= .002)
 
 
 async def select_equipment(host, bridge, character: str, target: str | None) -> dict:
@@ -164,6 +169,13 @@ async def service_fire_modes(client, active: bool) -> None:
 
 async def perform(host, bridge, character: str, operation_id: str, action: str, guid: str, *, seed_kind=None,
                   bandit_fixture: str | None = None) -> dict:
+    direction = None
+    if action == "native-guest-weapon-fire" and isinstance(guid, str) and "@" in guid:
+        parts = guid.split("@")
+        if (len(parts) != 3 or parts[1] != host.zone_epoch or not valid_shot_direction(parts[2])
+                or bandit_fixture is not None):
+            raise party.RuleError("native_guest_weapon_view_unqualified")
+        guid, _, direction = parts
     fixture = bandit_fixture is not None or action in ("native-guest-weapon-seed", "native-guest-weapon-seed-ammo")
     if (not host.native_guest or (fixture and not host.fixtures) or host.native_profile is None
             or host.transitioning or host.stopping or host.native_checkpoint_unsafe
@@ -181,7 +193,7 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
     if not scope or not scope["connected"]:
         raise party.RuleError("guest_not_active")
     operation = action.removeprefix("native-guest-weapon-")
-    extra = (seed_kind,) if seed_kind is not None else ()
+    extra = (seed_kind,) if seed_kind is not None else (direction,) if direction is not None else ()
     fingerprint = [action, guid, bandit_fixture or (extra[0] if extra else None)]
     mutates = operation != "inspect"
     if mutates:
@@ -300,6 +312,8 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
 
         host.last_game, host.last_seen = snapshot, time.monotonic()
         result = {"native_guest_weapon": dict(proof, kind="camera", class_path=CAMERA_PATH) if camera else proof}
+        if direction is not None:
+            result["native_guest_trigger_direction"] = direction
         if old_pipe:
             result["native_guest_weapon"] = dict(proof, kind=native_guest_melee.KIND, class_path=OLD_PIPE)
         if blowtorch:

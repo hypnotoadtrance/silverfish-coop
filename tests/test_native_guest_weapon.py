@@ -212,6 +212,31 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(host.party["receipts"], {})
                 host.checkpoint_native.assert_not_awaited()
 
+    async def test_trigger_direction_is_scoped_to_the_current_visit(self):
+        host = self.host()
+        host.zone_epoch = "current"
+        guid, operation = "1" * 32, "a" * 32
+        action = "native-guest-weapon-fire"
+        direction = "0.600000,-0.800000,0.000000"
+        bridge = SimpleNamespace(command=AsyncMock(return_value={
+            "state": "hosting", "map": "zone",
+            "native_guest_weapon": {"map": "zone", "action": "fire", "pawn": "exact pawn", "guid": guid,
+                                    "ok": True, "status": "equipped", "actor_ammo": 5, "stored_ammo": 5,
+                                    "before": 6, "after": 5, "projectiles": 1},
+        }))
+        for target in (f"{guid}@previous@{direction}", f"{guid}@current@0.000000,0.000000,0.000000"):
+            with self.assertRaisesRegex(party.RuleError, "view_unqualified"):
+                await native_guest_weapon.perform(host, bridge, "character", operation, action, target)
+        bridge.command.assert_not_awaited()
+
+        result = await native_guest_weapon.perform(host, bridge, "character", operation, action,
+                                                   f"{guid}@current@{direction}")
+        bridge.command.assert_awaited_once_with(action, "exact pawn", guid, direction, timeout=5)
+        self.assertEqual(result["native_guest_trigger_direction"], direction)
+        with self.assertRaisesRegex(party.RuleError, "operation_id_conflict"):
+            await native_guest_weapon.perform(host, bridge, "character", operation, action,
+                                              f"{guid}@current@1.000000,0.000000,0.000000")
+
     async def test_missing_acknowledgment_keeps_host_checkpoint_unsafe(self):
         host = self.host()
         bridge = SimpleNamespace(command=AsyncMock(side_effect=TimeoutError("missing acknowledgment")))
