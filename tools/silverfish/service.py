@@ -998,6 +998,8 @@ class Host:
             view["host_world"]["native_world_view"] = world_view
             if sirens := native_weather_view.siren_frame(self.last_game, area):
                 view["host_world"][native_weather_view.KEY] = sirens
+            if strikes := native_weather_view.lightning_frame(self.last_game, area, time.monotonic() - self.last_seen):
+                view["host_world"][native_weather_view.LIGHTNING] = strikes
         view["native_quests"] = self.party.get("native_quests", {})
         if jammer_pose := native_flood_jammer.pose_frame(self.last_game, self.zone_epoch):
             view[native_flood_jammer.POSE] = jammer_pose
@@ -5129,6 +5131,7 @@ class Client:
         self.voice_playback = native_voice.Playback()
         self.hurt_playback = native_damage_feedback.Playback()
         self.weather_sirens = native_weather_view.SirenPlayback()
+        self.weather_lightning = native_weather_view.LightningPlayback()
         self.anomaly_playback = native_anomaly_effects.Playback()
         self.destructible_playback = native_destructibles.Playback()
         self.weapon_shot_playback = native_weapon_fire_view.Playback()
@@ -6099,6 +6102,11 @@ class Client:
                         self.last_game = await native_loot.project_power_boxes(
                             self.bridge, self.last_game, self.gameplay.get(native_loot.POWER_BOX_STATES))
                 await self.project_world_view()
+                self.last_game = await self.weather_lightning.sync(
+                    self.bridge, self.control, self.last_game,
+                    self.gameplay.get("host_world", {}).get(native_weather_view.LIGHTNING), self.zone_epoch,
+                    snapshot_age=time.monotonic() - self.gameplay_seen,
+                )
                 self.last_game = await self.weather_sirens.sync(
                     self.bridge, self.control, self.last_game,
                     self.gameplay.get("host_world", {}).get(native_weather_view.KEY), self.zone_epoch,

@@ -969,6 +969,13 @@ local function run_command(fields, state, current_phase)
         end
         return native_world_view.play_siren(state, current_phase, fields[3], tonumber(fields[4]),
             fields[5], tonumber(fields[6]), tonumber(fields[7]))
+    elseif command == "native-weather-lightning-play" then
+        if not world_view_enabled or #fields ~= 10 or current_phase ~= "connected" or role ~= "client" then
+            error("Weather lightning requires the authenticated client", 0)
+        end
+        return native_world_view.play_lightning(state, current_phase, fields[3], tonumber(fields[4]),
+            {X = tonumber(fields[5]), Y = tonumber(fields[6]), Z = tonumber(fields[7])},
+            {Pitch = tonumber(fields[8]), Yaw = tonumber(fields[9]), Roll = tonumber(fields[10])})
     elseif command == "native-world-view-apply" or command == "native-world-view-apply-local" then
         if not world_view_enabled or (#fields ~= 18 and #fields ~= 23 and #fields ~= 27)
             or current_phase ~= "connected" or role ~= "client" then
@@ -1321,13 +1328,16 @@ local function write_status(state, current_phase, failure, fields, pending, crat
             if host_world_view then host_world_view.sequence = sequence end
         end
         if host_world_view then rows[#rows + 1] = world_view_row("sample", host_world_view) end
-        for _, row in ipairs(native_world_view.siren_rows(state, current_phase, status_row)) do
+        for _, row in ipairs(native_world_view.weather_cue_rows(state, current_phase, status_row)) do
             rows[#rows + 1] = row
         end
     elseif world_view_enabled and current_phase == "connected" then
         host_world_view = nil
         local seen = native_world_view.status(state, current_phase)
-        if seen then rows[#rows + 1] = world_view_row("applied", seen) end
+        if seen then
+            rows[#rows + 1] = world_view_row("applied", seen)
+            for _, row in ipairs(native_world_view.lightning_rows(status_row)) do rows[#rows + 1] = row end
+        end
     end
     local viewed_health, viewed_food, viewed_regen, viewed_stim = native_save_scope.guest_vitals(state, current_phase)
     for _, details in ipairs(state.pawns) do
@@ -1670,6 +1680,7 @@ local function tick(fields, pending, periodic)
     pcall(native_voice.footsteps.sync, state, current_phase, native_player_avatar.player_id)
     pcall(native_time_shift.sync, state, current_phase)
     native_guest_armor.sync(state, current_phase)
+    if world_view_enabled then pcall(native_world_view.sync_lightning, state, current_phase) end
     native_world_view.sync(state, current_phase)
     native_inventory_view.sync(state, current_phase)
     native_finite_shop.sync(state, current_phase)
@@ -1858,6 +1869,7 @@ LoopInGameThreadWithDelay(25, function()
     if role == "host" and not leaving then pcall(native_zone.update_exit, current_world) end
     if role == "host" and not leaving then pcall(native_weapon_fire_view.flush, current_world) end
     pcall(native_weapon_fire_view.animate_bolts, (role == "client" or role == "host") and not leaving and current_world or nil)
+    pcall(native_world_view.animate_lightning, role == "client" and not leaving and current_world or nil)
     if not leaving then pcall(native_voice.footsteps.update, current_world) end
     if native_avatar_lean_bridge.enabled then pcall(native_avatar_lean_bridge.update, current_world, role, leaving) end
     if not leaving then pcall(native_player_avatar.animate_head, current_world) end

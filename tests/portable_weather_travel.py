@@ -9,6 +9,13 @@ from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.travel import CROSSROADS, OBSERVATORY
 
 
+async def enter_crossroads(host, pawn):
+    route, = (route for route in AUTHORED_ROUTES if
+              (route.source, route.destination, route.entrance) == (OBSERVATORY, CROSSROADS, "Obsv_Etr"))
+    for participant, position in ((pawn, "near"), ("local", "near"), ("local", "inside")):
+        await host.bridge.command("native-exit-position", participant, position, route.entrance, route.actor)
+
+
 async def verify_weather_travel(host, guest, pawn, probe):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
 
@@ -17,10 +24,7 @@ async def verify_weather_travel(host, guest, pawn, probe):
 
     initial = await wait_resident_status(guest_run, lambda f: f["game"]["map"] == OBSERVATORY
                                          and f["game"].get("native_world_view", {}).get("weather_verified") is True)
-    route, = (route for route in AUTHORED_ROUTES if
-              (route.source, route.destination, route.entrance) == (OBSERVATORY, CROSSROADS, "Obsv_Etr"))
-    for participant, position in ((pawn, "near"), ("local", "near"), ("local", "inside")):
-        await host.bridge.command("native-exit-position", participant, position, route.entrance, route.actor)
+    await enter_crossroads(host, pawn)
 
     async def applied(intensity):
         def matches(frame):

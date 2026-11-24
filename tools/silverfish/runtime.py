@@ -2549,6 +2549,12 @@ class Bridge:
                     cues = data.setdefault(native_weather_view.KEY, [])
                     if len(cues) < native_weather_view.MAX_SIRENS:
                         cues.append(native_weather_view.parse_siren(fields))
+                elif fields[0] == native_weather_view.LIGHTNING_TAG and len(fields) == 9 and data.get("state") == "hosting":
+                    strikes = data.setdefault(native_weather_view.LIGHTNING, [])
+                    if len(strikes) < native_weather_view.MAX_LIGHTNING:
+                        strikes.append(native_weather_view.parse_lightning(fields))
+                elif fields[0] == native_weather_view.LIGHTNING_PLAYED_TAG and len(fields) == 13 and data.get("state") == "connected":
+                    data[native_weather_view.LIGHTNING_PLAYBACK] = native_weather_view.parse_lightning_playback(fields)
                 elif fields == [native_weather_view.LOCAL_APPLY, "1"] and data.get("state") == "connected":
                     data[native_weather_view.LOCAL_CAPABILITY] = True
                 elif fields[0] == "native-world-view" and len(fields) in (21, 27, 32) and fields[1] in ("sample", "applied"):

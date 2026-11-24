@@ -1,10 +1,22 @@
-"""Relay the active stock weather siren and validate rendered rain snapshots."""
+"""Relay stock weather events and validate rendered rain snapshots."""
 
+from collections import deque
 import math
 import re
 import time
 
+from .native_guest_drop_record import valid_id, valid_position
+
 KEY = "native_weather_sirens"
+LIGHTNING = "native_weather_lightning"
+LIGHTNING_TAG = "native-weather-lightning"
+LIGHTNING_PLAY = "native-weather-lightning-play"
+LIGHTNING_PLAYED_TAG = "native-weather-lightning-played"
+LIGHTNING_PLAYBACK = "native_weather_lightning_playback"
+LIGHTNING_COMPONENTS = ("flash_registered", "bolt_component", "blast_component", "audio_component")
+MAX_LIGHTNING = 4
+LIGHTNING_LIFETIME = 3.0
+LIGHTNING_MIN_LIFE = 0.08
 LOCAL_APPLY = "native-world-view-apply-local"
 LOCAL_CAPABILITY = "native_world_view_apply_local"
 RAIN_FIELDS = ("rain_intensity", "rain_x", "rain_y", "rain_z")
@@ -44,6 +56,93 @@ def siren_frame(game, area):
         return []
     return [[serial, source, sound, round(expiry - now, 3)]
             for serial, source, sound, expiry in cues if 0.2 < expiry - now <= 120]
+
+
+def valid_lightning(row):
+    if not isinstance(row, dict):
+        return False
+    serial, remaining, point, angles = (row.get(key) for key in ("serial", "ttl", "position", "rotation"))
+    return (type(serial) is int and 0 < serial < 2**31
+            and type(remaining) in (int, float) and 0 < remaining <= LIGHTNING_LIFETIME
+            and valid_position(point) and type(angles) is list and len(angles) == 3
+            and all(type(axis) in (int, float) and -360 <= axis <= 360 for axis in angles))
+
+
+def parse_lightning(fields):
+    _, serial, expiry, *coordinates = fields
+    point = list(map(float, coordinates[:3]))
+    angles = list(map(float, coordinates[3:]))
+    row = {"serial": int(serial), "ttl": float(expiry), "position": point, "rotation": angles}
+    if not valid_lightning(row):
+        raise ValueError("Unqualified stock lightning strike")
+    return row
+
+
+def parse_lightning_playback(fields):
+    _, epoch, serial, *report = fields
+    activation = report[6:]
+    if not valid_id(epoch) or len(activation) != len(LIGHTNING_COMPONENTS) or any(
+            value not in ("0", "1") for value in activation):
+        raise ValueError("Unqualified stock lightning playback")
+    proof = parse_lightning([LIGHTNING_TAG, serial, "1", *report[:6]])
+    del proof["ttl"]
+    proof["epoch"] = epoch
+    proof.update(zip(LIGHTNING_COMPONENTS, (value == "1" for value in activation), strict=True))
+    return proof
+
+
+def lightning_frame(game, area, snapshot_age):
+    if game.get("state") != "hosting" or game.get("map") != area:
+        return []
+    return [{**row, "ttl": row["ttl"] - snapshot_age}
+            for row in game.get(LIGHTNING, ()) if row["ttl"] - snapshot_age >= LIGHTNING_MIN_LIFE]
+
+
+class LightningPlayback:
+    def __init__(self):
+        self.scope = None
+        self.played = deque(maxlen=64)
+
+    async def sync(self, bridge, control, game, incoming, epoch, snapshot_age=0.0):
+        world = game.get("native_world_view", {})
+        area = game.get("map")
+        if (not valid_id(epoch) or game.get("state") != "connected"
+                or (world.get("mode"), world.get("map"), world.get("epoch")) != ("applied", area, epoch)
+                or not isinstance(incoming, list) or not 0 < len(incoming) <= MAX_LIGHTNING):
+            return game
+        scope = area, epoch
+        if scope != self.scope:
+            self.scope = scope
+            self.played.clear()
+        started = time.monotonic()
+        for row in incoming:
+            if not valid_lightning(row):
+                continue
+            serial, point, angles = row["serial"], row["position"], row["rotation"]
+            remaining = row["ttl"] - snapshot_age - (time.monotonic() - started)
+            if serial in self.played or remaining < LIGHTNING_MIN_LIFE:
+                continue
+            try:
+                result = await bridge.command(LIGHTNING_PLAY, epoch, str(serial),
+                                              *map(str, (*point, *angles)), timeout=1.5)
+            except (OSError, RuntimeError) as error:
+                control.event("native_weather_lightning_unavailable", serial=serial, reason=str(error))
+                continue
+            if (result.get("state"), result.get("map")) != ("connected", area):
+                return result
+            receipt = result.get("ack", {}).get("message")
+            if receipt in {"played", "duplicate"}:
+                self.played.append(serial)
+                if receipt == "played":
+                    proof = result.get(LIGHTNING_PLAYBACK, {})
+                    verified = ((proof.get("epoch"), proof.get("serial")) == (epoch, serial)
+                                and proof.get("position") == point and proof.get("rotation") == angles
+                                and all(type(proof.get(key)) is bool for key in LIGHTNING_COMPONENTS))
+                    components = {key: proof[key] for key in LIGHTNING_COMPONENTS} if verified else {}
+                    control.event("native_weather_lightning_played", serial=serial, position=point,
+                                  rotation=angles, **components)
+            game = result
+        return game
 
 
 class SirenPlayback:
