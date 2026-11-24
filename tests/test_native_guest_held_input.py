@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 import uuid
 
-from tools.silverfish.native_smg_hold import ACTION, AIM_ACTION, ALL, KEY, Authority, GuestInput
+from tools.silverfish.native_smg_hold import ACTION, AIM_ACTION, ALL, KEY, Authority, GuestInput, parse
 from tools.silverfish.runtime import Bridge, MAP
 
 
@@ -274,6 +274,13 @@ class GuestHeldInputRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await pending)[ALL][PAWN]["projectiles"], 2)
             self.assertFalse(command.exists())
             self.assertEqual(ordinary.read_text(encoding="utf-8"), "checkpoint\n")
+
+    def test_held_receipt_accepts_stock_pellet_counts_with_an_exact_round_debit(self):
+        fields = ["native-guest-smg-hold", MAP, PAWN, GUID, "1", "released", "5", "3", "2", "18"]
+        self.assertEqual(parse(fields)["projectiles"], 18)
+        for invalid in ("0", "4", "17", "20"):
+            with self.assertRaises(ValueError):
+                parse([*fields[:-1], invalid])
 
     async def test_resident_authority_uses_matched_compact_receipt_without_mailboxes(self):
         with TemporaryDirectory() as temporary:

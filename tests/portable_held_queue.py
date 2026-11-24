@@ -6,7 +6,7 @@ import uuid
 
 from tools.silverfish import native_guest_ui, native_inventory, native_smg_hold, runtime
 from tools.silverfish.control import submit
-from tools.silverfish.guest_weapon_profiles import STOCK_HELD_FIRE_MAGAZINES
+from tools.silverfish.guest_weapon_profiles import STOCK_HELD_FIRE_MAGAZINES, THIRTY_06_TANDEM, TWELVE_GAUGE_BUCK
 from tools.silverfish.travel import OBSERVATORY
 
 from portable_guest_world_start import resident_events, wait_resident_status
@@ -20,7 +20,9 @@ RECEIVERS = {
     "smg-03": ("burst", ROUNDS, "stock_burst_hold"),
     "famas": ("famas", ROUNDS, "stock_famas_hold"),
     "lmg-01": ("lmg", 100, "stock_lmg_hold"),
+    "full-auto-shotgun": ("shotgun", 8, "stock_auto_shotgun_hold"),
 }
+ALTERNATE_ROUNDS = {"lmg-01": THIRTY_06_TANDEM, "full-auto-shotgun": TWELVE_GAUGE_BUCK}
 FIXTURE = "native_guest_held_fire_fixture"
 PUBLICATION = "native_guest_primary_publication"
 TERMINAL = "native_guest_smg_hold_accepted"
@@ -60,6 +62,9 @@ async def replay_prior_selection(guest, character, pawn, guid, contents, source_
 
 async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=False, kind=KIND):
     fixture_name, load, check_name = RECEIVERS[kind]
+    magazine = STOCK_HELD_FIRE_MAGAZINES[kind]
+    alternate = ALTERNATE_ROUNDS.get(kind)
+    round_type = alternate or magazine.ammo
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_frame = await wait_resident_status(host_run, lambda status:
         status.get("local_bridge") == "memory" and status.get("game", {}).get("map") == OBSERVATORY)
@@ -131,14 +136,13 @@ async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=
             await wait_resident_status(guest_run, lambda status:
                 status.get("game", {}).get("native_inventory_view", {}).get("state") == state, timeout=8)
 
-        magazine = STOCK_HELD_FIRE_MAGAZINES[kind]
         assert magazine.capacity == 100 and 64 < remaining < magazine.capacity
         await inventory_view("stock")
         await control(guest_run, "native-inventory-stock-use-click-fixture", target=f"{guid}|take-ammo")
         unloaded = (await observe(lambda row: row.get(native_inventory.TAKE_AMMO_KEY, {}).get("source_guid") == guid)
                     )[native_inventory.TAKE_AMMO_KEY]
         assert (unloaded["class_path"], unloaded["split"], unloaded["remaining"]) == (
-            magazine.ammo.item_path, remaining, 0), unloaded
+            round_type.item_path, remaining, 0), unloaded
         await inventory_view("closed")
         trigger = (await control(guest_run, "native-guest-reload-input-fixture"))["native_guest_reload_fixture"]
         reload = (await observe(lambda row: row["event"] == "native_guest_reload_input"
@@ -160,6 +164,16 @@ async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=
         equipped = await accepted_selection(guid)
         assert (equipped["guid"], equipped["pawn"], equipped["actor_ammo"], equipped["stored_ammo"]) == (guid, pawn, load, load), equipped
         await scoped(guid, kind)
+        if alternate:
+            changed = await host.bridge.command("fixture-stock-take-ammo-select-round", pawn, guid, alternate.item_path)
+            assert changed["ack"]["message"] == "stock round loaded", changed["ack"]
+            slot = selected.split(";")[1]
+            async with asyncio.timeout(8):
+                while True:
+                    projected = await guest.bridge.command("fixture-stock-take-ammo-loadout", slot, guid, "ammo")
+                    if projected["ack"]["message"] == alternate.item_path:
+                        break
+                    await asyncio.sleep(.1)
         selector = f"\t{previous['pawn']}\t{guid}"
         semi = await probe(guest.bridge, "portable-held-queue", "semi" + selector)
         if semi == "semi":
@@ -192,8 +206,9 @@ async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=
             OBSERVATORY, pawn, guid, terminal["serial"]), started
         assert (terminal["map"], terminal["pawn"], terminal["character_id"], terminal["status"], terminal["before"]) == (
             OBSERVATORY, pawn, character, "released", load), terminal
-        assert 1 < terminal["rounds"] == terminal["projectiles"] == load - terminal["after"] < load, terminal
-        burst_length = STOCK_HELD_FIRE_MAGAZINES[kind].burst_length
+        assert 1 < terminal["rounds"] == load - terminal["after"] < load, terminal
+        assert terminal["projectiles"] == terminal["rounds"] * round_type.projectile_count, terminal
+        burst_length = magazine.burst_length
         if burst_length:
             assert terminal["rounds"] == burst_length, terminal
         assert terminal["revision"] is None, terminal
@@ -207,7 +222,8 @@ async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=
         # absent mailbox files prove that press used the same in-process bridge as the release receipt.
         proof = {"press": pressed, "release": released, "release_publication": expected,
                  "guest_selection": selected, "host_selection": equipped, "guest_edges": edges,
-                 "fire_mode": {"semi_hold_blocked": semi == "semi", "restored": mode}, "host_terminal": terminal}
+                 "fire_mode": {"semi_hold_blocked": semi == "semi", "restored": mode}, "host_terminal": terminal,
+                 "round_type": round_type.item_path}
         if stale_reply:
             proof["stale_quick_slot_reply"] = stale_reply
         if kind == "lmg-01":

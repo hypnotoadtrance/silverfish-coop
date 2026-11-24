@@ -70,6 +70,8 @@ namespace silverfish::guest_weapon_profiles
         STR("/Game/Classes/Items/Ammo_30-06_HEI_BP.Ammo_30-06_HEI_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_30-06_HE.Projectile_30-06_HE_C"), 14, 1};
     inline constexpr StockAmmo thirty_06_mine{3, STR("30-06_Mine"),
         STR("/Game/Classes/Items/Ammo_30-06_Mine_BP.Ammo_30-06_Mine_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_30-06_Mine.Projectile_30-06_Mine_C"), 24, 1};
+    inline constexpr StockAmmo thirty_06_tandem{3, STR("30-06_Tandem"),
+        STR("/Game/Classes/Items/Ammo_30-06_Tandem_BP.Ammo_30-06_Tandem_BP_C"), STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Projectile_30-06_Tandem.Projectile_30-06_Tandem_C"), 14, 3};
     inline constexpr std::array stock_ammo{
         &nine_mm_ball,
         &nine_mm_ap,
@@ -97,6 +99,7 @@ namespace silverfish::guest_weapon_profiles
         &thirty_06_incendiary,
         &thirty_06_he,
         &thirty_06_mine,
+        &thirty_06_tandem,
     };
 
     struct Profile
@@ -134,6 +137,8 @@ namespace silverfish::guest_weapon_profiles
         Profile{"revolver-01", STR("/Game/Classes/Weapons/Wep_Revolver_01.Wep_Revolver_01_C"), true, 6, 1, 0.5, true, &forty_five_ball, true},
         Profile{"revolver-02", STR("/Game/Classes/Weapons/Wep_Revolver_02.Wep_Revolver_02_C"), true, 6, 1, 0.5, true, &forty_five_hollow_point, true},
         Profile{"revolver-03", STR("/Game/Classes/Weapons/Wep_Revolver_03.Wep_Revolver_03_C"), true, 6, 1, 0.5, true, &forty_five_hollow_point, true},
+        Profile{"full-auto-shotgun", STR("/Game/Classes/Weapons/Wep_ShotGun_FullAuto.Wep_ShotGun_FullAuto_C"), true, 8, 0, 0.16, true, &twelve_gauge_dsapi, true},
+        Profile{"full-auto-shotgun-02", STR("/Game/Classes/Weapons/Wep_ShotGun_FullAuto_02.Wep_ShotGun_FullAuto_02_C"), true, 24, 0, 0.16, true, &twelve_gauge_dsapi, true},
         Profile{"sg-71-a", STR("/Game/Classes/Weapons/Wep_ShotGun_SemiAuto.Wep_ShotGun_SemiAuto_C"), true, 10, 1, 0.2, true, &twelve_gauge_buck, true},
         Profile{"sg-71-b", STR("/Game/Classes/Weapons/Wep_ShotGun_SemiAuto_02.Wep_ShotGun_SemiAuto_02_C"), true, 10, 1, 0.2, true, &twelve_gauge_buck, true},
         Profile{"sg-71-a-suppressed", STR("/Game/Classes/Weapons/Wep_ShotGun_SemiAuto_Suppressed.Wep_ShotGun_SemiAuto_Suppressed_C"), true, 5, 1, 0.2, true, &twelve_gauge_buck, true},
@@ -262,6 +267,8 @@ namespace silverfish::guest_weapon_profiles
     };
     inline constexpr std::array stock_held_fire_kinds{
         std::string_view{"smg-standard"},
+        std::string_view{"full-auto-shotgun"},
+        std::string_view{"full-auto-shotgun-02"},
         std::string_view{"hcr-loki"},
         std::string_view{"ar-08"},
         std::string_view{"bizon-01"},

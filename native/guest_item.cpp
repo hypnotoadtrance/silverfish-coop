@@ -691,8 +691,7 @@ namespace
 
     bool compatible_magazine_round(const profiles::StockAmmo& base, const profiles::StockAmmo& ammo)
     {
-        return base.caliber == ammo.caliber &&
-            (&base == &profiles::twelve_gauge_buck || base.projectile_count == ammo.projectile_count);
+        return base.caliber == ammo.caliber;
     }
 
     const profiles::StockAmmo* magazine_round(const profiles::Profile& profile, Unreal::UClass* ammo)
@@ -781,10 +780,11 @@ namespace
     }
 
     bool ordinary_magazine_payload(const profiles::Profile* profile, const Context& context, const Inventory& inventory,
-                                    Unreal::UObject* actor = nullptr)
+                                    Unreal::UObject* actor = nullptr, const profiles::StockAmmo* pinned_round = nullptr)
     {
         if (!profile || !profile->require_default_payload) return true;
         const auto* selected = saved_magazine_round(*profile, context.weapon, inventory);
+        if (pinned_round && selected != pinned_round) return false;
         if (!selected || !actor) return selected != nullptr;
         auto* ammo = field<Unreal::FStructProperty>(actor, STR("AmmoType"));
         auto* type = find<Unreal::UScriptStruct>(ammo_type_path);
@@ -2204,6 +2204,7 @@ namespace
         Guid guid{};
         HoldClock::time_point deadline{};
         profiles::Profile profile{};
+        const profiles::StockAmmo* round{};
         GuestMuzzleAim aim;
         ShotView view;
         std::int64_t view_sequence{};
@@ -2297,7 +2298,7 @@ namespace
         context = smg_hold.context();
         return ownership_current(context) && locate(context, inventory).empty() &&
             equipped(context, inventory) == receiver && stock_magazine_shape(receiver, smg_hold.profile) &&
-            ordinary_magazine_payload(&smg_hold.profile, context, inventory, receiver);
+            ordinary_magazine_payload(&smg_hold.profile, context, inventory, receiver, smg_hold.round);
     }
 
     void hold_pre(HoldHook& iteration, Unreal::UObject* receiver, Unreal::FFrame& frame, void*)
@@ -2358,7 +2359,8 @@ namespace
         Context context;
         Inventory inventory;
         auto* ammo = field<Unreal::FIntProperty>(receiver, STR("Ammo"));
-        if (!smg_hold.aim.restore() || smg_hold.shot_births != 1 || !smg_hold.owned_birth || !ammo ||
+        if (!smg_hold.aim.restore() || smg_hold.shot_births != smg_hold.round->projectile_count ||
+            !smg_hold.owned_birth || !ammo ||
             !hold_locate(smg_hold, receiver, context, inventory) || ammo->GetPropertyValueInContainer(receiver) != remaining ||
             inventory.ammo->GetPropertyValueInContainer(inventory.item) != remaining)
         {
@@ -2367,7 +2369,7 @@ namespace
         }
         smg_hold.after = remaining;
         ++smg_hold.rounds;
-        ++smg_hold.projectiles;
+        smg_hold.projectiles += smg_hold.shot_births;
     }
 
     void remove_hold_hooks()
@@ -2482,7 +2484,8 @@ namespace
         auto* action = find<Unreal::UFunction>(primary_path);
         auto* fire = find<Unreal::UFunction>(fire_weapon_path);
         auto* end = find<Unreal::UFunction>(end_cycle_path);
-        auto* projectile = stock_projectile(actor);
+        const auto* round = saved_magazine_round(*profile, context.weapon, inventory);
+        auto* projectile = round ? stock_projectile(actor, round->projectile_count) : nullptr;
         auto* ammo = field<Unreal::FIntProperty>(actor, STR("Ammo"));
         const auto loaded = ammo ? ammo->GetPropertyValueInContainer(actor) : -1;
         const auto exact_signal = [&](Unreal::UFunction* function) {
@@ -2498,7 +2501,7 @@ namespace
             !(boolean(actor, STR("HasSelectFire"), false) ||
               (boolean(actor, STR("HasSelectFire"), true) && boolean(actor, STR("SemiAutoSelected"), false))) ||
             !stock_magazine_shape(actor, *profile) ||
-            !stock_round_matches(actor, mounted_ammo(actor), projectile, magazine_round(*profile, mounted_ammo(actor))) ||
+            !stock_round_matches(actor, mounted_ammo(actor), projectile, round) ||
             loaded < 1 || loaded > profile->capacity || loaded != inventory.ammo->GetPropertyValueInContainer(inventory.item))
             return hold_result(lua, false, "native_guest_smg_hold_ineligible");
 
@@ -2522,6 +2525,7 @@ namespace
         smg_hold.projectile = projectile;
         smg_hold.guid = context.guid;
         smg_hold.profile = strict;
+        smg_hold.round = round;
         smg_hold.view = view;
         smg_hold.serial = ++smg_hold_serial;
         smg_hold.before = smg_hold.after = loaded;

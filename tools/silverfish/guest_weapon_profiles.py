@@ -78,12 +78,15 @@ THIRTY_06_INCENDIARY = StockAmmo(
 )
 THIRTY_06_HE = StockAmmo("thirty_06_he", 3, "30-06_HE", "Ammo_30-06_HEI_BP", "Projectile_30-06_HE", 14)
 THIRTY_06_MINE = StockAmmo("thirty_06_mine", 3, "30-06_Mine", "Ammo_30-06_Mine_BP", "Projectile_30-06_Mine", 24)
+THIRTY_06_TANDEM = StockAmmo(
+    "thirty_06_tandem", 3, "30-06_Tandem", "Ammo_30-06_Tandem_BP", "Projectile_30-06_Tandem", 14, projectile_count=3,
+)
 STOCK_AMMO = (
     NINE_MM_BALL, NINE_MM_AP, NINE_MM_VAMP,
     FORTY_FIVE_BALL, FORTY_FIVE_HOLLOW_POINT, FORTY_FIVE_AIR_BURST, FORTY_FIVE_MICRO_FRAG,
     FIVE_SIX_FMJ, FIVE_SIX_AP, FIVE_SIX_INCENDIARY, FIVE_SIX_STUN,
     *SHOTGUN_AMMO, FIVE_SEVEN_AP, FIVE_SEVEN_HP, FIVE_SEVEN_INCENDIARY,
-    FIFTY_CAL_FMJ, FIFTY_CAL_HEIAP, THIRTY_06_FMJ, THIRTY_06_INCENDIARY, THIRTY_06_HE, THIRTY_06_MINE,
+    FIFTY_CAL_FMJ, FIFTY_CAL_HEIAP, THIRTY_06_FMJ, THIRTY_06_INCENDIARY, THIRTY_06_HE, THIRTY_06_MINE, THIRTY_06_TANDEM,
 )
 
 
@@ -265,6 +268,10 @@ FIREARMS = (
             Magazine(6, 1, 0.5, True, FORTY_FIVE_HOLLOW_POINT, reload_first_stack=True)),
     Firearm("revolver-03", "Wep_Revolver_03", True,
             Magazine(6, 1, 0.5, True, FORTY_FIVE_HOLLOW_POINT, reload_first_stack=True)),
+    Firearm("full-auto-shotgun", "Wep_ShotGun_FullAuto", True,
+            Magazine(8, 0, 0.16, True, TWELVE_GAUGE_DSAPI, reload_first_stack=True)),
+    Firearm("full-auto-shotgun-02", "Wep_ShotGun_FullAuto_02", True,
+            Magazine(24, 0, 0.16, True, TWELVE_GAUGE_DSAPI, reload_first_stack=True)),
     Firearm("sg-71-a", "Wep_ShotGun_SemiAuto", True,
             Magazine(10, 1, 0.2, True, TWELVE_GAUGE_BUCK, reload_first_stack=True)),
     Firearm("sg-71-b", "Wep_ShotGun_SemiAuto_02", True,
@@ -294,7 +301,7 @@ TAKE_AMMO_MAGAZINES = {weapon.path: weapon.magazine for weapon in FIREARMS if we
 STOCK_HELD_FIRE_MAGAZINES = {
     weapon.kind: magazine for weapon in FIREARMS
     if (magazine := weapon.magazine) and not magazine.action_on_release
-    and magazine.burst_length != 1 and magazine.ammo.projectile_count == 1
+    and magazine.burst_length != 1
 }
 MAX_HELD_FIRE_ROUNDS = max(magazine.capacity for magazine in STOCK_HELD_FIRE_MAGAZINES.values())
 BOLT_ACTION_UNLOAD_CAPACITY = 5
@@ -305,9 +312,7 @@ AMMO_BY_PATH = {ammo.item_path: ammo for ammo in STOCK_AMMO}
 
 
 def compatible_magazine_round(base: StockAmmo, candidate: StockAmmo) -> bool:
-    return base.caliber == candidate.caliber and (
-        base == TWELVE_GAUGE_BUCK or base.projectile_count == candidate.projectile_count
-    )
+    return base.caliber == candidate.caliber
 
 
 AMMO_BY_KIND = {
@@ -316,3 +321,6 @@ AMMO_BY_KIND = {
     if firearm.magazine else BOLT_ACTION_AMMO
     for firearm in FIREARMS if firearm.magazine or firearm.path in BOLT_ACTION_UNLOADS
 }
+HELD_FIRE_PROJECTILE_COUNTS = frozenset(
+    AMMO_BY_PATH[path].projectile_count for kind in STOCK_HELD_FIRE_MAGAZINES for path in AMMO_BY_KIND[kind]
+)

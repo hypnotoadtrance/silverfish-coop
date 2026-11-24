@@ -5666,6 +5666,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_stock_held_queue(host, guest, pawn, portable_probe_command, kind="famas")),
         (resident_held_queue, weapon_campaign, "stock_lmg_hold",
          lambda host, guest, pawn: verify_stock_held_queue(host, guest, pawn, portable_probe_command, kind="lmg-01")),
+        (resident_held_queue, weapon_campaign, "stock_auto_shotgun_hold",
+         lambda host, guest, pawn: verify_stock_held_queue(host, guest, pawn, portable_probe_command, kind="full-auto-shotgun")),
         (stock_food, "observatory", "stock_food", verify_resident_guest_food),
         (stock_cooked_meal, "observatory", "stock_cooked_meal", verify_stock_cooked_meal),
         (stock_personal_consumable, "personal_consumable", "stock_personal_consumable",
@@ -5816,7 +5818,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_shovel_quest:
             for game in games:
                 probes.enter_context(stock_board_approach_overlay(game))
-        if stock_take_ammo or stock_shotguns or stock_loki_guest:
+        if stock_take_ammo or stock_shotguns or stock_loki_guest or resident_held_queue:
             proof["stock_take_ammo_overlays"] = [
                 probes.enter_context(guest_weapon_fixture_overlay(game, "portable_take_ammo_probe.lua")) for game in games
             ]

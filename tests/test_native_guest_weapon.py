@@ -148,7 +148,7 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
                       if profile.magazine and profile.magazine.reload_first_stack}
         self.assertEqual(same_stack, {
             "army-pistol", "pistol", "pistol-02", "tac-pistol", "1911", "1911-fancy", "heavy-pistol",
-            "rusty-pistol",
+            "rusty-pistol", "full-auto-shotgun", "full-auto-shotgun-02",
             "sg-71-a", "sg-71-b", "sg-71-a-suppressed", "model-1931", "fennec-57", "black-fox", "break-action-50",
             "bolt-action-shotgun", "bolt-action-shotgun-suppressed", "sawn-off-shotgun",
             "revolver-9mm", "revolver-01", "revolver-02", "revolver-03",
@@ -192,6 +192,12 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
         self.assertNotIn("sg-71-a", magazines)
         self.assertEqual(magazines["famas"].burst_length, 3)
         self.assertEqual(magazines["lmg-01"].capacity, 100)
+        for kind, capacity in (("full-auto-shotgun", 8), ("full-auto-shotgun-02", 24)):
+            self.assertEqual(magazines[kind], guest_weapon_profiles.Magazine(
+                capacity, 0, 0.16, True, guest_weapon_profiles.TWELVE_GAUGE_DSAPI, reload_first_stack=True))
+            self.assertEqual(guest_weapon_profiles.AMMO_BY_KIND[kind],
+                             frozenset(ammo.item_path for ammo in guest_weapon_profiles.SHOTGUN_AMMO))
+        self.assertIn(guest_weapon_profiles.THIRTY_06_TANDEM.item_path, guest_weapon_profiles.AMMO_BY_KIND["lmg-01"])
         self.assertEqual(guest_weapon_profiles.MAX_HELD_FIRE_ROUNDS, 100)
 
 

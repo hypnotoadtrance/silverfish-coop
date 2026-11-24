@@ -28,7 +28,9 @@ local function check(ok, status, serial, before, after, rounds, projectiles)
         or not math.tointeger(serial) or serial < 1 or serial >= 2 ^ 53
         or not math.tointeger(before) or before < 1 or before > weapon_profiles.max_held_fire_rounds
         or not math.tointeger(after) or after < 0 or after > before
-        or not math.tointeger(rounds) or rounds ~= before - after or projectiles ~= rounds then
+        or not math.tointeger(rounds) or rounds ~= before - after or not math.tointeger(projectiles)
+        or (rounds == 0 and projectiles ~= 0)
+        or (rounds > 0 and (projectiles % rounds ~= 0 or not weapon_profiles.held_projectile_counts[projectiles // rounds])) then
         error("mutation_unverified_guest_smg_hold_abi", 0)
     end
     return {serial = serial, status = status, before = before, after = after,
