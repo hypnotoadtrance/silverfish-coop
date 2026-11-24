@@ -4449,12 +4449,12 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     else:
                         finish_check("stock_personal_consumable_reconnect", started)
 
-                async def check_storm_reconnect(guest, _started):
+                async def check_storm_reconnect(guest, reconnect_started):
                     if "stock_storm_ambience" not in gameplay:
                         return
                     started = time.perf_counter()
                     try:
-                        await storm_trial.reconnected(host, guest)
+                        await storm_trial.reconnected(host, guest, reconnect_started)
                     except Exception as error:
                         finish_check("stock_storm_ambience_reconnect", started, error)
                     else:

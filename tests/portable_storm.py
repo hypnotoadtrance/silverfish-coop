@@ -21,9 +21,9 @@ def source_report(response):
 
 
 def conflict_report(response):
-    variant, denied, actor, ongoing = response.split(";")
-    assert variant == FOG and int(denied) > 0 and int(actor) == 0 and ongoing == "false", response
-    return dict(stock_storm=variant, denied=int(denied), independent_storm_actor=int(actor), ongoing=False)
+    variant, actor, ongoing = response.split(";")
+    assert variant == FOG and int(actor) == 0 and ongoing == "false", response
+    return dict(stock_storm=variant, independent_storm_actor=int(actor), ongoing=False)
 
 
 class StockStormTrial:
@@ -33,7 +33,7 @@ class StockStormTrial:
     async def stage(self, seat, action):
         return (await self.probe(seat.bridge, "portable-storm", action)).strip()
 
-    async def wait_projection(self, host, guest, variant):
+    async def wait_projection(self, host, guest, variant, *, guard_after=0, fresh_after=0):
         host_run, guest_run = host.campaign / "run", guest.client / "run"
 
         def host_ambience(frame):
@@ -50,10 +50,11 @@ class StockStormTrial:
         def guest_ambience(frame):
             game = frame.get("game", {})
             row = game.get("native_weather_ambience_guest", {})
-            return (frame.get("state") == "connected" and game.get("map") == OBSERVATORY
+            return (frame.get("updated_unix", 0) >= fresh_after and frame.get("state") == "connected"
+                    and game.get("map") == OBSERVATORY
                     and frame.get("gameplay_fresh") is True and row.get("epoch") == epoch
                     and row.get("phase") == "active" and row.get("variant") == variant
-                    and row.get("blend", 0) > 0 and game.get("native_weather_storm_guard", 0) > 0
+                    and row.get("blend", 0) > 0 and game.get("native_weather_storm_guard", 0) > guard_after
                     and all(row.get(key) == expected.get(key) for key in ("level", "particle", "sound", "volume"))
                     and (variant != PESTILENCE or row.get("fog")))
 
@@ -69,7 +70,8 @@ class StockStormTrial:
             assert expected_fog["density"] > 0 and viewed_fog["density"] > 0, (expected_fog, viewed_fog)
             assert all(viewed_fog[key] == expected_fog[key] for key in
                        ("material", "start_distance", "r", "g", "b", "a")), (expected_fog, viewed_fog)
-        return {"host_projection": expected, "guest_readback": viewed, "zone_epoch": epoch}
+        return {"host_projection": expected, "guest_readback": viewed, "zone_epoch": epoch,
+                "guard_denials": guest_frame["game"].get("native_weather_storm_guard", 0)}
 
     async def prepare(self, host, guest, _character):
         self.checkpoint = campaign_save_hashes(host.campaign)
@@ -105,10 +107,10 @@ class StockStormTrial:
         self.evidence = {"join": dict(projected, guest_conflict=attempt, host_stock=host_stock, guest_stock=guest_stock)}
         return {"stock_storm_ambience": self.evidence}
 
-    async def reconnected(self, host, guest):
-        await self.wait_projection(host, guest, LIGHTNING)
+    async def reconnected(self, host, guest, started):
+        before = await self.wait_projection(host, guest, LIGHTNING, guard_after=-1, fresh_after=started)
         attempt = conflict_report(await self.stage(guest, "conflict"))
-        projected = await self.wait_projection(host, guest, LIGHTNING)
+        projected = await self.wait_projection(host, guest, LIGHTNING, guard_after=before["guard_denials"])
         host_stock, guest_stock = map(source_report, await asyncio.gather(
             self.stage(host, "read"), self.stage(guest, "read")))
         assert host_stock["actor"] == self.first_actor and host_stock["lightning_spawns"] == 1, host_stock

@@ -57,15 +57,18 @@ local function install_hooks()
         if identity == fog then armed.fog_spawns = armed.fog_spawns + 1 end
         if identity == pestilence then armed.pestilence_spawns = armed.pestilence_spawns + 1 end
     end)
-    RegisterHook("/Script/Niagara.NiagaraFunctionLibrary:SpawnSystemAtLocation", function(_, context, asset)
-        if in_world(context:get()) and path(asset:get()):find(weather_particle, 1, true) then
+    RegisterHook("/Script/Niagara.NiagaraFunctionLibrary:SpawnSystemAtLocation", function(_, context, asset, location)
+        if not armed or not path(asset:get()):find(weather_particle, 1, true) then return end
+        local origin = location:get()
+        if in_world(context:get()) and origin.X == 0 and origin.Y == 0 and origin.Z == 10000 then
             armed.lightning_particles = armed.lightning_particles + 1
         end
     end)
     RegisterHook("/Script/Engine.GameplayStatics:SpawnSoundAttached", function(_, sound, component)
-        if not armed then return end
+        if not armed or not path(sound:get()):find(wind, 1, true) then return end
         local target = component:get()
-        if valid(target) and in_world(target:GetOwner()) and path(sound:get()):find(wind, 1, true) then
+        local owner = valid(target) and target:GetOwner()
+        if in_world(owner) and same(target, owner.RootComponent) then
             armed.lightning_audio = armed.lightning_audio + 1
         end
     end)
@@ -146,21 +149,22 @@ local function start_host(world, statics, pawn, day, instance, action)
 end
 
 local function read_conflict(world, day, instance)
-    assert(valid(world.NetDriver.ServerConnection) and type(SilverfishReadNativeGuestStormGuard) == "function")
+    assert(valid(world.NetDriver.ServerConnection), "the stock challenge requires a real guest world")
     return stock_active_track(instance.SaveSlot_Ref, "TheFog_Data", function(track, expected)
-        local prior_world, prior_count = SilverfishReadNativeGuestStormGuard()
         local prior, ongoing = day.LocalStorm, instance.OngoingStorm
         local prior_address = valid(prior) and prior:GetAddress() or 0
-        day:UpdateStormTrack()
-        local guard_world, guard_count = SilverfishReadNativeGuestStormGuard()
+        local storming, weather_min, weather_max = day.Storming, day.WeatherMin, day.WeatherMax
+        -- Exercise the stock activation branch even if an earlier schedule set Storming.
+        day.Storming = false
+        local ok, reason = pcall(day.UpdateStormTrack, day)
+        local changed = day.Storming ~= false or day.WeatherMin ~= weather_min or day.WeatherMax ~= weather_max
+        day.Storming = storming
+        assert(ok, reason)
         local active = day.LocalStorm
-        assert(guard_world == world:GetAddress() and type(guard_count) == "number"
-            and guard_count == (prior_world == guard_world and prior_count or 0) + 1,
-            "the exact guest world did not deny the stock storm scheduler")
-        assert((valid(active) and active:GetAddress() or 0) == prior_address and instance.OngoingStorm == ongoing
+        assert(not changed and (valid(active) and active:GetAddress() or 0) == prior_address and instance.OngoingStorm == ongoing
             and same(track[field_class], expected) and track[field_active] == false,
             "denied weather scheduling changed the guest's storm track, actor or danger state")
-        return ("%s;%s;%s;%s"):format(path(expected), guard_count, prior_address, tostring(ongoing))
+        return ("%s;%s;%s"):format(path(expected), prior_address, tostring(ongoing))
     end)
 end
 
