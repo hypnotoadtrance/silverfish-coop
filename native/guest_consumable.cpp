@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <format>
 #include <memory>
 #include <string>
@@ -1066,6 +1067,162 @@ namespace
         }
     };
 
+    struct CookingEffect
+    {
+        double food{}, health{}, regen{};
+        int fatigue{}, intox{};
+
+        bool valid_delta() const
+        {
+            return food >= -200 && food <= 200 && health >= 0 && health <= 1000 &&
+                regen >= 0 && regen <= 1000 && fatigue >= -100 && fatigue <= 0 && intox >= -100 && intox <= 0;
+        }
+        bool operator==(const CookingEffect&) const = default;
+    };
+
+    const Unreal::FName& fatigue_flag()
+    {
+        static const Unreal::FName name{STR("Player_Fatigue")};
+        return name;
+    }
+
+    CookingEffect cooking_vitals(const Scope& scope, const Health& health, const Intoxication& flags)
+    {
+        const auto vitals = health.read(scope.guest);
+        auto* entries = flags.data(scope.guest);
+        return {vitals.food, vitals.health, vitals.regen, flags.read(entries, fatigue_flag()), flags.read(entries)};
+    }
+
+    Hook::GlobalCallbackId cooking_pre = Hook::ERROR_ID, cooking_post = Hook::ERROR_ID;
+    struct LocalCook
+    {
+        Unreal::FWeakObjectPtr pawn, save, eat;
+        Unreal::FFrame* frame{};
+        CookingEffect before;
+        std::deque<std::pair<std::int64_t, CookingEffect>> receipts;
+    };
+    LocalCook local_cook;
+    std::int64_t recipe_sequence{};
+
+    bool local_cooking_scope(Scope& scope)
+    {
+        scope.pawn = local_cook.pawn.Get();
+        scope.guest = local_cook.save.Get();
+        if (!live(scope.pawn) || !live(scope.guest) || read_object(scope.pawn, STR("Save")) != scope.guest) return false;
+        scope.world = static_cast<Unreal::AActor*>(scope.pawn)->GetWorld();
+        scope.instance = read_object(scope.world, STR("OwningGameInstance"));
+        auto* driver = read_object(scope.world, STR("NetDriver"));
+        return live(scope.instance) && live(read_object(driver, STR("ServerConnection"))) &&
+            read_object(scope.instance, STR("SaveSlot_Ref")) == scope.guest &&
+            read_object(scope.pawn, STR("As Game Instance FP")) == scope.instance;
+    }
+
+    void read_cooking_start(Hook::TCallbackIterationData<void>& iteration, Unreal::UObject* fire, Unreal::FFrame& frame, void*)
+    {
+        if (!Unreal::IsInGameThreadRaw() || !local_cook.eat.Get() || frame.Node() != local_cook.eat.Get() ||
+            iteration.OriginalFunctionCallPrevented() || local_cook.frame || local_cook.receipts.size() >= 8) return;
+        Scope scope;
+        Health health;
+        Intoxication flags;
+        if (!live(fire) || !local_cooking_scope(scope) || static_cast<Unreal::AActor*>(fire)->GetWorld() != scope.world ||
+            !health.bind(scope, false).empty() || !flags.bind(scope.guest)) return;
+        auto* portion = field<Unreal::FDoubleProperty>(fire, STR("Food_AmmountReady"));
+        if (!portion || !(portion->GetPropertyValueInContainer(fire) > 0)) return;
+        local_cook.frame = &frame;
+        local_cook.before = cooking_vitals(scope, health, flags);
+    }
+
+    void read_cooking_end(Hook::TCallbackIterationData<void>& iteration, Unreal::UObject* fire, Unreal::FFrame& frame, void*)
+    {
+        if (!Unreal::IsInGameThreadRaw() || &frame != local_cook.frame) return;
+        local_cook.frame = nullptr;
+        Scope scope;
+        Health health;
+        Intoxication flags;
+        if (iteration.OriginalFunctionCallPrevented() || !live(fire) ||
+            !number_is<Unreal::FDoubleProperty>(fire, STR("Food_AmmountReady"), 0.0) ||
+            !local_cooking_scope(scope) || !health.bind(scope, false).empty() || !flags.bind(scope.guest)) return;
+        const auto after = cooking_vitals(scope, health, flags);
+        const auto before = local_cook.before;
+        const CookingEffect delta{after.food - before.food, after.health - before.health, after.regen - before.regen,
+            after.fatigue - before.fatigue, after.intox - before.intox};
+        if (delta.valid_delta() && delta != CookingEffect{})
+            local_cook.receipts.emplace_back(++recipe_sequence, delta);
+    }
+
+    int poll_cooking(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || cooking_pre == Hook::ERROR_ID || cooking_post == Hook::ERROR_ID) return 0;
+        if (lua.get_stack_size() == 0)
+        {
+            if (local_cook.pawn.Get()) local_cook = {};
+            return 0;
+        }
+        if (lua.get_stack_size() != 2 || !lua.is_integer(1) || !lua.is_integer(2)) return 0;
+        auto* pawn = reinterpret_cast<Unreal::UObject*>(lua.get_integer());
+        auto* save = reinterpret_cast<Unreal::UObject*>(lua.get_integer());
+        if (local_cook.pawn.Get() != pawn || local_cook.save.Get() != save)
+        {
+            local_cook = {};
+            if (!exact(pawn, find<Unreal::UClass>(pawn_path)) || !exact(save, find<Unreal::UClass>(save_path))) return 0;
+            local_cook.pawn = pawn;
+            local_cook.save = save;
+        }
+        if (!local_cook.eat.Get()) local_cook.eat = find<Unreal::UFunction>(
+            STR("/Game/Classes/Actors/CampFire_BP.CampFire_BP_C:EatFood"));
+        if (local_cook.receipts.empty()) return 0;
+        const auto [sequence, delta] = local_cook.receipts.front();
+        local_cook.receipts.pop_front();
+        lua.set_integer(sequence);
+        lua.set_number(delta.food);
+        lua.set_number(delta.health);
+        lua.set_number(delta.regen);
+        lua.set_integer(delta.fatigue);
+        lua.set_integer(delta.intox);
+        return 6;
+    }
+
+    int settle_cooking(const Lua& lua)
+    {
+        const auto refuse = [&] { return result(lua, false, "guest_cooked_meal_refused_scope"); };
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 8) return refuse();
+        for (int i = 1; i <= 8; ++i)
+            if (i >= 4 && i <= 6 ? !lua.is_number(i) : !lua.is_integer(i)) return refuse();
+        const auto pawn = lua.get_integer(), guest = lua.get_integer(), stock = lua.get_integer();
+        const auto food = lua.get_number(), health = lua.get_number(), regen = lua.get_number();
+        const auto fatigue = lua.get_integer(), intox = lua.get_integer();
+        if (pawn <= 0 || guest <= 0 || stock <= 0 || fatigue < -100 || fatigue > 0 || intox < -100 || intox > 0) return refuse();
+        const CookingEffect delta{food, health, regen, static_cast<int>(fatigue), static_cast<int>(intox)};
+        Scope scope;
+        Health vitals;
+        Intoxication flags;
+        if (!delta.valid_delta() || delta == CookingEffect{} || !scope.bind(pawn, guest, stock) ||
+            !vitals.bind(scope, false).empty() || !flags.bind(scope.guest)) return refuse();
+        auto* entries = flags.data(scope.guest);
+        auto* pawn_intox = field<Unreal::FIntProperty>(scope.pawn, STR("Intoxication"));
+        if (!pawn_intox) return refuse();
+        auto copy = copy_value(flags.map, entries);
+        if (!copy) return refuse();
+        auto* next_flags = static_cast<Unreal::FScriptMap*>(copy.get());
+        if ((delta.fatigue && !flags.write(next_flags, fatigue_flag(),
+                std::clamp(flags.read(entries, fatigue_flag()) + delta.fatigue, 0, 100))) ||
+            (delta.intox && !flags.write(next_flags, std::clamp(flags.read(entries) + delta.intox, 0, 100)))) return refuse();
+        if (delta.fatigue || delta.intox) flags.map->CopyCompleteValue(entries, next_flags);
+        if (delta.intox) pawn_intox->SetPropertyValueInContainer(scope.pawn, flags.read(entries));
+        auto after = vitals.before;
+        after.food = std::clamp(after.food + delta.food, 0.0, 200.0);
+        after.health = std::clamp(after.health + delta.health, 0.0, vitals.max_health);
+        after.regen = std::clamp(after.regen + delta.regen, 0.0, vitals.max_health);
+        vitals.write(scope.guest, after);
+        lua.set_bool(true);
+        lua.set_number(after.food);
+        lua.set_number(after.health);
+        lua.set_number(after.regen);
+        lua.set_integer(flags.read(entries, fatigue_flag()));
+        lua.set_integer(flags.read(entries));
+        return 6;
+    }
+
     struct FoodFunctions
     {
         Unreal::UFunction* effect{};
@@ -1468,6 +1625,14 @@ bool silverfish::native_guest_consumable::qualifies_personal_consumable(Unreal::
 
 void silverfish::native_guest_consumable::install_hooks()
 {
+    if (enabled() && cooking_pre == Hook::ERROR_ID && cooking_post == Hook::ERROR_ID)
+    {
+        constexpr auto owner = STR("SilverfishCoopNative");
+        cooking_pre = Hook::RegisterProcessLocalScriptFunctionPreCallback(read_cooking_start,
+            {false, false, owner, STR("Capture the local guest state before a stock meal")});
+        cooking_post = Hook::RegisterProcessLocalScriptFunctionPostCallback(read_cooking_end,
+            {false, false, owner, STR("Capture the completed stock meal's personal effects")});
+    }
     if (!mre_enabled() || intox_hook != Hook::ERROR_ID) return;
     intox_hook = Hook::RegisterProcessLocalScriptFunctionPreCallback(redirect_guest_intox,
         {false, false, STR("SilverfishCoopNative"), STR("Keep stock guest MRE intoxication in its detached Save")});
@@ -1475,6 +1640,10 @@ void silverfish::native_guest_consumable::install_hooks()
 
 void silverfish::native_guest_consumable::uninstall_hooks()
 {
+    if (cooking_pre != Hook::ERROR_ID) Hook::UnregisterCallback(cooking_pre);
+    if (cooking_post != Hook::ERROR_ID) Hook::UnregisterCallback(cooking_post);
+    cooking_pre = cooking_post = Hook::ERROR_ID;
+    local_cook = {};
     if (intox_hook != Hook::ERROR_ID) Hook::UnregisterCallback(intox_hook);
     intox_hook = Hook::ERROR_ID;
     food_functions = {};
@@ -1487,6 +1656,8 @@ void silverfish::native_guest_consumable::register_lua(RC::LuaMadeSimple::Lua& l
         lua.register_function("SilverfishUseNativeGuestBandage", use);
         lua.register_function("SilverfishOpenNativeGuestStarterBag", open_starter_bag);
         lua.register_function("SilverfishSettleNativeGuestPersonalConsumable", settle_personal_consumable);
+        lua.register_function("SilverfishPollNativeGuestCookedMeal", poll_cooking);
+        lua.register_function("SilverfishSettleNativeGuestCookedMeal", settle_cooking);
     }
     if (mre_enabled())
     {

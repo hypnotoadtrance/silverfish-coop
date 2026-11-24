@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import math
 import re
 import time
+import uuid
 
 from . import party
 from .native_gold import valid_guid
@@ -22,6 +23,7 @@ BROWN_MUSHROOM = "native-guest-brown-mushroom"
 BROWN_MUSHROOM_CLASS = "/Game/Classes/Items/Item_BrownMushroom.Item_BrownMushroom_C"
 STARTER_BAG = "native-guest-starter-bag"
 PERSONAL = "native-guest-personal-consumable"
+COOKED_MEAL = "native-guest-cooked-meal"
 PERSONAL_KEY = "native_guest_personal_consumable"
 PERSONAL_ENTRY = "use-personal-consumable"
 PERSONAL_PREVIEW = "native-guest-personal-consumable-preview"
@@ -153,6 +155,83 @@ async def settle_personal_preview(client, area, epoch, operation, guid, sequence
             or any(receipt.get(field) != preview[field] for field in ("class_path", "quantity_before", "quantity_after"))):
         raise ValueError("The host did not verify the exact personal consumable")
     return receipt
+
+
+def _cooking_effect(value):
+    food, health, regen, fatigue, intox = value.split(",")
+    effect = (float(food), float(health), float(regen), int(fatigue), int(intox))
+    if not any(effect) or not all(low <= amount <= high for amount, (low, high) in zip(
+            effect, ((-200, 200), (0, 1000), (0, 1000), (-100, 0), (-100, 0)), strict=True)):
+        raise ValueError("Invalid cooked meal effect")
+    return effect
+
+
+async def service_cooked_meals(client, active):
+    applied = False
+    for raw in client.bridge.native_cooked_meals():
+        if not active or not client.host_session or not client.zone_epoch:
+            continue
+        try:
+            label, sequence, area, pawn, effect = raw.decode().rstrip("\n").split("\t")
+            if (label != COOKED_MEAL or not 1 <= int(sequence) < 2**53 or area != client.expected_zone
+                    or pawn != client.last_game.get("pawns", {}).get("local", {}).get("name")):
+                continue
+            _cooking_effect(effect)
+            operation = uuid.uuid5(client.bridge.input_namespace,
+                                   f"{client.host_session}:{client.zone_epoch}:{COOKED_MEAL}:{sequence}").hex
+            result = await client.gameplay_action(COOKED_MEAL, operation, f"{client.zone_epoch}@{effect}")
+            client.control.event("native_guest_cooked_meal", operation_id=operation, **result)
+            applied = True
+        except (OSError, RuntimeError, ValueError) as error:
+            client.control.event("native_guest_cooked_meal_rejected", reason=str(error))
+    return applied
+
+
+async def use_cooked_meal(host, bridge, character, target, operation):
+    from .native_inventory import retain_guest_save
+
+    if not isinstance(target, str) or len(target) > 192 or not party.REQUEST_ID.fullmatch(operation):
+        raise party.RuleError("invalid_cooked_meal")
+    epoch, separator, effect = target.partition("@")
+    try:
+        amounts = _cooking_effect(effect)
+    except ValueError as error:
+        raise party.RuleError("invalid_cooked_meal") from error
+    game = host.last_game
+    if (not separator or epoch != host.zone_epoch or not host.native_guest or host.native_profile is None
+            or host.transitioning or host.stopping or host.native_checkpoint_unsafe
+            or game.get("state") != "hosting" or time.monotonic() - host.last_seen > 3):
+        raise party.RuleError("guest_cooked_meal_unavailable")
+    request = [COOKED_MEAL, target, None]
+    for receipt in host.party["receipts"].get(character, ()):
+        if receipt["id"] == operation:
+            if receipt["request"] != request:
+                raise party.RuleError("operation_id_conflict")
+            return receipt["result"]
+    player = host.party["players"].get(character)
+    owner = host.native_recipients().get(character, {})
+    pawn = owner.get("pawn") if owner.get("connected") else None
+    if not player or player["downed"] or host.party["wipe"] is not None or not pawn or character in host.party["pending_spawns"]:
+        raise party.RuleError("guest_cooked_meal_owner_unavailable")
+    if not await retain_guest_save(host, bridge, character, pawn):
+        raise party.RuleError("guest_cooked_meal_working_save_unavailable")
+    if epoch != host.zone_epoch or host.native_recipients().get(character, {}).get("pawn") != pawn:
+        raise party.RuleError("guest_cooked_meal_visit_changed")
+    snapshot = await bridge.command(COOKED_MEAL, pawn, *map(str, amounts), timeout=4)
+    message = snapshot.get("ack", {}).get("message", "").split()
+    if (snapshot.get("state") != "hosting" or snapshot.get("map") != game.get("map")
+            or len(message) != 7 or message[:2] != ["cooked", "meal"]):
+        raise RuntimeError("The guest cooked meal could not be verified")
+    food, health, regen, fatigue, intox = map(float, message[2:])
+    if not (0 <= food <= 200 and 0 <= health <= 1_000_000 and 0 <= regen <= 1_000_000
+            and 0 <= fatigue <= 100 and 0 <= intox <= 100):
+        raise RuntimeError("The guest cooked meal has invalid readback")
+    host.last_game, host.last_seen = snapshot, time.monotonic()
+    result = {"cooked_meal": dict(food=food, health=health, regen=regen, fatigue=int(fatigue), intox=int(intox))}
+    recent = host.party["receipts"].setdefault(character, [])
+    recent.append({"id": operation, "request": request, "result": result})
+    del recent[:-party.RECENT_ACTIONS]
+    return result
 
 
 async def use_personal(host, bridge, character, target, operation_id):

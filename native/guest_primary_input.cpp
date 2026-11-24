@@ -230,6 +230,7 @@ namespace
         Clock::time_point expires{};
         std::uint64_t generation{};
         std::uint64_t stroke{};
+        bool local_melee{};
     };
 
     struct Receipt { std::uint64_t sequence{}; Clock::time_point expires{}; };
@@ -760,6 +761,11 @@ namespace
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - held.started);
         const auto duration = std::clamp(elapsed, std::chrono::milliseconds{0}, std::chrono::milliseconds{9000});
         queue_held(edge, held.id, now, duration.count());
+        if (press.stroke == held.id && press.local_melee)
+        {
+            silverfish::native_guest_melee::present_local_input(press.seat.pawn.Get(), press.seat.held.Get(), false);
+            press.local_melee = false;
+        }
         if (edge == HeldEdge::cancel && press.stroke == held.id && press.expires > now + held_probe_period)
             press.expires = now + held_probe_period;
         held = {};
@@ -791,6 +797,9 @@ namespace
             return false;
         held = {held_sequence, proof, now, until, now + held_probe_period};
         press.stroke = held.id;
+        if (scoped_melee_edges() && scope.seat.mirrored)
+            press.local_melee = silverfish::native_guest_melee::present_local_input(
+                scope.seat.pawn.Get(), scope.seat.held.Get(), true);
         return true;
     }
 
@@ -1478,6 +1487,8 @@ namespace silverfish::native_guest_primary_input
     {
         generation.fetch_add(1, std::memory_order_acq_rel);
         if (!U::IsInGameThreadRaw()) return;
+        if (press.local_melee)
+            silverfish::native_guest_melee::present_local_input(press.seat.pawn.Get(), press.seat.held.Get(), false);
         scope = {};
         press = {};
         head = count = 0;

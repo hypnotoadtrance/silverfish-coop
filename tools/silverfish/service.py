@@ -106,7 +106,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_lantern.EXTINGUISH,
                         *native_guest_weapon.GUEST_ACTIONS, native_guest_weapon.SELECT_EQUIPMENT,
                         native_guest_weapon.SET_FIRE_MODE,
-                        *native_guest_consumable.RESULT, native_guest_melee.SWING, native_guest_melee.INPUT,
+                        *native_guest_consumable.RESULT, native_guest_consumable.COOKED_MEAL, native_guest_melee.SWING, native_guest_melee.INPUT,
                         native_host_dig_live.GUEST_ACTION,
                         native_host_dig_live.COLLECT,
                         native_guest_armor.ACTION, native_guest_armor.HELMET_ACTION)
@@ -2257,6 +2257,8 @@ class Host:
                 result = await native_guest_armor.perform(self, bridge, character, request["operation_id"], action, target)
             elif action == native_guest_consumable.PERSONAL:
                 result = await native_guest_consumable.use_personal(self, bridge, character, target, request["operation_id"])
+            elif action == native_guest_consumable.COOKED_MEAL:
+                result = await native_guest_consumable.use_cooked_meal(self, bridge, character, target, request["operation_id"])
             elif action in native_guest_consumable.RESULT:
                 result = await native_guest_consumable.use(self, bridge, character, target, request["operation_id"], action=action)
             elif action in ("native-loot-inspect", "native-loot-open", "native-loot-claim"):
@@ -6571,7 +6573,8 @@ class Client:
                     self.next_retry = time.monotonic() + self.auto_delay
             active = (self.transport.connected and self.last_game.get("state") == "connected"
                       and not self.needs_travel and not self.server_transitioning)
-            await self.guest_ui.sync_health(self, active)
+            if not await native_guest_consumable.service_cooked_meals(self, active):
+                await self.guest_ui.sync_health(self, active)
             if active and self.last_game.get("map") == self.expected_zone and time.monotonic() - self.gameplay_seen < 2:
                 self.last_game = await self.hurt_playback.sync(
                     self.bridge, self.control, self.last_game, self.gameplay.get(native_damage_feedback.KEY), self.zone_epoch)

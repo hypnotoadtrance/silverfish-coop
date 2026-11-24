@@ -1295,6 +1295,28 @@ local function dock_strike(pawn, world, host)
     return ("%.6f;%.6f;%.6f;%s"):format(host_before, before, after, actor:GetFullName())
 end
 
+local local_melee_animation, local_melee_notifies, local_melee_hook
+
+local function observe_local_melee(action, pawn)
+    local weapon = pawn.EquipedItem
+    local mesh = valid(weapon) and weapon.Wep_Skeli
+    local animation = valid(mesh) and mesh:GetAnimInstance()
+    assert(valid(animation) and same(animation, weapon["As Melee Wep Anim BP"]), "stock first-person melee animator unavailable")
+    if action == "melee-local-read" then
+        assert(same(animation, local_melee_animation), "first-person melee animator was replaced")
+        return tostring(local_melee_notifies)
+    end
+    local_melee_animation, local_melee_notifies = animation, 0
+    if not local_melee_hook then
+        RegisterHook("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_Assets/MeleeWep_AnimBP.MeleeWep_AnimBP_C:AnimNotify_Hit",
+            function(context)
+                if same(context:get(), local_melee_animation) then local_melee_notifies = local_melee_notifies + 1 end
+            end)
+        local_melee_hook = true
+    end
+    return "watching"
+end
+
 local function run(action, actor_path)
     if action == "disarm-weapon-observers" then
         shot_turret, turret_effects = nil, nil
@@ -1315,7 +1337,10 @@ local function run(action, actor_path)
     local pawn = statics:GetPlayerPawn(world, 0)
     assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn:GetWorld(), world), "local stock pawn unavailable")
     local host = pawn:HasAuthority()
-    if action == "corpse-spawn" then
+    if action == "melee-local-arm" or action == "melee-local-read" then
+        assert(not host, "first-person melee observer requires the guest")
+        return observe_local_melee(action, pawn)
+    elseif action == "corpse-spawn" then
         assert(host, "only the host can spawn the stock carry target")
         return spawn_carry_target(world, pawn)
     elseif action:match("^corpse%-") then

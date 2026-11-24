@@ -4,6 +4,7 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TI
 
 local prefix = mailbox .. "/portable-guest-food-"
 local map = "World /Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
+local camp = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.CampFire_02_BP_C_1"
 local meal_path = "/Game/Classes/Items/Item_MRE.Item_MRE_C"
 local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
@@ -30,6 +31,30 @@ end
 local function medical_vitals(save)
     return ("%.6f,%.6f,%.6f,%d,%d"):format(save.PlayerHealth, save.PlayerRegen, save.PlayerStim,
         stock_flag(save, "Sickness"), stock_flag(save, "Use_AntiBio"))
+end
+
+local function cooking_stats(save)
+    return ("%.6f,%d,%d"):format(save.PlayerFood, stock_flag(save, "Player_Fatigue"), stock_flag(save, "Player_Intox"))
+end
+
+local function eat_all(pawn, save, empty)
+    local fire = asset(camp)
+    assert(not pawn:HasAuthority() and same(fire:GetWorld(), pawn:GetWorld()), "the cook must be the connected guest")
+    assert(fire.Food_AmmountReady == 0, "the guest's cooking pot was already prepared")
+    if not empty then
+        fire:AddFood(40)
+        -- Start with a ready portion so the fixture does not wait for the stock cooking timer.
+        fire.Food_AmmountReady = 20
+    end
+    local controller = pawn.Controller
+    local menu = asset("/Script/UMG.Default__WidgetBlueprintLibrary"):Create(controller,
+        asset("/Game/Classes/GUI/Menu_Cook_Widget.Menu_Cook_Widget_C"), controller)
+    assert(valid(menu) and same(menu:GetOwningPlayer(), controller), "could not create the stock Cook menu")
+    menu.FireRef = fire
+    controller:AddMenu(menu)
+    local before = cooking_stats(save)
+    menu:BndEvt__Menu_Cook_Widget_Button_Eat_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
+    return before .. ";" .. cooking_stats(save) .. ";" .. tostring(fire.Food_AmmountReady)
 end
 
 local function stock_item(remote, class, quantity)
@@ -71,6 +96,14 @@ local function host_read(pawn, save, world, action)
         return ("%.6f,%.6f,%.6f,%.6f"):format(save.PlayerFood, save.PlayerRegen, detached.PlayerFood, detached.PlayerRegen)
     end
     if action == "host-medical-vitals" then return medical_vitals(save) .. ";" .. medical_vitals(detached) end
+    if action == "host-cooking-state" then
+        return cooking_stats(save) .. ";" .. cooking_stats(detached) .. ";" .. tostring(asset(camp).Food_AmmountReady)
+    end
+    if action == "seed-cooking-state" then
+        detached.PlayerFood = 55
+        detached.Flags:Add(FName("Player_Fatigue"), 50)
+        return "seeded"
+    end
     if action == "seed-personal-compatibility" then
         local weta = asset("/Game/Classes/Items/Item_LiveWeta.Item_LiveWeta_C")
         local unsupported = stock_item(remote, weta, 1)
@@ -126,6 +159,8 @@ local function run(action)
         assert(not pawn:HasAuthority(), "the personal stat readback needs an enrolled guest")
         return ("%.6f,%.6f"):format(save.PlayerFood, save.PlayerRegen)
     end
+    if action == "cook" or action == "cook-empty" then return eat_all(pawn, save, action == "cook-empty") end
+    if action == "guest-cooking-state" then return cooking_stats(save) end
     assert(pawn:HasAuthority(), "the meal fixture must seed the detached save on the host")
     return host_read(pawn, save, world, action)
 end

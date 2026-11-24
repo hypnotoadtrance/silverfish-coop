@@ -1658,6 +1658,37 @@ bool silverfish::native_guest_melee::ordinary_weapon(RC::Unreal::UObject* weapon
         local_function(weapon, master, STR("Contact"), 1);
 }
 
+bool silverfish::native_guest_melee::present_local_input(U::UObject* pawn, U::UObject* weapon, bool down)
+{
+    if (!U::IsInGameThreadRaw() || !live(pawn) || !live(weapon) || object(weapon, STR("Player_Ref")) != pawn ||
+        object(weapon, STR("User")) != pawn || object(pawn, STR("EquipedItem")) != weapon) return false;
+    auto* master = find<U::UClass>(master_path);
+    auto* primary = local_function(weapon, master, STR("Use_Item_Primary"), 2);
+    auto* contact = local_function(weapon, master, STR("Contact"), 1);
+    auto* held = primary_input<U::FBoolProperty>(primary, STR("Held"), offsetof(Primary, held));
+    auto* variance = primary_input<U::FDoubleProperty>(primary, STR("VarianceScaler"), offsetof(Primary, variance));
+    if (!held || !variance || primary->GetParmsSize() != sizeof(Primary) || !contact) return false;
+
+    const auto known = [&] {
+        return std::ranges::any_of(fenced_pipes, [&](const PipeFence& entry) {
+            return entry.pipe.Get() == weapon && entry.contact.Get() == contact;
+        });
+    };
+    if (down && !known())
+    {
+        std::erase_if(fenced_pipes, [](const PipeFence& entry) { return !entry.pipe.Get() || !entry.contact.Get(); });
+        if (fenced_pipes.size() >= max_fenced_pipes || !hooks()) return false;
+        // Delayed animation notifies remain fenced even if the player swaps weapons.
+        fenced_pipes.push_back({weapon, contact});
+    }
+    else if (!known()) return false;
+
+    Primary parameters{};
+    held->SetPropertyValueInContainer(&parameters, down);
+    weapon->ProcessEvent(primary, &parameters);
+    return true;
+}
+
 void silverfish::native_guest_melee::register_lua(RC::LuaMadeSimple::Lua& lua)
 {
     if (!enabled()) return;

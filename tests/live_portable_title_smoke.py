@@ -68,7 +68,7 @@ CABINET_RELEASE_SHA256 = "e35f410f7231f2c510b4ec43c34fb59ff7e9574187e2cd32fe66a6
 
 # These Observatory checks reacquire their target or seed their own starting
 # state. They can still give a valid result after an unrelated check fails.
-INDEPENDENT_RESIDENT_CHECKS = frozenset({"stock_food", "stock_melee_edges"})
+INDEPENDENT_RESIDENT_CHECKS = frozenset({"stock_food", "stock_cooked_meal", "stock_melee_edges"})
 
 
 async def run_resident_checks(checks, host, guest, finish_check, skip_check):
@@ -1228,11 +1228,17 @@ async def verify_stock_melee_edges_only(host: Seat, guest: Seat, pawn: str) -> d
     before = campaign_save_hashes(host.campaign)
     frame = await equip_stock_guest_melee(host, guest, "seed-melee-edges", "old-pipe")
     guid = frame["game"]["native_guest_primary_scope"]["guid"]
+    async def observe(action):
+        return await portable_probe_command(guest.bridge, "portable-npc-override", action)
+
+    assert await observe("melee-local-arm") == "watching"
     edges = await verify_stock_melee_edges(host, guest)
     for edge in ("tap", "charged", "combo"):
         assert (edges[edge]["pawn"], edges[edge]["guid"]) == (pawn, guid), edges[edge]
+    first_person_contacts = int(await observe("melee-local-read"))
+    assert first_person_contacts >= 4, (first_person_contacts, edges)
     assert campaign_save_hashes(host.campaign) == before, "A regular melee attack wrote campaign saves"
-    return {"stock_melee_edges": {**edges, "campaign_unchanged": True}}
+    return {"stock_melee_edges": {**edges, "first_person_contacts": first_person_contacts, "campaign_unchanged": True}}
 
 
 async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict) -> dict:
@@ -2754,6 +2760,50 @@ async def verify_resident_guest_food(host: Seat, guest: Seat, pawn: str) -> dict
                                     "host_regen_unchanged": True, "campaign_checkpoint_unchanged": True,
                                     "stock_widget_tick_invoked_in_muted_fixture": True, "additional_stock_uses": verified,
                                     "host_observed_food_use": observed_food}}
+
+
+async def verify_stock_cooked_meal(host: Seat, guest: Seat, _pawn: str) -> dict:
+    guest_run = guest.client / "run"
+    checkpoint = campaign_save_hashes(host.campaign)
+    frame = await wait_resident_status(guest_run, lambda row: row.get("local_bridge") == "memory")
+
+    async def command(seat, action):
+        return await portable_probe_command(seat.bridge, "portable-guest-food", action)
+
+    def stats(value):
+        return tuple(map(float, value.split(",")))
+
+    assert await command(host, "seed-cooking-state") == "seeded"
+    async with asyncio.timeout(8):
+        while not 54 <= stats(await command(guest, "guest-cooking-state"))[0] <= 55:
+            await asyncio.sleep(.1)
+    stock_before, detached_before, host_pot = (await command(host, "host-cooking-state")).split(";")
+    started = time.time()
+    local_before, local_after, remainder = (await command(guest, "cook")).split(";")
+    food_before, _, _ = stats(local_before)
+    food_after, _, _ = stats(local_after)
+    assert float(remainder) == 0 and 19.9 <= food_after - food_before <= 20.1, (local_before, local_after, remainder)
+    async with asyncio.timeout(8):
+        while True:
+            events = [row for row in await resident_events(guest_run, frame)
+                      if row["time_unix"] >= started and row["event"].startswith("native_guest_cooked_meal")]
+            if events:
+                receipt, = events
+                assert receipt["event"] == "native_guest_cooked_meal", receipt
+                break
+            await asyncio.sleep(.1)
+    empty_before, empty_after, empty_remainder = (await command(guest, "cook-empty")).split(";")
+    assert empty_before == empty_after and float(empty_remainder) == 0
+    stock_after, detached_after, host_pot_after = (await command(host, "host-cooking-state")).split(";")
+    assert host_pot == host_pot_after and stats(stock_before)[1:] == stats(stock_after)[1:]
+    assert abs(stats(stock_before)[0] - stats(stock_after)[0]) < 1
+    guest_food, guest_fatigue, guest_intox = stats(detached_after)
+    assert 19 <= guest_food - stats(detached_before)[0] <= 20.1, detached_after
+    assert (guest_fatigue, guest_intox) == (40, 0), detached_after
+    assert campaign_save_hashes(host.campaign) == checkpoint, "Eat All wrote an early campaign checkpoint"
+    return {"stock_cooked_meal": {"local_before": stats(local_before), "local_after": stats(local_after),
+                                 "host_guest_before": stats(detached_before), "host_guest_after": stats(detached_after),
+                                 "host_pot_unchanged": True, "empty_pot_had_no_effect": True, "receipt": receipt}}
 
 
 async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> dict:
@@ -4551,7 +4601,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  second_legacy_work: Path | None = None, *, stock_drop: bool = False, stock_split: bool = False,
                  stock_equip: bool = False, stock_nearby: bool = False, projected_nearby: bool = False,
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
-                 stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False,
+                 stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False, stock_cooked_meal: bool = False,
                  stock_personal_consumable: bool = False,
                  stock_wipe_chooser: bool = False,
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
@@ -4659,6 +4709,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_stock_held_queue(host, guest, pawn, portable_probe_command,
                                                            stale_quick_slot=resident_stale_quick_slot)),
         (stock_food, "observatory", "stock_food", verify_resident_guest_food),
+        (stock_cooked_meal, "observatory", "stock_cooked_meal", verify_stock_cooked_meal),
         (stock_personal_consumable, "personal_consumable", "stock_personal_consumable",
          lambda host, guest, pawn: verify_stock_personal_consumable(host, guest, pawn, portable_probe_command)),
         (stock_wipe_chooser, "wipe_chooser", "stock_wipe_chooser",
@@ -4746,7 +4797,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableWipeChooserProbe",
                                                      fixture="portable_wipe_chooser_probe.lua"))
-        if stock_food or stock_personal_consumable:
+        if stock_food or stock_cooked_meal or stock_personal_consumable:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableGuestFoodProbe",
                                                      fixture="portable_guest_food_probe.lua"))
@@ -5222,6 +5273,7 @@ if __name__ == "__main__":
     parser.add_argument("--stock-drop", action="store_true", help="test stock guest backpack Sort, Drop, and Use actions")
     parser.add_argument("--stock-use", action="store_true", help="open a starter bag by stock drag and use a Bandage by stock click")
     parser.add_argument("--stock-food", action="store_true", help="verify the guest's Food stat after a meal, combinable with campfire and weapon cues")
+    parser.add_argument("--stock-cooked-meal", action="store_true", help="verify the guest's stock cooking pot Eat All action")
     parser.add_argument("--stock-personal-consumable", action="store_true",
                         help="use an unlisted stock consumable through the guest inventory and recover it across reconnect")
     parser.add_argument("--stock-campfire", action="store_true", help="verify stock campfire damage and feedback, combinable with food and weapon cues")
@@ -5445,7 +5497,8 @@ if __name__ == "__main__":
         parser.error("Use --stock-shovel-loot with --stock-shovel")
     if args.stock_shovel_quest and (not args.stock_shovel or args.stock_shovel_loot):
         parser.error("Use --stock-shovel-quest with --stock-shovel alone")
-    if any((args.stock_food, args.stock_personal_consumable, args.stock_wipe_chooser,
+    resident_check_options.add("stock_cooked_meal")
+    if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
             args.stock_campfire, args.stock_npc_override, args.stock_board_offers, args.tutorial_dock_melee,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel, args.stock_lightning,
@@ -5491,6 +5544,7 @@ if __name__ == "__main__":
                        stock_nearby=args.stock_nearby, projected_nearby=args.projected_nearby,
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
                        stock_use=args.stock_use, stock_food=args.stock_food, stock_campfire=args.stock_campfire,
+                       stock_cooked_meal=args.stock_cooked_meal,
                        stock_personal_consumable=args.stock_personal_consumable,
                        stock_wipe_chooser=args.stock_wipe_chooser,
                        stock_npc_override=args.stock_npc_override, stock_board_offers=args.stock_board_offers,

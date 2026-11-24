@@ -738,6 +738,7 @@ class Bridge:
         self._local_board_records = deque(maxlen=64)
         self._local_crate_records = deque(maxlen=64)
         self._local_melee_records = deque(maxlen=64)
+        self._local_cooked_meals = deque(maxlen=16)
         self._local_primary_records = deque(maxlen=64)
         self._local_held_fire_records = deque(maxlen=64)
         self._local_held_aim = None
@@ -800,6 +801,8 @@ class Bridge:
                     self._local_crate_records.append(record)
                 elif record.startswith(b"native-guest-melee-edge\t"):
                     self._local_melee_records.append(record)
+                elif record.startswith(b"native-guest-cooked-meal\t"):
+                    self._local_cooked_meals.append(record)
                 elif record.startswith(b"native-guest-primary-intent\t"):
                     self._local_primary_records.append(record)
                 elif record.startswith(b"native-guest-held-fire-intent\t"):
@@ -820,6 +823,9 @@ class Bridge:
     def native_melee_input_requests(self):
         return [edge for raw in self._take_local_inputs(self._local_melee_records)
                 if (edge := native_guest_melee.input_record(raw)) is not None]
+
+    def native_cooked_meals(self) -> list[bytes]:
+        return self._take_local_inputs(self._local_cooked_meals)
 
     def interactions(self) -> list[tuple[str, str | None]]:
         """Consume complete local input records once, even if writing is in progress."""

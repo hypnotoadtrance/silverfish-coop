@@ -1,10 +1,12 @@
 local consumable = {}
 local guest_save = require("guest_save")
+local local_save = require("native_save_scope")
 local use_presentation = require("native_weapon_fire_view")
 
 local enabled = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
 local starter_bag = "native-guest-starter-bag"
 local personal_consumable = "native-guest-personal-consumable"
+local cooked_meal = "native-guest-cooked-meal"
 local observation
 
 local function valid(value)
@@ -46,6 +48,19 @@ end
 
 function consumable.command(fields, state, phase)
     local action = fields[2]
+    if action == cooked_meal then
+        local name = fields[3]
+        if not enabled or phase ~= "hosting" or not state.listening or #fields ~= 8
+            or type(SilverfishSettleNativeGuestCookedMeal) ~= "function" then error("guest_cooked_meal_refused_scope", 0) end
+        local pawn, detached = guest_save.exact_item_context(state, phase, name)
+        local stock = state.local_pawn and state.local_pawn.pawn.Save
+        if not valid(pawn) or not valid(detached) or not valid(stock) then error("guest_cooked_meal_refused_scope", 0) end
+        local applied, food, health, regen, fatigue, intox = SilverfishSettleNativeGuestCookedMeal(
+            pawn:GetAddress(), detached:GetAddress(), stock:GetAddress(), tonumber(fields[4]),
+            tonumber(fields[5]), tonumber(fields[6]), math.tointeger(tonumber(fields[7])), math.tointeger(tonumber(fields[8])))
+        if not applied then error("guest_cooked_meal_refused_scope", 0) end
+        return ("cooked meal %.17g %.17g %.17g %d %d"):format(food, health, regen, fatigue, intox)
+    end
     if action ~= "native-guest-bandage" and action ~= starter_bag and action ~= personal_consumable then return end
     observation = nil
     local name, guid = fields[3], fields[4]
@@ -110,6 +125,24 @@ function consumable.command(fields, state, phase)
     }
     pcall(use_presentation.consumed, pawn, "/Game/Classes/Items/Item_Bandage.Item_Bandage_C", false)
     return "native guest Bandage used"
+end
+
+function consumable.sync(state, phase)
+    if not enabled or type(SilverfishPollNativeGuestCookedMeal) ~= "function"
+        or type(SilverfishEnqueueLocalBridgeInput) ~= "function" then return end
+    if local_save.guest_vitals(state, phase) == nil then
+        SilverfishPollNativeGuestCookedMeal()
+        return
+    end
+    local owner = state.local_pawn
+    for _ = 1, 8 do
+        local sequence, food, health, regen, fatigue, intox =
+            SilverfishPollNativeGuestCookedMeal(owner.pawn:GetAddress(), owner.pawn.Save:GetAddress())
+        if not sequence then return end
+        local record = ("%s\t%d\t%s\t%s\t%.17g,%.17g,%.17g,%d,%d\n"):format(
+            cooked_meal, sequence, state.map, owner.name, food, health, regen, fatigue, intox)
+        if not SilverfishEnqueueLocalBridgeInput(record) then return end
+    end
 end
 
 function consumable.reset()
