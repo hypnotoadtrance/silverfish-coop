@@ -2059,6 +2059,7 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
         and frame["game"].get("native_guest_primary_scope", {}).get("kind") == "rusty-pistol"), timeout=12)
     presentation = {}
     if shot_view:
+        presentation.update(await verify_dock_npc_population(host, guest, command))
         presentation.update(await verify_dock_garage_shots(host, guest, frame, command))
         presentation.update(await verify_dock_garage_burst(host, guest, frame, command))
         return presentation
@@ -2158,6 +2159,33 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
                                                      "retargeted_when_guest_downed": True,
                                                      "downed_aggro_and_queued_strike_denied": True},
                                      "stock_swing": {"host": source, "guest": observer, "received": received}}}
+
+async def verify_dock_npc_population(host: Seat, guest: Seat, command) -> dict:
+    async def wait_for_population(seat, points, expected):
+        observed = "unavailable"
+        try:
+            async with asyncio.timeout(7):
+                while (observed := await command(seat, f"dock-population-at\t{points}")) != expected:
+                    await asyncio.sleep(.05)
+        except TimeoutError as error:
+            raise AssertionError(f"Expected {expected} at {points}, saw {observed}") from error
+
+    try:
+        local_points = await command(guest, "dock-population-spawn")
+        await wait_for_population(guest, local_points, "empty")
+        await wait_for_population(host, local_points, "empty")
+        authoritative_points = await command(host, "dock-population-spawn")
+        await wait_for_population(host, authoritative_points, "bandit=3,state=3")
+        await wait_for_population(guest, authoritative_points, "bandit=1,state=1")
+        assert await command(host, "dock-population-cleanup") == "cleared"
+        await wait_for_population(guest, authoritative_points, "empty")
+        return {"tutorial_dock_npc_population": {"client_only_retired": 2, "host_authorities": 2,
+                "guest_replicas": 2, "host_removal_seen": True}}
+    finally:
+        assert await asyncio.gather(command(host, "dock-population-cleanup"), command(guest, "dock-population-cleanup")) == [
+            "cleared", "cleared",
+        ]
+
 
 async def verify_dock_garage_shots(host: Seat, guest: Seat, frame: dict, command) -> dict:
     try:

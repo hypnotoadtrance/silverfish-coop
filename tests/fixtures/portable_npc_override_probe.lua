@@ -802,6 +802,49 @@ local function dock_worker(world, name)
     end
 end
 
+local population_fixture = {}
+
+local function dock_spawn_population(pawn, world, host)
+    assert(not next(population_fixture), "clean stock NPC population fixture required")
+    local origin = pawn:K2_GetActorLocation()
+    local points = {}
+    for index, kind in ipairs({"bandit", "state"}) do
+        local point = {X=origin.X + 125 * index, Y=origin.Y + 200, Z=origin.Z}
+        local actor = create_stock_npc(pawn, world, kind, point, 0)
+        actor.CharacterMovement:DisableMovement()
+        actor:SetActorTickEnabled(false)
+        if valid(actor.Controller) then actor.Controller:SetActorTickEnabled(false) end
+        if host then
+            actor:SetReplicates(false)
+            actor:SetReplicateMovement(false)
+            assert(actor.bReplicates == false, "fixture must start with an unpublished host NPC")
+        end
+        population_fixture[kind] = actor
+        local at = actor:K2_GetActorLocation()
+        points[#points + 1] = ("%s,%.3f,%.3f,%.3f"):format(kind, at.X, at.Y, at.Z)
+    end
+    return table.concat(points, ";")
+end
+
+local function dock_population_at(world, points)
+    local visible = {}
+    for point in points:gmatch("[^;]+") do
+        local kind, x, y, z = point:match("^(%w+),([^,]+),([^,]+),([^,]+)$")
+        local class = assert(shooter_paths[kind]):match("%.([^%.]+)$")
+        x, y, z = tonumber(x), tonumber(y), tonumber(z)
+        for _, actor in ipairs(FindAllOf(class) or {}) do
+            if valid(actor) and same(actor:GetWorld(), world) and not actor:IsActorBeingDestroyed() then
+                local at = actor:K2_GetActorLocation()
+                if (at.X-x)^2 + (at.Y-y)^2 + (at.Z-z)^2 < 40^2 then
+                    visible[#visible + 1] = kind .. "=" .. actor:GetLocalRole()
+                end
+            end
+        end
+    end
+    table.sort(visible)
+    return #visible > 0 and table.concat(visible, ",") or "empty"
+end
+
 local function dock_combat(pawn, world, host, action, name)
     local actor = dock_worker(world, name or "NPC_Survivor_Worker_C_1")
     if not valid(actor) then return "absent" end
@@ -1299,6 +1342,18 @@ local function run(action, actor_path)
         return select_equipment(pawn, function(row)
             return row[item_class]:GetFName():ToString() == "Wep_RustyPistol_C"
         end)
+    elseif action == "dock-population-spawn" then
+        assert(world:GetFullName() == "World " .. dock)
+        return dock_spawn_population(pawn, world, host)
+    elseif action == "dock-population-at" then
+        assert(world:GetFullName() == "World " .. dock)
+        return dock_population_at(world, actor_path)
+    elseif action == "dock-population-cleanup" then
+        for _, actor in pairs(population_fixture) do
+            if valid(actor) and not actor:IsActorBeingDestroyed() then actor:K2_DestroyActor() end
+        end
+        population_fixture = {}
+        return "cleared"
     elseif action == "dock-block-weapon" or action == "dock-unblock-weapon" then
         assert(not host and pawn.Dead == false and valid(pawn.EquipedItem), "the guest needs a live equipped pawn")
         local blocked = action == "dock-block-weapon"

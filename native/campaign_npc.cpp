@@ -293,6 +293,7 @@ namespace
         U::FWeakObjectPtr driver, connection;
         U::FWorldContext* context{};
         const DirectorProfile* director{};
+        RC::StringType map;
     } pending_client_load;
 
     bool server_connection(U::UObject* connection, U::UObject* driver)
@@ -311,10 +312,12 @@ namespace
         return nullptr;
     }
 
-    Network network(U::UWorld* world, bool during_load = false)
+    Network network(U::UWorld* world, bool during_load = false, bool any_campaign_map = false)
     {
-        const auto* profile = live(world) ? director_for(world->GetPathName()) : nullptr;
-        if (!profile) return {};
+        if (!live(world)) return {};
+        const auto path = world->GetPathName();
+        const auto* profile = director_for(path);
+        if (!profile && (!any_campaign_map || !path.starts_with(STR("/Game/Classes/Maps/")))) return {};
         auto* instance = object(world, STR("OwningGameInstance"));
         if (!exact(instance, instance_class)) return {};
         auto* driver = object(world, STR("NetDriver"));
@@ -326,7 +329,13 @@ namespace
             if (server) return {};
             if (!during_load || driver != pending_client_load.driver.Get()) return {world, driver, instance, Seat::Host, profile};
         }
-        if (!during_load || !pending_client_load.context || pending_client_load.director != profile) return {};
+        if (!during_load || !pending_client_load.context) return {};
+        if (any_campaign_map)
+        {
+            const auto package = std::wstring_view{path}.substr(0, path.find_last_of(L'.'));
+            if (pending_client_load.map != path && pending_client_load.map != package) return {};
+        }
+        else if (pending_client_load.director != profile) return {};
         auto* pending = pending_client_load.driver.Get();
         if ((driver && driver != pending) || !server_connection(pending_client_load.connection.Get(), pending)) return {};
         return {world, pending, instance, Seat::Client, profile};
@@ -691,7 +700,7 @@ namespace
                 param->GetOffset_Internal() == 0 ? param : nullptr;
         }
 
-        bool apply(const Actors& actors) const
+        bool apply(std::span<U::UObject* const> actors) const
         {
             auto* set_replication = argument(replication, STR("bInReplicates"));
             auto* set_movement = argument(movement, STR("bInReplicateMovement"));
@@ -721,6 +730,50 @@ namespace
             });
         }
     };
+
+    Handles pending_dynamic_npcs;
+    bool hook_ready();
+
+    bool dynamic_stock_npc(U::UObject* actor)
+    {
+        if (!live(actor) || actor->HasAnyFlags(U::RF_WasLoaded) ||
+            !bool_field(actor, STR("bActorIsBeingDestroyed"), false) || byte_field(actor, STR("Role")) != 3)
+            return false;
+        static const std::array roots{
+            std::pair{U::FName{STR("NPC_Master_BP_C")}, npc_base},
+            std::pair{U::FName{STR("NPC_Drone_C")}, drone_base},
+            std::pair{U::FName{STR("Turret_Master_BP_C")}, turret_base},
+        };
+        for (const U::UStruct* type = actor->GetClassPrivate(); type; type = type->GetSuperStruct())
+            for (const auto& [name, path] : roots)
+                if (type->GetFName() == name && type->GetPathName() == path) return true;
+        return false;
+    }
+
+    bool local_client_npc(U::UObject* actor)
+    {
+        return production_roster && dynamic_stock_npc(actor) &&
+            network(static_cast<U::AActor*>(actor)->GetWorld(), true, true).seat == Seat::Client;
+    }
+
+    void settle_dynamic_npcs()
+    {
+        if (!hook_ready() || pending_dynamic_npcs.empty()) return;
+        Handles batch;
+        batch.swap(pending_dynamic_npcs);
+        for (const auto& handle : batch)
+        {
+            auto* actor = handle.Get();
+            if (!dynamic_stock_npc(actor)) continue;
+            auto* npc = static_cast<U::AActor*>(actor);
+            const auto active = network(npc->GetWorld(), true, true);
+            if (active.seat == Seat::Client)
+                npc->K2_DestroyActor();
+            else if (active.seat == Seat::Host && (!bool_field(actor, STR("bReplicates"), true) ||
+                !bool_field(actor, STR("bReplicateMovement"), true) || byte_field(actor, STR("RemoteRole")) != 1))
+                Replication{}.apply(std::array{actor});
+        }
+    }
 
     struct Counts
     {
@@ -885,7 +938,7 @@ namespace
 
     std::atomic<bool> installed{};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID,
-        Hook::ERROR_ID};
+        Hook::ERROR_ID, Hook::ERROR_ID};
     bool operate{};
     bool publish_flayers{};
     bool veto_flayer_spawns{};
@@ -1649,8 +1702,10 @@ namespace
         const bool damage = name == damage_name;
         if ((!damage && name != death_name && name != die_name)
             || function->GetReturnProperty() || function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net)
-            || !live(receiver) || byte_field(receiver, STR("Role")) != 1 ||
-            !bool_field(receiver, STR("bReplicates"), true) || (frame && frame->Object() != receiver)) return false;
+            || !live(receiver) || (frame && frame->Object() != receiver)) return false;
+        const bool ghost = byte_field(receiver, STR("Role")) == 3;
+        if (!ghost && (byte_field(receiver, STR("Role")) != 1 ||
+            !bool_field(receiver, STR("bReplicates"), true))) return false;
 
         const auto* owner = U::Cast<U::UClass>(function->GetOuterPrivate());
         const auto* type = receiver->GetClassPrivate();
@@ -1679,10 +1734,10 @@ namespace
         if (damage && (!total || !lethal)) return false;
         auto* world = static_cast<U::AActor*>(receiver)->GetWorld();
         auto* driver = object(world, STR("NetDriver"));
-        // A stock simulated NPC only exists here because the host published it.
-        // The director profile limits spawn capture, not damage on existing replicas.
-        if (!in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
-            object(driver, STR("World")) != world || !server_connection(object(driver, STR("ServerConnection")), driver))
+        // The game may call a fresh local actor before its queued removal.
+        if (ghost ? !local_client_npc(receiver)
+            : !in_level(receiver, world) || !exact(object(world, STR("OwningGameInstance")), instance_class) ||
+                object(driver, STR("World")) != world || !server_connection(object(driver, STR("ServerConnection")), driver))
             return false;
         call.PreventOriginalFunctionCall();
         if (!call.OriginalFunctionCallPrevented()) return false;
@@ -1711,7 +1766,13 @@ namespace
         const auto name = function->GetFName();
         if ((name != init_name && name != perceive_name) ||
             function != find<U::UFunction>(name == init_name ? initialize_path : perceive_path) ||
-            function->GetReturnProperty() || byte_field(receiver, STR("Role")) != 1) return;
+            function->GetReturnProperty()) return;
+        if (local_client_npc(receiver))
+        {
+            call.PreventOriginalFunctionCall();
+            return;
+        }
+        if (byte_field(receiver, STR("Role")) != 1) return;
         const auto family = npc_family(receiver);
         if (!publishes(family) || (family == NpcFamily::NotDeer && byte_field(receiver, STR("Faction")) != 7)) return;
         const auto active = network(static_cast<U::AActor*>(receiver)->GetWorld());
@@ -2669,14 +2730,16 @@ namespace silverfish::campaign_npc
                 if (!hook_ready()) return;
                 pending_client_load = {};
                 if (!pending || url.Map.IsEmpty()) return;
-                const auto* profile = director_for(*url.Map);
-                if (!profile) return;
+                const std::wstring_view map{*url.Map};
+                const auto* profile = director_for(map);
+                if (!profile && (!production_roster || !map.starts_with(STR("/Game/Classes/Maps/")))) return;
                 // The engine can start map Blueprints before publishing World.NetDriver.
                 auto* pending_object = reinterpret_cast<U::UObject*>(pending);
                 if (!exact(pending_object, STR("/Script/Engine.PendingNetGame"))) return;
                 auto* driver = object(pending_object, STR("NetDriver"));
                 auto* connection = object(driver, STR("ServerConnection"));
-                if (server_connection(connection, driver)) pending_client_load = {driver, connection, &context, profile};
+                if (server_connection(connection, driver))
+                    pending_client_load = {driver, connection, &context, profile, RC::StringType{map}};
             }, {false, true, STR("SilverfishCoopNative"), STR("Bind early connected CrossRoads load")});
         callbacks[5] = Hook::RegisterLoadMapPostCallback(
             [](Hook::TCallbackIterationData<bool>&, U::UEngine*, U::FWorldContext& context,
@@ -2686,6 +2749,8 @@ namespace silverfish::campaign_npc
         callbacks[6] = Hook::RegisterBeginPlayPreCallback(
             [](Iteration&, U::AActor* candidate) {
                 if (!hook_ready()) return;
+                if (production_roster && dynamic_stock_npc(candidate))
+                    pending_dynamic_npcs.emplace_back(candidate);
                 const auto family = npc_family(candidate);
                 if (family == NpcFamily::Unknown || (family == NpcFamily::NotDeer && !operate_not_deer) ||
                     byte_field(candidate, STR("Role")) != 3) return;
@@ -2698,6 +2763,10 @@ namespace silverfish::campaign_npc
                 births.last_caller.Reset();
                 births.last_script.Reset();
             }, {false, false, STR("SilverfishCoopNative"), STR("Observe local CrossRoads Husk births")});
+        if (production_roster)
+            callbacks[7] = Hook::RegisterEngineTickPreCallback(
+                [](Iteration&, U::UEngine*, float, bool) { settle_dynamic_npcs(); },
+                {false, false, STR("SilverfishCoopNative"), STR("Settle stock NPC births after role assignment")});
         if (callbacks[4] == Hook::ERROR_ID || callbacks[5] == Hook::ERROR_ID)
         {
             for (const int index : {4, 5})
@@ -2761,6 +2830,7 @@ namespace silverfish::campaign_npc
             combat_watch = {};
             flayer_hit = {};
             inactive_targets = {};
+            pending_dynamic_npcs.clear();
         }
     }
 }
