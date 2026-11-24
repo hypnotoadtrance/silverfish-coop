@@ -22,6 +22,7 @@ from live_multi_smoke import saved_hashes
 from live_resident_host_smoke import stock_profile, stock_save_hashes
 from live_same_process_listener_smoke import choose_ports
 from live_stock_pause_exit_smoke import stock_pause
+from portable_guest_world_start import resident_events
 
 
 @dataclass
@@ -123,6 +124,8 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
             await stock_pause(guest.bridge, action)
         left = await wait_status(guest_run, lambda frame: frame.get("state") == "stopped")
         assert left["stop_reason"] == "guest_left", left
+        assert sum(event["event"] == "stock_pause_exit" and event.get("reason") == "quit_to_menu"
+                   and event.get("result") == "ok" for event in await resident_events(guest_run, left)) == 1
         await offered(guest)
         assert not owns_udp_port(guest_pid, joined["unreal_local_port"])
         assert (await wait_status(host_run, lambda frame: frame.get("state") == "hosting"))["pid"] == host_pid
@@ -175,6 +178,9 @@ async def start_pair(host, guest, character_name, *, on_join=None, create_charac
     if after_exit:
         await after_exit(host, stopped[host_run], saved, character)
     if guest_stock_exit:
+        assert saved["revision"] > recovered["campaign"]["revision"]
+        assert sum(event["event"] == "stock_pause_exit" and event.get("reason") == "save_and_quit"
+                   and event.get("result") == "ok" for event in await resident_events(host_run, stopped[host_run])) == 1
         removed_mailboxes = (
             "native-coop-pause-session.tsv", "native-coop-pause-request.tsv", "native-coop-pause-response.tsv",
             "native-session-exit-eligibility.state", "native-session-exit-input.state",

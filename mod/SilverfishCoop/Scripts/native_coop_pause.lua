@@ -325,8 +325,8 @@ function pause.rows(state, phase, row)
         return {}
     end
     local lines = {row("native-coop-pause", scene.role, scene.generation, scene.press ~= 0 and "requested" or "armed", scene.press)}
-    if fixture_status then lines[#lines + 1] = row("native-coop-pause-fixture", bound.role, fixture_status) end
-    if fixture_diagnostic then lines[#lines + 1] = row("native-coop-pause-fixture-diagnostic", bound.role, fixture_diagnostic) end
+    if fixture_status then lines[#lines + 1] = row("native-coop-pause-fixture", scene.role, fixture_status) end
+    if fixture_diagnostic then lines[#lines + 1] = row("native-coop-pause-fixture-diagnostic", scene.role, fixture_diagnostic) end
     return lines
 end
 
