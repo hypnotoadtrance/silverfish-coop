@@ -48,6 +48,7 @@ from portable_eye_board import verify_stock_eye_stacks
 from portable_guest_world_start import GuestWorldStartProof, resident_events, wait_resident_status
 from portable_lingering_teleport import lingering_overlay, verify_stock_lingering_teleport
 from portable_personal_consumable import verify_personal_consumable_reconnect, verify_stock_personal_consumable
+from portable_wipe_chooser import verify_stock_wipe_chooser
 from portable_simmi_jammer import verify_stock_simmi_jammers
 from portable_weather_travel import verify_weather_travel
 from portable_stock_shovel import verify_stock_shovel, verify_stock_shovel_reconnect
@@ -145,6 +146,16 @@ def tutorial_dock_zone_overlay(game: Path):
                               + '\n        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1")', 1)
 
     return portable_script_overlay(game, "native_zone.lua", allow_dock_position)
+
+
+def stock_wipe_chooser_overlay(game: Path):
+    def allow_stock_fixture(script):
+        gate = 'local stock_fixture = os.getenv("SILVERFISH_COOP_STOCK_WIPE_TEST") == "1"'
+        if script.count(gate) != 1:
+            raise ValueError("The private replica lacks the stock wipe chooser fixture gate")
+        return script.replace(gate, gate + '\n    or headless and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"')
+
+    return portable_script_overlay(game, "native_wipe_view.lua", allow_stock_fixture)
 
 
 def jammer_aim_overlay(game: Path):
@@ -4025,6 +4036,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  container_nearby: bool = False, steam_cloud: bool = False, memory_bridge: bool = False,
                  stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False,
                  stock_personal_consumable: bool = False,
+                 stock_wipe_chooser: bool = False,
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
                  stock_weather_travel: bool = False, stock_melee_family: bool = False, stock_melee_edges: bool = False,
@@ -4104,6 +4116,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_food, "observatory", "stock_food", verify_resident_guest_food),
         (stock_personal_consumable, "personal_consumable", "stock_personal_consumable",
          lambda host, guest, pawn: verify_stock_personal_consumable(host, guest, pawn, portable_probe_command)),
+        (stock_wipe_chooser, "wipe_chooser", "stock_wipe_chooser",
+         lambda host, guest, pawn: verify_stock_wipe_chooser(host, guest, pawn, portable_probe_command)),
         (stock_take_ammo, "observatory", "stock_take_ammo", verify_stock_take_ammo),
         (stock_roaming_barter, "observatory", "stock_roaming_barter", verify_roaming_barter),
         (stock_simmi_jammers, "simmi", "stock_simmi_jammers",
@@ -4161,6 +4175,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableStockThrowablesProbe",
                                                      fixture="portable_stock_throwables_probe.lua"))
+        if stock_wipe_chooser:
+            proof["stock_wipe_chooser_overlays"] = [probes.enter_context(stock_wipe_chooser_overlay(game)) for game in games]
+            for game in games:
+                probes.enter_context(installed_probe(game, mod="SilverfishPortableWipeChooserProbe",
+                                                     fixture="portable_wipe_chooser_probe.lua"))
         if stock_food or stock_personal_consumable:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableGuestFoodProbe",
@@ -4655,6 +4674,8 @@ if __name__ == "__main__":
                         help="verify guest Heavy Pipe and Old Pipe kills and stock melee input")
     parser.add_argument("--stock-melee-edges", action="store_true",
                         help="verify guest Old Pipe tap, charge, and combo without spawning an NPC target")
+    parser.add_argument("--stock-wipe-chooser", action="store_true",
+                        help="verify stock Pause and Journal yield to the stock party wipe chooser and both players confirm")
     parser.add_argument("--guest-world-start", action="store_true",
                         help="verify first stock guest map startup and short reconnect in one portable session")
     parser.add_argument("--nonmirrored-startup", action="store_true",
@@ -4726,7 +4747,7 @@ if __name__ == "__main__":
             args.guest_world_start, args.guest_world_start_travel, args.guest_ui_memory, args.compact_crate_status,
             args.compact_world_view, args.guest_shop_lease, args.resident_cabinet_archive, args.second_legacy_work)):
         parser.error("Use --stock-host-prop-observer with two fresh private replicas and no other gameplay fixtures")
-    resident_check_options = {"stock_food", "stock_personal_consumable", "stock_campfire", "stock_npc_override",
+    resident_check_options = {"stock_food", "stock_personal_consumable", "stock_wipe_chooser", "stock_campfire", "stock_npc_override",
                               "stock_board_offers", "resident_weapon_cues",
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "tutorial_dock_melee", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_shovel_quest", "stock_take_ammo",
@@ -4744,8 +4765,8 @@ if __name__ == "__main__":
         parser.error("Use --stock-shovel-loot with --stock-shovel")
     if args.stock_shovel_quest and (not args.stock_shovel or args.stock_shovel_loot):
         parser.error("Use --stock-shovel-quest with --stock-shovel alone")
-    if any((args.stock_food, args.stock_personal_consumable, args.stock_campfire, args.stock_npc_override, args.stock_board_offers,
-            args.tutorial_dock_melee,
+    if any((args.stock_food, args.stock_personal_consumable, args.stock_wipe_chooser,
+            args.stock_campfire, args.stock_npc_override, args.stock_board_offers, args.tutorial_dock_melee,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
             args.stock_melee_family, args.stock_melee_edges, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
@@ -4790,6 +4811,7 @@ if __name__ == "__main__":
                        container_nearby=args.container_nearby, steam_cloud=args.steam_cloud, memory_bridge=args.memory_bridge,
                        stock_use=args.stock_use, stock_food=args.stock_food, stock_campfire=args.stock_campfire,
                        stock_personal_consumable=args.stock_personal_consumable,
+                       stock_wipe_chooser=args.stock_wipe_chooser,
                        stock_npc_override=args.stock_npc_override, stock_board_offers=args.stock_board_offers,
                        stock_npc_rivalry=args.stock_npc_rivalry,
                        stock_host_corpse_carry=args.stock_host_corpse_carry,
