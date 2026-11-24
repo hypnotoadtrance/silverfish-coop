@@ -1406,6 +1406,10 @@ async def verify_tutorial_bandage_revisit(host: Seat, guest: Seat, pawn: str) ->
     assert pistol_visibility == ["visible", "visible"], dict(actor=pistol, visibility=pistol_visibility)
     host_suppressed = await visibility(host, second_bandage)
     assert host_suppressed in ("absent", "hidden"), host_suppressed
+    respawn_hidden = (host.bridge.snapshot() or {}).get(native_loose_pickup.RESPAWN_HIDDEN, [])
+    assert second_bandage in respawn_hidden, dict(unclaimed=second_bandage, host_respawn_hidden=respawn_hidden)
+    await wait_resident_status(guest_run, lambda frame: settled(frame) and
+        second_bandage in frame["gameplay"][native_loose_pickup.STATE], timeout=8)
     async with asyncio.timeout(8):
         while (guest_suppressed := await visibility(guest, second_bandage)) == "visible":
             await asyncio.sleep(.05)

@@ -476,7 +476,7 @@ namespace
     constexpr auto drop_settle = std::chrono::milliseconds(750);
     std::atomic<bool> installed{};
     std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID,
-        Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
+        Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
 
     bool ready() { return U::IsInGameThreadRaw() && installed.load(std::memory_order_acquire); }
 
@@ -2057,14 +2057,8 @@ namespace
         RespawnSeat seat{};
     } respawn_load;
 
-    struct RespawnCheck
-    {
-        const Iteration* call{};
-        U::FWeakObjectPtr actor;
-        std::string path;
-    } respawn_check;
-
     U::FWeakObjectPtr respawn_world;
+    std::set<std::wstring> pending_host_respawns;
     std::set<std::string> host_respawn_hidden;
 
     bool established_server(U::UObject* driver, U::UObject* connection)
@@ -2076,8 +2070,8 @@ namespace
     void begin_respawn_load(U::FWorldContext& context, const U::FURL& url, U::UPendingNetGame* pending)
     {
         respawn_load = {};
-        respawn_check = {};
         respawn_world.Reset();
+        pending_host_respawns.clear();
         host_respawn_hidden.clear();
         if (url.Map.IsEmpty() || !std::wstring_view{*url.Map}.starts_with(STR("/Game/Classes/Maps/"))) return;
         if (pending)
@@ -2115,7 +2109,7 @@ namespace
     void begin_loose_respawn(Iteration& call, U::UObject* context, U::UFunction* function)
     {
         static const U::FName respawn_name{STR("HandleRespawn")};
-        if (!ready() || !function || function->GetFName() != respawn_name || respawn_check.call ||
+        if (!ready() || !function || function->GetFName() != respawn_name ||
             call.OriginalFunctionCallPrevented() || !live(context) || !context->HasAnyFlags(U::RF_WasLoaded)) return;
         auto* base = find<U::UClass>(base_class);
         if (!base || function->GetOuterPrivate() != base || function->GetNumParms() ||
@@ -2146,26 +2140,28 @@ namespace
         if (respawn_world.Get() != world)
         {
             respawn_world = world;
+            pending_host_respawns.clear();
             host_respawn_hidden.clear();
         }
-        respawn_check = {&call, actor, RC::to_utf8_string(path)};
-    }
-
-    void end_loose_respawn(Iteration& call)
-    {
-        if (!U::IsInGameThreadRaw() || respawn_check.call != &call) return;
-        auto check = std::exchange(respawn_check, {});
-        if (call.OriginalFunctionCallPrevented()) return;
-        auto* actor = check.actor.Get();
-        if (!live(actor) || !boolean(actor, STR("bActorIsBeingDestroyed"), false))
-            host_respawn_hidden.insert(std::move(check.path));
-        else host_respawn_hidden.erase(check.path);
+        pending_host_respawns.insert(path);
     }
 
     int read_host_respawn_hidden(const Lua& lua)
     {
-        if (!ready() || !loose_host || lua.get_stack_size() != 0 || !live(loose_world.Get()) ||
-            respawn_world.Get() != loose_world.Get()) return 0;
+        if (!ready() || !loose_host || lua.get_stack_size() != 0) return 0;
+        auto* world = loose_world.Get();
+        if (!live(world) || respawn_world.Get() != world) return 0;
+        // Read after the engine has finished placing actors and retiring any that
+        // stock removed during BeginPlay. This also catches pending-kill actors.
+        for (const auto& path : pending_host_respawns)
+        {
+            auto* actor = find<U::UObject>(path.c_str());
+            auto key = RC::to_utf8_string(path);
+            if (!live(actor) || !boolean(actor, STR("bActorIsBeingDestroyed"), false))
+                host_respawn_hidden.insert(std::move(key));
+            else host_respawn_hidden.erase(key);
+        }
+        pending_host_respawns.clear();
         std::string paths;
         for (const auto& path : host_respawn_hidden) paths.append(path).append(1, '\n');
         lua.set_string(paths);
@@ -2967,28 +2963,22 @@ namespace silverfish::native_authored_pickup
             }, {false, false, STR("SilverfishCoopNative"), STR("Qualify authored loose pickup script")});
         callbacks[2] = Hook::RegisterProcessEventPostCallback(
             [](Iteration& call, U::UObject* context, U::UFunction* fn, void*) {
-                end_loose_respawn(call);
                 if (!call.OriginalFunctionCallPrevented()) complete_floor_projection(context, fn);
             }, {false, false, STR("SilverfishCoopNative"), STR("Display host loot stack counts in the stock inventory")});
         callbacks[3] = Hook::RegisterProcessLocalScriptFunctionPostCallback(
             [](Iteration& call, U::UObject* context, U::FFrame& frame, void*) {
-                end_loose_respawn(call);
                 if (!call.OriginalFunctionCallPrevented()) complete_floor_projection(context, frame.Node());
             }, {false, false, STR("SilverfishCoopNative"), STR("Display host loot stack counts in the stock floor query")});
         callbacks[4] = Hook::RegisterProcessInternalPreCallback(
             [](Iteration& call, U::UObject* context, U::FFrame& frame, void*) {
                 begin_loose_respawn(call, context, frame.Node());
             }, {false, false, STR("SilverfishCoopNative"), STR("Use host availability for placed stock pickups")});
-        callbacks[5] = Hook::RegisterProcessInternalPostCallback(
-            [](Iteration& call, U::UObject*, U::FFrame&, void*) {
-                end_loose_respawn(call);
-            }, {false, false, STR("SilverfishCoopNative"), STR("Observe reflected stock pickup respawn results")});
-        callbacks[6] = Hook::RegisterLoadMapPreCallback(
+        callbacks[5] = Hook::RegisterLoadMapPreCallback(
             [](Hook::TCallbackIterationData<bool>& call, U::UEngine*, U::FWorldContext& context,
                U::FURL url, U::UPendingNetGame* pending, U::FString&) {
                 if (ready() && !call.OriginalFunctionCallPrevented()) begin_respawn_load(context, url, pending);
             }, {false, true, STR("SilverfishCoopNative"), STR("Qualify placed pickups during network map loading")});
-        callbacks[7] = Hook::RegisterLoadMapPostCallback(
+        callbacks[6] = Hook::RegisterLoadMapPostCallback(
             [](Hook::TCallbackIterationData<bool>&, U::UEngine*, U::FWorldContext& context,
                U::FURL, U::UPendingNetGame*, U::FString&) {
                 if (ready() && respawn_load.context == &context) respawn_load = {};
@@ -3002,8 +2992,8 @@ namespace silverfish::native_authored_pickup
     {
         clear_scope();
         respawn_load = {};
-        respawn_check = {};
         respawn_world.Reset();
+        pending_host_respawns.clear();
         host_respawn_hidden.clear();
         installed.store(false, std::memory_order_release);
         for (auto& id : callbacks)
