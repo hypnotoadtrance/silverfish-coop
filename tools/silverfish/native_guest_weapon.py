@@ -337,7 +337,9 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
             host.party = candidate
             host.native_checkpoint_unsafe = False
         return result
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, ValueError) as error:
         if host.native_checkpoint_unsafe:
+            host.session_stop_reason = "native_guest_weapon_verification_failed"
+            host.control.event("native_guest_weapon_verification_failed", action=action, map=source, reason=str(error))
             host.stopping = True
         raise

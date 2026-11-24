@@ -127,7 +127,6 @@ namespace
     constexpr std::int32_t magazine_fixture = 7;
     constexpr int max_inventory = 4096;
     constexpr int max_clients = 4;
-    constexpr std::size_t max_observed_projectiles = 128;
 
     template <typename T>
     T* find(const Unreal::TCHAR* path)
@@ -1070,53 +1069,41 @@ namespace
             (ammo == find<Unreal::UClass>(rifle_incendiary_path) && projectile == find<Unreal::UClass>(rifle_incendiary_projectile));
     }
 
-    struct ProjectileSnapshot
+    // A round can hit and destroy its projectile during the same Blueprint call.
+    // Count the exact actor when it starts play, before stock impact processing.
+    struct TapBirths
     {
-        std::array<Unreal::FWeakObjectPtr, max_observed_projectiles> previous;
-        std::size_t count{};
-
-        bool capture(const Context& context, Unreal::UClass* type)
-        {
-            bool complete = true;
-            Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* candidate, int, int) {
-                if (!matches(context, type, candidate)) return RC::LoopAction::Continue;
-                if (count == previous.size())
-                {
-                    complete = false;
-                    return RC::LoopAction::Break;
-                }
-                previous[count++] = candidate;
-                return RC::LoopAction::Continue;
-            });
-            return complete;
-        }
-
-        bool proves_count(const Context& context, Unreal::UClass* type, int expected, int& observed) const
-        {
-            observed = 0;
-            bool owned = true;
-            Unreal::UObjectGlobals::ForEachUObject([&](Unreal::UObject* candidate, int, int) {
-                if (!matches(context, type, candidate)) return RC::LoopAction::Continue;
-                const auto end = previous.begin() + static_cast<std::ptrdiff_t>(count);
-                if (std::find_if(previous.begin(), end, [candidate](const Unreal::FWeakObjectPtr& old) {
-                        return old.Get() == candidate;
-                    }) != end) return RC::LoopAction::Continue;
-
-                ++observed;
-                owned = object(candidate, STR("Owner")) == context.pawn && object(candidate, STR("Instigator")) == context.pawn;
-                return observed <= expected && owned ? RC::LoopAction::Continue : RC::LoopAction::Break;
-            });
-            return observed == expected && owned;
-        }
-
-    private:
-        static bool matches(const Context& context, Unreal::UClass* type, Unreal::UObject* candidate)
-        {
-            return candidate->GetClassPrivate() == type && authority(candidate) &&
-                   static_cast<Unreal::AActor*>(candidate)->GetWorld() == context.world &&
-                   boolean(candidate, STR("bActorIsBeingDestroyed"), false);
-        }
+        Unreal::UWorld* world;
+        Unreal::UObject* pawn;
+        Unreal::UClass* projectile;
+        int count{};
+        bool owned{true};
     };
+
+    thread_local TapBirths* active_tap{};
+    auto tap_birth_hook = Hook::ERROR_ID;
+
+    struct TapObservation
+    {
+        explicit TapObservation(TapBirths* shot) : previous(std::exchange(active_tap, shot)) {}
+        ~TapObservation() { active_tap = previous; }
+
+        TapBirths* previous;
+    };
+
+    bool install_tap_birth_hook()
+    {
+        if (tap_birth_hook != Hook::ERROR_ID) return true;
+        tap_birth_hook = Hook::RegisterBeginPlayPreCallback(
+            [](Hook::TCallbackIterationData<void>&, Unreal::AActor* actor) {
+                auto* shot = active_tap;
+                if (!shot || !actor || actor->GetClassPrivate() != shot->projectile || actor->GetWorld() != shot->world) return;
+                ++shot->count;
+                shot->owned = shot->owned && authority(actor) && object(actor, STR("Owner")) == shot->pawn &&
+                    object(actor, STR("Instigator")) == shot->pawn;
+            }, {false, false, STR("SilverfishCoopNative"), STR("Count stock guest tap projectiles before impact")});
+        return tap_birth_hook != Hook::ERROR_ID;
+    }
 
     constexpr auto aim_vector_type = STR("/Script/CoreUObject.Vector");
     constexpr auto aim_rotator_type = STR("/Script/CoreUObject.Rotator");
@@ -1357,43 +1344,51 @@ namespace
 
         Unreal::FWeakObjectPtr held_actor;
         held_actor = actor;
-        ProjectileSnapshot projectiles;
+        TapBirths projectiles{context.world, context.pawn, projectile};
         // Pose the authoritative muzzle for the stock launch. The remote pawn's first-person
         // weapon animation does not run on this seat.
         GuestMuzzleAim aim;
         if (!disarm)
         {
-            if (!projectiles.capture(context, projectile)) return report(false, "guest_weapon_projectile_scope_full");
+            if (active_tap || !install_tap_birth_hook()) return report(false, "guest_weapon_projectile_scope_unavailable");
             if (!aim.apply(context.pawn, actor, trigger_direction)) return report(false, "guest_weapon_aim_unavailable");
-            held->SetPropertyValueInContainer(&parameters, true);
+        }
+        {
+            TapObservation observation(disarm ? nullptr : &projectiles);
+            if (!disarm)
+            {
+                held->SetPropertyValueInContainer(&parameters, true);
+                actor->ProcessEvent(action, &parameters);
+            }
+            if (held_actor.Get() != actor || !live(actor))
+                return report(false, "mutation_unverified_guest_weapon_actor_lost", before);
+            // Release the verified live actor before deciding whether the shot produced a valid receipt.
+            held->SetPropertyValueInContainer(&parameters, false);
             actor->ProcessEvent(action, &parameters);
         }
-        if (held_actor.Get() != actor || !live(actor))
-            return report(false, "mutation_unverified_guest_weapon_actor_lost", before);
-        // Always release the verified live actor before deciding whether the shot produced a valid receipt.
-        held->SetPropertyValueInContainer(&parameters, false);
-        actor->ProcessEvent(action, &parameters);
         if (!aim.restore()) return report(false, "mutation_unverified_guest_weapon_muzzle_restore", before);
 
         Inventory after;
         if (!ownership_current(context) || !locate(context, after).empty() || equipped(context, after) != actor ||
             !boolean(actor, STR("Holding_Primary"), false) || !boolean(actor, STR("IsSeerOpen"), false) ||
-            !ordinary_magazine_payload(stock_profile, context, after, actor) ||
-            (bolt && (!boolean(actor, STR("IsCycling"), true) || !boolean(actor, STR("ChamberReady"), false))))
+            !ordinary_magazine_payload(stock_profile, context, after, actor))
             return report(false, "mutation_unverified_guest_weapon_release", before);
+
         const auto remaining = live_ammo->GetPropertyValueInContainer(actor);
         if (disarm) return report(true, "disarmed", before, remaining);
-        int observed_projectiles{};
-        if (!projectiles.proves_count(context, projectile, expected_projectiles, observed_projectiles))
-            return report(false, "mutation_unverified_guest_weapon_projectile", before, remaining, observed_projectiles);
         const auto after_stored = after.ammo->GetPropertyValueInContainer(after.item);
-        if (remaining != before - 1 || (after_stored != stored && after_stored != remaining))
-            return report(false, "mutation_unverified_guest_weapon_shot", before, remaining, observed_projectiles);
+        if (projectiles.count == 0 && remaining == before && after_stored == stored && boolean(actor, STR("IsCycling"), false))
+            return report(false, "guest_weapon_stock_shot_not_started", before, remaining);
+        if (!projectiles.owned || projectiles.count != expected_projectiles)
+            return report(false, "mutation_unverified_guest_weapon_projectile", before, remaining, projectiles.count);
+        if (remaining != before - 1 || (after_stored != stored && after_stored != remaining) ||
+            (bolt && (!boolean(actor, STR("IsCycling"), true) || !boolean(actor, STR("ChamberReady"), false))))
+            return report(false, "mutation_unverified_guest_weapon_shot", before, remaining, projectiles.count);
 
         after.ammo->SetPropertyValueInContainer(after.item, remaining);
         return after.ammo->GetPropertyValueInContainer(after.item) == remaining
-            ? report(true, "fired", before, remaining, observed_projectiles)
-            : report(false, "mutation_unverified_guest_weapon_ammo_commit", before, remaining, observed_projectiles);
+            ? report(true, "fired", before, remaining, projectiles.count)
+            : report(false, "mutation_unverified_guest_weapon_ammo_commit", before, remaining, projectiles.count);
     }
 
     struct ReserveStack
@@ -3301,6 +3296,8 @@ void silverfish::native_guest_item::shutdown()
         }
     }
     remove_hold_hooks();
+    if (tap_birth_hook != Hook::ERROR_ID) Hook::UnregisterCallback(tap_birth_hook);
+    tap_birth_hook = Hook::ERROR_ID;
     local_selection = {};
     for (auto& callback : flare_hooks)
     {

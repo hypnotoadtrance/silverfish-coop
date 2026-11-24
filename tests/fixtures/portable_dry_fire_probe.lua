@@ -25,6 +25,7 @@ local last, local_pawn, peer, failure, world_address
 local hooked = false
 local clicks, projectiles, shot_sounds, muzzle_flashes = {}, 0, 0, 0
 local local_flashes, local_reload = 0, nil
+local retire_projectile, projectile_retired
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -86,6 +87,16 @@ local function arm()
             clicks[#clicks + 1] = ("%s,%.3f,%.3f,%.3f"):format(original and "stock-weapon" or "observer", point.X, point.Y, point.Z)
         end)
         if not ok then failure = message end
+    end)
+    RegisterBeginPlayPostHook(function(context)
+        if not retire_projectile or not observing() then return end
+        local actor = context:get()
+        if not valid(actor) or not actor:IsA(retire_projectile) or not actor:HasAuthority()
+            or not same(actor:GetWorld(), local_pawn:GetWorld())
+            or not same(actor:GetOwner(), peer) or not same(actor.Instigator, peer) then return end
+        retire_projectile = nil
+        actor:K2_DestroyActor()
+        projectile_retired = not valid(actor) or actor:IsActorBeingDestroyed()
     end)
     RegisterHook("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:SpawnProjectile", function(context)
         if not observing() then return end
@@ -252,8 +263,16 @@ local function run(action, argument)
     end
     if action == "disarm" then
         world_address, local_pawn, peer, local_reload = nil, nil, nil, nil
+        retire_projectile, projectile_retired = nil, nil
         return "disarmed"
     end
+    if action == "retire-peer-projectile" then
+        assert(observing() and local_pawn:HasAuthority() and peer:HasAuthority())
+        retire_projectile = asset("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C")
+        projectile_retired = nil
+        return "retirement-armed"
+    end
+    if action == "retirement-read" then return projectile_retired and "retired" or "waiting" end
     if action == "seed-local" then return seed(local_pawn, 0) end
     if action == "seed-peer" then return seed(peer, 1) end
     if action == "projected" then return identify(local_pawn.Save.PlayerEquipment[slot]) end

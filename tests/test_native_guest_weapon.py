@@ -258,6 +258,8 @@ class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "mutation_unverified_guest_weapon_shot"):
             await native_guest_weapon.perform(host, bridge, "character", "a" * 32, "native-guest-weapon-fire", guid)
         self.assertTrue(host.stopping)
+        self.assertEqual(host.session_stop_reason, 'native_guest_weapon_verification_failed')
+        host.control.event.assert_called_once()
         self.assertTrue(host.native_checkpoint_unsafe)
         host.checkpoint_native.assert_not_awaited()
 

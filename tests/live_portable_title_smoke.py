@@ -741,11 +741,15 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
     assert await command(guest, "face-away") == "turned"
     for seat in (host, guest):
         assert await command(seat, "clear") == "clear"
+    if rusty:
+        assert await command(host, "retire-peer-projectile") == "retirement-armed"
     loaded_press = await submit(guest_run, "native-guest-primary-input-fixture")
     assert loaded_press["ok"], loaded_press
     capture = loaded_press["native_guest_primary_fixture"]
     shot = await input_result("native_guest_primary_input", capture["sequence"])
     assert (shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (guest_guid, 1, 0, 1), shot
+    if rusty:
+        assert await command(host, "retirement-read") == "retired"
     expected_publication = None
     if memory_queue:
         expected_publication = {key: capture[key] for key in ("map", "pawn", "guid", "sequence")}
@@ -825,7 +829,8 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
     return {**combat, "weapon_kind": kind, "host_stock_click": host_click, "guest_heard_host": guest_heard, "guest_primary_input": press,
             "guest_primary_publication": expected_publication,
             "host_heard_guest": host_heard, "guest_click": guest_click, "guest_cue_receipts": events,
-            "guest_live_round": shot, "host_guest_shot_dispatch": {"projectile_calls": host_shot[0],
+            "guest_live_round": shot, "guest_projectile_retired_during_birth": rusty,
+            "host_guest_shot_dispatch": {"projectile_calls": host_shot[0],
                 "shot_sounds": host_shot[1], "muzzle_flashes": host_shot[2]},
             "guest_empty_magazine_receipt": guest_input,
             "pistols_still_empty_after_dry_fire": True, "projectiles_spawned": 0, "observers_played_shot_effects": 0,
