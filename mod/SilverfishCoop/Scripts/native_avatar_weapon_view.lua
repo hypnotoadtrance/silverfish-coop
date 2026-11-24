@@ -113,9 +113,25 @@ local function encode_pose(location, rotation, scale)
     return table.concat(values, "@")
 end
 
-local function root_pose(component, math_api, root_transform)
+local function root_pose(component, math_api, root_transform, grip)
     local transform = math_api:MakeRelativeTransform(component:K2_GetComponentToWorld(), root_transform)
-    return encode_pose(transform.Translation, math_api:Quat_Rotator(transform.Rotation), transform.Scale3D)
+    local position = transform.Translation
+    if grip then
+        local anchor = math_api:InverseTransformLocation(root_transform, grip)
+        position = {X = position.X - anchor.X, Y = position.Y - anchor.Y, Z = position.Z - anchor.Z}
+    end
+    return encode_pose(position, math_api:Quat_Rotator(transform.Rotation), transform.Scale3D)
+end
+
+local function melee_grip(component, equipment)
+    if component:GetAttachSocketName():ToString() ~= "Melee_Socket" then return end
+    local rig = component:GetAttachParent()
+    if not valid(rig) or not same(rig, equipment.Wep_Skeli) then return end
+    local grip = FName("Wep_Root", EFindName.FNAME_Find)
+    if rig:GetBoneIndex(grip) < 0 then return end
+    -- Keep the stock equipment axes and use the rig's grip as the origin.
+    -- The first-person root includes an offset from the hand.
+    return rig:GetSocketLocation(grip)
 end
 
 local function cycle_rig(equipment, root)
@@ -196,7 +212,7 @@ function view.observe(pawn, save, cached)
                     end
                     if not pose then
                         socket = nil
-                        pose = root_pose(component, math_api, root_transform)
+                        pose = root_pose(component, math_api, root_transform, kind == "s" and melee_grip(component, equipment))
                     end
                     if pose then parts[#parts + 1] = table.concat({kind, path, pose, socket}, "@") end
                 end
