@@ -26,7 +26,7 @@ class ObservatoryLanternTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_not_awaited()
         result = await lantern.extinguish(host, bridge, "guest", f"{epoch}@{aim}")
         self.assertIs(result[lantern.KEY]["lit"], False)
-        bridge.command.assert_awaited_once_with(lantern.EXTINGUISH, pawn, "-10.00", "180.00", timeout=4)
+        bridge.command.assert_awaited_once_with(lantern.EXTINGUISH, pawn, timeout=4)
 
     async def test_current_epoch_applies_only_changed_exact_lantern_light(self):
         epoch = "a" * 32

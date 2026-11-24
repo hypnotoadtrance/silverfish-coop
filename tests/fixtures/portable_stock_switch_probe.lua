@@ -1,6 +1,7 @@
     if (fields[2] == "fixture-warehouse-switch" or fields[2] == "fixture-warehouse-radio")
         and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        local stock_focus = require("native_loot_crate_input").stock_focus
         local dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
         local radio = fields[2] == "fixture-warehouse-radio"
         local class, number = "CircutBox_BP_C", 1

@@ -30,7 +30,7 @@ async def extinguish(host, bridge, character, requested):
     if (not angles or not pawn or not player or player.get("downed") or host.party.get("wipe") or host.transitioning
             or host.stopping or epoch != host.zone_epoch or host.last_game.get("map") != OBSERVATORY):
         raise party.RuleError("native_observatory_lantern_extinguish_unavailable")
-    snapshot = await bridge.command(EXTINGUISH, pawn, *angles, timeout=4)
+    snapshot = await bridge.command(EXTINGUISH, pawn, timeout=4)
     result = frame(snapshot, epoch)
     if not result or result["lit"] is not False:
         raise RuntimeError("The host could not verify the stock lantern interaction")

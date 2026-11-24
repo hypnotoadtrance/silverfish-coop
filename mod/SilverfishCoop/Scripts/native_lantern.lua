@@ -11,7 +11,6 @@ local mesh_path = "/Script/Engine.StaticMeshComponent"
 local sphere_path = "/Script/Engine.SphereComponent"
 local interact_channel, blocking = 16, 2 -- ECC_GameTraceChannel3, the game's Interactable trace.
 local host, guest, surface
-local trace_color = {R = 0, G = 0, B = 0, A = 0}
 
 local function valid(object) return object and object:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -105,45 +104,16 @@ function lantern.sync(state, phase)
     if phase == "hosting" and host or phase == "connected" and guest then expose_flame(actor) end
 end
 
-local function stock_hit(pawn, actor, pitch, yaw)
-    local camera = pawn.Camera
-    local api = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
-    local reach = pawn.InteractionRange
-    if not valid(camera) or not same(camera:GetOwner(), pawn) or not valid(api)
-        or not finite(reach) or reach <= 0 or reach > 1000 then return end
-    local origin, body = camera:K2_GetComponentLocation(), pawn:K2_GetActorLocation()
-    local function squared(a, b) return (a.X - b.X)^2 + (a.Y - b.Y)^2 + (a.Z - b.Z)^2 end
-    if not origin or not body or squared(origin, body) > 150^2 then return end
-    local p, y = math.rad(pitch), math.rad(yaw)
-    local function hit(range, channel, complex)
-        local out = {}
-        local endpoint = {X = origin.X + math.cos(p) * math.cos(y) * range,
-            Y = origin.Y + math.cos(p) * math.sin(y) * range, Z = origin.Z + math.sin(p) * range}
-        if api:LineTraceSingle(pawn, origin, endpoint, channel, complex, {pawn}, 0, out, true, trace_color, trace_color, 0) then
-            return out.OutHit or out
-        end
-    end
-    local visibility = hit(reach, 1, true)
-    if visibility and visibility.ImpactPoint then
-        reach = math.min(reach, math.sqrt(squared(origin, visibility.ImpactPoint)))
-    end
-    local interaction = hit(reach, 4, false)
-    local component = interaction and interaction.Component and interaction.Component:Get()
-    if valid(component) and same(component:GetOwner(), actor) then return component end
-end
-
 function lantern.command(fields, state, phase)
     if fields[2] == "native-observatory-lantern-extinguish" then
         local actor = scene(state, phase)
-        local pitch, yaw = tonumber(fields[4]), tonumber(fields[5])
-        if #fields ~= 5 or phase ~= "hosting" or not host or not same(host.actor, actor) or not actor:HasAuthority()
-            or not finite(pitch) or math.abs(pitch) > 89.9 or not finite(yaw) or math.abs(yaw) > 180 then
+        if #fields ~= 3 or phase ~= "hosting" or not host or not same(host.actor, actor) or not actor:HasAuthority() then
             error("native_observatory_lantern_extinguish_unavailable", 0)
         end
-        local ok, pawn = pcall(guest_save.exact_item_context, state, phase, fields[3])
-        local component = ok and valid(pawn) and pawn.Dead == false and stock_hit(pawn, actor, pitch, yaw)
-        if not component then error("native_observatory_lantern_out_of_reach", 0) end
-        if actor.Lit then actor:SendInteractionToActor(pawn, component) end
+        local pawn = guest_save.exact_item_context(state, phase, fields[3])
+        if not valid(pawn) or pawn.Dead ~= false then error("native_observatory_lantern_extinguish_unavailable", 0) end
+        -- The input hook already matched the guest's stock trace to this lantern.
+        if actor.Lit then actor:SendInteractionToActor(pawn, actor.PropMesh) end
         if actor.Lit ~= false then error("native_observatory_lantern_extinguish_unverified", 0) end
         return "stock lantern interaction extinguished the flame"
     end

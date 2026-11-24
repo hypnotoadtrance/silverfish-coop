@@ -1,6 +1,5 @@
 local switches = {}
 local guest_save = require("guest_save")
-local stock_focus = require("native_loot_crate_input").stock_focus
 
 local root = "/Game/Classes/ScriptingActors/"
 local profiles = {
@@ -170,8 +169,9 @@ function switches.command(fields, state, phase)
         local pawn = guest_save.exact_item_context(state, phase, fields[4])
         if not valid(pawn) or pawn.Dead ~= false then error("stock_switch_guest_unavailable", 0) end
         local before = entry.actor.Powered
-        stock_focus(pawn, entry.box, function() entry.actor:SendInteractionToActor(pawn, entry.box) end,
-            "stock_switch_guest_out_of_reach")
+        -- The guest routes the exact stock interaction component it just hit.
+        if not valid(entry.box) or not same(entry.box:GetOwner(), entry.actor) then error("stock_switch_unavailable", 0) end
+        entry.actor:SendInteractionToActor(pawn, entry.box)
         if not valid(entry.actor) or entry.actor.Powered ~= not before then error("stock_switch_toggle_unverified", 0) end
         return "stock switch interaction dispatched"
     end
