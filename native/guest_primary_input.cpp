@@ -685,7 +685,7 @@ namespace
             }
         }
         if (next.completed.function.Get() && !next.seat.host && held_enabled() &&
-            silverfish::guest_weapon_profiles::stock_selectable_automatic(next.item->kind))
+            silverfish::guest_weapon_profiles::stock_automatic(next.item->kind))
             bind_mapped_input(next);
         return next.completed.function.Get() ? std::string_view{} : "stock_guest_primary_wrappers_unavailable";
     }
@@ -717,7 +717,7 @@ namespace
     {
         // Keep the receipt route open after a mode change so it can drain a cancellation.
         return scope.item && !scope.seat.host && held_enabled() &&
-            silverfish::guest_weapon_profiles::stock_selectable_automatic(scope.item->kind);
+            silverfish::guest_weapon_profiles::stock_automatic(scope.item->kind);
     }
 
     bool stock_automatic_selected()
@@ -725,8 +725,8 @@ namespace
         auto* receiver = scope.seat.held.Get();
         if (!scope.seat.mirrored || !live(receiver)) return false;
         auto* selector = field<U::FBoolProperty>(receiver, STR("HasSelectFire"));
-        return selector && selector->GetPropertyValueInContainer(receiver) &&
-            false_field(receiver, STR("SemiAutoSelected"));
+        return selector && (!selector->GetPropertyValueInContainer(receiver) ||
+            false_field(receiver, STR("SemiAutoSelected")));
     }
 
     bool scoped_melee_edges()

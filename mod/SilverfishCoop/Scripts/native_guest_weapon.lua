@@ -149,7 +149,8 @@ local function remember_mode(fields, state, phase)
             if item_identity(row) == guid then
                 local class = row[class_field]
                 local path = class and class:IsValid() and class:GetFullName():match("^%S+ (%S+)$")
-                if matched or not path or not weapon_profiles.automatic[weapon_profiles.kinds[path]] then
+                if matched or not path or not weapon_profiles.automatic[weapon_profiles.kinds[path]]
+                    or class:GetCDO().HasSelectFire ~= true then
                     error("guest_fire_mode_unavailable", 0)
                 end
                 matched = class
@@ -453,7 +454,8 @@ function guest_weapon.rows(state, phase, status_row)
             local held = row and pawn.EquipedItem
             local amount = row and row[ammo_field]
             if held and weapon_profiles.paths[profile] and amount == held.Ammo and valid_rounds(held, amount) then
-                local mode = weapon_profiles.automatic[profile] and saved_mode(save, id, row[class_field])
+                local mode = weapon_profiles.automatic[profile] and held.HasSelectFire == true
+                    and saved_mode(save, id, row[class_field])
                 return id, profile, amount, mode
             end
             return id, profile

@@ -1,6 +1,7 @@
 local canary = {}
 local guest_save = require("guest_save")
 local shot_view = require("guest_shot_view")
+local weapon_profiles = require("guest_weapon_registry")
 
 local fixtures = os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1"
 local native_scope = os.getenv("SILVERFISH_COOP_NATIVE_GUEST_SAVE") == "1"
@@ -25,7 +26,7 @@ local function check(ok, status, serial, before, after, rounds, projectiles)
     local dirty = type(status) == "string" and status:match("^mutation_unverified_guest_smg_hold_")
     if (ok ~= true and not dirty) or (ok == true and not states[status])
         or not math.tointeger(serial) or serial < 1 or serial >= 2 ^ 53
-        or not math.tointeger(before) or before < 1 or before > 30
+        or not math.tointeger(before) or before < 1 or before > weapon_profiles.max_automatic_rounds
         or not math.tointeger(after) or after < 0 or after > before
         or not math.tointeger(rounds) or rounds ~= before - after or projectiles ~= rounds then
         error("mutation_unverified_guest_smg_hold_abi", 0)

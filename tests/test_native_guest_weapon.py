@@ -130,16 +130,14 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
                 self.assertEqual(profile.magazine, guest_weapon_profiles.Magazine(
                     24, 0, 0.1, require_default_payload=True, ammo=ammo, reload_first_stack=True))
 
-    def test_audited_selectable_automatic_receivers_use_stock_single_projectile_magazines(self):
-        profiles = {profile.kind: profile for profile in guest_weapon_profiles.FIREARMS}
-        kinds = guest_weapon_profiles.STOCK_SELECTABLE_AUTOMATIC_KINDS
-        self.assertEqual(set(kinds), {
-            "smg-standard", "light-ar-01", "light-ar-02", "light-ar-03", "light-ar-cqc", "light-ar-silenced",
-        })
-        for kind in kinds:
-            with self.subTest(kind=kind):
-                magazine = profiles[kind].magazine
-                self.assertEqual((magazine.burst_length, magazine.ammo.projectile_count), (0, 1))
+    def test_held_fire_registry_includes_large_automatic_magazines_and_excludes_burst_and_pellets(self):
+        magazines = guest_weapon_profiles.STOCK_AUTOMATIC_MAGAZINES
+        self.assertEqual(magazines["bizon-01"].capacity, 64)
+        self.assertEqual(magazines["light-ar-01"].capacity, 24)
+        self.assertEqual(magazines["smg-standard"].capacity, 30)
+        self.assertNotIn("smg-03", magazines)
+        self.assertNotIn("sg-71-a", magazines)
+        self.assertEqual(guest_weapon_profiles.MAX_AUTOMATIC_ROUNDS, 64)
 
 
 class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):

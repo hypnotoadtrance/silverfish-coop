@@ -137,17 +137,37 @@ namespace silverfish::guest_weapon_profiles
         Profile{"dmr-night-vision", STR("/Game/Classes/Weapons/Wep_NightVis_DMR.Wep_NightVis_DMR_C"), true, 8, 1, 0.2, true, &thirty_06_fmj, true},
         Profile{"dmr-suppressed", STR("/Game/Classes/Weapons/Wep_Suppressed_DMR.Wep_Suppressed_DMR_C"), true, 16, 1, 0.2, true, &thirty_06_fmj, true},
     };
-    inline constexpr std::array stock_selectable_automatic_kinds{
+    inline constexpr std::array stock_automatic_kinds{
         std::string_view{"smg-standard"},
+        std::string_view{"bizon-01"},
+        std::string_view{"bizon-02"},
+        std::string_view{"bizon-03"},
+        std::string_view{"pistol-auto"},
+        std::string_view{"smg-assault"},
+        std::string_view{"smg-02"},
+        std::string_view{"smg-02-guard"},
+        std::string_view{"grease-gun"},
         std::string_view{"light-ar-01"},
         std::string_view{"light-ar-02"},
         std::string_view{"light-ar-03"},
         std::string_view{"light-ar-cqc"},
         std::string_view{"light-ar-silenced"},
+        std::string_view{"mp28"},
+        std::string_view{"mp28-02"},
+        std::string_view{"hmp2"},
+        std::string_view{"hmp3"},
+        std::string_view{"tac-hmp2"},
+        std::string_view{"vsk-01"},
+        std::string_view{"rifle-50-auto"},
+        std::string_view{"type33"},
+        std::string_view{"type33-scoped"},
+        std::string_view{"type33-tactical"},
+        std::string_view{"type33-shorty"},
+        std::string_view{"type33-lmg"},
     };
-    inline constexpr bool stock_selectable_automatic(std::string_view kind)
+    inline constexpr bool stock_automatic(std::string_view kind)
     {
-        for (auto candidate : stock_selectable_automatic_kinds)
+        for (auto candidate : stock_automatic_kinds)
             if (candidate == kind) return true;
         return false;
     }

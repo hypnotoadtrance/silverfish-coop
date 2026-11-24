@@ -4,7 +4,10 @@ if os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TI
     or (seat ~= "first" and seat ~= "second") then return end
 
 local prefix = mailbox .. "/portable-held-queue-"
-local weapon = "/Game/Classes/Weapons/Wep_SMG_01.Wep_SMG_01_C"
+local weapons = {
+    standard = { path = "/Game/Classes/Weapons/Wep_SMG_01.Wep_SMG_01_C", rounds = 7 },
+    bizon = { path = "/Game/Classes/Weapons/Wep_Bizon_01.Wep_Bizon_01_C", rounds = 64 },
+}
 local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
@@ -39,9 +42,10 @@ local function current_player()
     return world, pawn
 end
 
-local function seed(name)
+local function seed(name, choice)
+    local weapon = assert(weapons[choice], "unknown stock held-fire test receiver")
     local world, host = current_player()
-    assert(seat == "first" and host:HasAuthority(), "only the authoritative seat can seed the SMG")
+    assert(seat == "first" and host:HasAuthority(), "only the authoritative seat can seed the receiver")
     local guest
     for _, pawn in ipairs(FindAllOf("Player_FP_C") or {}) do
         if valid(pawn) and pawn:GetFullName() == name and same(pawn:GetWorld(), world)
@@ -54,7 +58,7 @@ local function seed(name)
     assert(valid(guest) and same(host.Save, canonical) and valid(guest.Save) and not same(guest.Save, canonical),
         "the exact guest needs a detached save")
     local rows = guest.Save.PlayerEquipment
-    local class = asset(weapon)
+    local class = asset(weapon.path)
     local slot
     for index = 1, rows:GetArrayNum() do
         assert(not same(rows[index][item_class], class), "the guest already has a fixture SMG in their equipment")
@@ -65,12 +69,12 @@ local function seed(name)
     local output = {}
     asset(factory):ItemActorToStruct(defaults, guest, output)
     local row = output.Item or output
-    row[ammo] = 7
+    row[ammo] = weapon.rounds
     assert(same(row[item_class], class) and type(defaults.DataStruct) == "userdata", "stock SMG factory row is unavailable")
     rows[slot] = row
     rows[slot][payload] = defaults.DataStruct
     local entry = rows[slot]
-    assert(same(entry[item_class], class) and entry[ammo] == 7, "the detached guest did not receive the stock SMG row")
+    assert(same(entry[item_class], class) and entry[ammo] == weapon.rounds, "the detached guest did not receive the stock SMG row")
     local encoded = identity(entry)
     assert(encoded ~= string.rep("0", 32), "the stock SMG row did not receive its own GUID")
     return encoded
@@ -111,11 +115,11 @@ local function set_stock_mode(name, guid, semi)
     local save, held = pawn.Save, pawn.EquipedItem
     local rows, selected = save.PlayerEquipment, save.PlayerEquipIndex
     local row = selected >= 0 and selected < rows:GetArrayNum() and rows[selected + 1] or nil
-    local class = asset(weapon)
-    assert(identity(row) == guid and same(row[item_class], class) and valid(held)
-        and same(held:GetClass(), class) and same(held:GetOwner(), pawn) and same(held.Instigator, pawn)
-        and same(held:GetWorld(), world) and held.HasSelectFire == true
-        and type(held.SemiAutoSelected) == "boolean", "the exact selected SMG must have a stock fire selector")
+    assert(identity(row) == guid and valid(held) and same(held:GetClass(), row[item_class])
+        and same(held:GetOwner(), pawn) and same(held.Instigator, pawn) and same(held:GetWorld(), world),
+        "the exact selected held-fire receiver is unavailable")
+    if held.HasSelectFire == false then return "fixed-automatic" end
+    assert(held.HasSelectFire == true and type(held.SemiAutoSelected) == "boolean", "stock fire selector unqualified")
     if held.SemiAutoSelected ~= semi then held:ItemFireSelect(true) end
     assert(same(pawn.EquipedItem, held) and held.SemiAutoSelected == semi, "stock selection did not switch fire mode")
     return semi and "semi" or "auto"
@@ -127,10 +131,13 @@ LoopInGameThreadWithDelay(40, function()
     local input = request:read(650)
     request:close()
     if not input then return end
-    local ticket, action, pawn, guid = input:match("^(%x+)\t([a-z]+)\t(Player_FP_C [^%c]+)\t(%x*)$")
-    if not ticket or #ticket ~= 32 or ticket == last or #pawn > 512
-        or (action ~= "seed" or guid ~= "")
-        and ((action ~= "select" and action ~= "semi" and action ~= "auto") or #guid ~= 32) then return end
+    local ticket, action, pawn, guid = input:match("^(%x+)\t([a-z]+)\t(Player_FP_C [^%c]+)\t([%w]+)$")
+    if not ticket or #ticket ~= 32 or ticket == last or #pawn > 512 then return end
+    if action == "seed" then
+        if not weapons[guid] then return end
+    elseif (action ~= "select" and action ~= "semi" and action ~= "auto") or #guid ~= 32 or not guid:match("^%x+$") then
+        return
+    end
     last = ticket
     local handler = action == "seed" and seed or action == "select" and select_stock or set_stock_mode
     local ok, response = pcall(handler, pawn, guid, action == "semi")

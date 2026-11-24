@@ -7,12 +7,13 @@ import time
 import uuid
 
 from . import native_inventory, party
-from .guest_weapon_profiles import STOCK_SELECTABLE_AUTOMATIC_KINDS as HOLD_KINDS
+from .guest_weapon_profiles import MAX_AUTOMATIC_ROUNDS, STOCK_AUTOMATIC_MAGAZINES
 from .native_gold import valid_guid
 from .native_guest_weapon import valid_shot_view
 from .travel import OBSERVATORY
 
 
+HOLD_KINDS = STOCK_AUTOMATIC_MAGAZINES.keys()
 FIXTURE = "native-guest-smg-hold-fixture"
 KEY = "native_guest_smg_hold"
 ALL = "native_guest_smg_holds"
@@ -32,7 +33,7 @@ def parse(row: list[str]) -> dict:
     _, area, pawn, guid, serial, status, before, after, rounds, projectiles = row
     serial, before, after, rounds, projectiles = map(int, (serial, before, after, rounds, projectiles))
     if (not NATIVE_MAP.fullmatch(area) or not pawn or not valid_guid(guid)
-            or not 0 < serial < 2**53 or not 0 <= after <= before <= 30 or before == 0
+            or not 0 < serial < 2**53 or not 0 <= after <= before <= MAX_AUTOMATIC_ROUNDS or before == 0
             or rounds != before - after or projectiles != rounds
             or not (status in LIVE or status in FINISHED or status.startswith(DIRTY))):
         raise ValueError("Invalid stock automatic hold status")
