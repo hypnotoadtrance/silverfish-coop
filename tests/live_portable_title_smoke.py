@@ -32,6 +32,7 @@ from tools.silverfish.control import NAME, current_status, submit
 from tools.silverfish.guest_weapon_profiles import FIREARMS, THIRTY_06_FMJ, THIRTY_06_INCENDIARY
 from tools.silverfish.service import PROTOCOL, menu_host_checkpoint
 from tools.silverfish.steam_cloud import FOLDER
+from tools.silverfish.travel import OBSERVATORY
 from tools.silverfish.win_job import GameProcess
 from live_installed_title_smoke import boot_states, native_mailbox
 from live_loose_pickup_smoke import DEFAULT_ACTOR
@@ -64,6 +65,36 @@ from tools.silverfish.title_session import STATUS_FILE as TITLE_STATUS_FILE
 
 
 CABINET_RELEASE_SHA256 = "e35f410f7231f2c510b4ec43c34fb59ff7e9574187e2cd32fe66a61b3e87c14c"
+
+# These Observatory checks reacquire their target or seed their own starting
+# state. They can still give a valid result after an unrelated check fails.
+INDEPENDENT_RESIDENT_CHECKS = frozenset({"stock_food", "stock_melee_edges"})
+
+
+async def run_resident_checks(checks, host, guest, finish_check, skip_check):
+    gameplay = {}
+    blocking_failure = None
+    for name, check in checks:
+        if blocking_failure and name not in INDEPENDENT_RESIDENT_CHECKS:
+            skip_check(name, blocking_failure)
+            continue
+        started = time.perf_counter()
+        try:
+            # Travel replaces the stock guest pawn, so reacquire the current binding.
+            frame = await wait_resident_status(host.campaign / "run", lambda f:
+                not f.get("awaiting_zone_guest")
+                and f.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
+            if blocking_failure and frame["game"].get("map") != OBSERVATORY:
+                skip_check(name, blocking_failure)
+                continue
+            evidence = await check(host, guest, frame["game"]["native_guest_save"]["pawn"])
+        except Exception as error:
+            finish_check(name, started, error)
+            blocking_failure = blocking_failure or name
+        else:
+            finish_check(name, started, evidence=evidence)
+            gameplay.update(evidence)
+    return gameplay
 
 
 @dataclass(frozen=True)
@@ -4953,7 +4984,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 gameplay = {}
 
                 def finish_check(name, started, error=None, *, evidence=None):
-                    row = {"passed": error is None, "seconds": round(time.perf_counter() - started, 3)}
+                    row = {"passed": error is None, "status": "passed" if error is None else "failed",
+                           "seconds": round(time.perf_counter() - started, 3)}
                     if evidence:
                         row["evidence"] = evidence
                     if error is not None:
@@ -4964,23 +4996,14 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                         print(f"{name} failed: {message}", flush=True)
                     results[name] = row
 
-                async def run_checks(host, guest, pawn):
+                def skip_check(name, blocked_by):
+                    results[name] = {"passed": False, "status": "skipped", "blocked_by": blocked_by}
+                    print(f"{name} skipped after {blocked_by} failed", flush=True)
+
+                async def run_checks(host, guest, _pawn):
                     gameplay["join_seconds"] = round(time.perf_counter() - campaign_started, 3)
                     proof.setdefault("join_seconds", gameplay["join_seconds"])
-                    for name, check in checks:
-                        started = time.perf_counter()
-                        try:
-                            # Travel replaces the stock guest pawn. Read the current binding before every check.
-                            frame = await wait_resident_status(host.campaign / "run", lambda f:
-                                not f.get("awaiting_zone_guest")
-                                and f.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
-                            evidence = await check(host, guest, frame["game"]["native_guest_save"]["pawn"])
-                            gameplay.update(evidence)
-                        except Exception as error:
-                            finish_check(name, started, error)
-                            # Later checks in this campaign can depend on the failed check's map or inventory.
-                            break
-                        finish_check(name, started, evidence=evidence)
+                    gameplay.update(await run_resident_checks(checks, host, guest, finish_check, skip_check))
                     return gameplay
 
                 async def check_shovel_reconnect(guest, _started):
@@ -5137,7 +5160,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             del observed["Config.sav"]
             assert observed == hashes and await stock_profile(seat.bridge) == preferences
             assert seat.bridge.process.poll() is None
-        failures = [name for name, result in proof.get("resident_check_results", {}).items() if not result["passed"]]
+        failures = [name for name, result in proof.get("resident_check_results", {}).items()
+                    if result["status"] == "failed"]
         if failures:
             raise AssertionError(f"Resident checks failed: {', '.join(failures)}")
         proof.update(verified=True, solo_slots_and_settings_preserved=True,
@@ -5164,6 +5188,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["stock_travel_failure"] = str(error)
         raise
     finally:
+        proof["game_executable_launches"] = len(processes)
         proof["native_boot_states"] = {str(game): boot_states(game) for game, _ in processes}
         for _, process in reversed(processes):
             if process.poll() is None:
