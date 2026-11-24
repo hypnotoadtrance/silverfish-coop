@@ -980,7 +980,10 @@ namespace
             return finish("mutation_unverified_guest_melee_health_readback");
         if (ordinary && swing.damage.blocked_by_obstacle)
         {
+            // The ordinary receipt still includes its damage fields for a stock no-op.
             swing.damage = {};
+            swing.damage.requested = true;
+            swing.damage.contact_status = "obstacle_damage_blocked";
             return finish("stock_miss_verified", true);
         }
         if (ordinary && swing.damage.fenced_miss && !swing.damage.sweeps && !swing.damage.calls)
