@@ -596,7 +596,7 @@ namespace
             cost && cost->GetPropertyValueInContainer(weapon) == 1 &&
             rate && rate->GetPropertyValueInContainer(weapon) == profile.fire_rate &&
             field<Unreal::FObjectProperty>(weapon, STR("InputIntercept")) && !object(weapon, STR("InputIntercept")) &&
-            boolean(weapon, STR("Action_OnRelease"), false) && boolean(weapon, STR("SingleReload"), false) &&
+            boolean(weapon, STR("Action_OnRelease"), profile.action_on_release) && boolean(weapon, STR("SingleReload"), false) &&
             boolean(weapon, STR("UseEatherAsAmmo"), false);
     }
 
@@ -1570,7 +1570,9 @@ namespace
             (bolt && action->GetOuterPrivate() != context.weapon))
             return report(false, "stock_guest_weapon_primary_schema_unavailable");
 
-        if (!boolean(actor, STR("Action_OnRelease"), bolt != nullptr) || (bolt && (disarm || !stock_bolt_shape(actor, *bolt))) ||
+        const bool fires_on_release = bolt || (stock_profile && stock_profile->action_on_release);
+        if (!boolean(actor, STR("Action_OnRelease"), fires_on_release) || (disarm && fires_on_release) ||
+            (bolt && !stock_bolt_shape(actor, *bolt)) ||
             (stock_profile && !stock_magazine_shape(actor, *stock_profile)))
             return report(false, "guest_weapon_release_mode_unqualified");
         if (bolt && (!field<Unreal::FObjectProperty>(context.pawn, STR("OffhandEquipment")) ||

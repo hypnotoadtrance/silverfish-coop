@@ -2636,7 +2636,7 @@ async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gue
     return evidence
 
 
-async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str) -> dict:
+async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str, *, shotguns: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_inventory = (await submit(host_run, "native-inventory-list"))["native_inventory"]
     checkpoint = campaign_save_hashes(host.campaign)
@@ -2661,6 +2661,10 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str) -> dict:
              ("obrez", "backpack"), ("obrez", "equipped"), ("revolver-9mm", "equipped"),
              ("heavy-pistol-silenced", "equipped"), ("rifle-50-semi", "equipped"),
              ("type33-scoped", "equipped"))
+    if shotguns:
+        cases = tuple((kind, "equipped") for kind in (
+            "bolt-action-shotgun", "bolt-action-shotgun-suppressed", "sawn-off-shotgun", "sg-71-a",
+        ))
     for kind, source in cases:
         seed_started = time.time()
         seeded = await host.bridge.command("fixture-stock-take-ammo-seed", pawn, kind)
@@ -2746,7 +2750,9 @@ async def verify_stock_take_ammo(host: Seat, guest: Seat, pawn: str) -> dict:
                     await asyncio.sleep(.15)
             proof["reload"] = magazine
             shot = await stock_input("primary")
-            assert (shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (guid, 1, 0, 1), shot
+            assert (shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (
+                guid, 1, 0, expected.projectile_count,
+            ), shot
             async with asyncio.timeout(8):
                 while await read_loadout() != "0,0":
                     await asyncio.sleep(.15)
@@ -4820,7 +4826,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  tutorial_dock_shot_view: bool = False,
                  stock_bandage_revisit: bool = False, stock_shovel: bool = False, stock_shovel_loot: bool = False,
                  stock_shovel_quest: bool = False,
-                 stock_take_ammo: bool = False, stock_alternate_ammo: bool = False,
+                 stock_take_ammo: bool = False, stock_shotguns: bool = False, stock_alternate_ammo: bool = False,
                  stock_light_ar: bool = False, stock_fire_mode_reopen: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
@@ -4921,6 +4927,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_wipe_chooser, "wipe_chooser", "stock_wipe_chooser",
          lambda host, guest, pawn: verify_stock_wipe_chooser(host, guest, pawn, portable_probe_command)),
         (stock_take_ammo, "observatory", "stock_take_ammo", verify_stock_take_ammo),
+        (stock_shotguns, "observatory", "stock_shotguns",
+         lambda host, guest, pawn: verify_stock_take_ammo(host, guest, pawn, shotguns=True)),
         (stock_alternate_ammo, "observatory", "stock_alternate_ammo",
          lambda host, guest, pawn: verify_alternate_ammo(host, guest, pawn, portable_probe_command)),
         (stock_roaming_barter, "observatory", "stock_roaming_barter", verify_roaming_barter),
@@ -5055,7 +5063,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_shovel_quest:
             for game in games:
                 probes.enter_context(stock_board_approach_overlay(game))
-        if stock_take_ammo:
+        if stock_take_ammo or stock_shotguns:
             proof["stock_take_ammo_overlays"] = [probes.enter_context(stock_take_ammo_overlay(game)) for game in games]
         if stock_warehouse_switch:
             proof["warehouse_switch_overlays"] = [probes.enter_context(warehouse_switch_overlay(game)) for game in games]
@@ -5610,6 +5618,8 @@ if __name__ == "__main__":
                         help="verify stock guest excavation and pickup of the buried Missing Contact package")
     parser.add_argument("--stock-take-ammo", action="store_true",
                         help="unload guest firearms through the normal stock context menu")
+    parser.add_argument("--stock-shotguns", action="store_true",
+                        help="verify guest shotgun Take Ammo, reload, and a nine-pellet shot")
     parser.add_argument("--stock-npc-rivalry", action="store_true",
                         help="observe stock perception, attacks, and death between two NPC factions")
     parser.add_argument("--guest-ui-memory", action="store_true",
@@ -5726,6 +5736,7 @@ if __name__ == "__main__":
                               "tutorial_dock_shot_view",
                               "tutorial_dock_melee", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_shovel_quest", "stock_take_ammo",
+                              "stock_shotguns",
                               "stock_host_corpse_carry", "stock_host_prop_observer", "stock_flashlights", "stock_simmi_jammers",
                               "stock_weather_travel", "stock_lightning",
                               "stock_storm_ambience",
@@ -5766,7 +5777,7 @@ if __name__ == "__main__":
         resident_check_options.add("stock_crate_ring")
     if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
             args.stock_campfire, args.stock_npc_override, args.stock_board_offers, args.tutorial_dock_melee,
-            args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
+            args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo, args.stock_shotguns,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
             args.crossroads_profile, args.stock_lightning,
             args.stock_storm_ambience,
@@ -5844,7 +5855,8 @@ if __name__ == "__main__":
                        stock_shovel=args.stock_shovel,
                        stock_shovel_loot=args.stock_shovel_loot,
                        stock_shovel_quest=args.stock_shovel_quest,
-                       stock_take_ammo=args.stock_take_ammo, stock_alternate_ammo=args.stock_alternate_ammo,
+                       stock_take_ammo=args.stock_take_ammo, stock_shotguns=args.stock_shotguns,
+                       stock_alternate_ammo=args.stock_alternate_ammo,
                        stock_light_ar=args.stock_light_ar,
                        stock_fire_mode_reopen=args.stock_fire_mode_reopen,
                        stock_crate_ring=args.stock_crate_ring, guest_world_start=args.guest_world_start,

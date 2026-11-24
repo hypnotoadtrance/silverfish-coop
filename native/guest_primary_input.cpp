@@ -231,6 +231,7 @@ namespace
         std::uint64_t generation{};
         std::uint64_t stroke{};
         bool local_melee{};
+        bool fire_on_release{};
     };
 
     struct Receipt { std::uint64_t sequence{}; Clock::time_point expires{}; };
@@ -908,8 +909,15 @@ namespace
             const bool same_actor = press.seat.mirrored ? current && current == press.seat.held.Get() : !current;
             if (press.stroke != 0 && press.stroke == held.id)
                 stop_held(same_actor ? HeldEdge::release : HeldEdge::cancel, now);
+            const bool fire_on_release = press.fire_on_release;
             press = {};
-            if (same_actor) iteration.PreventOriginalFunctionCall();
+            if (same_actor)
+            {
+                iteration.PreventOriginalFunctionCall();
+                if (fire_on_release && iteration.OriginalFunctionCallPrevented() && qualified(scope, now) &&
+                    scope.item->action_on_release && scope.seat.pawn.Get() == pawn && can_act(scope.seat))
+                    queue_tap(now);
+            }
             return;
         }
         const bool leased = started && qualified(scope, now) && verifies_source(scope.started, scope.action.Get(), arguments);
@@ -922,6 +930,11 @@ namespace
             press.seat.world.Get() == scope.seat.world.Get()) return;
         press = {scope.seat, scope.action, scope.completed, now + release_lease, active_generation};
         if (!can_act(scope.seat)) return;
+        if (scope.item->action_on_release)
+        {
+            press.fire_on_release = true;
+            return;
+        }
         if (fixture_dispatch != FixtureDispatch::tap &&
             ((scoped_held_fire() && stock_held_fire_selected()) || scoped_melee_edges()))
         {
@@ -1217,6 +1230,8 @@ namespace
             factory.dispatch(pawn, action, first, true);
             if (press.seat.pawn.Get() != pawn || !qualified(scope, Clock::now()))
                 return result(lua, false, "native_guest_primary_fixture_start_unverified");
+            if (scope.item->action_on_release && (sequence != before || count != 0))
+                return result(lua, false, "native_guest_primary_fixture_fired_before_release");
         }
         factory.dispatch(pawn, action, scope.completed, false);
         if (press.seat.pawn.Get() || sequence != before + 1 || count != 1)

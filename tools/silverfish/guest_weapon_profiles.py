@@ -51,6 +51,7 @@ class Magazine:
     require_default_payload: bool = False
     ammo: StockAmmo = NINE_MM_BALL
     reload_first_stack: bool = False
+    action_on_release: bool = False
 
 
 @dataclass(frozen=True)
@@ -162,6 +163,12 @@ FIREARMS = (
             Magazine(10, 1, 0.2, True, TWELVE_GAUGE_BUCK, reload_first_stack=True)),
     Firearm("sg-71-a-suppressed", "Wep_ShotGun_SemiAuto_Suppressed", True,
             Magazine(5, 1, 0.2, True, TWELVE_GAUGE_BUCK, reload_first_stack=True)),
+    Firearm("bolt-action-shotgun", "Wep_BoltAction_Shotgun", True,
+            Magazine(4, 1, 1.3, True, TWELVE_GAUGE_BUCK, reload_first_stack=True, action_on_release=True)),
+    Firearm("bolt-action-shotgun-suppressed", "Wep_BoltAction_Shotgun_Suppressed", True,
+            Magazine(4, 1, 1.3, True, TWELVE_GAUGE_BUCK, reload_first_stack=True, action_on_release=True)),
+    Firearm("sawn-off-shotgun", "Wep_SawnOff_ShotGun", True,
+            Magazine(2, 1, 0.1, True, TWELVE_GAUGE_BUCK, reload_first_stack=True)),
     Firearm("model-1931", "Wep_Pistol_Long", True, Magazine(10, 1, 0.1, True, reload_first_stack=True)),
     Firearm("fennec-57", "Wep_Pistol_Fennec_01", True,
             Magazine(17, 1, 0.06, True, FIVE_SEVEN_AP, reload_first_stack=True)),
@@ -177,7 +184,8 @@ TAKE_AMMO_MAGAZINES = {weapon.path: weapon.magazine for weapon in FIREARMS if we
 # The native input and authority adapters still verify the live receiver and stock functions.
 STOCK_HELD_FIRE_MAGAZINES = {
     weapon.kind: magazine for weapon in FIREARMS
-    if (magazine := weapon.magazine) and magazine.burst_length != 1 and magazine.ammo.projectile_count == 1
+    if (magazine := weapon.magazine) and not magazine.action_on_release
+    and magazine.burst_length != 1 and magazine.ammo.projectile_count == 1
 }
 MAX_HELD_FIRE_ROUNDS = max(magazine.capacity for magazine in STOCK_HELD_FIRE_MAGAZINES.values())
 BOLT_ACTION_UNLOAD_CAPACITY = 5

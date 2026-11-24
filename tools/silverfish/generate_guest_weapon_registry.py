@@ -45,6 +45,7 @@ def outputs() -> dict[str, str]:
         "        bool require_default_payload;",
         "        const StockAmmo* ammo;",
         "        bool reload_first_stack;",
+        "        bool action_on_release{};",
         "    };", "",
         "    inline constexpr std::array firearms{",
     ])
@@ -62,6 +63,8 @@ def outputs() -> dict[str, str]:
                  f"{str(magazine.require_default_payload).lower()}, &{magazine.ammo.symbol}, "
                  f"{str(magazine.reload_first_stack).lower()}"
                  if magazine else "0, 0, 0.0, false, nullptr, false")
+        if magazine and magazine.action_on_release:
+            shape += ", true"
         ammo = f'"{magazine.ammo.item_path}"' if magazine and magazine.ammo != NINE_MM_BALL else "nil"
         lua_magazine = f", {ammo}, {magazine.capacity}" if magazine else ""
         header.append(f'        Profile{{"{firearm.kind}", STR("{firearm.path}"), {headless}, {shape}}},')

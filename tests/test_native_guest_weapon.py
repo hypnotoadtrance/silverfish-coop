@@ -80,18 +80,23 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
         self.assertIn("obrez", native_guest_weapon.PRIMARY_KINDS)
         self.assertNotIn(path, guest_weapon_profiles.TAKE_AMMO_MAGAZINES)
 
-    def test_only_qualified_sg_71_variants_use_buckshot(self):
+    def test_qualified_shotguns_use_nine_pellets_per_shell(self):
         ammo = guest_weapon_profiles.TWELVE_GAUGE_BUCK
         self.assertEqual((ammo.caliber, ammo.row, ammo.item, ammo.projectile, ammo.fixture_units, ammo.projectile_count),
                          (4, "12Gauge_Buck", "Ammo_ShotgunShells_BP", "Projectile_ShotGun_Pellet", 5, 9))
         profiles = [profile for profile in guest_weapon_profiles.FIREARMS
                     if profile.magazine and profile.magazine.ammo == ammo]
-        self.assertEqual([(p.kind, p.blueprint, p.magazine.capacity, p.magazine.burst_length, p.magazine.fire_rate) for p in profiles],
-                         [("sg-71-a", "Wep_ShotGun_SemiAuto", 10, 1, 0.2),
-                          ("sg-71-b", "Wep_ShotGun_SemiAuto_02", 10, 1, 0.2),
-                          ("sg-71-a-suppressed", "Wep_ShotGun_SemiAuto_Suppressed", 5, 1, 0.2)])
+        self.assertEqual([(p.kind, p.blueprint, p.magazine.capacity, p.magazine.burst_length,
+                           p.magazine.fire_rate, p.magazine.action_on_release) for p in profiles],
+                         [("sg-71-a", "Wep_ShotGun_SemiAuto", 10, 1, 0.2, False),
+                          ("sg-71-b", "Wep_ShotGun_SemiAuto_02", 10, 1, 0.2, False),
+                          ("sg-71-a-suppressed", "Wep_ShotGun_SemiAuto_Suppressed", 5, 1, 0.2, False),
+                          ("bolt-action-shotgun", "Wep_BoltAction_Shotgun", 4, 1, 1.3, True),
+                          ("bolt-action-shotgun-suppressed", "Wep_BoltAction_Shotgun_Suppressed", 4, 1, 1.3, True),
+                          ("sawn-off-shotgun", "Wep_SawnOff_ShotGun", 2, 1, 0.1, False)])
         self.assertTrue(all(p.magazine.require_default_payload and p.magazine.reload_first_stack for p in profiles))
-        self.assertFalse({"Wep_ShotGun_SemiAuto_03_UBGL", "Wep_ShotGun_FullAuto"} & {p.blueprint for p in profiles})
+        self.assertNotIn("bolt-action-shotgun-loki", native_guest_weapon.PRIMARY_KINDS)
+        self.assertFalse({p.kind for p in profiles} & guest_weapon_profiles.STOCK_HELD_FIRE_MAGAZINES.keys())
 
     def test_exact_fennec_ap_profiles_use_one_stock_projectile(self):
         ammo = guest_weapon_profiles.FIVE_SEVEN_AP
@@ -114,6 +119,7 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
             "army-pistol", "pistol", "pistol-02", "tac-pistol", "1911", "1911-fancy", "heavy-pistol",
             "rusty-pistol",
             "sg-71-a", "sg-71-b", "sg-71-a-suppressed", "model-1931", "fennec-57", "black-fox", "break-action-50",
+            "bolt-action-shotgun", "bolt-action-shotgun-suppressed", "sawn-off-shotgun",
             "revolver-9mm", "revolver-01", "revolver-02", "revolver-03",
             *(kind for kind, *_ in guest_weapon_profiles.ORDINARY_WEAPONS),
         })

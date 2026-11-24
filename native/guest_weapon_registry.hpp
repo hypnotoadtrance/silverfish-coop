@@ -59,6 +59,7 @@ namespace silverfish::guest_weapon_profiles
         bool require_default_payload;
         const StockAmmo* ammo;
         bool reload_first_stack;
+        bool action_on_release{};
     };
 
     inline constexpr std::array firearms{
@@ -84,6 +85,9 @@ namespace silverfish::guest_weapon_profiles
         Profile{"sg-71-a", STR("/Game/Classes/Weapons/Wep_ShotGun_SemiAuto.Wep_ShotGun_SemiAuto_C"), true, 10, 1, 0.2, true, &twelve_gauge_buck, true},
         Profile{"sg-71-b", STR("/Game/Classes/Weapons/Wep_ShotGun_SemiAuto_02.Wep_ShotGun_SemiAuto_02_C"), true, 10, 1, 0.2, true, &twelve_gauge_buck, true},
         Profile{"sg-71-a-suppressed", STR("/Game/Classes/Weapons/Wep_ShotGun_SemiAuto_Suppressed.Wep_ShotGun_SemiAuto_Suppressed_C"), true, 5, 1, 0.2, true, &twelve_gauge_buck, true},
+        Profile{"bolt-action-shotgun", STR("/Game/Classes/Weapons/Wep_BoltAction_Shotgun.Wep_BoltAction_Shotgun_C"), true, 4, 1, 1.3, true, &twelve_gauge_buck, true, true},
+        Profile{"bolt-action-shotgun-suppressed", STR("/Game/Classes/Weapons/Wep_BoltAction_Shotgun_Suppressed.Wep_BoltAction_Shotgun_Suppressed_C"), true, 4, 1, 1.3, true, &twelve_gauge_buck, true, true},
+        Profile{"sawn-off-shotgun", STR("/Game/Classes/Weapons/Wep_SawnOff_ShotGun.Wep_SawnOff_ShotGun_C"), true, 2, 1, 0.1, true, &twelve_gauge_buck, true},
         Profile{"model-1931", STR("/Game/Classes/Weapons/Wep_Pistol_Long.Wep_Pistol_Long_C"), true, 10, 1, 0.1, true, &nine_mm_ball, true},
         Profile{"fennec-57", STR("/Game/Classes/Weapons/Wep_Pistol_Fennec_01.Wep_Pistol_Fennec_01_C"), true, 17, 1, 0.06, true, &five_seven_ap, true},
         Profile{"black-fox", STR("/Game/Classes/Weapons/Wep_Pistol_Fennec_02.Wep_Pistol_Fennec_02_C"), true, 17, 1, 0.06, true, &five_seven_ap, true},
