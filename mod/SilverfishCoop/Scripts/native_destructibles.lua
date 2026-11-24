@@ -46,7 +46,8 @@ local function census(state, phase)
     local actors, ids = {}, {}
     for _, actor in ipairs(output.OutActors or output) do
         if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
-        if live(actor) and actor.bReplicates == false and actor:HasAuthority() then
+        -- Client copies of authored non-replicating actors can have a simulated role.
+        if live(actor) and actor.bReplicates == false and (phase == "connected" or actor:HasAuthority()) then
             local path = actor:GetFullName():match("^%S+ (.+)$")
             local placed, guest
             if path then placed, guest = SilverfishQualifyNativePlacedDestructible(path) end
