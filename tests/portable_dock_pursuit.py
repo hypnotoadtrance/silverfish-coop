@@ -54,7 +54,8 @@ def tap_publication(game, captured, kind):
 
 async def verify_dock_pursuit(host, guest, frame, command):
     guest_run = guest.client / "run"
-    weapon_kind = frame["game"]["native_guest_primary_scope"]["kind"]
+    scope = frame["game"]["native_guest_primary_scope"]
+    weapon_kind = scope["kind"]
     origin, guest_spawn = (await command(host, "dock-pursuit-stage")).split(";")
     history = []
     last_view = None
@@ -169,6 +170,25 @@ async def verify_dock_pursuit(host, guest, frame, command):
                 return record
         raise AssertionError(("Two stock trigger attempts ended before the guest published a shot", history))
 
+    async def reload_pistol():
+        await firing_window(1)
+        started = time.time()
+        result = await submit(guest_run, "native-guest-reload-input-fixture")
+        assert result["ok"], result
+        sequence = result["native_guest_reload_fixture"]["sequence"]
+
+        async def receipt():
+            return next((row for row in await resident_events(guest_run, frame)
+                         if row.get("sequence") == sequence and row["time_unix"] >= started
+                         and row["event"] in ("native_guest_reload_input", "native_guest_reload_input_rejected")), None)
+
+        reply = await wait_for(receipt, "The stock warehouse reload did not receive a receipt", 8)
+        assert reply["event"] == "native_guest_reload_input", reply
+        reload = reply["native_guest_weapon"]
+        assert (reload["guid"], reload["before"], reload["after"], reload["reserve_before"], reload["reserve_after"]) == (
+            scope["guid"], 0, 8, 8, 0), reload
+        return reload
+
     try:
         baseline = await observe()
         assert baseline["alive"] and baseline["health"] == baseline["initial_health"] == 120, baseline
@@ -198,8 +218,16 @@ async def verify_dock_pursuit(host, guest, frame, command):
         current = retaliation
         moved = False
         pursued_while_moving = False
-        for remaining in range(initial_view["round"]["after"], 0, -1):
+        reload = None
+        remaining = initial_view["round"]["after"]
+        while current["alive"]:
+            if remaining == 0:
+                if reload is not None:
+                    break
+                reload = await reload_pistol()
+                remaining = reload["after"]
             view = await fire_round(remaining, 1 if remaining % 2 == 0 else -1)
+            remaining = view["round"]["after"]
             moved = moved or all(math.dist(history[0][seat]["seat"], view[seat]["seat"]) > 45 for seat in ("host", "guest"))
             before = current["health"]
             deadline = time.monotonic() + 1.5
@@ -211,8 +239,6 @@ async def verify_dock_pursuit(host, guest, frame, command):
             view["combat"] = current
             assert current["host_hits"] == 0 and current["guest_health"] > 0, (baseline, history)
             pursued_while_moving = pursued_while_moving or (moved and current["alive"] and current["target"] == "guest")
-            if not current["alive"]:
-                break
 
         assert moved, ("The host never observed the guest walk during pursuit", history)
         assert pursued_while_moving, ("The stock worker did not stay on the moving guest during the fight", history)
@@ -226,7 +252,7 @@ async def verify_dock_pursuit(host, guest, frame, command):
             return states if all(state.startswith("false;true;1;") for state in states) else None
 
         death = await wait_for(shared_death, "The exact worker death/ragdoll did not reach both seats", 10)
-        return {"baseline": baseline, "retaliation": retaliation, "rounds": history,
+        return {"baseline": baseline, "retaliation": retaliation, "rounds": history, "reload": reload,
                 "muzzle_target_camera_angles_at_launch": launches, "both_peers_dead_and_ragdolled": death}
     except Exception as error:
         with suppress(RuntimeError, TimeoutError):

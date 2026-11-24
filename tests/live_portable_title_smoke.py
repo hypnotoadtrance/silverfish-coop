@@ -683,7 +683,7 @@ async def verify_resident_footsteps(host: Seat, guest: Seat) -> list[dict]:
 
 
 async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool = False,
-                                 rusty: bool = False, memory_queue: bool = False) -> dict:
+                                 rusty: bool = False, memory_queue: bool = False, pursuit: bool = False) -> dict:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-dry-fire", action)
 
@@ -782,8 +782,9 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
                     and entry.get("sequence") == press["native_guest_primary_fixture"]["sequence"]]
     assert guest_input["reason"] == "guest_weapon_preloaded_magazine_required", guest_input
 
-    reserve = await command(host, "seed-reserve")
-    assert re.fullmatch(r"[0-9A-F]{32},9", reserve), reserve
+    reserve_rounds = 16 if pursuit else 9
+    reserve = await command(host, "seed-pursuit-reserve" if pursuit else "seed-reserve")
+    assert re.fullmatch(rf"[0-9A-F]{{32}},{reserve_rounds}", reserve), reserve
     await wait_for(guest, "reserve", reserve)
     reloaded = await submit(guest_run, "native-guest-reload-input-fixture")
     assert reloaded["ok"] and reloaded["native_guest_reload_fixture"]["stock_wrappers"] == 2, reloaded
@@ -798,9 +799,9 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
                      if row["event"] == "native_guest_reload_view_played"]
     assert [row["clip"] for row in owner_reloads] == [reload_clip], owner_reloads
     loaded = 8 if rusty else 9
-    reserve_left = f"{reserve.split(',')[0]},1" if rusty else ""
+    reserve_left = f"{reserve.split(',')[0]},{reserve_rounds - loaded}" if rusty else ""
     assert (reload["guid"], reload["before"], reload["after"], reload["reserve_before"], reload["reserve_after"]) == (
-        guest_guid, 0, loaded, 9, 9 - loaded), reload
+        guest_guid, 0, loaded, reserve_rounds, reserve_rounds - loaded), reload
     await wait_for(host, "peer-ready", f"{guest_guid},{loaded},{loaded}")
     await wait_for(guest, "ready", f"{guest_guid},{loaded},{loaded}")
     await wait_for(guest, "reserve", reserve_left)
@@ -2077,7 +2078,7 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
 
 async def capture_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool,
                                        memory_queue: bool,
-                                      rusty: bool, npc_rivalry: bool) -> dict:
+                                      rusty: bool, npc_rivalry: bool, pursuit: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     host_frame, guest_frame = await asyncio.gather(
         wait_resident_status(host_run, lambda frame: frame.get("local_bridge") == "memory"),
@@ -2130,7 +2131,8 @@ async def capture_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gu
     assert visual["player_id"] == player_id, visual
     guest_melee = await verify_resident_guest_melee(host, guest) if guest_combat and not rusty else {}
     footsteps = await verify_resident_footsteps(host, guest)
-    pistol = await verify_resident_pistol(host, guest, guest_combat=guest_combat, rusty=rusty, memory_queue=memory_queue)
+    pistol = await verify_resident_pistol(host, guest, guest_combat=guest_combat, rusty=rusty, memory_queue=memory_queue,
+                                         pursuit=pursuit)
     npc_shots = await verify_resident_npc_shots(host, guest_run, guest_frame) if guest_combat else []
     npc_kill = await verify_resident_npc_kill(host, guest) if guest_combat and not npc_rivalry else {}
     turret_death = await verify_resident_turret_combat(host, guest, guest_frame) if guest_combat else {}
@@ -2155,13 +2157,15 @@ async def capture_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, gu
 
 
 async def verify_resident_weapon_cues(host: Seat, guest: Seat, pawn: str, *, guest_combat: bool = False,
-                                      rusty: bool = False, npc_rivalry: bool = False, memory_queue: bool = False) -> dict:
+                                      rusty: bool = False, npc_rivalry: bool = False, memory_queue: bool = False,
+                                      pursuit: bool = False) -> dict:
     probes = [("portable-dry-fire", "disarm"), ("portable-footstep", "disarm")]
     if guest_combat:
         probes.append(("portable-npc-override", "disarm-weapon-observers"))
     try:
         evidence = await capture_resident_weapon_cues(host, guest, pawn, guest_combat=guest_combat,
-                                                      rusty=rusty, npc_rivalry=npc_rivalry, memory_queue=memory_queue)
+                                                      rusty=rusty, npc_rivalry=npc_rivalry, memory_queue=memory_queue,
+                                                      pursuit=pursuit)
     finally:
         # The installed probes stay registered when the same process loads another map.
         replies = await asyncio.gather(*(portable_probe_command(seat.bridge, probe, action)
@@ -4210,7 +4214,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (resident_weapon_cues, weapon_campaign, "resident_weapon_cues",
          lambda host, guest, pawn: verify_resident_weapon_cues(host, guest, pawn, guest_combat=stock_npc_override,
                                                                rusty=rusty_pistol, npc_rivalry=stock_npc_rivalry,
-                                                               memory_queue=resident_held_queue)),
+                                                               memory_queue=resident_held_queue, pursuit=tutorial_dock_pursuit)),
         (stock_light_ar, "observatory", "stock_light_ar",
          lambda host, guest, pawn: verify_stock_light_ar(host, guest, pawn, portable_probe_command)),
         (resident_held_queue, weapon_campaign, "stock_held_queue",

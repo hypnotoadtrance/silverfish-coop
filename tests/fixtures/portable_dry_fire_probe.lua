@@ -153,7 +153,7 @@ local function read_reserve(pawn)
     return table.concat(rows, "|")
 end
 
-local function seed_reserve()
+local function seed_reserve(extra)
     assert(local_pawn:HasAuthority() and peer:HasAuthority() and valid(peer.Save) and not same(local_pawn.Save, peer.Save),
         "stock reload requires a detached authoritative guest inventory")
     assert(read_reserve(peer) == "", "fixture expected no preexisting matching reserve")
@@ -161,6 +161,11 @@ local function seed_reserve()
     asset(factory):ItemActorToStruct(asset(reserve_path):GetCDO(), peer, output)
     local row = output.Item or output
     assert(same(row[item_class], asset(reserve_path)) and row[ammo] == reserve_units, "stock reserve did not match its profile")
+    if extra then
+        assert(weapon_path == arm_profiles["arm-rusty"][1] and reserve_units == 9,
+            "the pursuit reserve requires the stock Rusty Pistol")
+        row[ammo] = 16
+    end
     pack[pack:GetArrayNum() + 1] = row
     return read_reserve(peer)
 end
@@ -184,7 +189,9 @@ local function run(action)
     end
     if action == "ready" then return ready(local_pawn) end
     if action == "peer-ready" then return ready(peer) end
-    if action == "seed-reserve" then return seed_reserve() end
+    if action == "seed-reserve" or action == "seed-pursuit-reserve" then
+        return seed_reserve(action == "seed-pursuit-reserve")
+    end
     if action == "reserve" then return read_reserve(local_pawn) end
     if action == "peer-reserve" then return read_reserve(peer) end
     if action == "face-away" then
