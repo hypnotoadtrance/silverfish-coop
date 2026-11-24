@@ -38,7 +38,16 @@ namespace
     {
         Unreal::UObject* stock{};
         Unreal::UObject* guest{};
+        Unreal::UObject* instance{};
     };
+
+    struct EscrowReference
+    {
+        std::uintptr_t address{};
+        Unreal::FWeakObjectPtr instance;
+        Unreal::FWeakObjectPtr save;
+    };
+    std::vector<EscrowReference> retained_escrows;
 
     template <typename Property>
     auto field(Unreal::UObject* object, const Unreal::TCHAR* name) -> Property*
@@ -90,6 +99,7 @@ namespace
             {
                 const auto* current = slot->GetObjectPropertyValue(slot->ContainerPtrToValuePtr<void>(object));
                 const auto current_address = reinterpret_cast<std::uintptr_t>(current);
+                if (current_address == static_cast<std::uintptr_t>(stock_address)) pair.instance = object;
                 stock_is_slot |= current_address == static_cast<std::uintptr_t>(stock_address);
                 guest_is_slot |= current_address == static_cast<std::uintptr_t>(guest_address);
             }
@@ -185,23 +195,62 @@ namespace
         return result(lua, true, "detached_save_retained");
     }
 
-    int release_detached_save(const Lua& lua)
+    // The reflected UGameInstance array is visited by the engine's garbage
+    // collector. Setting the internal root flag alone does not register a root.
+    bool update_escrow_reference(Unreal::UObject* instance, Unreal::UObject* save, bool retain)
+    {
+        auto* references = field<Unreal::FArrayProperty>(instance, STR("ReferencedObjects"));
+        auto* entry = references ? Unreal::CastField<Unreal::FObjectProperty>(references->GetInner()) : nullptr;
+        if (!entry) return false;
+        Unreal::FScriptArrayHelper objects(references, references->ContainerPtrToValuePtr<void>(instance));
+        for (int index = 0; index < objects.Num(); ++index)
+        {
+            if (entry->GetObjectPropertyValue(objects.GetRawPtr(index)) != save) continue;
+            if (retain) return false;
+            objects.RemoveValues(index, 1);
+            return true;
+        }
+        if (!retain) return true;
+        const auto index = objects.AddValue();
+        if (index < 0 || index >= objects.Num()) return false;
+        auto* storage = objects.GetRawPtr(index);
+        entry->SetObjectPropertyValue(storage, save);
+        if (entry->GetObjectPropertyValue(storage) == save) return true;
+        objects.RemoveValues(index, 1);
+        return false;
+    }
+
+    int retain_loot_escrow(const Lua& lua)
+    {
+        SavePair pair;
+        if (const auto error = resolve_pair(lua, pair); !error.empty()) return result(lua, false, error);
+        auto* outer = pair.guest->GetOuterPrivate();
+        if (!outer || outer->GetPathName() != STR("/Engine/Transient"))
+            return result(lua, false, "loot_escrow_not_transient");
+        const auto address = reinterpret_cast<std::uintptr_t>(pair.guest);
+        if (std::ranges::any_of(retained_escrows, [address](const auto& row) { return row.address == address; }) ||
+            !update_escrow_reference(pair.instance, pair.guest, true))
+            return result(lua, false, "loot_escrow_reference_unavailable");
+        retained_escrows.push_back({address, Unreal::FWeakObjectPtr(pair.instance), Unreal::FWeakObjectPtr(pair.guest)});
+        return result(lua, true, "loot_escrow_retained");
+    }
+
+    int release_loot_escrow(const Lua& lua)
     {
         if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1))
             return result(lua, false, "expected_retained_save_address");
         const auto address = lua.get_integer();
         if (address <= 0) return result(lua, false, "expected_retained_save_address");
-        // This only releases a root acquired by this mod. A save scope can
-        // already have ended by the time an escrow cache is cleared.
-        for (auto entry = retained_saves.begin(); entry != retained_saves.end(); ++entry)
-        {
-            auto* save = entry->Get();
-            if (reinterpret_cast<std::uintptr_t>(save) != static_cast<std::uintptr_t>(address)) continue;
-            save->ClearRootSet();
-            retained_saves.erase(entry);
-            return result(lua, true, "detached_save_released");
-        }
-        return result(lua, false, "detached_save_not_retained");
+        const auto owned = std::ranges::find_if(retained_escrows, [address](const auto& row) {
+            return row.address == static_cast<std::uintptr_t>(address);
+        });
+        if (owned == retained_escrows.end()) return result(lua, false, "loot_escrow_not_retained");
+        auto* instance = owned->instance.Get();
+        auto* save = owned->save.Get();
+        if (instance && save && !update_escrow_reference(instance, save, false))
+            return result(lua, false, "loot_escrow_reference_unavailable");
+        retained_escrows.erase(owned);
+        return result(lua, true, "loot_escrow_released");
     }
 
     int copy_guest_save(const Lua& lua)
@@ -437,7 +486,8 @@ namespace
 void silverfish::register_native_save_copy_lua(RC::LuaMadeSimple::Lua& lua)
 {
     lua.register_function("SilverfishReferenceNativeDetachedSave", run<reference_detached_save>);
-    lua.register_function("SilverfishReleaseNativeDetachedSave", run<release_detached_save>);
+    lua.register_function("SilverfishRetainNativeLootEscrow", run<retain_loot_escrow>);
+    lua.register_function("SilverfishReleaseNativeLootEscrow", run<release_loot_escrow>);
     lua.register_function("SilverfishCopyNativeGuestSave", run<copy_guest_save>);
     lua.register_function("SilverfishProbeNativeInventory", run<probe_stock_inventory>);
     lua.register_function("SilverfishProbeNativeInventoryFixture", run<probe_fixture_inventory>);

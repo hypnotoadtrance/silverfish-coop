@@ -23,7 +23,7 @@ from portable_guest_world_start import resident_events, wait_resident_status
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.silverfish import native_host_save, native_loot, native_world_loot, runtime
-from tools.silverfish.authored_loot import full_name
+from tools.silverfish.authored_loot import GUARANTEED_CRATES, full_name
 from tools.silverfish.control import submit
 from tools.silverfish.service import menu_host_checkpoint
 from tools.silverfish.title_host_campaigns import saved_campaign
@@ -387,54 +387,70 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
     restored, = [row for row in await resident_events(host_run, host_state) if row["event"] == "native_host_save_restored"]
     assert (restored["state"], restored["slot"], restored["map"]) == (
         "restored", saved["world"]["native_host_save"]["slot"], OBSERVATORY)
-    guid = item["guid"]
-    identity = native_world_loot.crate_identity(roll["id"], guid)
 
-    def visible(state, within):
-        frame = state.get("game", {})
-        position = frame.get("pawns", {}).get("local", {}).get("location")
-        return (memory(state) and frame.get("map") == OBSERVATORY and position
-                and math.dist(position, item["transform"]["position"]) <= within
-                and frame.get(native_world_loot.KEY, {}).get(identity, {}).get("class_path") == item["class_path"])
+    def save_fingerprints():
+        stock = {name: digest for name, digest in saved_hashes(host.profile / "Saved/SaveGames").items()
+                 if Path(name).name.startswith("SFCoop_")}
+        return campaign_save_hashes(host.campaign), stock
 
-    await wait_resident_status(host_run, lambda state: visible(state, 350))
-    for pawn in (guest_pawn, host_pawn):
-        approached = await host.bridge.command(native_world_loot.APPROACH, identity, pawn, timeout=5)
-        assert approached["ack"]["message"] == "stock loot height and line of sight verified"
-    await asyncio.gather(wait_resident_status(host_run, lambda state: visible(state, 250)),
-                         wait_resident_status(guest_run, lambda state: visible(state, 250)))
-    before = campaign_save_hashes(host.campaign), saved_hashes(host.profile / "Saved/SaveGames")
-    assert all(before)
+    async def pick_up(crate, current_roll, current_item):
+        guid = current_item["guid"]
+        identity = native_world_loot.crate_identity(current_roll["id"], guid)
 
-    trace = await arm_probe(host.bridge.directory, identity)
-    fired = await host.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
-    assert fired["ack"]["message"] == "stock world loot interaction intercepted", fired["ack"]
+        def visible(state, within):
+            frame = state.get("game", {})
+            position = frame.get("pawns", {}).get("local", {}).get("location")
+            return (memory(state) and frame.get("map") == OBSERVATORY and position
+                    and math.dist(position, current_item["transform"]["position"]) <= within
+                    and frame.get(native_world_loot.KEY, {}).get(identity, {}).get("class_path") == current_item["class_path"])
 
-    def settled(state):
-        rows = state.get("gameplay", {}).get(native_loot.STATE_KEY, {}).get(CABINET, {}).get("items", ())
-        return identity not in state.get("game", {}).get(native_world_loot.KEY, {}) and any(
-            row["guid"] == guid and row.get("claimed_by") == "host" for row in rows)
+        await wait_resident_status(host_run, lambda state: visible(state, 350))
+        for pawn in (guest_pawn, host_pawn):
+            approached = await host.bridge.command(native_world_loot.APPROACH, identity, pawn, timeout=5)
+            assert approached["ack"]["message"] == "stock loot height and line of sight verified"
+        await asyncio.gather(wait_resident_status(host_run, lambda state: visible(state, 250)),
+                             wait_resident_status(guest_run, lambda state: visible(state, 250)))
+        before = save_fingerprints()
+        assert all(before)
 
-    await asyncio.gather(wait_resident_status(host_run, settled), wait_resident_status(guest_run, settled))
-    await finish_probe(trace)
-    records = await resident_events(host_run, host_state)
-    claim, = [row for row in records if row["event"] == "native_loot_claim_accepted" and row.get("guid") == guid]
-    receipt = claim["operation_id"]
-    played, = [row for row in records if row["event"] == "native_pickup_sound_played" and row.get("operation_id") == receipt]
-    inventory = (await submit_ok(host_run, "native-inventory-list"))["native_inventory"]
-    inventory_guid = claim.get("inventory_guid", guid)
-    received, = [row for row in inventory["items"] if row["guid"] == inventory_guid]
-    assert received["class_path"] == item["class_path"]
-    if received["stackable"]:
-        assert received["quantity"] == claim.get("stack_merge", {}).get("after", item["ammo"])
-    assert before == (campaign_save_hashes(host.campaign), saved_hashes(host.profile / "Saved/SaveGames"))
-    timings = summarize(trace, resident=True, combined_operation=receipt if combined else None)
-    assert timings["escrow_load_ms"] is not None, "The measurement did not exercise the copied cold escrow"
+        trace = await arm_probe(host.bridge.directory, identity)
+        fired = await host.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
+        assert fired["ack"]["message"] == "stock world loot interaction intercepted", fired["ack"]
+
+        def settled(state):
+            rows = state.get("gameplay", {}).get(native_loot.STATE_KEY, {}).get(crate, {}).get("items", ())
+            return identity not in state.get("game", {}).get(native_world_loot.KEY, {}) and any(
+                row["guid"] == guid and row.get("claimed_by") == "host" for row in rows)
+
+        await asyncio.gather(wait_resident_status(host_run, settled), wait_resident_status(guest_run, settled))
+        await finish_probe(trace)
+        records = await resident_events(host_run, host_state)
+        claim, = [row for row in records if row["event"] == "native_loot_claim_accepted" and row.get("guid") == guid]
+        receipt = claim["operation_id"]
+        played, = [row for row in records if row["event"] == "native_pickup_sound_played" and row.get("operation_id") == receipt]
+        inventory = (await submit_ok(host_run, "native-inventory-list"))["native_inventory"]
+        received, = [row for row in inventory["items"] if row["guid"] == claim.get("inventory_guid", guid)]
+        assert received["class_path"] == current_item["class_path"]
+        if received["stackable"]:
+            assert received["quantity"] == claim.get("stack_merge", {}).get("after", current_item["ammo"])
+        assert save_fingerprints() == before
+        timings = summarize(trace, resident=True, combined_operation=receipt if combined else None)
+        return {"cabinet": crate, "stock_class": current_item["class_path"], "guid": guid, "projection": identity,
+                "operation": receipt, "inventory": received, "native_claim_unix": claim["time_unix"],
+                "sound_receipt_unix": played["time_unix"], "timings": timings, "trace": str(trace),
+                "both_projected_views_retired": True, "saves_unchanged_after_pickup": True}
+
+    pickup = await pick_up(CABINET, roll, item)
+    assert pickup["timings"]["escrow_load_ms"] is not None, "The measurement did not exercise the copied cold escrow"
     cached_replays = None
+    after_checkpoint = []
     if combined:
         # This checkpoint has one item. Reissue its exact native claim to exercise
         # the same escrow lookup after Unreal collects unreferenced objects.
-        assert inventory_guid == guid and not claim.get("stack_merge"), claim
+        guid = item["guid"]
+        assert pickup["inventory"]["guid"] == guid, pickup
+        inventory = (await submit_ok(host_run, "native-inventory-list"))["native_inventory"]
+        before = save_fingerprints()
         await collect_probe_garbage(host.bridge.directory)
         replay_trace = await arm_probe(host.bridge.directory)
         for _ in range(2):
@@ -444,19 +460,39 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
             assert details["ok"] and details["status"] == "already_claimed", details
         await finish_probe(replay_trace)
         labels = [line.split("\t", 1)[0] for line in replay_trace.read_text(encoding="utf-8").splitlines()]
-        assert labels.count("claim-native") == 2 and "escrow-load" not in labels, labels
         after = (await submit_ok(host_run, "native-inventory-list"))["native_inventory"]
         assert after == inventory
-        assert before == (campaign_save_hashes(host.campaign), saved_hashes(host.profile / "Saved/SaveGames"))
-        cached_replays = {"native_claims": 2, "escrow_disk_loads": 0, "engine_gc_verified": True,
+        assert save_fingerprints() == before
+        cached_replays = {"native_claims": labels.count("claim-native"),
+                          "escrow_disk_loads": labels.count("escrow-load"), "engine_gc_verified": True,
                           "trace": str(replay_trace)}
-    return {"cabinet": CABINET, "stock_class": item["class_path"], "guid": guid, "projection": identity,
-            "operation": receipt, "inventory": received, "native_claim_unix": claim["time_unix"],
-            "sound_receipt_unix": played["time_unix"], "timings": timings,
+        # Checkpoint a real in-memory roll while the party is still in the map.
+        crate, = [name for name in GUARANTEED_CRATES if native_loot.CRATES[name] == OBSERVATORY
+                  and name.endswith(":PersistentLevel.LootCrate_Small_BP_C_1")]
+        await host.bridge.command("native-loot-approach", host_pawn, crate, timeout=5)
+        before_open = save_fingerprints()
+        opened = (await submit_ok(host_run, "native-loot-open", target=crate))["native_loot_roll"]
+        candidates = [row for row in opened["items"] if row["class_path"] not in native_loot.CASH_RANGES]
+        assert len(candidates) == 2 and save_fingerprints() == before_open, opened
+        checkpoint = await submit_ok(host_run, "checkpoint")
+        committed = menu_host_checkpoint(host.campaign, profile=host.profile, require_scoped=True)
+        assert committed["revision"] == checkpoint["revision"] > saved["revision"]
+        durable = committed["world"]["party"][native_loot.STATE_KEY][crate]
+        assert durable["id"] == opened["id"] and durable["escrow"].get("pending") is not True, durable
+        assert all(row in durable["items"] for row in candidates), durable
+        await collect_probe_garbage(host.bridge.directory)
+        for candidate in candidates:
+            checkpoint_pickup = await pick_up(crate, durable, candidate)
+            assert checkpoint_pickup["timings"]["escrow_load_ms"] is None, checkpoint_pickup
+            checkpoint_pickup.update(checkpoint_revision=checkpoint["revision"], engine_gc_verified=True)
+            after_checkpoint.append(checkpoint_pickup)
+        assert cached_replays["native_claims"] == 2 and cached_replays["escrow_disk_loads"] == 0, [
+            label for label in labels if label.startswith(("claim", "escrow"))
+        ]
+    return {**pickup,
             "restored_source_revision": saved["revision"], "restored_scope": game["save_scope"],
             "restored_host_slot": restored["slot"], "restored_seed": SEED, "escrow_slot": roll["escrow"]["slot"],
-            "trace": str(trace), "local_bridge": "memory", "both_projected_views_retired": True,
-            "saves_unchanged_after_pickup": True, "cached_replays": cached_replays}
+            "local_bridge": "memory", "cached_replays": cached_replays, "after_checkpoint": after_checkpoint}
 
 
 async def verify_saved_pickup(host, stopped, saved, source):
