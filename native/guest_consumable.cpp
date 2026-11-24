@@ -15,6 +15,7 @@
 #include <deque>
 #include <format>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -1096,9 +1097,10 @@ namespace
     Hook::GlobalCallbackId cooking_pre = Hook::ERROR_ID, cooking_post = Hook::ERROR_ID;
     struct LocalCook
     {
-        Unreal::FWeakObjectPtr pawn, save, eat;
+        Unreal::FWeakObjectPtr pawn, save, eat, fatigue, intox;
         Unreal::FFrame* frame{};
         CookingEffect before;
+        std::optional<int> fatigue_effect, intox_effect;
         std::deque<std::pair<std::int64_t, CookingEffect>> receipts;
     };
     LocalCook local_cook;
@@ -1119,8 +1121,27 @@ namespace
 
     void read_cooking_start(Hook::TCallbackIterationData<void>& iteration, Unreal::UObject* fire, Unreal::FFrame& frame, void*)
     {
-        if (!Unreal::IsInGameThreadRaw() || !local_cook.eat.Get() || frame.Node() != local_cook.eat.Get() ||
-            iteration.OriginalFunctionCallPrevented() || local_cook.frame || local_cook.receipts.size() >= 8) return;
+        if (!Unreal::IsInGameThreadRaw() || iteration.OriginalFunctionCallPrevented()) return;
+        if (local_cook.frame)
+        {
+            auto* call = frame.Node();
+            if (!call || !frame.Locals()) return;
+            const bool fatigue = call == local_cook.fatigue.Get();
+            const bool intox = call == local_cook.intox.Get() && fire == local_cook.pawn.Get();
+            if (!fatigue && !intox) return;
+            auto* ancestor = frame.PreviousFrame();
+            for (int i = 0; ancestor && ancestor != local_cook.frame && i < 6; ++i) ancestor = ancestor->PreviousFrame();
+            if (ancestor != local_cook.frame) return;
+            auto* difference = field<Unreal::FIntProperty>(call, STR("Difference"));
+            if (difference && difference->HasAnyPropertyFlags(Unreal::CPF_Parm) &&
+                difference->GetOffset_Internal() == (fatigue ? 8 : 0))
+            {
+                const int amount = difference->GetPropertyValueInContainer(frame.Locals());
+                (fatigue ? local_cook.fatigue_effect : local_cook.intox_effect) = amount;
+            }
+            return;
+        }
+        if (!local_cook.eat.Get() || frame.Node() != local_cook.eat.Get() || local_cook.receipts.size() >= 8) return;
         Scope scope;
         Health health;
         Intoxication flags;
@@ -1130,6 +1151,8 @@ namespace
         if (!portion || !(portion->GetPropertyValueInContainer(fire) > 0)) return;
         local_cook.frame = &frame;
         local_cook.before = cooking_vitals(scope, health, flags);
+        local_cook.fatigue_effect.reset();
+        local_cook.intox_effect.reset();
     }
 
     void read_cooking_end(Hook::TCallbackIterationData<void>& iteration, Unreal::UObject* fire, Unreal::FFrame& frame, void*)
@@ -1144,8 +1167,11 @@ namespace
             !local_cooking_scope(scope) || !health.bind(scope, false).empty() || !flags.bind(scope.guest)) return;
         const auto after = cooking_vitals(scope, health, flags);
         const auto before = local_cook.before;
+        // The stock helper clamps personal flags against the guest's local copy.
+        // Replay the helper's requested adjustment against the campaign value.
         const CookingEffect delta{after.food - before.food, after.health - before.health, after.regen - before.regen,
-            after.fatigue - before.fatigue, after.intox - before.intox};
+            local_cook.fatigue_effect.value_or(after.fatigue - before.fatigue),
+            local_cook.intox_effect.value_or(after.intox - before.intox)};
         if (delta.valid_delta() && delta != CookingEffect{})
             local_cook.receipts.emplace_back(++recipe_sequence, delta);
     }
@@ -1170,6 +1196,9 @@ namespace
         }
         if (!local_cook.eat.Get()) local_cook.eat = find<Unreal::UFunction>(
             STR("/Game/Classes/Actors/CampFire_BP.CampFire_BP_C:EatFood"));
+        if (!local_cook.fatigue.Get()) local_cook.fatigue = find<Unreal::UFunction>(
+            STR("/Game/Classes/Libraries/Fuctions_Lib/FL_GameEffects.FL_GameEffects_C:Add_PlayerFatigue"));
+        if (!local_cook.intox.Get()) local_cook.intox = find<Unreal::UFunction>(intox_path);
         if (local_cook.receipts.empty()) return 0;
         const auto [sequence, delta] = local_cook.receipts.front();
         local_cook.receipts.pop_front();
@@ -1200,26 +1229,37 @@ namespace
             !vitals.bind(scope, false).empty() || !flags.bind(scope.guest)) return refuse();
         auto* entries = flags.data(scope.guest);
         auto* pawn_intox = field<Unreal::FIntProperty>(scope.pawn, STR("Intoxication"));
-        if (!pawn_intox) return refuse();
-        auto copy = copy_value(flags.map, entries);
-        if (!copy) return refuse();
-        auto* next_flags = static_cast<Unreal::FScriptMap*>(copy.get());
-        if ((delta.fatigue && !flags.write(next_flags, fatigue_flag(),
-                std::clamp(flags.read(entries, fatigue_flag()) + delta.fatigue, 0, 100))) ||
-            (delta.intox && !flags.write(next_flags, std::clamp(flags.read(entries) + delta.intox, 0, 100)))) return refuse();
-        if (delta.fatigue || delta.intox) flags.map->CopyCompleteValue(entries, next_flags);
-        if (delta.intox) pawn_intox->SetPropertyValueInContainer(scope.pawn, flags.read(entries));
+        const auto before = cooking_vitals(scope, vitals, flags);
+        if (!pawn_intox || before.fatigue < 0 || before.fatigue > 100 || before.intox < 0 || before.intox > 100)
+            return refuse();
+        if (delta.fatigue || delta.intox)
+        {
+            std::int32_t trauma{};
+            const Unreal::FName trait{STR("LingeringTrauma"), Unreal::FNAME_Find};
+            if (delta.fatigue && !silverfish::native_enemy_loot::count_save_passive(scope.guest, trait, trauma)) return refuse();
+            auto copy = copy_value(flags.map, entries);
+            if (!copy) return refuse();
+            auto* next_flags = static_cast<Unreal::FScriptMap*>(copy.get());
+            if ((delta.fatigue && !flags.write(next_flags, fatigue_flag(),
+                    std::clamp(before.fatigue + delta.fatigue, trauma > 0 ? 15 : 0, 100))) ||
+                (delta.intox && !flags.write(next_flags, std::clamp(before.intox + delta.intox, 0, 100)))) return refuse();
+            flags.map->CopyCompleteValue(entries, next_flags);
+            if (delta.intox) pawn_intox->SetPropertyValueInContainer(scope.pawn, flags.read(entries));
+        }
         auto after = vitals.before;
         after.food = std::clamp(after.food + delta.food, 0.0, 200.0);
         after.health = std::clamp(after.health + delta.health, 0.0, vitals.max_health);
         after.regen = std::clamp(after.regen + delta.regen, 0.0, vitals.max_health);
         vitals.write(scope.guest, after);
+        const auto observed = cooking_vitals(scope, vitals, flags);
+        if (observed.food != after.food || observed.health != after.health || observed.regen != after.regen)
+            return result(lua, false, "mutation_unverified_guest_cooked_meal");
         lua.set_bool(true);
-        lua.set_number(after.food);
-        lua.set_number(after.health);
-        lua.set_number(after.regen);
-        lua.set_integer(flags.read(entries, fatigue_flag()));
-        lua.set_integer(flags.read(entries));
+        lua.set_number(observed.food);
+        lua.set_number(observed.health);
+        lua.set_number(observed.regen);
+        lua.set_integer(observed.fatigue);
+        lua.set_integer(observed.intox);
         return 6;
     }
 

@@ -1187,7 +1187,7 @@ async def stock_melee_charge(host_run, guest_run, guest_frame, guid, *, before_r
     return charged
 
 
-async def verify_stock_melee_edges(host: Seat, guest: Seat) -> dict:
+async def verify_stock_melee_edges(host: Seat, guest: Seat, *, observe=None) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     guest_frame = await current_status(guest_run)
     scope = guest_frame["game"]["native_guest_primary_scope"]
@@ -1196,10 +1196,16 @@ async def verify_stock_melee_edges(host: Seat, guest: Seat) -> dict:
     tap, = await stock_melee_edge_receipts(guest_run, guest_frame, await stock_melee_edge(guest_run, guid, "tap"))
     tap = await stock_melee_terminal(host_run, tap)
     assert (tap["presses"], tap["releases"], tap["contacts"], tap["charged"], tap["combo"]) == (1, 1, 1, 0, 0), tap
+    if observe:
+        assert int(await observe("melee-local-read")) == 1, "The first swing did not reach the guest's stock animator"
+        repeat, = await stock_melee_edge_receipts(guest_run, guest_frame, await stock_melee_edge(guest_run, guid, "tap"))
+        repeat = await stock_melee_terminal(host_run, repeat)
+        assert repeat["serial"] != tap["serial"] and repeat["contacts"] == 1, repeat
+        assert int(await observe("melee-local-read")) == 2, "The repeat swing did not reach the same stock animator"
     charged = await stock_melee_charge(host_run, guest_run, guest_frame, guid)
 
     attempts = []
-    for spacing in (.24, .36, .48, .60):
+    for spacing in (.24, .12, .36, .48, .60):
         first = await stock_melee_edge(guest_run, guid, "tap")
         await asyncio.sleep(spacing)
         second = await stock_melee_edge(guest_run, guid, "tap")
@@ -1232,11 +1238,11 @@ async def verify_stock_melee_edges_only(host: Seat, guest: Seat, pawn: str) -> d
         return await portable_probe_command(guest.bridge, "portable-npc-override", action)
 
     assert await observe("melee-local-arm") == "watching"
-    edges = await verify_stock_melee_edges(host, guest)
+    edges = await verify_stock_melee_edges(host, guest, observe=observe)
     for edge in ("tap", "charged", "combo"):
         assert (edges[edge]["pawn"], edges[edge]["guid"]) == (pawn, guid), edges[edge]
     first_person_contacts = int(await observe("melee-local-read"))
-    assert first_person_contacts >= 4, (first_person_contacts, edges)
+    assert first_person_contacts >= 5, (first_person_contacts, edges)
     assert campaign_save_hashes(host.campaign) == before, "A regular melee attack wrote campaign saves"
     return {"stock_melee_edges": {**edges, "first_person_contacts": first_person_contacts, "campaign_unchanged": True}}
 

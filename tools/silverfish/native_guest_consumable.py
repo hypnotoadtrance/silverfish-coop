@@ -190,7 +190,8 @@ async def service_cooked_meals(client, active):
 async def use_cooked_meal(host, bridge, character, target, operation):
     from .native_inventory import retain_guest_save
 
-    if not isinstance(target, str) or len(target) > 192 or not party.REQUEST_ID.fullmatch(operation):
+    if (not isinstance(target, str) or len(target) > 192
+            or not isinstance(operation, str) or not party.REQUEST_ID.fullmatch(operation)):
         raise party.RuleError("invalid_cooked_meal")
     epoch, separator, effect = target.partition("@")
     try:
