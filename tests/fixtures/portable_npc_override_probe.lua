@@ -830,6 +830,7 @@ local function dock_combat(pawn, world, host, action, name)
 end
 
 local garage_view, garage_door, garage_aim
+local garage_shot_hook
 local garage_path = dock .. ":PersistentLevel.StaticMeshActor_347"
 
 local function stock_garage(world)
@@ -849,6 +850,27 @@ end
 
 local function point_string(point)
     return ("%.3f,%.3f,%.3f"):format(point.X, point.Y, point.Z)
+end
+
+local function watch_garage_projectiles()
+    if garage_shot_hook then return end
+    local base = StaticFindObject("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C")
+    assert(valid(base), "the stock projectile class was unavailable")
+    RegisterBeginPlayPostHook(function(context)
+        local view = garage_view
+        if not view or not valid(view.shooter) or not garage_door then return end
+        local actor = context:get()
+        if not valid(actor) or not actor:IsA(base) or not same(actor:GetOwner(), view.shooter)
+            or not same(actor.Instigator, view.shooter) then return end
+        local excluded = {}
+        for index = 1, actor["Actors to Ignore"]:GetArrayNum() do
+            local item = actor["Actors to Ignore"][index]
+            if valid(item) then excluded[#excluded + 1] = item:GetFName():ToString() end
+        end
+        view.last_shot = table.concat({point_string(actor:K2_GetActorLocation()), point_string(actor.Velocity),
+            table.concat(excluded, ",")}, ";")
+    end)
+    garage_shot_hook = true
 end
 
 local function open_garage_for_test(world)
@@ -911,6 +933,7 @@ local function stage_garage_shot(host, world)
                         if valid(worker.Controller) then worker.Controller:SetActorTickEnabled(false) end
                         worker:ForceNetUpdate()
                         garage_view = {shooter=shooter, worker=worker}
+                        watch_garage_projectiles()
                         return table.concat({point_string(near), point_string(far), point_string(blocked),
                             point_string(high_target), tostring(worker.Health)}, ";")
                     end
@@ -1387,6 +1410,8 @@ local function run(action, actor_path)
     elseif action == "dock-garage-health" then
         assert(host and garage_view and valid(garage_view.worker))
         return ("%.6f"):format(garage_view.worker.Health)
+    elseif action == "dock-garage-shot-witness" then
+        return garage_view and garage_view.last_shot or "none"
     elseif action == "dock-garage-projectile-trace" then
         local from_text, to_text = actor_path:match("^([^;]+);([^;]+)$")
         local from, to = position(from_text), position(to_text)
