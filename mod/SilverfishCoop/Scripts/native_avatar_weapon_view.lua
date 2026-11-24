@@ -331,7 +331,9 @@ function view.clear(entry)
     entry.stock_weapon_check_at = nil
     active_recoil[entry] = nil
     active_cycle[entry] = nil
-    for _, component in ipairs(entry.weapon_parts or {}) do
+    local parts = entry.weapon_parts
+    for index = parts and #parts or 0, 1, -1 do
+        local component = parts[index]
         if valid(component) and valid(entry.pawn) then component:K2_DestroyComponent(entry.pawn) end
     end
     if valid(entry.weapon_anchor) and valid(entry.pawn) then entry.weapon_anchor:K2_DestroyComponent(entry.pawn) end

@@ -12,6 +12,8 @@ local arm_profiles = {
     ["arm-rusty"] = {"/Game/Classes/Weapons/Wep_RustyPistol.Wep_RustyPistol_C", reserve_9mm, 9, 2},
     ["arm-light-ar"] = {"/Game/Classes/Weapons/Wep_LightAR_01.Wep_LightAR_01_C",
         "/Game/Classes/Items/Ammo_IntrRifle_BP.Ammo_IntrRifle_BP_C", 7, 3},
+    ["arm-nagant"] = {"/Game/Classes/Weapons/Wep_Nagant_01.Wep_Nagant_01_C", reserve_9mm, 0, 6},
+    ["arm-obrez"] = {"/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C", reserve_9mm, 0, 7},
 }
 local weapon_path, reserve_path, reserve_units, slot
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
@@ -171,24 +173,39 @@ local function seed_reserve(extra)
 end
 
 local function rifle_grip()
-    assert(observing() and local_pawn:HasAuthority())
+    assert(observing())
     local weapon = peer.EquipedItem
-    if not valid(weapon) or not same(weapon:GetClass(), asset(weapon_path)) then return "waiting" end
+    if not valid(weapon) then
+        local attached = {}
+        peer:GetAttachedActors(attached, true, false)
+        for _, actor in ipairs(attached.OutActors or attached) do
+            if type(actor) == "userdata" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+            if valid(actor) and same(actor:GetClass(), asset(weapon_path)) then weapon = actor; break end
+        end
+    end
+    if not valid(weapon) or not same(weapon:GetClass(), asset(weapon_path)) then return "waiting:weapon" end
     local frame, root, marker = weapon.Mesh_Frame, weapon.RootComponent, weapon.Arrow_Forgrip
-    if not valid(frame) or not valid(root) or not valid(marker) then return "waiting" end
+    if not valid(frame) or not valid(root) or not valid(marker) then return "waiting:marker" end
     local hand_socket = FName("Weapon_Socket01", EFindName.FNAME_Find)
     local left = FName("LeftHand", EFindName.FNAME_Find)
     local index = FName("LeftHandIndex1", EFindName.FNAME_Find)
     local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
+    local witness = "waiting:frame"
     for _, part in ipairs(peer:K2_GetComponentsByClass(asset("/Script/Engine.StaticMeshComponent"))) do
         if type(part) == "userdata" and part:type() == "RemoteUnrealParam" then part = part:get() end
         if same(part.StaticMesh, frame.StaticMesh) and part:IsVisible() then
             local anchor = part:GetAttachParent()
             local pivot = valid(anchor) and anchor:GetAttachParent()
+            for _ = 1, 3 do
+                if not valid(pivot) or pivot:GetAttachSocketName():ToString() == "Weapon_Socket01" then break end
+                anchor, pivot = pivot, pivot:GetAttachParent()
+            end
+            witness = "waiting:foregrip-pivot"
             if valid(pivot) and pivot:GetAttachSocketName():ToString() == "Weapon_Socket01" then
                 local body = pivot:GetAttachParent()
                 local instance = valid(body) and body.AnimScriptInstance
                 local clip = valid(instance) and instance.CurrentAsset
+                witness = "waiting:" .. (valid(clip) and clip:GetFullName() or "animation")
                 if valid(clip) and clip:GetFullName():find("Rifle_Lowered_BlendSpace", 1, true) then
                     local wrist, knuckle = body:GetSocketLocation(left), body:GetSocketLocation(index)
                     local palm = {X = (wrist.X + knuckle.X) * .5, Y = (wrist.Y + knuckle.Y) * .5,
@@ -199,12 +216,17 @@ local function rifle_grip()
                     local function distance(a, b)
                         return math.sqrt((a.X-b.X)^2 + (a.Y-b.Y)^2 + (a.Z-b.Z)^2)
                     end
-                    return ("%.3f,%.3f"):format(distance(baseline, palm), distance(actual, palm))
+                    local angle = pivot.RelativeRotation
+                    local from_pivot = math_api:TransformLocation(pivot:K2_GetComponentToWorld(), grip)
+                    local from_root = math_api:InverseTransformLocation(body:GetSocketTransform(hand_socket, 0), palm)
+                    return ("%.3f,%.3f,%.3f;%.3f,%.3f,%.3f;%.3f,%.3f,%.3f;%.3f,%.3f,%.3f"):format(
+                        distance(baseline, palm), distance(actual, palm), distance(from_pivot, palm),
+                        angle.Pitch, angle.Yaw, angle.Roll, grip.X, grip.Y, grip.Z, from_root.X, from_root.Y, from_root.Z)
                 end
             end
         end
     end
-    return "waiting"
+    return witness
 end
 
 local function run(action)
@@ -227,7 +249,11 @@ local function run(action)
     if action == "ready" then return ready(local_pawn) end
     if action == "peer-ready" then return ready(peer) end
     if action == "rifle-grip" then return rifle_grip() end
-    if action == "light-ar-aim" then
+    if action == "stand" then
+        local_pawn:UnCrouch(false)
+        return "standing"
+    end
+    if action == "aim" then
         assert(observing() and not local_pawn:HasAuthority() and ready(local_pawn) ~= "waiting")
         local input = asset("/Game/Classes/Player/Player_Inputs/IA_Use_Secondary.IA_Use_Secondary")
         local value = asset("/Script/EnhancedInput.Default__EnhancedInputLibrary"):MakeInputActionValueOfType(1, 0, 0, 0)
@@ -239,13 +265,13 @@ local function run(action)
         if not valid(held) or not same(held:GetClass(), asset(weapon_path)) then return "waiting" end
         return held.SemiAutoSelected and "semi" or "auto"
     end
-    if action == "light-ar-put-away" or action == "light-ar-other-ready" then
+    if action == "put-away" or action == "other-ready" then
         local other_slot = arm_profiles["arm-rusty"][4]
         local row = local_pawn.Save.PlayerEquipment[other_slot]
         local class = asset(arm_profiles["arm-rusty"][1])
-        assert(observing() and not local_pawn:HasAuthority() and weapon_path == arm_profiles["arm-light-ar"][1]
-            and same(row[item_class], class), "the paired LightAR and Rusty Pistol slots are required")
-        if action == "light-ar-put-away" then
+        assert(observing() and not local_pawn:HasAuthority() and same(row[item_class], class),
+            "the paired Rusty Pistol slot is required")
+        if action == "put-away" then
             local_pawn:Equip_NextItem(other_slot - 1, false)
             return "changing"
         end

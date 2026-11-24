@@ -765,7 +765,7 @@ async def observe_stock_flashlight(host_run, guest_run, *, verify_view=False, he
 
 async def verify_pose(host_run, guest_run):
     fields = ("base_cm", "body_cm", "neck_error_cm", "head_offset_error_cm", "head_roll", "head_yaw",
-              "tail_x", "tail_z", "tail_yaw", "actor_yaw", "falling")
+              "tail_x", "tail_z", "tail_yaw", "actor_yaw", "falling", "skeletal_tail", "tail_gap_cm")
 
     async def observe(run, predicate=lambda _: True, timeout=5):
         async with asyncio.timeout(timeout):
@@ -780,13 +780,13 @@ async def verify_pose(host_run, guest_run):
     def aligned(row, *, skeletal):
         assert row["base_cm"] < .01 and row["body_cm"] < 3, row
         assert row["neck_error_cm"] < .15 and row["head_offset_error_cm"] < .15 and abs(row["head_roll"]) < .1, row
-        expected_tail = (21.374724, -7.291765, -10) if skeletal else (0, 0, 0)
-        assert all(math.isclose(row[key], value, abs_tol=.02)
-                   for key, value in zip(("tail_x", "tail_z", "tail_yaw"), expected_tail, strict=True)), row
+        assert row["skeletal_tail"] == int(skeletal) and row["tail_gap_cm"] < .15, row
+        assert math.isclose(row["tail_yaw"], -10 if skeletal else 0, abs_tol=.02), row
 
     await avatar_probe(host_run, "style")
-    initial = await observe(guest_run, lambda row: row["tail_x"] > 0 and row["falling"] == 0, timeout=15)
-    stationary = await observe(host_run, lambda row: row["tail_x"] == 0 and row["falling"] == 0, timeout=15)
+    initial = await observe(guest_run, lambda row: row["skeletal_tail"] == 1 and row["tail_yaw"] < -9
+                            and row["falling"] == 0, timeout=15)
+    stationary = await observe(host_run, lambda row: row["skeletal_tail"] == 0 and row["falling"] == 0, timeout=15)
     aligned(initial, skeletal=True)
     aligned(stationary, skeletal=False)
     def angle_between(first, second):
