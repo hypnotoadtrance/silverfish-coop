@@ -72,7 +72,7 @@ CABINET_RELEASE_SHA256 = "e35f410f7231f2c510b4ec43c34fb59ff7e9574187e2cd32fe66a6
 INDEPENDENT_RESIDENT_MAPS = {
     "stock_food": OBSERVATORY, "stock_cooked_meal": OBSERVATORY, "stock_melee_edges": OBSERVATORY,
     "stock_critters": CROSSROADS, "stock_lingering_teleport": CROSSROADS, "stock_mushrooms": CROSSROADS,
-    "stock_placed_item": CROSSROADS,
+    "stock_placed_item": CROSSROADS, "stock_weather_travel": OBSERVATORY,
 }
 
 
@@ -4775,8 +4775,17 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if crossroads_profile:
             from portable_crossroads_profile import instrument_profile
 
+            crate_probe = ((Path(__file__).with_name("fixtures") / "portable_crate_input_probe.lua").read_text(encoding="utf-8")
+                           if stock_crate_ring else None)
+
+            def crossroads_overlay(source):
+                profiled = instrument_profile(source)
+                # Native globals are registered on the co-op Lua state.
+                return (profiled + "\nstatus_publication.cold_crate_probe = function()\n" + crate_probe
+                        + "\nend\nstatus_publication.cold_crate_probe()\n") if crate_probe else profiled
+
             proof["crossroads_profile_overlays"] = [
-                probes.enter_context(portable_main_overlay(game, instrument_profile)) for game in games
+                probes.enter_context(portable_main_overlay(game, crossroads_overlay)) for game in games
             ]
         if stock_weather_travel:
             for game in games:
@@ -4948,7 +4957,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["world_view_overlay"] = {
                 str(game): probes.enter_context(portable_main_overlay(game, patch_world_view_receipts)) for game in games
             }
-        if stock_crate_ring or compact_crate_status:
+        if stock_crate_ring and not crossroads_profile or compact_crate_status:
             probes.enter_context(installed_probe(second_game, mod="SilverfishPortableCrateProbe",
                                                  fixture="portable_crate_input_probe.lua"))
         if (stock_use or stock_drop or stock_split or stock_equip or stock_nearby or container_nearby
