@@ -3,6 +3,7 @@ local bridge = assert(os.getenv("SILVERFISH_COOP_BRIDGE"))
 local nonce, deadline, previous, next_probe = nil, nil, nil, 0
 local rows = {}
 local target, acknowledged_ticket
+local collection
 
 local function record(label, start, stop)
     rows[#rows + 1] = {label, start, stop}
@@ -51,10 +52,31 @@ LoopInGameThreadWithDelay(1, function()
         end
     elseif now >= next_probe then
         next_probe = now + .15
+        if collection then
+            local canary = StaticFindObject(collection.path)
+            if not canary or not canary:IsValid() then
+                local reply = assert(io.open(bridge .. "/cabinet-cold-" .. collection.id .. ".gc", "wb"))
+                assert(reply:write("collected\n"))
+                assert(reply:close())
+                collection = nil
+            end
+            return
+        end
         local request = io.open(bridge .. "/measure-cabinet-cold", "rb")
         if not request then return end
         local line = request:read("*l")
         request:close()
+        local collect = line and line:match("^(%x+)\tgc$")
+        if collect and #collect == 16 and collect ~= nonce then
+            local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+            local system = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+            local class = StaticFindObject("/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C")
+            local canary = statics:CreateSaveGameObject(class)
+            collection = {id = collect, path = assert(canary:GetFullName():match("^%S+ (.+)$"))}
+            nonce = collect
+            system:CollectGarbage()
+            return
+        end
         local id, identity
         if line then
             id, identity = line:match("^(%x+)\t(%x+)$")

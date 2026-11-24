@@ -185,6 +185,25 @@ namespace
         return result(lua, true, "detached_save_retained");
     }
 
+    int release_detached_save(const Lua& lua)
+    {
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 1 || !lua.is_integer(1))
+            return result(lua, false, "expected_retained_save_address");
+        const auto address = lua.get_integer();
+        if (address <= 0) return result(lua, false, "expected_retained_save_address");
+        // This only releases a root acquired by this mod. A save scope can
+        // already have ended by the time an escrow cache is cleared.
+        for (auto entry = retained_saves.begin(); entry != retained_saves.end(); ++entry)
+        {
+            auto* save = entry->Get();
+            if (reinterpret_cast<std::uintptr_t>(save) != static_cast<std::uintptr_t>(address)) continue;
+            save->ClearRootSet();
+            retained_saves.erase(entry);
+            return result(lua, true, "detached_save_released");
+        }
+        return result(lua, false, "detached_save_not_retained");
+    }
+
     int copy_guest_save(const Lua& lua)
     {
         SavePair pair;
@@ -418,6 +437,7 @@ namespace
 void silverfish::register_native_save_copy_lua(RC::LuaMadeSimple::Lua& lua)
 {
     lua.register_function("SilverfishReferenceNativeDetachedSave", run<reference_detached_save>);
+    lua.register_function("SilverfishReleaseNativeDetachedSave", run<release_detached_save>);
     lua.register_function("SilverfishCopyNativeGuestSave", run<copy_guest_save>);
     lua.register_function("SilverfishProbeNativeInventory", run<probe_stock_inventory>);
     lua.register_function("SilverfishProbeNativeInventoryFixture", run<probe_fixture_inventory>);

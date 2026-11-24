@@ -30,7 +30,8 @@ from tools.silverfish.title_host_campaigns import saved_campaign
 from tools.silverfish.travel import OBSERVATORY
 
 
-PRIVATE_RUNTIME = ROOT.parent / "Runtime"
+PRIVATE_RUNTIME = next((parent / "Runtime" for parent in (ROOT.parent, ROOT.parent.parent)
+                        if (parent / "Runtime").is_dir()), ROOT.parent / "Runtime")
 CABINET = full_name(OBSERVATORY, "LootCabnet_Small_BP_C_3")
 SEED = 441206
 PROFILE_MODULE = "cabinet_pickup_profile.lua"
@@ -350,6 +351,14 @@ async def finish_probe(trace: Path) -> None:
         while not trace.is_file() or not trace.read_bytes().endswith(b"\n"):
             await asyncio.sleep(.10)
 
+async def collect_probe_garbage(mailbox: Path) -> None:
+    nonce = uuid.uuid4().hex[:16]
+    (mailbox / "measure-cabinet-cold").write_text(f"{nonce}\tgc\n", encoding="ascii", newline="")
+    receipt = mailbox / f"cabinet-cold-{nonce}.gc"
+    async with asyncio.timeout(8):
+        while not receipt.is_file() or receipt.read_bytes() != b"collected\n":
+            await asyncio.sleep(.05)
+
 
 async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dict, dict, dict], *,
                                  combined: bool = False) -> dict:
@@ -424,8 +433,9 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
     cached_replays = None
     if combined:
         # This checkpoint has one item. Reissue its exact native claim to exercise
-        # the same escrow lookup after other commands have run, without minting loot.
+        # the same escrow lookup after Unreal collects unreferenced objects.
         assert inventory_guid == guid and not claim.get("stack_merge"), claim
+        await collect_probe_garbage(host.bridge.directory)
         replay_trace = await arm_probe(host.bridge.directory)
         for _ in range(2):
             replay = await host.bridge.command("native-loot-claim", host_pawn, CABINET, guid, roll["escrow"]["slot"],
@@ -438,7 +448,8 @@ async def verify_resident_pickup(host, guest, guest_pawn: str, source: tuple[dic
         after = (await submit_ok(host_run, "native-inventory-list"))["native_inventory"]
         assert after == inventory
         assert before == (campaign_save_hashes(host.campaign), saved_hashes(host.profile / "Saved/SaveGames"))
-        cached_replays = {"native_claims": 2, "escrow_disk_loads": 0, "trace": str(replay_trace)}
+        cached_replays = {"native_claims": 2, "escrow_disk_loads": 0, "engine_gc_verified": True,
+                          "trace": str(replay_trace)}
     return {"cabinet": CABINET, "stock_class": item["class_path"], "guid": guid, "projection": identity,
             "operation": receipt, "inventory": received, "native_claim_unix": claim["time_unix"],
             "sound_receipt_unix": played["time_unix"], "timings": timings,

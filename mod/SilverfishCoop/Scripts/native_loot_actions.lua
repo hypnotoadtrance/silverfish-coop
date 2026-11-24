@@ -22,8 +22,21 @@ local function valid_object(value)
     return value and value:IsValid()
 end
 
+local function unroot_escrow(entry)
+    if not valid_object(entry.pool) then return true end
+    if type(SilverfishReleaseNativeDetachedSave) == "function" then
+        return SilverfishReleaseNativeDetachedSave(entry.pool:GetAddress())
+    end
+    local stock = valid_object(entry.owner) and entry.owner.SaveSlot_Ref
+    return valid_object(stock) and SilverfishReferenceNativeDetachedSave(stock:GetAddress(), entry.pool:GetAddress(), false)
+end
+
 local function clear_cache()
-    escrow_cache, escrow_order = {}, {}
+    while #escrow_order > 0 do
+        local slot = escrow_order[#escrow_order]
+        if not unroot_escrow(escrow_cache[slot]) then error("native_loot_escrow_release_failed", 0) end
+        escrow_cache[slot], escrow_order[#escrow_order] = nil, nil
+    end
     cache_world, cache_save = nil, nil
 end
 
@@ -35,16 +48,27 @@ local function bind_cache(scope)
     end
 end
 
-local function remember_escrow(slot, pool)
-    -- Resolve the loaded name on reuse so a collected UObject is never accessed from Lua.
-    local path = pool:GetFullName():match("^SaveGame_BP_C (/Engine/Transient[%.:][%w_]+)$")
-    if not path then return end
+local function remember_escrow(slot, pool, owner, retained)
+    local entry = escrow_cache[slot]
+    if not entry then
+        if #escrow_order == max_cached_escrows then
+            local evicted = escrow_order[1]
+            if not unroot_escrow(escrow_cache[evicted]) then return false end
+            escrow_cache[evicted] = nil
+            table.remove(escrow_order, 1)
+        end
+        local stock = valid_object(owner) and owner.SaveSlot_Ref
+        if not retained and (not valid_object(stock) or type(SilverfishReferenceNativeDetachedSave) ~= "function"
+            or not SilverfishReferenceNativeDetachedSave(stock:GetAddress(), pool:GetAddress(), true)) then return false end
+        escrow_cache[slot] = {pool = pool, owner = owner}
+    elseif not valid_object(entry.pool) or entry.pool:GetAddress() ~= pool:GetAddress() then
+        return false
+    end
     for index, cached in ipairs(escrow_order) do
         if cached == slot then table.remove(escrow_order, index); break end
     end
-    escrow_cache[slot] = path
     escrow_order[#escrow_order + 1] = slot
-    if #escrow_order > max_cached_escrows then escrow_cache[table.remove(escrow_order, 1)] = nil end
+    return true
 end
 
 local function save_escrow(api, slot, pool, source, verify_roundtrip)
@@ -132,22 +156,35 @@ local function capture(scope, slot, outputs, items, pending)
         end
         item.object:K2_DestroyActor()
     end
-    if restored and #items > 0 then
+    if pending and #items > 0 then
+        pending_escrows[slot].cache_after_commit = true
+    elseif restored and #items > 0 then
         bind_cache(scope)
-        remember_escrow(slot, restored)
+        remember_escrow(slot, restored, scope.instance)
     end
 end
 
 local function release_escrow(slot)
     local escrow = pending_escrows[slot]
     if not escrow then return end
-    if valid_object(escrow.owner) and valid_object(escrow.pool) then
+    if not unroot_escrow(escrow) then error("native_loot_escrow_release_failed", 0) end
+    pending_escrows[slot] = nil
+end
+
+local function commit_escrow_cache(world, slot)
+    local escrow = pending_escrows[slot]
+    if escrow and escrow.cache_after_commit and valid_object(world) and escrow.world == world:GetAddress()
+        and valid_object(escrow.owner) and valid_object(escrow.pool) then
         local stock = escrow.owner.SaveSlot_Ref
-        if not valid_object(stock) or not SilverfishReferenceNativeDetachedSave(stock:GetAddress(), escrow.pool:GetAddress(), false) then
-            error("native_loot_escrow_release_failed", 0)
+        if valid_object(stock) then
+            bind_cache({world = world, stock = stock})
+            if remember_escrow(slot, escrow.pool, escrow.owner, true) then
+                pending_escrows[slot] = nil
+                return
+            end
         end
     end
-    pending_escrows[slot] = nil
+    release_escrow(slot)
 end
 
 actions.release_escrow = release_escrow
@@ -168,7 +205,7 @@ function actions.command(fields, state, phase)
             local escrow = pending_escrows[slot]
             if not valid_slot(slot) then error("native_loot_escrow_save_slot_invalid", 0) end
             if fields[2] == "native-loot-release-escrows" then
-                release_escrow(slot)
+                commit_escrow_cache(state.world, slot)
             else
                 if not escrow then error("native_loot_escrow_not_pending", 0) end
                 if not valid_object(api) then error("native_loot_escrow_save_api_unavailable", 0) end
@@ -238,8 +275,8 @@ function actions.command(fields, state, phase)
         end
         bind_cache(scope)
         local pending_pool = actions.pending_escrow(scope.world, slot)
-        local cached_path = escrow_cache[slot]
-        local pool = pending_pool or (cached_path and StaticFindObject(cached_path))
+        local cached = escrow_cache[slot]
+        local pool = pending_pool or (cached and cached.pool)
         if not valid_object(pool) then
             local api = StaticFindObject(statics)
             pool = valid_object(api) and api:LoadGameFromSlot(slot, 0)
@@ -248,7 +285,6 @@ function actions.command(fields, state, phase)
             result.status = "native_loot_escrow_generation_missing"
             return "stock loot escrow missing"
         end
-        if not pending_pool then remember_escrow(slot, pool) end
         result.distance, result.escrow_slot = scope.distance, slot
         local source = scope.profile.capacity ~= 2 and {scope.crate:GetAddress()} or {}
         local retained, new_retention
@@ -261,6 +297,7 @@ function actions.command(fields, state, phase)
         end
         local ok, status, amount, before, after, inventory_guid = SilverfishClaimNativeLootEscrow(scope.pawn:GetAddress(),
             scope.save:GetAddress(), scope.stock:GetAddress(), pool:GetAddress(), guid, table.unpack(source))
+        if ok and not pending_pool then remember_escrow(slot, pool, scope.world.OwningGameInstance) end
         result.ok, result.status = ok, status
         if ok and status == "cash_credited" then
             result.cash = { guid = guid, amount = amount, before = before, after = after }
