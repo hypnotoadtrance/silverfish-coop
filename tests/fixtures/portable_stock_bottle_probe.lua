@@ -1,3 +1,5 @@
+local bottle_contact_watch, bottle_contact_hook
+local function stock_prop_fixture(args, state, phase)
     if args[2] == "fixture-stock-bottle" and os.getenv("SILVERFISH_COOP_HEADLESS") == "1"
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
         local dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
@@ -298,3 +300,30 @@
         end
         error("invalid stock bottle fixture")
     end
+end
+
+local prop_fixture_mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
+local prop_fixture_ticket
+local function poll_stock_prop_fixture(state, phase)
+    if (phase ~= "hosting" and phase ~= "connected") or state.map ~= "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
+        or os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1" or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") ~= "1"
+        or not prop_fixture_mailbox
+        or not prop_fixture_mailbox:match("[/\\]portable%-title%-%x+[/\\][%a]+[/\\]titles[/\\]local[/\\]run[/\\]game%-bridge[/\\]%x+$")
+        then return end
+    local prefix = prop_fixture_mailbox .. "/portable-stock-prop"
+    local input = io.open(prefix .. "-command.tsv", "rb")
+    if not input then return end
+    local request = input:read(1536)
+    input:close()
+    local ticket, fields
+    if request then ticket, fields = request:match("^([0-9a-f]+)\t([^\r\n]+)$") end
+    if not ticket or #ticket ~= 32 or ticket == prop_fixture_ticket then return end
+    prop_fixture_ticket = ticket
+    local args = {ticket, "fixture-stock-bottle"}
+    for value in fields:gmatch("[^\t]+") do args[#args + 1] = value end
+    local ok, response = pcall(stock_prop_fixture, args, state, phase)
+    local output = assert(io.open(prefix .. "-reply.tsv", "wb"))
+    output:write(ticket, "\t", ok and "ok" or "error", "\t", (tostring(response):gsub("[\r\n\t]", " ")),
+        "\nportable-stock-prop-complete")
+    output:close()
+end

@@ -324,10 +324,10 @@ def stock_bottle_overlay(game: Path):
     fixture = (Path(__file__).with_name("fixtures") / "portable_stock_bottle_probe.lua").read_text(encoding="utf-8")
 
     def add_probe(script):
-        marker = "function effects.command(args, state, phase, animate_vortex)\n"
+        marker = "function fields.rows(state, phase, row)\n"
         if script.count(marker) != 1:
-            raise ValueError("The replica lacks the anomaly cue command")
-        return script.replace(marker, "local bottle_contact_watch, bottle_contact_hook\n" + marker + fixture, 1)
+            raise ValueError("The replica lacks the anomaly state publisher")
+        return script.replace(marker, fixture + "\n" + marker + "    poll_stock_prop_fixture(state, phase)\n", 1)
 
     def add_grip_probe(script):
         marker = "function carry.command(fields, current, seat)\n"
@@ -353,7 +353,7 @@ def stock_bottle_overlay(game: Path):
 
     with ExitStack() as overlays:
         yield {name: overlays.enter_context(portable_script_overlay(game, name, patch)) for name, patch in (
-            ("native_anomaly_effects.lua", add_probe), ("native_prop_carry.lua", add_grip_probe),
+            ("native_anomaly_fields.lua", add_probe), ("native_prop_carry.lua", add_grip_probe),
         )}
 
 
@@ -1753,8 +1753,10 @@ async def verify_warehouse_board(host: Seat, guest: Seat, pawn: str) -> dict:
 
 
 async def warehouse_prop_probe(seat, mode, *args, timeout=8):
-    reply = await seat.bridge.command("fixture-stock-bottle", mode, *args, timeout=timeout)
-    return reply["ack"]["message"]
+    end = "\nportable-stock-prop-complete"
+    async with asyncio.timeout(timeout):
+        reply = await portable_probe_command(seat.bridge, "portable-stock-prop", "\t".join((mode, *args)), reply_end=end)
+    return reply.removesuffix(end)
 
 
 async def wait_stock_prop_break(host, guest, frame, path, started, point=None, *, guest_path=None, kind="bottle"):
