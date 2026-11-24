@@ -48,6 +48,7 @@ from portable_dock_pursuit import verify_dock_pursuit
 from portable_held_mask import verify_stock_held_mask
 from portable_eye_board import verify_stock_eye_stacks
 from portable_guest_world_start import GuestWorldStartProof, resident_events, wait_resident_status
+from portable_acid_pool import acid_pool_overlay, verify_acid_pool
 from portable_light_ar import verify_stock_light_ar
 from portable_lingering_teleport import lingering_overlay, verify_stock_lingering_teleport
 from portable_personal_consumable import verify_personal_consumable_reconnect, verify_stock_personal_consumable
@@ -4128,7 +4129,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_melee_family: bool = False, stock_melee_edges: bool = False,
                  stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False,
                  stock_roaming_barter: bool = False, stock_critters: bool = False, stock_placed_item: bool = False,
-                 stock_eye_stacks: bool = False, stock_lingering_teleport: bool = False,
+                 stock_eye_stacks: bool = False, stock_lingering_teleport: bool = False, stock_acid_pool: bool = False,
                  stock_npc_rivalry: bool = False, stock_throwables: str | None = None,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
@@ -4236,6 +4237,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             host, guest, pawn, loot=stock_shovel_loot, quest=stock_shovel_quest)),
         (stock_lingering_teleport, "crossroads_anomaly", "stock_lingering_teleport",
          lambda host, guest, pawn: verify_stock_lingering_teleport(host, guest, pawn, portable_probe_command)),
+        (stock_acid_pool, "lab_east_wing_acid", "stock_acid_pool",
+         lambda host, guest, _pawn: verify_acid_pool(host, guest, portable_probe_command)),
         (stock_bandage_revisit, "tutorial_dock", "stock_bandage_revisit", verify_tutorial_bandage_revisit),
         (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_switch", verify_warehouse_switch),
         (stock_warehouse_board, "tutorial_dock", "stock_warehouse_board", verify_warehouse_board),
@@ -4285,7 +4288,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if guest_world_start:
             probes.enter_context(installed_probe(second_game, mod="SilverfishPortableGuestWorldStartProbe",
                                                  fixture="portable_guest_world_start_probe.lua"))
-        if guest_world_start_travel:
+        if guest_world_start_travel or stock_acid_pool:
             probes.enter_context(installed_probe(first_game, mod="SilverfishPortableRuinExitProbe",
                                                  fixture="portable_ruin_exit_probe.lua"))
         if stock_throwables:
@@ -4330,6 +4333,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["lingering_teleport_overlays"] = [
                 probes.enter_context(lingering_overlay(game, portable_script_overlay)) for game in games
             ]
+        if stock_acid_pool:
+            proof["acid_pool_overlays"] = [
+                probes.enter_context(acid_pool_overlay(game, portable_script_overlay)) for game in games
+            ]
         if stock_eye_stacks:
             for game in games:
                 probes.enter_context(eye_board_overlay(game))
@@ -4345,9 +4352,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                      fixture="portable_npc_override_probe.lua"))
         if (tutorial_dock_combat or tutorial_dock_melee or stock_bandage_revisit or stock_shovel or stock_simmi_jammers or stock_weather_travel or stock_lightning
                 or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_critters or stock_placed_item
-                or stock_eye_stacks or stock_lingering_teleport):
+                or stock_eye_stacks or stock_lingering_teleport or stock_acid_pool):
             overlay_key = ("weather_zone_overlays" if stock_weather_travel or stock_lightning else
-                           "jammer_zone_overlays" if stock_simmi_jammers else "dock_zone_overlays")
+                           "jammer_zone_overlays" if stock_simmi_jammers else
+                           "acid_pool_zone_overlays" if stock_acid_pool else "dock_zone_overlays")
             proof[overlay_key] = [probes.enter_context(tutorial_dock_zone_overlay(game)) for game in games]
         if stock_campfire:
             for game in games:
@@ -4591,7 +4599,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                         finish_check("stock_storm_ambience_reconnect", started)
 
                 exit_actions = ("prompt", "confirm") if campaign in {
-                    "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_melee", "crossroads", "crossroads_anomaly", "shopkeep"
+                    "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_melee", "crossroads", "crossroads_anomaly",
+                    "lab_east_wing_acid", "shopkeep"
                 } else ("save_and_quit",)
                 after_reconnect = None
                 if campaign == "crossroads" and stock_shovel_quest:
@@ -4760,6 +4769,8 @@ if __name__ == "__main__":
                         help="redeem ShopKeep's Eye contract from one of two stock guest inventory stacks")
     parser.add_argument("--stock-lingering-teleport", action="store_true",
                         help="verify authority and presentation of the moving Crossroads teleport anomaly")
+    parser.add_argument("--stock-acid-pool", action="store_true",
+                        help="verify stock authored pool damage and lifecycle in Lab East Wing")
     parser.add_argument("--stock-flashlights", action="store_true",
                         help="Observe stock handheld and offhand beams on the connected seat")
     parser.add_argument("--stock-host-corpse-carry", action="store_true",
@@ -4934,7 +4945,7 @@ if __name__ == "__main__":
                               "stock_storm_ambience",
                               "stock_melee_family", "stock_melee_edges", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
                               "stock_roaming_barter", "stock_critters", "stock_placed_item", "stock_throwables", "stock_eye_stacks",
-                              "stock_lingering_teleport", "stock_light_ar"}
+                              "stock_lingering_teleport", "stock_light_ar", "stock_acid_pool"}
     if args.resident_held_queue and not args.resident_weapon_cues:
         parser.error("Use --resident-held-queue with --resident-weapon-cues")
     if args.resident_stale_quick_slot and not args.resident_held_queue:
@@ -4963,7 +4974,7 @@ if __name__ == "__main__":
             args.stock_storm_ambience,
             args.stock_melee_family, args.stock_melee_edges, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
             args.stock_roaming_barter, args.stock_critters, args.stock_placed_item, args.stock_throwables, args.stock_eye_stacks,
-            args.stock_lingering_teleport)) and (
+            args.stock_lingering_teleport, args.stock_acid_pool)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
         parser.error("Run the resident gameplay checks without other gameplay fixtures")
@@ -5019,6 +5030,7 @@ if __name__ == "__main__":
                        stock_roaming_barter=args.stock_roaming_barter, stock_critters=args.stock_critters,
                        stock_placed_item=args.stock_placed_item,
                        stock_eye_stacks=args.stock_eye_stacks, stock_lingering_teleport=args.stock_lingering_teleport,
+                       stock_acid_pool=args.stock_acid_pool,
                        stock_throwables=args.stock_throwables,
                        memory_status=args.memory_status, stock_prop_grip=args.stock_prop_grip,
                        stock_host_prop_observer=args.stock_host_prop_observer, resident_weapon_cues=args.resident_weapon_cues,
