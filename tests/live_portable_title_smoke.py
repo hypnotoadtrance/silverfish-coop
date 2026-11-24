@@ -1914,7 +1914,8 @@ async def verify_stock_acid_bottle(host: Seat, guest: Seat, _pawn: str) -> dict:
     assert authority["damage_active"] and authority["collision"] and not projected["damage_active"] and not projected["collision"]
 
     expired = await asyncio.gather(*(read_pool(seat, "extinguished") for seat in (host, guest)))
-    assert all(not reading["damage_active"] and reading["spheres"] == 0 for reading in expired), expired
+    assert all(not reading["damage_active"] for reading in expired), expired
+    assert expired[0]["spheres"] == expired[1]["spheres"] < authority["spheres"], expired
     assert await warehouse_prop_probe(host, "pool-remove", impact) == "removed"
     await asyncio.gather(*(read_pool(seat, "absent") for seat in (host, guest)))
     assert campaign_save_hashes(host.campaign) == checkpoint

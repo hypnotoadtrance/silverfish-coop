@@ -13,6 +13,29 @@
             local point = candidate:K2_GetActorLocation()
             return (point.X-tonumber(x))^2 + (point.Y-tonumber(y))^2 + (point.Z-tonumber(z))^2 < 40^2
         end
+        local function floor_under(point, ignored)
+            local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+            local color, hit = {R=0,G=0,B=0,A=0}, {}
+            if trace:LineTraceSingle(pawn, point, {X=point.X,Y=point.Y,Z=point.Z-300},
+                0, true, ignored, 0, hit, true, color, color, 0) then
+                local result = hit.OutHit or hit
+                if result.ImpactNormal.Z > .9 then return result.ImpactPoint end
+            end
+        end
+        local function clear_acid_floor(origin)
+            for step = 0, 7 do
+                local angle = step * math.pi / 4
+                local floor = floor_under({X=origin.X+600*math.cos(angle),Y=origin.Y+600*math.sin(angle),Z=origin.Z+60}, {pawn})
+                if floor then
+                    local clear = true
+                    for _, guest in ipairs(state.guests) do
+                        local remote = guest.pawn:K2_GetActorLocation()
+                        if (remote.X-floor.X)^2 + (remote.Y-floor.Y)^2 < 400^2 then clear = false end
+                    end
+                    if clear then return {X=floor.X,Y=floor.Y,Z=floor.Z+24} end
+                end
+            end
+        end
         if mode == "pool-near" or mode == "pool-remove" then
             local found
             for _, candidate in ipairs(FindAllOf("AcidPool_BP_C") or {}) do
@@ -43,6 +66,9 @@
                 if not valid(class) then LoadAsset(base); class = StaticFindObject(base) end
                 assert(valid(class), "could not load the stock " .. stem .. " class")
                 local point = {X=location.X+105, Y=location.Y+60, Z=location.Z+90}
+                if stem == "Prop_AcidBottle" then
+                    point = assert(clear_acid_floor(location), "no stock floor far enough from both pawns")
+                end
                 local candidate = state.world:SpawnActor(class, point, {Pitch=0,Yaw=0,Roll=0})
                 assert(current(candidate), "could not spawn " .. stem .. " in the warehouse")
                 assert(candidate:HasAuthority() and candidate.DestroyIfBroken and valid(candidate.PropMesh),
@@ -221,11 +247,7 @@
         end
         if (mode == "impact" or mode == "floor-impact") and phase == "hosting" and actor:HasAuthority() then
             if mode == "floor-impact" then
-                local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
-                local color, hit = {R=0,G=0,B=0,A=0}, {}
-                assert(trace:LineTraceSingle(pawn, point, {X=point.X,Y=point.Y,Z=point.Z-300},
-                    0, true, {pawn, actor}, 0, hit, true, color, color, 0), "could not locate warehouse floor")
-                point = (hit.OutHit or hit).ImpactPoint
+                point = assert(floor_under(point, {pawn, actor}), "could not locate warehouse floor")
             end
             local total, lethal = {}, {}
             local before = actor.Health
