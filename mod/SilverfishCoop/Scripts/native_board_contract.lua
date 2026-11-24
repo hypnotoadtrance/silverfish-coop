@@ -223,10 +223,6 @@ local function catalog(fields, state, phase)
             local guest = not same(context.save, context.receiving_save)
             local permitted, owned = pcall(backpack_objectives, context.receiving_save, contract, guest)
             if not permitted or not owned[1] then return end
-            if guest then
-                local known, other = pcall(backpack_objectives, context.save, contract)
-                if not known or other[1] then return end
-            end
         elseif contract.step < contract.final then
             return
         end
@@ -289,9 +285,6 @@ function board_contract.command(fields, state, phase)
             if not selected then refuse("missing_objective") end
             outcome.guid, outcome.units = selected.guid, selected.units
             outcome.remaining = contract.stacks and outcome.units - 1 or 0
-            if guest and backpack_objectives(context.save, contract)[1] then
-                refuse("canonical_objective_conflict")
-            end
         elseif step < contract.final then
             refuse("objective_not_complete")
         end
@@ -313,13 +306,13 @@ function board_contract.command(fields, state, phase)
     local has_deposit = outcome.guid ~= "-"
     local guest_deposit = has_deposit and not same(context.save, context.receiving_save)
     if guest_deposit then
-        if type(SilverfishStageBoardObjective) ~= "function" then refuse("native_objective_transfer_unavailable") end
-        local staged, reason, moved = SilverfishStageBoardObjective(context.interactor:GetAddress(),
+        if type(SilverfishRedeemBoardObjective) ~= "function" then refuse("native_objective_redemption_unavailable") end
+        local redeemed, reason, moved = SilverfishRedeemBoardObjective(context.interactor:GetAddress(),
             context.receiving_save:GetAddress(), context.save:GetAddress(), outcome.guid, quest, contract.path,
             contract.final, contract.cash, contract.xp, outcome.units)
-        if staged ~= true then
+        if redeemed ~= true then
             if type(reason) == "string" and reason:match("^mutation_unverified_") then error(reason, 0) end
-            refuse("objective_transfer_rejected")
+            refuse("objective_redemption_rejected")
         end
         if type(moved) ~= "string" or #moved ~= 32 or moved:find("[^0-9A-F]") or not moved:find("[^0]")
             or (moved == outcome.guid) ~= (outcome.remaining == 0) then
@@ -335,11 +328,12 @@ function board_contract.command(fields, state, phase)
             context.instance:AddQuest_ByName(context.key)
             context.board:Configure_Stock()
         else
-            local out = {}
-            library:TurnIn_Quest(context.key, context.instance, true, context.host, out, out)
-            if out.Success ~= true or valid(out.ConfirmationPopup) then return end
+            if not guest_deposit then
+                local out = {}
+                library:TurnIn_Quest(context.key, context.instance, true, context.host, out, out)
+                if out.Success ~= true or valid(out.ConfirmationPopup) then return end
+            end
             if has_deposit then
-                if guest_deposit and backpack_objectives(context.save, contract)[1] then return end
                 local observed = backpack_objectives(context.receiving_save, contract, guest_deposit)
                 if outcome.remaining > 0 then
                     objective_before[1].units = outcome.remaining

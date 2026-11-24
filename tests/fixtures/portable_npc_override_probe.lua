@@ -287,7 +287,7 @@ local function stage_melee(world, attempt)
 end
 
 local function aim_melee(world, pawn, center)
-    local active = {world=world, pawn=pawn, center=center, expires=os.clock()+3}
+    local active = {world=world, pawn=pawn, expires=os.clock()+3}
     melee_aim = active
     local function aim()
         if melee_aim ~= active or os.clock() >= active.expires then return false end
@@ -297,7 +297,10 @@ local function aim_melee(world, pawn, center)
         local camera, controller = active.pawn.Camera, active.pawn.Controller
         if not valid(camera) or not valid(controller) or not same(camera:GetOwner(), active.pawn)
             or not same(controller.Pawn, active.pawn) or not same(controller:GetWorld(), active.world) then return false end
-        local angle = heading(camera:K2_GetComponentLocation(), active.center)
+        local target = center
+        if type(center) == "function" then target = center() end
+        if not target then return false end
+        local angle = heading(camera:K2_GetComponentLocation(), target)
         controller:SetControlRotation(angle)
         camera:K2_SetWorldRotation(angle, false, {}, true)
         return true
@@ -830,7 +833,7 @@ local live_worker = "NPC_Survivor_Worker_C_2"
 local live_probe, live_probe_hooked
 local weapon_block_pawn, weapon_block_hooked
 
-local function dock_fight_position(pawn, actor, ignored, distance, shot_lane)
+local function dock_fight_position(pawn, actor, ignored, distance, shot_lane, contact)
     local center = actor:K2_GetActorLocation()
     local half_height = pawn.CapsuleComponent:GetScaledCapsuleHalfHeight()
     for offset = 0, 11 do
@@ -847,14 +850,14 @@ local function dock_fight_position(pawn, actor, ignored, distance, shot_lane)
                 local obstructed = trace:LineTraceSingle(pawn, eye, center, 0, true, ignored, 0, {},
                     true, color, color, 0)
                 if (not shot_lane or not obstructed) and pawn:K2_TeleportTo(point, heading(eye, center)) then
-                    return pawn:K2_GetActorLocation()
+                    if not contact or contact() then return pawn:K2_GetActorLocation() end
                 end
             end
         end
     end
 end
 
-local function stage_live_worker(pawn, world)
+local function stage_live_worker(pawn, world, distance)
     local actor = dock_worker(world, live_worker)
     assert(valid(actor) and actor.Alive and not valid(actor.CombatTarget) and actor.Health > 1
         and actor:HasAuthority() and valid(actor.Controller), "expected an untouched warehouse worker with its stock brain")
@@ -862,7 +865,19 @@ local function stage_live_worker(pawn, world)
     local original = actor:K2_GetActorLocation()
     local ignored = {pawn, guest, actor}
     assert(dock_fight_position(pawn, actor, ignored, 1800, false), "no host position away from the warehouse fight")
-    local guest_point = assert(dock_fight_position(guest, actor, ignored, 350, true), "no clear guest shot in the warehouse")
+    local contact = distance and function()
+        return melee_lane(guest, actor, heading(guest.Camera:K2_GetComponentLocation(), actor:K2_GetActorLocation()))
+    end
+    local guest_point
+    for _, approach in ipairs(distance and {distance, 160, 195} or {350}) do
+        guest_point = dock_fight_position(guest, actor, ignored, approach, true, contact)
+        if guest_point then break end
+    end
+    assert(guest_point, "no clear guest approach in the warehouse")
+    if contact then
+        guest.CharacterMovement:StopMovementImmediately()
+        guest:ForceNetUpdate()
+    end
     live_probe = {actor = actor, guest = guest, host = pawn, enemy_health = actor.Health,
         guest_health = guest.Save.PlayerHealth, guest_attacks = 0, host_attacks = 0}
     if not live_probe_hooked then
@@ -1080,6 +1095,22 @@ local function run(action, actor_path)
     elseif action == "dock-natural-stage" then
         assert(host, "the test stages the stock host NPC")
         return stage_live_worker(pawn, world)
+    elseif action == "dock-melee-stage" then
+        assert(host, "the original worker is owned by the host")
+        return stage_live_worker(pawn, world, 135)
+    elseif action == "dock-melee-equip" then
+        assert(not host, "the guest must select their stock melee equipment")
+        return select_equipment(pawn, function(row) return guid_of(row) == actor_path end)
+    elseif action == "dock-melee-aim" then
+        local worker = dock_worker(world, live_worker)
+        assert(valid(worker) and worker.Alive and worker:GetLocalRole() == (host and 3 or 1),
+            "the original live warehouse worker is unavailable")
+        local shooter = host and authoritative_guest(world) or pawn
+        return aim_melee(world, shooter, function()
+            if valid(worker) and not worker:IsActorBeingDestroyed() and same(worker:GetWorld(), world) and worker.Alive then
+                return worker:K2_GetActorLocation()
+            end
+        end) and "ready" or "unavailable"
     elseif action == "dock-natural-position" then
         return live_worker_position(world)
     elseif action == "dock-natural-impact" then

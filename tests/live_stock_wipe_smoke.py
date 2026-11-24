@@ -144,6 +144,10 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
             assert current["limit"] == keep_slots and current["total"] == len(all_items), current
             if stock_screen:
                 assert current["screen"] == "stock" and current["offset"] > 0, current
+                for owner, blocker in ((primary, "pause"), (secondary, "journal")):
+                    reopened = await key(owner, f"stock-reopen-{blocker}")
+                    assert (reopened["state"], reopened["screen"], reopened["id"]) == (
+                        "selecting", "stock", current["id"]), reopened
                 selected = await key(secondary, f"stock-keep-{retained_item}")
             else:
                 if current["guid"] != retained_item:
@@ -167,6 +171,13 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
                     assert waiting["game"]["native_wipe_view"]["state"] == "selecting", waiting
                     assert waiting["gameplay"]["wipe"]["choices"] == {character: {retained_item: 1}}, waiting
                     assert waiting["gameplay"]["wipe"]["deadline"] is None, waiting
+                    if stock_screen:
+                        await wait(guest, lambda status: status.get("game", {}).get("native_wipe_view", {}).get("state") == "accepted")
+                        visible = await key(secondary, "stock-waiting")
+                        assert (visible["state"], visible["selected"], visible["screen"]) == ("accepted", 1, "stock"), visible
+                        reopened = await key(secondary, "stock-reopen-journal")
+                        assert (reopened["id"], reopened["state"], reopened["selected"]) == (visible["id"], "accepted", 1), reopened
+                        assert await key(secondary, "stock-waiting") == reopened
         elif keep_slots:
             await action(secondary, "keep", "--keep", f"{retained_item}=1")
             await action(primary, "keep")
@@ -219,6 +230,7 @@ async def validate(work: Path, vanilla_saved: Path | None, visible_bag: bool, au
             proof["native_inventory_selection_input"] = submitted
         if stock_screen:
             proof["stock_wipe_screen_selection_verified"] = True
+            proof["stock_pause_journal_and_waiting_selection_verified"] = True
         if downed_aim:
             proof["guest_aim_released_on_down"] = {"before": aiming[0], "downed": lowered[0],
                                                   "movement": downed["game"]["player_effects"]["local"]}

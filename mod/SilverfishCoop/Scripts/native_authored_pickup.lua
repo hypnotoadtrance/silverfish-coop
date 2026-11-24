@@ -315,17 +315,13 @@ function pickup.update(state, phase)
         local count, eligible, generation = SilverfishDiscoverLoosePickups(pawn:GetAddress(), host)
         binding.loose_count, binding.loose_generation = count, generation
         if host and type(eligible) == "string" and eligible ~= "" then
-            binding.carry_sources, binding.carry_cursor = {}, 1
-            for path in eligible:gmatch("[^\n]+") do binding.carry_sources[#binding.carry_sources + 1] = path end
-        end
-        if binding.carry_sources then
             local carry = require("native_prop_carry")
-            local limit = math.min(binding.carry_cursor + 7, #binding.carry_sources)
-            for index = binding.carry_cursor, limit do
-                carry.enroll_loose(StaticFindObject(binding.carry_sources[index]))
+            for path in eligible:gmatch("[^\n]+") do
+                local actor = StaticFindObject(path)
+                if carry.enroll_loose(actor) and type(SilverfishAcknowledgeLooseCarry) == "function" then
+                    SilverfishAcknowledgeLooseCarry(path, actor:GetAddress())
+                end
             end
-            binding.carry_cursor = limit + 1
-            if limit == #binding.carry_sources then binding.carry_sources = nil end
         end
     end
     local active, unavailable, reason = {}, {}, nil

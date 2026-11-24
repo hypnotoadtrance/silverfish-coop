@@ -14,6 +14,7 @@ class WipeView:
         self.namespace = uuid.uuid4()
         self.offset = 0
         self.scope = None
+        self.confirmed = None
         self.next_lease = 0.0
         self.next_page = None
         self.retry_at = 0.0
@@ -32,8 +33,7 @@ class WipeView:
         return [line.decode("utf-8", errors="replace").split("\t") for line in batch[:end].splitlines()]
 
     def binding(self, game: dict, draft: dict | None) -> tuple[str, ...] | None:
-        if (not draft or not draft.get("native_inventory_ready") or self.owner not in draft["roster"]
-                or self.owner in draft["choices"]):
+        if not draft or not draft.get("native_inventory_ready") or self.owner not in draft["roster"]:
             return None
         limit, remaining, identifier = draft["keep_slots"], draft.get("remaining_seconds"), draft["id"]
         pawn = game.get("pawns", {}).get("local", {}).get("name")
@@ -62,8 +62,15 @@ class WipeView:
             row["guid"], row["source"], row["index"], row["quantity"], row["class_path"],
             native_inventory_wipe.selection_policy(row), int(row["stackable"]),
         )) for row in items)
+        confirmed = "-"
+        if self.confirmed is not None:
+            if (type(self.confirmed) is not dict or len(self.confirmed) > limit - forced
+                    or any(not valid_guid(guid) or type(count) is not int or count != 1
+                           for guid, count in self.confirmed.items())):
+                raise RuntimeError("The host reported an invalid confirmed wipe selection")
+            confirmed = ",".join(sorted(self.confirmed)) or "0"
         snapshot = await self.bridge.command("native-wipe-view-render", *scope, str(limit), str(forced), str(offset),
-                                             str(total), *rows, timeout=4)
+                                             str(total), confirmed, *rows, timeout=4)
         observed = snapshot.get("native_wipe_view", {})
         if (tuple(observed.get(key) for key in ("id", "map", "pawn", "owner")) != scope[:4]
                 or observed.get("offset") != offset or observed.get("total") != total):
@@ -74,7 +81,8 @@ class WipeView:
 
     async def fixture(self, action: str, key: str) -> dict:
         if not self.scope or not isinstance(key, str) or (
-                key not in ("up", "down", "toggle", "submit", "back", "stock-submit")
+                key not in ("up", "down", "toggle", "submit", "back", "stock-submit", "stock-waiting",
+                            "stock-reopen-pause", "stock-reopen-journal")
                 and not (key.startswith("stock-keep-") and valid_guid(key[11:]))):
             raise ValueError("Select an input for the active staged wipe overlay")
         return await self.bridge.command(action, *self.scope[:4], key, timeout=4)
@@ -82,12 +90,14 @@ class WipeView:
     async def sync(self, game: dict, draft: dict | None, fetch, submit) -> dict:
         events = self.read_events()
         scope = self.binding(game, draft)
-        if scope != self.scope and self.scope:
+        confirmed = draft["choices"].get(self.owner) if scope else None
+        if self.scope and (scope != self.scope or confirmed is not None and confirmed != self.confirmed):
             with contextlib.suppress(OSError, RuntimeError, ValueError):
                 game = await self.bridge.command("native-wipe-view-clear", *self.scope[:4], timeout=2)
             self.scope = None
             self.next_page = None
         if not scope:
+            self.confirmed = None
             self.retry_at = 0.0
             self.last_error = None
             return game
@@ -95,6 +105,7 @@ class WipeView:
             if self.scope is None:
                 if time.monotonic() < self.retry_at:
                     return game
+                self.confirmed = confirmed
                 game = await self.render(scope, draft["keep_slots"], 0, fetch)
                 self.scope = scope
                 self.last_error = None
@@ -107,12 +118,14 @@ class WipeView:
                 self.sequence = sequence
                 if row[0] == "native-wipe-view-page" and len(row) == 7 and row[6].isascii() and row[6].isdigit() and len(row[6]) <= 4:
                     game = await self.render(scope, draft["keep_slots"], int(row[6]), fetch)
-                elif (row[0] == "native-wipe-view-submit" and row[6] == str(len(row[7:])) and len(row[7:]) <= draft["keep_slots"]
+                elif (self.confirmed is None and row[0] == "native-wipe-view-submit"
+                      and row[6] == str(len(row[7:])) and len(row[7:]) <= draft["keep_slots"]
                       and len(set(row[7:])) == len(row[7:]) and all(valid_guid(guid) for guid in row[7:])):
                     operation = uuid.uuid5(self.namespace, f"{scope[0]}:{sequence}").hex
                     outcome = "refused"
+                    retained = dict.fromkeys(row[7:], 1)
                     try:
-                        await submit(operation, dict.fromkeys(row[7:], 1))
+                        await submit(operation, retained)
                         outcome = "accepted"
                         self.control.event("native_wipe_view_choice", wipe_id=scope[0], character_id=self.owner,
                                            operation_id=operation, selected=len(row[7:]))
@@ -120,6 +133,8 @@ class WipeView:
                         self.control.event("native_wipe_view_choice_rejected", wipe_id=scope[0], operation_id=operation, reason=str(error))
                     with contextlib.suppress(OSError, RuntimeError, ValueError):
                         game = await self.bridge.command("native-wipe-view-result", *scope[:4], outcome, timeout=2)
+                        if outcome == "accepted":
+                            self.confirmed = retained
                     break
             if time.monotonic() >= self.next_lease:
                 game = await self.bridge.command("native-wipe-view-lease", *scope, timeout=2)
