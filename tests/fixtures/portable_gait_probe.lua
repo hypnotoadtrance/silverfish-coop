@@ -95,7 +95,9 @@ end
 local function position_row(pawn)
     local point, velocity, movement = pawn:K2_GetActorLocation(), pawn:GetVelocity(), pawn.CharacterMovement
     return table.concat({point.X, point.Y, point.Z, math.sqrt(velocity.X^2 + velocity.Y^2),
-        bit(pawn.Sprinting), bit(pawn.bIsCrouched), bit(pawn.Aiming), bit(movement:IsMovingOnGround())}, ";")
+        bit(pawn.Sprinting), bit(pawn.bIsCrouched), bit(pawn.Aiming), bit(movement:IsMovingOnGround()),
+        movement.MaxWalkSpeed, pawn.Speed_Walking, pawn.Speed_Sprinting, pawn.MovementSpeedMod,
+        pawn.Save.PlayerFood}, ";")
 end
 
 local function observe(action, world, pawn, weapon)
@@ -186,6 +188,11 @@ local function run(action)
     local world, pawn, weapon, guest = scope()
     if not world then return "pending" end
     if guest then return drive(action, world, pawn, weapon) end
+    if action == "hostspeed" then
+        local owner = StaticFindObject(clock_path):GetPlayerPawn(world, 0)
+        assert(valid(owner) and owner:IsLocallyControlled() and owner:HasAuthority(), "expected the stock host player")
+        return position_row(owner)
+    end
     return observe(action, world, pawn, weapon)
 end
 

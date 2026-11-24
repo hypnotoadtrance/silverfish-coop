@@ -1986,6 +1986,8 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
         presentation.update(await verify_stock_gait(host, guest, portable_probe_command))
     if held_mask:
         return {**presentation, **await verify_stock_held_mask(host, guest, portable_probe_command)}
+    if grounded_gait and not pursuit and not retaliation:
+        return presentation
     if pursuit:
         try:
             presentation.update(await verify_stock_held_mask(host, guest, portable_probe_command))
@@ -1996,7 +1998,7 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
         assert "stock_held_mask_error" not in presentation, (presentation, combat)
         return {**presentation, "tutorial_dock_pursuit": combat}
     if retaliation:
-        return {"tutorial_dock_retaliation": await verify_tutorial_dock_retaliation(host, guest, frame)}
+        return {**presentation, "tutorial_dock_retaliation": await verify_tutorial_dock_retaliation(host, guest, frame)}
     seen = await asyncio.gather(*(command(seat, "dock-worker") for seat in (host, guest)))
     assert all(row.startswith("true;false;0;") for row in seen), seen
     target = await command(host, "dock-stage")
@@ -4220,7 +4222,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         verify_stock_held_queue = None
     dock_combat_check = ("stock_held_mask" if tutorial_dock_held_mask else
                          "tutorial_dock_pursuit" if tutorial_dock_pursuit else
-                         "tutorial_dock_retaliation" if tutorial_dock_retaliation else "tutorial_dock_combat")
+                         "tutorial_dock_retaliation" if tutorial_dock_retaliation else
+                         "stock_grounded_gait" if tutorial_dock_gait else "tutorial_dock_combat")
     for enabled, campaign, name, check in (
         (stock_campfire, "observatory", "stock_campfire", verify_resident_campfire),
         (stock_npc_override and not resident_weapon_cues, "observatory", "stock_npc_override", verify_resident_npc_override),
@@ -4993,12 +4996,13 @@ if __name__ == "__main__":
         parser.error("Use --resident-stale-quick-slot with --resident-held-queue")
     if args.rusty_pistol and not args.resident_weapon_cues:
         parser.error("Use --rusty-pistol with --resident-weapon-cues")
-    if args.tutorial_dock_combat and not (args.rusty_pistol and (args.tutorial_dock_pursuit or args.stock_npc_override)):
-        parser.error("Use --tutorial-dock-combat with --rusty-pistol and select --tutorial-dock-pursuit or --stock-npc-override")
+    if args.tutorial_dock_combat and not (args.rusty_pistol and (
+            args.tutorial_dock_pursuit or args.stock_npc_override or args.tutorial_dock_gait)):
+        parser.error("Use --tutorial-dock-combat with --rusty-pistol and a Dock pursuit, NPC, or gait fixture")
     if args.tutorial_dock_retaliation and not args.tutorial_dock_combat:
         parser.error("Use --tutorial-dock-retaliation with --tutorial-dock-combat")
-    if args.tutorial_dock_gait and not (args.tutorial_dock_held_mask or args.tutorial_dock_pursuit):
-        parser.error("Use --tutorial-dock-gait with the Dock held-mask or pursuit check")
+    if args.tutorial_dock_gait and not args.tutorial_dock_combat:
+        parser.error("Use --tutorial-dock-gait with --tutorial-dock-combat")
     if args.tutorial_dock_held_mask and (not args.tutorial_dock_combat or args.tutorial_dock_pursuit
                                          or args.tutorial_dock_retaliation):
         parser.error("Use --tutorial-dock-held-mask with --tutorial-dock-combat and without another Dock fight")
