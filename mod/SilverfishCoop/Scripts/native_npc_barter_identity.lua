@@ -31,9 +31,14 @@ local function exact_npc(actor)
     return actor_in_world(actor) and valid(npc_class) and actor:IsA(npc_class)
 end
 
+function identity.is_marker(rotation)
+    -- UE4SS can reverse the pitch sign when it spawns the native actor.
+    return byte(math.abs(rotation.Pitch)) == marker_code
+end
+
 local function number_on(marker)
     local rotation = marker:K2_GetActorRotation()
-    if byte(rotation.Pitch) ~= marker_code then return end
+    if not identity.is_marker(rotation) then return end
     local value = byte(rotation.Yaw) + 256 * byte(rotation.Roll)
     if value > 0 then return value end
 end
@@ -93,14 +98,16 @@ local function install()
             pending[actor.LinkedNPC:GetAddress()] = actor.LinkedNPC
         end
     end)
-    RegisterEndPlayPreHook(function(context)
+    RegisterEndPlayPreHook(function(context, reason)
         if not phase then return end
         local actor = context:get()
         if not valid(actor) then return end
         local address = actor:GetAddress()
         local entry = markers[address]
         markers[address], pending[address] = nil, nil
-        if phase == "hosting" and entry and valid(entry.marker) then entry.marker:K2_DestroyActor() end
+        if phase == "hosting" and reason:get() == 0 and entry and valid(entry.marker) then
+            entry.marker:K2_DestroyActor()
+        end
     end)
     return true
 end
