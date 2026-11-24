@@ -1310,6 +1310,12 @@ local function write_status(state, current_phase, failure, fields, pending, crat
     if current_phase == "connected" and world_view_enabled and compact_crates then
         rows[#rows + 1] = status_row("native-world-view-apply-local", 1)
     end
+    if current_phase == "connected" and world_view_enabled and type(SilverfishReadNativeGuestStormGuard) == "function" then
+        local guarded, denied = SilverfishReadNativeGuestStormGuard()
+        if guarded == state.world:GetAddress() and math.type(denied) == "integer" then
+            rows[#rows + 1] = status_row("native-weather-storm-guard", denied)
+        end
+    end
     for _, row in ipairs(native_stock_creator.rows(state, current_phase, status_row)) do rows[#rows + 1] = row end
     if role == "host" and party_travel_guard_available() then
         rows[#rows + 1] = status_row("native-zone-party-guard", 1)
