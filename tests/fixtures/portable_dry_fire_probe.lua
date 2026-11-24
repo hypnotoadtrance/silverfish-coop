@@ -15,6 +15,8 @@ local arm_profiles = {
         "/Game/Classes/Items/Ammo_IntrRifle_BP.Ammo_IntrRifle_BP_C", 7, 3},
     ["arm-alternate"] = {"/Game/Classes/Weapons/Wep_1911.Wep_1911_C",
         "/Game/Classes/Items/Ammo_Magnum_HollowPoint_BP.Ammo_Magnum_HollowPoint_BP_C", 18, 4},
+    ["arm-buckshot"] = {"/Game/Classes/Weapons/Wep_ShotGun_SemiAuto.Wep_ShotGun_SemiAuto_C",
+        "/Game/Classes/Items/Ammo_ShotgunShells_BP.Ammo_ShotgunShells_BP_C", 5, 3},
     ["arm-nagant"] = {"/Game/Classes/Weapons/Wep_Nagant_01.Wep_Nagant_01_C", reserve_9mm, 0, 6},
     ["arm-obrez"] = {"/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C", reserve_9mm, 0, 7},
 }
@@ -69,7 +71,8 @@ local function arm()
     local viewport = FindFirstOf("GameViewportClient")
     local world = valid(viewport) and viewport.World
     local name = valid(world) and world:GetFullName()
-    assert(name == map or name == dock_map and weapon_path == arm_profiles["arm-light-ar"][1],
+    assert(name == map or name == dock_map and
+        (weapon_path == arm_profiles["arm-light-ar"][1] or weapon_path == arm_profiles["arm-buckshot"][1]),
         "stock weapon fixture map unavailable")
     local statics = asset("/Script/Engine.Default__GameplayStatics")
     local_pawn = statics:GetPlayerPawn(world, 0)
@@ -333,6 +336,11 @@ local function run(action, argument)
             and index >= 1 and index <= local_pawn.Save.PlayerEquipment:GetArrayNum())
         slot = index
         return "scoped"
+    end
+    if action == "seed-dock-buckshot" then
+        assert(observing() and local_pawn:GetWorld():GetFullName() == dock_map
+            and weapon_path == arm_profiles["arm-buckshot"][1])
+        return seed(peer, 4)
     end
     if action == "seed-dock-light-ar" then
         assert(observing() and local_pawn:GetWorld():GetFullName() == dock_map

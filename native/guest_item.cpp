@@ -1607,7 +1607,7 @@ namespace
 
         Unreal::FWeakObjectPtr held_actor;
         held_actor = actor;
-        TapBirths projectiles{context.world, context.pawn, projectile, expected_projectiles == 1 ? &shot_view : nullptr};
+        TapBirths projectiles{context.world, context.pawn, projectile, &shot_view};
         // Pose the authoritative muzzle for the stock launch. The remote pawn's first-person
         // weapon animation does not run on this seat.
         GuestMuzzleAim aim;
