@@ -269,6 +269,13 @@ local function restore_locomotion(entry)
     end
 end
 
+local function refresh_pose_when_hidden(entry)
+    if entry.pose_tick_option == nil then
+        entry.pose_tick_option = entry.body.VisibilityBasedAnimTickOption
+        entry.body.VisibilityBasedAnimTickOption = 0
+    end
+end
+
 local function apply_locomotion(entry, aim, outfit)
     if swings[entry] then return end
     local crouched = entry.pawn.bIsCrouched == true
@@ -316,10 +323,7 @@ local function apply_locomotion(entry, aim, outfit)
     -- pose keeps the visible remote body upright. Use the stock full-body clip.
     -- A single-node player's clock can advance while its socket bones retain
     -- the previous pose. The projected held items and head use those bones.
-    if entry.pose_tick_option == nil then
-        entry.pose_tick_option = entry.body.VisibilityBasedAnimTickOption
-        entry.body.VisibilityBasedAnimTickOption = 0
-    end
+    refresh_pose_when_hidden(entry)
     if entry.body.AnimationMode == 1 and not valid(instance) then
         entry.body:SetAnimationMode(1, true)
     end
@@ -386,6 +390,7 @@ function avatar.play_melee(world, id, kind, serial, duration, start_fraction)
             local length = clip:GetPlayLength()
             local clock = StaticFindObject("/Script/Engine.Default__GameplayStatics")
             if length <= 0 or not valid(clock) then return end
+            refresh_pose_when_hidden(entry)
             entry.body:SetAnimationMode(1, false)
             entry.body:SetAnimation(clip)
             entry.body:Stop()
