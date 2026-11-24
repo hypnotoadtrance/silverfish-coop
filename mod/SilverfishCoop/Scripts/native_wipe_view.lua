@@ -8,6 +8,10 @@ local pawn_path = "/Game/Classes/Player/Player_FP.Player_FP_C"
 local controller_path = "/Game/Classes/Player/PlayerControler_FP.PlayerControler_FP_C"
 local display_path = "/Game/Classes/GUI/SubWidgets/SimpleText_01_Widget.SimpleText_01_Widget_C"
 local stock_screen_path = "/Game/Classes/GUI/GameOver_RespawnPenalties_Widget.GameOver_RespawnPenalties_Widget_C"
+local stock_blockers = {
+    pause = "/Game/Classes/GUI/Menu_Pause_Widget.Menu_Pause_Widget_C",
+    journal = "/Game/Classes/GUI/Menu_QuestLog_Widget.Menu_QuestLog_Widget_C",
+}
 local black_stone = "/Game/Classes/Items/Artifacts/Art_BlackStone.Art_BlackStone_C"
 local widgets_path = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local statics_path = "/Script/Engine.Default__GameplayStatics"
@@ -142,6 +146,22 @@ local function hex32(value, pattern)
         and value:match(pattern) ~= nil
 end
 
+local function confirmed_choices(encoded, cap)
+    if encoded == "-" then return nil, 0 end
+    local selected, guids = {}, {}
+    if type(encoded) ~= "string" or #encoded > 329 then error("Invalid confirmed wipe choices", 0) end
+    if encoded == "0" then return selected, 0 end
+    for guid in encoded:gmatch("[^,]+") do
+        if not hex32(guid, "^[0-9A-F]+$") or selected[guid] or #guids >= cap then
+            error("Invalid confirmed wipe choices", 0)
+        end
+        selected[guid] = true
+        guids[#guids + 1] = guid
+    end
+    if #guids == 0 or table.concat(guids, ",") ~= encoded then error("Invalid confirmed wipe choices", 0) end
+    return selected, #guids
+end
+
 local function character_id(value, client)
     if not client then return value == "host" end
     if type(value) ~= "string" then return false end
@@ -151,13 +171,13 @@ local function character_id(value, client)
 end
 
 local function page(fields, row, offset)
-    local count = #fields - 11
+    local count = #fields - 12
     if (offset % page_size ~= 0) or (offset ~= 0 and offset >= row.total)
         or count ~= math.min(page_size, row.total - offset) then
         error("The frozen wipe inventory page is incomplete", 0)
     end
     local records, locked_ordinal, guids, positions = {}, row.locked_ordinal, {}, {}
-    for index = 12, #fields do
+    for index = 13, #fields do
         local guid, source, raw_slot, raw_amount, class, policy, stackable =
             fields[index]:match("^([0-9A-F]+)|([a-z]+)|(%d+)|(%d+)|(/Game/[%w_/%-%%]+%.[%w_%-%%]+_C)|([a-z]+)|([01])$")
         local slot = integer(raw_slot, (source == "armor" or source == "helmet") and 0 or 4095)
@@ -168,7 +188,7 @@ local function page(fields, row, offset)
             or (policy ~= "selectable" and policy ~= "locked" and (policy ~= "excluded" or source ~= "backpack")) then
             error("The frozen wipe inventory contains an invalid stock item", 0)
         end
-        local ordinal, position = offset + index - 11, source .. "|" .. slot
+        local ordinal, position = offset + index - 12, source .. "|" .. slot
         if guids[guid] or positions[position] or (row.guid_ordinals[guid] and row.guid_ordinals[guid] ~= ordinal)
             or (row.position_ordinals[position] and row.position_ordinals[position] ~= ordinal)
             or (row.verified[ordinal] and row.verified[ordinal] ~= fields[index]) then
@@ -192,7 +212,7 @@ local function page(fields, row, offset)
     row.locked_ordinal = locked_ordinal
     for guid, ordinal in pairs(guids) do row.guid_ordinals[guid] = ordinal end
     for position, ordinal in pairs(positions) do row.position_ordinals[position] = ordinal end
-    for index = 12, #fields do row.verified[offset + index - 11] = fields[index] end
+    for index = 13, #fields do row.verified[offset + index - 12] = fields[index] end
     return records
 end
 
@@ -211,6 +231,8 @@ local function show(row)
     if row.state == "confirming" then
         lines[#lines + 1] = row.count == 0 and "Submit without selecting any items? Home confirms. End cancels."
             or "Submit your selection? Home confirms. End cancels."
+    elseif row.state == "accepted" then
+        lines[#lines + 1] = "Waiting for the party."
     elseif row.state == "submitting" then
         lines[#lines + 1] = "Waiting for the host to confirm your selection."
     elseif row.state == "paging" then
@@ -304,16 +326,21 @@ local function stock_item(current, record)
     return result
 end
 
-local function load_stock_preview(screen, current, records)
-    local count = 0
-    for _, record in ipairs(records) do
+local function load_stock_preview(screen, row)
+    local count, kept = 0, 0
+    for _, record in ipairs(row.stock_records) do
         local projected
         if record.policy == "locked" then
-            screen.ItemsToKeep[1] = stock_item(current, record)
+            screen.ItemsToKeep[1] = stock_item(row.context, record)
             projected = screen.ItemsToKeep[1]
+        elseif record.policy == "selectable" and row.confirmed and row.selected[record.guid] then
+            kept = kept + 1
+            local slot = row.locked + kept
+            screen.ItemsToKeep[slot] = stock_item(row.context, record)
+            projected = screen.ItemsToKeep[slot]
         elseif record.policy == "selectable" then
             count = count + 1
-            screen.PlayerInventory[count] = stock_item(current, record)
+            screen.PlayerInventory[count] = stock_item(row.context, record)
             projected = screen.PlayerInventory[count]
         end
         if projected then
@@ -324,9 +351,41 @@ local function load_stock_preview(screen, current, records)
         end
     end
     screen.InventoryPanel:FullRefresh()
-    if screen.InventoryPanel.Cards:GetArrayNum() ~= count then
+    if screen.InventoryPanel.Cards:GetArrayNum() ~= count or row.confirmed and kept ~= row.count then
         error("The stock wipe inventory did not render the frozen items", 0)
     end
+end
+
+local function stock_message(screen, message)
+    screen.Button_Continue.Button_Text = FText(message)
+end
+
+local function accept_stock(row)
+    local screen = row.stock
+    stock_message(screen, "Waiting for the party")
+    screen.Button_Continue:SetIsEnabled(false)
+    screen.InventoryPanel:SetIsEnabled(false)
+    screen.ItemManager:SetIsEnabled(false)
+    for index = 1, row.limit do screen.KeptItemSlots[index]:SetIsEnabled(false) end
+end
+
+local function clear_stock_blockers(current)
+    local controller = current.controller
+    local stack = controller.MenuStack
+    while stack:GetArrayNum() > 0 do
+        local count = stack:GetArrayNum()
+        local menu = stack[count]
+        if not (exact(menu, stock_blockers.pause) or exact(menu, stock_blockers.journal))
+            or not same(menu:GetOwningPlayer(), controller) or not menu:IsInViewport() or not menu:IsVisible() then
+            return false
+        end
+        local result = {}
+        controller:CloseMenu(result)
+        if result.Success ~= true or stack:GetArrayNum() ~= count - 1 or valid(menu) and menu:IsInViewport() then
+            return false
+        end
+    end
+    return true
 end
 
 local function emit(kind, row, values)
@@ -341,11 +400,11 @@ local function emit(kind, row, values)
     return written and closed
 end
 
-local function show_stock(row)
+local function show_stock(row, now)
     local current = row.context
-    if current.controller.Loading or current.controller.MenuStack:GetArrayNum() ~= 0 then
-        error("Close other menus before showing the stock wipe screen", 0)
-    end
+    if row.retry_open and now < row.retry_open then return end
+    row.retry_open = now + .25
+    if current.controller.Loading or not clear_stock_blockers(current) then return end
     local screen = open_guarded_stock_screen(current)
     row.stock = screen
     current.controller:AddMenu(screen)
@@ -358,7 +417,7 @@ local function show_stock(row)
     screen["Is Unclosable"] = true
     local targets = {}
     for index = 1, row.limit do screen.ItemsToKeep[index] = {} end
-    load_stock_preview(screen, current, row.stock_records)
+    load_stock_preview(screen, row)
     for index = 0, row.limit - 1 do
         screen:CreateKeepSlot(index)
         local slot = screen.KeptItemSlots[index + 1]
@@ -366,6 +425,8 @@ local function show_stock(row)
         else targets[#targets + 1] = slot end
     end
     screen.InventoryPanel:SetQuickMoveTargets(targets)
+    row.state = row.confirmed and "accepted" or "selecting"
+    if row.confirmed then accept_stock(row) end
 end
 
 local function stock_choices(row)
@@ -385,13 +446,10 @@ local function stock_choices(row)
     if #selected <= row.cap then return selected end
 end
 
-local function stock_message(screen, message)
-    screen.Button_Continue.Button_Text = FText(message)
-end
-
 local function stock_continue(row)
     local screen = row.stock
-    if row.state == "submitting" or screen.ItemManager.HoldingItem or screen.ItemManager.IsSplittingStack then return end
+    if row.state ~= "selecting" and row.state ~= "refused" or screen.ItemManager.HoldingItem
+        or screen.ItemManager.IsSplittingStack then return end
     local chosen = stock_choices(row)
     if not chosen then
         row.state = "refused"
@@ -400,6 +458,8 @@ local function stock_continue(row)
     end
     row.count = #chosen
     table.sort(chosen)
+    row.selected = {}
+    for _, guid in ipairs(chosen) do row.selected[guid] = true end
     table.insert(chosen, 1, #chosen)
     if emit("native-wipe-view-submit", row, chosen) then
         row.state = "submitting"
@@ -421,6 +481,7 @@ local function poll_stock(row)
 end
 
 local function stock_fixture_keep(row, guid)
+    if row.state ~= "selecting" and row.state ~= "refused" then return false end
     local screen = row.stock
     local panel, manager = screen.InventoryPanel, screen.ItemManager
     for index = 1, panel.Cards:GetArrayNum() do
@@ -439,6 +500,36 @@ local function stock_fixture_keep(row, guid)
         end
     end
     error("The stock wipe Quick Move did not fill the keep slot", 0)
+end
+
+local function stock_fixture_reopen(row, blocker, now)
+    if row.state ~= "selecting" and row.state ~= "accepted" then return false end
+    local current = row.context
+    close_stock_screen(row)
+    if current.controller.MenuStack:GetArrayNum() ~= 0 then return false end
+    if not valid(StaticFindObject(blocker)) then LoadAsset(blocker) end
+    local class, widgets = StaticFindObject(blocker), StaticFindObject(widgets_path)
+    if not valid(class) or not valid(widgets) then return false end
+    local menu = widgets:Create(current.pawn, class, current.controller)
+    if not exact(menu, blocker) or not same(menu:GetOwningPlayer(), current.controller) then return false end
+    current.controller:AddMenu(menu)
+    if not same(current.controller.MenuStack[1], menu) or not menu:IsInViewport() then return false end
+    row.state, row.retry_open = "opening", nil
+    show_stock(row, now)
+    return valid(row.stock) and row.stock:IsInViewport() and not menu:IsInViewport()
+end
+
+local function stock_fixture_waiting(row)
+    if row.state ~= "accepted" or not row.stock:IsInViewport() or row.stock.Button_Continue:GetIsEnabled()
+        or row.stock.InventoryPanel:GetIsEnabled() or row.stock.ItemManager:GetIsEnabled()
+        or row.stock.Button_Continue.Button_Text:ToString() ~= "Waiting for the party" then return false end
+    for index = 1, row.limit do
+        if row.stock.KeptItemSlots[index]:GetIsEnabled() then return false end
+    end
+    local choices = stock_choices(row)
+    if not choices or #choices ~= row.count then return false end
+    for _, guid in ipairs(choices) do if not row.selected[guid] then return false end end
+    return true
 end
 
 local function choose(row, action)
@@ -488,6 +579,7 @@ local function poll_keys()
     if not row then return end
     local now, reason = current_time(row.context, row)
     if not now then invalidate(reason) return end
+    if row.state == "opening" then show_stock(row, now) return end
     if row.stock then poll_stock(row) return end
     if not can_choose(row) then held = {} return end
     local changed
@@ -537,18 +629,22 @@ function wipe_view.command(fields, state, phase)
             or not locked or not offset or not total or locked > total then
             error("The authoritative wipe draft deadline or inventory limits are invalid", 0)
         end
+        local cap = math.max(0, limit - locked)
+        local confirmed, selected_count = confirmed_choices(fields[12], cap)
         local row
         if not matches then
             if offset ~= 0 then error("The wipe view must begin with the first frozen page", 0) end
             row = {id = id, character = character, context = current, deadline = deadline, limit = limit,
-                locked = locked, cap = math.max(0, limit - locked), total = total, leased_at = now,
-                state = "selecting", count = 0, sequence = 0, selected = {}, verified = {},
+                locked = locked, cap = cap, total = total, leased_at = now,
+                state = "selecting", count = selected_count, sequence = 0, selected = confirmed or {}, verified = {},
+                confirmed = confirmed ~= nil, choice = fields[12],
                 guid_ordinals = {}, position_ordinals = {}}
             if wants_stock() then row.stock_records, row.stock_by_guid = {}, {} end
         else
             row = view
             if not current_time(current, row) or row.state ~= "paging" or row.pending_offset ~= offset
-                or row.total ~= total or row.limit ~= limit or row.locked ~= locked or row.deadline ~= deadline then
+                or row.total ~= total or row.limit ~= limit or row.locked ~= locked or row.deadline ~= deadline
+                or row.choice ~= fields[12] then
                 error("The frozen wipe page does not match the current request", 0)
             end
         end
@@ -561,6 +657,7 @@ function wipe_view.command(fields, state, phase)
         end
         local ok, failure = pcall(function()
             if not row.stock_records then
+                if row.confirmed then row.state = "accepted" end
                 if matches then show(row) else render(current, row) end
                 return
             end
@@ -571,7 +668,8 @@ function wipe_view.command(fields, state, phase)
             if offset + #records < row.total then
                 row.state, row.pending_offset = "paging", offset + #records
             else
-                show_stock(row)
+                row.state = "opening"
+                show_stock(row, now)
             end
         end)
         if not ok then wipe_view.clear() error(failure, 0) end
@@ -597,11 +695,18 @@ function wipe_view.command(fields, state, phase)
             poll_stock(view)
             if view.state == "submitting" then return "verified stock wipe confirmation" end
         end
+        local blocker = stock_blockers[fields[7]:match("^stock%-reopen%-(%a+)$") or ""]
+        if blocker and stock_fixture_reopen(view, blocker, now) then
+            return "verified stock wipe reopened over the stock menu"
+        end
+        if fields[7] == "stock-waiting" and stock_fixture_waiting(view) then
+            return "verified visible read-only stock wipe selection"
+        end
     end
     if op == "native-wipe-view-result" and #fields == 7 then
         if fields[7] == "accepted" and view.state == "submitting" then
-            view.state = "accepted"
-            remove_display(view)
+            view.state, view.confirmed = "accepted", true
+            if view.stock then accept_stock(view) else show(view) end
             return "verified wipe selection accepted"
         end
         if fields[7] == "refused" and (view.state == "submitting" or view.state == "paging") then
