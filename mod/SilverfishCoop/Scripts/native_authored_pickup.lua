@@ -866,6 +866,14 @@ function pickup.rows(state, phase, status_row)
     end
     if binding.loose_count then
         rows[#rows + 1] = status_row("native-loose-pickup-capability", 1, binding.loose_count)
+        if phase == "hosting" and type(SilverfishReadHostLooseRespawnHidden) == "function" then
+            local hidden = SilverfishReadHostLooseRespawnHidden()
+            if type(hidden) == "string" then
+                for path in hidden:gmatch("[^\n]+") do
+                    rows[#rows + 1] = status_row("native-loose-pickup-respawn-hidden", state.map, path)
+                end
+            end
+        end
         if phase == "connected" and binding.loose_generation then
             rows[#rows + 1] = status_row("native-loose-pickup-view-scope", binding.loose_generation)
         end

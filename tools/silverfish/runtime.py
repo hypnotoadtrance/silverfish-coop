@@ -2512,6 +2512,12 @@ class Bridge:
                             "hosting", area, area) or available not in ("0", "1"):
                         raise ValueError("Invalid placed stock pickup availability")
                     data.setdefault(native_loose_pickup.CHECK_KEY, {})[actor] = available == "1"
+                elif fields[0] == native_loose_pickup.RESPAWN_HIDDEN_ROW and len(fields) == 3:
+                    _, area, actor = fields
+                    if (data.get("state"), data.get("map"), native_loose_pickup.actor_map(actor)) != (
+                            "hosting", area, area):
+                        raise ValueError("Invalid host-only stock pickup respawn")
+                    data.setdefault(native_loose_pickup.RESPAWN_HIDDEN, []).append(actor)
                 elif fields[0] == "native-authored-pickup" and len(fields) in (6, 7):
                     source, area, actor, item_class, state = fields[1:6]
                     placed = data.setdefault(native_authored_pickup.SOURCES_KEY, {})

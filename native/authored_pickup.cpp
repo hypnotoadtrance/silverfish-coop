@@ -36,6 +36,7 @@
 #include <Unreal/CoreUObject/UObject/FStrProperty.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FFrame.hpp>
+#include <Unreal/FURL.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
 #include <Unreal/GameplayStatics.hpp>
 #include <Unreal/Hooks.hpp>
@@ -474,7 +475,8 @@ namespace
     constexpr auto drop_lease = std::chrono::milliseconds(1800);
     constexpr auto drop_settle = std::chrono::milliseconds(750);
     std::atomic<bool> installed{};
-    std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
+    std::array callbacks{Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID,
+        Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID, Hook::ERROR_ID};
 
     bool ready() { return U::IsInGameThreadRaw() && installed.load(std::memory_order_acquire); }
 
@@ -2045,6 +2047,131 @@ namespace
         });
     }
 
+    enum class RespawnSeat { Inactive, Host, Guest };
+
+    struct RespawnLoad
+    {
+        U::FWorldContext* context{};
+        std::wstring package;
+        U::FWeakObjectPtr driver, server;
+        RespawnSeat seat{};
+    } respawn_load;
+
+    struct RespawnCheck
+    {
+        const Iteration* call{};
+        U::FWeakObjectPtr actor;
+        std::string path;
+    } respawn_check;
+
+    U::FWeakObjectPtr respawn_world;
+    std::set<std::string> host_respawn_hidden;
+
+    bool established_server(U::UObject* driver, U::UObject* connection)
+    {
+        return live(driver) && live(connection) && connection == object(driver, STR("ServerConnection")) &&
+            object(connection, STR("Driver")) == driver;
+    }
+
+    void begin_respawn_load(U::FWorldContext& context, const U::FURL& url, U::UPendingNetGame* pending)
+    {
+        respawn_load = {};
+        respawn_check = {};
+        respawn_world.Reset();
+        host_respawn_hidden.clear();
+        if (url.Map.IsEmpty() || !std::wstring_view{*url.Map}.starts_with(STR("/Game/Classes/Maps/"))) return;
+        if (pending)
+        {
+            auto* request = reinterpret_cast<U::UObject*>(pending);
+            if (!exact(request, STR("/Script/Engine.PendingNetGame"))) return;
+            auto* driver = object(request, STR("NetDriver"));
+            auto* server = object(driver, STR("ServerConnection"));
+            if (established_server(driver, server))
+                respawn_load = {&context, *url.Map, driver, server, RespawnSeat::Guest};
+        }
+        else if (std::ranges::any_of(url.Op, [](const auto& option) { return std::wstring_view{*option} == STR("listen"); }))
+        {
+            respawn_load = {&context, *url.Map, {}, {}, RespawnSeat::Host};
+        }
+    }
+
+    RespawnSeat respawn_seat(U::UObject* world, std::wstring_view path)
+    {
+        auto* driver = object(world, STR("NetDriver"));
+        const auto package = path.substr(0, path.rfind(L'.'));
+        if (respawn_load.context && respawn_load.package == package)
+        {
+            if (respawn_load.seat == RespawnSeat::Host) return RespawnSeat::Host;
+            auto* pending_driver = respawn_load.driver.Get();
+            if ((!driver || driver == pending_driver) && established_server(pending_driver, respawn_load.server.Get()))
+                return RespawnSeat::Guest;
+        }
+        if (!live(driver) || object(driver, STR("World")) != world) return RespawnSeat::Inactive;
+        auto* server = object(driver, STR("ServerConnection"));
+        if (established_server(driver, server)) return RespawnSeat::Guest;
+        return server ? RespawnSeat::Inactive : RespawnSeat::Host;
+    }
+
+    void begin_loose_respawn(Iteration& call, U::UObject* context, U::UFunction* function)
+    {
+        static const U::FName respawn_name{STR("HandleRespawn")};
+        if (!ready() || !function || function->GetFName() != respawn_name || respawn_check.call ||
+            call.OriginalFunctionCallPrevented() || !live(context) || !context->HasAnyFlags(U::RF_WasLoaded)) return;
+        auto* base = find<U::UClass>(base_class);
+        if (!base || function->GetOuterPrivate() != base || function->GetNumParms() ||
+            function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) || !context->IsA(base)) return;
+        auto* actor = static_cast<U::AActor*>(context);
+        auto* mode = loose_respawn_mode(actor);
+        if (!mode || (mode->GetPropertyValueInContainer(actor) == 0 &&
+            !boolean(actor, STR("DespawnIfPlayerOwns"), true))) return;
+        auto* world = actor->GetWorld();
+        if (!live(world) || !exact(object(world, STR("OwningGameInstance")), instance_path) ||
+            actor->GetOuterPrivate() != object(world, STR("PersistentLevel"))) return;
+        const auto world_path = world->GetPathName();
+        if (!world_path.starts_with(STR("/Game/Classes/Maps/"))) return;
+        const auto seat = respawn_seat(world, world_path);
+        if (seat == RespawnSeat::Inactive) return;
+        const auto path = actor->GetPathName();
+        if (authored_path(path) || !source_box(actor) ||
+            !actor->GetClassPrivate()->GetPathName().starts_with(STR("/Game/Classes/")) ||
+            generic_payload_fault(actor, silverfish::stock_cash::is_family(actor->GetClassPrivate()))) return;
+
+        if (seat == RespawnSeat::Guest)
+        {
+            // This stock function only removes placed items. Let the host resolve its
+            // ownership and save flags before projecting availability to this guest.
+            call.PreventOriginalFunctionCall();
+            return;
+        }
+        if (respawn_world.Get() != world)
+        {
+            respawn_world = world;
+            host_respawn_hidden.clear();
+        }
+        respawn_check = {&call, actor, RC::to_utf8_string(path)};
+    }
+
+    void end_loose_respawn(Iteration& call)
+    {
+        if (!U::IsInGameThreadRaw() || respawn_check.call != &call) return;
+        auto check = std::exchange(respawn_check, {});
+        if (call.OriginalFunctionCallPrevented()) return;
+        auto* actor = check.actor.Get();
+        if (!live(actor) || !boolean(actor, STR("bActorIsBeingDestroyed"), false))
+            host_respawn_hidden.insert(std::move(check.path));
+        else host_respawn_hidden.erase(check.path);
+    }
+
+    int read_host_respawn_hidden(const Lua& lua)
+    {
+        if (!ready() || !loose_host || lua.get_stack_size() != 0 || !live(loose_world.Get()) ||
+            respawn_world.Get() != loose_world.Get()) return 0;
+        std::string paths;
+        for (const auto& path : host_respawn_hidden) paths.append(path).append(1, '\n');
+        lua.set_string(paths);
+        return 1;
+    }
+
     void apply_guest_loose_view(std::string_view path, Scope& scope)
     {
         auto* actor = static_cast<U::AActor*>(scope.actor.Get());
@@ -2830,20 +2957,42 @@ namespace silverfish::native_authored_pickup
         if (!env("SILVERFISH_COOP_NATIVE_ZONE") || installed.load(std::memory_order_acquire)) return;
         callbacks[0] = Hook::RegisterProcessEventPreCallback(
             [](Iteration& call, U::UObject* context, U::UFunction* fn, void* parms) {
+                begin_loose_respawn(call, context, fn);
                 intercept(call, context, fn, parms, nullptr);
             }, {false, false, STR("SilverfishCoopNative"), STR("Qualify authored loose pickup event")});
         callbacks[1] = Hook::RegisterProcessLocalScriptFunctionPreCallback(
             [](Iteration& call, U::UObject* context, U::FFrame& frame, void*) {
+                begin_loose_respawn(call, context, frame.Node());
                 intercept(call, context, frame.Node(), frame.Locals(), &frame);
             }, {false, false, STR("SilverfishCoopNative"), STR("Qualify authored loose pickup script")});
         callbacks[2] = Hook::RegisterProcessEventPostCallback(
             [](Iteration& call, U::UObject* context, U::UFunction* fn, void*) {
+                end_loose_respawn(call);
                 if (!call.OriginalFunctionCallPrevented()) complete_floor_projection(context, fn);
             }, {false, false, STR("SilverfishCoopNative"), STR("Display host loot stack counts in the stock inventory")});
         callbacks[3] = Hook::RegisterProcessLocalScriptFunctionPostCallback(
             [](Iteration& call, U::UObject* context, U::FFrame& frame, void*) {
+                end_loose_respawn(call);
                 if (!call.OriginalFunctionCallPrevented()) complete_floor_projection(context, frame.Node());
             }, {false, false, STR("SilverfishCoopNative"), STR("Display host loot stack counts in the stock floor query")});
+        callbacks[4] = Hook::RegisterProcessInternalPreCallback(
+            [](Iteration& call, U::UObject* context, U::FFrame& frame, void*) {
+                begin_loose_respawn(call, context, frame.Node());
+            }, {false, false, STR("SilverfishCoopNative"), STR("Use host availability for placed stock pickups")});
+        callbacks[5] = Hook::RegisterProcessInternalPostCallback(
+            [](Iteration& call, U::UObject*, U::FFrame&, void*) {
+                end_loose_respawn(call);
+            }, {false, false, STR("SilverfishCoopNative"), STR("Observe reflected stock pickup respawn results")});
+        callbacks[6] = Hook::RegisterLoadMapPreCallback(
+            [](Hook::TCallbackIterationData<bool>& call, U::UEngine*, U::FWorldContext& context,
+               U::FURL url, U::UPendingNetGame* pending, U::FString&) {
+                if (ready() && !call.OriginalFunctionCallPrevented()) begin_respawn_load(context, url, pending);
+            }, {false, true, STR("SilverfishCoopNative"), STR("Qualify placed pickups during network map loading")});
+        callbacks[7] = Hook::RegisterLoadMapPostCallback(
+            [](Hook::TCallbackIterationData<bool>&, U::UEngine*, U::FWorldContext& context,
+               U::FURL, U::UPendingNetGame*, U::FString&) {
+                if (ready() && respawn_load.context == &context) respawn_load = {};
+            }, {false, true, STR("SilverfishCoopNative"), STR("Release the placed pickup map-load scope")});
         const bool ok = std::ranges::all_of(callbacks, [](auto id) { return id != Hook::ERROR_ID; });
         if (!ok) uninstall_hooks();
         installed.store(ok, std::memory_order_release);
@@ -2852,6 +3001,10 @@ namespace silverfish::native_authored_pickup
     void uninstall_hooks()
     {
         clear_scope();
+        respawn_load = {};
+        respawn_check = {};
+        respawn_world.Reset();
+        host_respawn_hidden.clear();
         installed.store(false, std::memory_order_release);
         for (auto& id : callbacks)
         {
@@ -2864,6 +3017,7 @@ namespace silverfish::native_authored_pickup
     {
         lua.register_function("SilverfishSetNativeAuthoredPickupScope", set_scope);
         lua.register_function("SilverfishDiscoverLoosePickups", discover_loose);
+        lua.register_function("SilverfishReadHostLooseRespawnHidden", read_host_respawn_hidden);
         lua.register_function("SilverfishAcknowledgeLooseCarry", acknowledge_loose_carry);
         lua.register_function("SilverfishSetGuestLoosePickupView", set_guest_loose_view);
         lua.register_function("SilverfishDescribeLoosePickup", describe_loose);

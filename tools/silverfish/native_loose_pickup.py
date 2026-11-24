@@ -24,6 +24,8 @@ PROJECT = "native-loose-pickup-project"
 CHECK = "native-loose-pickup-check"
 CHECK_ROW = "native-loose-pickup-check-result"
 CHECK_KEY = "native_loose_pickup_check"
+RESPAWN_HIDDEN_ROW = "native-loose-pickup-respawn-hidden"
+RESPAWN_HIDDEN = "native_loose_pickup_respawn_hidden"
 _PREFIX = "loose:"
 _CLASS = re.compile(r"/Game/Classes/(?:[A-Za-z0-9_]+/)*([A-Za-z0-9_]+)\.\1_C")
 _PATH = re.compile(r"(/Game/Classes/Maps/[A-Za-z0-9_/]+)\.([A-Za-z0-9_]+):PersistentLevel\.[A-Za-z0-9_]+")
@@ -144,8 +146,10 @@ class Visibility:
     def hidden(self, host):
         area, epoch = host.last_game.get("map"), host.zone_epoch
         replenished = self.replenished if self.epoch == epoch else ()
-        return [path for path, row in host.party.get(STATE, {}).items()
-                if row["map"] == area and (row["epoch"] == epoch or row["mode"] == 2 or path not in replenished)]
+        claimed = {path for path, row in host.party.get(STATE, {}).items()
+                   if row["map"] == area and (row["epoch"] == epoch or row["mode"] == 2 or path not in replenished)}
+        claimed.update(host.last_game.get(RESPAWN_HIDDEN, ()))
+        return sorted(claimed)
 
 
 class GuestView:

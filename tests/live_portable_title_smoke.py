@@ -197,24 +197,26 @@ def stock_nearby_overlay(game: Path):
     return portable_script_overlay(game, "native_authored_pickup.lua", omit_available_bolt)
 
 
-def bandage_revisit_overlay(game: Path):
-    def add_bandage_observation(script):
+def loose_revisit_overlay(game: Path):
+    def add_loose_observation(script):
         marker = '    if action == "native-loose-pickup-check" then'
-        observer = '''    if action == "fixture-bandage-visibility" and fixtures and title_fixtures then
+        observer = '''    if action == "fixture-loose-revisit-visibility" and fixtures and title_fixtures then
         local dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
         assert(state.map == dock and (phase == "hosting" or phase == "connected"), "The test needs Tutorial Dock")
-        local diagnosis = SilverfishDiagnoseLoosePickup(dock .. ".Tut_Dock_P:PersistentLevel.Item_Bandage_C_1")
+        local leaf = fields[3]
+        assert(#fields == 3 and (leaf == "Item_Bandage_C_1" or leaf == "Item_Bandage_C_2" or leaf == "Wep_RustyPistol_C_1"))
+        local diagnosis = SilverfishDiagnoseLoosePickup(dock .. ".Tut_Dock_P:PersistentLevel." .. leaf)
         if diagnosis == "actor_absent" then return "absent" end
         if diagnosis == "hidden_or_disabled" then return "hidden" end
         if diagnosis == "stock_item_available" then return "visible" end
-        error("Unexpected stock bandage state " .. tostring(diagnosis), 0)
+        error("Unexpected stock loose pickup state " .. tostring(diagnosis), 0)
     end
 '''
         if script.count(marker) != 1:
             raise ValueError("The replica lacks the stock loose-item command")
         return script.replace(marker, observer + marker, 1)
 
-    return portable_script_overlay(game, "native_authored_pickup.lua", add_bandage_observation)
+    return portable_script_overlay(game, "native_authored_pickup.lua", add_loose_observation)
 
 
 def stock_shovel_overlay(game: Path):
@@ -1342,6 +1344,8 @@ async def verify_tutorial_bandage_revisit(host: Seat, guest: Seat, pawn: str) ->
     dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
     observatory = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P"
     bandage = f"{dock}.Tut_Dock_P:PersistentLevel.Item_Bandage_C_1"
+    second_bandage = f"{dock}.Tut_Dock_P:PersistentLevel.Item_Bandage_C_2"
+    pistol = f"{dock}.Tut_Dock_P:PersistentLevel.Wep_RustyPistol_C_1"
 
     def bound(frame, area):
         game = frame.get("game", {})
@@ -1361,30 +1365,56 @@ async def verify_tutorial_bandage_revisit(host: Seat, guest: Seat, pawn: str) ->
                                    and frame.get("zone_epoch") == arrival["zone_epoch"], timeout=35)
         return arrival
 
-    async def visibility(seat):
-        report = await seat.bridge.command("fixture-bandage-visibility", update_status=False)
+    async def visibility(seat, actor):
+        leaf = actor.rsplit(".", 1)[-1]
+        report = await seat.bridge.command("fixture-loose-revisit-visibility", leaf, update_status=False)
         return report["ack"]["message"]
 
-    first = await travel(observatory, dock, "Level_Exit_BP_C_213", pawn)
-    assert await visibility(host) == await visibility(guest) == "visible"
+    first = await wait_resident_status(host_run, lambda frame: bound(frame, observatory) or bound(frame, dock))
+    if first["game"]["map"] == observatory:
+        first = await travel(observatory, dock, "Level_Exit_BP_C_213", pawn)
+    for actor in (bandage, second_bandage, pistol):
+        assert await visibility(host, actor) == await visibility(guest, actor) == "visible", actor
     await host.bridge.command(native_loose_pickup.APPROACH, bandage, first["game"]["pawns"]["local"]["name"])
     claimed = await submit(host_run, native_loose_pickup.CLAIM, target=f"loose:{bandage}")
     assert claimed["ok"] and claimed[native_loose_pickup.PROOF]["mode"] == 0, claimed
     await wait_resident_status(guest_run, lambda frame: bandage in frame.get("gameplay", {}).get(native_loose_pickup.STATE, []))
+    await host.bridge.command(native_loose_pickup.APPROACH, pistol, first["game"]["native_guest_save"]["pawn"])
+    await guest.bridge.wait_for(lambda game: game.get(native_loose_pickup.KEY, {}).get(pistol, {}).get("state") == "available")
+    await guest.bridge.command(native_loose_pickup.FIXTURE, pistol)
+    pistol_state = await wait_resident_status(guest_run, lambda frame:
+        pistol in frame.get("gameplay", {}).get(native_loose_pickup.STATE, []))
+    pistol_events = [row for row in await resident_events(guest_run, pistol_state)
+                     if row.get(native_loose_pickup.PROOF, {}).get("actor") == pistol]
+    [pistol_claim] = [row[native_loose_pickup.PROOF] for row in pistol_events]
+    assert pistol_claim["mode"] == 0 and pistol_claim["owner"] == pistol_state["character_id"], pistol_claim
     await travel(dock, observatory, "Level_Exit_BP_C_1")
     revisit = await travel(observatory, dock, "Level_Exit_BP_C_213")
     await host.bridge.wait_for(lambda game: game.get(native_loose_pickup.CHECK_KEY, {}).get(bandage) is False)
-    await wait_resident_status(guest_run, lambda frame: frame.get("zone_epoch") == revisit["zone_epoch"]
-                               and bandage in frame.get("gameplay", {}).get(native_loose_pickup.STATE, []), timeout=10)
-    host_visibility = await visibility(host)
+    def settled(frame):
+        hidden = frame.get("gameplay", {}).get(native_loose_pickup.STATE, [])
+        return frame.get("zone_epoch") == revisit["zone_epoch"] and bandage in hidden and pistol not in hidden
+
+    await wait_resident_status(guest_run, settled, timeout=10)
+    host_visibility = await visibility(host, bandage)
     assert host_visibility in ("absent", "hidden"), host_visibility
     async with asyncio.timeout(8):
-        while (guest_visibility := await visibility(guest)) == "visible":
+        while (guest_visibility := await visibility(guest, bandage)) == "visible":
             await asyncio.sleep(.05)
     assert guest_visibility in ("absent", "hidden"), guest_visibility
+    pistol_visibility = await asyncio.gather(visibility(host, pistol), visibility(guest, pistol))
+    assert pistol_visibility == ["visible", "visible"], dict(actor=pistol, visibility=pistol_visibility)
+    host_suppressed = await visibility(host, second_bandage)
+    assert host_suppressed in ("absent", "hidden"), host_suppressed
+    async with asyncio.timeout(8):
+        while (guest_suppressed := await visibility(guest, second_bandage)) == "visible":
+            await asyncio.sleep(.05)
+    assert guest_suppressed in ("absent", "hidden"), guest_suppressed
     return {"stock_bandage_revisit": {"actor": bandage, "claim": claimed[native_loose_pickup.PROOF],
             "first_visit": first["zone_epoch"], "revisit": revisit["zone_epoch"],
-            "host_visibility": host_visibility, "guest_visibility": guest_visibility}}
+            "host_visibility": host_visibility, "guest_visibility": guest_visibility,
+            "guest_owned_respawn": {"actor": pistol, "claim": pistol_claim, "visibility": pistol_visibility},
+            "host_owned_unclaimed_source": {"actor": second_bandage, "visibility": [host_suppressed, guest_suppressed]}}}
 
 
 async def verify_warehouse_switch(host: Seat, guest: Seat, pawn: str, *, radio: bool = False,
@@ -4488,7 +4518,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_nearby:
             proof["stock_nearby_overlays"] = [probes.enter_context(stock_nearby_overlay(game)) for game in games]
         if stock_bandage_revisit:
-            proof["bandage_revisit_overlays"] = [probes.enter_context(bandage_revisit_overlay(game)) for game in games]
+            proof["loose_revisit_overlays"] = [probes.enter_context(loose_revisit_overlay(game)) for game in games]
         if stock_shovel:
             proof["stock_shovel_overlays"] = [probes.enter_context(stock_shovel_overlay(game)) for game in games]
         if stock_shovel_quest:
@@ -5017,7 +5047,7 @@ if __name__ == "__main__":
     parser.add_argument("--tutorial-dock-melee", action="store_true",
                         help="verify the stock guest melee input damages a live, full-health warehouse worker")
     parser.add_argument("--stock-bandage-revisit", action="store_true",
-                        help="collect the Tutorial Dock bandage and verify both views after revisiting the map")
+                        help="collect the Tutorial Dock bandage and pistol and compare both views on revisit")
     parser.add_argument("--stock-warehouse-switch", action="store_true",
                         help="verify host and guest interactions on the Tutorial Dock warehouse circuit box")
     parser.add_argument("--stock-warehouse-board", action="store_true",
