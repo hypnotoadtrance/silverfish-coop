@@ -182,7 +182,7 @@ local function drain_taps(current, address)
     local take = embedded and SilverfishPeekNativeGuestPrimaryIntent or SilverfishTakeNativeGuestPrimaryIntent
     local emitted = 0
     for _ = 1, 8 do
-        local sequence, owner, guid, kind, x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz, actor, hx, hy, hz = take(address)
+        local sequence, owner, guid, kind, underbarrel, x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz, actor, hx, hy, hz = take(address)
         if not valid_sequence(sequence) or owner ~= address or guid ~= binding.guid or kind ~= binding.kind then break end
         if not can_use(current) then break end
         if kind == "blowtorch" or kind == "crowbar" then
@@ -203,6 +203,13 @@ local function drain_taps(current, address)
             commit("tap", address, sequence)
         else
             local view = shot_view.format(x, y, z, ex, ey, ez, tx, ty, tz, mx, my, mz, actor, hx, hy, hz)
+            if underbarrel then
+                if not view or not mx then
+                    commit("tap", address, sequence)
+                    break
+                end
+                view = "loki:" .. view
+            end
             if not publish("tap", event_path, current, address, sequence,
                 {"native-guest-primary-intent", sequence, current.map, current.name, guid, kind, view}) then break end
         end

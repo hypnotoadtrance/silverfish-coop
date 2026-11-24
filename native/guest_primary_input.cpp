@@ -235,7 +235,11 @@ namespace
     };
 
     struct Receipt { std::uint64_t sequence{}; Clock::time_point expires{}; };
-    struct TapReceipt : Receipt { silverfish::native_guest_item::ShotView view{}; };
+    struct TapReceipt : Receipt
+    {
+        silverfish::native_guest_item::ShotView view{};
+        bool underbarrel{};
+    };
     enum class HeldEdge { press, release, cancel };
     enum class HeldProof { none, mapped_key, edge_window, stock_melee_edges, fixture };
     enum class FixtureDispatch { none, tap, held };
@@ -724,7 +728,7 @@ namespace
     bool stock_held_fire_selected()
     {
         auto* receiver = scope.seat.held.Get();
-        if (!scope.seat.mirrored || !live(receiver)) return false;
+        if (!scope.seat.mirrored || !live(receiver) || object_field(receiver, STR("InputIntercept"))) return false;
         auto* selector = field<U::FBoolProperty>(receiver, STR("HasSelectFire"));
         return selector && (!selector->GetPropertyValueInContainer(receiver) ||
             false_field(receiver, STR("SemiAutoSelected")));
@@ -857,16 +861,16 @@ namespace
     static_assert(select_started_route(true, false) == StartedRoute::authorized);
     static_assert(select_started_route(true, true) == StartedRoute::authorized);
 
-    void queue_tap(Clock::time_point now)
+    void queue_tap(Clock::time_point now, U::UObject* underbarrel = nullptr)
     {
         if (sequence == max_sequence) return;
         discard_expired(now);
         if (count == receipt_limit) return;
         auto& receipt = receipts[(head + count) % receipt_limit];
-        receipt = {{++sequence, now + receipt_lifetime}, {}};
+        receipt = {{++sequence, now + receipt_lifetime}, {}, underbarrel != nullptr};
         if (std::ranges::find(silverfish::guest_weapon_profiles::firearms, scope.item->kind, &Equipment::kind)
             != silverfish::guest_weapon_profiles::firearms.end())
-            receipt.view = silverfish::native_guest_item::capture_shot_view(scope.seat.pawn.Get(), scope.seat.held.Get());
+            receipt.view = silverfish::native_guest_item::capture_shot_view(scope.seat.pawn.Get(), scope.seat.held.Get(), underbarrel);
         ++count;
     }
 
@@ -915,7 +919,8 @@ namespace
             {
                 iteration.PreventOriginalFunctionCall();
                 if (fire_on_release && iteration.OriginalFunctionCallPrevented() && qualified(scope, now) &&
-                    scope.item->action_on_release && scope.seat.pawn.Get() == pawn && can_act(scope.seat))
+                    scope.item->action_on_release && scope.seat.pawn.Get() == pawn && can_act(scope.seat) &&
+                    !object_field(current, STR("InputIntercept")))
                     queue_tap(now);
             }
             return;
@@ -930,6 +935,12 @@ namespace
             press.seat.world.Get() == scope.seat.world.Get()) return;
         press = {scope.seat, scope.action, scope.completed, now + release_lease, active_generation};
         if (!can_act(scope.seat)) return;
+        auto* receiver = scope.seat.held.Get();
+        if (object_field(receiver, STR("InputIntercept")))
+        {
+            if (auto* child = silverfish::native_guest_item::active_loki_barrel(pawn, receiver)) queue_tap(now, child);
+            return;
+        }
         if (scope.item->action_on_release)
         {
             press.fire_on_release = true;
@@ -1033,7 +1044,8 @@ namespace
         lua.set_integer(pawn);
         lua.set_string(scope.text);
         lua.set_string(scope.item->kind);
-        const int fields = 4 + push_shot_view(lua, receipt.view);
+        if (!host) lua.set_bool(receipt.underbarrel);
+        const int fields = (host ? 4 : 5) + push_shot_view(lua, receipt.view);
         if (!peek)
         {
             head = (head + 1) % receipt_limit;

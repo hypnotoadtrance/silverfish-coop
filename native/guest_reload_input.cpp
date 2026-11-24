@@ -1,4 +1,5 @@
 #include "guest_reload_input.hpp"
+#include "guest_item.hpp"
 
 #include <algorithm>
 #include <array>
@@ -9,6 +10,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <string_view>
+#include <string>
+#include <utility>
 
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
@@ -131,6 +134,7 @@ namespace
     {
         Unreal::FWeakObjectPtr pawn{};
         Clock::time_point expires{};
+        std::string underbarrel_guid;
     };
 
     Press press;
@@ -241,8 +245,12 @@ namespace
         // Press duration alone does not turn a reload into an ammo selection.
         auto* changing_ammo = field<Unreal::FBoolProperty>(pawn, STR("IsChangingAmmo"));
         if (!changing_ammo || changing_ammo->GetPropertyValueInContainer(pawn) || sequence == max_sequence) return;
+        auto* receiver = object_field(pawn, STR("EquipedItem"));
+        auto guid = silverfish::native_guest_item::local_loki_identity(pawn, receiver);
+        if (object_field(receiver, STR("InputIntercept")) && guid.empty()) return;
         pending.pawn = pawn;
         pending.expires = now + intent_timeout;
+        pending.underbarrel_guid = std::move(guid);
         ++sequence;
     }
 
@@ -381,7 +389,9 @@ namespace
         if (!pawn || Clock::now() >= pending.expires || !local_client(pawn) || !standing_autonomous(pawn)) return 0;
         lua.set_integer(static_cast<std::int64_t>(sequence));
         lua.set_integer(reinterpret_cast<std::intptr_t>(pawn));
-        return 2;
+        if (pending.underbarrel_guid.empty()) return 2;
+        lua.set_string(pending.underbarrel_guid);
+        return 3;
     }
 
     int clear_intent(const Lua&)

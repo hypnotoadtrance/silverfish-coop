@@ -5551,8 +5551,10 @@ class Client:
                 or not pawn or self.last_game.get("pawns", {}).get("local", {}).get("name") != pawn):
             return
         operation = uuid.uuid5(self.bridge.input_namespace, f"{self.host_session}:{self.zone_epoch}:{pawn}:reload:{sequence}").hex
+        guid = intent.get("underbarrel_guid")
+        target = f"{guid}@{self.zone_epoch}@loki" if guid else "equipped"
         try:
-            result = await self.gameplay_action("native-guest-weapon-reload", operation, "equipped")
+            result = await self.gameplay_action("native-guest-weapon-reload", operation, target)
             self.control.event("native_guest_reload_input", operation_id=operation, sequence=sequence, **result)
         except (ValueError, OSError, RuntimeError) as error:
             self.control.event("native_guest_reload_input_rejected", operation_id=operation, sequence=sequence, reason=str(error))
@@ -5600,12 +5602,21 @@ class Client:
                 ammo = equipment.get("ammo_class")
                 if not native_guest_weapon.valid_mounted_ammo(kind, ammo):
                     ammo = None
-                magazine = self.host_session, self.zone_epoch, scope, rounds, ammo
+                shells, shell = equipment.get("underbarrel_rounds"), equipment.get("underbarrel_ammo")
+                underbarrel = (shells, shell) if (
+                    kind in native_guest_weapon.LOKI_KINDS and type(shells) is int and 0 <= shells <= 4
+                    and isinstance(shell, str) and shell in native_guest_weapon.LOKI_AMMO
+                ) else None
+                magazine = self.host_session, self.zone_epoch, scope, rounds, ammo, underbarrel
                 attempt = magazine, self.gameplay_seen
                 if self.primary_magazine != magazine and self.primary_magazine_attempt != attempt:
                     self.primary_magazine_attempt = attempt
                     try:
-                        payload = (str(rounds), ammo) if ammo else (str(rounds),)
+                        payload = (str(rounds),)
+                        if underbarrel:
+                            payload += (ammo or "-", str(underbarrel[0]), underbarrel[1])
+                        elif ammo:
+                            payload += (ammo,)
                         self.last_game = await self.bridge.command("native-guest-weapon-magazine", *scope, *payload, timeout=2)
                         self.primary_magazine = magazine
                     except (OSError, RuntimeError) as error:

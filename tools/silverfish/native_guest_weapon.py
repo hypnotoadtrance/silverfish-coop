@@ -27,6 +27,8 @@ SPADE_STATES = {"spade_backpack", "spade_stored_equipment", "spade_equipped"}
 OLD_PIPE = "/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C"
 OLD_PIPE_STATES = {"old_pipe_backpack", "old_pipe_stored_equipment", "old_pipe_equipped"}
 FIRE_CLASSES = {firearm.kind: firearm.path for firearm in guest_weapon_profiles.FIREARMS}
+LOKI_KINDS = {firearm.kind for firearm in guest_weapon_profiles.LOKI_RECEIVERS}
+LOKI_AMMO = {ammo.item_path: ammo for ammo in guest_weapon_profiles.SHOTGUN_AMMO}
 CLASS_PATHS = {*FIRE_CLASSES.values(), CAMERA_PATH, OLD_PIPE, BLOWTORCH_PATH, CROWBAR_PATH, SPADE_PATH}
 PRIMARY_KINDS = frozenset((*FIRE_CLASSES, "camera", "blowtorch", "crowbar", "spade", *native_guest_melee.KINDS))
 SEED_KINDS = frozenset(firearm.kind for firearm in guest_weapon_profiles.FIREARMS if firearm.headless_seed) | {
@@ -61,6 +63,16 @@ def valid_shot_view(value: str) -> bool:
         positions.append(contact[1])
     return (valid_shot_direction(direction) and all(SHOT_POSITION.fullmatch(point)
                     and all(abs(float(axis)) <= 2000000 for axis in point.split(",")) for point in positions))
+
+
+def valid_loki_shot(view: str) -> bool:
+    return valid_shot_view(view) and view.partition("|")[0].count(";") == 3
+
+
+def valid_primary_shot(kind: str, view: str) -> bool:
+    if view.startswith("loki:"):
+        return kind in LOKI_KINDS and valid_loki_shot(view[5:])
+    return valid_shot_view(view)
 
 
 async def select_equipment(host, bridge, character: str, target: str | None) -> dict:
@@ -191,12 +203,21 @@ async def service_fire_modes(client, active: bool) -> None:
 async def perform(host, bridge, character: str, operation_id: str, action: str, guid: str, *, seed_kind=None,
                   bandit_fixture: str | None = None) -> dict:
     shot_view = None
+    underbarrel = False
     if action == "native-guest-weapon-fire" and isinstance(guid, str) and "@" in guid:
         parts = guid.split("@")
-        if (len(parts) != 3 or parts[1] != host.zone_epoch or not valid_shot_view(parts[2])
-                or bandit_fixture is not None):
+        if len(parts) != 3 or parts[1] != host.zone_epoch or bandit_fixture is not None:
             raise party.RuleError("native_guest_weapon_view_unqualified")
-        guid, _, shot_view = parts
+        guid, _, view = parts
+        underbarrel = view.startswith("loki:")
+        shot_view = view[5:] if underbarrel else view
+        if not (valid_loki_shot(shot_view) if underbarrel else valid_shot_view(shot_view)):
+            raise party.RuleError("native_guest_weapon_view_unqualified")
+    elif action == "native-guest-weapon-reload" and isinstance(guid, str) and "@" in guid:
+        parts = guid.split("@")
+        if len(parts) != 3 or parts[1:] != [host.zone_epoch, "loki"]:
+            raise party.RuleError("native_guest_weapon_view_unqualified")
+        guid, underbarrel = parts[0], True
     fixture = bandit_fixture is not None or action in ("native-guest-weapon-seed", "native-guest-weapon-seed-ammo")
     if (not host.native_guest or (fixture and not host.fixtures) or host.native_profile is None
             or host.transitioning or host.stopping or host.native_checkpoint_unsafe
@@ -214,7 +235,12 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
     if not scope or not scope["connected"]:
         raise party.RuleError("guest_not_active")
     operation = action.removeprefix("native-guest-weapon-")
-    extra = (seed_kind,) if seed_kind is not None else (shot_view,) if shot_view is not None else ()
+    if seed_kind is not None:
+        extra = (seed_kind,)
+    elif shot_view is not None:
+        extra = (("loki:" if underbarrel else "") + shot_view,)
+    else:
+        extra = ("loki",) if underbarrel else ()
     fingerprint = [action, guid, bandit_fixture or (extra[0] if extra else None)]
     mutates = operation != "inspect"
     if mutates:
@@ -311,6 +337,10 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
         elif operation == "seed-ammo":
             if proof.get("status") not in ("seeded", "present"):
                 raise RuntimeError("The stock guest reserve fixture did not verify the exact ammo GUID")
+        elif underbarrel:
+            if (proof.get("status") != "underbarrel_equipped" or type(actor) is not int or type(stored) is not int
+                    or not 0 <= stored <= 4 or actor != stored or proof.get("ammo_class") not in LOKI_AMMO):
+                raise RuntimeError("Native guest underbarrel ammunition did not verify")
         elif (proof.get("status") not in READBACK_STATES or type(stored) is not int or stored < 0
               or type(actor) is not int or actor != (stored if proof["status"] == "equipped" else -1)):
             raise RuntimeError("Native guest stock weapon ammunition did not verify")
@@ -318,16 +348,17 @@ async def perform(host, bridge, character: str, operation_id: str, action: str, 
             equipped = snapshot.get("native_guest_equipped_weapons", {}).get(pawn, {})
             shot_kind = equipped.get("kind") if equipped.get("guid") == guid else None
             ammo_class = equipped.get("ammo_class")
-            mounted = guest_weapon_profiles.AMMO_BY_PATH[ammo_class] if valid_mounted_ammo(shot_kind, ammo_class) else None
+            mounted = (LOKI_AMMO[proof["ammo_class"]] if underbarrel else
+                       guest_weapon_profiles.AMMO_BY_PATH[ammo_class] if valid_mounted_ammo(shot_kind, ammo_class) else None)
             expected_projectiles = mounted.projectile_count if mounted else PROJECTILES_PER_ROUND.get(shot_kind, 1)
             projectile_count = proof.get("projectiles")
-            if (proof["status"] != "equipped" or type(proof.get("before")) is not int
+            if (proof["status"] != ("underbarrel_equipped" if underbarrel else "equipped") or type(proof.get("before")) is not int
                     or proof.get("after") != stored or proof["before"] - stored != 1
                     or type(projectile_count) is not int or projectile_count != expected_projectiles):
                 raise RuntimeError("The stock shot did not verify its guest-owned projectile count and one round debit")
         if operation == "reload":
             before, reserve_before, reserve_after = (proof.get(key) for key in ("before", "reserve_before", "reserve_after"))
-            if (proof["status"] != "equipped" or proof.get("after") != stored
+            if (proof["status"] != ("underbarrel_equipped" if underbarrel else "equipped") or proof.get("after") != stored
                     or any(type(amount) is not int for amount in (before, reserve_before, reserve_after))
                     or not 0 <= before < stored or not 0 <= reserve_after < reserve_before
                     or stored - before != reserve_before - reserve_after):

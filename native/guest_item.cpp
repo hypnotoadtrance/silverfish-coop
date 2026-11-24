@@ -111,6 +111,13 @@ namespace
         STR("/Game/Classes/Weapons/Wep_Assets/Projectiles/Wep_Projectile_Master_BP.Wep_Projectile_Master_BP_C");
     constexpr auto primary_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:Use_Item_Primary");
     constexpr auto update_mag_path = STR("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:Update_Mag");
+    constexpr auto loki_path = STR("/Game/Classes/Weapons/Wep_Assets/Weapon_UnderBarrel_Loki.Weapon_UnderBarrel_Loki_C");
+    constexpr auto loki_base_update =
+        STR("/Game/Classes/Weapons/Weapon_UnderBarrel_BP.Weapon_UnderBarrel_BP_C:Update_Mag");
+    constexpr auto loki_change_ammo =
+        STR("/Game/Classes/Weapons/Weapon_UnderBarrel_BP.Weapon_UnderBarrel_BP_C:ChangeAmmoType");
+    constexpr profiles::Profile loki_magazine{
+        "loki-underbarrel", loki_path, false, 4, 1, 1.0, true, &profiles::twelve_gauge_buck, true};
     constexpr auto equip_path = STR("/Game/Classes/Player/Player_FP.Player_FP_C:Equip_NextItem");
     constexpr auto converter_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:ItemActorToStruct");
     constexpr auto sort_path = STR("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.FL_Inventory_C:SortItemArray");
@@ -121,6 +128,8 @@ namespace
     constexpr auto ammo_name = STR("Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788");
     constexpr auto weight_name = STR("Weight_12_11AB9ED547504E78A849A692A36DC938");
     constexpr auto payload_name = STR("DataStruct_30_7A0DD7674F2FE505BF65209B6B2BCA59");
+    constexpr auto loki_rounds_name = STR("UnderBarrelAmmo_8_D30DE28A473111BF8B86299C237C9831");
+    constexpr auto loki_ammo_name = STR("UnderBarrelAmmoType_7_27EBD17F43ACB75947A05EA7056298CF");
     constexpr auto ammo_item_name = STR("Ammo_Item_9_DC1291D94AB26C3244B369B14FA38582");
     constexpr auto ammo_caliber_name = STR("Caliber_3_3C88B25D42998F32221AA0AA7E1B4537");
     constexpr auto value_name = STR("Value_15_5D96101F4BADB44D9DC5F0BD5F8A35C9");
@@ -176,6 +185,33 @@ namespace
     {
         auto* role = field<Unreal::FByteProperty>(actor, STR("Role"));
         return live(actor) && role && role->GetPropertyValueInContainer(actor) == 3;
+    }
+
+    const profiles::Profile* stock_magazine(Unreal::UClass* weapon);
+
+    const Unreal::TCHAR* loki_mount(Unreal::UObject* receiver)
+    {
+        const auto* profile = receiver ? stock_magazine(receiver->GetClassPrivate()) : nullptr;
+        return profile ? profile->underbarrel_mount : nullptr;
+    }
+
+    Unreal::UObject* mounted_loki(Unreal::UObject* receiver, Unreal::UObject* pawn)
+    {
+        const auto* mount_name = loki_mount(receiver);
+        if (!mount_name || !live(receiver) || !live(pawn)) return nullptr;
+        auto* mount = object(receiver, mount_name);
+        auto* mount_class = find<Unreal::UClass>(STR("/Script/Engine.ChildActorComponent"));
+        auto* child_class = find<Unreal::UClass>(loki_path);
+        if (!mount_class || !live(mount) || mount->GetClassPrivate() != mount_class ||
+            mount->GetOuterPrivate() != receiver || !child_class || object(mount, STR("ChildActorClass")) != child_class)
+            return nullptr;
+        auto* child = object(mount, STR("ChildActor"));
+        if (!live(child) || child->GetClassPrivate() != child_class ||
+            object(child, STR("ParentWeapon")) != receiver || object(child, STR("User")) != pawn ||
+            object(child, STR("Player_Ref")) != pawn || !boolean(child, STR("HeldByPlayer"), true) ||
+            static_cast<Unreal::AActor*>(child)->GetWorld() != static_cast<Unreal::AActor*>(receiver)->GetWorld())
+            return nullptr;
+        return child;
     }
 
     bool env(const char* name)
@@ -584,7 +620,7 @@ namespace
         return match == profiles::firearms.end() ? nullptr : &*match;
     }
 
-    bool stock_magazine_shape(Unreal::UObject* weapon, const profiles::Profile& profile)
+    bool stock_magazine_shape(Unreal::UObject* weapon, const profiles::Profile& profile, bool single_reload = false)
     {
         auto* magazine = field<Unreal::FIntProperty>(weapon, STR("MagSize"));
         auto* burst = field<Unreal::FIntProperty>(weapon, STR("BurstLength"));
@@ -597,7 +633,8 @@ namespace
             cost && cost->GetPropertyValueInContainer(weapon) == 1 &&
             rate && rate->GetPropertyValueInContainer(weapon) == profile.fire_rate &&
             field<Unreal::FObjectProperty>(weapon, STR("InputIntercept")) && !object(weapon, STR("InputIntercept")) &&
-            boolean(weapon, STR("Action_OnRelease"), profile.action_on_release) && boolean(weapon, STR("SingleReload"), false) &&
+            boolean(weapon, STR("Action_OnRelease"), profile.action_on_release) &&
+            boolean(weapon, STR("SingleReload"), single_reload) &&
             boolean(weapon, STR("UseEatherAsAmmo"), false);
     }
 
@@ -657,44 +694,43 @@ namespace
 
     struct WeaponDataView
     {
-        const Unreal::UScriptStruct* type;
-        const void* data;
+        Unreal::UScriptStruct* type{};
+        const void* data{};
     };
 
-    const profiles::StockAmmo* saved_magazine_round(const profiles::Profile& profile, Unreal::UClass* weapon,
-                                                    const Inventory& inventory)
+    WeaponDataView weapon_data(Unreal::FStructProperty* property, const void* owner)
     {
-        if (!profile.ammo || !weapon) return nullptr;
-        auto* defaults = weapon->GetClassDefaultObject().Get();
-        if (mounted_payload_matches(defaults, inventory)) return profile.ammo;
-        auto* reference = field<Unreal::FStructProperty>(defaults, STR("DataStruct"));
-        auto* saved = field<Unreal::FStructProperty>(inventory.type->GetStruct().Get(), payload_name);
-        auto* instanced = find<Unreal::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct"));
-        auto* weapon_data = find<Unreal::UScriptStruct>(
+        const auto* instanced = find<Unreal::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct"));
+        auto* type = find<Unreal::UScriptStruct>(
             STR("/Game/Classes/Libraries/Structs/WeaponData_Struct.WeaponData_Struct"));
-        if (!defaults || !reference || !saved || !instanced || !weapon_data ||
-            reference->GetStruct().Get() != instanced || saved->GetStruct().Get() != instanced ||
-            reference->GetSize() != sizeof(WeaponDataView) || saved->GetSize() != sizeof(WeaponDataView))
-            return nullptr;
-        // The qualified cooked x64 build stores the InstancedStruct type and data as two
-        // pointers. Verify both instances' exact struct before reading reflected members.
-        WeaponDataView stock{}, loaded{};
-        std::memcpy(&stock, reference->ContainerPtrToValuePtr<void>(defaults), sizeof(stock));
-        std::memcpy(&loaded, saved->ContainerPtrToValuePtr<void>(inventory.item), sizeof(loaded));
-        if (stock.type != weapon_data || loaded.type != weapon_data || !stock.data || !loaded.data)
-            return nullptr;
-        auto* selected = field<Unreal::FStructProperty>(
-            weapon_data, STR("AmmoType_2_039B4A454BFB079ACA16C3836A743543"));
+        if (!owner || !property || !instanced || !type || property->GetStruct().Get() != instanced ||
+            property->GetSize() != sizeof(WeaponDataView)) return {};
+        // In the qualified cooked x64 build these are the reflected type and its data pointer.
+        WeaponDataView view;
+        std::memcpy(&view, property->ContainerPtrToValuePtr<void>(owner), sizeof(view));
+        return view.type == type && view.data ? view : WeaponDataView{};
+    }
+
+    int loki_rounds(const Inventory& inventory)
+    {
+        auto* saved = field<Unreal::FStructProperty>(inventory.type->GetStruct().Get(), payload_name);
+        const auto data = weapon_data(saved, inventory.item);
+        auto* count = field<Unreal::FIntProperty>(data.type, loki_rounds_name);
+        if (!count) return -1;
+        const auto rounds = count->GetPropertyValueInContainer(data.data);
+        return 0 <= rounds && rounds <= 4 ? rounds : -1;
+    }
+
+    const profiles::StockAmmo* round_from_handle(const profiles::Profile& profile, const WeaponDataView& loaded,
+                                                const Unreal::TCHAR* member)
+    {
+        auto* selected = field<Unreal::FStructProperty>(loaded.type, member);
         auto* handle = find<Unreal::UScriptStruct>(STR("/Script/Engine.DataTableRowHandle"));
         auto* table = field<Unreal::FObjectProperty>(handle, STR("DataTable"));
         auto* name = field<Unreal::FNameProperty>(handle, STR("RowName"));
         auto* ammo_table = stock_ammo_table();
         if (!selected || !handle || selected->GetStruct().Get() != handle || !table || !name || !ammo_table)
             return nullptr;
-        for (Unreal::TFieldIterator<Unreal::FProperty> member(weapon_data); member; ++member)
-        {
-            if (*member != selected && !member->Identical_InContainer(stock.data, loaded.data)) return nullptr;
-        }
         const auto* row = selected->ContainerPtrToValuePtr<void>(loaded.data);
         if (table->GetObjectPropertyValue(table->ContainerPtrToValuePtr<void>(row)) != ammo_table) return nullptr;
         const auto selected_name = name->GetPropertyValueInContainer(row);
@@ -703,6 +739,32 @@ namespace
                 selected_name == Unreal::FName(candidate->row, Unreal::FNAME_Find);
         });
         return match == profiles::stock_ammo.end() || selected_name.IsNone() ? nullptr : *match;
+    }
+
+    const profiles::StockAmmo* saved_magazine_round(const profiles::Profile& profile, Unreal::UClass* weapon,
+                                                    const Inventory& inventory, bool underbarrel = false)
+    {
+        if (!profile.ammo || !weapon) return nullptr;
+        auto* defaults = weapon->GetClassDefaultObject().Get();
+        const bool loki = profile.underbarrel_mount || (underbarrel && loki_mount(defaults));
+        if (!loki && mounted_payload_matches(defaults, inventory)) return underbarrel ? nullptr : profile.ammo;
+        auto* reference = field<Unreal::FStructProperty>(defaults, STR("DataStruct"));
+        auto* saved = field<Unreal::FStructProperty>(inventory.type->GetStruct().Get(), payload_name);
+        const auto stock = weapon_data(reference, defaults);
+        const auto loaded = weapon_data(saved, inventory.item);
+        if (!stock.type || stock.type != loaded.type || (underbarrel && !loki)) return nullptr;
+        const auto* shell = loki && loki_rounds(inventory) >= 0 ? round_from_handle(loki_magazine, loaded, loki_ammo_name) : nullptr;
+        if (loki && !shell) return nullptr;
+        constexpr auto ammo_type = STR("AmmoType_2_039B4A454BFB079ACA16C3836A743543");
+        const auto* selected = field<Unreal::FStructProperty>(stock.type, ammo_type);
+        const auto* shell_count = loki ? field<Unreal::FIntProperty>(stock.type, loki_rounds_name) : nullptr;
+        const auto* shell_type = loki ? field<Unreal::FStructProperty>(stock.type, loki_ammo_name) : nullptr;
+        for (Unreal::TFieldIterator<Unreal::FProperty> member(stock.type); member; ++member)
+        {
+            if (*member != selected && *member != shell_count && *member != shell_type &&
+                !member->Identical_InContainer(stock.data, loaded.data)) return nullptr;
+        }
+        return underbarrel ? shell : round_from_handle(profile, loaded, ammo_type);
     }
 
     bool ordinary_magazine_payload(const profiles::Profile* profile, const Context& context, const Inventory& inventory,
@@ -1179,6 +1241,21 @@ namespace
             (profile == &profiles::nine_mm_ball || ammo_item_row_matches(ammo, *profile));
     }
 
+    int inspect_underbarrel(const Lua& lua, const Context& context, const Inventory& inventory)
+    {
+        auto* receiver = equipped(context, inventory);
+        auto* child = mounted_loki(receiver, context.pawn);
+        auto* ammo = field<Unreal::FIntProperty>(child, STR("Ammo"));
+        const auto* round = saved_magazine_round(loki_magazine, context.weapon, inventory, true);
+        const auto stored = loki_rounds(inventory);
+        if (!child || !ammo || !round || stored < 0 || ammo->GetPropertyValueInContainer(child) != stored ||
+            !stock_round_matches(child, mounted_ammo(child), stock_projectile(child, round->projectile_count), round))
+            return proof(lua, false, "guest_weapon_underbarrel_payload_unqualified");
+        proof(lua, true, "underbarrel_equipped", stored, stored);
+        lua.set_string(RC::to_utf8_string(round->item));
+        return 5;
+    }
+
     bool bolt_round(Unreal::UObject* actor, Unreal::UClass* ammo, Unreal::UClass* projectile)
     {
         if (!ammo || !projectile) return false;
@@ -1494,11 +1571,12 @@ namespace
             return true;
         }
 
-        bool apply(Unreal::UObject* pawn, Unreal::UObject* weapon, const ShotView& view = {})
+        bool apply(Unreal::UObject* pawn, Unreal::UObject* weapon, const ShotView& view = {},
+                   Unreal::UObject* barrel = nullptr)
         {
             previous_location.reset();
             auto* camera = shot_component(pawn, STR("Camera"), camera_component);
-            auto* muzzle = shot_component(weapon, STR("Arrow_Muzzle"), muzzle_component);
+            auto* muzzle = shot_component(barrel ? barrel : weapon, STR("Arrow_Muzzle"), muzzle_component);
             if (!camera || !muzzle) return false;
             auto* relative = field<Unreal::FStructProperty>(muzzle, STR("RelativeRotation"));
             if (!aim_vector_field(relative, aim_rotator_type)) return false;
@@ -1554,18 +1632,20 @@ namespace
     };
 
     int fire(const Lua& lua, const Context& context, const Inventory& inventory, bool disarm,
-             const ShotView& shot_view)
+             const ShotView& shot_view, bool underbarrel)
     {
         const auto report = [&](bool ok, std::string_view status, std::int32_t first = -1, std::int32_t second = -1,
                                 int projectiles = 0) {
             return proof(lua, ok, status, first, second, disarm ? -1 : projectiles);
         };
-        auto* actor = equipped(context, inventory);
-        if (!actor) return report(false, "guest_weapon_actor_not_equipped");
+        auto* receiver = equipped(context, inventory);
+        if (!receiver) return report(false, "guest_weapon_actor_not_equipped");
+        auto* actor = underbarrel ? mounted_loki(receiver, context.pawn) : receiver;
+        if (!actor) return report(false, "guest_weapon_underbarrel_unavailable");
 
         const Unreal::FName use_name{STR("Use_Item_Primary")};
-        const auto* bolt = stock_bolt(context.weapon);
-        const auto* stock_profile = stock_magazine(context.weapon);
+        const auto* bolt = underbarrel ? nullptr : stock_bolt(context.weapon);
+        const auto* stock_profile = underbarrel ? &loki_magazine : stock_magazine(context.weapon);
         auto* base_action = find<Unreal::UFunction>(bolt ? bolt->primary : primary_path);
         auto* action = actor->GetFunctionByNameInChain(use_name);
         // Some registered firearms forward through a Blueprint override. Preserve that
@@ -1591,7 +1671,7 @@ namespace
         const bool fires_on_release = bolt || (stock_profile && stock_profile->action_on_release);
         if (!boolean(actor, STR("Action_OnRelease"), fires_on_release) || (disarm && fires_on_release) ||
             (bolt && !stock_bolt_shape(actor, *bolt)) ||
-            (stock_profile && !stock_magazine_shape(actor, *stock_profile)))
+            (stock_profile && !stock_magazine_shape(actor, *stock_profile, underbarrel)))
             return report(false, "guest_weapon_release_mode_unqualified");
         if (bolt && (!field<Unreal::FObjectProperty>(context.pawn, STR("OffhandEquipment")) ||
             live(object(context.pawn, STR("OffhandEquipment"))) || !boolean(actor, STR("ReloadInput"), false) ||
@@ -1608,15 +1688,18 @@ namespace
         auto* magazine = field<Unreal::FIntProperty>(actor, STR("MagSize"));
         if (!live_ammo || !shot_cost || !magazine) return report(false, "stock_guest_weapon_ammo_unavailable");
         const auto before = live_ammo->GetPropertyValueInContainer(actor);
-        const auto stored = inventory.ammo->GetPropertyValueInContainer(inventory.item);
+        const auto primary_before = inventory.ammo->GetPropertyValueInContainer(inventory.item);
+        const auto stored = underbarrel ? loki_rounds(inventory) : primary_before;
         // A factory-empty weapon can lack a resolved round payload. Its verified
         // empty trigger pull dispatches a click without entering the firing path.
         if (!disarm && before == 0 && stored == 0 && shot_cost->GetPropertyValueInContainer(actor) == 1)
             return report(false, "guest_weapon_preloaded_magazine_required", 0, 0);
-        if (!ordinary_magazine_payload(stock_profile, context, inventory, actor))
+        if (!ordinary_magazine_payload(stock_magazine(context.weapon), context, inventory, receiver))
             return report(false, "guest_weapon_payload_unqualified");
         auto* ammo_class = disarm ? nullptr : mounted_ammo(actor);
         const auto* round = stock_profile ? magazine_round(*stock_profile, ammo_class) : nullptr;
+        if (underbarrel && round != saved_magazine_round(loki_magazine, context.weapon, inventory, true))
+            return report(false, "guest_weapon_underbarrel_payload_unqualified");
         const auto expected_projectiles = round ? round->projectile_count : 1;
         auto* projectile = disarm ? nullptr : stock_projectile(actor, expected_projectiles);
         const auto minimum = bolt || stock_profile ? 1 : 2;
@@ -1635,7 +1718,7 @@ namespace
         if (!disarm)
         {
             if (active_tap || !install_tap_birth_hook()) return report(false, "guest_weapon_projectile_scope_unavailable");
-            if (!aim.apply(context.pawn, actor, shot_view)) return report(false, "guest_weapon_aim_unavailable");
+            if (!aim.apply(context.pawn, receiver, shot_view, actor)) return report(false, "guest_weapon_aim_unavailable");
         }
         {
             TapObservation observation(disarm ? nullptr : &projectiles);
@@ -1653,14 +1736,16 @@ namespace
         if (!aim.restore()) return report(false, "mutation_unverified_guest_weapon_muzzle_restore", before);
 
         Inventory after;
-        if (!ownership_current(context) || !locate(context, after).empty() || equipped(context, after) != actor ||
+        if (!ownership_current(context) || !locate(context, after).empty() || equipped(context, after) != receiver ||
+            (underbarrel && mounted_loki(receiver, context.pawn) != actor) ||
             !boolean(actor, STR("Holding_Primary"), false) || !boolean(actor, STR("IsSeerOpen"), false) ||
-            !ordinary_magazine_payload(stock_profile, context, after, actor))
+            !ordinary_magazine_payload(stock_magazine(context.weapon), context, after, receiver))
             return report(false, "mutation_unverified_guest_weapon_release", before);
 
         const auto remaining = live_ammo->GetPropertyValueInContainer(actor);
         if (disarm) return report(true, "disarmed", before, remaining);
-        const auto after_stored = after.ammo->GetPropertyValueInContainer(after.item);
+        const auto primary_after = after.ammo->GetPropertyValueInContainer(after.item);
+        const auto after_stored = underbarrel ? loki_rounds(after) : primary_after;
         if (projectiles.count == 0 && remaining == before && after_stored == stored && boolean(actor, STR("IsCycling"), false))
             return report(false, "guest_weapon_stock_shot_not_started", before, remaining);
         if (!projectiles.owned || projectiles.count != expected_projectiles)
@@ -1669,6 +1754,13 @@ namespace
             (bolt && (!boolean(actor, STR("IsCycling"), true) || !boolean(actor, STR("ChamberReady"), false))))
             return report(false, "mutation_unverified_guest_weapon_shot", before, remaining, projectiles.count);
 
+        if (underbarrel)
+        {
+            const bool verified = primary_after == primary_before && after_stored == remaining &&
+                saved_magazine_round(loki_magazine, context.weapon, after, true) == round;
+            return report(verified, verified ? "fired" : "mutation_unverified_guest_underbarrel_ammo",
+                          before, remaining, projectiles.count);
+        }
         after.ammo->SetPropertyValueInContainer(after.item, remaining);
         return after.ammo->GetPropertyValueInContainer(after.item) == remaining
             ? report(true, "fired", before, remaining, projectiles.count)
@@ -1714,17 +1806,16 @@ namespace
     }
 
     bool select_stock_round(Unreal::UObject* actor, const Inventory& inventory, Unreal::UClass* ammo,
-                            const profiles::StockAmmo& selected)
+                            const profiles::StockAmmo& selected, Unreal::UObject* receiver)
     {
-        auto* fn = find<Unreal::UFunction>(change_ammo_path);
+        auto* fn = find<Unreal::UFunction>(actor == receiver ? change_ammo_path : loki_change_ammo);
         auto* handle = input<Unreal::FStructProperty>(fn, STR("InputPin"), 0);
         auto* handle_type = find<Unreal::UScriptStruct>(STR("/Script/Engine.DataTableRowHandle"));
         const Unreal::FName change_name{STR("ChangeAmmoType")};
-        if (!fn || fn->GetOuterPrivate() != find<Unreal::UClass>(weapon_base_path) ||
-            actor->GetFunctionByNameInChain(change_name) != fn || fn->GetNumParms() != 1 || fn->GetReturnProperty() ||
+        if (!fn || actor->GetFunctionByNameInChain(change_name) != fn || fn->GetNumParms() != 1 || fn->GetReturnProperty() ||
             fn->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
             !handle || !handle_type || handle->GetStruct().Get() != handle_type || fn->GetParmsSize() != handle->GetSize() ||
-            !ammo_item_row_matches(ammo, selected) || !mounted_payload_matches(actor, inventory)) return false;
+            !ammo_item_row_matches(ammo, selected) || !mounted_payload_matches(receiver, inventory)) return false;
         auto* defaults = ammo->GetClassDefaultObject().Get();
         auto* ammo_handle = field<Unreal::FStructProperty>(defaults, STR("AmmoType"));
         const auto* row = ammo_handle->ContainerPtrToValuePtr<void>(defaults);
@@ -1737,26 +1828,30 @@ namespace
         return true;
     }
 
-    int reload(const Lua& lua, const Context& context, Inventory inventory)
+    int reload(const Lua& lua, const Context& context, Inventory inventory, bool underbarrel)
     {
-        auto* actor = equipped(context, inventory);
-        if (!actor) return reload_proof(lua, false, "guest_weapon_actor_not_equipped");
-        const auto* bolt = stock_bolt(context.weapon);
-        const auto* stock_profile = stock_magazine(context.weapon);
-        if (!ordinary_magazine_payload(stock_profile, context, inventory, actor))
+        auto* receiver = equipped(context, inventory);
+        if (!receiver) return reload_proof(lua, false, "guest_weapon_actor_not_equipped");
+        auto* actor = underbarrel ? mounted_loki(receiver, context.pawn) : receiver;
+        if (!actor) return reload_proof(lua, false, "guest_weapon_underbarrel_unavailable");
+        const auto* bolt = underbarrel ? nullptr : stock_bolt(context.weapon);
+        const auto* receiver_profile = stock_magazine(context.weapon);
+        const auto* stock_profile = underbarrel ? &loki_magazine : receiver_profile;
+        if (!ordinary_magazine_payload(receiver_profile, context, inventory, receiver))
             return reload_proof(lua, false, "guest_weapon_payload_unqualified");
         if (!ready_pawn(context) || !boolean(context.pawn, STR("Wep_HeldAside"), false) ||
             !boolean(actor, STR("Reloading"), false) || !boolean(actor, STR("IsCycling"), false) ||
             !boolean(actor, STR("Holding_Primary"), false) || !boolean(actor, STR("IsSeerOpen"), false) ||
-            !boolean(actor, STR("SingleReload"), bolt != nullptr) || !boolean(actor, STR("UseEatherAsAmmo"), false) ||
-            (stock_profile && !stock_magazine_shape(actor, *stock_profile)) ||
+            !boolean(actor, STR("SingleReload"), bolt != nullptr || underbarrel) ||
+            !boolean(actor, STR("UseEatherAsAmmo"), false) ||
+            (stock_profile && !stock_magazine_shape(actor, *stock_profile, underbarrel)) ||
             (bolt && (!stock_bolt_shape(actor, *bolt) || !boolean(actor, STR("ReloadInput"), false) ||
                 !mounted_payload_matches(actor, inventory))))
             return reload_proof(lua, false, "guest_weapon_reload_ineligible");
 
         auto* rounds = field<Unreal::FIntProperty>(actor, STR("Ammo"));
         auto* capacity = field<Unreal::FIntProperty>(actor, STR("MagSize"));
-        auto* update = find<Unreal::UFunction>(update_mag_path);
+        auto* update = find<Unreal::UFunction>(underbarrel ? loki_base_update : update_mag_path);
         const Unreal::FName update_name{STR("Update_Mag")};
         if (!rounds || !capacity || !update || actor->GetFunctionByNameInChain(update_name) != update ||
             update->GetNumParms() != 0 || update->GetParmsSize() != 0 || update->GetReturnProperty())
@@ -1764,6 +1859,8 @@ namespace
 
         auto* ammo_class = mounted_ammo(actor);
         const auto* round = stock_profile ? magazine_round(*stock_profile, ammo_class) : nullptr;
+        if (underbarrel && round != saved_magazine_round(loki_magazine, context.weapon, inventory, true))
+            return reload_proof(lua, false, "guest_weapon_underbarrel_payload_unqualified");
         AmmoStackSchema stack_schema;
         if (!stack_schema.read(ammo_class, inventory) ||
             (bolt && !bolt_round(actor, ammo_class, stock_projectile(actor))) ||
@@ -1773,7 +1870,11 @@ namespace
 
         const auto before = rounds->GetPropertyValueInContainer(actor);
         const auto cap = capacity->GetPropertyValueInContainer(actor);
-        if (cap <= 0 || before < 0 || before > cap || before != inventory.ammo->GetPropertyValueInContainer(inventory.item))
+        const auto primary_before = inventory.ammo->GetPropertyValueInContainer(inventory.item);
+        const auto stored_rounds = [&](const Inventory& view) {
+            return underbarrel ? loki_rounds(view) : view.ammo->GetPropertyValueInContainer(view.item);
+        };
+        if (cap <= 0 || before < 0 || before > cap || before != stored_rounds(inventory))
             return reload_proof(lua, false, "guest_weapon_magazine_unqualified", before, before);
 
         std::int32_t reserve_before{};
@@ -1809,7 +1910,7 @@ namespace
 
         // These stock magazine reloads exit after debiting the first matching Backpack stack.
         const auto available = stock_profile && stock_profile->reload_first_stack ? stacks.front().units : reserve_before;
-        const auto transferred = bolt ? 1 : std::min(cap - before, available);
+        const auto transferred = bolt || underbarrel ? 1 : std::min(cap - before, available);
         auto needed = transferred;
         for (auto& stack : stacks)
         {
@@ -1824,20 +1925,20 @@ namespace
         if (changed_round)
         {
             const Unreal::FWeakObjectPtr held_actor{actor};
-            if (!select_stock_round(actor, inventory, ammo_class, *changed_round))
+            if (!select_stock_round(actor, inventory, ammo_class, *changed_round, receiver))
                 return reload_proof(lua, false, "stock_guest_weapon_ammo_switch_unqualified", before, before, reserve_before);
             Inventory selected;
             std::vector<ReserveStack> selected_stacks;
             std::int32_t selected_total{};
             if (held_actor.Get() != actor || !ownership_current(context) || !locate(context, selected).empty() ||
-                equipped(context, selected) != actor || rounds->GetPropertyValueInContainer(actor) != before ||
-                selected.ammo->GetPropertyValueInContainer(selected.item) != before ||
+                equipped(context, selected) != receiver || (underbarrel && mounted_loki(receiver, context.pawn) != actor) ||
+                rounds->GetPropertyValueInContainer(actor) != before || stored_rounds(selected) != before ||
                 mounted_ammo(actor) != ammo_class ||
                 (bolt ? !bolt_round(actor, ammo_class, stock_projectile(actor))
                       : !stock_round_matches(actor, ammo_class, stock_projectile(actor, changed_round->projectile_count),
                                              changed_round) ||
-                        !ordinary_magazine_payload(stock_profile, context, selected, actor)) ||
-                !mounted_payload_matches(actor, selected) ||
+                        !ordinary_magazine_payload(receiver_profile, context, selected, receiver)) ||
+                !mounted_payload_matches(receiver, selected) ||
                 !snapshot_reserve(context, selected, ammo_class, selected_stacks, selected_total) || selected_total != reserve_before ||
                 !std::ranges::equal(stacks, selected_stacks, [](const ReserveStack& first, const ReserveStack& second) {
                     return first.guid == second.guid && first.index == second.index && first.units == second.units;
@@ -1862,22 +1963,25 @@ namespace
             inventory.ammo->SetPropertyValueInContainer(row, remaining);
             stack_schema.set_totals(row, remaining);
         }
-        inventory.ammo->SetPropertyValueInContainer(inventory.item, refilled);
+        if (!underbarrel) inventory.ammo->SetPropertyValueInContainer(inventory.item, refilled);
         rounds->SetPropertyValueInContainer(actor, refilled);
         const Unreal::FWeakObjectPtr held_actor{actor};
         actor->ProcessEvent(update, nullptr);
 
         Inventory after;
         if (held_actor.Get() != actor || !ownership_current(context) || !locate(context, after).empty() ||
-            equipped(context, after) != actor)
+            equipped(context, after) != receiver || (underbarrel && mounted_loki(receiver, context.pawn) != actor))
             return reload_proof(lua, false, "mutation_unverified_guest_weapon_reload_owner", before, -1, reserve_before);
 
         const auto observed = rounds->GetPropertyValueInContainer(actor);
         std::int32_t reserve_after{};
         std::vector<ReserveStack> remaining_stacks;
-        if (observed != refilled || after.ammo->GetPropertyValueInContainer(after.item) != observed ||
-            !ordinary_magazine_payload(stock_profile, context, after, actor) ||
-            ((bolt || changed_round) && (mounted_ammo(actor) != ammo_class || !mounted_payload_matches(actor, after))) ||
+        if (observed != refilled || stored_rounds(after) != observed ||
+            !ordinary_magazine_payload(receiver_profile, context, after, receiver) ||
+            (underbarrel && (after.ammo->GetPropertyValueInContainer(after.item) != primary_before ||
+                           saved_magazine_round(loki_magazine, context.weapon, after, true) !=
+                               (changed_round ? changed_round : round))) ||
+            ((bolt || changed_round) && (mounted_ammo(actor) != ammo_class || !mounted_payload_matches(receiver, after))) ||
             !snapshot_reserve(context, after, ammo_class, remaining_stacks, reserve_after) ||
             reserve_after != reserve_before - transferred)
             return reload_proof(lua, false, "mutation_unverified_guest_weapon_reload_commit", before, observed, reserve_before);
@@ -3388,7 +3492,7 @@ namespace
         return 7;
     }
 
-    template <Operation operation>
+    template <Operation operation, bool underbarrel = false>
     int run(const Lua& lua)
     {
         constexpr bool reports_ammo = operation == Operation::Inspect || operation == Operation::Fire ||
@@ -3455,13 +3559,39 @@ namespace
         }
         if (!context.weapon) return fail("guest_weapon_class_unqualified");
         if constexpr (operation == Operation::Equip) return equip(lua, context, inventory);
-        if constexpr (operation == Operation::Inspect) return inspect(lua, context, inventory);
-        if constexpr (operation == Operation::Reload) return reload(lua, context, inventory);
-        return fire(lua, context, inventory, operation == Operation::Disarm, shot_view);
+        if constexpr (operation == Operation::Inspect)
+            return underbarrel ? inspect_underbarrel(lua, context, inventory) : inspect(lua, context, inventory);
+        if constexpr (operation == Operation::Reload) return reload(lua, context, inventory, underbarrel);
+        return fire(lua, context, inventory, operation == Operation::Disarm, shot_view, underbarrel);
     }
 }
 
-silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_shot_view(Unreal::UObject* pawn, Unreal::UObject* held)
+Unreal::UObject* silverfish::native_guest_item::active_loki_barrel(Unreal::UObject* pawn, Unreal::UObject* receiver)
+{
+    auto* child = mounted_loki(receiver, pawn);
+    return child && boolean(receiver, STR("Tertiary_Mode"), true) && object(receiver, STR("InputIntercept")) == child
+        ? child : nullptr;
+}
+
+std::string silverfish::native_guest_item::local_loki_identity(Unreal::UObject* pawn, Unreal::UObject* receiver)
+{
+    if (!active_loki_barrel(pawn, receiver)) return {};
+    Context context;
+    context.save = object(pawn, STR("Save"));
+    if (!live(context.save) || context.save->GetClassPrivate() != find<Unreal::UClass>(save_path)) return {};
+    Inventory inventory;
+    if (!bind_inventory(context, inventory).empty()) return {};
+    Unreal::FScriptArrayHelper rows(inventory.equipment, inventory.equipment->ContainerPtrToValuePtr<void>(context.save));
+    const auto index = inventory.selected->GetPropertyValueInContainer(context.save);
+    if (index < 0 || index >= rows.Num() || rows.Num() > max_inventory) return {};
+    const auto* row = rows.GetRawPtr(index);
+    if (inventory.row_class(row) != receiver->GetClassPrivate()) return {};
+    const auto guid = inventory.identity(row);
+    return guid != Guid{} ? std::format("{:08X}{:08X}{:08X}{:08X}", guid[0], guid[1], guid[2], guid[3]) : std::string{};
+}
+
+silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_shot_view(
+    Unreal::UObject* pawn, Unreal::UObject* held, Unreal::UObject* barrel)
 {
     ShotView view;
     auto* camera = shot_component(pawn, STR("Camera"), camera_component);
@@ -3476,7 +3606,7 @@ silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_s
         {
             view.eye = eye;
             view.target = aim->point;
-            if (auto* muzzle = shot_component(held, STR("Arrow_Muzzle"), muzzle_component))
+            if (auto* muzzle = shot_component(barrel ? barrel : held, STR("Arrow_Muzzle"), muzzle_component))
                 view.muzzle = actor_aim_vector(muzzle, component_location);
             if (view.muzzle && aim->hit && living_combat_target(aim->actor, static_cast<Unreal::AActor*>(pawn)->GetWorld()))
             {
@@ -3606,8 +3736,11 @@ void silverfish::native_guest_item::register_lua(RC::LuaMadeSimple::Lua& lua)
     if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE")) return;
     lua.register_function("SilverfishEquipNativeGuestWeapon", run<Operation::Equip>);
     lua.register_function("SilverfishInspectNativeGuestWeapon", run<Operation::Inspect>);
+    lua.register_function("SilverfishInspectNativeGuestUnderbarrel", run<Operation::Inspect, true>);
     lua.register_function("SilverfishFireNativeGuestWeapon", run<Operation::Fire>);
+    lua.register_function("SilverfishFireNativeGuestUnderbarrel", run<Operation::Fire, true>);
     lua.register_function("SilverfishReloadNativeGuestWeapon", run<Operation::Reload>);
+    lua.register_function("SilverfishReloadNativeGuestUnderbarrel", run<Operation::Reload, true>);
     lua.register_function("SilverfishSplitNativeGuestAmmoStack", split_ammo);
     lua.register_function("SilverfishTakeNativeGuestWeaponAmmo", take_ammo);
     lua.register_function("SilverfishSortNativeGuestBackpack", sort_backpack);

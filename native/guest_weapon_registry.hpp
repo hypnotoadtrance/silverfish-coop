@@ -75,6 +75,7 @@ namespace silverfish::guest_weapon_profiles
         const StockAmmo* ammo;
         bool reload_first_stack;
         bool action_on_release{};
+        const RC::CharType* underbarrel_mount{};
     };
 
     inline constexpr std::array firearms{
@@ -106,6 +107,9 @@ namespace silverfish::guest_weapon_profiles
         Profile{"model-1931", STR("/Game/Classes/Weapons/Wep_Pistol_Long.Wep_Pistol_Long_C"), true, 10, 1, 0.1, true, &nine_mm_ball, true},
         Profile{"fennec-57", STR("/Game/Classes/Weapons/Wep_Pistol_Fennec_01.Wep_Pistol_Fennec_01_C"), true, 17, 1, 0.06, true, &five_seven_ap, true},
         Profile{"black-fox", STR("/Game/Classes/Weapons/Wep_Pistol_Fennec_02.Wep_Pistol_Fennec_02_C"), true, 17, 1, 0.06, true, &five_seven_ap, true},
+        Profile{"bolt-action-shotgun-loki", STR("/Game/Classes/Weapons/Wep_BoltAction_Shotgun_Loki.Wep_BoltAction_Shotgun_Loki_C"), true, 4, 1, 1.3, true, &twelve_gauge_buck, true, true, STR("ChildActor1")},
+        Profile{"hcr-loki", STR("/Game/Classes/Weapons/Wep_HCR_Loki.Wep_HCR_Loki_C"), true, 20, 0, 0.1, true, &thirty_06_fmj, true, false, STR("UnderBarrel_Loki_BP")},
+        Profile{"ar-08", STR("/Game/Classes/Weapons/Wep_AR_08.Wep_AR_08_C"), true, 30, 4, 0.08, true, &five_six_fmj, true, false, STR("UnderBarrel_Loki_BP")},
         Profile{"revolver-snub", STR("/Game/Classes/Weapons/Wep_Revolver_SnubNose.Wep_Revolver_SnubNose_C"), true, 6, 1, 0.2, true, &forty_five_ball, true},
         Profile{"revolver-snub-02", STR("/Game/Classes/Weapons/Wep_Revolver_SnubNose_02.Wep_Revolver_SnubNose_02_C"), true, 6, 1, 0.2, true, &forty_five_ball, true},
         Profile{"revolver-carbine", STR("/Game/Classes/Weapons/Wep_Revolver_Carbine_01.Wep_Revolver_Carbine_01_C"), true, 6, 1, 0.5, true, &forty_five_ball, true},
@@ -169,6 +173,8 @@ namespace silverfish::guest_weapon_profiles
     };
     inline constexpr std::array stock_held_fire_kinds{
         std::string_view{"smg-standard"},
+        std::string_view{"hcr-loki"},
+        std::string_view{"ar-08"},
         std::string_view{"bizon-01"},
         std::string_view{"bizon-02"},
         std::string_view{"bizon-03"},

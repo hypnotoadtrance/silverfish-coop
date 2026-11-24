@@ -59,7 +59,9 @@ from .native_guest_npc import parse_bandit
 from .enemy_loot_profiles import BY_ACTOR as ENEMY_LOOT_ACTORS
 from .native_host_save import SLOT
 from . import native_smg_hold
-from .native_guest_weapon import FIRE_CLASSES, PRIMARY_KINDS, valid_mounted_ammo, valid_shot_view
+from .native_guest_weapon import (
+    FIRE_CLASSES, LOKI_AMMO, LOKI_KINDS, PRIMARY_KINDS, valid_mounted_ammo, valid_primary_shot, valid_shot_view,
+)
 from .native_guest_armor import parse as parse_guest_armor
 from .native_guest_armor import DISGUISE_PROBE, parse_recognition
 from . import native_guest_melee
@@ -923,7 +925,7 @@ class Bridge:
             if fields[5] in native_loot.PRY_TOOL_ACTIONS:
                 if not target or not (lockable_container(target, fields[2]) or native_stock_door.actor_map(target) == fields[2]):
                     continue
-            elif target is not None and (fields[5] not in FIRE_CLASSES or not valid_shot_view(target)):
+            elif target is not None and (fields[5] not in FIRE_CLASSES or not valid_primary_shot(fields[5], target)):
                 continue
             events.append((sequence, *fields[2:]))
         return events
@@ -1490,7 +1492,7 @@ class Bridge:
                         if report["pawn"] in projected or report["action"] != "project":
                             raise ValueError("Invalid stock helmet projection receipt")
                         projected[report["pawn"]] = report
-                elif fields[0] == "native-guest-weapon" and len(fields) in (12, 14):
+                elif fields[0] == "native-guest-weapon" and len(fields) in (12, 14, 15):
                     data["native_guest_weapon"] = {
                         "map": fields[1], "action": fields[2], "pawn": fields[3], "guid": fields[4],
                         "ok": fields[5] == "1", "status": fields[6],
@@ -1498,6 +1500,8 @@ class Bridge:
                            for key, value in zip(("before", "after", "actor_ammo", "stored_ammo", "projectiles",
                                                   "reserve_before", "reserve_after"), fields[7:])},
                     }
+                    if len(fields) == 15 and fields[14] != "-":
+                        data["native_guest_weapon"]["ammo_class"] = fields[14]
                 elif fields[0] == "native-rest" and len(fields) == 19:
                     data["native_rest"] = {
                         "map": fields[1], "pawn": fields[2], "actor": fields[3], "bed": fields[4], "level": fields[5],
@@ -2086,8 +2090,10 @@ class Bridge:
                     data["native_campaign_npc_melee_sickness"] = {
                         **dict(zip(identities, fields[1:5])), **dict(zip(counters, map(int, fields[5:]))),
                     }
-                elif fields[0] == "native-guest-reload-intent" and len(fields) == 4:
+                elif fields[0] == "native-guest-reload-intent" and len(fields) in (4, 5):
                     data["native_guest_reload_intent"] = {"map": fields[1], "pawn": fields[2], "sequence": int(fields[3])}
+                    if len(fields) == 5 and valid_guid(fields[4]):
+                        data["native_guest_reload_intent"]["underbarrel_guid"] = fields[4]
                 elif (fields[0] == "native-guest-equipment-selection" and len(fields) == 5 and valid_guid(fields[4])
                       and (selection := _held_input_sequence(fields[3]))):
                     data["native_guest_equipment_selection"] = {"map": fields[1], "pawn": fields[2],
@@ -2097,14 +2103,16 @@ class Bridge:
                       and data.get("state") == "connected" and fields[1] == data.get("map") and len(fields[2]) <= 512):
                     data.setdefault("native_guest_fire_modes", []).append(
                         (sequence, fields[1], fields[2], fields[4], fields[5]))
-                elif fields[0] == "native-guest-equipped-weapon" and len(fields) in (4, 5, 6, 7) and fields[3] in PRIMARY_KINDS:
+                elif fields[0] == "native-guest-equipped-weapon" and len(fields) in (4, 5, 6, 7, 9) and fields[3] in PRIMARY_KINDS:
                     equipped = {"guid": fields[2], "kind": fields[3]}
                     if len(fields) >= 5 and re.fullmatch(r"[0-9]{1,4}", fields[4]) and int(fields[4]) <= 4096:
                         equipped["rounds"] = int(fields[4])
                     if len(fields) >= 6 and fields[3] in native_smg_hold.HOLD_KINDS and fields[5] in ("semi", "auto"):
                         equipped["fire_mode"] = fields[5]
-                    if len(fields) == 7 and valid_mounted_ammo(fields[3], fields[6]):
+                    if len(fields) >= 7 and valid_mounted_ammo(fields[3], fields[6]):
                         equipped["ammo_class"] = fields[6]
+                    if len(fields) == 9 and fields[3] in LOKI_KINDS and fields[7] in "01234" and len(fields[7]) == 1 and fields[8] in LOKI_AMMO:
+                        equipped["underbarrel_rounds"], equipped["underbarrel_ammo"] = int(fields[7]), fields[8]
                     data.setdefault("native_guest_equipped_weapons", {})[fields[1]] = equipped
                 elif fields[0] == "native-guest-primary-fixture" and len(fields) == 6:
                     data["native_guest_primary_fixture"] = {"map": fields[1], "pawn": fields[2], "guid": fields[3],

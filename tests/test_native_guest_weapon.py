@@ -104,9 +104,10 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
                           ("sg-71-a-suppressed", "Wep_ShotGun_SemiAuto_Suppressed", 5, 1, 0.2, False),
                           ("bolt-action-shotgun", "Wep_BoltAction_Shotgun", 4, 1, 1.3, True),
                           ("bolt-action-shotgun-suppressed", "Wep_BoltAction_Shotgun_Suppressed", 4, 1, 1.3, True),
-                          ("sawn-off-shotgun", "Wep_SawnOff_ShotGun", 2, 1, 0.1, False)])
+                          ("sawn-off-shotgun", "Wep_SawnOff_ShotGun", 2, 1, 0.1, False),
+                          ("bolt-action-shotgun-loki", "Wep_BoltAction_Shotgun_Loki", 4, 1, 1.3, True)])
         self.assertTrue(all(p.magazine.require_default_payload and p.magazine.reload_first_stack for p in profiles))
-        self.assertNotIn("bolt-action-shotgun-loki", native_guest_weapon.PRIMARY_KINDS)
+        self.assertEqual(native_guest_weapon.LOKI_KINDS, {"bolt-action-shotgun-loki", "hcr-loki", "ar-08"})
         self.assertFalse({p.kind for p in profiles} & guest_weapon_profiles.STOCK_HELD_FIRE_MAGAZINES.keys())
 
     def test_exact_fennec_ap_profiles_use_one_stock_projectile(self):
@@ -133,9 +134,17 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
             "bolt-action-shotgun", "bolt-action-shotgun-suppressed", "sawn-off-shotgun",
             "revolver-9mm", "revolver-01", "revolver-02", "revolver-03",
             *(kind for kind, *_ in guest_weapon_profiles.ORDINARY_WEAPONS),
+            *native_guest_weapon.LOKI_KINDS,
         })
         self.assertEqual(guest_weapon_profiles.MAX_TAKE_AMMO_ROUNDS, 64)
         self.assertEqual(len(native_guest_weapon.FIRE_CLASSES), len(guest_weapon_profiles.FIREARMS))
+
+    def test_loki_primary_intent_requires_the_mounted_muzzle_and_receiver(self):
+        view = "1.000000,0.000000,0.000000;1.000,0.000,0.000;200.000,0.000,0.000;2.000,0.000,0.000"
+        self.assertTrue(native_guest_weapon.valid_primary_shot("hcr-loki", "loki:" + view))
+        self.assertFalse(native_guest_weapon.valid_primary_shot("light-pistol", "loki:" + view))
+        self.assertFalse(native_guest_weapon.valid_primary_shot("hcr-loki", "loki:" + view.rsplit(";", 1)[0]))
+        self.assertTrue(native_guest_weapon.valid_primary_shot("light-pistol", view))
 
     def test_stock_light_ar_family_uses_the_audited_intermediate_fmj_magazine(self):
         ammo = guest_weapon_profiles.FIVE_SIX_FMJ

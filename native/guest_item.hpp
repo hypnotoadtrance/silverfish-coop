@@ -27,7 +27,9 @@ namespace silverfish::native_guest_item
         std::optional<ShotVector> contact;
     };
 
-    ShotView capture_shot_view(RC::Unreal::UObject* pawn, RC::Unreal::UObject* held);
+    RC::Unreal::UObject* active_loki_barrel(RC::Unreal::UObject* pawn, RC::Unreal::UObject* receiver);
+    std::string local_loki_identity(RC::Unreal::UObject* pawn, RC::Unreal::UObject* receiver);
+    ShotView capture_shot_view(RC::Unreal::UObject* pawn, RC::Unreal::UObject* held, RC::Unreal::UObject* barrel = nullptr);
     bool take_ammo_supported(RC::Unreal::UObject* item_class, int rounds);
     std::string_view finish_local_removal(RC::Unreal::UObject* pawn, RC::Unreal::UObject* save,
                                          RC::Unreal::UObject* prior_actor, int slot, std::string_view identity,

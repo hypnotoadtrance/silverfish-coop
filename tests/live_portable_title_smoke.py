@@ -52,7 +52,7 @@ from portable_guest_world_start import GuestWorldStartProof, resident_events, wa
 from portable_acid_pool import acid_pool_overlay, verify_acid_pool
 from portable_alternate_ammo import verify_alternate_ammo
 from portable_light_ar import verify_fire_mode_reopen, verify_stock_light_ar
-from portable_loki_control import verify_stock_loki_control
+from portable_loki_control import verify_guest_loki, verify_stock_loki_control
 from portable_lingering_teleport import lingering_overlay, verify_stock_lingering_teleport
 from portable_personal_consumable import verify_personal_consumable_reconnect, verify_stock_personal_consumable
 from portable_wipe_chooser import verify_stock_wipe_chooser
@@ -5216,7 +5216,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_bandage_revisit: bool = False, stock_shovel: bool = False, stock_shovel_loot: bool = False,
                  stock_shovel_quest: bool = False,
                  stock_take_ammo: bool = False, stock_shotguns: bool = False, stock_alternate_ammo: bool = False,
-                 stock_loki_control: bool = False,
+                 stock_loki_control: bool = False, stock_loki_guest: bool = False,
                  stock_light_ar: bool = False, stock_fire_mode_reopen: bool = False,
                  stock_crate_ring: bool = False, guest_world_start: bool = False,
                  guest_world_start_travel: bool = False, guest_ui_memory: bool = False, nonmirrored_startup: bool = False,
@@ -5325,6 +5325,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_shotguns, "observatory", "stock_shotguns",
          lambda host, guest, pawn: verify_stock_take_ammo(host, guest, pawn, shotguns=True)),
         (stock_loki_control, "observatory", "stock_loki_control", verify_stock_loki_control),
+        (stock_loki_guest, "observatory", "stock_loki_guest", verify_guest_loki),
         (stock_alternate_ammo, "observatory", "stock_alternate_ammo",
          lambda host, guest, pawn: verify_alternate_ammo(host, guest, pawn, portable_probe_command)),
         (stock_roaming_barter, "observatory", "stock_roaming_barter", verify_roaming_barter),
@@ -5464,11 +5465,11 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         if stock_shovel_quest:
             for game in games:
                 probes.enter_context(stock_board_approach_overlay(game))
-        if stock_take_ammo or stock_shotguns:
+        if stock_take_ammo or stock_shotguns or stock_loki_guest:
             proof["stock_take_ammo_overlays"] = [
                 probes.enter_context(guest_weapon_fixture_overlay(game, "portable_take_ammo_probe.lua")) for game in games
             ]
-        if stock_loki_control:
+        if stock_loki_control or stock_loki_guest:
             proof["stock_loki_control_overlays"] = [
                 probes.enter_context(guest_weapon_fixture_overlay(game, "portable_loki_control_probe.lua")) for game in games
             ]
@@ -6032,6 +6033,8 @@ if __name__ == "__main__":
                         help="verify guest shotgun Take Ammo, reload, and fire for each stock 12-gauge round")
     parser.add_argument("--stock-loki-control", action="store_true",
                         help="verify stock Loki mode, reload, and fire on the three host receiver mounts")
+    parser.add_argument("--stock-loki-guest", action="store_true",
+                        help="verify guest Loki mode, reload, and independent primary and underbarrel fire")
     parser.add_argument("--stock-npc-rivalry", action="store_true",
                         help="observe stock perception, attacks, and death between two NPC factions")
     parser.add_argument("--guest-ui-memory", action="store_true",
@@ -6148,7 +6151,7 @@ if __name__ == "__main__":
                               "tutorial_dock_shot_view",
                               "tutorial_dock_melee", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_shovel_quest", "stock_take_ammo",
-                              "stock_shotguns", "stock_loki_control",
+                              "stock_shotguns", "stock_loki_control", "stock_loki_guest",
                               "stock_host_corpse_carry", "stock_host_prop_observer", "stock_flashlights", "stock_simmi_jammers",
                               "stock_weather_travel", "stock_lightning",
                               "stock_storm_ambience",
@@ -6190,7 +6193,7 @@ if __name__ == "__main__":
     if any((args.stock_food, args.stock_cooked_meal, args.stock_personal_consumable, args.stock_wipe_chooser,
             args.stock_campfire, args.stock_npc_override, args.stock_board_offers, args.tutorial_dock_melee,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo, args.stock_shotguns,
-            args.stock_loki_control,
+            args.stock_loki_control, args.stock_loki_guest,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
             args.crossroads_profile, args.stock_lightning,
             args.stock_storm_ambience,
@@ -6269,7 +6272,7 @@ if __name__ == "__main__":
                        stock_shovel_loot=args.stock_shovel_loot,
                        stock_shovel_quest=args.stock_shovel_quest,
                        stock_take_ammo=args.stock_take_ammo, stock_shotguns=args.stock_shotguns,
-                       stock_loki_control=args.stock_loki_control,
+                       stock_loki_control=args.stock_loki_control, stock_loki_guest=args.stock_loki_guest,
                        stock_alternate_ammo=args.stock_alternate_ammo,
                        stock_light_ar=args.stock_light_ar,
                        stock_fire_mode_reopen=args.stock_fire_mode_reopen,

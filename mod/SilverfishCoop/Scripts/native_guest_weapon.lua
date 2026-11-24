@@ -256,6 +256,43 @@ local function allowed_ammo(kind, path)
     return path and weapon_profiles.ammo_options[kind] and weapon_profiles.ammo_options[kind][path]
 end
 
+local function loki_child(held, pawn, kind)
+    local field = weapon_profiles.underbarrel[kind]
+    local mount = field and held and held[field]
+    local child = mount and mount:IsValid() and mount.ChildActor
+    if child and child:IsValid() and not child:IsActorBeingDestroyed()
+        and child:GetClass():GetFullName() ==
+            "BlueprintGeneratedClass /Game/Classes/Weapons/Wep_Assets/Weapon_UnderBarrel_Loki.Weapon_UnderBarrel_Loki_C"
+        and same(child.ParentWeapon, held) and same(child.User, pawn) and same(child.Player_Ref, pawn)
+        and same(child:GetWorld(), pawn:GetWorld()) and valid_rounds(child, child.Ammo) then
+        return child
+    end
+end
+
+local function project_underbarrel(fields, pawn, held, kind)
+    local rounds, path = math.tointeger(tonumber(fields[9])), fields[10]
+    local child = loki_child(held, pawn, kind)
+    if not child or not valid_rounds(child, rounds) or not allowed_ammo("bolt-action-shotgun-loki", path) then
+        error("The co-op magazine no longer matches the selected underbarrel", 0)
+    end
+    if mounted_ammo_path(child) ~= path then
+        local class = StaticFindObject(path)
+        if not class or not class:IsValid() then LoadAsset(path); class = StaticFindObject(path) end
+        local handle = class and class:IsValid() and class:GetCDO().AmmoType
+        local source, name = handle and handle.DataTable, handle and handle.RowName
+        local stock = same(source, StaticFindObject(ammo_table_path)) and name and source:FindRow(name:ToString())
+        if not stock or not same(stock[ammo_item_field], class) then error("The co-op shell data is unavailable", 0) end
+        child:ChangeAmmoType(handle)
+    end
+    if child.Ammo ~= rounds then
+        child.Ammo = rounds
+        child:Update_Mag()
+    end
+    if child.Ammo ~= rounds or mounted_ammo_path(child) ~= path then
+        error("The stock underbarrel projection failed readback", 0)
+    end
+end
+
 local function write_magazine(held, row, rounds)
     if held.Ammo ~= rounds then
         held.Ammo = rounds
@@ -280,7 +317,7 @@ end
 local function project_magazine(fields, state, phase)
     local area, name, guid, kind, rounds = fields[3], fields[4], fields[5], fields[6], tonumber(fields[7])
     local save, pawn = save_scope.bind_guest(state, phase)
-    if (#fields ~= 7 and #fields ~= 8) or not save or state.map ~= area or pawn:GetFullName() ~= name then
+    if (#fields ~= 7 and #fields ~= 8 and #fields ~= 10) or not save or state.map ~= area or pawn:GetFullName() ~= name then
         error("The co-op magazine belongs to another guest or visit", 0)
     end
     local selected, actual_kind, row = equipped_guid(pawn, save)
@@ -291,7 +328,7 @@ local function project_magazine(fields, state, phase)
         error("The co-op magazine no longer matches the selected weapon", 0)
     end
     local ammo_path = fields[8]
-    if ammo_path then
+    if ammo_path and ammo_path ~= "-" then
         if not allowed_ammo(kind, ammo_path) then error("The co-op round does not match the receiver", 0) end
         if mounted_ammo_path(held) ~= ammo_path then
             local class = StaticFindObject(ammo_path)
@@ -311,6 +348,7 @@ local function project_magazine(fields, state, phase)
         end
     end
     write_magazine(held, row, rounds)
+    if #fields == 10 then project_underbarrel(fields, pawn, held, kind) end
     return "stock co-op magazine projected"
 end
 
@@ -364,10 +402,17 @@ function guest_weapon.command(fields, state, phase)
     local fixture_kind = fields[5] == "smg-standard-full" and "smg-standard" or fields[5]
     local seed_profile = action == "seed" and #fields == 5 and fixtures and headless
         and (pry_tool_paths[fixture_kind] or weapon_profiles.seeds[fixture_kind] or flare_fixture_paths[fixture_kind])
-    local shot_view = action == "fire" and #fields == 5 and require("guest_shot_view").parse(fields[5])
+    local view = action == "fire" and #fields == 5 and fields[5]
+    local underbarrel = (view and view:sub(1, 5) == "loki:") or (action == "reload" and fields[5] == "loki")
+    local shot_view = view and require("guest_shot_view").parse(underbarrel and view:sub(6) or view)
+    local underbarrel_reload = underbarrel and action == "reload" and #fields == 5
+    if underbarrel then
+        invoke = action == "fire" and SilverfishFireNativeGuestUnderbarrel or SilverfishReloadNativeGuestUnderbarrel
+        inspect = SilverfishInspectNativeGuestUnderbarrel
+    end
     local equipped_target = action == "reload" and guid == "equipped"
     observation = nil
-    if not enabled or (#fields ~= 4 and not seed_profile and not shot_view) or phase ~= "hosting"
+    if not enabled or (#fields ~= 4 and not seed_profile and not shot_view and not underbarrel_reload) or phase ~= "hosting"
         or (not equipped_target and (not guid or #guid ~= 32 or guid:find("[^0-9A-F]"))) then
         error("A native weapon operation needs an exact guest and item GUID", 0)
     end
@@ -402,7 +447,7 @@ function guest_weapon.command(fields, state, phase)
     local spratt = spratt_fixture and state.map == spratt_fixture.map
     local shot_fixture = spratt and spratt_fixture or flayer_fixture
     local shot_tag = spratt and "spratt" or "flayer"
-    if action == "fire" and shot_fixture then
+    if action == "fire" and shot_fixture and not underbarrel then
         local checked
         checked, restore, refusal = pcall(shot_fixture.before_guest_fire, state, phase, name, guid)
         if not checked then
@@ -428,22 +473,25 @@ function guest_weapon.command(fields, state, phase)
     else
         ok, status, first, second, fifth, sixth = invoke(pawn_address, save_address, guid, table.unpack(arguments))
     end
-    local before, after, actor_ammo, stored_ammo, projectiles, reserve_before, reserve_after
+    local before, after, actor_ammo, stored_ammo, projectiles, reserve_before, reserve_after, ammo_class
     if action == "fire" then projectiles = fifth end
     if action == "reload" then before, after, reserve_before, reserve_after = first, second, fifth, sixth end
     if ok and (action == "inspect" or action == "select") then
         actor_ammo, stored_ammo = first, second
     elseif ok and action ~= "seed-ammo" then
         if action == "fire" then before, after = first, second end
-        local verified, state_name, actor, stored = inspect(pawn_address, save_address, guid)
+        local verified, state_name, actor, stored, mounted_ammo = inspect(pawn_address, save_address, guid)
         if verified then
             state_name, actor_ammo, stored_ammo = tostring(state_name), actor, stored
             status = state_name
+            if underbarrel then ammo_class = mounted_ammo end
         else
             ok, status = false, "mutation_unverified_stock_readback"
         end
     end
-    if ok and action == "reload" then pcall(require("native_weapon_fire_view").reloaded, pawn, before) end
+    if ok and action == "reload" and not underbarrel then
+        pcall(require("native_weapon_fire_view").reloaded, pawn, before)
+    end
     if not ok and action == "fire" and status == "guest_weapon_preloaded_magazine_required"
         and first == 0 and second == 0 and projectiles == 0 then
         pcall(require("native_weapon_fire_view").dry_fired, pawn)
@@ -451,7 +499,7 @@ function guest_weapon.command(fields, state, phase)
     observation = { map = state.map, action = action, pawn = name, guid = guid,
         ok = ok == true, status = status, before = before, after = after,
         actor_ammo = actor_ammo, stored_ammo = stored_ammo, projectiles = projectiles,
-        reserve_before = reserve_before, reserve_after = reserve_after }
+        reserve_before = reserve_before, reserve_after = reserve_after, ammo_class = ammo_class }
     return "native guest weapon operation reported"
 end
 
@@ -479,7 +527,7 @@ function guest_weapon.rows(state, phase, status_row)
     end
     if not enabled or phase ~= "hosting" then return rows end
     for _, detail in ipairs(state.guests) do
-        local ok, guid, kind, rounds, mode, ammo_path = pcall(function()
+        local ok, guid, kind, rounds, mode, ammo_path, shell_count, shell_path = pcall(function()
             local pawn, save = guest_save.exact_item_context(state, phase, detail.name)
             if not pawn or not save then return end
             local id, profile, row = equipped_guid(pawn, save, state.world, state.map)
@@ -489,20 +537,25 @@ function guest_weapon.rows(state, phase, status_row)
                 local mode = weapon_profiles.held_fire[profile] and held.HasSelectFire == true
                     and saved_mode(save, id, row[class_field])
                 local path = weapon_profiles.ammo_options[profile] and mounted_ammo_path(held)
-                return id, profile, amount, mode, allowed_ammo(profile, path) and path or nil
+                local child = loki_child(held, pawn, profile)
+                local shell = child and mounted_ammo_path(child)
+                local count = allowed_ammo("bolt-action-shotgun-loki", shell) and child.Ammo
+                return id, profile, amount, mode, allowed_ammo(profile, path) and path or nil,
+                    count or nil, count and shell or nil
             end
             return id, profile
         end)
         if ok and guid and kind then
+            local shell = shell_count and {shell_count, shell_path} or {}
             rows[#rows + 1] = status_row("native-guest-equipped-weapon", detail.name, guid, kind,
-                rounds or "-", mode or "-", ammo_path or "-")
+                rounds or "-", mode or "-", ammo_path or "-", table.unpack(shell))
         end
     end
     local row = observation
     if not row or row.map ~= state.map then return rows end
     rows[#rows + 1] = status_row("native-guest-weapon", row.map, row.action, row.pawn, row.guid, row.ok and 1 or 0,
         row.status, row.before or "-", row.after or "-", row.actor_ammo or "-", row.stored_ammo or "-",
-        row.projectiles or "-", row.reserve_before or "-", row.reserve_after or "-")
+        row.projectiles or "-", row.reserve_before or "-", row.reserve_after or "-", row.ammo_class or "-")
     return rows
 end
 

@@ -81,6 +81,7 @@ class Firearm:
     blueprint: str
     headless_seed: bool = False
     magazine: Magazine | None = None
+    underbarrel_mount: str | None = None
 
     @property
     def path(self) -> str:
@@ -152,6 +153,16 @@ ORDINARY_WEAPONS = (
     ("dmr-suppressed", "Wep_Suppressed_DMR", 16, 1, 0.2, THIRTY_06_FMJ),
 )
 
+LOKI_RECEIVERS = (
+    Firearm("bolt-action-shotgun-loki", "Wep_BoltAction_Shotgun_Loki", True,
+            Magazine(4, 1, 1.3, True, TWELVE_GAUGE_BUCK, reload_first_stack=True, action_on_release=True), "ChildActor1"),
+    Firearm("hcr-loki", "Wep_HCR_Loki", True,
+            Magazine(20, 0, 0.1, True, THIRTY_06_FMJ, reload_first_stack=True), "UnderBarrel_Loki_BP"),
+    Firearm("ar-08", "Wep_AR_08", True,
+            Magazine(30, 4, 0.08, True, FIVE_SIX_FMJ, reload_first_stack=True), "UnderBarrel_Loki_BP"),
+)
+
+
 FIREARMS = (
     Firearm("smg", "Wep_SMG_UBGL"),
     Firearm("smg-standard", "Wep_SMG_01", True, Magazine(30, 0, 0.075)),
@@ -195,6 +206,7 @@ FIREARMS = (
             Magazine(17, 1, 0.06, True, FIVE_SEVEN_AP, reload_first_stack=True)),
     Firearm("black-fox", "Wep_Pistol_Fennec_02", True,
             Magazine(17, 1, 0.06, True, FIVE_SEVEN_AP, reload_first_stack=True)),
+    *LOKI_RECEIVERS,
     *(Firearm(kind, blueprint, True, Magazine(capacity, burst, rate, True, ammo, reload_first_stack=True))
       for kind, blueprint, capacity, burst, rate, ammo in ORDINARY_WEAPONS),
 )

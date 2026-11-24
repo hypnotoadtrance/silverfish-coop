@@ -1,3 +1,35 @@
+    if fields[2] == "fixture-loki-guest" and headless
+        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        assert(phase == "connected" and state.map == "/Game/Classes/Maps/Maps_OverWorld/Observitory_P")
+        local pawn = assert(state.local_pawn.pawn)
+        local guid, kind = equipped_guid(pawn, pawn.Save)
+        if guid ~= fields[3] then return "waiting" end
+        local held = pawn.EquipedItem
+        local child = loki_child(held, pawn, kind)
+        if not child then return "waiting" end
+        if fields[4] == "toggle" then
+            held:ToggleMode(true)
+            held:ToggleMode(false)
+        end
+        return ("%d,%d,%s"):format(held.Ammo, child.Ammo, same(child, held.InputIntercept) and "loki" or "primary")
+    end
+    if fields[2] == "fixture-loki-reserve" and headless
+        and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
+        assert(phase == "hosting" and state.map == "/Game/Classes/Maps/Maps_OverWorld/Observitory_P")
+        local pawn, save = guest_save.exact_item_context(state, phase, fields[3])
+        assert(pawn and save and not same(save, state.world.OwningGameInstance.SaveSlot_Ref))
+        local path = weapon_profiles.ammo["bolt-action-shotgun-loki"]
+        local class = StaticFindObject(path)
+        if not class or not class:IsValid() then LoadAsset(path); class = StaticFindObject(path) end
+        local converter = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C")
+        local converted = {}
+        converter:ItemActorToStruct(class:GetCDO(), pawn, converted)
+        local row = converted.Item or converted
+        assert(same(row[class_field], class))
+        row[ammo_field] = 1
+        save.PlayerBackpack[save.PlayerBackpack:GetArrayNum() + 1] = row
+        return "seeded"
+    end
     if fields[2] == "fixture-loki-stock" and headless
         and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
         assert(phase == "hosting" and state.map == "/Game/Classes/Maps/Maps_OverWorld/Observitory_P")
