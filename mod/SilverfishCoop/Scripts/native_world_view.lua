@@ -30,6 +30,7 @@ local weather_fields = {
 
 local profiles = require("authored_world_view")
 local weather_view = require("native_weather_view")
+local lightning_host = require("native_weather_lightning_host")
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -405,6 +406,7 @@ end
 
 function view.sync(state, phase)
     pcall(weather_view.sync, state, phase)
+    pcall(lightning_host.sync, state, phase)
     if not lease then return true end
     local ok, current = pcall(lease_current, state, phase)
     if not ok or not current then return view.clear() end
@@ -506,8 +508,10 @@ function view.status(state, phase)
     return ok and report or nil
 end
 
-function view.siren_rows(state, phase, row)
-    return weather_view.siren_rows(state, phase, row)
+function view.weather_cue_rows(state, phase, row)
+    local rows = weather_view.siren_rows(state, phase, row)
+    for _, strike in ipairs(lightning_host.rows(state, phase, row)) do rows[#rows + 1] = strike end
+    return rows
 end
 
 function view.play_siren(state, phase, epoch, sequence, source, cue, remaining)
