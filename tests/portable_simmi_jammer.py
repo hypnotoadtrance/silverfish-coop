@@ -58,6 +58,7 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
             "native_guest_primary_scope", "native_guest_equipped_weapons",
         )}
         observed["quests"] = frame.get("gameplay", {}).get("native_quests")
+        observed["jammer_pose"] = game.get(POSE)
         raise RuntimeError(f"{run.parent.name} did not reach the expected resident state: {observed}")
 
     async def quest_on(seat, spec, step):
@@ -174,6 +175,10 @@ async def verify_stock_simmi_jammers(host, guest, pawn, probe):
             aim = aimed[f"{spec.key}_aim"]
             assert (aim["map"], aim["pawn"], aim["jammer"], aim["guid"]) == (
                 spec.objective_map, pawn, spec.jammer, guid), aim
+            await movement_arrived(guest, aimed["pawns"]["guest"]["location"])
+            async with asyncio.timeout(5):
+                while await command(guest, "aimjammer") != "the guest crosshair is on the jammer":
+                    await asyncio.sleep(.1)
             started = time.time()
             sequence = await press_primary()
             async with asyncio.timeout(7):

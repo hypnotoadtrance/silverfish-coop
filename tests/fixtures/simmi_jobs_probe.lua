@@ -217,6 +217,40 @@ local function select_pistol(pawn)
     return "waiting"
 end
 
+local function aim_jammer(state)
+    local leaf = state.map:match("/(CrossRoads_P)$") or state.map:match("/(Lake_01_P)$")
+    assert(leaf, "Scoped jammer map required")
+    local actor = StaticFindObject(state.map .. "." .. leaf .. ":PersistentLevel.SignalJammer_BP_C_1")
+    local pawn = state.local_pawn.pawn
+    local weapon, camera = pawn.EquipedItem, pawn.Camera
+    if not valid(actor) or not same(actor:GetWorld(), state.world) or not valid(actor.Capsule)
+        or not exact(weapon, pistol_class) or not valid(camera) then return "waiting" end
+    local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local eye, center = camera:K2_GetComponentLocation(), actor.Capsule:K2_GetComponentLocation()
+    local color, ignored = {R=0, G=0, B=0, A=0}, {pawn, weapon}
+    for _, height in ipairs({0, 8, -8, 16, -16, 25}) do
+        local dx, dy, dz = center.X-eye.X, center.Y-eye.Y, center.Z+height-eye.Z
+        local distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+        if distance > 1 and distance < 2000 then
+            local scale = (distance + 60) / distance
+            local stop = {X=eye.X+dx*scale, Y=eye.Y+dy*scale, Z=eye.Z+dz*scale}
+            local out = {}
+            if trace:LineTraceSingle(pawn, eye, stop, 0, false, ignored, 0, out, true, color, color, 0) then
+                local hit = out.OutHit or out
+                local component = hit.Component and hit.Component:Get()
+                if valid(component) and same(component:GetOwner(), actor) then
+                    local rotation = {Pitch=math.deg(math.atan(dz, math.sqrt(dx*dx + dy*dy))),
+                        Yaw=math.deg(math.atan(dy, dx)), Roll=0}
+                    state.controller:SetControlRotation(rotation)
+                    camera:K2_SetWorldRotation(rotation, false, {}, true)
+                    return "the guest crosshair is on the jammer"
+                end
+            end
+        end
+    end
+    return "waiting"
+end
+
 local function sync(state, phase)
     if (phase ~= "hosting" and phase ~= "connected") or not state.local_pawn then return end
     local file = io.open(bridge .. (portable and "/simmi-jobs-command.tsv" or "/simmi-jobs-probe"), "rb")
@@ -233,6 +267,7 @@ local function sync(state, phase)
         if portable and phase == "connected" and operation == "selectpistol" then
             return select_pistol(state.local_pawn.pawn)
         end
+        if portable and phase == "connected" and operation == "aimjammer" then return aim_jammer(state) end
         assert(state.map == area, "Simmi's stock board is only available in Observatory")
         if portable and phase == "hosting" then
             if operation == "seedpistol" then return seed_pistol(state) end
