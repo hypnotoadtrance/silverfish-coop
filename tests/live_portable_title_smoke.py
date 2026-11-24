@@ -318,6 +318,7 @@ def warehouse_board_overlay(game: Path):
     return portable_script_overlay(game, "native_destructibles.lua", add_board_fixture)
 
 
+@contextmanager
 def stock_bottle_overlay(game: Path):
     fixture = (Path(__file__).with_name("fixtures") / "portable_stock_bottle_probe.lua").read_text(encoding="utf-8")
 
@@ -325,9 +326,34 @@ def stock_bottle_overlay(game: Path):
         marker = "function effects.command(args, state, phase, animate_vortex)\n"
         if script.count(marker) != 1:
             raise ValueError("The replica lacks the anomaly cue command")
-        return script.replace(marker, marker + fixture, 1)
+        return script.replace(marker, "local bottle_contact_watch, bottle_contact_hook\n" + marker + fixture, 1)
 
-    return portable_script_overlay(game, "native_anomaly_effects.lua", add_probe)
+    def add_grip_probe(script):
+        marker = "function carry.command(fields, current, seat)\n"
+        probe = '''    if fields[2] == "fixture-stock-bottle-grip" and headless and seat == "hosting" then
+        local actor = StaticFindObject(fields[3])
+        assert(prop_mesh(actor) and actor:HasAuthority() and actor.BeingHeld
+            and actor:GetClass():GetFName():ToString() == "Prop_Bottle_Booze01_C")
+        for _, entry in pairs(holdings) do
+            if same(entry.actor, actor) and held(entry.pawn, actor, entry.grip) then
+                local target, rotation = {}, {}
+                entry.grip:GetTargetLocationAndRotation(target, rotation)
+                local desired = entry.target
+                return ("sample=%s receivedZ=%s targetZ=%.1f"):format(tostring(entry.sample),
+                    tostring(desired and desired.Z), target.Z)
+            end
+        end
+        return "no authoritative bottle grip"
+    end
+'''
+        if script.count(marker) != 1:
+            raise ValueError("The replica lacks the stock prop carry command")
+        return script.replace(marker, marker + probe, 1)
+
+    with ExitStack() as overlays:
+        yield {name: overlays.enter_context(portable_script_overlay(game, name, patch)) for name, patch in (
+            ("native_anomaly_effects.lua", add_probe), ("native_prop_carry.lua", add_grip_probe),
+        )}
 
 
 def roaming_barter_overlay(game: Path):
@@ -1754,8 +1780,9 @@ async def verify_stock_bottle(host: Seat, guest: Seat, pawn: str) -> dict:
                 return cues[0]
             if asyncio.get_running_loop().time() >= deadline:
                 host_frame = await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("map") == dock)
+                contacts = await operate(host, "contact-read", path) if point is None else None
                 raise AssertionError((path, host_after, guest_after, cues,
-                                      host_frame["game"].get(native_anomaly_effects.KEY, [])))
+                                      host_frame["game"].get(native_anomaly_effects.KEY, []), contacts))
             await asyncio.sleep(.12)
 
     path = await operate(host, "find")
@@ -1783,15 +1810,30 @@ async def verify_stock_bottle(host: Seat, guest: Seat, pawn: str) -> dict:
     assert grabbed["ok"], grabbed
     await wait_resident_status(host_run, lambda frame: (edge := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
                                and edge["edge"] == "grab" and edge["actor"] == actor_name)
-    await operate(guest, "aim-down", thrown)
+    height_before = float(await operate(host, "height", thrown))
+    assert await operate(guest, "lift", thrown) == "guest lifted the bottle"
+    height = height_before
+    try:
+        async with asyncio.timeout(5):
+            while (height := float(await operate(host, "height", thrown))) < height_before + 45:
+                await asyncio.sleep(.05)
+    except TimeoutError as error:
+        authority = await host.bridge.command("fixture-stock-bottle-grip", thrown)
+        raise AssertionError({"height_cm": [height_before, height], "authority": authority["ack"]["message"],
+                              "guest_grip": await operate(guest, "guest-grip", thrown)}) from error
+    assert await operate(host, "contact-watch", thrown) == "armed"
     started = time.time()
-    released = await submit(guest_run, native_prop_carry.FIXTURE, target="throw")
-    assert released["ok"], released
+    assert await operate(guest, "throw-down", thrown) == "guest threw at the floor"
+    release = await wait_resident_status(host_run, lambda frame: (edge := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
+                                         and edge["edge"] == "throw" and edge["actor"] == actor_name)
     throw_cue = await wait_broken(thrown, started)
+    contacts = await operate(host, "contact-read", thrown)
     assert impact["serial"] != throw_cue["serial"]
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_bottle": {"host_impact": {"actor": path, "guest_role": guest_before, "break_cue": impact},
-                             "guest_throw": {"actor": thrown, "break_cue": throw_cue},
+                             "guest_throw": {"actor": thrown, "break_cue": throw_cue, "stock_contacts": contacts,
+                                             "host_release": release["game"][native_prop_carry.PROOF],
+                                             "lift_cm": height - height_before},
                              "checkpoint_unchanged": True}}
 
 

@@ -25,12 +25,66 @@
         local path = assert(args[4])
         assert(path:sub(1, #dock + 1) == dock .. ".")
         local actor = StaticFindObject(path)
+        if mode == "contact-read" and phase == "hosting" then
+            local watch = assert(bottle_contact_watch)
+            assert(watch.path == path)
+            bottle_contact_watch = nil
+            local parts = watch.contacts
+            if watch.held_hits > 0 then
+                parts[#parts + 1] = ("held hits=%d peak impulse=%.1f"):format(watch.held_hits, watch.held_impulse)
+            end
+            if current(actor) then
+                local mesh = actor.PropMesh
+                local location = mesh:K2_GetComponentLocation()
+                parts[#parts + 1] = ("rest=(%.1f,%.1f,%.1f) health=%s awake=%s"):format(
+                    location.X, location.Y, location.Z, tostring(actor.Health), tostring(mesh:IsAnyRigidBodyAwake()))
+            end
+            return table.concat(parts, ";")
+        end
         if mode == "inspect" then
             if not current(actor) or actor:GetLocalRole() == 0 then return "absent" end
             return ("%d,%s"):format(actor:GetLocalRole(), tostring(actor.Broken))
         end
         assert(current(actor) and not actor.Broken and valid(actor.PropMesh))
         local point = actor.PropMesh:K2_GetComponentLocation()
+        if mode == "height" and phase == "hosting" then return tostring(point.Z) end
+        if mode == "guest-grip" and phase == "connected" then
+            local eye, aim = pawn.Camera:K2_GetComponentLocation(), pawn.Camera:GetForwardVector()
+            local target, rotation = {}, {}
+            pawn.PhysicsHandle:GetTargetLocationAndRotation(target, rotation)
+            return ("rootZ=%.1f eyeZ=%.1f aimZ=%.3f targetZ=%.1f held=%s"):format(point.Z, eye.Z, aim.Z, target.Z,
+                tostring(valid(pawn.HeldObject) and pawn.HeldObject:GetAddress() == actor:GetAddress()))
+        end
+        if mode == "contact-watch" and phase == "hosting" and actor:HasAuthority() then
+            bottle_contact_watch = {path = path, address = actor:GetAddress(), contacts = {}, held_hits = 0, held_impulse = 0}
+            if not bottle_contact_hook then
+                bottle_contact_hook = RegisterHook("/Game/Classes/Actors/PhysicsProp_Master_BP.PhysicsProp_Master_BP_C:" ..
+                    "BndEvt__PhysicsProp_Master_BP_PropMesh_K2Node_ComponentBoundEvent_0_ComponentHitSignature__DelegateSignature",
+                    function(context, _, other, _, impulse)
+                        local watch = bottle_contact_watch
+                        local current_actor = watch and context:get()
+                        if not watch or not valid(current_actor) or current_actor:GetAddress() ~= watch.address then return end
+                        local value, surface = impulse:get(), other:get()
+                        local strength = math.sqrt(value.X^2 + value.Y^2 + value.Z^2)
+                        if not current(current_actor) then
+                            watch.contacts[#watch.contacts + 1] = ("retired on impulse=%.1f"):format(strength)
+                            return
+                        end
+                        if current_actor.BeingHeld then
+                            watch.held_hits = watch.held_hits + 1
+                            watch.held_impulse = math.max(watch.held_impulse, strength)
+                            return
+                        end
+                        if #watch.contacts >= 8 then return end
+                        local position = current_actor.PropMesh:K2_GetComponentLocation()
+                        local speed = current_actor.PropMesh:GetPhysicsLinearVelocity(FName("None", EFindName.FNAME_Find))
+                        watch.contacts[#watch.contacts + 1] = ("%s impulse=%.1f vz=%.1f at=(%.1f,%.1f,%.1f) health=%s held=%s"):format(
+                            valid(surface) and surface:GetFName():ToString() or "none", strength,
+                            speed.Z, position.X, position.Y, position.Z, tostring(current_actor.Health), tostring(current_actor.BeingHeld))
+                    end)
+            end
+            return "armed"
+        end
         if mode == "approach" and phase == "hosting" then
             local remote
             for _, guest in ipairs(state.guests) do
@@ -65,13 +119,16 @@
             remote:K2_TeleportTo(original, facing)
             error("could not focus the stock bottle from a nearby placement")
         end
-        if mode == "aim-down" and phase == "connected" and valid(pawn.HeldObject)
+        if (mode == "lift" or mode == "throw-down") and phase == "connected" and valid(pawn.HeldObject)
             and pawn.HeldObject:GetAddress() == actor:GetAddress() then
             local aim = pawn.Controller:GetControlRotation()
-            aim = {Pitch = -67, Yaw = aim.Yaw, Roll = 0}
+            aim = {Pitch = mode == "lift" and 35 or -67, Yaw = aim.Yaw, Roll = 0}
             pawn.Controller:SetControlRotation(aim)
             pawn.Camera:K2_SetWorldRotation(aim, false, {}, true)
-            return "guest aimed at the floor"
+            if mode == "lift" then return "guest lifted the bottle" end
+            pawn:Grab_Release_Object(true, false, false)
+            assert(not valid(pawn.HeldObject), "stock throw did not release the bottle")
+            return "guest threw at the floor"
         end
         if mode == "local-break" and phase == "connected" then
             actor:PropBroken(point, pawn)

@@ -181,18 +181,10 @@ local function camera_aim(pawn)
     if finite(pitch, 89.9) and finite(yaw, 180) then return pitch, yaw end
 end
 
-local function stock_target(pawn)
-    local camera, arrow = pawn.Camera, pawn.Prop_Arrow
-    if not valid(camera) or not valid(arrow) or not same(camera:GetOwner(), pawn)
-        or not same(arrow:GetOwner(), pawn) then return end
-    local eye, forward = camera:K2_GetComponentLocation(), camera:GetForwardVector()
-    local rotation = arrow:K2_GetComponentRotation()
-    if not point(eye) or not point(forward) or not pose(rotation) then return end
-    -- HoldObject uses the pawn's horizontal heading when looking down.
-    local horizontal = forward.Z > 0 and forward or pawn:GetActorForwardVector()
-    if not point(horizontal) then return end
-    return {X = eye.X + 110 * horizontal.X, Y = eye.Y + 110 * horizontal.Y, Z = eye.Z + 110 * forward.Z},
-        {Pitch = 0, Yaw = rotation.Yaw, Roll = 0}
+local function stock_target(grip)
+    local position, rotation = {}, {}
+    grip:GetTargetLocationAndRotation(position, rotation)
+    if point(position) and pose(rotation) then return position, rotation end
 end
 
 local function emit(pawn, kind, class, position, pitch, yaw, corpse, placement, loot_id, final)
@@ -886,11 +878,12 @@ local function publish_local_pose(now)
     if not local_hold or now < (next_local_pose or 0) or type(SilverfishPublishLocalPropPose) ~= "function" then return end
     next_local_pose = now + .05
     local pawn = local_hold.pawn
+    local grip = handle(pawn)
     if not state.listening or state.server ~= true or not same(state.local_pawn and state.local_pawn.pawn, pawn)
         or pawn.Dead ~= false or not pawn:IsLocallyControlled() or pawn:HasAuthority() or players.is_downed(pawn) ~= false
-        or not held(pawn, local_hold.actor, handle(pawn), local_hold.corpse) then return end
-    local position, rotation = stock_target(pawn)
-    if point(position) and pose(rotation) then
+        or not held(pawn, local_hold.actor, grip, local_hold.corpse) then return end
+    local position, rotation = stock_target(grip)
+    if position then
         SilverfishPublishLocalPropPose(string.format("%s\t%d\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f",
             pawn:GetFullName(), local_hold.serial, position.X, position.Y, position.Z,
             rotation.Pitch, rotation.Yaw, rotation.Roll))
@@ -968,8 +961,8 @@ function carry.rows(current, seat, row)
     for _, edge in ipairs(edges) do rows[#rows + 1] = row("native-prop-carry-input", current.map, table.unpack(edge)) end
     local grip = local_hold and handle(local_hold.pawn)
     if not local_hold or not held(local_hold.pawn, local_hold.actor, grip, local_hold.corpse) then return rows end
-    local position, rotation = stock_target(local_hold.pawn)
-    if point(position) and pose(rotation) then
+    local position, rotation = stock_target(grip)
+    if position then
         rows[#rows + 1] = row("native-prop-carry-target", current.map, local_hold.serial, position.X, position.Y,
             position.Z, rotation.Pitch, rotation.Yaw, rotation.Roll)
     end
