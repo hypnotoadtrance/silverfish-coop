@@ -61,6 +61,17 @@ local preflight_op = "native-wire-quest-preflight"
 local start_op = "native-wire-quest-start"
 local approach_op = "native-wire-quest-approach"
 local last
+local missing_contact_id, missing_contact_display = "Note_Farmhouse", "Note_FarmHouse"
+
+function meet.stock_quest_id(display)
+    -- The FName pool can retain the associated package's spelling.
+    return display == missing_contact_display and missing_contact_id or display
+end
+
+function meet.stock_quest_key(id)
+    local key = FName(id, EFindName.FNAME_Find)
+    if key:GetComparisonIndex() ~= 0 and meet.stock_quest_id(key:ToString()) == id then return key end
+end
 
 local function valid(value)
     return value ~= nil and value ~= false and value:IsValid()
@@ -426,7 +437,8 @@ function meet.live_stock_board_context(state, phase, name, full_board_name, ques
     local speaker = full_board_name == simmi_jobs.board_name and simmi_jobs.speaker or nil
     return context_for(state, phase, name, false, {map = map, world_path = world,
         board_path = full_board_name:sub(#"BountyBoard_BP_C " + 1), board_name = full_board_name,
-        quest_id = quest, dynamic = true, speaker = speaker})
+        quest_id = quest, quest_display_alias = quest == missing_contact_id and missing_contact_display or nil,
+        dynamic = true, speaker = speaker})
 end
 meet.stock_board_approach = approach_board
 meet.stock_quest_table = stock_quest_table

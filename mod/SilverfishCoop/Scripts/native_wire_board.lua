@@ -423,8 +423,8 @@ local function stock_ids(raw)
     end
     local names, allowed = {}, {}
     for id in raw:gmatch("[^,]+") do
-        local key = #id <= 96 and FName(id, EFindName.FNAME_Find)
-        if not key or key:GetComparisonIndex() == 0 or key:ToString() ~= id or allowed[id] or #names >= 128 then
+        local key = #id <= 96 and stock.stock_quest_key(id)
+        if not key or allowed[id] or #names >= 128 then
             error("wire_board_catalog_invalid", 0)
         end
         names[#names + 1] = key
@@ -440,7 +440,7 @@ local function read_menu_rows(menu, list, class, allowed, expected)
     for index = 0, expected - 1 do
         local row = list:GetChildAt(index)
         if not exact(row, class) or not same(row.QuestLog_MenuRef, menu) then return false end
-        local id = row.Quest_IDTag:ToString()
+        local id = stock.stock_quest_id(row.Quest_IDTag:ToString())
         if not allowed[id] or seen[id] then return false end
         seen[id] = true
     end
@@ -453,9 +453,9 @@ local function show_stock_menu(current, sequence, offers_arg, ready_arg, now, ex
     local table_data = require("native_wire_quest").stock_quest_table()
     local templates = {}
     for index, key in ipairs(offer_names) do
-        local id = key:ToString()
-        local row = table_data:FindRow(id)
-        if not row or ready[id] then error("wire_board_catalog_row_missing", 0) end
+        local display = key:ToString()
+        local row = table_data:FindRow(display)
+        if not row or ready[stock.stock_quest_id(display)] then error("wire_board_catalog_row_missing", 0) end
         templates[index] = row
     end
 
@@ -497,6 +497,7 @@ local function drain_stock(current, now)
     if stock_session and (stock_session.expires <= now or not same(menu, stock_session.menu)) then stock_session = nil end
     if not menu or type(SilverfishTakeNativeStockBoardAction) ~= "function" then return end
     local sequence, kind, quest = SilverfishTakeNativeStockBoardAction(current.pawn:GetAddress())
+    quest = stock.stock_quest_id(quest)
     sequence = math.tointeger(sequence)
     if not sequence or sequence <= last_sequence or sequence >= max_sequence then return end
     last_sequence = sequence
@@ -532,13 +533,15 @@ local function stock_fixture(current, fields, now)
     end
     if not menu then error("wire_board_stock_fixture_menu_missing", 0) end
     if verb == "start" then
-        local id = FName(quest, EFindName.FNAME_Find)
-        local offer = stock.stock_row(current.board.Contracts, id)
+        local id = stock.stock_quest_key(quest)
+        local offer = id and stock.stock_row(current.board.Contracts, id)
         if not offer then error("wire_board_stock_fixture_offer_missing", 0) end
         menu:ShowDetails_Quest(offer, id)
         local details = menu.VerticalBox_Details:GetChildAt(0)
         if not exact(details, quest_details_path) or not same(details.QuestLog_MenuRef, menu)
-            or details.Quest_ID:ToString() ~= quest then error("wire_board_stock_fixture_details_missing", 0) end
+            or stock.stock_quest_id(details.Quest_ID:ToString()) ~= quest then
+            error("wire_board_stock_fixture_details_missing", 0)
+        end
         details:BndEvt__Quest_DetailsWindow_Widget_Button_Clear_Accept_K2Node_ComponentBoundEvent_1_Pressed__DelegateSignature()
     else
         if not projected then menu:FillInCompletedQuests() end
@@ -548,7 +551,7 @@ local function stock_fixture(current, fields, now)
         for index = 0, math.min(count, 64) - 1 do
             local entry = list:GetChildAt(index)
             if exact(entry, quest_turnin_path) and same(entry.QuestLog_MenuRef, menu)
-                and entry.Quest_IDTag:ToString() == quest then selected = entry; break end
+                and stock.stock_quest_id(entry.Quest_IDTag:ToString()) == quest then selected = entry; break end
         end
         if not selected then error("wire_board_stock_fixture_redemption_missing", 0) end
         selected:BndEvt__Quest_TurnIn_Widget_Button_K2Node_ComponentBoundEvent_2_OnButtonReleasedEvent__DelegateSignature()

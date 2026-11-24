@@ -1,4 +1,7 @@
 package.path = "mod/SilverfishCoop/Scripts/?.lua;" .. package.path
+package.loaded.guest_save = {}
+package.loaded.players = {}
+local stock_keys = require("native_wire_quest")
 
 local function ref(value) return {get = function() return value end} end
 local function array(rows)
@@ -82,6 +85,7 @@ board.Configure_Stock = function(self)
 end
 
 package.loaded.native_wire_quest = {
+    stock_quest_id = stock_keys.stock_quest_id,
     live_stock_board_context = function(state, phase, pawn, board_name, key)
         assert(state.world == world and phase == "hosting" and pawn == "Guest" and board_name == "Board")
         return {key = key, world = world, board = board, save = store, receiving_save = bag, host = player,
@@ -205,4 +209,23 @@ action("turnin", "inspect", kill)
 assert(proof()[18] == "-" and proof()[16] == 3000 and proof()[9] == 2)
 action("turnin", "apply", kill, "-")
 assert(proof()[13] == 3818 and host_flags.BountyDone == 1 and host_flags.Rep_Freelancer == 42)
+
+local missing, display = "Note_Farmhouse", "Note_FarmHouse"
+local configure = board.Configure_Stock
+local missing_recipe = quest(2, class, 450)
+missing_recipe[items] = array({class}) -- A specialist recipe cannot use the ordinary turn-in path.
+board.Configure_Stock = function(self)
+    configure(self)
+    if not store.ActiveQuests[display] then self.Contracts[display] = missing_recipe end
+end
+assert(catalog(missing)[7] == missing)
+store.ActiveQuests[display] = missing_recipe
+assert(catalog()[8] == "-")
+assert(catalog(missing)[7] == "-" and catalog(missing)[8] == missing)
+function FName(text)
+    return {GetComparisonIndex = function() return 1 end,
+        ToString = function() return text == missing and display or text end}
+end
+assert(stock_keys.stock_quest_key(missing):ToString() == display)
+assert(stock_keys.stock_quest_id("Other_Quest") == "Other_Quest")
 print("Stock board live-row qualification and settlement passed")

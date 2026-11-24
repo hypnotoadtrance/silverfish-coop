@@ -42,8 +42,9 @@ local function board_accepts(board, key, row)
     local redeemable = board.RedeemableQuests
     local size = len(redeemable)
     if not int(size) or size < 0 or size > 128 then refuse("redeemable_list_unqualified") end
+    local id = wire.stock_quest_id(name(key))
     for index = 1, size do
-        if name(redeemable[index]) == name(key) then return true end
+        if wire.stock_quest_id(name(redeemable[index])) == id then return true end
     end
     if type(board.BountyBoard_RedeemableHere) ~= "boolean" or type(board.AcceptAllGlobalContracts) ~= "boolean"
         or not int(board.TurnIn_ID) then refuse("redeemable_scope_unqualified") end
@@ -203,7 +204,7 @@ local function catalog(fields, state, phase)
     if not active or not contracts or #active > 128 or #contracts > 128 then refuse("catalog_extent") end
     local function descriptor(raw_key, raw_row, target, accepting)
         local key, row = raw_key:get(), raw_row:get()
-        local id = name(key)
+        local id = wire.stock_quest_id(name(key))
         if type(id) ~= "string" or #id > 96 or not id:match("^[A-Za-z0-9_]+$") then return end
         if accepting then
             -- Configure_Stock has already checked the board's eligibility rules.
