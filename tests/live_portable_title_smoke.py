@@ -749,7 +749,8 @@ async def verify_resident_pistol(host: Seat, guest: Seat, *, guest_combat: bool 
     shot = await input_result("native_guest_primary_input", capture["sequence"])
     assert (shot["guid"], shot["before"], shot["after"], shot["projectiles"]) == (guest_guid, 1, 0, 1), shot
     if rusty:
-        assert await command(host, "retirement-read") == "retired"
+        retirement = await command(host, "retirement-read")
+        assert retirement == "retired", retirement
     expected_publication = None
     if memory_queue:
         expected_publication = {key: capture[key] for key in ("map", "pawn", "guid", "sequence")}

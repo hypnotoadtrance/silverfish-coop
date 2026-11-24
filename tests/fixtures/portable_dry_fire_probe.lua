@@ -94,9 +94,9 @@ local function arm()
         if not valid(actor) or not actor:IsA(retire_projectile) or not actor:HasAuthority()
             or not same(actor:GetWorld(), local_pawn:GetWorld())
             or not same(actor:GetOwner(), peer) or not same(actor.Instigator, peer) then return end
+        projectile_retired = {address = actor:GetAddress(), class = actor:GetClass()}
         retire_projectile = nil
         actor:K2_DestroyActor()
-        projectile_retired = not valid(actor) or actor:IsActorBeingDestroyed()
     end)
     RegisterHook("/Game/Classes/Weapons/Weapon_Master_BP.Weapon_Master_BP_C:SpawnProjectile", function(context)
         if not observing() then return end
@@ -272,7 +272,16 @@ local function run(action, argument)
         projectile_retired = nil
         return "retirement-armed"
     end
-    if action == "retirement-read" then return projectile_retired and "retired" or "waiting" end
+    if action == "retirement-read" then
+        if not projectile_retired then return "no birth captured" end
+        local active = {}
+        asset("/Script/Engine.Default__GameplayStatics"):GetAllActorsOfClass(
+            local_pawn:GetWorld(), projectile_retired.class, active)
+        for _, actor in ipairs(active) do
+            if valid(actor) and actor:GetAddress() == projectile_retired.address then return "still in world" end
+        end
+        return "retired"
+    end
     if action == "seed-local" then return seed(local_pawn, 0) end
     if action == "seed-peer" then return seed(peer, 1) end
     if action == "projected" then return identify(local_pawn.Save.PlayerEquipment[slot]) end
