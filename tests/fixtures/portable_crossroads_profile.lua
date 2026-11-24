@@ -3,14 +3,12 @@ local prefix = bridge .. "/crossroads-profile-"
 local capture, complete, previous, last
 local window = 3
 
-local function record(rows, start, stop)
-    rows[#rows + 1] = (stop - start) * 1000
-end
-
 local function measured(active, tag, started, ...)
     local rows = active.rows[tag]
     if not rows then rows = {}; active.rows[tag] = rows end
-    record(rows, started, os.clock())
+    local duration = (os.clock() - started) * 1000
+    rows[#rows + 1] = duration
+    if duration >= 1 then active.calls[tag] = (active.calls[tag] or 0) + duration end
     return ...
 end
 
@@ -30,14 +28,29 @@ local function result()
             samples[count], sum)
     end
     table.sort(rows)
-    return ("%.5f"):format(complete.elapsed) .. table.concat(rows)
+    local peak = {"!%.4f"}
+    peak[1] = peak[1]:format(complete.peak)
+    for tag, duration in pairs(complete.peak_calls) do
+        peak[#peak + 1] = (";%s,%.4f"):format(tag, duration)
+    end
+    return ("%.5f"):format(complete.elapsed) .. table.concat(rows) .. table.concat(peak)
 end
 
 LoopInGameThreadWithDelay(1, function()
     local active = capture
     if not active then return end
     local now = os.clock()
-    if previous then record(active.rows.frame, previous, now) end
+    if previous then
+        local duration = (now - previous) * 1000
+        local frames = active.rows.frame
+        frames[#frames + 1] = duration
+        if duration > active.peak then
+            active.peak, active.peak_calls = duration, active.calls
+            active.calls = {}
+        else
+            for tag in pairs(active.calls) do active.calls[tag] = nil end
+        end
+    end
     previous = now
     if now >= active.deadline then
         active.elapsed = now - active.started
@@ -57,7 +70,9 @@ LoopInGameThreadWithDelay(50, function()
     local message
     if action == "arm" and not capture then
         local now = os.clock()
-        capture, previous, complete = {rows = {frame = {}}, started = now, deadline = now + window}, nil, nil
+        capture, previous, complete = {
+            rows = {frame = {}}, calls = {}, peak = 0, peak_calls = {}, started = now, deadline = now + window,
+        }, nil, nil
         message = "armed"
     elseif action == "read" then
         message = complete and result() or "sampling"

@@ -59,6 +59,7 @@ from portable_weather_travel import verify_weather_travel
 from portable_lightning import verify_stock_lightning
 from portable_storm import StockStormTrial
 from portable_stock_shovel import verify_stock_shovel, verify_stock_shovel_reconnect
+from portable_mushrooms import verify_stock_mushrooms
 from portable_placed_item import placed_item_overlay, verify_stock_placed_item
 from portable_world_view_receipt import patch_world_view_receipts, verify_world_view_receipt
 from tools.silverfish.title_session import STATUS_FILE as TITLE_STATUS_FILE
@@ -4617,7 +4618,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_melee_family: bool = False, stock_melee_edges: bool = False,
                  stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False,
                  stock_roaming_barter: bool = False, stock_critters: bool = False, stock_placed_item: bool = False,
-                 stock_eye_stacks: bool = False, stock_lingering_teleport: bool = False, stock_acid_pool: bool = False,
+                 stock_mushrooms: bool = False, stock_eye_stacks: bool = False, stock_lingering_teleport: bool = False, stock_acid_pool: bool = False,
                  stock_npc_rivalry: bool = False, stock_throwables: str | None = None,
                  memory_status: bool = False, stock_prop_grip: bool = False,
                  stock_unequip: bool = False, stock_host_prop_observer: bool = False, resident_weapon_cues: bool = False,
@@ -4739,6 +4740,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_lingering_teleport, "crossroads" if crossroads_profile else "crossroads_anomaly", "stock_lingering_teleport",
          lambda host, guest, pawn: verify_stock_lingering_teleport(host, guest, pawn, portable_probe_command)),
         (stock_placed_item, "crossroads", "stock_placed_item", verify_stock_placed_item),
+        (stock_mushrooms, "crossroads", "stock_mushrooms", verify_stock_mushrooms),
         (stock_acid_pool, "lab_east_wing_acid", "stock_acid_pool",
          lambda host, guest, _pawn: verify_acid_pool(host, guest, portable_probe_command)),
         (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_switch", verify_warehouse_switch),
@@ -4865,7 +4867,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                      fixture="portable_npc_override_probe.lua"))
         if (tutorial_dock_combat or tutorial_dock_melee or stock_bandage_revisit or stock_shovel or stock_simmi_jammers or stock_weather_travel or stock_lightning
                 or stock_warehouse_switch or stock_warehouse_board or stock_bottle or stock_critters or stock_placed_item
-                or stock_eye_stacks or stock_lingering_teleport or stock_acid_pool):
+                or stock_eye_stacks or stock_lingering_teleport or stock_acid_pool or stock_mushrooms):
             overlay_key = ("weather_zone_overlays" if stock_weather_travel or stock_lightning else
                            "jammer_zone_overlays" if stock_simmi_jammers else
                            "acid_pool_zone_overlays" if stock_acid_pool else "dock_zone_overlays")
@@ -5393,6 +5395,8 @@ if __name__ == "__main__":
                         help="verify one stock lightning strike and thunder across a private Crossroads pair")
     parser.add_argument("--stock-storm-ambience", action="store_true",
                         help="verify active stock storms across fresh join and reconnect in one private pair")
+    parser.add_argument("--stock-mushrooms", action="store_true",
+                        help="verify both players harvest identified stock Crossroads mushrooms in one campaign")
     parser.add_argument("--stock-placed-item", action="store_true",
                         help="verify one placed Crossroads item's stock carry, drop, and shared pickup")
     parser.add_argument("--stock-melee-family", action="store_true",
@@ -5484,7 +5488,7 @@ if __name__ == "__main__":
                               "stock_weather_travel", "stock_lightning",
                               "stock_storm_ambience",
                               "stock_melee_family", "stock_melee_edges", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
-                              "stock_roaming_barter", "stock_critters", "stock_placed_item", "stock_throwables", "stock_eye_stacks",
+                              "stock_roaming_barter", "stock_critters", "stock_placed_item", "stock_mushrooms", "stock_throwables", "stock_eye_stacks",
                               "stock_lingering_teleport", "stock_light_ar", "stock_acid_pool"}
     if args.resident_held_queue and not args.resident_weapon_cues:
         parser.error("Use --resident-held-queue with --resident-weapon-cues")
@@ -5524,7 +5528,7 @@ if __name__ == "__main__":
             args.stock_storm_ambience,
             args.stock_melee_family, args.stock_melee_edges, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
             args.stock_roaming_barter, args.stock_critters, args.stock_placed_item, args.stock_throwables, args.stock_eye_stacks,
-            args.stock_lingering_teleport, args.stock_acid_pool)) and (
+            args.stock_lingering_teleport, args.stock_acid_pool, args.stock_mushrooms)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
                 value is True for key, value in vars(args).items() if key not in resident_check_options)):
         parser.error("Run the resident gameplay checks without other gameplay fixtures")
@@ -5580,7 +5584,7 @@ if __name__ == "__main__":
                        stock_warehouse_switch=args.stock_warehouse_switch,
                        stock_warehouse_board=args.stock_warehouse_board, stock_bottle=args.stock_bottle,
                        stock_roaming_barter=args.stock_roaming_barter, stock_critters=args.stock_critters,
-                       stock_placed_item=args.stock_placed_item,
+                       stock_placed_item=args.stock_placed_item, stock_mushrooms=args.stock_mushrooms,
                        stock_eye_stacks=args.stock_eye_stacks, stock_lingering_teleport=args.stock_lingering_teleport,
                        stock_acid_pool=args.stock_acid_pool,
                        stock_throwables=args.stock_throwables,

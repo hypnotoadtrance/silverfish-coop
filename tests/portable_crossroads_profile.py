@@ -19,23 +19,31 @@ def instrument_profile(source):
     wrapper = "status_publication.profile.call"
     rest, protected = re.subn(r"\bpcall\((" + names + r"|tick)(?=[,)])",
                               lambda m: 'pcall(' + wrapper + ', "' + m[1] + '", ' + m[1], rest)
-    rest, direct = re.subn(r"\b(" + names + r"|inspect|write_status)\((?=[^)]*\))",
+    rest, direct = re.subn(
+        r"(?<!function )\b(" + names + r"|inspect|write_status|read_command|observe_session|current_world)\((?=[^)]*\))",
                            lambda m: wrapper + '("' + m[1] + '", ' + m[1]
                            + ("" if rest[m.end()] == ")" else ", "), rest)
     if protected < 10 or direct < 20:
         raise ValueError("The gameplay timing anchors changed")
+    mailbox = 'io.open(command_path, "rb")'
+    assert before.count(mailbox) == 1
+    before = before.replace(mailbox, f'{wrapper}("command_mailbox", io.open, command_path, "rb")')
     return before + "status_publication.profile = (function()\n" + code + "\nend)()\n\n" + anchor + rest
 
 
 def read_comparison(raw):
-    duration, *sections = raw.split(";")
+    summary, slow_frame = raw.split("!")
+    duration, *sections = summary.split(";")
     totals = {}
     for section in sections:
         name, count, p50, p95, p99, maximum, total = section.split(",")
         totals[name] = dict(count=int(count), p50_ms=float(p50), p95_ms=float(p95), p99_ms=float(p99),
                             max_ms=float(maximum), sum_ms=float(total))
     assert float(duration) >= 3 and totals["frame"]["count"] > 10 and totals["write_status"]["count"] > 3
-    return {"seconds": float(duration), "timings": totals}
+    elapsed, *calls = slow_frame.split(";")
+    slow_calls = dict((name, float(total)) for name, total in (entry.split(",") for entry in calls))
+    return {"seconds": float(duration), "timings": totals,
+            "slowest_interval": {"elapsed_ms": float(elapsed), "inclusive_calls_ms": slow_calls}}
 
 
 async def profile_world(host, guest, area, probe):

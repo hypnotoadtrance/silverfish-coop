@@ -72,19 +72,11 @@ local function saved(patch, expected)
     return found
 end
 
-local function assign_patch_ids(state, patch, base)
+local function assign_patch_ids(state, patch, pending, used)
     local instance = state.world.OwningGameInstance
     local list = patch.PatchData and patch.PatchData[saved_children]
     local count = list and list:GetArrayNum()
     if not count or count == 0 or count > 128 or not valid(instance) or not same(patch.Save, instance.SaveSlot_Ref) then return end
-    local pending, used = {}, {}
-    patch_children(patch, function(child, guid, id)
-        if guid then used[guid] = true
-        elseif qualified(state, child, base, false) and id.A == 0 and id.B == 0 and id.C == 0 and id.D == 0 then
-            pending[#pending + 1] = {item = child, live_id = id}
-        end
-    end)
-    if #pending == 0 then return end
     local library = StaticFindObject("/Script/Engine.Default__KismetGuidLibrary")
     if not valid(library) then return end
     local matched = {}
@@ -128,6 +120,7 @@ local function assign_patch_ids(state, patch, base)
         end
     end
     patch:SavePatch()
+    return true
 end
 
 local function census(state)
@@ -154,25 +147,36 @@ local function sample(state, radius)
             roster[#roster + 1] = member.pawn:K2_GetActorLocation()
         end
     end
-    local values = {}
+    local values, radius_squared = {}, radius^2
+    local function collect(path, child, guid)
+        local position = child:K2_GetActorLocation()
+        local distance = math.huge
+        for _, point in ipairs(roster) do
+            distance = math.min(distance, (position.X - point.X)^2 + (position.Y - point.Y)^2 + (position.Z - point.Z)^2)
+        end
+        if distance > radius_squared then return end
+        local class = child:GetClass():GetFullName():match("^%S+ (/Game/Classes/[%w_./%-]+)$")
+        local child_path = actor_path(child)
+        if not class or not child_path then return end
+        local rotation, scale = child:K2_GetActorRotation(), child:GetActorScale3D()
+        values[#values + 1] = {distance, path, guid, child_path, class, child.Ammo,
+            position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, scale.X, scale.Y, scale.Z}
+    end
     for path, patch in pairs(patches or {}) do
         if valid(patch) and not patch:IsActorBeingDestroyed() then
-            assign_patch_ids(state, patch, base)
-            patch_children(patch, function(child, guid)
-                if not guid or not qualified(state, child, base, false) then return end
-                local position = child:K2_GetActorLocation()
-                local distance = math.huge
-                for _, point in ipairs(roster) do
-                    distance = math.min(distance, (position.X - point.X)^2 + (position.Y - point.Y)^2 + (position.Z - point.Z)^2)
+            local pending, used = {}, {}
+            patch_children(patch, function(child, guid, id)
+                if guid then used[guid] = true end
+                if not qualified(state, child, base, false) then return end
+                if guid then
+                    collect(path, child, guid)
+                elseif id and id.A == 0 and id.B == 0 and id.C == 0 and id.D == 0 then
+                    pending[#pending + 1] = {item = child, live_id = id}
                 end
-                if distance > radius^2 then return end
-                local class = child:GetClass():GetFullName():match("^%S+ (/Game/Classes/[%w_./%-]+)$")
-                local child_path = actor_path(child)
-                if not class or not child_path then return end
-                local rotation, scale = child:K2_GetActorRotation(), child:GetActorScale3D()
-                values[#values + 1] = {distance, path, guid, child_path, class, child.Ammo,
-                    position.X, position.Y, position.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, scale.X, scale.Y, scale.Z}
             end)
+            if #pending > 0 and assign_patch_ids(state, patch, pending, used) then
+                for _, entry in ipairs(pending) do collect(path, entry.item, entry.hex) end
+            end
         end
     end
     table.sort(values, function(left, right) return left[1] < right[1] end)

@@ -229,8 +229,7 @@ local function controller_in_world(controller, world)
     return valid(controller) and same_object(controller:GetWorld(), world)
 end
 
-local function session_controllers(world, driver, server)
-    local statics = StaticFindObject(gameplay_statics_path)
+local function session_controllers(world, driver, server, statics)
     local controller = valid(statics) and statics:GetPlayerController(world, 0) or nil
     if not controller_in_world(controller, world) or not controller:IsLocalController()
         or not controller:GetFullName():match("^PlayerControler_FP_C ") then
@@ -300,8 +299,12 @@ local function inspect()
         if own_session then state.connection_timeout = driver.ConnectionTimeout end
     end
 
+    if not valid(status_publication.gameplay_statics) then
+        status_publication.gameplay_statics = StaticFindObject(gameplay_statics_path)
+    end
+    local statics = status_publication.gameplay_statics
     local known_pawns = {}
-    for _, controller in ipairs(session_controllers(world, driver, state.server)) do
+    for _, controller in ipairs(session_controllers(world, driver, state.server, statics)) do
         if controller_in_world(controller, world) then
             local is_local = controller:IsLocalController()
             local pawn = controller.Pawn
@@ -318,10 +321,22 @@ local function inspect()
     -- Unreal only replicates our own controller to a client. Report the other
     -- player's visible pawn independently of whether its controller exists here.
     if role == "client" and state.server then
-        for _, pawn in ipairs(FindAllOf("Player_FP_C") or {}) do
-            if valid(pawn) and same_object(pawn:GetWorld(), world)
-                and not known_pawns[pawn:GetAddress()]
-                and not pawn:GetFullName():find("Default__", 1, true) then
+        if not valid(status_publication.player_class) then
+            status_publication.player_class = StaticFindObject("/Game/Classes/Player/Player_FP.Player_FP_C")
+        end
+        local class = status_publication.player_class
+        local actors
+        if valid(statics) and valid(class) then
+            local out = {}
+            statics:GetAllActorsOfClass(world, class, out)
+            actors = out.OutActors or out
+        else
+            actors = FindAllOf("Player_FP_C") or {}
+        end
+        for _, pawn in ipairs(actors) do
+            if pawn and type(pawn.type) == "function" and pawn:type() == "RemoteUnrealParam" then pawn = pawn:get() end
+            if valid(pawn) and not known_pawns[pawn:GetAddress()] and same_object(pawn:GetWorld(), world)
+                and pawn:GetFullName():match("^Player_FP_C ") and not pawn:GetFullName():find("Default__", 1, true) then
                 state.pawns[#state.pawns + 1] = describe_pawn(pawn, false, nil)
             end
         end
@@ -1223,7 +1238,8 @@ local function read_command(periodic)
             if pending_local.dispatched then return nil, pending_local end
             return pending_local.fields, pending_local
         end
-        if active and not content and not periodic then return end
+        if active and not content and (not periodic or resident_title and status_publication.installed
+            and not status_publication.mirror) then return end
     end
     if not content then
         ticket = nil
