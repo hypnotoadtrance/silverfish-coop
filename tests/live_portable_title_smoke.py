@@ -2833,6 +2833,13 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
     expected_guest_collision = actor_names["guest"] if actor_names else "NPC_Survivor_Worker_C_2"
     assert guest_collision == expected_guest_collision and host_collision == "StaticMeshActor_347", (
         guest_collision, host_collision)
+    if family == "turret":
+        async def turret(action):
+            return await asyncio.gather(*(command(seat, f"dock-garage-turret-{action}\t{actor_names[name]}")
+                                          for seat, name in ((host, "host"), (guest, "guest"))))
+
+        assert await turret("view") == ["true,false,false,false"] * 2
+        assert await turret("arm") == ["armed"] * 2
     receipt, after_disagreement = await shoot(before_mismatch, should_hit=True, contact_required=True)
     key = {None: "tutorial_dock_world_collision_mismatch", "bandit": "tutorial_dock_buckshot_mismatch",
            "drone": "tutorial_dock_drone_mismatch", "turret": "tutorial_dock_turret_mismatch"}[family]
@@ -2842,6 +2849,29 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
     }
     if actor_names:
         evidence[key]["actor_names"] = actor_names
+        if family == "turret":
+            shots = [receipt]
+            while after_disagreement > 0 and shots[-1]["native_guest_weapon"]["after"] > 0:
+                target = await command(guest, f"dock-garage-turret-aimpoint\t{actor_names['guest']}")
+                approach = f"dock-garage-aim\t{low};{target};turret"
+                lanes = [await command(host, approach), await command(guest, approach)]
+                assert lanes == ["blocked", "worker"], {"lanes": lanes, "target": target, "health": after_disagreement}
+                followup, after_disagreement = await shoot(after_disagreement, should_hit=True, contact_required=True)
+                shots.append(followup)
+                evidence[key]["health"].append(after_disagreement)
+            assert after_disagreement <= 0, evidence[key]["health"]
+            evidence[key]["shots"] = shots
+            async with asyncio.timeout(5):
+                while (views := await turret("view")) != ["false,true,true,true"] * 2:
+                    await asyncio.sleep(.05)
+            evidence[key]["turret_views"] = dict(zip(("host", "guest"), views))
+            async with asyncio.timeout(5):
+                while True:
+                    effects = await turret("effects")
+                    if [row.split(";")[0] for row in effects] == ["1,1,1,1", "1,1,1,0"]:
+                        break
+                    await asyncio.sleep(.05)
+            evidence[key]["turret_effects"] = dict(zip(("host", "guest"), effects))
         if after_disagreement <= 0:
             async with asyncio.timeout(5):
                 while True:
@@ -2954,10 +2984,13 @@ async def verify_dock_garage_buckshot(host: Seat, guest: Seat, pawn: str) -> dic
             try:
                 result.update(await verify_dock_garage_shots(host, guest, frame, command, pellets=9, family=family))
             except Exception as error:
-                failures[family] = f"{type(error).__name__}: {error}"
+                failures[family] = traceback.format_exception_only(type(error), error)[-1].strip() or type(error).__name__
         assert not failures, (failures, list(result))
+        turret_shots = result["tutorial_dock_turret_mismatch"]["shots"]
+        ammo = turret_shots[-1]["native_guest_weapon"]["after"]
+        assert ammo == 7 - (3 + len(turret_shots)), turret_shots
         async with asyncio.timeout(6):
-            while await weapon(host, "peer-ready") != f"{guid},0,0" or await weapon(guest, "ready") != f"{guid},0,0":
+            while await weapon(host, "peer-ready") != f"{guid},{ammo},{ammo}" or await weapon(guest, "ready") != f"{guid},{ammo},{ammo}":
                 await asyncio.sleep(.05)
         assert campaign_save_hashes(host.campaign) == checkpoint
         return result
@@ -3560,6 +3593,13 @@ async def verify_stock_host_corpse_carry(host: Seat, guest: Seat, _pawn: str) ->
     checkpoint = campaign_save_hashes(host.campaign)
     assert await carry(host, "spawn") == "spawned"
     async with asyncio.timeout(8):
+        while True:
+            references = await asyncio.gather(*(carry(seat, "combat-reference") for seat in (host, guest)))
+            if references[0] == references[1] and re.fullmatch(r"[0-9A-F]{32}", references[0]):
+                break
+            await asyncio.sleep(.1)
+    assert await carry(host, "kill") == "killed"
+    async with asyncio.timeout(8):
         while await asyncio.gather(carry(host, "ready"), carry(guest, "ready")) != ["ready", "ready"]:
             await asyncio.sleep(.1)
     await asyncio.sleep(.4)
@@ -3606,7 +3646,7 @@ async def verify_stock_host_corpse_carry(host: Seat, guest: Seat, _pawn: str) ->
                                       "guest_peak_anchor_spin_deg_per_sec": guest_spin,
                                       "guest_max_backstep_cm": reverse, "end_gap_cm": end_gap,
                                       "settled_gap_cm": settled_gap, "guest_stock_focus_restored": True,
-                                      "campaign_checkpoint_unchanged": True, **views}}
+                                      "campaign_checkpoint_unchanged": True, "live_combat_reference": references[0], **views}}
 
 
 async def verify_stock_flashlights(host: Seat, guest: Seat, _pawn: str) -> dict:

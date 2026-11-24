@@ -314,7 +314,7 @@ local function locally_carried(pawn, actor, mesh)
     return valid(grip) and same(grip:GetGrabbedComponent(), mesh)
 end
 
-local function restore_corpse_physics(mirror)
+local function restore_corpse_physics(mirror, released_by_host)
     local original = mirror.host_grip
     if not original then return end
     mirror.host_grip = nil
@@ -323,6 +323,13 @@ local function restore_corpse_physics(mirror)
         if valid(original.actor) then original.handle:K2_DestroyComponent(original.actor) end
     end
     if valid(original.mesh) then
+        if released_by_host then
+            -- Drop the motion from the observer's temporary grip before
+            -- restoring collision. Subsequent host poses guide the fall.
+            local stopped = {X = 0, Y = 0, Z = 0}
+            original.mesh:SetAllPhysicsLinearVelocity(stopped, false)
+            original.mesh:SetAllPhysicsAngularVelocityInRadians(stopped, false)
+        end
         for channel, response in pairs(original.responses) do
             original.mesh:SetCollisionResponseToChannel(channel, response)
         end
@@ -369,11 +376,12 @@ local function follow_corpse(address, mirror, actor, pawn, now)
     local _, host_grip = marker_state(mirror.marker:K2_GetActorRotation())
     local local_grip = valid(mesh) and locally_carried(pawn, actor, mesh)
     if not host_grip or local_grip then
+        local released_by_host = mirror.host_grip and not local_grip
         if mirror.host_grip then
             corrections[address] = nil
-            mirror.host_released = not local_grip
+            mirror.host_released = released_by_host
         end
-        restore_corpse_physics(mirror)
+        restore_corpse_physics(mirror, released_by_host)
         observed_grips[address] = nil
     end
     if not valid(mesh) or not (mesh:IsAnySimulatingPhysics() or mirror.host_grip) or local_grip then

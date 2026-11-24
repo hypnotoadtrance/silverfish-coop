@@ -50,7 +50,7 @@ local function corpse_carry(action, world, pawn, actor, host)
     local marker = corpse_trace and corpse_trace.marker
     if not valid(marker) then
         for _, candidate in ipairs(FindAllOf("TargetPoint") or {}) do
-            if valid(candidate) and same(candidate:GetOwner(), actor) then
+            if corpse_marker(candidate, actor, host and 3 or 1) then
                 assert(not marker, "unexpected second corpse marker")
                 marker = candidate
             end
@@ -378,9 +378,6 @@ local function spawn_carry_target(world, pawn)
     actor:SetReplicateMovement(true)
     actor:ForceNetUpdate()
     carry_target = actor
-    actor.Health = 0
-    actor:ResolveDeath()
-    assert(not actor.Alive and actor.Mesh:IsAnySimulatingPhysics(), "the bandit's stock death did not create a ragdoll")
     return "spawned"
 end
 
@@ -664,7 +661,7 @@ local function read_turret_effects(world, turret)
         end
     end
     for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
-        if valid(marker) and same(marker:GetOwner(), turret) then
+        if corpse_marker(marker, turret) then
             pitch = ("%.2f"):format(marker:K2_GetActorRotation().Pitch)
         end
     end
@@ -739,6 +736,15 @@ local function turret_fire(pawn, world, turret, host, with_downed_target)
     return ("%d,%d,%s"):format(fired_count, remaining, tostring(selected))
 end
 
+local function turret_visual_state(turret)
+    local gun = turret.Turret_Gun
+    assert(valid(gun) and same(gun:GetOwner(), turret), "stock turret gun unavailable")
+    local material = gun:GetMaterial(0)
+    local burned = valid(material) and material:GetFName():ToString() == "Mat_PolygonMilitary_VehBurnt_01"
+    return ("%s,%s,%s,%s"):format(tostring(turret.Alive), tostring(turret.Health <= 0), tostring(burned == true),
+        tostring(turret:ActorHasTag(FName("Dead", EFindName.FNAME_Find))))
+end
+
 local function turret_state(pawn, world, host, action)
     local turret = host and authority_turret
     if action == "turret-spawn" then
@@ -789,12 +795,7 @@ local function turret_state(pawn, world, host, action)
         assert(lethal.IsLethal == true and turret.Alive == false and turret.Health <= 0,
             ("stock turret stayed alive at %.2f HP, lethal=%s"):format(turret.Health, tostring(lethal.IsLethal)))
     end
-    local gun = turret.Turret_Gun
-    assert(valid(gun) and same(gun:GetOwner(), turret), "stock turret gun unavailable")
-    local material = gun:GetMaterial(0)
-    local burned = valid(material) and material:GetFName():ToString() == "Mat_PolygonMilitary_VehBurnt_01"
-    return ("%s,%s,%s,%s"):format(tostring(turret.Alive), tostring(turret.Health <= 0), tostring(burned == true),
-        tostring(turret:ActorHasTag(FName("Dead", EFindName.FNAME_Find))))
+    return turret_visual_state(turret)
 end
 
 local function dock_worker(world, name)
@@ -1570,6 +1571,17 @@ local function run(action, actor_path)
                 end
             end
         end
+        if action == "corpse-combat-reference" then
+            if not valid(actor) then return "waiting" end
+            return require("native_npc_barter_identity").key(actor) or "waiting"
+        end
+        if action == "corpse-kill" then
+            assert(host and valid(actor) and actor:HasAuthority() and actor.Alive)
+            actor.Health = 0
+            actor:ResolveDeath()
+            assert(not actor.Alive and actor.Mesh:IsAnySimulatingPhysics(), "the bandit's stock death did not create a ragdoll")
+            return "killed"
+        end
         if action == "corpse-ready" then
             if not valid(actor) or actor.Alive or not actor.Mesh:IsAnySimulatingPhysics() then return "waiting" end
             for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
@@ -1723,6 +1735,19 @@ local function run(action, actor_path)
         local actor = StaticFindObject(dock .. ":PersistentLevel." .. actor_path)
         if not valid(actor) or actor:IsActorBeingDestroyed() then return "removed" end
         return actor.Alive and "alive" or "dead"
+    elseif action:match("^dock%-garage%-turret%-") then
+        assert(actor_path:match("^Turret_[%w_]+_%d+$"))
+        local actor = StaticFindObject(dock .. ":PersistentLevel." .. actor_path)
+        assert(valid(actor) and same(actor:GetClass(), StaticFindObject(turret_class)) and same(actor:GetWorld(), world))
+        if action == "dock-garage-turret-arm" then return arm_turret_effects(actor) end
+        if action == "dock-garage-turret-effects" then return read_turret_effects(world, actor) end
+        if action == "dock-garage-turret-aimpoint" then
+            local bounds = {}
+            trace:GetComponentBounds(actor.Turret_Gun, bounds, {}, {})
+            return point_string(bounds.Origin or bounds)
+        end
+        assert(action == "dock-garage-turret-view")
+        return turret_visual_state(actor)
     elseif action == "dock-garage-plank" then
         return stage_garage_plank(pawn, world, host, actor_path)
     elseif action == "dock-garage-plank-health" then

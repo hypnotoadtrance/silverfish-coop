@@ -340,7 +340,7 @@ local function run(action, argument)
     if action == "seed-dock-buckshot" then
         assert(observing() and local_pawn:GetWorld():GetFullName() == dock_map
             and weapon_path == arm_profiles["arm-buckshot"][1])
-        return seed(peer, 4)
+        return seed(peer, 7)
     end
     if action == "seed-dock-light-ar" then
         assert(observing() and local_pawn:GetWorld():GetFullName() == dock_map
