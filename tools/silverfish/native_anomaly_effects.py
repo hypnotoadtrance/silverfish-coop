@@ -32,7 +32,8 @@ MAX_CUES = 12
 MAX_SENSORS = 256
 MAX_ANGLER_LAMPS = 32
 _MAX_ACID_POOLS = 64
-_ACID_STATE = re.compile(r"([A-Za-z0-9_]{1,96}):[afe]")
+_ACID_STATE = re.compile(r"([A-Za-z0-9_]{1,96}):[afe]((?::[-.0-9,]+){3})?")
+_ACID_VECTOR = re.compile(r"-?[0-9]{1,8}\.[0-9]{3}(?:,-?[0-9]{1,8}\.[0-9]{3}){2}")
 
 
 def valid_acid_pools(states):
@@ -43,7 +44,18 @@ def valid_acid_pools(states):
         match = _ACID_STATE.fullmatch(state) if isinstance(state, str) else None
         if not match or match[1] <= previous:
             return False
-        previous = match[1]
+        identity, transform = match.groups()
+        if identity.startswith("spawned_") != (transform is not None):
+            return False
+        if transform:
+            for vector, minimum, maximum in zip(
+                transform[1:].split(":"), (-1e7, -360, .001), (1e7, 360, 100), strict=True,
+            ):
+                if not _ACID_VECTOR.fullmatch(vector) or not all(
+                    minimum <= float(value) <= maximum for value in vector.split(",")
+                ):
+                    return False
+        previous = identity
     return True
 
 

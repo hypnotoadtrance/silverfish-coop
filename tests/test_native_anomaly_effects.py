@@ -15,6 +15,14 @@ from tools.silverfish.native_weather_view import (
 
 
 class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
+    def test_dynamic_acid_pool_requires_a_bounded_stock_transform(self):
+        pose = "50.000,-100.000,30.000:0.000,20.000,0.000:1.250,1.000,1.000"
+        self.assertTrue(valid_acid_pools(["AcidPool_BP_C_1:e", "spawned_AcidPool_BP_C_3:a:" + pose]))
+        self.assertFalse(valid_acid_pools(["spawned_AcidPool_BP_C_3:a"]))
+        self.assertFalse(valid_acid_pools(["AcidPool_BP_C_1:e:" + pose]))
+        self.assertFalse(valid_acid_pools(["spawned_AcidPool_BP_C_3:a:" + pose.replace("1.250", "-1.250")]))
+        self.assertFalse(valid_acid_pools(["spawned_AcidPool_BP_C_3:a:" + pose.replace("50.000", "10000001.000")]))
+
     async def test_authored_acid_pool_roster_projects_once_per_state_and_visit(self):
         playback = AcidPoolPlayback()
         epoch = "9" * 32

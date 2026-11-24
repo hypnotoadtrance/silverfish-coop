@@ -514,11 +514,11 @@ namespace
         return loading.context && (!driver || driver == pending) && server_connection(pending, loading.connection.Get());
     }
 
-    U::UWorld* authored_acid_pool(U::UObject* actor)
+    U::UWorld* stock_acid_pool(U::UObject* actor)
     {
         auto* type = actor ? actor->GetClassPrivate() : nullptr;
         if (!type || type->GetFName() != acid_pool_name || type->GetPathName() != acid_pool_class ||
-            !actor->HasAnyFlags(U::RF_WasLoaded) || actor->IsUnreachable()) return nullptr;
+            actor->IsUnreachable()) return nullptr;
         auto* world = static_cast<U::AActor*>(actor)->GetWorld();
         auto* replicates = property<U::FBoolProperty>(actor, STR("bReplicates"));
         auto* dot = object(actor, STR("DotVolume"));
@@ -537,7 +537,7 @@ namespace
         if (type->GetFName() == acid_pool_name &&
             (name == acid_fizzle || name == acid_extinguish || name == acid_actor_damage) &&
             function->GetNumParms() == (name == acid_fizzle ? 0 : 1) &&
-            projecting_acid_pool.Get() != context && guest_world(authored_acid_pool(context)))
+            projecting_acid_pool.Get() != context && guest_world(stock_acid_pool(context)))
         {
             call.PreventOriginalFunctionCall();
         }
@@ -546,7 +546,7 @@ namespace
                   (name == dot_damage && function->GetNumParms() == 2)))
         {
             auto* owner = context->GetOuterPrivate();
-            if (!guest_world(authored_acid_pool(owner)) || object(owner, STR("DotVolume")) != context) return;
+            if (!guest_world(stock_acid_pool(owner)) || object(owner, STR("DotVolume")) != context) return;
             call.PreventOriginalFunctionCall();
             if (name == receive_begin && call.OriginalFunctionCallPrevented())
                 if (auto* active = property<U::FBoolProperty>(context, STR("DotActive")))
@@ -564,7 +564,7 @@ namespace
         const auto address = static_cast<std::uintptr_t>(lua.get_integer());
         auto* actor = path.size() <= 512 && path.starts_with(STR("/Game/Classes/Maps/")) ?
             U::UObjectGlobals::StaticFindObject<U::UObject*>(nullptr, nullptr, path.c_str()) : nullptr;
-        auto* world = authored_acid_pool(actor);
+        auto* world = stock_acid_pool(actor);
         const bool accepted = world && reinterpret_cast<std::uintptr_t>(world) == address;
         const bool guest = accepted && guest_world(world);
         if (count == 2)
@@ -1265,7 +1265,7 @@ namespace silverfish::native_anomaly_fields
         });
         lua.register_function("SilverfishQualifyNativePlacedTrap",
             [](const Lua& current) { return qualify_placed(current, trap_class); });
-        lua.register_function("SilverfishNativeAuthoredAcidPool", acid_pool_view);
+        lua.register_function("SilverfishNativeAcidPool", acid_pool_view);
         lua.register_function("SilverfishQualifyNativePlacedCanister",
             [](const Lua& current) { return qualify_placed(current, canister_class); });
         lua.register_function("SilverfishQualifyNativePlacedFixedExplosive",

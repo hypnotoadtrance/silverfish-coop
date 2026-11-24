@@ -240,6 +240,10 @@ function fields.start(role)
             local source = effects.observe_pipe_bomb_blast(actor)
             if source then flare.retire_detonated_bomb(source) end
         end
+        if class == acid_pools.class_name then
+            pcall(acid_pools.created, actor, seat)
+            return
+        end
         if class == pyrogeist.jet then
             pyrogeist.created(actor, seat, replica)
             return

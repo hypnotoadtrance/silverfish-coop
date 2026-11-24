@@ -17,7 +17,7 @@ _CONTROL = "AcidPool_BP_C_9"
 def acid_pool_overlay(game, portable_script_overlay):
     fixture = (Path(__file__).with_name("fixtures") / "portable_acid_pool_probe.lua").read_text(encoding="utf-8")
     declarations = "function pools.rows(state, phase, row)\n"
-    publication = "    if not current or not current.complete or #current.ids == 0 then return end\n"
+    publication = "    if not current or not current.complete then return end\n"
 
     def add_fixture(script):
         if script.count(declarations) != 1 or script.count(publication) != 1:
@@ -89,6 +89,39 @@ def pool_readback(raw):
     return parse(selected), parse(control)
 
 
+async def verify_dynamic_pool(host, guest, operate):
+    assert await operate(guest, "spawn-guest") == "suppressed"
+    identity = await operate(host, "spawn-host")
+    read = f"read-dynamic\t{identity}"
+    source = await operate(host, read)
+    summary, pose = source.split(";")
+    assert summary == "a,1,0,1,1", source
+
+    async def guest_state(phase):
+        async with asyncio.timeout(9):
+            while True:
+                observed = await operate(guest, read)
+                if observed.startswith(phase + ","):
+                    state, actual = observed.split(";")
+                    assert state == f"{phase},0,0,0,1", observed
+                    assert all(math.dist(tuple(map(float, left.split(","))), tuple(map(float, right.split(",")))) < .02
+                               for left, right in zip(pose.split(":"), actual.split(":"), strict=True)), observed
+                    return
+                await asyncio.sleep(.09)
+
+    await guest_state("a")
+    assert await operate(host, f"fizzle-dynamic\t{identity}") == "f"
+    await guest_state("f")
+    await guest_state("e")
+    assert await operate(host, f"remove-dynamic\t{identity}") == "removed"
+    async with asyncio.timeout(8):
+        while await operate(guest, read) != "absent":
+            await asyncio.sleep(.09)
+    assert await operate(host, read) == "absent"
+    return {"identity": identity, "pose": pose, "guest_phases": ["a", "f", "e"], "guest_only_pool_suppressed": True,
+            "retired_on_both_seats": True, "guest_damage_component_inactive": True}
+
+
 async def verify_acid_pool(host, guest, probe):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     visits = await cross_to_east_wing(host, guest, probe)
@@ -158,6 +191,7 @@ async def verify_acid_pool(host, guest, probe):
                 break
             await asyncio.sleep(.12)
     assert all(values == ["a", "f", "e"] for values in phases.values()), phases
+    dynamic = await verify_dynamic_pool(host, guest, operate)
 
     def roster_retired(frame):
         game = frame.get("game", {})
@@ -190,4 +224,4 @@ async def verify_acid_pool(host, guest, probe):
                                 "retirement": {"trigger": "stock_timer", "host_roster_omitted_pool": True,
                                                "host_removed_after_seconds": round(host_removed_after, 3),
                                                "host": readings[0], "guest": readings[1]},
-                                "checkpoint_unchanged": True}}
+                                "dynamic": dynamic, "checkpoint_unchanged": True}}

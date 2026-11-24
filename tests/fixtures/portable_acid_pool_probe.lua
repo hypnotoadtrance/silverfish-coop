@@ -76,7 +76,7 @@ local function acid_qualification(state, phase, current)
         local ok, result = pcall(get)
         return ok and tostring(result) or "unavailable"
     end
-    local native = type(SilverfishNativeAuthoredAcidPool) == "function"
+    local native = type(SilverfishNativeAcidPool) == "function"
     local actors = FindAllOf("AcidPool_BP_C") or {}
     local rows = {("phase=%s;native=%s;found=%d;accepted=%s;complete=%s"):format(
         phase, tostring(native), #actors, tostring(current and #current.ids), tostring(current and current.complete))}
@@ -118,7 +118,7 @@ local function acid_qualification(state, phase, current)
             local path = full:match("^AcidPool_BP_C (.+)$")
             if native and path then
                 record("native_result", function()
-                    local qualified, guest = SilverfishNativeAuthoredAcidPool(path, state.world:GetAddress())
+                    local qualified, guest = SilverfishNativeAcidPool(path, state.world:GetAddress())
                     return tostring(qualified) .. "/" .. tostring(guest)
                 end)
             end
@@ -128,7 +128,7 @@ local function acid_qualification(state, phase, current)
     return table.concat(rows, "|")
 end
 
-local function acid_fixture(command, state, phase, current)
+local function acid_fixture(command, state, phase, current, id)
     if command == "qualify" then return acid_qualification(state, phase, current) end
     assert(current and current.complete, "the authored pool census is unavailable")
     local entry, sibling = current.entries[acid_id], current.entries[acid_control]
@@ -138,6 +138,39 @@ local function acid_fixture(command, state, phase, current)
     assert(acid_exact(host, acid_pawn) and host:IsLocallyControlled() and same(host:GetWorld(), state.world)
         and host:HasAuthority() ~= current.guest and valid(host.Save), "the private local pawn is not qualified")
     if command == "read" then return acid_summary(entry) .. ";" .. acid_summary(sibling) end
+    if command == "spawn-host" or command == "spawn-guest" then
+        assert((command == "spawn-guest") == current.guest)
+        local point = sibling.actor:K2_GetActorLocation()
+        local class = sibling.actor:GetClass()
+        local spawned = state.world:SpawnActor(class, {X=point.X+320, Y=point.Y+180, Z=point.Z+10},
+            {Pitch=0, Yaw=25, Roll=0})
+        assert(live(spawned) and not spawned:HasAnyFlags(EObjectFlags.RF_WasLoaded))
+        if current.guest then
+            local summary = acid_summary({actor=spawned})
+            local passive = spawned.DotVolume.DotActive == false and spawned.bHidden == true
+                and not spawned:GetActorEnableCollision()
+            spawned:K2_DestroyActor()
+            assert(passive, summary)
+            return "suppressed"
+        end
+        spawned:SetActorScale3D({X=1.25, Y=1.1, Z=1.0})
+        local id = "spawned_" .. spawned:GetFName():ToString()
+        assert(current.dynamic[id] and same(current.dynamic[id].actor, spawned), "dynamic pool was not registered")
+        return id
+    end
+    if command == "read-dynamic" or command == "fizzle-dynamic" or command == "remove-dynamic" then
+        local dynamic = current.dynamic[id]
+        if not dynamic or not live(dynamic.actor) then return "absent" end
+        local spawned = dynamic.actor
+        if command == "read-dynamic" then return acid_summary(dynamic) .. ";" .. transform(spawned) end
+        assert(not current.guest)
+        if command == "fizzle-dynamic" then
+            spawned:FizzleOut()
+            return stock_phase(spawned)
+        end
+        spawned:K2_DestroyActor()
+        return "removed"
+    end
     assert(live(actor), "the selected stock pool has already retired")
     local dot = actor.DotVolume
     assert(acid_exact(dot, "/Game/Classes/Actors/StatusEffect_Actors/DotVolume.DotVolume_C")
@@ -199,11 +232,11 @@ local function poll_acid_fixture(state, phase, current)
     if not input then return end
     local request = input:read(256)
     input:close()
-    local ticket, command
-    if request then ticket, command = request:match("^([0-9a-f]+)\t([a-z%-]+)$") end
+    local ticket, command, id
+    if request then ticket, command, id = request:match("^([0-9a-f]+)\t([a-z%-]+)\t?([A-Za-z0-9_]*)$") end
     if not ticket or #ticket ~= 32 or ticket == acid_ticket then return end
     acid_ticket = ticket
-    local ok, response = pcall(acid_fixture, command, state, phase, current)
+    local ok, response = pcall(acid_fixture, command, state, phase, current, id)
     local output = assert(io.open(prefix .. "-reply.tsv", "wb"))
     output:write(ticket, "\t", ok and "ok" or "error", "\t", (tostring(response):gsub("[\r\n\t]", " ")))
     output:close()
