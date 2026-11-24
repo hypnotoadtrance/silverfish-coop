@@ -88,7 +88,8 @@ async def verify_dock_pursuit(host, guest, frame, command):
         # Include lateral travel so the next shot requires a different aim while the worker gives chase.
         x, y = (x - side * .5 * y) / distance, (y + side * .5 * x) / distance
         scale = math.hypot(x, y)
-        await guest.bridge.walk(x / scale, y / scale, 650, continuous=True)
+        result = await submit(guest_run, "walk", x=x / scale, y=y / scale, milliseconds=650, continuous=True)
+        assert result["ok"] and result["movement_scheduled"], (result, history)
 
     try:
         baseline = await observe()
