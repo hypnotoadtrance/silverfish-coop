@@ -8,6 +8,11 @@ from tools.silverfish.control import submit
 from portable_guest_world_start import resident_events
 
 
+MINIMUM_CLEARANCE_CM = 175
+NATIVE_TAP_LIFETIME = 1.5  # native/guest_primary_input.cpp receipt_lifetime
+RETREAT_MILLISECONDS = 650
+
+
 def coordinates(value):
     return tuple(map(float, value.split(",")))
 
@@ -18,7 +23,8 @@ def aim_error(current, desired):
 
 def view_frame(fields):
     seat, target, desired, control, camera, muzzle, blocked = fields.split(";")
-    return {"seat": coordinates(seat), "target": coordinates(target), "desired": coordinates(desired),
+    seat, target = coordinates(seat), coordinates(target)
+    return {"seat": seat, "target": target, "clearance_cm": math.dist(seat[:2], target[:2]), "desired": coordinates(desired),
             "controller": coordinates(control), "camera": coordinates(camera), "muzzle": coordinates(muzzle),
             "blocked": blocked == "true"}
 
@@ -31,8 +37,26 @@ def combat_frame(fields):
             "host_observer": coordinates(observer), "worker_observer_distance_cm": float(separation)}
 
 
+def tap_publication(path, captured, kind):
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if text and not text.endswith("\n"):
+        return None
+    prefix = ["native-guest-primary-intent", str(captured["sequence"])]
+    for line in text.splitlines():
+        fields = line.split("\t")
+        if fields[:2] == prefix:
+            assert fields[2:] == [captured["map"], captured["pawn"], captured["guid"], kind], fields
+            return True
+    return False
+
+
 async def verify_dock_pursuit(host, guest, frame, command):
     guest_run = guest.client / "run"
+    tap_path = guest.bridge.directory / "native-guest-primary-events"
+    weapon_kind = frame["game"]["native_guest_primary_scope"]["kind"]
     origin, guest_spawn = (await command(host, "dock-pursuit-stage")).split(";")
     history = []
     last_view = None
@@ -52,34 +76,45 @@ async def verify_dock_pursuit(host, guest, frame, command):
         except TimeoutError as error:
             raise AssertionError((description, reading, last_view, history)) from error
 
-    async def trigger(remaining):
+    async def trigger(remaining, attempt):
         started = time.time()
         command_result = await submit(guest_run, "native-guest-primary-input-fixture")
-        assert command_result["ok"], (command_result, history)
-        sequence = command_result["native_guest_primary_fixture"]["sequence"]
+        if not command_result["ok"]:
+            attempt.update(outcome="refused_before_capture", reason=command_result["error"])
+            assert ("temporarily blocked by the equipped player's state" in attempt["reason"]
+                    or "(native_guest_primary_fixture_scope_unavailable)" in attempt["reason"]), (command_result, history)
+            return None
+        captured = command_result["native_guest_primary_fixture"]
+        sequence = captured["sequence"]
+        attempt.update(sequence=sequence, outcome="captured")
+        published = tap_publication(tap_path, captured, weapon_kind)
+        deadline = time.monotonic() + NATIVE_TAP_LIFETIME
+        while published is not True and time.monotonic() < deadline:
+            await asyncio.sleep(.04)
+            published = tap_publication(tap_path, captured, weapon_kind)
+        if published is not True:
+            # The game-thread read fences an emit already in progress when the tap expired.
+            await command(guest, "dock-pursuit-view")
+            published = tap_publication(tap_path, captured, weapon_kind)
+            assert published is not None, ("Could not read the guest's complete outbound tap log", history)
+            if not published:
+                attempt["outcome"] = "expired_before_publication"
+                return None
+        attempt["outcome"] = "published"
 
         async def receipt():
             return next((row for row in await resident_events(guest_run, frame)
                          if row.get("sequence") == sequence and row["time_unix"] >= started
                          and row["event"] in ("native_guest_primary_input", "native_guest_primary_input_rejected")), None)
 
-        result = await wait_for(receipt, "No authoritative round receipt during pursuit", 8)
+        result = await wait_for(receipt, "Published guest shot did not receive an authoritative receipt", 8)
+        if result["event"] != "native_guest_primary_input":
+            attempt.update(outcome="host_rejected", reason=result.get("reason"))
         assert result["event"] == "native_guest_primary_input", (result, history)
         shot = result["native_guest_weapon"]
         assert (shot["before"], shot["after"], shot["projectiles"]) == (remaining, remaining - 1, 1), (shot, history)
+        attempt["outcome"] = "fired"
         return shot
-
-    async def firing_view():
-        nonlocal last_view
-        local = await command(guest, "dock-pursuit-aim")
-        if local == "absent":
-            return None
-        local_frame = view_frame(local)
-        last_view = local_frame
-        if local_frame["blocked"] or aim_error(local_frame["camera"], local_frame["desired"]) > 8:
-            return None
-        authority = await command(host, "dock-pursuit-view")
-        return {"guest": local_frame, "host": view_frame(authority)} if authority != "absent" else None
 
     async def retreat(aim, side):
         x, y, _ = (seat - target for seat, target in zip(aim["seat"], aim["target"], strict=True))
@@ -88,8 +123,43 @@ async def verify_dock_pursuit(host, guest, frame, command):
         # Include lateral travel so the next shot requires a different aim while the worker gives chase.
         x, y = (x - side * .5 * y) / distance, (y + side * .5 * x) / distance
         scale = math.hypot(x, y)
-        result = await submit(guest_run, "walk", x=x / scale, y=y / scale, milliseconds=650, continuous=True)
+        result = await submit(guest_run, "walk", x=x / scale, y=y / scale, milliseconds=RETREAT_MILLISECONDS, continuous=True)
         assert result["ok"] and result["movement_scheduled"], (result, history)
+
+    async def firing_window(side):
+        next_retreat = 0
+
+        async def find_window():
+            nonlocal next_retreat, last_view
+            local = await command(guest, "dock-pursuit-aim")
+            if local == "absent":
+                return None
+            last_view = local_frame = view_frame(local)
+            if side and time.monotonic() >= next_retreat:
+                await retreat(local_frame, side)
+                next_retreat = time.monotonic() + .75 * RETREAT_MILLISECONDS / 1000
+                return None
+            if (local_frame["clearance_cm"] < MINIMUM_CLEARANCE_CM or local_frame["blocked"]
+                    or aim_error(local_frame["camera"], local_frame["desired"]) > 8):
+                return None
+            authority = await command(host, "dock-pursuit-view")
+            return {"guest": local_frame, "host": view_frame(authority)} if authority != "absent" else None
+
+        return await wait_for(find_window, "No clear and unblocked firing lane during the warehouse pursuit", 7)
+
+    async def fire_round(remaining, side):
+        record = {"attempts": []}
+        history.append(record)
+        for attempt_index in range(2):
+            view = await firing_window(side or attempt_index)
+            record.update(view)
+            attempt = {"clearance_cm": round(view["guest"]["clearance_cm"], 1)}
+            record["attempts"].append(attempt)
+            shot = await trigger(remaining, attempt)
+            if shot:
+                record["round"] = shot
+                return record
+        raise AssertionError(("Two stock trigger attempts ended before the guest published a shot", history))
 
     try:
         baseline = await observe()
@@ -106,9 +176,7 @@ async def verify_dock_pursuit(host, guest, frame, command):
                     and math.dist(coordinates(seat), coordinates(guest_spawn)) < 100)
 
         await wait_for(arrived, "The guest did not reach the initial warehouse firing lane", 6)
-        initial_view = await wait_for(firing_view, "The guest did not get a stock firing view", 5)
-        history.append(initial_view)
-        initial_view["round"] = await trigger(7)
+        initial_view = await fire_round(7, 0)
 
         async def under_attack():
             result = await observe()
@@ -123,13 +191,9 @@ async def verify_dock_pursuit(host, guest, frame, command):
         moved = False
         pursued_while_moving = False
         for remaining in range(6, 0, -1):
-            previous = history[-1]
-            await retreat(previous["guest"], 1 if remaining % 2 == 0 else -1)
-            view = await wait_for(firing_view, "No unblocked guest firing view while retreating on foot", 5)
-            history.append(view)
+            view = await fire_round(remaining, 1 if remaining % 2 == 0 else -1)
             moved = moved or all(math.dist(history[0][seat]["seat"], view[seat]["seat"]) > 45 for seat in ("host", "guest"))
             before = current["health"]
-            view["round"] = await trigger(remaining)
             deadline = time.monotonic() + 1.5
             while True:
                 current = await observe()
