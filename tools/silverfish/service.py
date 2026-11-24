@@ -42,7 +42,7 @@ from .native_roster import RosterEnrollment, _census
 from .restart_wipe_guard import RestartWipeGuard
 from . import native_borough_barter, native_dust_cabinet, native_mindcore, native_mosby_station_view, native_mosby_tape, native_smg_hold
 from . import native_cistern_lockpick, native_datasilo_door, native_datasilo_lift, native_mindcore_carry, native_mindcore_view
-from . import native_flashlight, native_lantern, native_stock_door
+from . import native_flashlight, native_lantern, native_stock_door, native_stock_switch
 from . import native_player_avatar
 from . import native_pickup_audio
 from . import native_damage_feedback, native_weather_view
@@ -95,7 +95,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         native_stash.LIST, native_stash.MOVE,
                         native_guest_ui.ACTION,
                         "native-loot-inspect", "native-loot-open", "native-loot-claim", *native_loot.PRY_TOOL_ACTIONS.values(),
-                        native_stock_door.ACTION, *native_stock_door.PRY_ACTIONS.values(),
+                        native_stock_door.ACTION, *native_stock_door.PRY_ACTIONS.values(), native_stock_switch.ACTION,
                         *native_guest_drop.ACTIONS,
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS, native_npc_barter.OPEN, native_npc_barter.EXCHANGE,
@@ -1009,6 +1009,8 @@ class Host:
             view[native_flashlight.KEY] = flashlight
         if doors := native_stock_door.frame(self.last_game, self.zone_epoch):
             view[native_stock_door.KEY] = doors
+        if switches := self.last_game.get(native_stock_switch.KEY):
+            view[native_stock_switch.KEY] = {"map": self.last_game["map"], "epoch": self.zone_epoch, "switches": switches}
         if rolls := self.party.get(native_enemy_loot.STATE_KEY):
             view[native_enemy_loot.STATE_KEY] = native_enemy_loot.published(rolls)
             if frame := native_enemy_loot.shell_frame(self):
@@ -2205,6 +2207,8 @@ class Host:
                     result = await native_loot.use_vehicle_pry_tool(self, bridge, character, target, request["operation_id"], action)
             elif action == native_stock_door.ACTION:
                 result = await native_stock_door.interact(self, bridge, character, target, request["operation_id"])
+            elif action == native_stock_switch.ACTION:
+                result = await native_stock_switch.interact(self, bridge, character, target, request["operation_id"])
             elif action in native_stock_door.PRY_ACTIONS.values():
                 kind = action.removeprefix("native-guest-door-")
                 async with self.smg_holds.lock if self.smg_holds is not None else contextlib.nullcontext():
@@ -5399,7 +5403,7 @@ class Client:
             target = f"{target}@{self.zone_epoch}"
         elif action in (native_guest_melee.SWING, native_host_dig_live.GUEST_ACTION):
             target = native_guest_melee.request_target(target, self.zone_epoch)
-        elif (action in native_loot.PRY_TOOL_ACTIONS.values() or action == native_stock_door.ACTION
+        elif (action in native_loot.PRY_TOOL_ACTIONS.values() or action in (native_stock_door.ACTION, native_stock_switch.ACTION)
               or action in native_stock_door.PRY_ACTIONS.values()):
             target = f"{self.zone_epoch}@{target}"
         request = {"action": action, "operation_id": operation_id, "target": target}
@@ -6013,6 +6017,8 @@ class Client:
                         self.bridge, self.last_game, self.gameplay.get(native_player_avatar.KEY), self.zone_epoch)
                     self.last_game = await native_stock_door.project(
                         self.bridge, self.last_game, self.gameplay.get(native_stock_door.KEY), self.zone_epoch)
+                    self.last_game = await native_stock_switch.project(
+                        self.bridge, self.last_game, self.gameplay.get(native_stock_switch.KEY), self.zone_epoch)
                     self.last_game = await native_lantern.project(
                         self.bridge, self.last_game, self.gameplay.get(native_lantern.KEY), self.zone_epoch)
                     self.last_game = await native_stock_enemy_drops.project_broker_cue(
@@ -6498,6 +6504,10 @@ class Client:
                             continue
                         if door := native_stock_door.target_actor(target):
                             result = await self.gameplay_action(native_stock_door.ACTION, operation_id, door)
+                            self.control.event("local_interaction", operation_id=operation_id, **result)
+                            continue
+                        if switch := native_stock_switch.target_actor(target):
+                            result = await self.gameplay_action(native_stock_switch.ACTION, operation_id, switch)
                             self.control.event("local_interaction", operation_id=operation_id, **result)
                             continue
                         if native_lantern.target_angles(target):

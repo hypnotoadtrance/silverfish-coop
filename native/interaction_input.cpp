@@ -968,8 +968,36 @@ namespace
 
     void intercept_npc_barter(Iteration&, Unreal::UObject*, Unreal::UFunction*);
 
+    void intercept_stock_switch(Iteration& call, Unreal::UObject* actor, Unreal::UFunction* function, const void* args)
+    {
+        static const Unreal::FName interaction{STR("SendInteractionToActor")};
+        if (!function || function->GetFName() != interaction || !args || scope.host ||
+            call.OriginalFunctionCallPrevented() || !live(actor) || !actor->HasAnyFlags(Unreal::RF_WasLoaded)) return;
+        auto* pawn = scope.pawn.Get();
+        auto* world = scope.world.Get();
+        if (!pawn || Clock::now() >= scope.expires || !live_scope(scope) ||
+            actor->GetOuterPrivate() != object_field(world, STR("PersistentLevel"))) return;
+        auto* klass = actor->GetClassPrivate();
+        const auto path = klass->GetPathName();
+        if (path != STR("/Game/Classes/ScriptingActors/CircutBox_BP.CircutBox_BP_C") &&
+            path != STR("/Game/Classes/ScriptingActors/LightSwitch_BP.LightSwitch_BP_C") &&
+            path != STR("/Game/Classes/ScriptingActors/LightSwitch_02_BP.LightSwitch_02_BP_C")) return;
+        if (!live_actor(actor, world, 3) && !live_actor(actor, world, 1)) return;
+        if (klass->GetFunctionByNameInChain(interaction) != function || function->GetNumParms() != 2 ||
+            function->GetParmsSize() != 2 * sizeof(void*) || function->GetReturnProperty() ||
+            function->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net)) return;
+        auto* player = input<Unreal::FObjectProperty>(function, STR("Player"), 0);
+        auto* target = input<Unreal::FObjectProperty>(function, STR("HitComponent"), sizeof(void*));
+        auto* box = object_field(actor, STR("Box"));
+        if (player && target && live(box) && box->GetOuterPrivate() == actor &&
+            player->GetObjectPropertyValue(player->ContainerPtrToValuePtr<void>(args)) == pawn &&
+            target->GetObjectPropertyValue(target->ContainerPtrToValuePtr<void>(args)) == box)
+            call.PreventOriginalFunctionCall();
+    }
+
     void route_interaction(Iteration& iteration, Unreal::UObject* actor, Unreal::UFunction* function, const void* parameters)
     {
+        intercept_stock_switch(iteration, actor, function, parameters);
         intercept_wire_board(iteration, actor, function, parameters);
         intercept_npc_barter(iteration, actor, function);
         intercept_stock_board_validation(iteration, actor, function);
