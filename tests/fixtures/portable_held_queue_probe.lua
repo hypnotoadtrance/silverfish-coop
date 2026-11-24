@@ -73,6 +73,7 @@ LoopInGameThreadWithDelay(40, function()
     last = ticket
     local ok, response = pcall(seed, pawn)
     local reply = assert(io.open(prefix .. "reply.tsv", "wb"))
-    reply:write(ticket, "\t", ok and "ok" or "error", "\t", tostring(response):gsub("[%c]", " "))
+    local message = tostring(response):gsub("[%c]", " ")
+    reply:write(ticket, "\t", ok and "ok" or "error", "\t", message)
     reply:close()
 end)
