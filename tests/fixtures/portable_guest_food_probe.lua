@@ -72,12 +72,13 @@ local function host_read(pawn, save, world, action)
     end
     if action == "host-medical-vitals" then return medical_vitals(save) .. ";" .. medical_vitals(detached) end
     if action == "seed-personal-compatibility" then
-        local blue = asset("/Game/Classes/Items/Item_BlueMushroom.Item_BlueMushroom_C")
-        local unsupported = stock_item(remote, blue, 2)
+        local weta = asset("/Game/Classes/Items/Item_LiveWeta.Item_LiveWeta_C")
+        local unsupported = stock_item(remote, weta, 1)
+        local spare = stock_item(remote, weta, 1)
         local known = stock_item(remote, asset(meal_path), 1)
         detached.PlayerHealth, detached.PlayerRegen, detached.PlayerStim = 100, 110, 0
         detached.PlayerFood = 40
-        return unsupported .. ";" .. known
+        return unsupported .. ";" .. spare .. ";" .. known
     end
     if action == "seed-use-cases" then
         local ids = {}

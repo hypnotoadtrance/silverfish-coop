@@ -2,6 +2,7 @@
 #include "authored_pickup.hpp"
 #include "drop_item_class.hpp"
 #include "guest_drop_maps.hpp"
+#include "guest_consumable.hpp"
 #include "guest_item.hpp"
 #include "guest_meal_profiles.hpp"
 #include "guest_weapon_registry.hpp"
@@ -17,6 +18,7 @@
 #include <cstdlib>
 #include <initializer_list>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -270,6 +272,15 @@ namespace
         std::string_view entry;
         std::int32_t expected{};
         Unreal::FWeakObjectPtr prior_held{};
+        bool previewed{};
+    };
+
+    struct PersonalPreview
+    {
+        Unreal::UObject* manager;
+        Unreal::UClass* item_class;
+        Unreal::UObject* pawn;
+        bool applied{};
     };
 
     struct StashSplit
@@ -323,6 +334,9 @@ namespace
     thread_local std::int64_t host_drop_sequence{};
     thread_local StashScreen stash_screen;
     thread_local GuestUseCursor guest_use_cursor;
+    thread_local PersonalPreview* personal_preview{};
+
+    constexpr std::string_view personal_use = "use-personal-consumable";
 
     [[nodiscard]] bool enabled()
     {
@@ -1489,7 +1503,8 @@ namespace
             return "use-starter-bag";
         for (const auto& consumable : silverfish::native_guest_consumable::consumables)
             if (path == consumable.path) return consumable.entry;
-        return {};
+        return silverfish::native_guest_consumable::qualifies_personal_consumable(Unreal::Cast<Unreal::UClass>(item_class))
+            ? personal_use : std::string_view{};
     }
 
     void intercept_backpack_sort(Iteration& iteration, Unreal::UObject* instance, Unreal::UFunction* function)
@@ -2399,6 +2414,15 @@ namespace
             return;
         }
         const auto name = function->GetNamePrivate();
+        if (personal_preview)
+        {
+            if (context == personal_preview->manager) return;
+            if (name == entries->apply_effects && context->GetClassPrivate() == personal_preview->item_class &&
+                object_field(context, STR("Player_Ref")) == personal_preview->pawn &&
+                object_field(context, STR("Owner")) == personal_preview->pawn &&
+                object_field(context, STR("Instigator")) == personal_preview->pawn)
+                personal_preview->applied = true;
+        }
         if (intercept_stash(iteration, context, function, name, parameters)) return;
         const auto guarded_inventory = [&] {
             if (!host_drop_scope.stock_inventory || !qualified_drop_seat(false) || !exact_class(context, manager_path) ||
@@ -2812,6 +2836,200 @@ namespace
     {
         if (Unreal::IsInGameThreadRaw()) clear_host_drop();
         return 0;
+    }
+
+    Unreal::UObject* make_personal_preview_save(Unreal::UClass* save_class)
+    {
+        using Unreal::UObjectGlobals::StaticFindObject;
+        auto* statics = StaticFindObject<Unreal::UObject*>(nullptr, nullptr, STR("/Script/Engine.Default__GameplayStatics"));
+        auto* create = StaticFindObject<Unreal::UFunction*>(nullptr, nullptr,
+            STR("/Script/Engine.GameplayStatics:CreateSaveGameObject"));
+        auto* input = field<Unreal::FClassProperty>(create, STR("SaveGameClass"));
+        auto* output = field<Unreal::FObjectProperty>(create, STR("ReturnValue"));
+        struct Arguments { Unreal::UClass* type; Unreal::UObject* result{}; } args{save_class};
+        if (!statics || !create || !create->HasAnyFunctionFlags(Unreal::FUNC_Native) || create->GetNumParms() != 2 ||
+            create->GetParmsSize() != sizeof(args) || !input || input->GetOffset_Internal() != 0 ||
+            !output || output != create->GetReturnProperty() || output->GetOffset_Internal() != offsetof(Arguments, result))
+            return nullptr;
+        statics->ProcessEvent(create, &args);
+        return live(args.result) && args.result->GetClassPrivate() == save_class ? args.result : nullptr;
+    }
+
+    int lua_preview_personal_consumable(const Lua& lua)
+    {
+        const auto refuse = [&](std::string_view status) { return probe_result(lua, false, status); };
+        if (!Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 3 || !lua.is_integer(1) || !lua.is_string(2) ||
+            !lua.is_integer(3) || personal_preview) return refuse("personal_preview_scope");
+        const auto sequence = lua.get_integer(3);
+        const std::string epoch{lua.get_string(2)};
+        const auto address = lua.get_integer(1);
+        if (!drop_argument(address, epoch, false) || !host_drop_request || !host_drop_request->taken ||
+            host_drop_request->sequence != sequence || host_drop_request->entry != personal_use ||
+            host_drop_request->previewed || Clock::now() >= host_drop_request->expires)
+            return refuse("personal_preview_request");
+
+        auto& request = *host_drop_request;
+        auto* manager = request.manager.Get();
+        auto* screen = request.screen.Get();
+        auto* panel = request.panel.Get();
+        auto* pawn = scope.pawn.Get();
+        auto* instance = scope.instance.Get();
+        auto* save = canonical_host_save();
+        if (!save || !exact_drop_screen(manager, screen, panel)) return refuse("personal_preview_screen");
+        auto* menu = object_field(manager, STR("ItemContextMenu"));
+        auto* card = object_field(menu, STR("Item Card"));
+        const auto item = card_item(card);
+        auto* type = Unreal::Cast<Unreal::UClass>(object_value(field<Unreal::FClassProperty>(item.structure, item_class_name), item.value));
+        auto* ammo = field<Unreal::FIntProperty>(item.structure, item_ammo_name);
+        auto* action = stock_no_args(manager, entries->action_use);
+        const GuidFields identity(item.structure);
+        if (!action || !exact_class(menu, context_menu_path) || !same_widget_player(menu) || !same_widget_player(card) ||
+            object_field(menu, STR("ItemManager")) != manager || object_field(card, STR("ItemManager")) != manager ||
+            item.panel != panel || !array_has_widget(panel, STR("Cards"), card, false) ||
+            !identity.valid() || identity.read(item.value) != request.guid || !ammo ||
+            !silverfish::native_guest_consumable::qualifies_personal_consumable(type))
+            return refuse("personal_preview_item");
+
+        const auto raw = ammo->GetPropertyValueInContainer(item.value);
+        auto* defaults = type->GetClassDefaultObject().Get();
+        auto* stacks = field<Unreal::FBoolProperty>(defaults, STR("Stacks"));
+        const bool stackable = stacks && stacks->GetPropertyValueInContainer(defaults);
+        const auto source_count = raw == 0 || (raw == -1 && !stackable) ? 1 : raw;
+        if (!stacks || source_count < 1 || (!stackable && source_count != 1) ||
+            !exact_canonical_drop_row(save, item, request.guid, raw, type, {}, false))
+            return refuse("personal_preview_quantity");
+        for (const auto name : {STR("Dead"), STR("UsingItem"), STR("IsWeaponBlocked"), STR("HeadUnderWater")})
+        {
+            auto* field_value = field<Unreal::FBoolProperty>(pawn, name);
+            if (!field_value || field_value->GetPropertyValueInContainer(pawn)) return refuse("personal_preview_busy");
+        }
+
+        auto* pawn_slot = field<Unreal::FObjectProperty>(pawn, STR("Save"));
+        auto* instance_slot = field<Unreal::FObjectProperty>(instance, STR("SaveSlot_Ref"));
+        auto* backpack = field<Unreal::FArrayProperty>(save, STR("PlayerBackpack"));
+        auto* flags = field<Unreal::FMapProperty>(save, STR("Flags"));
+        auto* quests = field<Unreal::FMapProperty>(save, STR("ActiveQuests"));
+        auto* equipment = field<Unreal::FArrayProperty>(save, STR("PlayerEquipment"));
+        auto* helmet = field<Unreal::FStructProperty>(save, STR("PlayerHelmet"));
+        auto* armor = field<Unreal::FStructProperty>(save, STR("PlayerArmor"));
+        auto* known = field<Unreal::FArrayProperty>(save, STR("KnownInventory"));
+        auto* character = field<Unreal::FStructProperty>(save, STR("Character"));
+        auto* timed_effects = field<Unreal::FMapProperty>(save, STR("PlayerTempEffects"));
+        auto* passives = field<Unreal::FArrayProperty>(instance, STR("PassiveEffects"));
+        auto* weight = field<Unreal::FDoubleProperty>(pawn, STR("Inventory_CarryWeight"));
+        auto* intox = field<Unreal::FIntProperty>(pawn, STR("Intoxication"));
+        const std::array vitals{
+            field<Unreal::FDoubleProperty>(save, STR("PlayerFood")), field<Unreal::FDoubleProperty>(save, STR("PlayerHealth")),
+            field<Unreal::FDoubleProperty>(save, STR("PlayerRegen")), field<Unreal::FDoubleProperty>(save, STR("PlayerStim")),
+        };
+        const std::array<Unreal::FProperty*, 7> unchanged{flags, quests, equipment, helmet, armor, character, timed_effects};
+        if (!pawn_slot || !instance_slot || !backpack || !known || !passives || !weight || !intox ||
+            std::ranges::find(unchanged, nullptr) != unchanged.end() || std::ranges::find(vitals, nullptr) != vitals.end())
+            return refuse("personal_preview_schema");
+
+        auto* scratch = make_personal_preview_save(save->GetClassPrivate());
+        if (!scratch || scratch == save) return refuse("personal_preview_save");
+        const auto copy = [&](Unreal::FProperty* property) {
+            property->CopyCompleteValue(property->ContainerPtrToValuePtr<void>(scratch),
+                                        property->ContainerPtrToValuePtr<void>(save));
+        };
+        for (auto* property : unchanged) copy(property);
+        for (auto* property : vitals) copy(property);
+        copy(backpack);
+        copy(known);
+        auto* passive_cache = passives->ContainerPtrToValuePtr<void>(instance);
+        const auto free_passives = [passives](void* value) { passives->DestroyAndFreeValue(value); };
+        const std::unique_ptr<void, decltype(free_passives)> saved_passives(passives->AllocateAndInitializeValue(), free_passives);
+        if (!saved_passives) return refuse("personal_preview_passives");
+        passives->CopyCompleteValue(saved_passives.get(), passive_cache);
+
+        PersonalPreview preview{manager, type, pawn};
+        request.previewed = true;
+        {
+            // Stock TakeCard and the inherited effect run synchronously. Confine
+            // their save changes to this disposable save and restore both references
+            // before the host can receive or project the measured deltas.
+            struct Restore
+            {
+                Unreal::FObjectProperty* pawn_slot;
+                Unreal::FObjectProperty* instance_slot;
+                Unreal::UObject* pawn;
+                Unreal::UObject* instance;
+                Unreal::UObject* save;
+                Unreal::FDoubleProperty* weight;
+                Unreal::FIntProperty* intox;
+                Unreal::FArrayProperty* passives;
+                void* passive_cache;
+                const void* saved_passives;
+                double old_weight;
+                int old_intox;
+                ~Restore()
+                {
+                    personal_preview = nullptr;
+                    pawn_slot->SetObjectPropertyValue(pawn_slot->ContainerPtrToValuePtr<void>(pawn), save);
+                    instance_slot->SetObjectPropertyValue(instance_slot->ContainerPtrToValuePtr<void>(instance), save);
+                    weight->SetPropertyValueInContainer(pawn, old_weight);
+                    intox->SetPropertyValueInContainer(pawn, old_intox);
+                    passives->CopyCompleteValue(passive_cache, saved_passives);
+                }
+            } restore{pawn_slot, instance_slot, pawn, instance, save, weight, intox, passives, passive_cache,
+                saved_passives.get(), weight->GetPropertyValueInContainer(pawn), intox->GetPropertyValueInContainer(pawn)};
+            pawn_slot->SetObjectPropertyValue(pawn_slot->ContainerPtrToValuePtr<void>(pawn), scratch);
+            instance_slot->SetObjectPropertyValue(instance_slot->ContainerPtrToValuePtr<void>(instance), scratch);
+            personal_preview = &preview;
+            manager->ProcessEvent(action, nullptr);
+        }
+        if (canonical_host_save() != save || !drop_argument(address, epoch, false))
+            return refuse("personal_preview_restore");
+        if (!preview.applied) return refuse("personal_preview_no_effect");
+        for (auto* property : unchanged)
+            if (!property->Identical(property->ContainerPtrToValuePtr<void>(save), property->ContainerPtrToValuePtr<void>(scratch)))
+                return refuse("personal_preview_unhandled_effect");
+
+        auto* row_type = backpack->GetInner();
+        auto* class_field = field<Unreal::FClassProperty>(item.structure, item_class_name);
+        Unreal::FScriptArrayHelper before(backpack, backpack->ContainerPtrToValuePtr<void>(save));
+        Unreal::FScriptArrayHelper after(backpack, backpack->ContainerPtrToValuePtr<void>(scratch));
+        const int remaining = source_count - 1;
+        if (after.Num() != before.Num() - (remaining == 0 ? 1 : 0)) return refuse("personal_preview_debit");
+        std::map<Guid, const void*> other_rows;
+        for (int index = 0; index < before.Num(); ++index)
+        {
+            const auto* row = before.GetRawPtr(index);
+            const auto guid = identity.read(row);
+            if (guid != request.guid && !other_rows.emplace(guid, row).second) return refuse("personal_preview_debit");
+        }
+        bool source_present = false;
+        for (int index = 0; index < after.Num(); ++index)
+        {
+            const auto* row = after.GetRawPtr(index);
+            const auto guid = identity.read(row);
+            if (guid == request.guid)
+            {
+                if (source_present || remaining == 0 || object_value(class_field, row) != type ||
+                    ammo->GetPropertyValueInContainer(row) != remaining) return refuse("personal_preview_debit");
+                source_present = true;
+                continue;
+            }
+            const auto match = other_rows.find(guid);
+            if (match == other_rows.end() || !row_type->Identical(row, match->second)) return refuse("personal_preview_debit");
+            other_rows.erase(match);
+        }
+        if (!other_rows.empty() || source_present != (remaining > 0)) return refuse("personal_preview_debit");
+
+        std::array<double, vitals.size()> deltas{};
+        for (std::size_t index = 0; index < vitals.size(); ++index)
+        {
+            auto* property = vitals[index];
+            deltas[index] = property->GetPropertyValueInContainer(scratch) - property->GetPropertyValueInContainer(save);
+            if (!std::isfinite(deltas[index])) return refuse("personal_preview_vitals");
+        }
+        probe_result(lua, true, "previewed");
+        lua.set_string(RC::to_string(type->GetPathName()));
+        lua.set_integer(source_count);
+        lua.set_integer(remaining);
+        for (const auto delta : deltas) lua.set_number(delta);
+        return 9;
     }
 
     template <bool host>
@@ -3894,6 +4112,7 @@ void silverfish::native_transport::register_lua(RC::LuaMadeSimple::Lua& lua)
         lua.register_function("SilverfishTakeNativeHostDropRequest", lua_take_drop<true>);
         lua.register_function("SilverfishFinishNativeHostDropRequest", lua_finish_drop<true>);
         lua.register_function("SilverfishTakeNativeGuestDropRequest", lua_take_drop<false>);
+        lua.register_function("SilverfishPreviewNativeGuestPersonalConsumable", lua_preview_personal_consumable);
         lua.register_function("SilverfishFinishNativeGuestDropRequest", lua_finish_drop<false>);
         lua.register_function("SilverfishProbeNativeTransportHeldItem", lua_probe_held_item);
         lua.register_function("SilverfishTakeNativeGoldTransportRequest", lua_take_transport_request<TransportKind::Gold>);

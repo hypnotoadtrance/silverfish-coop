@@ -4330,7 +4330,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                         return
                     started = time.perf_counter()
                     try:
-                        await verify_personal_consumable_reconnect(guest, evidence, portable_probe_command)
+                        await verify_personal_consumable_reconnect(host, guest, evidence, portable_probe_command)
                     except Exception as error:
                         finish_check("stock_personal_consumable_reconnect", started, error)
                     else:
