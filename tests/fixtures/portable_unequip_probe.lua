@@ -18,7 +18,7 @@ local specs = {
 }
 local worn_fields = {[9] = "PlayerHelmet", [10] = "PlayerArmor"}
 local worn_classes = {
-    "/Game/Classes/Armor_Items/Helm_Demo.Helm_Demo_C",
+    "/Game/Classes/Armor_Items/Helm_FaceMask.Helm_FaceMask_C",
     "/Game/Classes/Armor_Items/Armor_LabCoat.Armor_LabCoat_C",
 }
 local stored_rounds, live_rounds = 5, 3
@@ -164,6 +164,15 @@ local function worn_state(pawn)
     return table.concat(fields, ",")
 end
 
+local function drop_helmet(pawn, guid)
+    local _, manager, card = equipped_card(pawn, 9, guid)
+    manager:OpenContextMenu(card)
+    local menu = manager.ItemContextMenu
+    assert(same(menu["Item Card"], card) and valid(menu.Button_Drop) and menu.Button_Drop:IsVisible(),
+        "fixture stock Drop button is not available for worn gear")
+    menu:BndEvt__ItemContextMenu_Button_Drop_K2Node_ComponentBoundEvent_6_Pressed__DelegateSignature()
+end
+
 local function equip_worn(pawn, guid, drag_to_chest)
     local stack = pawn.Controller.MenuStack
     local screen = widget_at(stack, stack:GetArrayNum())
@@ -273,6 +282,17 @@ local function run(action, argument)
             remote_seed.pistol.Ammo = live_rounds
         end
         return settled(remote, remote_seed)
+    elseif action == "host-wear-mask" or action == "host-drop-mask" then
+        assert(not guest and #driver.ClientConnections == 1, "fixture expected a co-op host")
+        if action == "host-wear-mask" then
+            assert(identity(pawn.Save.PlayerHelmet) == "-" and control.MenuStack:GetArrayNum() == 0)
+            local input = asset("/Game/Classes/Player/Player_Inputs/IA_Inventory.IA_Inventory")
+            control:InpActEvt_IA_Inventory_K2Node_EnhancedInputActionEvent_0({}, 0, 0, input)
+            equip_worn(pawn, argument, false)
+        else
+            drop_helmet(pawn, argument)
+        end
+        return identity(pawn.Save.PlayerHelmet)
     elseif action == "baseline" then
         assert(not guest and #driver.ClientConnections == 0 and not seed, "fixture needs its private solo host")
         seed = {pawn = pawn, ids = make_rows(pawn)}
@@ -350,12 +370,7 @@ local function run(action, argument)
         assert(guest and seed and same(pawn, seed.pawn), "fixture guest owner changed")
         local prior = worn_state(pawn)
         if action == "guest-drop-helmet" then
-            local _, manager, card = equipped_card(pawn, 9, argument)
-            manager:OpenContextMenu(card)
-            local menu = manager.ItemContextMenu
-            assert(same(menu["Item Card"], card) and valid(menu.Button_Drop) and menu.Button_Drop:IsVisible(),
-                "fixture stock Drop button is not available for worn gear")
-            menu:BndEvt__ItemContextMenu_Button_Drop_K2Node_ComponentBoundEvent_6_Pressed__DelegateSignature()
+            drop_helmet(pawn, argument)
         else
             drag(pawn, 10, argument, false, true)
         end

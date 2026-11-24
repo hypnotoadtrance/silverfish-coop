@@ -2995,7 +2995,7 @@ async def verify_stock_unequip(first, second, evidence):
             assert receipt["stock_inventory_proof"] == f"verified stock equipment slot {slot}", receipt
             proof = receipt[key]
             if slot == 8:
-                assert proof["class_path"].endswith("/Helm_Demo.Helm_Demo_C") and proof["voice_filter"], proof
+                assert proof["class_path"].endswith("/Helm_FaceMask.Helm_FaceMask_C"), proof
             else:
                 assert proof["class_path"].endswith("/Armor_LabCoat.Armor_LabCoat_C") and proof["minimum"] == 22, proof
             current_worn[index] = guid
@@ -3051,6 +3051,26 @@ async def verify_stock_unequip(first, second, evidence):
                 "backpack", receipt["class_path"], 1), recovered
             evidence["guest_worn_world_drop"].append({"receipt": receipt, "host_pickup": recovered})
         assert saves() == before, "The guest worn drop or host pickup wrote a save before a checkpoint"
+        mask = worn_guids[0]
+        await wait_resident_status(host_run, lambda frame: frame.get("game", {}).get("native_host_stack_drop_scope"))
+        assert await portable_probe_command(host.bridge, probe, f"host-wear-mask\t{mask}") == mask
+        host_frame = await wait_resident_status(host_run, lambda frame: frame.get("state") == "hosting")
+        await portable_probe_command(host.bridge, probe, f"host-drop-mask\t{mask}")
+        async with asyncio.timeout(10):
+            while True:
+                drops = [row for row in await resident_events(host_run, host_frame)
+                         if row.get("event") == "native_host_stock_drop" and row.get("entry") == "equipped_context_menu"]
+                if drops:
+                    assert len(drops) == 1 and not drops[0].get("error"), drops
+                    dropped = drops[0][native_guest_drop.RESULT]
+                    assert dropped["guid"] == mask, dropped
+                    break
+                await asyncio.sleep(.08)
+        marker = native_world_loot.player_drop_identity(dropped["drop_id"])
+        for run in (host_run, guest_run):
+            await wait_resident_status(run, lambda frame: marker in frame.get("game", {}).get(native_world_loot.KEY, {}))
+        evidence["host_face_mask_drop"] = dropped
+        assert saves() == before, "The worn Face Mask drop wrote a save before a checkpoint"
         await leaves_stock_open()
         await close_stock()
         return {"selected_and_inactive_slots_checked": True, "guest_duplicate_clicks_rejected": True,
