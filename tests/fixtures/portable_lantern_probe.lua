@@ -15,6 +15,12 @@ local function same(first, second)
     return valid(first) and valid(second) and first:GetAddress() == second:GetAddress()
 end
 
+local function current_world_is(address)
+    local viewport = FindFirstOf("GameViewportClient")
+    local current = valid(viewport) and viewport.World
+    return valid(current) and current:GetAddress() == address
+end
+
 local function holds(pawn, lantern, root)
     local grip = pawn.PhysicsHandle
     return same(pawn.HeldObject, lantern) == true and valid(grip) == true and same(grip:GetGrabbedComponent(), root) == true
@@ -31,13 +37,25 @@ local function sweep_lantern(world, driver, pawn, lantern, root, trace)
     local rotation = controller:GetControlRotation()
     local start_yaw, pitch, roll = rotation.Yaw, rotation.Pitch, rotation.Roll
     local began = os.clock()
-    LoopInGameThreadWithDelay(25, function()
-        if not same(world.NetDriver, driver) or not same(controller.Pawn, pawn) or pawn.Dead ~= false
-            or not same(pawn.HeldObject, lantern) then return true end
+    local world_address = world:GetAddress()
+    local sweep, finished
+    local function stop()
+        finished = true
+        CancelDelayedAction(sweep)
+    end
+    sweep = LoopInGameThreadWithDelay(25, function()
+        if finished then return end
+        if not current_world_is(world_address) or not same(world.NetDriver, driver)
+            or not same(controller.Pawn, pawn) or pawn.Dead ~= false or not same(pawn.HeldObject, lantern) then
+            stop()
+            return
+        end
         local fraction = math.min((os.clock() - began) / 1.2, 1)
         controller:SetControlRotation({Pitch = pitch, Yaw = start_yaw + 65 * fraction, Roll = roll})
-        if trace and fraction >= 1 then trace.swept = true end
-        return fraction >= 1
+        if fraction == 1 then
+            if trace then trace.swept = true end
+            stop()
+        end
     end)
     return "sweeping"
 end
@@ -75,9 +93,15 @@ end
 local function arm_trace(world, driver, pawn, lantern, root, role)
     assert(not watch and holds(pawn, lantern, root) == (role == 3), "wrong local lantern grip at trace start")
     local current = {world = world, pawn = pawn, actor = lantern, root = root, role = role, started = os.clock(), rows = {}}
+    local world_address = world:GetAddress()
     watch = current
-    LoopInGameThreadWithDelay(25, function()
-        if watch ~= current or #current.rows >= 240 then return true end
+    current.timer = LoopInGameThreadWithDelay(25, function()
+        if not current.timer then return end
+        if watch ~= current or #current.rows >= 240 or not current_world_is(world_address) then
+            CancelDelayedAction(current.timer)
+            current.timer = nil
+            return
+        end
         local ok, issue = pcall(function()
             assert(same(world.NetDriver, driver) and same(pawn:GetWorld(), world) and pawn.Dead == false
                 and same(lantern:GetWorld(), world) and not lantern:IsActorBeingDestroyed()
@@ -89,7 +113,11 @@ local function arm_trace(world, driver, pawn, lantern, root, role)
                 os.clock() - current.started, point.X, point.Y, point.Z, rotation.Pitch, rotation.Yaw, rotation.Roll,
                 visible and 1 or 0, holds(pawn, lantern, root) and 1 or 0)
         end)
-        if not ok then current.error = issue; return true end
+        if not ok then
+            current.error = issue
+            CancelDelayedAction(current.timer)
+            current.timer = nil
+        end
     end)
     return "armed"
 end
@@ -251,6 +279,10 @@ local function observer_probe(action, world, driver, pawn, lantern, root)
     if action == "traceread" then
         local result = string.format("%d %d %.2f|%s|end", role, watch.mark, lantern.NetUpdateFrequency,
             table.concat(watch.rows, "|"))
+        if watch.timer then
+            CancelDelayedAction(watch.timer)
+            watch.timer = nil
+        end
         watch = nil
         return result
     end

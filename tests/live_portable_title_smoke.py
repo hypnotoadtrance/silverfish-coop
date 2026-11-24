@@ -1388,7 +1388,7 @@ async def verify_tutorial_bandage_revisit(host: Seat, guest: Seat, pawn: str) ->
 
 
 async def verify_warehouse_switch(host: Seat, guest: Seat, pawn: str, *, radio: bool = False,
-                                  require_media: bool = False) -> dict:
+                                  check_track_selection: bool = False) -> dict:
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     dock = "/Game/Classes/Maps/Maps_Dungeons/Tut_Dock_P"
     kind, number, device = ("Prop_Radio01_C", 3, "radio") if radio else ("CircutBox_BP_C", 1, "switch")
@@ -1401,17 +1401,18 @@ async def verify_warehouse_switch(host: Seat, guest: Seat, pawn: str, *, radio: 
     async def playback(powered):
         expected = "playing" if powered else "silent"
         observed = {}
+
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
             for name, seat in (("host", host), ("guest", guest)):
-                if observed.get(name) == expected:
+                if observed.get(name, "").partition("|")[0] == expected:
                     continue
                 try:
                     reply = await seat.bridge.command(fixture, "playback", timeout=.8, update_status=False)
                 except TimeoutError:
                     continue
                 observed[name] = reply["ack"]["message"]
-            if observed == {"host": expected, "guest": expected}:
+            if all(observed.get(seat, "").partition("|")[0] == expected for seat in ("host", "guest")):
                 break
             await asyncio.sleep(.12)
         return observed
@@ -1461,11 +1462,14 @@ async def verify_warehouse_switch(host: Seat, guest: Seat, pawn: str, *, radio: 
               "guest_returned_to_initial": True, "checkpoint_unchanged": True}
     if radio:
         result["media_both_seats"] = [host_media, guest_media]
-        result["media_verified"] = all(observed == dict.fromkeys(("host", "guest"), "playing" if active else "silent")
-                                       for observed, active in ((host_media, host_flip["powered"]),
-                                                                (guest_media, initial["powered"])))
-        if require_media:
-            assert result["media_verified"], result
+        active, inactive = (host_media, guest_media) if host_flip["powered"] else (guest_media, host_media)
+        result["stock_track_selected"] = all(active.get(seat, "").partition("|")[2].lower().endswith(".wav")
+                                             for seat in ("host", "guest"))
+        result["media_playing_both_seats"] = all(active.get(seat, "").partition("|")[0] == "playing"
+                                                 and inactive.get(seat, "").partition("|")[0] == "silent"
+                                                 for seat in ("host", "guest"))
+        if check_track_selection:
+            assert result["stock_track_selected"], result
     return {f"stock_warehouse_{device}": result}
 
 
@@ -4413,9 +4417,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
          lambda host, guest, pawn: verify_stock_lingering_teleport(host, guest, pawn, portable_probe_command)),
         (stock_acid_pool, "lab_east_wing_acid", "stock_acid_pool",
          lambda host, guest, _pawn: verify_acid_pool(host, guest, portable_probe_command)),
-        (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_radio",
-         lambda host, guest, pawn: verify_warehouse_switch(host, guest, pawn, radio=True, require_media=stock_radio_media)),
         (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_switch", verify_warehouse_switch),
+        (stock_warehouse_switch, "tutorial_dock", "stock_warehouse_radio",
+         lambda host, guest, pawn: verify_warehouse_switch(host, guest, pawn, radio=True, check_track_selection=stock_radio_media)),
         (stock_bandage_revisit, "tutorial_dock", "stock_bandage_revisit", verify_tutorial_bandage_revisit),
         (stock_warehouse_board, "tutorial_dock", "stock_warehouse_board", verify_warehouse_board),
         (stock_bottle, "tutorial_dock", "stock_bottle", verify_stock_bottle),

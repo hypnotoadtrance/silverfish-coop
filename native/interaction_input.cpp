@@ -17,6 +17,7 @@
 #include <LuaMadeSimple/LuaMadeSimple.hpp>
 #include <Unreal/AActor.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
+#include <Unreal/CoreUObject/UObject/FStrProperty.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FFrame.hpp>
 #include <Unreal/FWeakObjectPtr.hpp>
@@ -1775,7 +1776,11 @@ namespace
         bool result{};
         media->ProcessEvent(query, &result);
         lua.set_bool(playing->GetPropertyValueInContainer(&result));
-        return 1;
+        auto* song = field<Unreal::FStrProperty>(actor, STR("CurrentSong"));
+        if (!song) return 1;
+        const auto name = song->GetPropertyValueInContainer(actor);
+        lua.set_string(name.Len() > 0 && name.Len() < 256 ? RC::to_string(*name) : "");
+        return 2;
     }
 
     int probe(const Lua& lua)

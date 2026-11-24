@@ -12,9 +12,9 @@
         local mode = fields[3]
         if radio and mode == "playback" then
             assert(type(SilverfishProbeNativeRadioPlayback) == "function", "the native media probe is missing")
-            local playing = SilverfishProbeNativeRadioPlayback(name:match("^%S+ (.+)$"))
+            local playing, song = SilverfishProbeNativeRadioPlayback(name:match("^%S+ (.+)$"))
             if type(playing) ~= "boolean" then return "no media player" end
-            return playing and "playing" or "silent"
+            return (playing and "playing" or "silent") .. "|" .. (song or "")
         elseif mode == "host" and phase == "hosting" then
             entry.actor:SendInteractionToActor(state.local_pawn.pawn, entry.box)
             return "host pressed"
