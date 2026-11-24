@@ -1817,8 +1817,11 @@ async def verify_stock_bottle(host: Seat, guest: Seat, pawn: str) -> dict:
     actor_name = f"Prop_Bottle_Booze01_C {thrown}"
     grabbed = await submit(guest_run, native_prop_carry.FIXTURE, target=f"pickup@{stock_class}|{actor_name}")
     assert grabbed["ok"], grabbed
-    await wait_resident_status(host_run, lambda frame: (edge := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
-                               and edge["edge"] == "grab" and edge["actor"] == actor_name)
+    receipt = await wait_resident_status(host_run, lambda frame: (edge := frame.get("game", {}).get(native_prop_carry.PROOF, {}))
+                                         and edge["edge"] == "grab" and edge["actor"] == actor_name)
+    lease = receipt["game"][native_prop_carry.PROOF]["lease"]
+    await wait_resident_status(guest_run, lambda row: (gate := row.get("game", {}).get(native_prop_carry.FILTER, {}))
+                               and gate["lease"] == lease and gate["active"], timeout=6)
     height_before = float(await operate(host, "height", thrown))
     assert await operate(guest, "lift", thrown) == "guest lifted the bottle"
     height = height_before
@@ -2003,20 +2006,38 @@ async def verify_stock_wood_debris(host: Seat, guest: Seat, pawn: str) -> dict:
         grabbed = await submit(guest_run, native_prop_carry.FIXTURE, target=request)
         assert grabbed["ok"], grabbed
         grabbed_proof = await proof("grab")
+        lease = grabbed_proof["lease"]
+
+        async def filter_status(active, *, require_suppressed=False):
+            confirmed = await wait_resident_status(guest_run, lambda row: (
+                gate := row.get("game", {}).get(native_prop_carry.FILTER, {}))
+                and gate["lease"] == lease and gate["active"] == active
+                and (not require_suppressed or gate["suppressed"] > 0), timeout=6)
+            return confirmed["game"][native_prop_carry.FILTER]
+
+        armed = await filter_status(True)
         assert await warehouse_prop_probe(guest, "lift", guest_path) == "guest lifted the bottle"
-        lifted = None
+        lift_started = asyncio.get_running_loop().time()
+        samples, settled = [], 0
         try:
             async with asyncio.timeout(5):
                 while True:
                     lifted = await motion()
-                    if all(held and center[2] > base[0][2] + 40 for (center, held), base in zip(lifted, starting, strict=True)):
+                    gap = math.dist(lifted[0][0], lifted[1][0])
+                    samples.append([round(asyncio.get_running_loop().time() - lift_started, 3), round(gap, 2)])
+                    both_up = all(held and center[2] > base[0][2] + 40
+                                  for (center, held), base in zip(lifted, starting, strict=True))
+                    settled = settled + 1 if both_up and gap < 40 else 0
+                    if settled >= 4:
                         break
                     await asyncio.sleep(.06)
         except TimeoutError as error:
-            raise AssertionError({"staged": starting, "last_lift": lifted}) from error
+            raise AssertionError({"staged": starting, "last_lift": lifted, "lift_gaps": samples}) from error
+        protected = await filter_status(True, require_suppressed=True)
         assert await warehouse_prop_probe(guest, "throw-up", guest_path) == "guest threw upward"
         thrown_proof = await proof("throw")
-        assert thrown_proof["lease"] == grabbed_proof["lease"] and thrown_proof.get("release_pose_applied"), thrown_proof
+        assert thrown_proof["lease"] == lease and thrown_proof.get("release_pose_applied"), thrown_proof
+        cleared = await filter_status(False)
         final = None
         try:
             async with asyncio.timeout(7):
@@ -2029,7 +2050,8 @@ async def verify_stock_wood_debris(host: Seat, guest: Seat, pawn: str) -> dict:
         except TimeoutError as error:
             raise AssertionError({"lifted": lifted, "last_throw": final}) from error
         return {"contested_grab": refusals[0], "guest_released_refused_grip": True,
-                "grab": grabbed_proof, "held": lifted, "throw": thrown_proof, "released": final}
+                "grab": grabbed_proof, "held": lifted, "throw": thrown_proof, "released": final,
+                "lift_gap_seconds_cm": samples, "filter": [armed, protected, cleared]}
 
     async def check(stock_class, kind, count):
         path, replica, position = await stage_warehouse_prop(host, guest, stock_class, "floor-physics")

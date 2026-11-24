@@ -109,7 +109,7 @@ end
 local function filter_root(entry, grip)
     local actor = entry.actor
     local root = rigid_root(entry, grip, FName("None", EFindName.FNAME_Find))
-    if root and not item_body(actor) and actor:HasAnyFlags(EObjectFlags.RF_WasLoaded)
+    if root and same(root, prop_mesh(actor)) and actor.bReplicates == true
         and same(actor:GetOuter(), world.PersistentLevel) then return root end
 end
 
@@ -963,8 +963,9 @@ function carry.rows(current, seat, row)
     if not local_hold or not held(local_hold.pawn, local_hold.actor, grip, local_hold.corpse) then return rows end
     local position, rotation = stock_target(grip)
     if position then
+        local actor = filter_available() and filter_root(local_hold, grip) and local_hold.actor:GetFullName()
         rows[#rows + 1] = row("native-prop-carry-target", current.map, local_hold.serial, position.X, position.Y,
-            position.Z, rotation.Pitch, rotation.Yaw, rotation.Roll)
+            position.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, actor or nil)
     end
     return rows
 end

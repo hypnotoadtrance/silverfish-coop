@@ -31,6 +31,7 @@ FILTER_READY_ROW = "native-prop-carry-filter-ready"
 FILTER_READY = "native_prop_carry_filter_ready"
 _CLASS = re.compile(r"/Game/[A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+_C\Z")
 _PLACED_NAME = re.compile(r"[A-Za-z0-9_-]{1,100}\Z")
+_LOCAL_INSTANCE = re.compile(r"[A-Za-z0-9_-]{1,200}\Z")
 _BONE = re.compile(r"[A-Za-z0-9_ .-]{1,64}\Z")
 _EDGES = {"grab", "drop", "throw"}
 _ORDER_LIMIT = 2**53
@@ -173,9 +174,18 @@ def parse(fields, phase, area):
             raise ValueError("Invalid stock physics carry input")
         return dict(sequence=_serial(fields[2]), pawn=fields[3], edge=fields[4], class_path=fields[5],
                     pose=_numbers(fields[6:11], (1e7, 1e7, 1e7, 89.9, 180)), **details)
-    if len(fields) != 9:
+    if len(fields) not in (9, 10):
         raise ValueError("Invalid stock physics grip")
-    return dict(grab=_serial(fields[2]), pose=_numbers(fields[3:], (1e7, 1e7, 1e7, 360, 360, 360)))
+    grip = dict(grab=_serial(fields[2]), pose=_numbers(fields[3:9], _POSE_LIMITS))
+    if len(fields) == 10:
+        actor = fields[9]
+        kind, _, path = actor.partition(" ")
+        prefix = f"{area}.{area.rsplit('/', 1)[-1]}:PersistentLevel."
+        if (not kind.endswith("_C") or not _LOCAL_INSTANCE.fullmatch(kind)
+                or not path.startswith(prefix) or not _LOCAL_INSTANCE.fullmatch(path[len(prefix):])):
+            raise ValueError("Invalid local stock physics grip actor")
+        grip["actor"] = actor
+    return grip
 
 
 class Host:
@@ -211,7 +221,7 @@ class Host:
         lease = holder["lease"]
         live = game.get(HELD, {}).get(lease)
         if (not live or live["serial"] != holder["sequence"] or live["pawn"] != holder["pawn"]
-                or live["actor"].partition(" ")[2] != holder["identity"].get("placement")):
+                or live["actor"] != holder["actor"]):
             return None
         remaining = int(min(live["remaining"] - 1000 * (now - self.service.last_seen),
                             1000 * (holder["deadline"] - now), 900))
@@ -252,15 +262,17 @@ class Host:
             raise party.RuleError("native_prop_carry_wrong_holder")
         snapshot = await bridge.command(ACTION, lease, pawn, edge, str(number), str(pitch), str(yaw), *args, timeout=4)
         proof = snapshot.get(PROOF, {})
+        actor = proof.get("actor")
         if (tuple(proof.get(key) for key in ("lease", "sequence", "edge", "pawn")) != (lease, number, edge, pawn)
+                or not isinstance(actor, str) or not actor
                 or any(proof.get(key) != identity.get(key) for key in ("corpse", "bone", "loot_id"))
                 or (proof.get("release_pose_applied") and (edge == "grab" or not args))
-                or ("placement" in identity and proof.get("actor", "").partition(" ")[2] != identity["placement"])):
+                or ("placement" in identity and actor.partition(" ")[2] != identity["placement"])):
             raise RuntimeError("The stock physics carry did not return the exact action")
         self.service.last_game, self.service.last_seen = snapshot, time.monotonic()
         if edge == "grab":
             self.holders[character] = dict(lease=lease, pawn=pawn, sequence=number, sample=0,
-                                           deadline=time.monotonic() + 1.4, identity=identity)
+                                           deadline=time.monotonic() + 1.4, identity=identity, actor=actor)
         else:
             self.holders.pop(character, None)
             self.poses.pop(lease, None)
@@ -321,6 +333,7 @@ class Guest:
         self.filter_enabled = filter_setting != "0"
         self.filter_file_fixture = filter_setting == "1"
         self.filter_actor = self.filter_job = None
+        self.filter_placed = False
         self.filter_version = 0
 
     async def _operate(self, row):
@@ -351,11 +364,16 @@ class Guest:
             else:
                 self.local_pose_ready.clear()
             self.filter_actor = None
+            self.filter_placed = False
             self.filter_version = 0
-            if self.filter_enabled and edge == "grab" and row.get("placement"):
+            if self.filter_enabled and edge == "grab" and "corpse" not in row and "loot_id" not in row:
                 actor = proof.get("actor", "")
-                if proof.get("lease") == lease and proof.get("edge") == "grab" and actor.partition(" ")[2] == row["placement"]:
+                kind, _, path = actor.partition(" ") if isinstance(actor, str) else ("", "", "")
+                placement = row.get("placement")
+                if (proof.get("lease") == lease and proof.get("edge") == "grab" and path
+                        and kind == row["class_path"].rsplit(".", 1)[-1] and (not placement or path == placement)):
                     self.filter_actor = actor
+                    self.filter_placed = bool(placement)
             self.last_pose = None
             self.last_local_sample = None
             self.next_pose = 0
@@ -363,6 +381,7 @@ class Guest:
             self.lease = self.grab = None
             self.local_pose_ready.clear()
             self.filter_actor = None
+            self.filter_placed = False
             service.control.event("native_prop_carry_refused", edge=edge, reason=str(error))
             if edge == "grab":
                 try:
@@ -382,22 +401,25 @@ class Guest:
             if reason:
                 self.service.control.event("native_prop_carry_pose_refused", reason=reason)
 
-    async def _arm_filter(self, confirmation, seen):
+    async def _arm_filter(self, confirmation, local_actor, seen):
         remaining = int(confirmation["remaining"] - 1000 * (time.monotonic() - seen))
         if self.lease != confirmation["lease"] or remaining < 150:
             return
         try:
             await self.service.bridge.command("native-prop-carry-arm-filter", self.lease, str(self.grab),
-                                              self.filter_actor, str(remaining), timeout=.5)
+                                              local_actor, str(remaining), timeout=.5)
         except (OSError, ValueError, RuntimeError):
             # Stock movement stays enabled when the local grip or fresh lease cannot be proved.
             pass
 
     def _poll_filter(self, grip):
+        local_actor = grip.get("actor")
         # Keep periodic lease renewals on the in-process bridge during ordinary play.
         if (not self.service.last_game.get(FILTER_READY)
                 or (self.service.bridge.local_bridge is None and not self.filter_file_fixture) or not self.filter_actor
-                or not self.lease or grip.get("grab") != self.grab
+                or not self.lease or grip.get("grab") != self.grab or not local_actor
+                or local_actor.partition(" ")[0] != self.filter_actor.partition(" ")[0]
+                or self.filter_placed and local_actor != self.filter_actor
                 or self.filter_job is not None and not self.filter_job.done()):
             return
         confirmation = self.service.gameplay.get(FILTER)
@@ -411,7 +433,7 @@ class Guest:
         if type(version) is not int or version <= self.filter_version or type(remaining) is not int or not 0 < remaining <= 900:
             return
         self.filter_version = version
-        self.filter_job = asyncio.create_task(self._arm_filter(confirmation, self.service.gameplay_seen))
+        self.filter_job = asyncio.create_task(self._arm_filter(confirmation, local_actor, self.service.gameplay_seen))
 
     def _send_pose(self, position, now, interval):
         service = self.service
@@ -491,6 +513,7 @@ class Guest:
         self.lease = self.grab = None
         self.local_pose_ready.clear()
         self.filter_actor = self.filter_job = None
+        self.filter_placed = False
         self.filter_version = 0
         self.last_local_sample = None
         self.next_pose = 0

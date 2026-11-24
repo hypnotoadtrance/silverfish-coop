@@ -1224,9 +1224,8 @@ namespace
         auto* world = scope.world.Get();
         auto* level = object_field(world, STR("PersistentLevel"));
         if (!base || !actor->IsA(base) || (core && actor->IsA(core)) || !mesh || !root->IsA(mesh) || !live(level) ||
-            actor->GetOuterPrivate() != level || !actor->HasAnyFlags(Unreal::RF_WasLoaded) ||
-            actor->HasAnyFlags(Unreal::RF_Transient))
-            return report(lua, false, "stock_prop_movement_placement");
+            actor->GetOuterPrivate() != level)
+            return report(lua, false, "stock_prop_movement_replica");
 
         auto* owner_type = find<Unreal::UClass>(STR("/Script/Engine.Actor"));
         auto* notify = find<Unreal::UFunction>(STR("/Script/Engine.Actor:OnRep_ReplicatedMovement"));
