@@ -24,6 +24,73 @@ local function asset(path)
     return object
 end
 
+local function face_open_space(pawn, held, kind)
+    local camera, controller = pawn.Camera, pawn.Controller
+    local trace = asset("/Script/Engine.Default__KismetSystemLibrary")
+    local direction = controller:GetControlRotation()
+    local origin = camera:K2_GetComponentLocation()
+    local color = {R = 0, G = 0, B = 0, A = 1}
+    local aim
+    if kind == "pipebomb" then
+        aim = {Pitch = -18, Yaw = direction.Yaw, Roll = 0}
+    else
+        for _, pitch in ipairs({25, 45, 60, 5}) do
+            for turn = 0, 7 do
+                local yaw = direction.Yaw + 45 * turn
+                local pitch_rad, yaw_rad = math.rad(pitch), math.rad(yaw)
+                local point = {X = origin.X + 480 * math.cos(pitch_rad) * math.cos(yaw_rad),
+                    Y = origin.Y + 480 * math.cos(pitch_rad) * math.sin(yaw_rad), Z = origin.Z + 480 * math.sin(pitch_rad)}
+                if not trace:LineTraceSingle(pawn, origin, point, 0, true, {pawn, held}, 0, {}, true, color, color, 0) then
+                    aim = {Pitch = pitch, Yaw = yaw, Roll = 0}
+                    break
+                end
+            end
+            if aim then break end
+        end
+    end
+    assert(aim, "no clear line for the stock bolt")
+    controller:SetControlRotation(aim)
+    pawn:K2_SetActorRotation({Pitch = 0, Yaw = aim.Yaw, Roll = 0}, false)
+    camera:K2_SetWorldRotation(aim, false, {}, true)
+end
+
+local function stock_owner(pawn, world, seat)
+    assert(pawn:HasAuthority(), "stock placement and seeding take place on the host")
+    if seat == "host" then return pawn end
+    assert(seat == "guest")
+    local owner
+    for _, other in ipairs(FindAllOf("Player_FP_C") or {}) do
+        if valid(other) and other:HasAuthority() and not other:IsLocallyControlled()
+            and not other:IsActorBeingDestroyed() and same(other:GetWorld(), world) then
+            assert(not owner, "the private fixture expects one guest")
+            owner = other
+        end
+    end
+    assert(owner and valid(owner.Save) and not same(owner.Save, pawn.Save), "no detached guest inventory")
+    return owner
+end
+
+local function stage_bolt(pawn, world, owner_side)
+    local owner = stock_owner(pawn, world, owner_side)
+    local trace = asset("/Script/Engine.Default__KismetSystemLibrary")
+    local color = {R = 0, G = 0, B = 0, A = 1}
+    -- Use the outdoor yard below the campfire where the stock pipe bomb lands.
+    local positions = owner_side == "guest" and {420, 150} or {-400, -120}
+    for _, y in ipairs(positions) do
+        local x, ground = 3810, {}
+        if trace:LineTraceSingle(owner, {X = x, Y = y, Z = -2180}, {X = x, Y = y, Z = -2450},
+            0, false, {pawn, owner}, 0, ground, true, color, color, 0) then
+            local floor = (ground.OutHit or ground).ImpactPoint
+            local target = {X = x, Y = y, Z = floor.Z + owner.CapsuleComponent:GetScaledCapsuleHalfHeight() + 3}
+            if owner:K2_TeleportTo(target, {Pitch = 0, Yaw = 90, Roll = 0}) then
+                owner:ForceNetUpdate()
+                return ("%.3f,%.3f,%.3f"):format(target.X, target.Y, target.Z)
+            end
+        end
+    end
+    error("could not stage the stock throw in the yard")
+end
+
 RegisterBeginPlayPostHook(function(context)
     local actor = context:get()
     if not valid(actor) or actor:IsActorBeingDestroyed() then return end
@@ -45,7 +112,7 @@ RegisterBeginPlayPostHook(function(context)
     for kind, profile in pairs(profiles) do
         if name:sub(-#profile[2]) == profile[2] then
             local point = actor:K2_GetActorLocation()
-            shots[kind] = {actor = actor, role = actor:GetLocalRole(), name = actor:GetFullName(),
+            shots[kind] = {actor = actor, class = actor:GetClass(), role = actor:GetLocalRole(), name = actor:GetFullName(),
                 clock = StaticFindObject("/Script/Engine.Default__GameplayStatics"), world = world,
                 x = point.X, y = point.Y, z = point.Z, peak = 0, fuse = actor.FuseTime, visible = 0}
             shots[kind].began = shots[kind].clock:GetTimeSeconds(world)
@@ -59,7 +126,12 @@ local function run(action, kind, arg)
     if action == "shot" then
         local shot = shots[kind]
         if not shot then return "absent" end
-        local active = valid(shot.actor) and not shot.actor:IsActorBeingDestroyed()
+        local active, result = false, {}
+        shot.clock:GetAllActorsOfClass(shot.world, shot.class, result)
+        for _, actor in ipairs(result.OutActors or result) do
+            if actor and type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
+            if same(actor, shot.actor) then active = true; break end
+        end
         local display = active and shot.actor.DisplayMesh
         local detail = valid(display) and table.concat({tostring(display:IsVisible()), tostring(display.bHiddenInGame),
             tostring(valid(display.StaticMesh)), tostring(shot.actor.bHidden)}, ":") or "no-mesh"
@@ -73,22 +145,11 @@ local function run(action, kind, arg)
     local pawn = asset("/Script/Engine.Default__GameplayStatics"):GetPlayerPawn(world, 0)
     assert(valid(pawn) and pawn:IsLocallyControlled() and same(pawn.Save, world.OwningGameInstance.SaveSlot_Ref),
         "the local stock pawn is not ready")
+    if action == "stage" then return stage_bolt(pawn, world, arg) end
     local name = profile[1]
     local class = asset(folder .. name .. "." .. name .. "_C")
     if action == "seed" then
-        assert(pawn:HasAuthority(), "seed takes place on the host")
-        local owner = pawn
-        if arg == "guest" then
-            owner = nil
-            for _, other in ipairs(FindAllOf("Player_FP_C") or {}) do
-                if valid(other) and other:HasAuthority() and not other:IsLocallyControlled()
-                    and not other:IsActorBeingDestroyed() and same(other:GetWorld(), world) then
-                    assert(not owner, "the private fixture expects one guest")
-                    owner = other
-                end
-            end
-            assert(owner and valid(owner.Save) and not same(owner.Save, pawn.Save), "no detached guest inventory")
-        end
+        local owner = stock_owner(pawn, world, arg)
         local output = {}
         asset(inventory):MakeItemStack(class, 1, owner, output)
         local row = output.Item or output
@@ -121,17 +182,14 @@ local function run(action, kind, arg)
     assert(action == "press" or action == "release", "unknown throw action")
     local held = pawn.EquipedItem
     assert(valid(held) and same(held:GetClass(), class), "the stock item is no longer held")
-    if action == "press" then
-        local aim = pawn.Controller:GetControlRotation()
-        pawn.Controller:SetControlRotation({Pitch = kind == "pipebomb" and -18 or 30, Yaw = aim.Yaw, Roll = 0})
-    end
+    if action == "press" then face_open_space(pawn, held, kind) end
     held:Use_Item_Primary(action == "press", 1.0)
     return action
 end
 
 LoopInGameThreadWithDelay(25, function()
     for _, shot in pairs(shots) do
-        if valid(shot.actor) and not shot.actor:IsActorBeingDestroyed() then
+        if valid(shot.actor) and not shot.actor:IsActorBeingDestroyed() and valid(shot.actor.RootComponent) then
             local point = shot.actor:K2_GetActorLocation()
             shot.peak = math.max(shot.peak, math.sqrt((point.X - shot.x)^2 + (point.Y - shot.y)^2 + (point.Z - shot.z)^2))
             local mesh = shot.actor.DisplayMesh
