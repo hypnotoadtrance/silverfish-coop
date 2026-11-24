@@ -1,4 +1,4 @@
-"""Verify a guest collects a real shovel and produces one stock hole on both peers."""
+"""Verify stock shovel input and its physical results on both co-op peers."""
 
 import asyncio
 import math
@@ -49,41 +49,68 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False):
         report = await seat.bridge.command("fixture-spade-" + action, *args, update_status=False)
         return report["ack"]["message"]
 
-    async def dig_once(stock_choice=None, *, advance=False):
+    async def dig_once(stock_choice=None, *, advance=False, host_dig=False):
         previous = await asyncio.gather(observe(host, "holes"), observe(guest, "holes"))
         previous = [set(text.split(";")) - {"none"} for text in previous]
-        staged = tuple(map(float, (await observe(host, "aim", pawn, "next" if advance else "find")).split(",")))
+        digger = "local" if host_dig else pawn
+        staged = await observe(host, "aim", digger, "next" if advance else "find")
+        # Keep the observing guest inside the stock actor's replication range.
+        if host_dig:
+            staged = await observe(host, "aim", pawn, "watch-host")
+        expected = tuple(map(float, staged.split(",")))
         await wait_resident_status(guest_run, lambda f: f.get("game", {}).get("pawns", {}).get("local", {}).get("location")
-                                         and math.dist(f["game"]["pawns"]["local"]["location"], staged) <= 40, timeout=8)
-        contacts = await asyncio.gather(observe(host, "aim", pawn), observe(guest, "aim"))
+                                         and math.dist(f["game"]["pawns"]["local"]["location"], expected) <= 40, timeout=8)
+        if host_dig:
+            contacts = [await observe(host, "aim", digger)]
+        else:
+            contacts = await asyncio.gather(observe(host, "aim", digger), observe(guest, "aim"))
         if stock_choice:
             await observe(host, "loot", stock_choice)
-        tap = await submit(guest_run, "native-guest-primary-input-fixture")
-        assert tap["ok"], tap
-        sequence = tap["native_guest_primary_fixture"]["sequence"]
-        async with asyncio.timeout(8):
-            while True:
-                events = [row for row in await resident_events(guest_run, current)
-                          if row.get("sequence") == sequence and row["event"].startswith("native_guest_dig_input")]
-                if events:
-                    break
-                await asyncio.sleep(.08)
-        dispatch, = events
-        assert dispatch["event"] == "native_guest_dig_input", dispatch
-        async with asyncio.timeout(10):
-            while True:
-                observed = await asyncio.gather(observe(host, "holes"), observe(guest, "holes"))
-                additions = [set(text.split(";")) - base - {"none"} for text, base in zip(observed, previous)]
-                if all(additions):
-                    break
-                await asyncio.sleep(.1)
+        if host_dig:
+            dispatch = await observe(host, "host-press", digger)
+            assert dispatch == "pressed and released", dispatch
+        else:
+            tap = await submit(guest_run, "native-guest-primary-input-fixture")
+            assert tap["ok"], tap
+            sequence = tap["native_guest_primary_fixture"]["sequence"]
+            async with asyncio.timeout(8):
+                while True:
+                    events = [row for row in await resident_events(guest_run, current)
+                              if row.get("sequence") == sequence and row["event"].startswith("native_guest_dig_input")]
+                    if events:
+                        break
+                    await asyncio.sleep(.08)
+            event, = events
+            assert event["event"] == "native_guest_dig_input", event
+            dispatch = event[dig.GUEST_RESULT]
+        additions = []
+        try:
+            async with asyncio.timeout(10):
+                while True:
+                    observed = await asyncio.gather(observe(host, "holes"), observe(guest, "holes"))
+                    additions = [set(text.split(";")) - base - {"none"} for text, base in zip(observed, previous)]
+                    if all(additions):
+                        break
+                    await asyncio.sleep(.1)
+        except TimeoutError as error:
+            raise AssertionError(f"No paired stock hole for {digger} at {contacts}. Observed additions {additions}.") from error
         (host_hole,), (guest_hole,) = additions
         assert host_hole.startswith("3,") and guest_hole.startswith("1,"), additions
         assert math.dist(tuple(map(float, host_hole.split(",")[1:])), tuple(map(float, guest_hole.split(",")[1:]))) < 5
-        return {"guid": item["guid"], "holes": [host_hole, guest_hole], "contact": contacts, "dispatch": dispatch[dig.GUEST_RESULT]}
+        result = {"holes": [host_hole, guest_hole], "contact": contacts, "dispatch": dispatch}
+        if not host_dig:
+            result["guid"] = item["guid"]
+        return result
+
+    async def verify_host_dig():
+        checkpoint = campaign_save_hashes(host.campaign)
+        assert await observe(host, "host-equip", "local") == "equipped"
+        result = await dig_once(advance=True, host_dig=True)
+        assert checkpoint == campaign_save_hashes(host.campaign), "An ordinary host dig wrote a checkpoint"
+        return result
 
     if not loot:
-        return {"stock_shovel": await dig_once()}
+        return {"stock_shovel": await dig_once(), "stock_host_shovel": await verify_host_dig()}
 
     checkpoint = campaign_save_hashes(host.campaign)
     host_status = await wait_resident_status(host_run, lambda f: f.get("state") == "hosting")
@@ -157,4 +184,4 @@ async def verify_stock_shovel(host, guest, pawn, *, loot=False):
         raise AssertionError(f"The stock can did not replicate its physics pose. Host {host_props}. Guest {guest_props}.") from error
     replica, = replicas
     return {"stock_shovel": {**dig_result, "unearthed_item": reward, "unearthed_prop": [source, replica],
-                             "duplicate_claim": rival["error"]}}
+                             "duplicate_claim": rival["error"]}, "stock_host_shovel": await verify_host_dig()}

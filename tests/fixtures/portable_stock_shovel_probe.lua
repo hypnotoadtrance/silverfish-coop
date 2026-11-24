@@ -1,5 +1,4 @@
-    if (fields[2] == "fixture-spade-aim" or fields[2] == "fixture-spade-holes" or fields[2] == "fixture-spade-loot"
-        or fields[2] == "fixture-spade-props" or fields[2] == "fixture-spade-sight") and
+    if fields[2]:match("^fixture%-spade%-") and
         os.getenv("SILVERFISH_COOP_HEADLESS") == "1" and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1" then
         assert(state.map == map and (phase == "hosting" or phase == "connected"), "Crossroads dig fixtures require a co-op session")
         if fields[2] == "fixture-spade-sight" then
@@ -78,9 +77,54 @@
             table.sort(holes)
             return table.concat(holes, ";") ~= "" and table.concat(holes, ";") or "none"
         end
-        local pawn = phase == "connected" and state.local_pawn.pawn or guest_save.exact_item_context(state, phase, fields[3])
+        local pawn = (phase == "connected" or fields[3] == "local") and state.local_pawn.pawn
+            or guest_save.exact_item_context(state, phase, fields[3])
+        if fields[2] == "fixture-spade-host-equip" or fields[2] == "fixture-spade-host-press" then
+            local ctx = assert(scope(state, phase))
+            assert(fields[3] == "local" and same(ctx.pawn, pawn) and pawn:IsLocallyControlled())
+            local path = "/Game/Classes/Equipment/MeleeWep_Spade.MeleeWep_Spade_C"
+            local class = StaticFindObject(path)
+            assert(valid(class))
+            if fields[2] == "fixture-spade-host-equip" then
+                local inventory = StaticFindObject("/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C")
+                local output = {}
+                inventory:MakeItemStack(class, 1, pawn, output)
+                local row, slots = output.Item or output, ctx.save.PlayerEquipment
+                local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
+                assert(same(row[item_class], class))
+                for index = 1, slots:GetArrayNum() do
+                    if not valid(slots[index][item_class]) then
+                        slots[index] = row
+                        pawn:Equip_NextItem(index - 1, false)
+                        assert(same(pawn.EquipedItem:GetClass(), class))
+                        return "equipped"
+                    end
+                end
+                error("Stock shovel fixture needs a free host equipment slot")
+            end
+            assert(same(pawn.EquipedItem:GetClass(), class))
+            local input = StaticFindObject("/Game/Classes/Player/Player_Inputs/IA_Use_Primary.IA_Use_Primary")
+            local library = StaticFindObject("/Script/EnhancedInput.Default__EnhancedInputLibrary")
+            assert(valid(input) and valid(library))
+            local press_path = path .. ":PrimaryPress"
+            local spade, presses = pawn.EquipedItem, 0
+            local pre, post = RegisterHook(press_path, function(context)
+                if same(context:get(), spade) then presses = presses + 1 end
+            end)
+            local aim = {Pitch=-86, Yaw=0, Roll=0}
+            pawn.Controller:SetControlRotation(aim)
+            pawn.Camera:K2_SetWorldRotation(aim, false, {}, true)
+            pawn:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_36(library:MakeInputActionValueOfType(1, 0, 0, 0), 0, 0, input)
+            pawn:InpActEvt_IA_Use_Primary_K2Node_EnhancedInputActionEvent_37(library:MakeInputActionValueOfType(0, 0, 0, 0), .05, .05, input)
+            UnregisterHook(press_path, pre, post)
+            assert(presses == 1, ("Stock host input reached PrimaryPress %d times, blocked=%s, using=%s")
+                :format(presses, tostring(pawn.IsWeaponBlocked), tostring(pawn.UsingItem)))
+            return "pressed and released"
+        end
+        assert(fields[2] == "fixture-spade-aim", "Unknown stock shovel fixture command")
         local controller = pawn.Controller
-        local origin = pawn:K2_GetActorLocation()
+        local observing = phase == "hosting" and fields[4] == "watch-host"
+        local origin = (observing and state.local_pawn.pawn or pawn):K2_GetActorLocation()
         local facing = pawn:K2_GetActorRotation()
         local trace = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
         local color = {R=0, G=0, B=0, A=0}
@@ -96,8 +140,8 @@
         end
         local aim = {Pitch=-86,Yaw=0,Roll=0}
         if phase == "hosting" then
-            if fields[4] == "find" or fields[4] == "next" then
-                local radii = fields[4] == "find" and {150, 250, 400, 550, 800, 1100} or {400, 550, 800, 1100}
+            if fields[4] == "find" or fields[4] == "next" or observing then
+                local radii = fields[4] == "next" and {400, 550, 800, 1100} or {150, 250, 400, 550, 800, 1100}
                 for _, radius in ipairs(radii) do
                     for bearing = 0, 315, 45 do
                         local dir = math.rad(bearing)
