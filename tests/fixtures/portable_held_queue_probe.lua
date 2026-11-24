@@ -8,6 +8,8 @@ local weapons = {
     standard = { path = "/Game/Classes/Weapons/Wep_SMG_01.Wep_SMG_01_C", rounds = 7 },
     bizon = { path = "/Game/Classes/Weapons/Wep_Bizon_01.Wep_Bizon_01_C", rounds = 64 },
     burst = { path = "/Game/Classes/Weapons/Wep_SMG_03.Wep_SMG_03_C", rounds = 7 },
+    famas = { path = "/Game/Classes/Weapons/Wep_Famas.Wep_Famas_C", rounds = 7 },
+    lmg = { path = "/Game/Classes/Weapons/Wep_LMG_01.Wep_LMG_01_C", rounds = 100 },
 }
 local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"

@@ -143,7 +143,7 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
             *(kind for kind, *_ in guest_weapon_profiles.ORDINARY_WEAPONS),
             *native_guest_weapon.LOKI_KINDS,
         })
-        self.assertEqual(guest_weapon_profiles.MAX_TAKE_AMMO_ROUNDS, 64)
+        self.assertEqual(guest_weapon_profiles.MAX_TAKE_AMMO_ROUNDS, 100)
         self.assertEqual(len(native_guest_weapon.FIRE_CLASSES), len(guest_weapon_profiles.FIREARMS))
 
     def test_loki_primary_intent_requires_the_mounted_muzzle_and_receiver(self):
@@ -178,7 +178,9 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
         self.assertEqual(magazines["smg-03"].burst_length, 3)
         self.assertNotIn("rusty-pistol", magazines)
         self.assertNotIn("sg-71-a", magazines)
-        self.assertEqual(guest_weapon_profiles.MAX_HELD_FIRE_ROUNDS, 64)
+        self.assertEqual(magazines["famas"].burst_length, 3)
+        self.assertEqual(magazines["lmg-01"].capacity, 100)
+        self.assertEqual(guest_weapon_profiles.MAX_HELD_FIRE_ROUNDS, 100)
 
 
 class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):

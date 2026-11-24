@@ -4,7 +4,7 @@ import asyncio
 import re
 import uuid
 
-from tools.silverfish import native_guest_ui, native_smg_hold, runtime
+from tools.silverfish import native_guest_ui, native_inventory, native_smg_hold, runtime
 from tools.silverfish.control import submit
 from tools.silverfish.guest_weapon_profiles import STOCK_HELD_FIRE_MAGAZINES
 from tools.silverfish.travel import OBSERVATORY
@@ -18,6 +18,8 @@ RECEIVERS = {
     KIND: ("standard", ROUNDS, "stock_held_queue"),
     "bizon-01": ("bizon", 64, "stock_bizon_hold"),
     "smg-03": ("burst", ROUNDS, "stock_burst_hold"),
+    "famas": ("famas", ROUNDS, "stock_famas_hold"),
+    "lmg-01": ("lmg", 100, "stock_lmg_hold"),
 }
 FIXTURE = "native_guest_held_fire_fixture"
 PUBLICATION = "native_guest_primary_publication"
@@ -115,6 +117,37 @@ async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=
                     return edges, terminals[0]
                 await asyncio.sleep(.04)
 
+    async def round_trip_ammo(guid, remaining):
+        async def observe(predicate):
+            async with asyncio.timeout(10):
+                while True:
+                    for row in await resident_events(guest_run, guest_frame):
+                        if predicate(row):
+                            return row
+                    await asyncio.sleep(.1)
+
+        async def inventory_view(state):
+            await control(guest_run, "native-inventory-view-fixture")
+            await wait_resident_status(guest_run, lambda status:
+                status.get("game", {}).get("native_inventory_view", {}).get("state") == state, timeout=8)
+
+        magazine = STOCK_HELD_FIRE_MAGAZINES[kind]
+        assert magazine.capacity == 100 and 64 < remaining < magazine.capacity
+        await inventory_view("stock")
+        await control(guest_run, "native-inventory-stock-use-click-fixture", target=f"{guid}|take-ammo")
+        unloaded = (await observe(lambda row: row.get(native_inventory.TAKE_AMMO_KEY, {}).get("source_guid") == guid)
+                    )[native_inventory.TAKE_AMMO_KEY]
+        assert (unloaded["class_path"], unloaded["split"], unloaded["remaining"]) == (
+            magazine.ammo.item_path, remaining, 0), unloaded
+        await inventory_view("closed")
+        trigger = (await control(guest_run, "native-guest-reload-input-fixture"))["native_guest_reload_fixture"]
+        reload = (await observe(lambda row: row["event"] == "native_guest_reload_input"
+                                 and row.get("sequence") == trigger["sequence"]))["native_guest_weapon"]
+        assert (reload["guid"], reload["before"], reload["after"]) == (guid, 0, remaining), reload
+        loaded = (await control(guest_run, "native-guest-weapon-inspect", target=guid))["native_guest_weapon"]
+        assert loaded["actor_ammo"] == loaded["stored_ammo"] == remaining, loaded
+        return {"unload": unloaded, "reload": reload}
+
     guid = await probe(host.bridge, "portable-held-queue", f"seed\t{pawn}\t{fixture_name}")
     assert re.fullmatch(r"[0-9A-F]{32}", guid), guid
     prior = await capture_prior_selection(host, pawn, character, previous["guid"], guid) if stale_quick_slot else None
@@ -177,6 +210,8 @@ async def verify_stock_held_queue(host, guest, pawn, probe, *, stale_quick_slot=
                  "fire_mode": {"semi_hold_blocked": semi == "semi", "restored": mode}, "host_terminal": terminal}
         if stale_reply:
             proof["stale_quick_slot_reply"] = stale_reply
+        if kind == "lmg-01":
+            proof["large_magazine_round_trip"] = await round_trip_ammo(guid, terminal["after"])
         return {check_name: proof}
     finally:
         await stock_select(previous["guid"])
