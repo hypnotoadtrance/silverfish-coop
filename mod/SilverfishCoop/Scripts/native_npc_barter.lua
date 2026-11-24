@@ -1,6 +1,7 @@
 local barter = {}
 local guest_save = require("guest_save")
 local wire = require("native_wire_quest")
+local identity = require("native_npc_barter_identity")
 
 local npc_class = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
 local trader_class = "/Game/Classes/Actors/Barter_BP.Barter_BP_C"
@@ -39,7 +40,8 @@ local function trader_identity(actor, state)
         or valid(actor.LinkedShop) or not exact(actor.MerchantData, merchant_class)
         or npc.Alive ~= true or npc:IsActorBeingDestroyed() or actor:IsActorBeingDestroyed()
         or not same(npc:GetWorld(), state.world) or not same(actor:GetWorld(), state.world) then return end
-    local id = guid(actor.TraderID)
+    local id = identity.key(npc)
+    if not id and not identity.is_dynamic(npc) then id = guid(actor.TraderID) end
     if id and id:find("[^0]") then return id, npc end
 end
 
@@ -407,6 +409,7 @@ end
 
 function barter.sync(state, phase)
     if not enabled or type(SilverfishSetNativeNpcBarter) ~= "function" then return end
+    identity.sync(state, phase)
     observed_state, observed_phase = state, phase
     if phase == "connected" and not menu_hook and type(RegisterHook) == "function" and valid(StaticFindObject(add_menu)) then
         menu_hook = RegisterHook(add_menu, function(controller)
@@ -467,7 +470,7 @@ function barter.command(fields, state, phase)
     local cash = math.tointeger(tonumber(fields[7]))
     if not cash or tostring(cash) ~= fields[7] or type(SilverfishNativeNpcBarterExchange) ~= "function" then fail("exchange_arguments") end
     local okay, detail, receipt, before, after = SilverfishNativeNpcBarterExchange(pawn:GetAddress(), save:GetAddress(),
-        stock:GetAddress(), actor:GetAddress(), identifier, fields[5], fields[6], cash)
+        stock:GetAddress(), actor:GetAddress(), guid(actor.TraderID), fields[5], fields[6], cash)
     if okay ~= true then error(detail, 0) end
     local verified, report = pcall(catalog, state, pawn, instance, actor, identifier)
     if not verified or before - after ~= cash or after ~= report.cash or detail ~= "exchanged"
