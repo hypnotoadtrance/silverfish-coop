@@ -184,4 +184,9 @@ end
 
 reconcile("/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C", true)
 reconcile("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C", false)
+local wire_mesh = "s@/Game/Classes/Weapons/WeaponMeshes/Nagant.Nagant@0.00@0.00@0.00@0.00@0.00@0.00@1.00@1.00@1.00"
+local parts, _, _, grip = view.decode(wire_mesh .. "^29.51,-10.54,10.65")
+assert(parts and #parts == 1 and grip.offset.X == 29.51 and grip.offset.Y == -10.54)
+assert(not view.decode(wire_mesh .. "^99.00,0.00,0.00") and not view.decode(wire_mesh .. "^0.00,0.00,0.00"))
+assert(view.decode(wire_mesh), "outfits without foregrip offsets must still decode")
 print("Late rifle and melee meshes are masked at the observer and restored on removal")

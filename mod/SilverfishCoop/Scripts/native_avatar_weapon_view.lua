@@ -74,6 +74,14 @@ function view.decode(model)
     if model == "-" then return {} end
     if type(model) ~= "string" or #model > 4096 or model == "" then return end
     local shape, mode = lighter.split(model)
+    local grip
+    local mesh_shape, x, y, z = shape:match("^(.-)%^(%-?%d%d?%.%d%d),(%-?%d%d?%.%d%d),(%-?%d%d?%.%d%d)$")
+    if mesh_shape then
+        x, y, z = tonumber(x), tonumber(y), tonumber(z)
+        local length = math.sqrt(x*x + y*y + z*z)
+        if mode or length < 10 or length > 80 then return end
+        shape, grip = mesh_shape, {offset = {X = x, Y = y, Z = z}, length = length}
+    end
     local parts, has_rig, needs_rig = {}, false, false
     for encoded in (shape .. "|"):gmatch("([^|]*)|") do
         local fields = {}
@@ -98,7 +106,7 @@ function view.decode(model)
     if needs_rig and not has_rig then return end
     if mode and (#parts ~= 2 or parts[1].kind ~= "s" or parts[2].kind ~= "s"
         or parts[1].socket or parts[2].socket or parts[1].path ~= lighter.body_path or parts[2].path ~= lighter.lid_path) then return end
-    return parts, mode, shape
+    return parts, mode, shape, grip
 end
 
 local function encode_pose(location, rotation, scale)
@@ -225,6 +233,15 @@ function view.observe(pawn, save, cached)
     if #parts == 0 or #parts == 1 and rig_description and rig_description:sub(1, 1) == "h" then return "-", nil end
     table.sort(parts)
     local model = table.concat(parts, "|")
+    local gun, foregrip = StaticFindObject(firearm_type), equipment.Arrow_Forgrip
+    if valid(gun) and equipment:IsA(gun) and equipment.ItemType ~= 3
+        and valid(foregrip) and same(foregrip:GetOwner(), equipment) then
+        local offset = math_api:InverseTransformLocation(root_transform, foregrip:K2_GetComponentLocation())
+        local length = math.sqrt(offset.X^2 + offset.Y^2 + offset.Z^2)
+        if length >= 10.02 and length <= 79.98 then
+            model = model .. ("^%.2f,%.2f,%.2f"):format(offset.X, offset.Y, offset.Z)
+        end
+    end
     return model, { actor = equipment, model = model }
 end
 
@@ -432,7 +449,7 @@ end
 function view.apply(entry, model, firearm)
     firearm = firearm or "-"
     if entry.weapon_model == model and entry.firearm_class == firearm then return end
-    local parts, mode, shape = view.decode(model)
+    local parts, mode, shape, grip = view.decode(model)
     if not parts or mode and firearm ~= "-" then error("Invalid stock held weapon model") end
     if mode and entry.lighter and entry.weapon_shape == shape and entry.firearm_class == firearm then
         lighter.apply(entry, mode)
@@ -458,6 +475,7 @@ function view.apply(entry, model, firearm)
             local base = StaticFindObject(firearm_type)
             if valid(defaults) and valid(base) and defaults:IsA(base) then
                 entry.weapon_stance = defaults.ItemType == 3 and "pistol" or "rifle"
+                if entry.weapon_stance == "rifle" then entry.rifle_grip = grip end
             end
         end
     end
@@ -467,22 +485,11 @@ end
 
 function view.rifle_idle(entry, idle, api, add_pivot)
     local pivot, grip = entry.rifle_pivot, entry.rifle_grip
-    local stock = entry.stock_weapon_actor
     local anchor, body = entry.weapon_anchor, entry.body
-    if idle and valid(anchor) and valid(stock) and not stock:IsActorBeingDestroyed() then
-        if not grip or not same(stock, grip.actor) then
-            local foregrip, root = stock.Arrow_Forgrip, stock.RootComponent
-            if valid(foregrip) and valid(root) and same(foregrip:GetOwner(), stock) then
-                local offset = api:InverseTransformLocation(root:K2_GetComponentToWorld(), foregrip:K2_GetComponentLocation())
-                grip = {actor = stock, offset = offset, length = math.sqrt(offset.X^2 + offset.Y^2 + offset.Z^2)}
-                entry.rifle_grip = grip
-            else
-                grip = nil
-            end
-        end
+    if idle and grip and valid(anchor) then
         local hand = FName("LeftHand", EFindName.FNAME_Find)
         local socket = FName("Weapon_Socket01", EFindName.FNAME_Find)
-        if grip and grip.length >= 10 and grip.length <= 80 and body:DoesSocketExist(hand) then
+        if body:DoesSocketExist(hand) then
             local palm = body:GetSocketLocation(hand)
             local index = FName("LeftHandIndex1", EFindName.FNAME_Find)
             if body:DoesSocketExist(index) then

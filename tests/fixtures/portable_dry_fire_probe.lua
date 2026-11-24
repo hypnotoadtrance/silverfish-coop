@@ -173,28 +173,29 @@ local function seed_reserve(extra)
     return read_reserve(peer)
 end
 
-local function rifle_grip()
+local function rifle_grip(argument)
     assert(observing())
     local weapon = peer.EquipedItem
-    if not valid(weapon) then
-        local attached = {}
-        peer:GetAttachedActors(attached, true, false)
-        for _, actor in ipairs(attached.OutActors or attached) do
-            if type(actor) == "userdata" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
-            if valid(actor) and same(actor:GetClass(), asset(weapon_path)) then weapon = actor; break end
-        end
-    end
-    if not valid(weapon) or not same(weapon:GetClass(), asset(weapon_path)) then return "waiting:weapon" end
-    local frame, root, marker = weapon.Mesh_Frame, weapon.RootComponent, weapon.Arrow_Forgrip
-    if not valid(frame) or not valid(root) or not valid(marker) then return "waiting:marker" end
     local hand_socket = FName("Weapon_Socket01", EFindName.FNAME_Find)
     local left = FName("LeftHand", EFindName.FNAME_Find)
     local index = FName("LeftHandIndex1", EFindName.FNAME_Find)
     local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
+    local stock_mesh, grip
+    if argument and argument ~= "" then
+        local path, x, y, z = argument:match("^(StaticMesh /Game/[%w_./%-]+);([%-%.%d]+),([%-%.%d]+),([%-%.%d]+)$")
+        assert(path and tonumber(x) and tonumber(y) and tonumber(z))
+        stock_mesh, grip = path, {X = tonumber(x), Y = tonumber(y), Z = tonumber(z)}
+    else
+        if not valid(weapon) or not same(weapon:GetClass(), asset(weapon_path)) then return "waiting:weapon" end
+        local frame, root, marker = weapon.Mesh_Frame, weapon.RootComponent, weapon.Arrow_Forgrip
+        if not valid(frame) or not valid(root) or not valid(marker) or not valid(frame.StaticMesh) then return "waiting:marker" end
+        stock_mesh = frame.StaticMesh:GetFullName()
+        grip = math_api:InverseTransformLocation(root:K2_GetComponentToWorld(), marker:K2_GetComponentLocation())
+    end
     local witness = "waiting:frame"
     for _, part in ipairs(peer:K2_GetComponentsByClass(asset("/Script/Engine.StaticMeshComponent"))) do
         if type(part) == "userdata" and part:type() == "RemoteUnrealParam" then part = part:get() end
-        if same(part.StaticMesh, frame.StaticMesh) and part:IsVisible() then
+        if valid(part.StaticMesh) and part.StaticMesh:GetFullName() == stock_mesh and part:IsVisible() then
             local anchor = part:GetAttachParent()
             local pivot = valid(anchor) and anchor:GetAttachParent()
             for _ = 1, 3 do
@@ -211,7 +212,6 @@ local function rifle_grip()
                     local wrist, knuckle = body:GetSocketLocation(left), body:GetSocketLocation(index)
                     local palm = {X = (wrist.X + knuckle.X) * .5, Y = (wrist.Y + knuckle.Y) * .5,
                         Z = (wrist.Z + knuckle.Z) * .5}
-                    local grip = math_api:InverseTransformLocation(root:K2_GetComponentToWorld(), marker:K2_GetComponentLocation())
                     local baseline = math_api:TransformLocation(body:GetSocketTransform(hand_socket, 0), grip)
                     local actual = math_api:TransformLocation(anchor:K2_GetComponentToWorld(), grip)
                     local function distance(a, b)
@@ -230,7 +230,7 @@ local function rifle_grip()
     return witness
 end
 
-local function run(action)
+local function run(action, argument)
     if arm_profiles[action] then
         weapon_path, reserve_path, reserve_units, slot = table.unpack(arm_profiles[action])
         return arm()
@@ -249,7 +249,15 @@ local function run(action)
     end
     if action == "ready" then return ready(local_pawn) end
     if action == "peer-ready" then return ready(peer) end
-    if action == "rifle-grip" then return rifle_grip() end
+    if action == "rifle-grip" then return rifle_grip(argument) end
+    if action == "rifle-witness" then
+        assert(observing() and ready(local_pawn) ~= "waiting")
+        local weapon = local_pawn.EquipedItem
+        local math_api = asset("/Script/Engine.Default__KismetMathLibrary")
+        local grip = math_api:InverseTransformLocation(weapon.RootComponent:K2_GetComponentToWorld(),
+            weapon.Arrow_Forgrip:K2_GetComponentLocation())
+        return ("%s;%.4f,%.4f,%.4f"):format(weapon.Mesh_Frame.StaticMesh:GetFullName(), grip.X, grip.Y, grip.Z)
+    end
     if action == "stand" then
         local_pawn:UnCrouch(false)
         return "standing"
@@ -334,13 +342,13 @@ end
 LoopInGameThreadWithDelay(40, function()
     local request = io.open(prefix .. "command.tsv", "rb")
     if not request then return end
-    local data = request:read(96)
+    local data = request:read(384)
     request:close()
     if not data then return end
-    local ticket, action = data:match("^(%x+)\t([a-z%-]+)$")
+    local ticket, action, argument = data:match("^(%x+)\t([a-z%-]+)\t?(.*)$")
     if not ticket or #ticket ~= 32 or ticket == last then return end
     last = ticket
-    local ok, response = pcall(run, action)
+    local ok, response = pcall(run, action, argument)
     local output = assert(io.open(prefix .. "reply.tsv", "wb"))
     local message = tostring(response):gsub("[\r\n\t]", " ")
     output:write(ticket, "\t", ok and "ok" or "error", "\t", message)

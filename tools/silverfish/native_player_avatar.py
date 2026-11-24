@@ -59,6 +59,12 @@ def weapon_meshes(model):
     if not isinstance(model, str) or not 1 <= len(model) <= 4096:
         return None
     shape, mode = _lighter_shape(model)
+    if "^" in shape:
+        shape, marker = shape.split("^", 1)
+        axes = marker.split(",")
+        if (mode or len(axes) != 3 or not all(_NUMBER.fullmatch(axis) for axis in axes)
+                or not 100 <= sum(float(axis) ** 2 for axis in axes) <= 6400):
+            return None
     parts = shape.split("|")
     if len(parts) > 12:
         return None

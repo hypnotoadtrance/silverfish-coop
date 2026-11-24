@@ -181,6 +181,7 @@ function view.clear_body(entry)
 end
 
 function view.clear(entry)
+    entry.tail_pending = nil
     for _, key in ipairs({"plumage", "tail_static", "tail_skeletal"}) do
         local component = entry[key]
         if valid(component) and valid(entry.pawn) then component:K2_DestroyComponent(entry.pawn) end

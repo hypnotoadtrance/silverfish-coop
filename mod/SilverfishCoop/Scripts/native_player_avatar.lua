@@ -664,7 +664,7 @@ function avatar.animate_head(get_world)
             aim_head(entry, now, lean_changed, math_api)
             character_view.align_tail(entry)
             if not uses[entry] and not swings[entry] then gait.advance(entry, now) end
-            if entry.weapon_stance == "rifle" and (entry.rifle_idle or entry.rifle_rotated) then
+            if entry.rifle_grip and (entry.rifle_idle or entry.rifle_rotated) then
                 math_api = math_api or StaticFindObject(math_library)
                 local movement = entry.pawn.CharacterMovement
                 if valid(math_api) then

@@ -65,12 +65,13 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
             host_run, lambda status: (weapon := status.get("game", {}).get("native_guest_equipped_weapons", {}).get(pawn, {}))
             and (weapon.get("guid"), weapon.get("fire_mode")) == (guid, mode))
 
-    async def measured_grip(observer):
+    async def measured_grip(observer, stock_readback=None):
+        action = "rifle-grip" + (f"\t{stock_readback}" if stock_readback else "")
         reading = None
         try:
             async with asyncio.timeout(8):
                 while True:
-                    reading = await command(observer, "rifle-grip")
+                    reading = await command(observer, action)
                     if not reading.startswith("waiting:"):
                         baseline, anchor_gap, adjusted = map(float, reading.split(";")[0].split(","))
                         if adjusted <= baseline + .1 and adjusted < 16 and abs(adjusted - anchor_gap) < .5:
@@ -150,7 +151,7 @@ async def verify_stock_light_ar(host, guest, pawn, probe, *, re_equip=False):
             assert await command(host, "stand") == "standing"
             assert await command(host, "equip") == "selected"
             await wait_readback(host, "ready", f"{long_rifle},0,0")
-            nagant_grip = await measured_grip(guest)
+            nagant_grip = await measured_grip(guest, await command(host, "rifle-witness"))
             assert await command(host, "arm-obrez") == await command(guest, "arm-obrez") == "armed"
             obrez = await command(host, "seed-peer")
             await wait_readback(guest, "projected", obrez)
