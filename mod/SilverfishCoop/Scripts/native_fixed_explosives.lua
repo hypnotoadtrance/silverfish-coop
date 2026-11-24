@@ -177,6 +177,11 @@ local function apply(entry, broken, burning)
     end
 end
 
+function fixed.aim_guest_fixture(path, state, phase)
+    local entry = aim_fixture and resolve(path, state)
+    return entry and entry.standing and aim_fixture.aim_fixed_guest(state, phase, entry.mesh)
+end
+
 function fixed.command(args, state, phase)
     if args[2] ~= "native-fixed-explosives-apply" then
         if fixture and args[2]:match("^native%-fixed%-explosive%-.+%-fixture$") then
@@ -184,9 +189,6 @@ function fixed.command(args, state, phase)
             if args[2] == "native-fixed-explosive-aim-fixture" and entry and #args == 5 then
                 return aim_fixture.aim_target(state, phase, args[4], args[5], "native-fixed-explosive",
                     entry.actor, nil, entry.mesh)
-            end
-            if args[2] == "native-fixed-explosive-guest-aim-fixture" and entry and #args == 3 then
-                return aim_fixture.aim_fixed_guest(state, phase, entry.mesh)
             end
             if args[2] == "native-fixed-explosive-flag-fixture" and entry and #args == 3 and phase == "hosting"
                 and (os.getenv("SILVERFISH_COOP_NATIVE_FIXTURES") == "1" or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1") then

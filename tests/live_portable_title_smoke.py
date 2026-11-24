@@ -3587,19 +3587,15 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, pawn: str) -> di
         for _ in range(magazine):
             aimed = await host.bridge.command("native-fixed-explosive-aim-fixture", target, pawn, guid, timeout=6)
             await at_point(aimed["pawns"]["guest"]["location"])
-            async with asyncio.timeout(5):
-                while True:
-                    aim = await guest.bridge.command("native-fixed-explosive-guest-aim-fixture", target)
-                    if aim["ack"]["message"] == "the guest crosshair is on the tank":
-                        break
-                    await asyncio.sleep(.1)
             async with asyncio.timeout(7):
                 while True:
-                    tap = await submit(guest_run, "native-guest-primary-input-fixture")
-                    if tap["ok"]:
+                    try:
+                        tap = await guest.bridge.command("native-guest-primary-input-fixture", pawn, target)
                         break
-                    assert tap["error"] == "Stock primary input is temporarily blocked by the equipped player's state", tap
-                    await asyncio.sleep(.15)
+                    except RuntimeError as exc:
+                        if str(exc) != "Stock primary input is temporarily blocked by the equipped player's state":
+                            raise
+                        await asyncio.sleep(.15)
             sequence = tap["native_guest_primary_fixture"]["sequence"]
             async with asyncio.timeout(6):
                 while True:

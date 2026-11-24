@@ -318,8 +318,10 @@ function primary.command(fields, state, phase)
     end
     if action == "native-guest-primary-input-fixture" then
         local pry_tool = binding and (binding.kind == "blowtorch" or binding.kind == "crowbar")
+        local tank_fixture = #fields == 4 and binding and binding.kind == "light-pistol"
+            and os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") == "1"
         if not fixtures or fields[3] ~= current.name or not same_context(current, binding)
-            or #fields ~= (pry_tool and 4 or 3)
+            or #fields ~= ((pry_tool or tank_fixture) and 4 or 3)
             or type(SilverfishProbeNativeGuestPrimaryInput) ~= "function" then
             error("The stock primary input fixture requires the exact scoped headless client pawn", 0)
         end
@@ -344,6 +346,11 @@ function primary.command(fields, state, phase)
             else
                 native_stock_door.input_fixture(state, phase, target, current.pawn, probe)
             end
+        elseif tank_fixture then
+            if not require("native_fixed_explosives").aim_guest_fixture(fields[4], state, phase) then
+                error("The guest camera and muzzle need a clear path to the stock tank", 0)
+            end
+            probe()
         else
             probe()
         end

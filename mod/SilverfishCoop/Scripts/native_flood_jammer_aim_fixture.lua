@@ -113,12 +113,12 @@ function fixture.aim_fixed_guest(state, phase, mesh)
     end
     local weapon, camera = pawn.EquipedItem, pawn.Camera
     if not valid(weapon) or weapon:GetClass():GetFullName() ~= "BlueprintGeneratedClass " .. firearms.paths["light-pistol"]
-        or not component(camera, pawn, "CameraComponent") then return "waiting" end
+        or not component(camera, pawn, "CameraComponent") then return false end
     local view = fixed_contact(pawn, weapon, camera, mesh, mesh_center(mesh))
-    if not view then return "waiting" end
+    if not view then return false end
     state.controller:SetControlRotation(view)
     camera:K2_SetWorldRotation(view, false, {}, true)
-    return "the guest crosshair is on the tank"
+    return true
 end
 
 local function floor_at(context, center, x, y, radius, height)
