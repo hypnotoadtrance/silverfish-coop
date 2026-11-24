@@ -89,15 +89,22 @@ async def stock_input(guest_run, guest_frame, kind):
 
 
 async def loki_guest_read(guest, guid, verb="read"):
-    result = await guest.bridge.command("fixture-loki-guest", guid, verb)
+    observational = verb in ("read", "ammo", "reload-ready")
+    try:
+        result = await guest.bridge.command("fixture-loki-guest", guid, verb, timeout=1.5 if observational else 8)
+    except TimeoutError:
+        if observational:
+            # The title fixture and resident projection can publish on the same bridge.
+            return "waiting"
+        raise
     return result["ack"]["message"]
 
 
-async def wait_loki_guest(guest, guid, expected):
+async def wait_loki_guest(guest, guid, expected, verb="read"):
     reading = None
     try:
         async with asyncio.timeout(12):
-            while (reading := await loki_guest_read(guest, guid)) != expected:
+            while (reading := await loki_guest_read(guest, guid, verb)) != expected:
                 await asyncio.sleep(.15)
     except TimeoutError as error:
         raise AssertionError(f"Guest Loki expected {expected} and reported {reading}") from error
@@ -106,9 +113,13 @@ async def wait_loki_guest(guest, guid, expected):
 async def wait_loki_slot(guest, slot, guid):
     async with asyncio.timeout(12):
         while True:
-            result = await guest.bridge.command("fixture-stock-take-ammo-loadout", str(slot), guid, "read")
-            if result["ack"]["message"] != "waiting":
-                return result["ack"]["message"]
+            try:
+                result = await guest.bridge.command("fixture-stock-take-ammo-loadout", str(slot), guid, "read", timeout=1.5)
+            except TimeoutError:
+                pass
+            else:
+                if result["ack"]["message"] != "waiting":
+                    return result["ack"]["message"]
             await asyncio.sleep(.15)
 
 
@@ -183,7 +194,7 @@ async def verify_guest_loki(host, guest, pawn):
     slug = await stock_input(guest_run, guest_frame, "reload")
     assert (slug["guid"], slug["after"], slug["ammo_class"]) == (guid, 1, TWELVE_GAUGE_SLUGS.item_path), slug
     await wait_loki_guest(guest, guid, "1,1,loki")
-    assert await loki_guest_read(guest, guid, "ammo") == TWELVE_GAUGE_SLUGS.item_path
+    await wait_loki_guest(guest, guid, TWELVE_GAUGE_SLUGS.item_path, "ammo")
     await wait_loki_host(host, pawn, guid, loaded=True)
 
     assert (await submit(host_run, "native-inventory-list"))["native_inventory"] == host_inventory["native_inventory"]
@@ -203,7 +214,7 @@ async def verify_guest_loki_reopened(host, guest, pawn, saved):
         await guest.bridge.command("fixture-stock-take-ammo-loadout", slot, guid, "equip")
     await wait_loki_host(host, pawn, guid, loaded=True)
     await wait_loki_guest(guest, guid, "1,1,loki")
-    assert await loki_guest_read(guest, guid, "ammo") == TWELVE_GAUGE_SLUGS.item_path
+    await wait_loki_guest(guest, guid, TWELVE_GAUGE_SLUGS.item_path, "ammo")
     fired = await stock_input(guest_run, guest_frame, "primary")
     assert (fired["guid"], fired["before"], fired["after"], fired["projectiles"], fired["ammo_class"]) == (
         guid, 1, 0, 1, TWELVE_GAUGE_SLUGS.item_path,
@@ -216,4 +227,4 @@ async def verify_guest_loki_reopened(host, guest, pawn, saved):
 async def verify_guest_loki_reconnected(host, guest, saved):
     await wait_loki_host(host, saved["pawn"], saved["guid"], loaded=True)
     await wait_loki_guest(guest, saved["guid"], "1,1,loki")
-    assert await loki_guest_read(guest, saved["guid"], "ammo") == TWELVE_GAUGE_SLUGS.item_path
+    await wait_loki_guest(guest, saved["guid"], TWELVE_GAUGE_SLUGS.item_path, "ammo")
