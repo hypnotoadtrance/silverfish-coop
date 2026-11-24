@@ -21,6 +21,14 @@ def reward(source, quest_id, index="0", class_path=REWARD):
 
 
 class QuestCatalogTests(unittest.TestCase):
+    def test_accepts_progress_past_the_final_step_as_ready(self):
+        result = parse([
+            summary("active", count="1", emitted="1"),
+            quest("active", "Sab_Fuel_01", state="ready", step="8", final="7"),
+            summary("stock"),
+        ], sequence=23)
+        self.assertEqual(result["active"]["entries"]["Sab_Fuel_01"]["step"], 8)
+
     def test_missing_contact_uses_its_cooked_id_when_the_stock_board_displays_package_casing(self):
         result = parse([
             summary("board", count="1", emitted="1"),

@@ -1,4 +1,5 @@
 local wire = require("native_wire_quest")
+local quest_catalog = require("native_quest_catalog")
 local board_contract = {}
 
 local keys = {
@@ -15,7 +16,6 @@ local keys = {
     chained = "Add_Quests_OnComplete_66_06ACA8C44193595C2DFAD8A85B7FC8B9",
     rep = "ReputationGain_86_DA02B32344A59A6C236B848B22520EEC",
     ping = "GlobalPing_OnTurnIn_108_68CA1968452BFC635A107EBB1EE3AA7F",
-    track = "TrackFlag_ForStep_111_31112EA54B887C1D869E1291BC819774",
 }
 local quest_library_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_CodeLib01.Default__FL_CodeLib01_C"
 local character_library_path = "/Game/Classes/Libraries/Fuctions_Lib/FL_Characters.Default__FL_Characters_C"
@@ -60,12 +60,13 @@ local function offer_step(row)
     if int(step) and int(final) and step >= 1 and step <= final then return step end
 end
 
-local function shape(row)
-    local step, final, cash, xp = row[keys.step], row[keys.final], row[keys.cash], row[keys.xp]
+local function shape(save, row)
+    local step = quest_catalog.tracked_step(save, row)
+    local final, cash, xp = row[keys.final], row[keys.cash], row[keys.xp]
     local quantity, consumed = len(row[keys.objective]), row[keys.consumed]
     if row[keys.kind] ~= 2 or not int(step) or not int(final) or final < 1 or not int(cash) or cash < 0
         or not int(xp) or xp < 0 or not int(row[keys.redeem]) or len(row[keys.items]) ~= 0
-        or len(row[keys.chained]) ~= 0 or not empty_name(row[keys.ping]) or not empty_name(row[keys.track])
+        or len(row[keys.chained]) ~= 0 or not empty_name(row[keys.ping])
         or not ((quantity == 0 and consumed == false) or (quantity == 1 and consumed == true))
         or not row[keys.flags] or #row[keys.flags] > 16 or not row[keys.rep] or #row[keys.rep] > 16 then
         refuse("specialized_recipe")
@@ -162,7 +163,7 @@ local function unchanged(context, state, phase, pawn, board, quest)
 end
 
 local function specialist_ready(context, row)
-    local step, final = row[keys.step], row[keys.final]
+    local step, final = quest_catalog.tracked_step(context.save, row), row[keys.final]
     if not int(step) or step <= 0 or not int(final) or final < 1 then return false end
     local objectives = row[keys.objective]
     local count = len(objectives)
@@ -217,7 +218,7 @@ local function catalog(fields, state, phase)
             if specialist_ready(context, row) then target[#target + 1] = id end
             return
         end
-        local supported, contract = pcall(shape, row)
+        local supported, contract = pcall(shape, context.save, row)
         if not supported or contract.step <= 0 then return end
         if contract.objective then
             local guest = not same(context.save, context.receiving_save)
@@ -276,7 +277,8 @@ function board_contract.command(fields, state, phase)
         if not starting_step then refuse("offer_step_unqualified") end
     else
         if not active or step <= 0 or not board_accepts(context.board, context.key, active) then refuse("wrong_turnin") end
-        contract = shape(active)
+        contract = shape(context.save, active)
+        if contract.step <= 0 then refuse("objective_not_complete") end
         outcome.cash, outcome.xp = contract.cash, contract.xp
         if contract.objective then
             local guest = not same(context.save, context.receiving_save)
@@ -285,7 +287,7 @@ function board_contract.command(fields, state, phase)
             if not selected then refuse("missing_objective") end
             outcome.guid, outcome.units = selected.guid, selected.units
             outcome.remaining = contract.stacks and outcome.units - 1 or 0
-        elseif step < contract.final then
+        elseif contract.step < contract.final then
             refuse("objective_not_complete")
         end
         effects = expected_effects(context, active)

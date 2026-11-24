@@ -4,6 +4,7 @@ package.loaded.players = {}
 local stock_keys = require("native_wire_quest")
 
 local function ref(value) return {get = function() return value end} end
+local function flag_name(value) return {ToString = function() return value end} end
 local function array(rows)
     return setmetatable(rows, {__index = {GetArrayNum = function(self) return #self end}})
 end
@@ -56,7 +57,7 @@ local function quest(at, class_value, payout, flag_values, rep_values)
         [step] = 1, [final] = 2, [cash] = payout, [xp] = 1, [objective] = array({class_value}),
         [consumed] = class_value ~= nil, [redeem] = at, [kind] = 2, [items] = array({}),
         [flags] = map(flag_values or {}), [chained] = array({}), [rep] = map(rep_values or {}),
-        [ping] = "None", [track] = "None",
+        [ping] = "None", [track] = flag_name("None"),
     }
 end
 
@@ -70,6 +71,10 @@ local bag = object({PlayerBackpack = array({}), PlayerEquipment = array({})})
 local guest = object({Save = bag})
 local world = object({})
 local host_flags = {Player_Cash = 17, Player_Xp = 3, Rep_Freelancer = 2}
+store.Flags = {
+    Contains = function(_, key) return host_flags[key:ToString()] ~= nil end,
+    Find = function(_, key) return ref(host_flags[key:ToString()]) end,
+}
 local game_instance = object({SaveSlot_Ref = store})
 game_instance.FindPassiveEffect = function(_, _, _, out) out.EffectActive, out.Instances = true, 1 end
 game_instance.AddQuest_ByName = function(_, key)
@@ -102,7 +107,7 @@ local function stock_finalize(_, key, instance, no_confirmation, host, out)
         assert(store.PlayerBackpack[1] == portion)
         store.PlayerBackpack = array({})
     else
-        assert(contract[step] >= contract[final])
+        assert(require("native_quest_catalog").tracked_step(store, contract) >= contract[final])
     end
     contract[step] = -10
     host_flags.Player_Cash = host_flags.Player_Cash + contract[cash]
@@ -207,16 +212,20 @@ assert(proof()[8] == "already" and host_flags.Player_Cash == 818)
 action("start", "apply", kill, "-")
 denied("wrong_turnin", "turnin", "inspect", kill)
 board.AcceptAllGlobalContracts = true
+kill_recipe[track] = flag_name("TrackedKills")
 denied("objective_not_complete", "turnin", "inspect", kill)
-kill_recipe[step] = 2
+host_flags.TrackedKills = 1
+denied("objective_not_complete", "turnin", "inspect", kill)
+host_flags.TrackedKills = 3
 kill_recipe[items] = array({class})
 assert(catalog()[8] == "-" and catalog(kill)[8] == kill)
 denied("specialized_recipe", "turnin", "inspect", kill)
 kill_recipe[items] = array({})
 action("turnin", "inspect", kill)
-assert(proof()[18] == "-" and proof()[16] == 3000 and proof()[9] == 2)
+assert(proof()[18] == "-" and proof()[16] == 3000 and proof()[9] == 1)
 action("turnin", "apply", kill, "-")
 assert(proof()[13] == 3818 and host_flags.BountyDone == 1 and host_flags.Rep_Freelancer == 42)
+assert(require("native_quest_catalog").tracked_step(store, kill_recipe) == -10)
 
 local missing, display = "Note_Farmhouse", "Note_FarmHouse"
 local configure = board.Configure_Stock

@@ -10,6 +10,7 @@ local final_field = "Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B"
 local cash_field = "Reward_Cash_24_CDC8F5D24E1EBE65914E3B88621E50D0"
 local xp_field = "Reward_PlayerXp_44_8ED601354EEC8BFBAC19B8BE0F25C797"
 local items_field = "Reward_Items_32_2B334D5F4DBA7AA760BF33A8E93A4C0A"
+local track_field = "TrackFlag_ForStep_111_31112EA54B887C1D869E1291BC819774"
 local active_limit, stock_limit, item_limit = 64, 128, 8
 local source_count_limit = 1024
 local cached
@@ -50,6 +51,18 @@ local function int32(value)
         and value >= -2147483648 and value <= 2147483647
 end
 
+function catalog.tracked_step(save, quest)
+    local step = quest[step_field]
+    if not int32(step) or step <= 0 then return step end
+    -- The stock journal updates active rows from the campaign flag when opened.
+    local flag = quest[track_field]
+    if flag and flag:ToString() ~= "None" and save.Flags:Contains(flag) then
+        local progress = save.Flags:Find(flag):get()
+        if int32(progress) then return progress end
+    end
+    return step
+end
+
 local function quest_identity(id, original)
     if type(id) ~= "string" or id == "" or #id > 96 or id == "None" or id:find("[%c]") then return end
     local name = FName(id, EFindName.FNAME_Find)
@@ -66,9 +79,10 @@ local function reward_path(reward)
     if path and #path <= 256 then return path end
 end
 
-local function quest_entry(source, id, quest)
+local function quest_entry(source, id, quest, save)
     if not id or not quest then return end
-    local step, final_step, cash, xp = quest[step_field], quest[final_field], quest[cash_field], quest[xp_field]
+    local step = save and catalog.tracked_step(save, quest) or quest[step_field]
+    local final_step, cash, xp = quest[final_field], quest[cash_field], quest[xp_field]
     if not int32(step) or not int32(final_step) or final_step < 0 or not int32(cash) or cash < 0
         or not int32(xp) or xp < 0 then return end
 
@@ -82,7 +96,7 @@ local function quest_entry(source, id, quest)
     end
     -- "ready" describes the final step. Stock turn-in still checks objective items and conditions.
     local status = source == "stock" and "template" or source == "board" and "offered" or step == -10 and "completed"
-        or step > 0 and step == final_step and "ready"
+        or step > 0 and final_step > 0 and step >= final_step and "ready"
         or step > 0 and step < final_step and "active" or "inactive"
     return { id = id, state = status, step = step, final_step = final_step, cash = cash, xp = xp,
         count = count, items = items }
@@ -127,14 +141,14 @@ local function collect(source, total, limit, visit, status_row)
     return rows
 end
 
-local function map_rows(source, quests, limit, status_row)
+local function map_rows(source, quests, limit, status_row, save)
     return collect(source, #quests, limit, function(accept)
         quests:ForEach(function(raw_key, raw_value)
             return accept(function()
                 local key = raw_key:get()
                 local id = quest_identity(key:ToString(), key)
                 if not id then return end
-                return quest_entry(source, id, raw_value:get())
+                return quest_entry(source, id, raw_value:get(), save)
             end)
         end)
     end, status_row)
@@ -183,7 +197,7 @@ function catalog.rows(state, phase, status_row)
     if cached and cached.world == world_address and cached.save == save_address and cached.time == now then
         return cached.rows
     end
-    local active_ok, active = pcall(map_rows, "active", save.ActiveQuests, active_limit, status_row)
+    local active_ok, active = pcall(map_rows, "active", save.ActiveQuests, active_limit, status_row, save)
     local stock_ok, stock = pcall(stock_rows, status_row)
     if not same(pawn.Save, save) or not same(instance.SaveSlot_Ref, save) then
         cached = nil

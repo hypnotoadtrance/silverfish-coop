@@ -3492,6 +3492,7 @@ async def verify_stock_cooked_meal(host: Seat, guest: Seat, _pawn: str) -> dict:
 
 
 async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> dict:
+    from tools.silverfish import native_board_contract
     from tools.silverfish.native_flood_jammer import OBSERVATORY_BOUNTY_BOARD
     from tools.silverfish.native_quest import AUTHORED_BOARD_ACTIONS
     from tools.silverfish.native_wire_board import catalog_specialists
@@ -3502,6 +3503,24 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> d
         return await portable_probe_command(seat.bridge, "portable-board-offer", request)
 
     host_run, guest_run = host.campaign / "run", guest.client / "run"
+
+    async def board_menu():
+        opened = await submit(guest_run, "native-wire-board-stock-f-fixture", target=OBSERVATORY_BOUNTY_BOARD)
+        assert opened["ok"], opened
+        return await wait_resident_status(guest_run, lambda frame: (
+            (board := frame.get("game", {}).get("native_wire_board_stock", {}))
+            and board.get("state") == "visible" and board.get("board") == OBSERVATORY_BOUNTY_BOARD))
+
+    async def select(quest, verb):
+        result = await submit(guest_run, "native-wire-board-stock-fixture", target=f"{quest}|{verb}")
+        assert result["ok"], result
+        await wait_resident_status(guest_run, lambda frame: not frame.get("game", {}).get("native_wire_board_stock"))
+
+    async def board_catalog():
+        result = await submit(guest_run, native_board_contract.CATALOG, target=OBSERVATORY_BOUNTY_BOARD)
+        assert result["ok"], result
+        return result[native_board_contract.CATALOG_KEY]
+
     checkpoint = campaign_save_hashes(host.campaign)
     target = tuple(map(float, (await command(host, "approach")).split(",")))
     await wait_resident_status(guest_run, lambda frame: (
@@ -3515,15 +3534,10 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> d
     assert previously_filtered <= offered and previously_filtered, (offered, previously_filtered)
     quest = min(previously_filtered)
 
-    opened = await submit(guest_run, "native-wire-board-stock-f-fixture", target=OBSERVATORY_BOUNTY_BOARD)
-    assert opened["ok"], opened
-    guest_frame = await wait_resident_status(guest_run, lambda frame: (
-        (board := frame.get("game", {}).get("native_wire_board_stock", {}))
-        and board.get("state") == "visible" and board.get("board") == OBSERVATORY_BOUNTY_BOARD))
+    guest_frame = await board_menu()
     visible = set(filter(None, (await command(guest, "menu")).split(",")))
     assert visible == offered, (visible, offered)
-    accepted = await submit(guest_run, "native-wire-board-stock-fixture", target=f"{quest}|start")
-    assert accepted["ok"], accepted
+    await select(quest, "start")
 
     async with asyncio.timeout(8):
         while True:
@@ -3533,10 +3547,47 @@ async def verify_resident_board_offers(host: Seat, guest: Seat, _pawn: str) -> d
             await asyncio.sleep(.1)
     entries = await resident_events(guest_run, guest_frame)
     assert any(entry.get("quest") == quest and entry.get("state") == "accepted" for entry in entries), entries
+
+    assert await command(host, "qualify-tracked") == "10"
+    tracked_quests = []
+    for tracked, progress, cash in (("Sab_Fuel_01", 8, 1600), ("Sab_Factory", 5, 1200)):
+        offers = await board_catalog()
+        assert tracked in offers["offers"] and tracked not in offers["turnins"], offers
+        await board_menu()
+        await select(tracked, "start")
+        early = await board_catalog()
+        assert tracked not in early["offers"] and tracked not in early["turnins"], early
+
+        assert await command(host, "track-progress", tracked) == str(progress)
+        assert await command(host, "journal", tracked) == "1"
+        ready = await board_catalog()
+        assert tracked in ready["turnins"], ready
+        current = await wait_resident_status(host_run,
+            lambda frame: type(frame.get("game", {}).get("native_wallet")) is int)
+        wallet = current["game"]["native_wallet"]
+        await board_menu()
+        await select(tracked, "turnin")
+        settled = await wait_resident_status(host_run, lambda frame:
+            frame.get("gameplay", {}).get("native_quests", {}).get(tracked, {}).get("step") == -10)
+        receipt = settled["gameplay"]["native_quests"][tracked]
+        assert (receipt["cash"], receipt["xp"], receipt["wallet"]) == (cash, 1, wallet + cash), receipt
+        member = guest_frame["character_id"]
+        assert set(receipt["recipients"]) == {"host", member} and receipt["actor"] == member, receipt
+        await wait_resident_status(guest_run, lambda frame: frame.get("game", {}).get("native_wallet") == wallet + cash)
+        async with asyncio.timeout(8):
+            while True:
+                journals = await asyncio.gather(*(command(seat, "journal", tracked) for seat in (host, guest)))
+                if journals == ["-10", "-10"]:
+                    break
+                await asyncio.sleep(.1)
+        assert tracked not in (await board_catalog())["turnins"]
+        tracked_quests.append({"quest_id": tracked, "world_flag_progress": progress, "receipt": receipt})
+
     assert campaign_save_hashes(host.campaign) == checkpoint, "Accepting a stock board offer caused an early save"
     return {"resident_board_offers": {"stock_offers": sorted(offered), "guest_offers": sorted(visible),
                                       "previously_filtered_offers": sorted(previously_filtered),
                                       "accepted": quest, "journal_step": int(observed[0]),
+                                      "tracked_turnins": tracked_quests,
                                       "campaign_checkpoint_unchanged": True}}
 
 

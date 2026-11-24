@@ -5,6 +5,7 @@ local creator = require("native_guest_creator")
 local appearance = require("native_avatar_character_view")
 local native_world = require("native_world")
 local guest_weapon = require("native_guest_weapon")
+local quest_catalog = require("native_quest_catalog")
 local players = require("players")
 local statics = "/Script/Engine.Default__GameplayStatics"
 local save_class = "/Game/Classes/Global/SaveGame_BP.SaveGame_BP_C"
@@ -33,7 +34,6 @@ local quest = {
     images = "Images_ByStep_92_0AB9A29B482457A8FB719ABB327DDD56",
     step = "Current_Step_40_D0772E7742BFEF4B5AFE66AECB42B01A",
     final = "Objective_FinalStep_57_F5A16DBF4E231A030BBD9F864F62A14B",
-    track_flag = "TrackFlag_ForStep_111_31112EA54B887C1D869E1291BC819774",
 }
 local slots = { backpack = "PlayerBackpack", equipment = "PlayerEquipment",
     armor = "PlayerArmor", helmet = "PlayerHelmet" }
@@ -109,17 +109,6 @@ local function photo(name)
     if exact(object, texture_class) then return object end
 end
 
-local function tracked_step(save, entry)
-    local step = entry[quest.step]
-    if step <= 0 then return step end
-    -- The stock Journal updates only active quests from this canonical flag.
-    local flag = entry[quest.track_flag]
-    if flag:ToString() ~= "None" and save.Flags:Contains(flag) then
-        return save.Flags:Find(flag):get()
-    end
-    return step
-end
-
 local function capture(state, phase, pawn_name)
     local pawn, save, character = guest_save.exact_item_context(state, phase, pawn_name)
     local host = state.local_pawn and state.local_pawn.pawn
@@ -180,7 +169,7 @@ local function capture(state, phase, pawn_name)
         local id, entry = key:get():ToString(), value:get()
         if not id:match("^[A-Za-z0-9_]+$") or #id > 96 then error("Invalid co-op quest identifier", 0) end
         local images = fields(entry[quest.images], photo_name)
-        quests[#quests+1] = table.concat({"quest", id, entry[quest.kind], tracked_step(canonical, entry), entry[quest.final],
+        quests[#quests+1] = table.concat({"quest", id, entry[quest.kind], quest_catalog.tracked_step(canonical, entry), entry[quest.final],
             encode(entry[quest.name]), encode(entry[quest.giver]), photo_name(entry[quest.icon]), table.concat(images, ","),
             table.unpack(fields(entry[quest.descriptions], encode))}, "\t")
     end)

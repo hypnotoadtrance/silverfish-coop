@@ -12,6 +12,10 @@ local items = "Reward_Items_32_2B334D5F4DBA7AA760BF33A8E93A4C0A"
 local chained = "Add_Quests_OnComplete_66_06ACA8C44193595C2DFAD8A85B7FC8B9"
 local track = "TrackFlag_ForStep_111_31112EA54B887C1D869E1291BC819774"
 local ping = "GlobalPing_OnTurnIn_108_68CA1968452BFC635A107EBB1EE3AA7F"
+local tracked = {
+    Sab_Fuel_01 = {flag = "Kill_ForestTank", threshold = 7, progress = 8},
+    Sab_Factory = {flag = "PB_Factory_Kill", threshold = 5, progress = 5},
+}
 local last
 
 local function valid(object) return object and object:IsValid() end
@@ -61,6 +65,25 @@ local function run(action, quest)
         assert(valid(guest) and guest:HasAuthority() and not guest:IsLocallyControlled() and valid(guest.Save)
             and not same(guest.Save, pawn.Save), "An enrolled stock guest is required")
         return approach(guest, pawn, board)
+    end
+    if action == "qualify-tracked" or action == "track-progress" then
+        local instance = world.OwningGameInstance
+        assert(pawn:HasAuthority() and same(pawn.Save, instance.SaveSlot_Ref))
+        if action == "qualify-tracked" then
+            instance:Add_PointTo_SaveFlag(FName("Player_Xp"), 10, true, true)
+            return "10"
+        end
+        local expected = assert(tracked[quest], "Unknown tracked stock contract")
+        local found
+        pawn.Save.ActiveQuests:ForEach(function(key, row)
+            if key:get():ToString() == quest then found = row:get() end
+        end)
+        assert(found and found[step] == 1 and found[final] == expected.threshold
+            and text(found[track]) == expected.flag, "The unrefreshed stock quest is unavailable")
+        local flag = found[track]
+        instance:Add_PointTo_SaveFlag(flag, expected.progress, true, true)
+        assert(pawn.Save.Flags:Contains(flag) and pawn.Save.Flags:Find(flag):get() == expected.progress)
+        return tostring(expected.progress)
     end
     if action == "catalog" then
         assert(pawn:HasAuthority(), "Only the host can read the stock catalog")

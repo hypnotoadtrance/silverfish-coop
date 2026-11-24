@@ -94,8 +94,8 @@ def _entry(source: str, fields: Sequence[str]) -> QuestEntry:
         expected = "offered"
     elif step == -10:
         expected = "completed"
-    elif 0 < step <= final_step:
-        expected = "ready" if step == final_step else "active"
+    elif step > 0 and final_step > 0:
+        expected = "ready" if step >= final_step else "active"
     else:
         expected = "inactive"
     if state != expected:
