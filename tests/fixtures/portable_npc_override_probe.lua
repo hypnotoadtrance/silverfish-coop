@@ -840,9 +840,9 @@ local function stock_garage(world)
     return actor, mesh
 end
 
-local function line_hit(pawn, start, finish, ignored)
+local function line_hit(pawn, start, finish, ignored, channel)
     local hit = {}
-    if trace:LineTraceSingle(pawn, start, finish, 1, true, ignored, 0, hit, true, color, color, 0) then
+    if trace:LineTraceSingle(pawn, start, finish, channel or 1, true, ignored, 0, hit, true, color, color, 0) then
         return hit.OutHit or hit
     end
 end
@@ -1387,6 +1387,16 @@ local function run(action, actor_path)
     elseif action == "dock-garage-health" then
         assert(host and garage_view and valid(garage_view.worker))
         return ("%.6f"):format(garage_view.worker.Health)
+    elseif action == "dock-garage-projectile-trace" then
+        local from_text, to_text = actor_path:match("^([^;]+);([^;]+)$")
+        local from, to = position(from_text), position(to_text)
+        local delta = {X=to.X-from.X, Y=to.Y-from.Y, Z=to.Z-from.Z}
+        local span = math.sqrt(delta.X^2 + delta.Y^2 + delta.Z^2)
+        local end_point = {X=to.X+100*delta.X/span, Y=to.Y+100*delta.Y/span, Z=to.Z+100*delta.Z/span}
+        local shooter = host and authoritative_guest(world) or pawn
+        local hit = line_hit(shooter, from, end_point, {shooter, shooter.EquipedItem}, 2)
+        local component = hit and hit.Component and hit.Component:Get()
+        return valid(component) and component:GetOwner():GetFName():ToString() or "clear"
     elseif action == "dock-garage-blockers" then
         local shooter = host and authoritative_guest(world) or pawn
         local blockers = {}

@@ -2059,8 +2059,7 @@ async def verify_tutorial_dock_combat(host: Seat, guest: Seat, pawn: str, *, ret
         and frame["game"].get("native_guest_primary_scope", {}).get("kind") == "rusty-pistol"), timeout=12)
     presentation = {}
     if shot_view:
-        presentation.update(await verify_dock_garage_shots(host, guest, frame, command,
-                                                           compare_world_collision=held_shot_view))
+        presentation.update(await verify_dock_garage_shots(host, guest, frame, command, compare_world_collision=True))
         if held_shot_view:
             presentation.update(await verify_dock_garage_burst(host, guest, frame, command))
         return presentation
@@ -2179,7 +2178,7 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
     above = f"dock-garage-aim\t{high};{obstruction}"
     below = f"dock-garage-aim\t{low};{worker}"
 
-    async def shoot(expected_health, *, should_hit):
+    async def shoot(expected_health, *, should_hit, contact_required=False):
         started = time.time()
         blockers = "unavailable"
         try:
@@ -2203,6 +2202,9 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         assert event["event"] == "native_guest_primary_input", event
         shot = event["native_guest_weapon"]
         assert shot["after"] == shot["before"] - 1 and shot["projectiles"] == 1, event
+        if contact_required:
+            contact = event.get("native_guest_trigger_view", {}).get("contact", {})
+            assert contact.get("actor", "").endswith(":PersistentLevel.NPC_Survivor_Worker_C_2"), event
         async with asyncio.timeout(6):
             while True:
                 observed = float(await command(host, "dock-garage-health"))
@@ -2237,9 +2239,11 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         assert await command(host, "dock-garage-lower-host") == "lowered"
         assert await command(host, below) == "blocked"
         assert await command(guest, below) == "worker"
-        receipt, after_disagreement = await shoot(after_clear, should_hit=True)
-        contact = receipt["native_guest_trigger_view"]["contact"]
-        assert contact["actor"].endswith(":PersistentLevel.NPC_Survivor_Worker_C_2"), contact
+        guest_collision = await command(guest, f"dock-garage-projectile-trace\t{low};{worker}")
+        host_collision = await command(host, f"dock-garage-projectile-trace\t{low};{worker}")
+        assert guest_collision == "NPC_Survivor_Worker_C_2" and host_collision == "StaticMeshActor_347", (
+            guest_collision, host_collision)
+        receipt, after_disagreement = await shoot(after_clear, should_hit=True, contact_required=True)
         evidence["tutorial_dock_world_collision_mismatch"] = {
             "same_low_aim": True, "host_world_line": "blocked", "guest_world_line": "worker",
             "health": [after_clear, after_disagreement], "accepted_shot": receipt,

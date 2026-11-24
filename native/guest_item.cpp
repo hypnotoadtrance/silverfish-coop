@@ -1312,14 +1312,13 @@ namespace
         return vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2];
     }
 
-    std::optional<AimVector> guest_aim_point(Unreal::UObject* pawn, Unreal::UObject* weapon,
-                                            const AimVector& eye, const AimVector& forward)
+    std::optional<AimContact> guest_aim_point(Unreal::UObject* pawn, Unreal::UObject* weapon,
+                                             const AimVector& eye, const AimVector& forward)
     {
         auto* range = field<Unreal::FDoubleProperty>(pawn, STR("SightRange"));
         const double distance = range ? range->GetPropertyValueInContainer(pawn) : 0.0;
         if (!std::isfinite(distance) || distance <= 0.0) return {};
-        const auto aim = trace_shot(pawn, eye, ahead(eye, forward, distance), visibility_trace, {weapon});
-        return aim ? std::optional{aim->point} : std::nullopt;
+        return trace_shot(pawn, eye, ahead(eye, forward, distance), visibility_trace, {weapon});
     }
 
     bool living_combat_target(Unreal::UObject* actor, Unreal::UWorld* world)
@@ -1425,8 +1424,13 @@ namespace
                 : actor_aim_vector(camera, component_forward);
             if (!old || !origin || !eye || !direction ||
                 std::abs(std::hypot((*direction)[0], (*direction)[1], (*direction)[2]) - 1.0) > 0.001) return false;
-            const auto target = view.target ? view.target : guest_aim_point(pawn, weapon, *eye, *direction);
-            if (!target) return false;
+            auto target = view.target;
+            if (!target)
+            {
+                const auto aim = guest_aim_point(pawn, weapon, *eye, *direction);
+                if (!aim) return false;
+                target = aim->point;
+            }
             std::optional<AimVector> position;
             if (view.eye)
             {
@@ -3380,22 +3384,23 @@ silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_s
     view.direction = *direction;
     if (const auto eye = actor_aim_vector(camera, component_location))
     {
-        if (const auto target = guest_aim_point(pawn, held, *eye, view.direction))
+        if (const auto aim = guest_aim_point(pawn, held, *eye, view.direction))
         {
             view.eye = eye;
-            view.target = target;
+            view.target = aim->point;
             if (auto* muzzle = shot_component(held, STR("Arrow_Muzzle"), muzzle_component))
                 view.muzzle = actor_aim_vector(muzzle, component_location);
-            if (view.muzzle)
+            if (view.muzzle && aim->hit && living_combat_target(aim->actor, static_cast<Unreal::AActor*>(pawn)->GetWorld()))
             {
-                const auto ray = difference(*target, *view.muzzle);
+                const auto ray = difference(aim->point, *view.muzzle);
                 const double span = std::sqrt(squared_length(ray));
                 // Reuse the stock aim point to trace from the actual muzzle on the projectile channel.
                 if (std::isfinite(span) && span > 1 && span <= contact_trace_range)
                 {
-                    const auto end = ahead(*target, ray, 10.0 / span);
+                    // Visibility can first hit the capsule, in front of the projectile's hit on the mesh.
+                    const auto end = ahead(aim->point, ray, 100.0 / span);
                     const auto hit = trace_shot(pawn, *view.muzzle, end, projectile_trace, {held});
-                    if (hit && hit->hit && living_combat_target(hit->actor, static_cast<Unreal::AActor*>(pawn)->GetWorld()))
+                    if (hit && hit->actor == aim->actor)
                     {
                         auto path = RC::to_utf8_string(hit->actor->GetPathName());
                         if (valid_contact_path(path))
