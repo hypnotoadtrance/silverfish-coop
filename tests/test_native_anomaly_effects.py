@@ -7,7 +7,10 @@ from tools.silverfish.native_anomaly_effects import (
     project_fixed_explosives, project_observer_opacity, project_sensors,
 )
 from tools.silverfish.native_damage_feedback import Playback as HurtPlayback
-from tools.silverfish.native_weather_view import SirenPlayback
+from tools.silverfish.native_weather_view import (
+    LIGHTNING, LIGHTNING_PLAYBACK, LightningPlayback, SirenPlayback,
+    lightning_frame, parse_lightning, parse_lightning_playback,
+)
 
 
 class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
@@ -143,6 +146,49 @@ class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
         bridge.command.assert_awaited_with(
             "native-anomaly-play-cues", game["map"], epoch, "2|blast|100|0|0|1|1", timeout=1.5)
         self.assertEqual([call.kwargs["serial"] for call in control.event.call_args_list], [1])
+
+    async def test_lightning_retries_in_the_current_visit_without_replaying_a_received_strike(self):
+        playback = LightningPlayback()
+        epoch = "a" * 32
+        other_epoch = "b" * 32
+        game = {"state": "connected", "map": "Crossroads",
+                "native_world_view": {"mode": "applied", "map": "Crossroads", "epoch": epoch}}
+        fields = "native-weather-lightning\t7\t1.5\t-600.5\t200\t50\t-67\t15\t0".split("\t")
+        strike = parse_lightning(fields)
+        proof = parse_lightning_playback(
+            ["native-weather-lightning-played", other_epoch, fields[1], *fields[3:], "1", "0", "0", "0"])
+        self.assertTrue(proof["flash_registered"])
+        self.assertFalse(proof["audio_component"])
+        with self.assertRaises(ValueError):
+            parse_lightning([*fields[:-1], "nan"])
+        host = {"state": "hosting", "map": game["map"], LIGHTNING: [strike]}
+        incoming = lightning_frame(host, game["map"], .5)
+        self.assertEqual(incoming[0]["ttl"], 1.0)
+        self.assertEqual(lightning_frame(host, game["map"], 1.8), [])
+        self.assertEqual(lightning_frame(host, "Observatory", 0), [])
+
+        bridge = Mock(command=AsyncMock(side_effect=[
+            TimeoutError("missing receipt"), {**game, "ack": {"message": "duplicate"}},
+            {**game, "ack": {"message": "played"}, LIGHTNING_PLAYBACK: proof},
+        ]))
+        control = Mock()
+        await playback.sync(bridge, control, game, incoming, other_epoch)
+        await playback.sync(bridge, control, game, incoming, epoch, snapshot_age=2)
+        bridge.command.assert_not_awaited()
+
+        for _ in range(3):
+            await playback.sync(bridge, control, game, incoming, epoch)
+        self.assertEqual(bridge.command.await_count, 2)
+        bridge.command.assert_awaited_with(
+            "native-weather-lightning-play", epoch, "7", "-600.5", "200.0", "50.0", "-67.0", "15.0", "0.0",
+            timeout=1.5,
+        )
+        view = {**game["native_world_view"], "epoch": other_epoch}
+        await playback.sync(bridge, control, {**game, "native_world_view": view}, incoming, other_epoch)
+        self.assertEqual(bridge.command.await_count, 3)
+        control.event.assert_any_call("native_weather_lightning_played", serial=7,
+                                      position=[-600.5, 200.0, 50.0], rotation=[-67.0, 15.0, 0.0],
+                                      flash_registered=True, bolt_component=False, blast_component=False, audio_component=False)
 
     async def test_active_weather_warnings_retry_by_source_without_replaying_an_older_cue(self):
         playback = SirenPlayback()
