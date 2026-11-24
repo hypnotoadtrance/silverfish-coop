@@ -4709,8 +4709,10 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                 campaign_started = time.perf_counter()
                 gameplay = {}
 
-                def finish_check(name, started, error=None):
+                def finish_check(name, started, error=None, *, evidence=None):
                     row = {"passed": error is None, "seconds": round(time.perf_counter() - started, 3)}
+                    if evidence:
+                        row["evidence"] = evidence
                     if error is not None:
                         row.update(error=str(error) or type(error).__name__, traceback=traceback.format_exc())
                         message = row["error"].splitlines()[0]
@@ -4729,12 +4731,13 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                             frame = await wait_resident_status(host.campaign / "run", lambda f:
                                 not f.get("awaiting_zone_guest")
                                 and f.get("game", {}).get("native_guest_save", {}).get("state") == "bound")
-                            gameplay.update(await check(host, guest, frame["game"]["native_guest_save"]["pawn"]))
+                            evidence = await check(host, guest, frame["game"]["native_guest_save"]["pawn"])
+                            gameplay.update(evidence)
                         except Exception as error:
                             finish_check(name, started, error)
                             # Later checks in this campaign can depend on the failed check's map or inventory.
                             break
-                        finish_check(name, started)
+                        finish_check(name, started, evidence=evidence)
                     return gameplay
 
                 async def check_shovel_reconnect(guest, _started):
