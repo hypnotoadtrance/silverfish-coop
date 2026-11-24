@@ -1,5 +1,6 @@
 local view = {}
 local lightning_guest = require("native_weather_lightning_guest")
+local ambience_guest = require("native_storm_ambience_guest")
 local lightning_context, local_lightning_gate
 
 local day_class = "/Game/Classes/Actors/DayCycle_SunControler_BP.DayCycle_SunControler_BP_C"
@@ -375,6 +376,7 @@ end
 
 function view.clear()
     lightning_guest.clear()
+    ambience_guest.clear()
     local previous = lease
     lease = nil
     if not previous then return true end
@@ -416,6 +418,7 @@ function view.sync(state, phase)
     if not lease then return true end
     local ok, current = pcall(lease_current, state, phase)
     if not ok or not current then return view.clear() end
+    ambience_guest.sync(lease.context, lease.frame.epoch)
     return true
 end
 
@@ -567,6 +570,15 @@ function view.lightning_rows(row)
     if not lease then return {} end
     return lightning_guest.rows(lease.context, lease.frame.epoch, row)
 end
+
+function view.apply_ambience(state, phase, epoch, report)
+    if not lease or lease.frame.epoch ~= epoch or not lease_current(state, phase) then
+        error("guest_weather_ambience_scope_unavailable", 0)
+    end
+    return ambience_guest.apply(lease.context, epoch, report)
+end
+
+view.ambience_rows = ambience_guest.rows
 
 view.animate_lightning = lightning_guest.animate
 

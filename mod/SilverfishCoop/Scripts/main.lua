@@ -976,6 +976,18 @@ local function run_command(fields, state, current_phase)
         return native_world_view.play_lightning(state, current_phase, fields[3], tonumber(fields[4]),
             {X = tonumber(fields[5]), Y = tonumber(fields[6]), Z = tonumber(fields[7])},
             {Pitch = tonumber(fields[8]), Yaw = tonumber(fields[9]), Roll = tonumber(fields[10])})
+    elseif command == "native-weather-ambience-apply" then
+        if not world_view_enabled or current_phase ~= "connected" or role ~= "client"
+            or (fields[4] == "idle" and #fields ~= 4)
+            or (fields[4] ~= "idle" and #fields ~= 11 and #fields ~= 18) then
+            error("Weather ambience requires the authenticated client and a complete snapshot", 0)
+        end
+        return native_world_view.apply_ambience(state, current_phase, fields[3], {
+            phase = fields[4], variant = fields[5], level = tonumber(fields[6]), blend = tonumber(fields[7]),
+            fade = tonumber(fields[8]), particle = fields[9], sound = fields[10], volume = tonumber(fields[11]),
+            fog = #fields == 18 and {material = fields[12], density = tonumber(fields[13]), start = tonumber(fields[14]),
+                r = tonumber(fields[15]), g = tonumber(fields[16]), b = tonumber(fields[17]), a = tonumber(fields[18])} or nil,
+        })
     elseif command == "native-world-view-apply" or command == "native-world-view-apply-local" then
         if not world_view_enabled or (#fields ~= 18 and #fields ~= 23 and #fields ~= 27)
             or current_phase ~= "connected" or role ~= "client" then
@@ -1343,6 +1355,7 @@ local function write_status(state, current_phase, failure, fields, pending, crat
         if seen then
             rows[#rows + 1] = world_view_row("applied", seen)
             for _, row in ipairs(native_world_view.lightning_rows(status_row)) do rows[#rows + 1] = row end
+            for _, row in ipairs(native_world_view.ambience_rows(status_row)) do rows[#rows + 1] = row end
         end
     end
     local viewed_health, viewed_food, viewed_regen, viewed_stim = native_save_scope.guest_vitals(state, current_phase)
