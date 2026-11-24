@@ -195,7 +195,10 @@ local function command(action)
     end
     assert(action == "read", action)
     local active = day.LocalStorm
+    local horn = statics:GetActorOfClass(world, find(siren_class))
+    local selected_cue = valid(horn) and valid(horn.Audio) and path(horn.Audio.Sound) or "-"
     return table.concat({path(valid(active) and active:GetClass()), valid(active) and active:GetAddress() or 0,
+        selected_cue,
         armed.lightning_warning, armed.fog_warning, armed.lightning_spawns, armed.fog_spawns, armed.pestilence_spawns,
         armed.lightning_particles, armed.lightning_audio}, ";")
 end

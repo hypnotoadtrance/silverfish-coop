@@ -14,8 +14,8 @@ PESTILENCE = STORMS + "PestilenceStorm_BP.PestilenceStorm_BP_C"
 
 
 def source_report(response):
-    variant, actor, *counts = response.split(";")
-    return dict(variant=variant, actor=int(actor), **dict(zip(
+    variant, actor, selected_cue, *counts = response.split(";")
+    return dict(variant=variant, actor=int(actor), selected_cue=selected_cue, **dict(zip(
         ("lightning_warning", "fog_warning", "lightning_spawns", "fog_spawns", "pestilence_spawns",
          "lightning_particles", "lightning_audio"), map(int, counts), strict=True)))
 
@@ -136,6 +136,11 @@ class StockStormTrial:
                 and frame["game"]["native_weather_ambience_guest"].get("epoch") == projected["zone_epoch"]))
         idle = guest_idle["game"]["native_weather_ambience_guest"]
         assert not any(idle.get(key) for key in ("particle_registered", "audio_registered", "fog_registered", "fog")), idle
+        host_stock, guest_stock = map(source_report, await asyncio.gather(
+            self.stage(host, "read"), self.stage(guest, "read")))
+        assert host_stock["fog_warning"] == 1 and "StormSiren_02_Cue" in host_stock["selected_cue"], host_stock
+        assert guest_stock["fog_warning"] == 0 and guest_stock["selected_cue"] == host_stock["selected_cue"], guest_stock
+        self.evidence["overlapping_siren"] = {"host": host_stock, "guest": guest_stock}
         self.evidence["cleared"] = {"host": host_idle["game"]["native_weather_ambience"], "guest": idle}
         assert campaign_save_hashes(host.campaign) == self.checkpoint, "Storm projection wrote the campaign early"
         self.evidence["campaign_unchanged"] = True
