@@ -5286,7 +5286,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                     "tutorial_dock", "tutorial_dock_combat", "tutorial_dock_shot_view", "tutorial_dock_melee",
                     "crossroads", "crossroads_anomaly",
                     "lab_east_wing_acid", "shopkeep"
-                } else ("save_and_quit",)
+                } or stock_host_prop_observer and campaign == prop_campaign else ("save_and_quit",)
                 after_reconnect = None
                 if campaign == "crossroads" and stock_shovel_quest:
                     after_reconnect = check_shovel_reconnect
@@ -5555,7 +5555,7 @@ if __name__ == "__main__":
                         help="verify the resident guest UI refresh on one stock Nearby Items container pickup")
     parser.add_argument("--stock-prop-grip", action="store_true", help="verify default guest carry filtering in one portable lantern session")
     parser.add_argument("--stock-host-prop-observer", action="store_true",
-                        help="sample the held stock lantern on the host and a passive guest during one sweep")
+                        help="sample a carried lantern and verify stock light and heavy prop impacts")
     parser.add_argument("--stock-crate-ring", action="store_true", help="verify one guest stock F crate open through the in-process ring")
     parser.add_argument("--compact-crate-status", action="store_true",
                         help="test normal crate status routing with one private muted portable pair and a temporary Lua overlay")
