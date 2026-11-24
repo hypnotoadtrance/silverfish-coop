@@ -298,6 +298,24 @@ local function amounts(items)
     return result
 end
 
+local function apply_catalog(actor, save, cash, seed, minimum, accepts, entries, taste)
+    local flag = FName("Player_Cash")
+    if save.Flags:Contains(flag) then save.Flags:Remove(flag) end
+    save.Flags:Add(flag, cash)
+    if not save.Flags:Contains(flag) or save.Flags:Find(flag):get() ~= cash then fail("view_wallet_projection") end
+    actor.MinWeaponValue = minimum
+    actor.AcceptCash = accepts == "1"
+    if not set_preferences(actor, taste, seed) or actor.MinWeaponValue ~= minimum
+        or actor.AcceptCash ~= (accepts == "1") then fail("view_preferences_projection") end
+    local inventory = actor.Inventory
+    inventory:Empty()
+    for i, item in ipairs(entries) do
+        inventory[i] = item
+        if not same(inventory[i][item_class], item[item_class]) or guid(inventory[i][item_guid]) ~= guid(item[item_guid])
+            or inventory[i][item_ammo] ~= item[item_ammo] then fail("view_item_projection") end
+    end
+end
+
 local function guest_command(action, fields, state, phase)
     local context = local_context(state, phase)
     local sequence = math.tointeger(tonumber(fields[3]))
@@ -342,8 +360,24 @@ local function guest_command(action, fields, state, phase)
         end
     end
 
-    close_stock(session.state == "confirming")
+    if not refresh then close_stock(session.state == "confirming") end
     local save, pawn = guest_scope.bind_guest(state, phase)
+    local stock_before = amounts(entries)
+    if refresh then
+        local screen = session.screen
+        if not same(save, session.save) or not same(pawn, session.pawn)
+            or not same(screen.Trader, context.actor) or context.actor.Save ~= false
+            or not valid(screen.TraderInventoryPanel) then fail("view_refresh_screen") end
+        local okay, reason = pcall(function()
+            apply_catalog(context.actor, save, cash, seed, minimum, accepts, entries, taste)
+            screen.TraderInventoryPanel:FullRefresh()
+            screen:UpdateBalance()
+        end)
+        if not okay then close_stock(); error(reason, 0) end
+        session.stock_before = stock_before
+        return "exact stock NPC barter screen shown"
+    end
+
     local api, class = StaticFindObject("/Script/Engine.Default__GameplayStatics"), load(save_class)
     if not valid(save) or not same(pawn, context.pawn) or not valid(api) or not valid(class)
         or context.actor.Save ~= true or context.controller.MenuStack:GetArrayNum() ~= 0 then fail("view_guest_save") end
@@ -351,7 +385,7 @@ local function guest_command(action, fields, state, phase)
     if not valid(original_stock) or not valid(original_pack)
         or not copy_items(context.actor.Inventory, original_stock.PlayerBackpack)
         or not copy_items(save.PlayerBackpack, original_pack.PlayerBackpack) then fail("view_before_image") end
-    local stock_before, pack_before = amounts(entries), amounts(original_pack.PlayerBackpack)
+    local pack_before = amounts(original_pack.PlayerBackpack)
     session = context
     session.sequence, session.state, session.save = sequence, "ready", save
     session.original_stock, session.original_pack = original_stock, original_pack
@@ -360,23 +394,8 @@ local function guest_command(action, fields, state, phase)
     session.original_minimum = context.actor.MinWeaponValue
     session.original_accepts_cash = context.actor.AcceptCash
     local okay, reason = pcall(function()
-        local flag = FName("Player_Cash")
-        if save.Flags:Contains(flag) then save.Flags:Remove(flag) end
-        save.Flags:Add(flag, cash)
-        if not save.Flags:Contains(flag) or save.Flags:Find(flag):get() ~= cash then fail("view_wallet_projection") end
         context.actor.Save = false
-        context.actor.MinWeaponValue = minimum
-        context.actor.AcceptCash = accepts == "1"
-        if not set_preferences(context.actor, taste, seed) or context.actor.MinWeaponValue ~= minimum
-            or context.actor.AcceptCash ~= (accepts == "1")
-            then fail("view_preferences_projection") end
-        local inventory = context.actor.Inventory
-        inventory:Empty()
-        for i, item in ipairs(entries) do
-            inventory[i] = item
-            if not same(inventory[i][item_class], item[item_class]) or guid(inventory[i][item_guid]) ~= guid(item[item_guid])
-                or inventory[i][item_ammo] ~= item[item_ammo] then fail("view_item_projection") end
-        end
+        apply_catalog(context.actor, save, cash, seed, minimum, accepts, entries, taste)
         local class = load(barter_screen)
         local widgets = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary")
         if not valid(class) or not valid(widgets) then fail("view_stock_class") end

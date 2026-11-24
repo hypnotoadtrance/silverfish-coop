@@ -70,24 +70,40 @@ local function roaming_probe(fields, state, phase)
                         local asset = "/Game/Classes/Items/Item_Bandage.Item_Bandage_C"
                         local class = load(asset)
                         assert(valid(class))
-                        local output = {}
-                        actor:GenerateItem(class, 1, output)
-                        local item = output.Item or output
-                        assert(valid(item[item_class]) and guid(item[item_guid]))
-                        actor.Inventory[actor.Inventory:GetArrayNum() + 1] = item
-                        return guid(item[item_guid]) .. "," .. ("%f,%f,%f"):format(target.X,target.Y,target.Z)
-                    elseif mode == "open" and phase == "connected" then
+                        local ids = {}
+                        for index = 1, 2 do
+                            local output = {}
+                            actor:GenerateItem(class, 1, output)
+                            local item = output.Item or output
+                            ids[index] = guid(item[item_guid])
+                            assert(valid(item[item_class]) and ids[index])
+                            actor.Inventory[actor.Inventory:GetArrayNum() + 1] = item
+                        end
+                        return table.concat(ids, ",") .. "," .. ("%f,%f,%f"):format(target.X,target.Y,target.Z)
+                    elseif mode == "open" then
                         actor:SendInteractionToActor(pawn, actor.Box)
                         local screen = state.controller.MenuStack[1]
                         assert(exact(screen, barter_screen) and same(screen.Trader, actor), "stock barter did not open")
                         return ("%s,%s"):format(tostring(screen:GetRenderOpacity()), tostring(screen:GetIsEnabled()))
-                    elseif mode == "close" and phase == "connected" then
+                    elseif mode == "close" then
                         state.controller:CloseMenu({})
                         return tostring(state.controller.MenuStack:GetArrayNum())
-                    elseif mode == "buy" and phase == "connected" then
+                    elseif mode == "screen" then
+                        local menus = state.controller.MenuStack
+                        local screen = menus:GetArrayNum() == 1 and menus[1]
+                        if not exact(screen, barter_screen) or not same(screen.Trader, actor)
+                            or not valid(screen.TraderInventoryPanel) then return "closed" end
+                        local cards = screen.TraderInventoryPanel.Cards
+                        local ids = {}
+                        for index = 1, cards:GetArrayNum() do ids[#ids + 1] = guid(cards[index].Item) end
+                        table.sort(ids)
+                        local wallet = pawn.Save.Flags:Find(FName("Player_Cash"))
+                        return table.concat({tostring(screen:GetAddress()), tostring(wallet:get()), tostring(screen:GetIsEnabled()),
+                            tostring(screen:GetRenderOpacity()), table.concat(ids, "|")}, ",")
+                    elseif mode == "buy" then
                         local screen = state.controller.MenuStack[1]
                         assert(exact(screen, barter_screen) and same(screen.Trader, actor) and screen:GetIsEnabled()
-                            and screen:GetRenderOpacity() == 1 and actor.Save == false)
+                            and screen:GetRenderOpacity() == 1 and actor.Save == (phase == "hosting"))
                         local stock
                         for index = 1, actor.Inventory:GetArrayNum() do
                             local row = actor.Inventory[index]

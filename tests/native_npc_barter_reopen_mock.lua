@@ -51,6 +51,10 @@ end
 local function screen(trader)
     local menu = object(screen_class)
     menu.Trader, menu.opacity, menu.enabled = trader, 1, true
+    menu.PlayerOffer, menu.TraderOffer, menu.PlayerCashOffer = array(), array(), 0
+    menu.TraderInventoryPanel = object()
+    menu.TraderInventoryPanel.FullRefresh = function() menu.refreshed = (menu.refreshed or 0) + 1 end
+    menu.UpdateBalance = function() menu.balance_updated = true end
     function menu:GetOwningPlayer() return controller end
     function menu:SetRenderOpacity(value) self.opacity = value end
     function menu:SetIsEnabled(value) self.enabled = value end
@@ -105,6 +109,15 @@ barter.sync(scene, "connected")
 local verified = project(first, 1200)
 controller:AddMenu(verified)
 assert(verified.opacity == 1 and verified.enabled)
+local changed = {"request", "native-npc-barter-refresh", tostring(sequence), "00000001" .. string.rep("0", 24),
+    "1100", "31", "2", "1"}
+verified.PlayerCashOffer = 3
+assert(barter.command(changed, scene, "connected") == "stock NPC barter selection pending")
+assert(save.Flags.Player_Cash == 1200 and not verified.refreshed and verified.PlayerCashOffer == 3)
+verified.PlayerCashOffer = 0
+assert(barter.command(changed, scene, "connected") == "exact stock NPC barter screen shown")
+assert(controller.MenuStack[1] == verified and verified.enabled and verified.opacity == 1)
+assert(verified.refreshed == 1 and verified.balance_updated and save.Flags.Player_Cash == 1100)
 
 controller:CloseMenu()
 local reopened = screen(first)

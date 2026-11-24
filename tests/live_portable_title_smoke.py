@@ -1903,6 +1903,14 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
             return dict(zip(keys, raw.split(","), strict=True))
         return {}
 
+    async def screen(seat, point):
+        raw = await operate(seat, "screen", point)
+        if raw == "closed":
+            return {}
+        widget, wallet, enabled, opacity, cards = raw.split(",", 4)
+        return {"widget": widget, "wallet": int(wallet), "visible": enabled == "true" and float(opacity) == 1,
+                "cards": set(cards.split("|")) if cards else set()}
+
     point = await operate(host, "spawn")
     await asyncio.sleep(1.2)
     before_registration = await inspect(host, point)
@@ -1919,13 +1927,14 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
     identity = host_before["mod_identity"]
     assert identity != "-" and identity == guest_before["mod_identity"], (host_before, guest_before)
     assert host_before["stock_trader_id"] != guest_before["stock_trader_id"], (host_before, guest_before)
-    item, target = (await operate(host, "prepare", point)).split(",", 1)
-    assert re.fullmatch(r"[0-9A-F]{32}", item)
+    host_item, item, target = (await operate(host, "prepare", point)).split(",", 2)
+    assert host_item != item and all(re.fullmatch(r"[0-9A-F]{32}", key) for key in (host_item, item))
     location = list(map(float, target.split(",")))
     await wait_resident_status(guest_run, lambda frame: math.dist(
         frame.get("game", {}).get("pawns", {}).get("local", {}).get("location", [0, 0, 0]), location) < 55)
     host_stock = await inspect(host, point)
-    assert item in host_stock["stock_items"].split("|") and item not in guest_before["stock_items"].split("|")
+    assert {host_item, item}.issubset(host_stock["stock_items"].split("|"))
+    assert {host_item, item}.isdisjoint(guest_before["stock_items"].split("|"))
     checkpoint = campaign_save_hashes(host.campaign)
     opacity, enabled = (await operate(guest, "open", point)).split(",")
     assert float(opacity) == 0 and enabled == "false", (opacity, enabled)
@@ -1933,6 +1942,26 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
                                        and scope(frame).get("trader") == identity)
     projected = await inspect(guest, point)
     assert projected["stock_items"] == host_stock["stock_items"], (projected, host_stock)
+    guest_screen = await screen(guest, point)
+    assert guest_screen["visible"] and {host_item, item}.issubset(guest_screen["cards"]), guest_screen
+
+    await operate(host, "open", point)
+    host_screen = await screen(host, point)
+    assert host_screen["visible"] and host_screen["wallet"] == guest_screen["wallet"], host_screen
+    host_payment = int(await operate(host, "buy", point, host_item))
+    async with asyncio.timeout(12):
+        while True:
+            updated = await screen(guest, point)
+            if updated.get("visible") and host_item not in updated["cards"]:
+                break
+            await asyncio.sleep(.1)
+    assert updated == {**guest_screen, "wallet": guest_screen["wallet"] - host_payment,
+                       "cards": guest_screen["cards"] - {host_item}}, (guest_screen, updated)
+
+    if not await screen(host, point):
+        await operate(host, "open", point)
+    host_browsing = await screen(host, point)
+    assert host_browsing["visible"] and host_browsing["wallet"] == updated["wallet"], host_browsing
     started = time.time()
     cash = int(await operate(guest, "buy", point, item))
     new_view = await wait_resident_status(guest_run, lambda frame: scope(frame).get("state") == "ready"
@@ -1946,11 +1975,18 @@ async def verify_roaming_barter(host: Seat, guest: Seat, _pawn: str) -> dict:
     assert received["guid"] == item and received["direction"] == "receive", received
     host_after, guest_after = await asyncio.gather(inspect(host, point), inspect(guest, point))
     assert host_after["stock_items"] == guest_after["stock_items"] and item not in host_after["stock_items"].split("|")
+    host_updated = await screen(host, point)
+    assert host_updated == {**host_browsing, "wallet": updated["wallet"] - cash,
+                            "cards": host_browsing["cards"] - {item}}, (host_browsing, host_updated)
     assert await operate(guest, "close", point) == "0"
+    assert await operate(host, "close", point) == "0"
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_roaming_barter": {"stock_ids": [host_before["stock_trader_id"], guest_before["stock_trader_id"]],
                                      "late_merchant_registration": True,
                                      "shared_identity": identity, "committed_trade": trade, "stock_view": scope(new_view),
+                                     "host_purchase_refreshed_same_guest_widget": True,
+                                     "guest_purchase_refreshed_same_host_widget": True,
+                                     "wallet": [guest_screen["wallet"], updated["wallet"], host_updated["wallet"]],
                                      "native_checkpoint_unchanged": True}}
 
 
