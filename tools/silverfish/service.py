@@ -1095,10 +1095,14 @@ class Host:
             self.enrollment.begin_travel()
 
     async def reopen_zone_guests(self, transport, roles: dict[str, str], prior: dict[str, dict]) -> None:
+        guest = self.guest
+        character = roles.get("guest")
         if transport is not None:
             await transport.refresh_game_routes()
-        if self.enrollment and "guest" in roles and self.guest:
-            reservation = self.enrollment.reserve(self.guest["guest_id"], roles["guest"], self.last_game)
+        if self.enrollment and character and guest:
+            if self.guest is not guest or guest["character_id"] != character:
+                raise RuntimeError("The authenticated guest changed during destination enrollment")
+            reservation = self.enrollment.reserve(guest["guest_id"], character, self.last_game)
             if reservation.state != "reserved":
                 raise RuntimeError(f"The destination could not reserve the native guest ({reservation.reason})")
         self.awaiting_zone_guest = roles.get("guest")
@@ -1316,7 +1320,30 @@ class Host:
                     raise RuntimeError("The authored arrival was acknowledged in the wrong world")
             self.last_game = observed
             self.last_seen = time.monotonic()
-            await self.reopen_zone_guests(transport, roles, guests)
+            returning_guests = self.enrollment is not None and any(role != "host" for role in roles)
+            hold = transport.hold_game_routes() if transport and returning_guests else contextlib.nullcontext()
+            with hold:
+                if returning_guests:
+                    # The destination can report hosting before its native roster becomes readable.
+                    source_driver = departure_proof[2] if departure_proof else source_frame.get("native_roster", {}).get("driver")
+                    arrival_sequence = observed["sequence"]
+                    arrival_pawn = observed.get("pawns", {}).get("local", {}).get("name")
+
+                    def listener_ready(frame):
+                        try:
+                            census = _census(frame)
+                        except ValueError:
+                            return False
+                        pawn = frame.get("pawns", {}).get("local", {}).get("name")
+                        return (census.map == destination and census.sequence >= arrival_sequence
+                                and census.driver != source_driver and not census.connections
+                                and isinstance(pawn, str) and bool(pawn)
+                                and (arrival_pawn is None or pawn == arrival_pawn))
+
+                    if not listener_ready(observed):
+                        self.last_game = await bridge.wait_for(listener_ready, timeout=7)
+                        self.last_seen = time.monotonic()
+                await self.reopen_zone_guests(transport, roles, guests)
             if dream_plan:
                 await self.ensure_dream_stack(bridge, dream_plan)
             self.zone_epoch = uuid.uuid4().hex

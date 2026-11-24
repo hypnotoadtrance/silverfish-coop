@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, call, patch
 
 from tools.silverfish.authored_routes import AUTHORED_ROUTES
 from tools.silverfish.link import HostLink
+from tools.silverfish.native_roster import RosterEnrollment
 from tools.silverfish.runtime import Bridge
 from tools.silverfish.service import Host
 
@@ -117,6 +118,7 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
         host.native_profile = object()
         host.native_guest = False
         host.expanded_zones = True
+        host.enrollment = None
         host.world_flush_supported = True
         host.transitioning = host.stopping = False
         host.roles = Mock(return_value={"host": "host", "guest": "scout"})
@@ -314,6 +316,78 @@ class DepartureGateTests(unittest.IsolatedAsyncioTestCase):
                                               "blockers": [{"id": "scout", "reason": "too_far"}]})
                     host.begin_zone_guests.assert_not_called()
                     host.reopen_zone_guests.assert_not_awaited()
+
+    async def test_observatory_travel_waits_for_the_new_empty_roster_before_guest_reservation(self):
+        for arrival_has_pawn in (True, False):
+            with self.subTest(arrival_has_pawn=arrival_has_pawn):
+                await self.verify_observatory_roster_settles(arrival_has_pawn)
+
+    async def verify_observatory_roster_settles(self, arrival_has_pawn):
+        route = next(route for route in AUTHORED_ROUTES
+                     if route.source.endswith("/Observitory_P") and route.destination.endswith("/CrossRoads_P"))
+        host = self.host(route.source, route.destination)
+        host.internal_port = 17000
+        host.guest = {"guest_id": "old-guest", "character_id": "scout"}
+        host.enrollment = RosterEnrollment()
+        host.saved_native_guest = Mock(return_value=None)
+        host.begin_zone_guests.side_effect = lambda _transport: host.enrollment.begin_travel()
+        source = self.frame(route.source, 3, 1500, guarded=True)
+        host.enrollment.observe(source)
+        listener = self.frame(route.destination, 5, 0, driver="d2", guarded=True)
+        listener["remote_clients"] = 0
+        listener["native_roster"].update(count=0, connections=[])
+        arrival = {**listener, "sequence": 4, "native_roster": {"state": "unavailable"},
+                   "native_authored_arrival": {"actor": route.arrival_actor}}
+        if not arrival_has_pawn:
+            arrival["pawns"] = {}
+        old_driver = {**listener, "native_roster": {**listener["native_roster"], "driver": "d1"}}
+        other_pawn = {**listener, "pawns": {"local": {"name": "another-host"}}}
+        missing_pawn = {**listener, "pawns": {}}
+        foreign_connection = self.frame(route.destination, 5, 0, driver="d2", guarded=True)
+        transport = HostLink(("127.0.0.1", 17000), Mock(), None)
+        transport.restrict_game_routes({"old-guest"})
+        bridge = Mock(command=AsyncMock(return_value={"ack": {"message": "zone travel requested"}}))
+        host.authored_arrival = AsyncMock(return_value=arrival)
+
+        async def wait_for(condition, *, timeout):
+            if bridge.wait_for.await_count == 1:
+                self.assertTrue(condition(source))
+                return source
+            if bridge.wait_for.await_count == 2:
+                self.assertTrue(condition(arrival))
+                return arrival
+            self.assertFalse(transport._native_route_permitted("old-guest"))
+            self.assertIsNone(host.enrollment.pending)
+            for premature in (source, arrival, old_driver, missing_pawn, foreign_connection):
+                self.assertFalse(condition(premature), premature)
+            if arrival_has_pawn:
+                self.assertFalse(condition(other_pawn))
+            self.assertTrue(condition(listener))
+            return listener
+
+        async def refresh():
+            self.assertFalse(transport._native_route_permitted("old-guest"))
+            self.assertIs(host.last_game, listener)
+
+        bridge.wait_for = AsyncMock(side_effect=wait_for)
+        transport.refresh_game_routes = AsyncMock(side_effect=refresh)
+        with patch("tools.silverfish.service.verify_loopback_socket") as verify_listener:
+            result = await host.travel_authored(bridge, transport, route)
+
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(host.stopping)
+        self.assertIs(host.last_game, listener)
+        self.assertEqual(host.awaiting_zone_guest, "scout")
+        reservation = host.enrollment.pending
+        self.assertEqual((reservation.guest_id, reservation.character_id, reservation.driver),
+                         ("old-guest", "scout", "d2"))
+        verify_listener.assert_called_once_with(bridge.process.pid, 17000)
+        transport.refresh_game_routes.assert_awaited_once()
+        self.assertTrue(transport._native_route_permitted("old-guest"))
+        self.assertFalse(transport._native_route_permitted("other-guest"))
+        host.control.event.assert_any_call("zone_travel_ready", source=route.source, destination=route.destination,
+                                           entrance=route.entrance, epoch=result["travel_epoch"], revision=2,
+                                           authored_arrival=arrival["native_authored_arrival"])
 
     async def test_guarded_departure_rejects_unattributed_native_connection(self):
         host = self.host(SOURCE, DESTINATION)

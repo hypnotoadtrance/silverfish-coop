@@ -475,6 +475,7 @@ class OrdinaryDeadBridgeLootTests(unittest.IsolatedAsyncioTestCase):
         host.smg_holds = None
         host.travelling_guests = Mock(return_value={"member": {}})
         host.world_flush_supported = False
+        host.enrollment = None
         host.begin_zone_guests = Mock()
         host.reopen_zone_guests = AsyncMock()
         host.internal_port = 12345
