@@ -872,7 +872,7 @@ local function dock_combat(pawn, world, host, action, name)
         eyes, actor:GetFullName())
 end
 
-local garage_view, garage_door, garage_aim
+local garage_view, garage_door, garage_aim, garage_plank
 local garage_shot_hook
 local garage_path = dock .. ":PersistentLevel.StaticMeshActor_347"
 
@@ -944,7 +944,13 @@ local function restore_garage_fixture()
         garage_door.mesh:K2_SetWorldLocation(garage_door.point, false, {}, true)
         garage_door.mesh:SetMobility(0)
     end
-    garage_view, garage_door, garage_aim = nil, nil, nil
+    if garage_plank and valid(garage_plank.mesh) then
+        local mesh = garage_plank.mesh
+        mesh:K2_SetWorldLocation(garage_plank.position, false, {}, true)
+        mesh:SetRelativeScale3D(garage_plank.scale)
+        mesh:SetMobility(garage_plank.mobility)
+    end
+    garage_view, garage_door, garage_aim, garage_plank = nil, nil, nil, nil
     return "restored"
 end
 
@@ -1084,6 +1090,40 @@ local function set_garage_aim(pawn, world, host, specification)
     if same(component, mesh) then return "blocked" end
     if valid(component) and same(component:GetOwner(), worker) then return "worker" end
     return valid(component) and component:GetFullName() or "clear"
+end
+
+local function stage_garage_plank(pawn, world, host, specification)
+    local from_text, to_text, state = specification:match("^([^;]+);([^;]+);(%a+)$")
+    assert(state == "in" or state == "out")
+    local eye, target = position(from_text), position(to_text)
+    local actor = StaticFindObject(dock .. ":PersistentLevel.Dest_WoodPlank_BP_C_1")
+    local mesh = valid(actor) and actor.StaticMesh
+    assert(valid(mesh) and same(actor:GetWorld(), world) and actor.Health > 0)
+    if not garage_plank then
+        local scale = mesh.RelativeScale3D
+        garage_plank = {mesh=mesh, position=mesh:K2_GetComponentLocation(),
+            scale={X=scale.X,Y=scale.Y,Z=scale.Z}, mobility=mesh.Mobility}
+    end
+    local shooter = host and authoritative_guest(world) or pawn
+    local weapon = shooter.EquipedItem
+    local view = set_garage_aim(pawn, world, host, from_text .. ";" .. to_text)
+    local muzzle = {X=eye.X,Y=eye.Y,Z=eye.Z-76}
+    weapon.Arrow_Muzzle:K2_SetWorldLocation(muzzle, false, {}, true)
+    -- Move the stock board to where the offset muzzle ray passes below the sight line.
+    local center = {X=muzzle.X+(target.X-muzzle.X)*.28,Y=muzzle.Y+(target.Y-muzzle.Y)*.28,
+        Z=muzzle.Z+(target.Z-muzzle.Z)*.28}
+    local scale = garage_plank.scale
+    mesh:SetMobility(2)
+    mesh:SetRelativeScale3D({X=scale.X*0.55,Y=scale.Y*0.55,Z=scale.Z*0.55})
+    local origin, bounds = mesh:K2_GetComponentLocation(), {}
+    trace:GetComponentBounds(mesh, bounds, {}, {})
+    local current = bounds.Origin or bounds
+    mesh:K2_SetWorldLocation({X=origin.X+center.X-current.X,Y=origin.Y+center.Y-current.Y,
+        Z=origin.Z+center.Z-current.Z+(state == "out" and 400 or 0)}, false, {}, true)
+    local hit = line_hit(shooter, muzzle, target, {shooter, weapon}, 2)
+    local component = hit and hit.Component and hit.Component:Get()
+    local first = valid(component) and component:GetOwner():GetFName():ToString() or "clear"
+    return table.concat({view, first, point_string(muzzle), tostring(actor.Health)}, ";")
 end
 
 local attack_probe
@@ -1613,6 +1653,11 @@ local function run(action, actor_path)
         return restore_garage_fixture()
     elseif action == "dock-garage-aim" then
         return set_garage_aim(pawn, world, host, actor_path)
+    elseif action == "dock-garage-plank" then
+        return stage_garage_plank(pawn, world, host, actor_path)
+    elseif action == "dock-garage-plank-health" then
+        assert(host and garage_plank)
+        return valid(garage_plank.mesh) and tostring(garage_plank.mesh:GetOwner().Health) or "removed"
     elseif action == "dock-garage-health" then
         assert(host and garage_view and valid(garage_view.worker))
         return ("%.6f"):format(garage_view.worker.Health)

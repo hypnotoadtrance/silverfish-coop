@@ -2770,13 +2770,13 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
             async with asyncio.timeout(6):
                 while True:
                     observed = float(await command(host, "dock-garage-health"))
-                    if not should_hit or observed < expected_health:
+                    if should_hit is not True or observed < expected_health:
                         break
                     await asyncio.sleep(.05)
         except TimeoutError as error:
             witness = await command(host, "dock-garage-shot-witness")
             raise AssertionError(dict(host_projectile=witness, shot=event, worker_health=expected_health)) from error
-        if not should_hit:
+        if should_hit is False:
             await asyncio.sleep(.35)
             observed = float(await command(host, "dock-garage-health"))
             assert observed == expected_health, dict(roof_contact_damaged_worker=observed, event=event)
@@ -2852,6 +2852,31 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         evidence["tutorial_dock_distant_contact"] = {
             "meters": round(distance / 100, 2), "health": [distant_health, after_blocked, after_hit],
             "blocked_shot": blocked, "accepted_shot": accepted, "host_only_barrier": host_collision,
+        }
+
+        board = "Dest_WoodPlank_BP_C_1"
+        stage = f"dock-garage-plank\t{eye};{target}"
+        host_camera, host_muzzle, _, board_health = (await command(host, f"{stage};in")).split(";")
+        guest_camera, guest_muzzle, _, _ = (await command(guest, f"{stage};out")).split(";")
+        assert (host_camera, host_muzzle) == ("blocked", host_collision), (host_camera, host_muzzle)
+        assert (guest_camera, guest_muzzle) == ("worker", "NPC_Survivor_Worker_C_2"), (guest_camera, guest_muzzle)
+        refused, protected_health = await shoot(after_hit, should_hit=False, contact_required=True)
+        exclusions = (await command(host, "dock-garage-shot-witness")).rsplit(";", 1)[-1].split(",")
+        assert host_collision not in exclusions and board not in exclusions, (exclusions, refused)
+        assert float(await command(host, "dock-garage-plank-health")) == float(board_health)
+
+        guest_camera, guest_muzzle, _, _ = (await command(guest, f"{stage};in")).split(";")
+        assert (guest_camera, guest_muzzle) == ("worker", board), (guest_camera, guest_muzzle)
+        assert (await command(host, f"{stage};in")).split(";")[:2] == ["blocked", host_collision]
+        accepted, _ = await shoot(protected_health, should_hit=None)
+        contact = accepted["native_guest_trigger_view"].get("contact", {})
+        assert contact.get("actor", "").endswith(f":PersistentLevel.{board}"), accepted
+        exclusions = (await command(host, "dock-garage-shot-witness")).rsplit(";", 1)[-1].split(",")
+        assert host_collision in exclusions and board not in exclusions, (exclusions, accepted)
+        evidence["tutorial_dock_damageable_contact"] = {
+            "camera_target": "NPC_Survivor_Worker_C_2", "muzzle_target": board,
+            "blocked_shot": refused, "accepted_shot": accepted,
+            "board_health_before": board_health, "board_health_after": await command(host, "dock-garage-plank-health"),
         }
     return evidence
 

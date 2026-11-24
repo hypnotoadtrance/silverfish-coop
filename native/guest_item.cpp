@@ -1486,6 +1486,12 @@ namespace
         return true;
     }
 
+    bool takes_projectile_damage(Unreal::UObject* actor)
+    {
+        const Unreal::FName damage_function{STR("DealDamage"), Unreal::FNAME_Find};
+        return actor->GetFunctionByNameInChain(damage_function) != nullptr;
+    }
+
     void reconcile_projectile_contact(Unreal::AActor* projectile, Unreal::UObject* pawn, const ShotView& view)
     {
         if (!view.contact || view.contact_actor.empty()) return;
@@ -1513,18 +1519,16 @@ namespace
         std::size_t count = 2;
         Unreal::UObject* target{};
         const auto reported_actor = RC::to_generic_string(view.contact_actor);
-        const Unreal::FName damage_function{STR("DealDamage"), Unreal::FNAME_Find};
-        // Use the actors returned by the stock trace. Commit exclusions only if the trace
-        // reaches the reported living target without crossing a damageable actor.
+        // A damageable actor may be the reported contact, but must still block
+        // the shot if it lies in front of a different reported actor.
         while (const auto hit = trace_shot(projectile, *origin, end, projectile_trace, excluded.first(count)))
         {
             auto* actor = hit->actor;
             if (!hit->hit || !live(actor) || !authority(actor)) return;
-            const bool damageable = actor->GetFunctionByNameInChain(damage_function) != nullptr;
-            if (count == 2 && damageable) return;
+            const bool damageable = takes_projectile_damage(actor);
             if (actor->GetPathName() == reported_actor)
             {
-                if (count == 2 || squared_length(difference(hit->point, *view.contact)) > 100 * 100 ||
+                if (count == 2 || !damageable || squared_length(difference(hit->point, *view.contact)) > 100 * 100 ||
                     !living_combat_target(actor, projectile->GetWorld())) return;
                 target = actor;
                 break;
@@ -3707,7 +3711,7 @@ silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_s
             view.target = aim->point;
             if (auto* muzzle = shot_component(barrel ? barrel : held, STR("Arrow_Muzzle"), muzzle_component))
                 view.muzzle = actor_aim_vector(muzzle, component_location);
-            if (view.muzzle && aim->hit && living_combat_target(aim->actor, static_cast<Unreal::AActor*>(pawn)->GetWorld()))
+            if (view.muzzle)
             {
                 const auto ray = difference(aim->point, *view.muzzle);
                 const double span = std::sqrt(squared_length(ray));
@@ -3717,7 +3721,8 @@ silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_s
                     // Visibility can first hit the capsule, in front of the projectile's hit on the mesh.
                     const auto end = ahead(aim->point, ray, 100.0 / span);
                     const auto hit = trace_shot(pawn, *view.muzzle, end, projectile_trace, std::array{held});
-                    if (hit && hit->actor == aim->actor)
+                    const auto world = static_cast<Unreal::AActor*>(pawn)->GetWorld();
+                    if (hit && hit->hit && living_combat_target(hit->actor, world) && takes_projectile_damage(hit->actor))
                     {
                         auto path = RC::to_utf8_string(hit->actor->GetPathName());
                         if (valid_contact_path(path))
