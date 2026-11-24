@@ -950,20 +950,25 @@ async def verify_stock_npc_rivalry(host: Seat, guest: Seat, _pawn: str) -> dict:
         assert await ask(host, "rivalry-cleanup") == "cleared"
 
 
+async def equip_stock_guest_melee(host: Seat, guest: Seat, seed: str, kind: str) -> dict:
+    guid = await portable_probe_command(host.bridge, "portable-npc-override", seed)
+    assert re.fullmatch(r"[0-9A-F]{32}", guid), guid
+    async with asyncio.timeout(8):
+        while await portable_probe_command(guest.bridge, "portable-npc-override", f"select-pipe\t{guid}") != "selected":
+            await asyncio.sleep(.05)
+    return await wait_resident_status(guest.client / "run", lambda current: (
+        (scope := current.get("game", {}).get("native_guest_primary_scope", {})).get("guid") == guid
+        and scope.get("kind") == kind), timeout=12)
+
+
 async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = False,
                                       verify_observer: bool = False) -> dict:
     async def command(seat, action):
         return await portable_probe_command(seat.bridge, "portable-npc-override", action)
 
     guest_run = guest.client / "run"
-    guid = await command(host, "seed-pipe\theavy" if heavy else "seed-pipe")
-    assert re.fullmatch(r"[0-9A-F]{32}", guid), guid
-    async with asyncio.timeout(8):
-        while await command(guest, f"select-pipe\t{guid}") != "selected":
-            await asyncio.sleep(.05)
-    frame = await wait_resident_status(guest_run, lambda current: (
-        current.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid), timeout=12)
-    assert frame["game"]["native_guest_primary_scope"]["kind"] == ("melee" if heavy else "old-pipe")
+    frame = await equip_stock_guest_melee(
+        host, guest, "seed-pipe\theavy" if heavy else "seed-pipe", "melee" if heavy else "old-pipe")
     host_run = host.campaign / "run"
     grip_error = None
     if verify_observer:
@@ -1052,7 +1057,7 @@ async def stock_melee_edge(guest_run, guid, edge):
     assert reply["ok"], reply
     fixture = reply[native_guest_melee.INPUT_FIXTURE_KEY]
     assert fixture["guid"] == guid and fixture["edge"] == ("release" if edge == "tap" else edge), fixture
-    return fixture
+    return dict(fixture, requested_edge=edge)
 
 
 async def stock_melee_edge_receipts(guest_run, guest_frame, *fixtures):
@@ -1065,8 +1070,9 @@ async def stock_melee_edge_receipts(guest_run, guest_frame, *fixtures):
             if sequences <= rows.keys():
                 break
             await asyncio.sleep(.05)
-    for event in rows.values():
-        assert event["event"] == "native_guest_melee_edge", event
+    for fixture in fixtures:
+        event = rows[fixture["sequence"]]
+        assert event["event"] == "native_guest_melee_edge" and event["edge"] == fixture["requested_edge"], event
     return [rows[fixture["sequence"]][native_guest_melee.INPUT_KEY] for fixture in fixtures]
 
 
@@ -1128,6 +1134,17 @@ async def verify_stock_melee_family(host: Seat, guest: Seat, _pawn: str) -> dict
     edges = await verify_stock_melee_edges(host, guest)
     assert campaign_save_hashes(host.campaign) == before, "A regular melee attack wrote campaign saves"
     return {"stock_melee_family": {"heavy_pipe": heavy_pipe, "old_pipe": old_pipe, "edges": edges, "campaign_unchanged": True}}
+
+
+async def verify_stock_melee_edges_only(host: Seat, guest: Seat, pawn: str) -> dict:
+    before = campaign_save_hashes(host.campaign)
+    frame = await equip_stock_guest_melee(host, guest, "seed-melee-edges", "old-pipe")
+    guid = frame["game"]["native_guest_primary_scope"]["guid"]
+    edges = await verify_stock_melee_edges(host, guest)
+    for edge in ("tap", "charged", "combo"):
+        assert (edges[edge]["pawn"], edges[edge]["guid"]) == (pawn, guid), edges[edge]
+    assert campaign_save_hashes(host.campaign) == before, "A regular melee attack wrote campaign saves"
+    return {"stock_melee_edges": {**edges, "campaign_unchanged": True}}
 
 
 async def verify_tutorial_dock_retaliation(host: Seat, guest: Seat, frame: dict) -> dict:
@@ -3937,7 +3954,9 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                  stock_use: bool = False, stock_food: bool = False, stock_campfire: bool = False,
                  stock_npc_override: bool = False, stock_board_offers: bool = False,
                  stock_host_corpse_carry: bool = False, stock_flashlights: bool = False, stock_simmi_jammers: bool = False,
-                 stock_weather_travel: bool = False, stock_melee_family: bool = False, stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False, stock_roaming_barter: bool = False, stock_critters: bool = False,
+                 stock_weather_travel: bool = False, stock_melee_family: bool = False, stock_melee_edges: bool = False,
+                 stock_warehouse_switch: bool = False, stock_warehouse_board: bool = False, stock_bottle: bool = False,
+                 stock_roaming_barter: bool = False, stock_critters: bool = False,
                  stock_eye_stacks: bool = False, stock_lingering_teleport: bool = False,
                  stock_npc_rivalry: bool = False, stock_throwables: str | None = None,
                  memory_status: bool = False, stock_prop_grip: bool = False,
@@ -4000,6 +4019,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
         (stock_board_offers, "observatory", "stock_board_offers", verify_resident_board_offers),
         (stock_host_corpse_carry, "observatory", "stock_host_corpse_carry", verify_stock_host_corpse_carry),
         (stock_flashlights, "observatory", "stock_flashlights", verify_stock_flashlights),
+        (stock_melee_edges, "observatory", "stock_melee_edges", verify_stock_melee_edges_only),
         (stock_melee_family, "observatory", "stock_melee_family", verify_stock_melee_family),
         (stock_throwables, "observatory", "stock_throwables",
          lambda host, guest, pawn: verify_stock_throwables(host, guest, pawn, stock_throwables)),
@@ -4101,7 +4121,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                      fixture="portable_board_offer_probe.lua"))
         if (stock_npc_override and resident_weapon_cues) or stock_melee_family:
             proof["npc_combat_overlays"] = [probes.enter_context(host_npc_combat_overlay(game)) for game in games]
-        elif stock_host_corpse_carry or stock_npc_rivalry or stock_npc_override:
+        elif stock_host_corpse_carry or stock_npc_rivalry or stock_npc_override or stock_melee_edges:
             for game in games:
                 probes.enter_context(installed_probe(game, mod="SilverfishPortableNpcOverrideProbe",
                                                      fixture="portable_npc_override_probe.lua"))
@@ -4528,7 +4548,9 @@ if __name__ == "__main__":
     parser.add_argument("--stock-weather-travel", action="store_true",
                         help="verify stock weather, rain, and sirens after opening Crossroads in one muted portable pair")
     parser.add_argument("--stock-melee-family", action="store_true",
-                        help="verify a guest's Heavy Pipe uses host-owned stock damage")
+                        help="verify guest Heavy Pipe and Old Pipe kills and stock melee input")
+    parser.add_argument("--stock-melee-edges", action="store_true",
+                        help="verify guest Old Pipe tap, charge, and combo without spawning an NPC target")
     parser.add_argument("--guest-world-start", action="store_true",
                         help="verify first stock guest map startup and short reconnect in one portable session")
     parser.add_argument("--nonmirrored-startup", action="store_true",
@@ -4604,7 +4626,7 @@ if __name__ == "__main__":
                               "rusty_pistol", "tutorial_dock_combat", "tutorial_dock_retaliation", "stock_npc_rivalry",
                               "stock_bandage_revisit", "stock_shovel", "stock_shovel_loot", "stock_shovel_quest", "stock_take_ammo",
                               "stock_host_corpse_carry", "stock_flashlights", "stock_simmi_jammers", "stock_weather_travel",
-                              "stock_melee_family", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
+                              "stock_melee_family", "stock_melee_edges", "stock_warehouse_switch", "stock_warehouse_board", "stock_bottle",
                               "stock_roaming_barter", "stock_critters", "stock_throwables", "stock_eye_stacks",
                               "stock_lingering_teleport"}
     if args.rusty_pistol and not args.resident_weapon_cues:
@@ -4620,7 +4642,7 @@ if __name__ == "__main__":
     if any((args.stock_food, args.stock_campfire, args.stock_npc_override, args.stock_board_offers,
             args.stock_npc_rivalry, args.stock_bandage_revisit, args.stock_shovel, args.stock_take_ammo,
             args.stock_host_corpse_carry, args.stock_flashlights, args.stock_simmi_jammers, args.stock_weather_travel,
-            args.stock_melee_family, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
+            args.stock_melee_family, args.stock_melee_edges, args.stock_warehouse_switch, args.stock_warehouse_board, args.stock_bottle,
             args.stock_roaming_barter, args.stock_critters, args.stock_throwables, args.stock_eye_stacks,
             args.stock_lingering_teleport)) and (
             args.second_legacy_work or args.resident_cabinet_archive or any(
@@ -4668,6 +4690,7 @@ if __name__ == "__main__":
                        stock_simmi_jammers=args.stock_simmi_jammers,
                        stock_weather_travel=args.stock_weather_travel,
                        stock_melee_family=args.stock_melee_family,
+                       stock_melee_edges=args.stock_melee_edges,
                        stock_warehouse_switch=args.stock_warehouse_switch,
                        stock_warehouse_board=args.stock_warehouse_board, stock_bottle=args.stock_bottle,
                        stock_roaming_barter=args.stock_roaming_barter, stock_critters=args.stock_critters,

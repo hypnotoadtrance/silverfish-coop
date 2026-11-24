@@ -1163,6 +1163,9 @@ local function run(action, actor_path)
         end
         rivalry = nil
         return "cleared"
+    elseif action == "seed-melee-edges" then
+        assert(host, "only the host can grant the fixture item")
+        return seed_pipe(world, pipe_path)
     elseif action == "seed-pipe" then
         assert(host, "only the host can grant the fixture item")
         assert(actor_path == "" or actor_path == "heavy", "unknown melee fixture item")

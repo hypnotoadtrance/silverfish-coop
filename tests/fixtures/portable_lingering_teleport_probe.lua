@@ -1,4 +1,4 @@
-local lingering_test, lingering_ticket
+local lingering_test, lingering_ticket, lingering_replica_path
 local lingering_mailbox = os.getenv("SILVERFISH_COOP_BRIDGE")
 local lingering_class = "Lingering_Teleport_BP1_C"
 local travel_spawner = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P.CrossRoads_P:PersistentLevel.Artifact_Spawner_BP_C_29"
@@ -21,6 +21,7 @@ local function lingering_fixture(action, point, state, phase)
     end
     if action == "prepare" or action == "guest-spawn-attempt" then
         assert(host == (action == "prepare"), "wrong seat for stock Travel spawning")
+        if not host then lingering_replica_path = nil end
         local before = local_teleporters()
         if host and before > 0 then return "natural" end
         local source = StaticFindObject(travel_spawner)
@@ -51,13 +52,21 @@ local function lingering_fixture(action, point, state, phase)
     local callback = "BndEvt__Wandering_Teleport_BP_Capsule_K2Node_ComponentBoundEvent_1_ComponentBeginOverlapSignature__DelegateSignature"
     if not host then
         assert(local_teleporters() == 0, "An independent Lingering teleporter spawned on the guest")
-        local actor = nearest()
+        local actor
+        if action == "guest-overlap" then
+            actor = lingering_replica_path and StaticFindObject(lingering_replica_path)
+            local entry = in_world(actor, world) and active[actor:GetAddress()]
+            assert(entry and entry.kind == "lingering-teleport" and same(entry.actor, actor) and replica(actor),
+                "The stock teleporter matched during motion is no longer a guest replica")
+        else
+            assert(action == "inspect")
+            actor = nearest()
+            if valid(actor) then lingering_replica_path = actor:GetFullName():match("^%S+ (.+)$") end
+        end
         if not valid(actor) then return "waiting" end
         assert(not actor:GetActorEnableCollision() and not actor:IsActorTickEnabled(), "Lingering replica is active")
         if action == "guest-overlap" then
             actor[callback](actor, actor.Capsule, pawn, pawn.CapsuleComponent, 0, false, {})
-        else
-            assert(action == "inspect")
         end
         return coords(actor:K2_GetActorLocation())
     end

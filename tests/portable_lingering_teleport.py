@@ -78,7 +78,7 @@ async def verify_stock_lingering_teleport(host, guest, pawn, probe):
                 await asyncio.sleep(.24)
         before = await wait_resident_status(guest_run, lambda f: f["game"].get("native_anomaly_field"))
         blocked = before["game"]["native_anomaly_field"]["blocked_triggers"]
-        assert await operate(guest, "guest-overlap", authority) != "waiting"
+        overlap_location = location(await operate(guest, "guest-overlap"))
         await wait_resident_status(guest_run, lambda f: f["game"].get("native_anomaly_field", {})
                                    .get("blocked_triggers", 0) > blocked, timeout=6)
         await near(guest_run, "local", guest_start)
@@ -103,5 +103,6 @@ async def verify_stock_lingering_teleport(host, guest, pawn, probe):
         assert await operate(host, "restore") == "restored"
     assert campaign_save_hashes(host.campaign) == checkpoint, "A stock anomaly interaction caused an early checkpoint"
     return {"stock_lingering_teleport": {"source": source, "spawn": spawned, "host_motion_cm": host_move, "guest_motion_cm": guest_move,
-                                       "guest_overlap_blocked": True, "guest_destination": destination,
+                                       "guest_overlap_blocked": True, "guest_overlap_location": overlap_location,
+                                       "guest_destination": destination,
                                        "arrival_and_departure": [departure[0], arrival[0]], "checkpoint_unchanged": True}}
