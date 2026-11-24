@@ -2,9 +2,10 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from tools.silverfish.native_anomaly_effects import (
+    ACID_POOL_VIEW, AcidPoolPlayback,
     ANGLER_COLORS, ANGLER_MAP, CANISTERS, ELECTRODE_PHASES, FIXED_EXPLOSIVES, OBSERVER_OPACITY, Playback, VORTEX_SENSORS,
     angler_frame, observer_frame, project_angler_colors, project_canisters, project_electrodes,
-    project_fixed_explosives, project_observer_opacity, project_sensors,
+    project_fixed_explosives, project_observer_opacity, project_sensors, valid_acid_pools,
 )
 from tools.silverfish.native_damage_feedback import Playback as HurtPlayback
 from tools.silverfish.native_weather_view import (
@@ -14,6 +15,43 @@ from tools.silverfish.native_weather_view import (
 
 
 class AnomalyPlaybackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_authored_acid_pool_roster_projects_once_per_state_and_visit(self):
+        playback = AcidPoolPlayback()
+        epoch = "9" * 32
+        area = "/Game/Classes/Maps/Maps_Dungeons/Lab_EastWing_P"
+        game = {"state": "connected", "map": area, ACID_POOL_VIEW: {"map": area, "epoch": "-"}}
+        acknowledged = {**game, ACID_POOL_VIEW: {"map": area, "epoch": epoch}}
+        bridge = Mock(command=AsyncMock(return_value=acknowledged))
+        frame = {"map": area, "epoch": epoch, "actors": ["AcidPool_BP_C_1:f", "AcidPool_BP_C_9:a"]}
+        for actors in (["acid:e", "acid:f"], ["z:a", "a:f"], ["acid:x"], [".acid:a"], ["acid:a"] * 65):
+            self.assertFalse(valid_acid_pools(actors))
+            self.assertIs(await playback.project(bridge, game, {**frame, "actors": actors}, epoch), game)
+        self.assertIs(await playback.project(bridge, game, frame, "8" * 32), game)
+        self.assertIs(await playback.project(bridge, game, {**frame, "map": ANGLER_MAP}, epoch), game)
+        bridge.command.assert_not_awaited()
+
+        self.assertIs(await playback.project(bridge, game, frame, epoch), acknowledged)
+        self.assertIs(await playback.project(bridge, acknowledged, frame, epoch), acknowledged)
+        bridge.command.assert_awaited_once_with(
+            "native-acid-pools-apply", area, epoch, *frame["actors"], timeout=1.5)
+        frame["actors"] = []
+        await playback.project(bridge, acknowledged, frame, epoch)
+        bridge.command.assert_awaited_with("native-acid-pools-apply", area, epoch, "-", timeout=1.5)
+
+        # Same map and epoch, but a fresh local world has no applied receipt.
+        await playback.project(bridge, game, frame, epoch)
+        self.assertEqual(bridge.command.await_count, 3)
+
+        frame["actors"] = ["AcidPool_BP_C_9:e"]
+        bridge.command.side_effect = RuntimeError("The stock acid pool transition refused")
+        self.assertIs(await playback.project(bridge, acknowledged, frame, epoch), acknowledged)
+        await playback.project(bridge, acknowledged, frame, epoch)
+        self.assertEqual(bridge.command.await_count, 4)
+        playback.retry = (playback.retry[0], 0)
+        bridge.command.side_effect = None
+        await playback.project(bridge, acknowledged, frame, epoch)
+        self.assertEqual(bridge.command.await_count, 5)
+
     async def test_observer_opacity_waits_for_a_unique_replica_and_updates_its_fade(self):
         epoch = "d" * 32
         host = {"state": "hosting", "map": ANGLER_MAP,

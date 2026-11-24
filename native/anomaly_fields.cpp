@@ -39,6 +39,8 @@ namespace
     constexpr auto mushroom_patch = STR("/Game/Assets/PCG_Brushes/MushroomPatch_BP.MushroomPatch_BP_C");
     constexpr auto trap_overlap = STR("BndEvt__Starburst_BP_Sphere_K2Node_ComponentBoundEvent_0_ComponentBeginOverlapSignature__DelegateSignature");
     constexpr auto electrode_class = STR("/Game/Classes/Anomalies/Electrode_BP.Electrode_BP_C");
+    constexpr auto acid_pool_class = STR("/Game/Classes/Anomalies/AcidPool_BP.AcidPool_BP_C");
+    constexpr auto acid_dot_class = STR("/Game/Classes/Actors/StatusEffect_Actors/DotVolume.DotVolume_C");
     constexpr auto gravity_class = STR("/Game/Classes/Anomalies/GravityAnomaly_BP.GravityAnomaly_BP_C");
     constexpr auto pyrogeist_class = STR("/Game/Classes/Anomalies/Pyrogeist_BP.Pyrogeist_BP_C");
     constexpr auto directed_jet_class = STR("/Game/Classes/Anomalies/Fire_Jet_Directed_BP.Fire_Jet_Directed_BP_C");
@@ -100,8 +102,10 @@ namespace
     U::FName fuel_drum, fuel_drum_graph, prop_broken, receive_tick, drum_fire_name, bottle_name;
     std::array<U::FName, 5> fixed_prop_events;
     U::FName destructible_name;
+    U::FName acid_pool_name, acid_dot_name, acid_fizzle, acid_extinguish, acid_actor_damage, dot_damage, receive_begin;
     std::array<U::FName, 8> destructible_events;
     thread_local bool guest_session{};
+    thread_local U::FWeakObjectPtr projecting_acid_pool;
     thread_local U::FWeakObjectPtr observed_world;
     thread_local std::int64_t skipped{}, blocked_triggers{}, blocked_canister_calls{}, blocked_fixed_prop_calls{};
     thread_local U::FWeakObjectPtr patch_world;
@@ -510,6 +514,92 @@ namespace
         return loading.context && (!driver || driver == pending) && server_connection(pending, loading.connection.Get());
     }
 
+    U::UWorld* authored_acid_pool(U::UObject* actor)
+    {
+        auto* type = actor ? actor->GetClassPrivate() : nullptr;
+        if (!type || type->GetFName() != acid_pool_name || type->GetPathName() != acid_pool_class ||
+            !actor->HasAnyFlags(U::RF_WasLoaded) || actor->IsUnreachable()) return nullptr;
+        auto* world = static_cast<U::AActor*>(actor)->GetWorld();
+        auto* replicates = property<U::FBoolProperty>(actor, STR("bReplicates"));
+        auto* dot = object(actor, STR("DotVolume"));
+        auto* dot_type = dot ? dot->GetClassPrivate() : nullptr;
+        if (!world || actor->GetOuterPrivate() != object(world, STR("PersistentLevel")) ||
+            !replicates || replicates->GetPropertyValueInContainer(actor) || !dot_type ||
+            dot_type->GetFName() != acid_dot_name || dot_type->GetPathName() != acid_dot_class ||
+            dot->GetOuterPrivate() != actor) return nullptr;
+        return world;
+    }
+
+    void suppress_acid_pool(Iteration& call, U::UObject* context, U::UFunction* function, const U::FName& name)
+    {
+        auto* type = context->GetClassPrivate();
+        if (!type || function->GetOuterPrivate() != type || function->GetReturnProperty()) return;
+        if (type->GetFName() == acid_pool_name &&
+            (name == acid_fizzle || name == acid_extinguish || name == acid_actor_damage) &&
+            function->GetNumParms() == (name == acid_fizzle ? 0 : 1) &&
+            projecting_acid_pool.Get() != context && guest_world(authored_acid_pool(context)))
+        {
+            call.PreventOriginalFunctionCall();
+        }
+        else if (type->GetFName() == acid_dot_name && type->GetPathName() == acid_dot_class &&
+                 ((name == receive_begin && function->GetNumParms() == 0) ||
+                  (name == dot_damage && function->GetNumParms() == 2)))
+        {
+            auto* owner = context->GetOuterPrivate();
+            if (!guest_world(authored_acid_pool(owner)) || object(owner, STR("DotVolume")) != context) return;
+            call.PreventOriginalFunctionCall();
+            if (name == receive_begin && call.OriginalFunctionCallPrevented())
+                if (auto* active = property<U::FBoolProperty>(context, STR("DotActive")))
+                    active->SetPropertyValueInContainer(context, false);
+        }
+    }
+
+    int acid_pool_view(const Lua& lua)
+    {
+        const auto count = lua.get_stack_size();
+        if (!U::IsInGameThreadRaw() || (count != 2 && count != 3) ||
+            !lua.is_string(1) || !lua.is_integer(2) || (count == 3 && !lua.is_string(3))) return 0;
+        // LuaMadeSimple removes each value as it is read.
+        const auto path = RC::to_generic_string(lua.get_string());
+        const auto address = static_cast<std::uintptr_t>(lua.get_integer());
+        auto* actor = path.size() <= 512 && path.starts_with(STR("/Game/Classes/Maps/")) ?
+            U::UObjectGlobals::StaticFindObject<U::UObject*>(nullptr, nullptr, path.c_str()) : nullptr;
+        auto* world = authored_acid_pool(actor);
+        const bool accepted = world && reinterpret_cast<std::uintptr_t>(world) == address;
+        const bool guest = accepted && guest_world(world);
+        if (count == 2)
+        {
+            lua.set_bool(accepted);
+            lua.set_bool(guest);
+            return 2;
+        }
+        const auto phase = lua.get_string();
+        if (!guest || (phase != "f" && phase != "e"))
+        {
+            lua.set_bool(false);
+            return 1;
+        }
+        auto* type = actor->GetClassPrivate();
+        auto* function = actor->GetFunctionByNameInChain(phase == "f" ? acid_fizzle : acid_extinguish);
+        auto* chance = phase == "e" ? property<U::FDoubleProperty>(function, STR("ExtinguishChance")) : nullptr;
+        if (!function || function->GetOuterPrivate() != type || function->GetReturnProperty() ||
+            function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net) ||
+            (phase == "f" ? function->GetNumParms() != 0 || function->GetParmsSize() != 0 :
+             !chance || function->GetNumParms() != 1 || function->GetParmsSize() != sizeof(double) ||
+             chance->GetOffset_Internal() != 0 || !chance->HasAnyPropertyFlags(U::CPF_Parm) ||
+             chance->HasAnyPropertyFlags(U::CPF_OutParm | U::CPF_ReturnParm)))
+        {
+            lua.set_bool(false);
+            return 1;
+        }
+        double parameters = 1.0;
+        projecting_acid_pool = actor;
+        actor->ProcessEvent(function, phase == "f" ? nullptr : &parameters);
+        projecting_acid_pool.Reset();
+        lua.set_bool(true);
+        return 1;
+    }
+
     struct TravelSpawn
     {
         const Iteration* call{};
@@ -702,6 +792,13 @@ namespace
     {
         if (!guest_session || !actor || !function) return;
         const auto name = function->GetFName();
+        if ((name == acid_fizzle || name == acid_extinguish || name == acid_actor_damage ||
+             name == receive_begin || name == dot_damage) && U::IsInGameThreadRaw() &&
+            !call.OriginalFunctionCallPrevented() && !function->HasAnyFunctionFlags(U::FUNC_Native | U::FUNC_Net))
+        {
+            suppress_acid_pool(call, actor, function, name);
+            if (call.OriginalFunctionCallPrevented()) return;
+        }
         if (name == update_storm_track)
         {
             auto* day = actor->GetClassPrivate();
@@ -976,6 +1073,13 @@ namespace silverfish::native_anomaly_fields
         bottle_name = U::FName{STR("Prop_Bottle_Booze01_C"), U::FNAME_Add};
         drum_fire_name = U::FName{STR("Fire_Molotov_C"), U::FNAME_Add};
         receive_tick = U::FName{STR("ReceiveTick"), U::FNAME_Add};
+        receive_begin = U::FName{STR("ReceiveBeginPlay"), U::FNAME_Add};
+        acid_pool_name = U::FName{STR("AcidPool_BP_C"), U::FNAME_Add};
+        acid_dot_name = U::FName{STR("DotVolume_C"), U::FNAME_Add};
+        acid_fizzle = U::FName{STR("FizzleOut"), U::FNAME_Add};
+        acid_extinguish = U::FName{STR("Extinguish"), U::FNAME_Add};
+        acid_actor_damage = U::FName{STR("FireDmg_Actor"), U::FNAME_Add};
+        dot_damage = U::FName{STR("DamageActor"), U::FNAME_Add};
         canister_names = {
             U::FName{STR("Prop_PropaneTank_Small_C"), U::FNAME_Add},
             U::FName{STR("Prop_PropaneTank_Tall_C"), U::FNAME_Add},
@@ -1161,6 +1265,7 @@ namespace silverfish::native_anomaly_fields
         });
         lua.register_function("SilverfishQualifyNativePlacedTrap",
             [](const Lua& current) { return qualify_placed(current, trap_class); });
+        lua.register_function("SilverfishNativeAuthoredAcidPool", acid_pool_view);
         lua.register_function("SilverfishQualifyNativePlacedCanister",
             [](const Lua& current) { return qualify_placed(current, canister_class); });
         lua.register_function("SilverfishQualifyNativePlacedFixedExplosive",

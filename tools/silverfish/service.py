@@ -2035,6 +2035,10 @@ class Host:
                     "map": self.last_game["map"], "epoch": self.zone_epoch,
                     "actors": self.last_game[native_destructibles.KEY],
                 }
+            if (acid_pools := self.last_game.get(native_anomaly_effects.ACID_POOLS)) is not None:
+                gameplay[native_anomaly_effects.ACID_POOLS] = {
+                    "map": self.last_game["map"], "epoch": self.zone_epoch, "actors": acid_pools,
+                }
             equipped = self.last_game.get("native_guest_equipped_weapons", {}).get(pawn, {})
             kind = equipped.get("kind")
             if native_gold.valid_guid(equipped.get("guid")) and kind in native_guest_weapon.FIRE_CLASSES:
@@ -5138,6 +5142,7 @@ class Client:
         self.weather_lightning = native_weather_view.LightningPlayback()
         self.storm_ambience = native_storm_ambience.Projection()
         self.anomaly_playback = native_anomaly_effects.Playback()
+        self.acid_pool_playback = native_anomaly_effects.AcidPoolPlayback()
         self.destructible_playback = native_destructibles.Playback()
         self.weapon_shot_playback = native_weapon_fire_view.Playback()
         self.loot_motion_playback = native_stock_enemy_drops.MotionPlayback()
@@ -6075,6 +6080,8 @@ class Client:
                         self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.FIXED_EXPLOSIVES), self.zone_epoch)
                     self.last_game = await self.destructible_playback.project(
                         self.bridge, self.last_game, self.gameplay.get(native_destructibles.KEY), self.zone_epoch)
+                    self.last_game = await self.acid_pool_playback.project(
+                        self.bridge, self.last_game, self.gameplay.get(native_anomaly_effects.ACID_POOLS), self.zone_epoch)
                     self.last_game = await self.pickup_playback.sync(
                         self.bridge, self.control, self.last_game, self.gameplay.get(native_pickup_audio.KEY),
                         self.zone_epoch, self.host_session)
