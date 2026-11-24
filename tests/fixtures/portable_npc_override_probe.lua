@@ -1719,7 +1719,7 @@ local function run(action, actor_path)
         local key = require("native_npc_barter_identity").key(actor)
         return actor:GetFName():ToString() .. ";" .. (key and tostring(tonumber(key:sub(-4), 16)) or "-")
     elseif action == "dock-garage-dynamic-death" then
-        assert(actor_path:match("^NPC_%w+_%d+$") or actor_path:match("^Turret_%w+_%d+$"))
+        assert(actor_path:match("^NPC_[%w_]+_%d+$") or actor_path:match("^Turret_[%w_]+_%d+$"))
         local actor = StaticFindObject(dock .. ":PersistentLevel." .. actor_path)
         if not valid(actor) or actor:IsActorBeingDestroyed() then return "removed" end
         return actor.Alive and "alive" or "dead"
@@ -1732,7 +1732,9 @@ local function run(action, actor_path)
         assert(host and garage_plank)
         return ("%d;%s"):format(garage_plank.hits, garage_plank.impact or "-")
     elseif action == "dock-garage-health" then
-        assert(host and garage_view and valid(garage_view.worker))
+        assert(host and garage_view)
+        if garage_view.dynamic and not valid(garage_view.worker) then return "0" end
+        assert(valid(garage_view.worker))
         return ("%.6f"):format(garage_view.worker.Health)
     elseif action == "dock-garage-shot-witness" then
         return garage_view and garage_view.last_shot or "none"
