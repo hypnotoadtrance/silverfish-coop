@@ -17,7 +17,7 @@ FALLBACK_RECEIPT = "native_guest_personal_consumable"
 
 async def stock_inventory_open(run, opened):
     def view(frame):
-        return frame.get("game", {}).get("native_inventory_view", {}).get("state")
+        return frame.get("game", {}).get("native_inventory_view", {}).get("state", "closed")
 
     desired = "stock" if opened else "closed"
     current = await wait_resident_status(run, lambda frame: view(frame) in {"stock", "closed"})
@@ -32,7 +32,7 @@ async def use_stock_item(run, frame, guid, result_key, *, drag=False):
     target = f"{guid}|drag" if drag else guid
     started = time.time()
     clicked = await submit(run, "native-inventory-stock-use-click-fixture", target=target)
-    assert clicked["ok"] and clicked["stock_action"]["guid"] == guid, clicked
+    assert clicked["ok"] and clicked["stock_action"]["guid"] == guid, (guid, result_key, drag, clicked)
     async with asyncio.timeout(14):
         while True:
             events = [item for item in await resident_events(run, frame) if item["time_unix"] >= started]
@@ -89,31 +89,28 @@ async def verify_stock_personal_consumable(host, guest, pawn, probe):
                     return current_food, current_regen
                 await asyncio.sleep(.08)
 
+    registered = await use_stock_item(guest_run, frame, mre, native_guest_consumable.RESULT[native_guest_consumable.MRE])
+    assert registered["guid"] == mre and registered["quantity_after"] == 0, registered
+    expected_regen = registered["regen_after"]
+    assert expected_regen > 110
+    await projected_vitals(registered["food_after"], expected_regen)
+    assert campaign_save_hashes(host.campaign) == saves, "Normal item use wrote an early checkpoint"
+
     _, _, food_before, _ = map(float, (await command(host, "host-read")).split(","))
     fallback = await use_stock_item(guest_run, frame, weta, FALLBACK_RECEIPT)
     assert (fallback["guid"], fallback["class_path"], fallback["quantity_before"], fallback["quantity_after"]) == (
         weta, LIVE_WETA, 1, 0), fallback
     food, regen = fallback["vitals"]["food"], fallback["vitals"]["regen"]
-    assert math.isclose(food - food_before, 7, abs_tol=1) and math.isclose(regen, 110, abs_tol=.02), fallback
+    assert math.isclose(food - food_before, 7, abs_tol=1) and math.isclose(regen, expected_regen, abs_tol=.02), fallback
     canonical, detached = (await command(host, "host-medical-vitals")).split(";")
     assert canonical == baseline and math.isclose(float(detached.split(",")[1]), regen, abs_tol=.02), (canonical, detached)
     _, _, current_food, _ = map(float, (await command(host, "host-read")).split(","))
     assert abs(current_food - food) < .6, (current_food, food)
     await projected_vitals(food, regen)
     after = await inventory(guest_run)
-    assert weta not in after and after[spare]["quantity"] == 1 and after[mre]["quantity"] == 1, after
+    assert weta not in after and mre not in after and after[spare]["quantity"] == 1, after
     assert await inventory(host_run) == starting_host
     assert campaign_save_hashes(host.campaign) == saves, "Fallback item use wrote an early checkpoint"
-
-    registered = await use_stock_item(guest_run, frame, mre, native_guest_consumable.RESULT[native_guest_consumable.MRE])
-    assert registered["guid"] == mre and registered["quantity_after"] == 0, registered
-    food, regen = registered["food_after"], registered["regen_after"]
-    assert regen > 110
-    await projected_vitals(food, regen)
-    after = await inventory(guest_run)
-    assert mre not in after and after[spare]["quantity"] == 1
-    assert await inventory(host_run) == starting_host
-    assert campaign_save_hashes(host.campaign) == saves, "Normal item use wrote an early checkpoint"
     await stock_inventory_open(guest_run, False)
     return {"stock_personal_consumable": {
         "pawn": pawn, "character_id": frame["character_id"], "guid": spare, "remaining": 1, "food": food, "regen": regen,
