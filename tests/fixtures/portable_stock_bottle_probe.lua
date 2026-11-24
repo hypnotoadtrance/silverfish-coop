@@ -15,12 +15,18 @@
             if mode == "spawn-prop" and phase == "hosting" then
                 local class = StaticFindObject(base)
                 if not valid(class) then LoadAsset(base); class = StaticFindObject(base) end
-                assert(valid(class))
+                assert(valid(class), "could not load the stock " .. stem .. " class")
                 local point = {X=location.X+105, Y=location.Y+60, Z=location.Z+90}
                 local candidate = state.world:SpawnActor(class, point, {Pitch=0,Yaw=0,Roll=0})
-                assert(current(candidate) and candidate:HasAuthority() and candidate.bReplicates and candidate.DestroyIfBroken)
+                assert(current(candidate), "could not spawn " .. stem .. " in the warehouse")
+                assert(candidate:HasAuthority() and candidate.DestroyIfBroken and valid(candidate.PropMesh),
+                    "stock " .. stem .. " has no authoritative breakable mesh")
+                -- Authored and crate props are enrolled by the corresponding gameplay path.
+                candidate:SetReplicates(true)
+                candidate:SetReplicateMovement(true)
                 candidate.PropMesh:SetSimulatePhysics(false)
                 candidate:ForceNetUpdate()
+                point = candidate:K2_GetActorLocation()
                 return ("%s;%.3f,%.3f,%.3f"):format(candidate:GetFullName():match("^%S+ (.+)$"), point.X, point.Y, point.Z)
             end
             assert(phase == "connected")

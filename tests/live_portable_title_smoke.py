@@ -1847,10 +1847,8 @@ async def verify_stock_bottle(host: Seat, guest: Seat, pawn: str) -> dict:
 async def verify_stock_prop_breaks(host: Seat, guest: Seat, _pawn: str) -> dict:
     checkpoint = campaign_save_hashes(host.campaign)
     frame = await wait_resident_status(guest.client / "run", lambda row: row.get("game", {}).get("map") == WAREHOUSE_DOCK)
-    results = {}
-    for kind, stock_class in (("bottle", "Prop_Bottle_Oil"), ("ceramic", "Prop_CoffeeMug"),
-                              ("platestand", "Prop_PlateStand"), ("glass", "Prop_ShotGlass"),
-                              ("paper", "Prop_OpenBook"), ("cardboard", "Prop_CardboardBox_01")):
+
+    async def check(kind, stock_class):
         path, position = (await warehouse_prop_probe(host, "spawn-prop", stock_class)).split(";")
         async with asyncio.timeout(8):
             while (replica := await warehouse_prop_probe(guest, "locate-prop", stock_class, position)) == "waiting":
@@ -1859,9 +1857,19 @@ async def verify_stock_prop_breaks(host: Seat, guest: Seat, _pawn: str) -> dict:
         assert await warehouse_prop_probe(guest, "inspect", replica) == "1,false", (kind, replica)
         started = time.time()
         point = list(map(float, (await warehouse_prop_probe(host, "impact", path)).split(",")))
-        results[kind] = {"class": stock_class, "cue": await wait_stock_prop_break(
+        return {"class": stock_class, "cue": await wait_stock_prop_break(
             host, guest, frame, path, started, point, guest_path=replica, kind=kind,
         )}
+
+    results, failures = {}, {}
+    for kind, stock_class in (("bottle", "Prop_Bottle_Oil"), ("ceramic", "Prop_CoffeeMug"),
+                              ("platestand", "Prop_PlateStand"), ("glass", "Prop_ShotGlass"),
+                              ("paper", "Prop_OpenBook"), ("cardboard", "Prop_CardboardBox_01")):
+        try:
+            results[kind] = await check(kind, stock_class)
+        except (AssertionError, RuntimeError, TimeoutError) as error:
+            failures[kind] = f"{type(error).__name__}: {error}"
+    assert not failures, (list(results), failures)
     assert campaign_save_hashes(host.campaign) == checkpoint
     return {"stock_prop_breaks": results}
 
