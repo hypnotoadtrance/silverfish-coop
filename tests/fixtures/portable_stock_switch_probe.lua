@@ -8,15 +8,13 @@
         if radio then class, number = "Prop_Radio01_C", 3 end
         local name = class .. " " .. dock .. ".Tut_Dock_P:PersistentLevel." .. class .. "_" .. number
         assert(state.map == dock)
-        local entry = assert(census(state, phase)[name], "the stock warehouse device is missing")
+        local entry = assert(find_switch(state, phase, name), "the stock warehouse device is missing")
         local mode = fields[3]
         if radio and mode == "playback" then
-            for _, player in ipairs(FindAllOf("MediaPlayer") or {}) do
-                if valid(player) and same(player:GetOuter(), entry.actor) then
-                    return player:IsPlaying() and "playing" or "silent"
-                end
-            end
-            return "no media player"
+            assert(type(SilverfishProbeNativeRadioPlayback) == "function", "the native media probe is missing")
+            local playing = SilverfishProbeNativeRadioPlayback(name:match("^%S+ (.+)$"))
+            if type(playing) ~= "boolean" then return "no media player" end
+            return playing and "playing" or "silent"
         elseif mode == "host" and phase == "hosting" then
             entry.actor:SendInteractionToActor(state.local_pawn.pawn, entry.box)
             return "host pressed"

@@ -89,8 +89,13 @@ local function census(state, phase)
                 if type(actor.type) == "function" and actor:type() == "RemoteUnrealParam" then actor = actor:get() end
                 local entry = parts(actor, world)
                 if entry and (phase ~= "hosting" or actor:HasAuthority()) then
-                    if not entry.radio then entry.lights = light_links(actor, world) end
-                    entries[actor:GetFullName()] = entry
+                    local name = actor:GetFullName()
+                    if entry.radio then
+                        entries[name] = {radio = true, path = name:match("^%S+ (.+)$")}
+                    else
+                        entry.lights = light_links(actor, world)
+                        entries[name] = entry
+                    end
                 end
             end
         end
@@ -98,13 +103,23 @@ local function census(state, phase)
     return entries
 end
 
+local function find_switch(state, phase, name)
+    local entry = census(state, phase)[name]
+    if not entry or not entry.radio then return entry end
+    local actor = StaticFindObject(entry.path)
+    local resolved = parts(actor, state.world)
+    if resolved and resolved.radio then return resolved end
+end
+
 function switches.rows(state, phase, row)
     local rows = {}
     for name, entry in pairs(census(state, phase)) do
-        local actor = entry.actor
-        if entry.radio and valid(actor) and not actor:IsActorBeingDestroyed() and type(actor.Powered) == "boolean" then
-            rows[#rows + 1] = row("native-stock-switch", state.map, name, bit(actor.Powered), 0, 0, 0, "-", "-")
-        elseif valid(actor) and not actor:IsActorBeingDestroyed() and valid(entry.lever) then
+        if entry.radio then
+            local actor = StaticFindObject(entry.path)
+            if qualified(actor, state.world) and type(actor.Powered) == "boolean" then
+                rows[#rows + 1] = row("native-stock-switch", state.map, name, bit(actor.Powered), 0, 0, 0, "-", "-")
+            end
+        elseif valid(entry.actor) and not entry.actor:IsActorBeingDestroyed() and valid(entry.lever) then
             local angles = entry.lever.RelativeRotation
             local panel = entry.panel:GetMaterial(0)
             local lights = {}
@@ -156,7 +171,7 @@ end
 function switches.command(fields, state, phase)
     local action = fields[2]
     if action ~= "native-stock-switch-project" and action ~= "native-stock-switch-interact" then return end
-    local entry = census(state, phase)[fields[3]]
+    local entry = find_switch(state, phase, fields[3])
     if not entry or not valid(entry.actor) or entry.actor:IsActorBeingDestroyed() then
         error("stock_switch_unavailable", 0)
     end

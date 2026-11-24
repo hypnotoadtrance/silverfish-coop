@@ -69,6 +69,7 @@ namespace
     constexpr auto lantern_interaction = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:SendInteractionToActor");
     constexpr auto lantern_ignite = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:SetOnFire");
     constexpr auto lantern_extinguish = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Candle_01.Prop_Candle_01_C:Extinguish");
+    constexpr auto radio_class = STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Radio01.Prop_Radio01_C");
 
     constexpr auto sewer_screen_class = STR("/Game/Classes/GUI/Menu_Trade_Widget.Menu_Trade_Widget_C");
     constexpr auto sewer_card_class = STR("/Game/Classes/GUI/SubWidgets/TradeOffer_Widget.TradeOffer_Widget_C");
@@ -982,7 +983,7 @@ namespace
         if (path != STR("/Game/Classes/ScriptingActors/CircutBox_BP.CircutBox_BP_C") &&
             path != STR("/Game/Classes/ScriptingActors/LightSwitch_BP.LightSwitch_BP_C") &&
             path != STR("/Game/Classes/ScriptingActors/LightSwitch_02_BP.LightSwitch_02_BP_C") &&
-            path != STR("/Game/Assets/StaticMeshes/Mesh_Props/Prop_Radio01.Prop_Radio01_C")) return;
+            path != radio_class) return;
         if (!live_actor(actor, world, 3) && !live_actor(actor, world, 1)) return;
         if (klass->GetFunctionByNameInChain(interaction) != function || function->GetNumParms() != 2 ||
             function->GetParmsSize() != 2 * sizeof(void*) || function->GetReturnProperty() ||
@@ -1724,6 +1725,34 @@ namespace
         }
     };
 
+    int probe_radio_playback(const Lua& lua)
+    {
+        if (!available() || !env_flag("SILVERFISH_COOP_HEADLESS") || !env_flag("SILVERFISH_COOP_TITLE_FIXTURES") ||
+            lua.get_stack_size() != 1 || !lua.is_string(1) || Clock::now() >= scope.expires || !live_scope(scope)) return 0;
+        const auto path = lua.get_string();
+        if (path.size() > 512 || !path.starts_with("/Game/Classes/Maps/") ||
+            path.find(":PersistentLevel.") == std::string_view::npos) return 0;
+
+        auto* world = scope.world.Get();
+        auto* actor = find<Unreal::UObject>(RC::to_wstring(path).c_str());
+        if (!live(actor) || actor->GetClassPrivate() != find<Unreal::UClass>(radio_class) ||
+            actor->GetOuterPrivate() != object_field(world, STR("PersistentLevel")) ||
+            (!live_actor(actor, world, 3) && (scope.host || !live_actor(actor, world, 1)))) return 0;
+
+        auto* media_class = find<Unreal::UClass>(STR("/Script/MediaAssets.MediaPlayer"));
+        auto* media = object_field(actor, STR("MediaPlayer"));
+        auto* query = find<Unreal::UFunction>(STR("/Script/MediaAssets.MediaPlayer:IsPlaying"));
+        auto* playing = query ? Unreal::CastField<Unreal::FBoolProperty>(query->GetReturnProperty()) : nullptr;
+        if (!live(media) || media->GetOuterPrivate() != actor || media->GetClassPrivate() != media_class ||
+            !playing || query->GetOuterPrivate() != media_class || query->GetNumParms() != 1 ||
+            query->GetParmsSize() != sizeof(bool) || playing->GetOffset_Internal() != 0) return 0;
+
+        bool result{};
+        media->ProcessEvent(query, &result);
+        lua.set_bool(playing->GetPropertyValueInContainer(&result));
+        return 1;
+    }
+
     int probe(const Lua& lua)
     {
         const auto argument_count = lua.get_stack_size();
@@ -1881,6 +1910,8 @@ namespace silverfish::native_interaction_input
         lua.register_function("SilverfishDispatchNativeSubwayValve", dispatch_valve);
         mosby_station_input::register_lua(lua);
         mindcore_input::register_lua(lua);
+        if (env_flag("SILVERFISH_COOP_HEADLESS") && env_flag("SILVERFISH_COOP_TITLE_FIXTURES"))
+            lua.register_function("SilverfishProbeNativeRadioPlayback", probe_radio_playback);
         if (fixture_enabled()) lua.register_function("SilverfishProbeNativeInteractInput", probe);
     }
 
