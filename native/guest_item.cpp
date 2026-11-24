@@ -1870,13 +1870,35 @@ namespace
         // its ammo selector through its parent, which can lag the guest's inventory view.
         auto* actor_payload = field<Unreal::FStructProperty>(held, STR("DataStruct"));
         auto* row_payload = field<Unreal::FStructProperty>(inventory.type->GetStruct().Get(), payload_name);
-        const auto held_data = weapon_data(actor_payload, held);
-        const auto saved_data = weapon_data(row_payload, inventory.item);
-        auto* saved_handle = field<Unreal::FStructProperty>(held_data.type, loki_ammo_name);
+        auto* instanced = find<Unreal::UScriptStruct>(STR("/Script/StructUtils.InstancedStruct"));
+        auto* defaults = context.weapon->GetClassDefaultObject().Get();
+        const auto stock_data = weapon_data(actor_payload, defaults);
+        auto* saved_handle = field<Unreal::FStructProperty>(stock_data.type, loki_ammo_name);
         auto* default_ammo = ammo->GetClassDefaultObject().Get();
         auto* stock_handle = field<Unreal::FStructProperty>(default_ammo, STR("AmmoType"));
-        if (!saved_handle || held_data.type != saved_data.type || !stock_handle ||
-            saved_handle->GetStruct().Get() != stock_handle->GetStruct().Get()) return result(lua, false, refusal);
+        if (!saved_handle || !stock_handle || !row_payload || !instanced || row_payload->GetStruct().Get() != instanced ||
+            row_payload->GetSize() != sizeof(WeaponDataView) ||
+            saved_handle->GetStruct().Get() != stock_handle->GetStruct().Get())
+            return result(lua, false, "guest_underbarrel_round_payload_unavailable");
+        auto held_data = weapon_data(actor_payload, held);
+        auto saved_data = weapon_data(row_payload, inventory.item);
+        // The guest's generic inventory can construct a stock row without a typed payload.
+        // Reuse the held payload when available, and use the exact receiver default for a fresh mirror.
+        if (!held_data.data)
+        {
+            const auto* source = saved_data.data ? row_payload->ContainerPtrToValuePtr<void>(inventory.item)
+                                                : actor_payload->ContainerPtrToValuePtr<void>(defaults);
+            actor_payload->CopyCompleteValue(actor_payload->ContainerPtrToValuePtr<void>(held), source);
+            held_data = weapon_data(actor_payload, held);
+        }
+        if (!saved_data.data && held_data.data)
+        {
+            row_payload->CopyCompleteValue(row_payload->ContainerPtrToValuePtr<void>(inventory.item),
+                                           actor_payload->ContainerPtrToValuePtr<void>(held));
+            saved_data = weapon_data(row_payload, inventory.item);
+        }
+        if (held_data.type != stock_data.type || saved_data.type != stock_data.type)
+            return result(lua, false, "guest_underbarrel_round_payload_unavailable");
         const auto* handle = stock_handle->ContainerPtrToValuePtr<void>(default_ammo);
         saved_handle->CopyCompleteValue(saved_handle->ContainerPtrToValuePtr<void>(held_data.data), handle);
         if (saved_data.data != held_data.data)
