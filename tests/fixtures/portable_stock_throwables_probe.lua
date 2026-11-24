@@ -169,10 +169,26 @@ local function run(action, kind, arg)
         local p = landed:K2_GetActorLocation()
         return ("%.3f,%.3f,%.3f,%s"):format(p.X, p.Y, p.Z, landed:GetFullName())
     end
-    if action == "nearby" then
+    if action == "nearby" or action == "nearlanding" then
         local x, y, z = arg:match("^([%d%.%-]+),([%d%.%-]+),([%d%.%-]+)$")
         x, y, z = tonumber(x), tonumber(y), tonumber(z)
         assert(x and y and z)
+        if action == "nearlanding" then
+            assert(pawn:HasAuthority())
+            local trace = asset("/Script/Engine.Default__KismetSystemLibrary")
+            local color = {R = 0, G = 0, B = 0, A = 1}
+            for degrees = 0, 315, 45 do
+                local ax, ay = x + 250 * math.cos(math.rad(degrees)), y + 250 * math.sin(math.rad(degrees))
+                local ground = {}
+                if trace:LineTraceSingle(pawn, {X = ax, Y = ay, Z = z + 250}, {X = ax, Y = ay, Z = z - 200},
+                    0, false, {pawn}, 0, ground, true, color, color, 0) then
+                    local floor = (ground.OutHit or ground).ImpactPoint
+                    local target = {X = ax, Y = ay, Z = floor.Z + pawn.CapsuleComponent:GetScaledCapsuleHalfHeight() + 3}
+                    if pawn:K2_TeleportTo(target, {Pitch = 0, Yaw = degrees + 180, Roll = 0}) then return "near" end
+                end
+            end
+            error("could not place the host near the banked bolt")
+        end
         local result = {}
         asset("/Script/Engine.Default__GameplayStatics"):GetAllActorsOfClass(world, class, result)
         for _, item in ipairs(result.OutActors or result) do

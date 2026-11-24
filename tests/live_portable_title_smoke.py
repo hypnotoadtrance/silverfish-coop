@@ -1340,6 +1340,7 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     checkpoint = campaign_save_hashes(host.campaign)
     guest_frame = await wait_resident_status(guest_run, lambda frame: frame.get("local_bridge") == "memory")
+    host_frame = await wait_resident_status(host_run, lambda frame: frame.get("local_bridge") == "memory")
 
     async def probe(seat, action, kind, arg=""):
         return await portable_probe_command(seat.bridge, "portable-stock-throwables", "\t".join((action, kind, arg)))
@@ -1363,7 +1364,7 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
 
     verified = {}
     for owner, kind in ((host, "pipebomb"), (host, "bolt"), (guest, "bolt")):
-        if case not in ("all", kind):
+        if case not in ("all", kind) and (case != "ground" or kind != "bolt"):
             continue
         side = "host" if owner is host else "guest"
         await asyncio.gather(*(probe(seat, "reset", kind) for seat in (host, guest)))
@@ -1401,6 +1402,44 @@ async def verify_stock_throwables(host: Seat, guest: Seat, pawn: str, case: str)
                 derived = await probe(guest, "nearby", kind, ",".join((x, y, z)))
                 await asyncio.sleep(.08)
             record["ground_probe"] = {"location": list(map(float, (x, y, z))), "host": name, "guest": derived}
+            if case == "ground":
+                async with asyncio.timeout(10):
+                    while True:
+                        banked = [row for row in await resident_events(host_run, host_frame)
+                                  if row["event"] == "native_stock_enemy_loot_banked" and row["actor"] == name]
+                        if banked:
+                            bank, = banked
+                            break
+                        await asyncio.sleep(.08)
+                assert bank["ammo"] == 1 and bank["revision"] is None, bank
+                identity = native_world_loot.stock_enemy_identity(bank["guid"], bank.get("visual_id"))
+                point = bank["transform"]["position"]
+                close = await probe(host, "nearlanding", kind, ",".join(f"{axis:.3f}" for axis in point))
+                assert close == "near", close
+                await wait_resident_status(host_run, lambda frame: identity in frame.get("game", {}).get(
+                    native_world_loot.KEY, {}), timeout=8)
+                picker, picker_run = (guest, guest_run) if owner is host else (host, host_run)
+                picker_name = pawn if picker is guest else host_frame["game"]["pawns"]["local"]["name"]
+                async def count_bolts():
+                    report = await submit(picker_run, "native-inventory-list")
+                    return sum(item["quantity"] for item in report["native_inventory"]["items"]
+                               if item["class_path"] == bank["class_path"])
+                before = await count_bolts()
+                if picker is host:
+                    await host.bridge.command(native_world_loot.APPROACH, identity, pawn, timeout=5)
+                approached = await host.bridge.command(native_world_loot.APPROACH, identity, picker_name, timeout=5)
+                assert approached["ack"]["message"] == "stock loot height and line of sight verified", approached["ack"]
+                await wait_resident_status(guest_run, lambda frame: identity in frame.get("game", {}).get(
+                    native_world_loot.KEY, {}), timeout=8)
+                await wait_resident_status(picker_run, lambda frame: math.dist(frame.get("game", {}).get("pawns", {})
+                                           .get("local", {}).get("location", [0, 0, 0]), point) < 225, timeout=8)
+                picked = await picker.bridge.command(native_world_loot.FIXTURE, identity, timeout=5)
+                assert picked["ack"]["message"] == "stock world loot interaction intercepted", picked["ack"]
+                for run in (host_run, guest_run):
+                    await wait_resident_status(run, lambda frame: identity not in frame.get("game", {}).get(
+                        native_world_loot.KEY, {}), timeout=8)
+                assert await count_bolts() == before + 1
+                record["ground_pickup"] = {"id": identity, "class": bank["class_path"], "quantity": 1}
         if owner is guest:
             confirmation = await wait_resident_status(host_run, lambda frame: (
                 frame.get("game", {}).get("native_guest_flare_throw", {}).get("guid") == guid))
@@ -4126,7 +4165,7 @@ if __name__ == "__main__":
                         help="verify both peers see the Tutorial Dock warehouse board break")
     parser.add_argument("--stock-bottle", action="store_true",
                         help="verify a stock Tutorial Dock bottle breaks once on both peers")
-    parser.add_argument("--stock-throwables", choices=("all", "pipebomb", "bolt"), nargs="?", const="all",
+    parser.add_argument("--stock-throwables", choices=("all", "pipebomb", "bolt", "ground"), nargs="?", const="all",
                         help="verify host and guest bolt flight, a stock host pipe bomb detonation, or both")
     parser.add_argument("--stock-roaming-barter", action="store_true",
                         help="compare the stock identity of a replicated dynamically spawned NPC trader")
