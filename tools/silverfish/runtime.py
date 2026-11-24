@@ -59,7 +59,7 @@ from .native_guest_npc import parse_bandit
 from .enemy_loot_profiles import BY_ACTOR as ENEMY_LOOT_ACTORS
 from .native_host_save import SLOT
 from . import native_smg_hold
-from .native_guest_weapon import PRIMARY_KINDS
+from .native_guest_weapon import FIRE_CLASSES, PRIMARY_KINDS, valid_shot_direction
 from .native_guest_armor import parse as parse_guest_armor
 from .native_guest_armor import DISGUISE_PROBE, parse_recognition
 from . import native_guest_melee
@@ -912,7 +912,7 @@ class Bridge:
             if fields[5] in native_loot.PRY_TOOL_ACTIONS:
                 if not target or not (lockable_container(target, fields[2]) or native_stock_door.actor_map(target) == fields[2]):
                     continue
-            elif target is not None:
+            elif target is not None and (fields[5] not in FIRE_CLASSES or not valid_shot_direction(target)):
                 continue
             events.append((sequence, *fields[2:]))
         return events

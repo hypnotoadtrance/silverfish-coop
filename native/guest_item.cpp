@@ -41,6 +41,7 @@ namespace
     namespace Unreal = RC::Unreal;
     using Lua = RC::LuaMadeSimple::Lua;
     using Guid = std::array<std::uint32_t, 4>;
+    using AimVector = std::array<double, 3>;
     namespace profiles = silverfish::guest_weapon_profiles;
     namespace Hook = Unreal::Hook;
 
@@ -335,20 +336,32 @@ namespace
 
     std::string_view resolve(const Lua& lua, Context& context, SeedSelection* seed_selection,
                              std::int64_t* hold_duration = nullptr, StackSplit* split = nullptr, bool full_split = false,
-                             int* requested_slot = nullptr)
+                             int* requested_slot = nullptr, std::optional<AimVector>* shot_direction = nullptr)
     {
         if (!env("SILVERFISH_COOP_NATIVE_GUEST_SAVE")) return "native_guest_weapon_scope_disabled";
         const auto count = lua.get_stack_size();
         const bool split_fields = split && count == 6 && lua.is_string(4) && lua.is_integer(5) && lua.is_integer(6);
+        const bool direction_fields = shot_direction && count == 6 && lua.is_number(4) && lua.is_number(5) && lua.is_number(6);
         const bool legacy_fields = count == 3 || (count == 4 && ((seed_selection && lua.is_string(4)) ||
             ((hold_duration || requested_slot) && lua.is_integer(4))));
-        if (!Unreal::IsInGameThreadRaw() || (split ? !split_fields : !legacy_fields) || (hold_duration && count != 4) ||
+        if (!Unreal::IsInGameThreadRaw() || (split ? !split_fields : !legacy_fields && !direction_fields) ||
+            (hold_duration && count != 4) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_string(3)) return "guest_pawn_save_and_guid_required";
         const auto pawn_address = lua.get_integer();
         const auto save_address = lua.get_integer();
         if (pawn_address <= 0 || save_address <= 0 || !parse_guid(lua.get_string(), context.guid))
             return "guest_pawn_save_and_guid_required";
-        if (split)
+        if (direction_fields)
+        {
+            AimVector direction{};
+            for (auto& axis : direction) axis = lua.get_number();
+            const auto length = std::hypot(direction[0], direction[1], direction[2]);
+            if (!std::isfinite(length) || std::abs(length - 1.0) > .001)
+                return "guest_weapon_view_unqualified";
+            for (auto& axis : direction) axis /= length;
+            *shot_direction = direction;
+        }
+        else if (split)
         {
             if (!parse_guid(lua.get_string(), split->created) || split->created == context.guid)
                 return "native_inventory_split_refused_guid";
@@ -1105,7 +1118,6 @@ namespace
         }
     };
 
-    using AimVector = std::array<double, 3>;
     constexpr auto aim_vector_type = STR("/Script/CoreUObject.Vector");
     constexpr auto aim_rotator_type = STR("/Script/CoreUObject.Rotator");
     constexpr auto aim_hit_type = STR("/Script/Engine.HitResult");
@@ -1230,7 +1242,7 @@ namespace
             return true;
         }
 
-        bool apply(Unreal::UObject* pawn, Unreal::UObject* weapon)
+        bool apply(Unreal::UObject* pawn, Unreal::UObject* weapon, const std::optional<AimVector>& trigger_direction = {})
         {
             auto* camera = object(pawn, STR("Camera"));
             auto* muzzle = object(weapon, STR("Arrow_Muzzle"));
@@ -1244,7 +1256,8 @@ namespace
             constexpr auto location = STR("/Script/Engine.SceneComponent:K2_GetComponentLocation");
             const auto origin = component_aim_vector(muzzle, location);
             const auto eye = component_aim_vector(camera, location);
-            const auto direction = component_aim_vector(camera, STR("/Script/Engine.SceneComponent:GetForwardVector"));
+            const auto direction = trigger_direction ? trigger_direction
+                : component_aim_vector(camera, STR("/Script/Engine.SceneComponent:GetForwardVector"));
             if (!old || !origin || !eye || !direction ||
                 std::abs(std::hypot((*direction)[0], (*direction)[1], (*direction)[2]) - 1.0) > 0.001) return false;
             const auto target = guest_aim_point(pawn, weapon, *eye, *direction);
@@ -1273,7 +1286,8 @@ namespace
         ~GuestMuzzleAim() { restore(); }
     };
 
-    int fire(const Lua& lua, const Context& context, const Inventory& inventory, bool disarm)
+    int fire(const Lua& lua, const Context& context, const Inventory& inventory, bool disarm,
+             const std::optional<AimVector>& trigger_direction)
     {
         const auto report = [&](bool ok, std::string_view status, std::int32_t first = -1, std::int32_t second = -1,
                                 int projectiles = 0) {
@@ -1350,7 +1364,7 @@ namespace
         if (!disarm)
         {
             if (!projectiles.capture(context, projectile)) return report(false, "guest_weapon_projectile_scope_full");
-            if (!aim.apply(context.pawn, actor)) return report(false, "guest_weapon_aim_unavailable");
+            if (!aim.apply(context.pawn, actor, trigger_direction)) return report(false, "guest_weapon_aim_unavailable");
             held->SetPropertyValueInContainer(&parameters, true);
             actor->ProcessEvent(action, &parameters);
         }
@@ -3091,7 +3105,9 @@ namespace
         }
         Context context;
         SeedSelection seed_selection;
-        if (const auto error = resolve(lua, context, operation == Operation::Seed ? &seed_selection : nullptr);
+        std::optional<AimVector> trigger_direction;
+        if (const auto error = resolve(lua, context, operation == Operation::Seed ? &seed_selection : nullptr,
+                                       nullptr, nullptr, false, nullptr, operation == Operation::Fire ? &trigger_direction : nullptr);
             !error.empty()) return fail(error);
         if constexpr (operation != Operation::Inspect)
             if (std::ranges::any_of(smg_holds, [&](const SmgHold& hold) {
@@ -3142,7 +3158,7 @@ namespace
         if constexpr (operation == Operation::Equip) return equip(lua, context, inventory);
         if constexpr (operation == Operation::Inspect) return inspect(lua, context, inventory);
         if constexpr (operation == Operation::Reload) return reload(lua, context, inventory);
-        return fire(lua, context, inventory, operation == Operation::Disarm);
+        return fire(lua, context, inventory, operation == Operation::Disarm, trigger_direction);
     }
 }
 

@@ -6,6 +6,7 @@ import math
 import time
 
 from tools.silverfish.control import current_status, submit
+from tools.silverfish.native_guest_weapon import valid_shot_direction
 from portable_guest_world_start import resident_events
 
 
@@ -115,6 +116,9 @@ async def verify_dock_pursuit(host, guest, frame, command):
         if result["event"] != "native_guest_primary_input":
             attempt.update(outcome="host_rejected", reason=result.get("reason"))
         assert result["event"] == "native_guest_primary_input", (result, history)
+        direction = result.get("native_guest_trigger_direction")
+        assert valid_shot_direction(direction), ("The shot did not carry the stock trigger view", result)
+        attempt["trigger_direction"] = direction
         shot = result["native_guest_weapon"]
         assert (shot["before"], shot["after"], shot["projectiles"]) == (remaining, remaining - 1, 1), (shot, history)
         attempt["outcome"] = "fired"
@@ -170,11 +174,14 @@ async def verify_dock_pursuit(host, guest, frame, command):
                 return record
         raise AssertionError(("Two stock trigger attempts ended before the guest published a shot", history))
 
-    async def reload_pistol():
+    async def reload_pistol(rounds):
+        assert 0 < rounds < 8, ("The guest needs a partially spent stock magazine", history)
         await firing_window(1)
+        before = await observe()
+        assert before["alive"] and before["target"] == "guest" and before["host_hits"] == 0, before
         started = time.time()
         result = await submit(guest_run, "native-guest-reload-input-fixture")
-        assert result["ok"], result
+        assert result["ok"] and result["native_guest_reload_fixture"]["stock_wrappers"] == 2, result
         sequence = result["native_guest_reload_fixture"]["sequence"]
 
         async def receipt():
@@ -186,8 +193,17 @@ async def verify_dock_pursuit(host, guest, frame, command):
         assert reply["event"] == "native_guest_reload_input", reply
         reload = reply["native_guest_weapon"]
         assert (reload["guid"], reload["before"], reload["after"], reload["reserve_before"], reload["reserve_after"]) == (
-            scope["guid"], 0, 8, 8, 0), reload
-        return reload
+            scope["guid"], rounds, 8, 8, rounds), reload
+
+        async def both_magazines():
+            local, authority = await asyncio.gather(command(guest, "dock-pursuit-aim"), command(host, "dock-pursuit-view"))
+            return (local != "absent" and authority != "absent"
+                    and view_frame(local)["rounds"] == view_frame(authority)["rounds"] == reload["after"])
+
+        await wait_for(both_magazines, "The guest and host did not agree on the reloaded magazine", 6)
+        after = await observe()
+        assert after["alive"] and after["target"] == "guest" and after["host_hits"] == 0, after
+        return {"receipt": reload, "before": before, "after": after}
 
     try:
         baseline = await observe()
@@ -221,11 +237,11 @@ async def verify_dock_pursuit(host, guest, frame, command):
         reload = None
         remaining = initial_view["round"]["after"]
         while current["alive"]:
+            if reload is None and len(history) >= 2:
+                reload = await reload_pistol(remaining)
+                remaining = reload["receipt"]["after"]
             if remaining == 0:
-                if reload is not None:
-                    break
-                reload = await reload_pistol()
-                remaining = reload["after"]
+                break
             view = await fire_round(remaining, 1 if remaining % 2 == 0 else -1)
             remaining = view["round"]["after"]
             moved = moved or all(math.dist(history[0][seat]["seat"], view[seat]["seat"]) > 45 for seat in ("host", "guest"))
@@ -243,7 +259,7 @@ async def verify_dock_pursuit(host, guest, frame, command):
         assert moved, ("The host never observed the guest walk during pursuit", history)
         assert pursued_while_moving, ("The stock worker did not stay on the moving guest during the fight", history)
         launches = await command(host, "dock-pursuit-launches")
-        assert len(history) >= 3 and not current["alive"] and current["credited"], (
+        assert reload and len(history) >= 3 and not current["alive"] and current["credited"], (
             "The guest did not kill the original worker after sustained fire under pressure", history,
             {"muzzle_target_camera_angles_at_launch": launches})
 
