@@ -85,11 +85,14 @@ class LocalCommandTests(unittest.IsolatedAsyncioTestCase):
             bridge = runtime.Bridge(Path(temporary), None)
             bridge.local_bridge = Mock()
             bridge.local_bridge.input_ready.return_value = True
-            bridge.local_bridge.read_input.return_value = [b"interact\t8", b"interact\t10"]
+            bridge.local_bridge.read_input.return_value = [
+                b"interact\t8", b"interact\t10\tstock-critter:1", b"interact\t11\tstock-critter:65536",
+            ]
             (bridge.directory / "input.tsv").write_bytes(b"interact\t9\n")
             await asyncio.wait_for(bridge.wait_for_interaction(1), .2)
             self.assertEqual(bridge.interactions(), [
-                (uuid.uuid5(bridge.input_namespace, str(sequence)).hex, None) for sequence in (8, 9, 10)
+                (uuid.uuid5(bridge.input_namespace, str(sequence)).hex, target)
+                for sequence, target in ((8, None), (9, None), (10, "stock-critter:1"))
             ])
 
     async def test_crate_ring_input_does_not_consume_a_loose_interaction(self):
