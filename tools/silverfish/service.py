@@ -53,7 +53,7 @@ from . import native_destructibles
 from . import native_drum_fire
 from . import native_weapon_fire_view
 from . import native_loose_pickup
-from . import native_mushrooms
+from . import native_mushrooms, native_critters
 from . import native_prop_carry
 from . import native_avatar_lean
 from . import native_flare
@@ -101,7 +101,7 @@ GUEST_NATIVE_ACTIONS = ("native-pickup", "native-shop-buy", "native-quest-start"
                         "native-wipe-items", "native-wipe-recover",
                         *native_finite_shop.ACTIONS, native_npc_barter.OPEN, native_npc_barter.EXCHANGE,
                         native_authored_pickup.ACTION, native_loose_pickup.CLAIM, native_enemy_loot.CLAIM, native_stock_enemy_drops.CLAIM,
-                        native_mushrooms.CLAIM,
+                        native_mushrooms.CLAIM, native_critters.ACTION,
                         native_prop_carry.ACTION, native_flare.ACTION,
                         native_lantern.EXTINGUISH,
                         *native_guest_weapon.GUEST_ACTIONS, native_guest_weapon.SELECT_EQUIPMENT,
@@ -2310,6 +2310,8 @@ class Host:
                 result = await native_npc_barter.perform(self, bridge, character, action, target, request["operation_id"])
             elif action == native_loose_pickup.CLAIM:
                 result = await native_loose_pickup.claim(self, bridge, character, target, request["operation_id"])
+            elif action == native_critters.ACTION:
+                result = await native_critters.pickup(self, bridge, character, target, request["operation_id"])
             elif action == native_mushrooms.CLAIM:
                 result = await native_mushrooms.claim(self, bridge, character, target, request["operation_id"])
             elif action == native_prop_carry.ACTION:
@@ -5410,7 +5412,8 @@ class Client:
             target = f"{target}@{self.zone_epoch}"
         elif action in (native_guest_melee.SWING, native_host_dig_live.GUEST_ACTION):
             target = native_guest_melee.request_target(target, self.zone_epoch)
-        elif (action in native_loot.PRY_TOOL_ACTIONS.values() or action in (native_stock_door.ACTION, native_stock_switch.ACTION)
+        elif (action in native_loot.PRY_TOOL_ACTIONS.values()
+              or action in (native_stock_door.ACTION, native_stock_switch.ACTION, native_critters.ACTION)
               or action in native_stock_door.PRY_ACTIONS.values()):
             target = f"{self.zone_epoch}@{target}"
         request = {"action": action, "operation_id": operation_id, "target": target}
@@ -6513,6 +6516,11 @@ class Client:
                             continue
                         if door := native_stock_door.target_actor(target):
                             result = await self.gameplay_action(native_stock_door.ACTION, operation_id, door)
+                            self.control.event("local_interaction", operation_id=operation_id, **result)
+                            continue
+                        if critter := native_critters.target_id(target):
+                            result = await self.gameplay_action(native_critters.ACTION, operation_id, critter)
+                            self.guest_ui.queue_stock_inventory(self)
                             self.control.event("local_interaction", operation_id=operation_id, **result)
                             continue
                         if switch := native_stock_switch.target_actor(target):
