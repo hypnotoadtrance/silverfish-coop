@@ -32,7 +32,9 @@ def render(releases):
     lines = ["# Release candidates", "",
              "Use the same ZIP on both PCs. These builds are for coordinated testing and bug reports. "
              "[Installation instructions](../README.md#install-or-update)", "",
-             "Candidates are listed by when they were published, newest first.", "",
+             "Candidates are listed by publication time, newest first. When older candidates are pruned, we keep "
+             "the newest three from the current day and the newest candidate from each previous release day, "
+             "using Mountain Time.", "",
              "| Published (UTC) | Release notes | ZIP |", "| --- | --- | --- |"]
     for row in releases:
         tag = row["tag_name"]
