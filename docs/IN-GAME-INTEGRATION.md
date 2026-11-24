@@ -468,3 +468,5 @@ Stock melee swing cues use the same short-lived Direct IP path as muzzle flashes
 The bat's stock first-person mesh carries an offset that put the replica beside the player's shin. The remote weapon view now aligns the bat handle to the hand socket. The rendered Observatory check used an actual equipped bat and verified the grip from the guest's view.
 
 The host now asks the stock AI to choose a new threat when its current target is downed and another party member is standing. A stock boar fixture confirmed that it switched from the downed guest to the standing host already in its threat list.
+
+On `rc-7b104f9`, a stock LightAR burst used the guest's trigger-time view for the first two rounds and the guest's new aim for the next three. The host spent exactly five rounds and stopped on release. Both seats agreed on the remaining ammo. Campaign files stayed unchanged through the burst. The same muted Direct IP host and guest processes also verified Rusty Pistol firing and reload, warehouse tap fire through cover, reconnect, and title return across two test campaigns. [Grouped title smoke runner](../tests/live_portable_title_smoke.py)
