@@ -105,3 +105,83 @@ assert(not project() and root_reads == 2, "A genuinely underscaled part must sta
 sight.RelativeScale3D = vector(4.00001, 1, 1)
 assert(not project() and root_reads == 3, "Out-of-range large scales must stay invalid")
 print("Stock socket pose and root-space fallback passed")
+
+local mesh_component = object({})
+local find_stock_asset = StaticFindObject
+StaticFindObject = function(path)
+    if path == "/Script/Engine.MeshComponent" then return mesh_component end
+    return find_stock_asset(path)
+end
+
+local function stock_component(owner, owner_only)
+    return object({
+        GetOwner = fixed(owner),
+        bOnlyOwnerSee = owner_only,
+        SetOnlyOwnerSee = function(self, value)
+            self.bOnlyOwnerSee = value
+            self.writes = (self.writes or 0) + 1
+        end,
+    })
+end
+
+local function reconcile(actor_path, firearm)
+    local scans = 0
+    local remote = object({})
+    local held_class = object({GetFullName = fixed("BlueprintGeneratedClass " .. actor_path)})
+    local stock = object({
+        User = remote, GetOwner = fixed(remote), GetClass = fixed(held_class), IsA = fixed(true),
+        IsActorBeingDestroyed = fixed(false), GetAttachParentActor = fixed(remote),
+        K2_GetComponentsByClass = function(self, component_class)
+            assert(component_class == mesh_component)
+            scans = scans + 1
+            return self.components
+        end,
+    })
+    remote.EquipedItem = stock
+    local projection = stock_component(remote, false)
+    projection.K2_DestroyComponent = function(self, owner)
+        assert(owner == remote)
+        self.destroyed = true
+    end
+    local frame = stock_component(stock, false)
+    local authored_owner_only = stock_component(stock, true)
+    local unrelated = stock_component(remote, false)
+    stock.components = {frame, authored_owner_only, unrelated}
+
+    local entry = {pawn = remote, firearm_class = firearm and actor_path or "-", weapon_parts = {projection}}
+    view.suppress_stock(entry, 10)
+    assert(frame.bOnlyOwnerSee and not projection.bOnlyOwnerSee and scans == 1)
+    assert(authored_owner_only.bOnlyOwnerSee and not authored_owner_only.writes and not unrelated.writes)
+
+    local late = stock_component(stock, false)
+    stock.components[4] = late
+    view.suppress_stock(entry, 10.10)
+    assert(not late.bOnlyOwnerSee and scans == 1, "Do not rescan stock equipment every avatar update")
+    view.suppress_stock(entry, 10.25)
+    assert(late.bOnlyOwnerSee and scans == 2 and frame.writes == 1, "Mask a late part on the same actor")
+    assert(entry.weapon_parts[1] == projection and not projection.writes, "Keep the existing hand projection")
+
+    frame.bOnlyOwnerSee = false
+    view.suppress_stock(entry, 10.50)
+    assert(frame.bOnlyOwnerSee and frame.writes == 2, "Restore observer masking after an equipment visibility update")
+    stock.components = {authored_owner_only, unrelated, late}
+    view.suppress_stock(entry, 10.75)
+    assert(not frame.bOnlyOwnerSee and frame.writes == 3, "Restore a part leaving the stock mesh set")
+
+    local replacement = object(setmetatable({}, {__index = stock}))
+    local replacement_frame = stock_component(replacement, false)
+    replacement.components = {replacement_frame}
+    remote.EquipedItem = replacement
+    view.suppress_stock(entry, 11)
+    assert(not late.bOnlyOwnerSee and late.writes == 2 and replacement_frame.bOnlyOwnerSee,
+        "Reconcile replacement equipment even when its projected model is unchanged")
+    assert(entry.weapon_parts[1] == projection and not projection.writes)
+
+    view.clear(entry)
+    assert(not replacement_frame.bOnlyOwnerSee and replacement_frame.writes == 2 and authored_owner_only.bOnlyOwnerSee
+        and not authored_owner_only.writes and not unrelated.writes and projection.destroyed)
+end
+
+reconcile("/Game/Classes/Weapons/Wep_Obrez_01.Wep_Obrez_01_C", true)
+reconcile("/Game/Classes/Weapons/MeleeWeapons/MeleeWep_OldPipe.MeleeWep_OldPipe_C", false)
+print("Late rifle and melee meshes are masked at the observer and restored on removal")

@@ -758,6 +758,7 @@ function avatar.sync(state, phase)
     local outfits = phase == "hosting" and observations or client_outfits
     local seen = {}
     if (phase == "hosting" or phase == "connected") and state.local_pawn then
+        local stock_time
         for _, details in ipairs(state.guests) do
             local pawn = details.pawn
             if valid(pawn) and not pawn:IsActorBeingDestroyed() and not pawn:IsLocallyControlled() then
@@ -787,7 +788,13 @@ function avatar.sync(state, phase)
                             local equipment = outfit and outfit.weapon or "-"
                             if phase == "hosting" then equipment = weapon_view.lighter_override(equipment, host_aims[entry.id]) end
                             weapon_view.apply(entry, equipment, outfit and outfit.firearm or "-")
-                            weapon_view.suppress_stock(entry)
+                            if #entry.weapon_parts > 0 then
+                                if stock_time == nil then
+                                    local clock = StaticFindObject(gameplay_statics)
+                                    stock_time = valid(clock) and clock:GetRealTimeSeconds(state.world) or false
+                                end
+                                if stock_time then weapon_view.suppress_stock(entry, stock_time) end
+                            end
                             if uses[entry] then hide_held_item(entry) end
                             local aim = outfit and outfit.aim or "-"
                             if phase == "hosting" then

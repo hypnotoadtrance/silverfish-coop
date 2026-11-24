@@ -25,6 +25,8 @@ local maximum_parts = 12
 local minimum_scale = .01
 local active_recoil = {}
 local kick_time = .05
+local stock_recheck_seconds = .2
+local max_stock_components = 24
 local identity = {
     Rotation = { X = 0, Y = 0, Z = 0, W = 1 },
     Translation = { X = 0, Y = 0, Z = 0 },
@@ -225,9 +227,15 @@ function view.observe(pawn, save, cached)
     return model, { actor = equipment, model = model }
 end
 
+local function restore_mask(stock, component)
+    if valid(component) and same(component:GetOwner(), stock) and component.bOnlyOwnerSee then
+        component:SetOnlyOwnerSee(false)
+    end
+end
+
 local function restore_stock(entry)
-    for _, component in ipairs(entry.stock_weapon_masks or {}) do
-        if valid(component) and component.bOnlyOwnerSee then component:SetOnlyOwnerSee(false) end
+    for _, component in pairs(entry.stock_weapon_masks or {}) do
+        restore_mask(entry.stock_weapon_actor, component)
     end
     entry.stock_weapon_actor, entry.stock_weapon_masks = nil, nil
 end
@@ -236,7 +244,7 @@ local function matches_displayed_mesh(entry, actor)
     local class = StaticFindObject(mesh_type)
     if not valid(class) then return false end
     local components = actor:K2_GetComponentsByClass(class)
-    if not components or #components > 24 then return false end
+    if not components or #components > max_stock_components then return false end
     for index = 1, #components do
         local component = unwrap(components[index])
         if valid(component) and same(component:GetOwner(), actor) then
@@ -281,29 +289,45 @@ local function stock_held_actor(entry)
     return result
 end
 
-function view.suppress_stock(entry)
-    local stock = #entry.weapon_parts > 0 and stock_held_actor(entry)
-    if stock and same(stock, entry.stock_weapon_actor) then return end
-    restore_stock(entry)
-    if not stock then return end
+function view.suppress_stock(entry, now)
+    if #entry.weapon_parts == 0 or entry.stock_weapon_check_at and now < entry.stock_weapon_check_at then return end
+    entry.stock_weapon_check_at = now + stock_recheck_seconds
+    local stock = stock_held_actor(entry)
+    if not same(stock, entry.stock_weapon_actor) then
+        restore_stock(entry)
+        if not stock then return end
+        entry.stock_weapon_actor, entry.stock_weapon_masks = stock, {}
+    end
+
     local class = StaticFindObject(mesh_type)
     if not valid(class) then return end
     local components = stock:K2_GetComponentsByClass(class)
-    entry.stock_weapon_actor, entry.stock_weapon_masks = stock, {}
+    if not components or #components > max_stock_components then return end
+    local previous, current = entry.stock_weapon_masks, {}
     for index = 1, #components do
         local component = unwrap(components[index])
-        if valid(component) and same(component:GetOwner(), stock) and not component.bOnlyOwnerSee then
-            -- Keep collision, actor replication, and the stock owner's own
-            -- first-person meshes intact. Only this observer renders the copy.
-            component:SetOnlyOwnerSee(true)
-            entry.stock_weapon_masks[#entry.stock_weapon_masks + 1] = component
+        if valid(component) and same(component:GetOwner(), stock) then
+            local address = component:GetAddress()
+            if not component.bOnlyOwnerSee then
+                -- Leave the owner's first-person view and stock actor intact.
+                -- Compare again after late replication adds or replaces meshes.
+                component:SetOnlyOwnerSee(true)
+                current[address] = component
+            elseif same(component, previous[address]) then
+                current[address] = component
+            end
         end
     end
+    for address, component in pairs(previous) do
+        if not current[address] then restore_mask(stock, component) end
+    end
+    entry.stock_weapon_masks = current
 end
 
 function view.clear(entry)
     lighter.clear(entry)
     restore_stock(entry)
+    entry.stock_weapon_check_at = nil
     active_recoil[entry] = nil
     active_cycle[entry] = nil
     for _, component in ipairs(entry.weapon_parts or {}) do
