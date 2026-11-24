@@ -1132,6 +1132,40 @@ local function run(action, actor_path)
     elseif action == "select-pipe" then
         assert(not host, "the guest must pick their test equipment")
         return select_equipment(pawn, function(row) return guid_of(row) == actor_path end)
+    elseif action == "melee-grip" then
+        local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+        if not host then
+            local weapon = pawn.EquipedItem
+            local rig, mesh = weapon.Wep_Skeli, weapon.SM_Wep_Melee_Machete_01
+            assert(valid(mesh) and valid(mesh.StaticMesh) and same(mesh:GetAttachParent(), rig)
+                and mesh:GetAttachSocketName():ToString() == "Melee_Socket")
+            local bone = FName("Wep_Root", EFindName.FNAME_Find)
+            assert(rig:GetBoneIndex(bone) >= 0)
+            local anchor = math_api:InverseTransformLocation(mesh:K2_GetComponentToWorld(), rig:GetSocketLocation(bone))
+            return ("%s;%.3f,%.3f,%.3f"):format(mesh.StaticMesh:GetFullName(), anchor.X, anchor.Y, anchor.Z)
+        end
+        local mesh_name, grip = actor_path:match("^(StaticMesh /Game/[^;]+);(.+)$")
+        assert(mesh_name and grip)
+        local remote = authoritative_guest(world)
+        local class = StaticFindObject("/Script/Engine.StaticMeshComponent")
+        local matches, error_cm = 0, nil
+        for _, raw in ipairs(remote:K2_GetComponentsByClass(class) or {}) do
+            local ok, value = pcall(function() return raw:get() end)
+            local copy = ok and value or raw
+            local mesh = valid(copy) and copy.StaticMesh
+            if valid(mesh) and mesh:GetFullName() == mesh_name and same(copy:GetOwner(), remote)
+                and copy:IsVisible() and not copy.bHiddenInGame then
+                local socket = copy:GetAttachSocketName()
+                local body = copy:GetAttachParent()
+                assert(valid(body) and socket:ToString() == "Weapon_Socket01" and body:DoesSocketExist(socket))
+                local actual = math_api:TransformLocation(copy:K2_GetComponentToWorld(), position(grip))
+                local hand = body:GetSocketLocation(socket)
+                error_cm = math.sqrt((actual.X - hand.X)^2 + (actual.Y - hand.Y)^2 + (actual.Z - hand.Z)^2)
+                matches = matches + 1
+            end
+        end
+        assert(matches < 2, "duplicate projected melee mesh")
+        return error_cm and ("%.3f"):format(error_cm) or "waiting"
     elseif action == "stage-melee" then
         assert(host, "only the host can stage the stock target")
         return stage_melee(world)

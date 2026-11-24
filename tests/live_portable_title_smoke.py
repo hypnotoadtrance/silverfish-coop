@@ -950,6 +950,7 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
         current.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid), timeout=12)
     assert frame["game"]["native_guest_primary_scope"]["kind"] == ("melee" if heavy else "old-pipe")
     host_run = host.campaign / "run"
+    grip_error = None
     if verify_observer:
         host_frame = await current_status(host_run)
         actor = host_frame["game"]["native_guest_save"]["pawn"]
@@ -957,6 +958,12 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
         def observer(state):
             return state.get("game", {}).get("native_avatar_melee", {}).get(actor, {})
 
+        grip = await command(guest, "melee-grip")
+        async with asyncio.timeout(5):
+            while (report := await command(host, f"melee-grip\t{grip}")) == "waiting":
+                await asyncio.sleep(.1)
+        grip_error = float(report)
+        assert 0 <= grip_error <= 5, (grip, grip_error)
     misses = []
     # The unattended client camera can settle after the fixture aligns the swing.
     # Retry only a verified stock miss that left the staged target untouched.
@@ -1009,6 +1016,8 @@ async def verify_resident_guest_melee(host: Seat, guest: Seat, *, heavy: bool = 
         proof, contact, before, after, result.get("host_observer_swing"))
     if misses:
         result["fixture_misses"] = misses
+    if grip_error is not None:
+        result["observer_grip_error_cm"] = grip_error
     async with asyncio.timeout(8):
         while True:
             states = await asyncio.gather(*(command(seat, f"melee-state\t{center}") for seat in (host, guest)))
