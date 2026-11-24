@@ -2723,10 +2723,11 @@ async def verify_dock_npc_population(host: Seat, guest: Seat, command) -> dict:
         ]
 
 
-async def verify_dock_garage_shots(host: Seat, guest: Seat, frame: dict, command, *, pellets: int = 1) -> dict:
+async def verify_dock_garage_shots(host: Seat, guest: Seat, frame: dict, command, *,
+                                   pellets: int = 1, family: str | None = None) -> dict:
     try:
         assert await asyncio.gather(*(command(seat, "dock-garage-open") for seat in (host, guest))) == ["raised", "raised"]
-        evidence = await compare_dock_garage_shots(host, guest, frame, command, pellets=pellets)
+        evidence = await compare_dock_garage_shots(host, guest, frame, command, pellets=pellets, family=family)
     finally:
         restored = await asyncio.gather(*(command(seat, "dock-garage-restore") for seat in (host, guest)),
                                          return_exceptions=True)
@@ -2734,17 +2735,18 @@ async def verify_dock_garage_shots(host: Seat, guest: Seat, frame: dict, command
     return evidence
 
 
-async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, command, *, pellets: int) -> dict:
+async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, command, *,
+                                    pellets: int, family: str | None) -> dict:
     guest_run = guest.client / "run"
-    dynamic = pellets != 1
-    stage = "dock-garage-stage-dynamic" if dynamic else "dock-garage-stage"
+    stage = f"dock-garage-stage-dynamic\t{family}" if family else "dock-garage-stage"
     low, worker, high, obstruction, health = (await command(host, stage)).split(";")
     contact_name = ":PersistentLevel.NPC_Survivor_Worker_C_2"
     actor_names = None
-    if dynamic:
+    if family:
         async with asyncio.timeout(8):
             while True:
-                names = await asyncio.gather(*(command(seat, f"dock-garage-dynamic-name\t{worker}") for seat in (host, guest)))
+                names = await asyncio.gather(*(command(seat, f"dock-garage-dynamic-name\t{worker};{family}")
+                                               for seat in (host, guest)))
                 references = [name.split(";") for name in names]
                 if all(len(entry) == 2 and entry[1].isdecimal() for entry in references):
                     break
@@ -2756,8 +2758,7 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         health = await command(host, "dock-garage-health")
     health = float(health)
     above = f"dock-garage-aim\t{high};{obstruction}"
-    aim = "dock-garage-dynamic-aim" if dynamic else "dock-garage-aim"
-    below = f"{aim}\t{low};{worker}"
+    below = f"dock-garage-aim\t{low};{worker}" + (f";{family}" if family else "")
 
     async def shoot(expected_health, *, should_hit, contact_required=False):
         started = time.time()
@@ -2811,7 +2812,7 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
         raise AssertionError(dict(guest_low_trace=seen, origin=low, target=worker)) from error
     assert await command(host, above) == "blocked"
     assert await command(guest, above) == "blocked"
-    blocked, after_blocked = await shoot(health, should_hit=False)
+    blocked, after_blocked = (None, health) if family in ("drone", "turret") else await shoot(health, should_hit=False)
     assert await command(host, above) == "blocked"
     assert await command(guest, below) == "worker"
     evidence = {}
@@ -2829,17 +2830,27 @@ async def compare_dock_garage_shots(host: Seat, guest: Seat, frame: dict, comman
     second_barrier = await command(host, f"dock-garage-second-barrier\t{low};{worker}") if pellets == 1 else None
     guest_collision = await command(guest, f"dock-garage-projectile-trace\t{low};{worker}")
     host_collision = await command(host, f"dock-garage-projectile-trace\t{low};{worker}")
-    expected_guest_collision = actor_names["guest"] if dynamic else "NPC_Survivor_Worker_C_2"
+    expected_guest_collision = actor_names["guest"] if actor_names else "NPC_Survivor_Worker_C_2"
     assert guest_collision == expected_guest_collision and host_collision == "StaticMeshActor_347", (
         guest_collision, host_collision)
     receipt, after_disagreement = await shoot(before_mismatch, should_hit=True, contact_required=True)
-    key = "tutorial_dock_world_collision_mismatch" if pellets == 1 else "tutorial_dock_buckshot_mismatch"
+    key = {None: "tutorial_dock_world_collision_mismatch", "bandit": "tutorial_dock_buckshot_mismatch",
+           "drone": "tutorial_dock_drone_mismatch", "turret": "tutorial_dock_turret_mismatch"}[family]
     evidence[key] = {
         "same_low_aim": True, "host_world_line": "blocked", "guest_world_line": "worker",
         "health": [before_mismatch, after_disagreement], "blocked_shot": blocked, "accepted_shot": receipt,
     }
     if actor_names:
         evidence[key]["actor_names"] = actor_names
+        if after_disagreement <= 0:
+            async with asyncio.timeout(5):
+                while True:
+                    deaths = await asyncio.gather(*(command(seat, f"dock-garage-dynamic-death\t{actor_names[name]}")
+                                                    for seat, name in ((host, "host"), (guest, "guest"))))
+                    if all(state in ("dead", "removed") for state in deaths):
+                        break
+                    await asyncio.sleep(.05)
+            evidence[key]["death"] = dict(zip(("host", "guest"), deaths))
     if second_barrier:
         witness = await command(host, "dock-garage-shot-witness")
         exclusions = witness.rsplit(";", 1)[-1].split(",")
@@ -2937,9 +2948,16 @@ async def verify_dock_garage_buckshot(host: Seat, guest: Seat, pawn: str) -> dic
         frame = await wait_resident_status(guest_run, lambda row:
             row.get("zone_epoch") == arrival["zone_epoch"] and
             row.get("game", {}).get("native_guest_primary_scope", {}).get("guid") == guid)
-        result = await verify_dock_garage_shots(host, guest, frame, command, pellets=9)
+        result = {}
+        failures = {}
+        for family in ("bandit", "drone", "turret"):
+            try:
+                result.update(await verify_dock_garage_shots(host, guest, frame, command, pellets=9, family=family))
+            except Exception as error:
+                failures[family] = f"{type(error).__name__}: {error}"
+        assert not failures, (failures, list(result))
         async with asyncio.timeout(6):
-            while await weapon(host, "peer-ready") != f"{guid},2,2" or await weapon(guest, "ready") != f"{guid},2,2":
+            while await weapon(host, "peer-ready") != f"{guid},0,0" or await weapon(guest, "ready") != f"{guid},0,0":
                 await asyncio.sleep(.05)
         assert campaign_save_hashes(host.campaign) == checkpoint
         return result

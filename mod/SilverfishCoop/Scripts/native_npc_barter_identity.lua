@@ -1,13 +1,17 @@
 local identity = {}
 
 local reference = require("replicated_actor_reference")
-local npc_path = "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"
+local npc_paths = {
+    "/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C",
+    "/Game/Classes/NPCs/NPC_Drones/NPC_Drone.NPC_Drone_C",
+    "/Game/Classes/NPCs/NPC_Assets/Turret_Master_BP.Turret_Master_BP_C",
+}
 local prefix = "5346434F4F504241525445520000"
 
-local marker_class, npc_class, world, phase
+local marker_class, world, phase
 local active = false
 local number, markers, pending = 0, {}, {}
-local census, cursor
+local classes, census, next_discovery = {}, {}, 0
 local retry_interval = 1
 local registration_window = 30
 
@@ -23,7 +27,11 @@ local function actor_in_world(actor)
 end
 
 local function exact_npc(actor)
-    return active and valid(npc_class) and valid(actor) and actor:IsA(npc_class) and actor_in_world(actor)
+    if not active or not valid(actor) then return false end
+    for _, class in pairs(classes) do
+        if valid(class) and actor:IsA(class) then return actor_in_world(actor) end
+    end
+    return false
 end
 
 local function bind(npc, marker, value)
@@ -74,8 +82,7 @@ local function install()
     if type(RegisterHook) ~= "function" or type(RegisterBeginPlayPostHook) ~= "function"
         or type(RegisterEndPlayPreHook) ~= "function" then return false end
     marker_class = StaticFindObject(reference.class)
-    npc_class = StaticFindObject(npc_path)
-    if not valid(marker_class) or not valid(npc_class) then return false end
+    if not valid(marker_class) then return false end
     RegisterHook("/Script/Engine.Actor:OnRep_Owner", function(context)
         if not active or phase ~= "connected" then return end
         local marker = context:get()
@@ -106,6 +113,27 @@ end
 
 local installed = false
 
+local function discover_classes(now)
+    if now < next_discovery then return end
+    next_discovery = now + retry_interval
+    for _, path in ipairs(npc_paths) do
+        if not valid(classes[path]) then
+            local class = StaticFindObject(path)
+            if valid(class) then
+                classes[path] = class
+                if phase == "hosting" then
+                    local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+                    if valid(statics) then
+                        local output = {}
+                        statics:GetAllActorsOfClass(world, class, output)
+                        census[#census + 1] = {actors = output.OutActors or output, cursor = 1}
+                    end
+                end
+            end
+        end
+    end
+end
+
 function identity.sync(state, current)
     active = (current == "hosting" or current == "connected") and valid(state.world)
     -- The BeginPlay hooks persist across title returns. Suspend reflection
@@ -117,33 +145,29 @@ function identity.sync(state, current)
     end
     if phase ~= current or not same(state.world, world) then
         world, phase, number, markers, pending = state.world, current, 0, {}, {}
+        classes, census, next_discovery = {}, {}, 0
+        discover_classes(os.time())
         if type(SilverfishBindNativeShotTarget) == "function" then SilverfishBindNativeShotTarget() end
-        if phase == "hosting" then
-            local statics = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-            if valid(statics) then
-                local output = {}
-                statics:GetAllActorsOfClass(world, npc_class, output)
-                census, cursor = output.OutActors or output, 1
-            end
-        else
-            census = nil
+        if phase == "connected" then
             -- A marker may have arrived before the guest entered the active session.
             for _, marker in ipairs(FindAllOf("TargetPoint") or {}) do
                 if not remember(marker) then enqueue(marker) end
             end
         end
     end
-    if census then
-        local limit = math.min(cursor + 7, #census)
-        for index = cursor, limit do
-            local npc = census[index]
+    local now = os.time()
+    discover_classes(now)
+    local batch = census[1]
+    if batch then
+        local limit = math.min(batch.cursor + 7, #batch.actors)
+        for index = batch.cursor, limit do
+            local npc = batch.actors[index]
             if npc and type(npc.type) == "function" and npc:type() == "RemoteUnrealParam" then npc = npc:get() end
             if exact_npc(npc) and not publish(npc) then enqueue(npc) end
         end
-        cursor = limit + 1
-        if cursor > #census then census = nil end
+        batch.cursor = limit + 1
+        if batch.cursor > #batch.actors then table.remove(census, 1) end
     end
-    local now = os.time()
     for address, entry in pairs(pending) do
         if now >= entry.expires or not actor_in_world(entry.actor) then
             pending[address] = nil

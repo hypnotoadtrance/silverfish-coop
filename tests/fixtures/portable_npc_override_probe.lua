@@ -322,6 +322,8 @@ end
 local shooter_paths = {
     state = "/Game/Classes/NPCs/NPC_State_Conscript.NPC_State_Conscript_C",
     bandit = "/Game/Classes/NPCs/NPC_Bandit.NPC_Bandit_C",
+    drone = class_path,
+    turret = "/Game/Classes/NPCs/Turret_MechGun_01_BP.Turret_MechGun_01_BP_C",
 }
 
 local function create_stock_npc(pawn, world, kind, point, yaw)
@@ -596,7 +598,7 @@ local function npc_combat_state(world, host)
         markers, shooter, actor:GetFullName())
 end
 
-local turret_class = "/Game/Classes/NPCs/Turret_MechGun_01_BP.Turret_MechGun_01_BP_C"
+local turret_class = shooter_paths.turret
 
 local shot_turret, fired_count, fire_hook
 local turret_effects, turret_effect_hooks
@@ -1063,13 +1065,25 @@ local function stage_garage_shot(host, world, dynamic)
                         shooter.CharacterMovement:StopMovementImmediately()
                         shooter:ForceNetUpdate()
                         if dynamic then
-                            worker = create_stock_npc(host, world, "bandit", far, aim.Yaw)
+                            worker = create_stock_npc(host, world, dynamic, far, aim.Yaw)
                             worker.bAlwaysRelevant = true
                         end
-                        assert(worker:K2_SetActorLocation(far, false, {}, true), "could not stage the stock NPC beyond the door")
-                        worker.CharacterMovement:DisableMovement()
+                        local root = worker:K2_GetActorLocation()
+                        local point = far
+                        if dynamic == "drone" or dynamic == "turret" then
+                            local component = dynamic == "drone" and worker.CapsuleComponent or worker.Turret_Gun
+                            assert(valid(component), "the stock target has no aim component")
+                            local bounds = {}
+                            trace:GetComponentBounds(component, bounds, {}, {})
+                            local center = bounds.Origin or bounds
+                            point = {X=far.X+root.X-center.X, Y=far.Y+root.Y-center.Y, Z=far.Z+root.Z-center.Z}
+                        end
+                        assert(worker:K2_SetActorLocation(point, false, {}, true), "could not stage the stock NPC beyond the door")
+                        if not dynamic or dynamic == "bandit" then
+                            worker.CharacterMovement:DisableMovement()
+                            if valid(worker.Controller) then worker.Controller:SetActorTickEnabled(false) end
+                        end
                         worker:SetActorTickEnabled(false)
-                        if valid(worker.Controller) then worker.Controller:SetActorTickEnabled(false) end
                         worker:ForceNetUpdate()
                         garage_view = {shooter=shooter, worker=worker, dynamic=dynamic}
                         watch_garage_projectiles()
@@ -1083,23 +1097,26 @@ local function stage_garage_shot(host, world, dynamic)
     error(("the garage has no qualified low firing lane at %s (bounds %s)"):format(point_string(center), point_string(extent)), 0)
 end
 
-local function garage_bandit(world, point)
-    for _, actor in ipairs(FindAllOf("NPC_Bandit_C") or {}) do
+local function garage_npc(world, point, kind)
+    local class = assert(shooter_paths[kind]):match("%.([^%.]+)$")
+    for _, actor in ipairs(FindAllOf(class) or {}) do
         if valid(actor) and same(actor:GetWorld(), world) and actor.Alive then
             local at = actor:K2_GetActorLocation()
-            if (at.X-point.X)^2 + (at.Y-point.Y)^2 + (at.Z-point.Z)^2 < 40^2 then return actor end
+            if not actor:HasAnyFlags(EObjectFlags.RF_WasLoaded)
+                and (at.X-point.X)^2 + (at.Y-point.Y)^2 + (at.Z-point.Z)^2 < 220^2 then return actor end
         end
     end
 end
 
-local function set_garage_aim(pawn, world, host, specification, dynamic)
-    local from_text, to_text = specification:match("^([^;]+);([^;]+)$")
+local function set_garage_aim(pawn, world, host, specification)
+    local from_text, to_text, kind = specification:match("^([^;]+);([^;]+);(%a+)$")
+    if not from_text then from_text, to_text = specification:match("^([^;]+);([^;]+)$") end
     assert(from_text and to_text)
     local from, to = position(from_text), position(to_text)
     local _, mesh = stock_garage(world)
     local shooter = host and authoritative_guest(world) or pawn
     local weapon = shooter.EquipedItem
-    local worker = dynamic and garage_bandit(world, to) or dock_worker(world, "NPC_Survivor_Worker_C_2")
+    local worker = kind and garage_npc(world, to, kind) or dock_worker(world, "NPC_Survivor_Worker_C_2")
     assert(valid(weapon) and valid(weapon.Arrow_Muzzle))
     local aim = heading(from, to)
     assert(not host or (garage_view and same(garage_view.shooter, shooter)))
@@ -1676,7 +1693,7 @@ local function run(action, actor_path)
         return "ready"
     elseif action == "dock-garage-stage" or action == "dock-garage-stage-dynamic" then
         assert(host)
-        return stage_garage_shot(pawn, world, action == "dock-garage-stage-dynamic")
+        return stage_garage_shot(pawn, world, action == "dock-garage-stage-dynamic" and actor_path or nil)
     elseif action == "dock-garage-open" then
         return open_garage_for_test(world)
     elseif action == "dock-garage-lower-host" then
@@ -1693,13 +1710,19 @@ local function run(action, actor_path)
         return relocate_garage_barrier(world, actor_path, action == "dock-garage-long-clear")
     elseif action == "dock-garage-restore" then
         return restore_garage_fixture()
-    elseif action == "dock-garage-aim" or action == "dock-garage-dynamic-aim" then
-        return set_garage_aim(pawn, world, host, actor_path, action == "dock-garage-dynamic-aim")
+    elseif action == "dock-garage-aim" then
+        return set_garage_aim(pawn, world, host, actor_path)
     elseif action == "dock-garage-dynamic-name" then
-        local actor = garage_bandit(world, position(actor_path))
+        local point, kind = actor_path:match("^([^;]+);(%a+)$")
+        local actor = garage_npc(world, position(point), kind)
         if not valid(actor) then return "absent" end
         local key = require("native_npc_barter_identity").key(actor)
         return actor:GetFName():ToString() .. ";" .. (key and tostring(tonumber(key:sub(-4), 16)) or "-")
+    elseif action == "dock-garage-dynamic-death" then
+        assert(actor_path:match("^NPC_%w+_%d+$") or actor_path:match("^Turret_%w+_%d+$"))
+        local actor = StaticFindObject(dock .. ":PersistentLevel." .. actor_path)
+        if not valid(actor) or actor:IsActorBeingDestroyed() then return "removed" end
+        return actor.Alive and "alive" or "dead"
     elseif action == "dock-garage-plank" then
         return stage_garage_plank(pawn, world, host, actor_path)
     elseif action == "dock-garage-plank-health" then

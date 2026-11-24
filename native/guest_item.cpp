@@ -1,4 +1,5 @@
 #include "guest_item.hpp"
+#include "campaign_npc.hpp"
 #include "guest_melee.hpp"
 #include "guest_weapon_registry.hpp"
 #include "interaction_input.hpp"
@@ -1507,13 +1508,6 @@ namespace
         return actor->GetFunctionByNameInChain(damage_function) != nullptr;
     }
 
-    bool spawned_humanoid(Unreal::UObject* actor)
-    {
-        if (actor->HasAnyFlags(Unreal::RF_WasLoaded)) return false;
-        auto* npc = find<Unreal::UClass>(STR("/Game/Classes/NPCs/NPC_Assets/NPC_Master_BP.NPC_Master_BP_C"));
-        return npc && actor->IsA(npc);
-    }
-
     struct ContactReference
     {
         Unreal::FWeakObjectPtr marker;
@@ -1546,7 +1540,8 @@ namespace
             return 0;
         auto* marker = static_cast<Unreal::AActor*>(candidate);
         auto* target = object(marker, STR("Owner"));
-        if (!available_projectile_target(target, marker->GetWorld()) || !spawned_humanoid(target)) return 0;
+        if (!available_projectile_target(target, marker->GetWorld()) || !silverfish::campaign_npc::is_spawned_stock_npc(target))
+            return 0;
         const auto point = actor_aim_vector(marker, STR("/Script/Engine.Actor:K2_GetActorLocation"));
         if (!point) return 0;
         const auto height = (*point)[2] - 262144; // replicated_actor_reference.lua
@@ -1592,7 +1587,7 @@ namespace
             if (!hit->hit || !live(actor) || !authority(actor)) return;
             const bool damageable = takes_projectile_damage(actor);
             const bool matches = number ? contact_reference(actor) == number :
-                actor->GetPathName() == reported_actor && !spawned_humanoid(actor);
+                actor->GetPathName() == reported_actor && !silverfish::campaign_npc::is_spawned_stock_npc(actor);
             if (matches)
             {
                 if (count == 2 || !damageable || squared_length(difference(hit->point, *view.contact)) > 100 * 100 ||
@@ -3793,7 +3788,8 @@ silverfish::native_guest_item::ShotView silverfish::native_guest_item::capture_s
                     {
                         const auto number = contact_reference(hit->actor);
                         auto path = number ? std::format("npc:{}", number) :
-                            spawned_humanoid(hit->actor) ? std::string{} : RC::to_utf8_string(hit->actor->GetPathName());
+                            silverfish::campaign_npc::is_spawned_stock_npc(hit->actor) ? std::string{} :
+                            RC::to_utf8_string(hit->actor->GetPathName());
                         if (valid_contact_path(path))
                         {
                             view.contact_actor = std::move(path);

@@ -755,18 +755,8 @@ namespace
 
     bool dynamic_stock_npc(U::UObject* actor)
     {
-        if (!live(actor) || actor->HasAnyFlags(U::RF_WasLoaded) ||
-            !bool_field(actor, STR("bActorIsBeingDestroyed"), false) || byte_field(actor, STR("Role")) != 3)
-            return false;
-        static const std::array roots{
-            std::pair{U::FName{STR("NPC_Master_BP_C")}, npc_base},
-            std::pair{U::FName{STR("NPC_Drone_C")}, drone_base},
-            std::pair{U::FName{STR("Turret_Master_BP_C")}, turret_base},
-        };
-        for (const U::UStruct* type = actor->GetClassPrivate(); type; type = type->GetSuperStruct())
-            for (const auto& [name, path] : roots)
-                if (type->GetFName() == name && type->GetPathName() == path) return true;
-        return false;
+        return silverfish::campaign_npc::is_spawned_stock_npc(actor) &&
+            bool_field(actor, STR("bActorIsBeingDestroyed"), false) && byte_field(actor, STR("Role")) == 3;
     }
 
     bool local_client_npc(U::UObject* actor, U::UWorld* world)
@@ -2859,5 +2849,19 @@ namespace silverfish::campaign_npc
             inactive_targets = {};
             pending_dynamic_npcs.clear();
         }
+    }
+
+    bool is_spawned_stock_npc(U::UObject* actor)
+    {
+        if (!live(actor) || actor->HasAnyFlags(U::RF_WasLoaded)) return false;
+        static const std::array roots{
+            std::pair{U::FName{STR("NPC_Master_BP_C")}, npc_base},
+            std::pair{U::FName{STR("NPC_Drone_C")}, drone_base},
+            std::pair{U::FName{STR("Turret_Master_BP_C")}, turret_base},
+        };
+        for (const U::UStruct* type = actor->GetClassPrivate(); type; type = type->GetSuperStruct())
+            for (const auto& [name, path] : roots)
+                if (type->GetFName() == name && type->GetPathName() == path) return true;
+        return false;
     }
 }
