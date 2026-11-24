@@ -2,7 +2,6 @@
 
 import asyncio
 import re
-import uuid
 
 from tools.silverfish import native_smg_hold
 from tools.silverfish.control import submit
@@ -41,6 +40,28 @@ async def verify_stock_held_queue(host, guest, pawn, probe):
             and (scope := status.get("game", {}).get("native_guest_primary_scope", {})).get("guid") == guid
             and (scope.get("map"), scope.get("pawn"), scope.get("kind")) == (OBSERVATORY, previous["pawn"], kind), timeout=10)
 
+    async def stock_select(guid):
+        last = None
+        try:
+            async with asyncio.timeout(8):
+                while True:
+                    last = await probe(guest.bridge, "portable-held-queue", f"select\t{previous['pawn']}\t{guid}")
+                    if last.startswith("selected;"):
+                        return last
+                    assert not last.startswith("conflict;"), (guid, last)
+                    await asyncio.sleep(.04)
+        except TimeoutError as error:
+            raise AssertionError(("The exact projected guest weapon did not equip locally", guid, last)) from error
+
+    async def accepted_selection(guid):
+        async with asyncio.timeout(8):
+            while True:
+                for event in await resident_events(guest_run, guest_frame):
+                    weapon = event.get("native_guest_weapon", {})
+                    if event["event"] == "native_guest_equipment_selected" and weapon.get("guid") == guid:
+                        return weapon
+                await asyncio.sleep(.04)
+
     async def matching_events():
         async with asyncio.timeout(8):
             while True:
@@ -55,18 +76,12 @@ async def verify_stock_held_queue(host, guest, pawn, probe):
                     return edges, terminals[0]
                 await asyncio.sleep(.04)
 
-    guid = uuid.uuid4().hex.upper()
-    seeded = await submit(host_run, "native-guest-weapon-seed", target="guest", item_guid=guid, kind=KIND)
-    if seeded["ok"]:
-        item = seeded["native_guest_weapon"]
-        assert (item["guid"], item["pawn"], item["stored_ammo"]) == (guid, pawn, ROUNDS), item
-    else:
-        assert seeded["error"] == "Action unavailable on the host", seeded
-        guid = await probe(host.bridge, "portable-held-queue", f"seed\t{pawn}")
-        assert re.fullmatch(r"[0-9A-F]{32}", guid), guid
+    guid = await probe(host.bridge, "portable-held-queue", f"seed\t{pawn}\t")
+    assert re.fullmatch(r"[0-9A-F]{32}", guid), guid
 
-    equipped = (await control(guest_run, "native-guest-weapon-equip", target=guid))["native_guest_weapon"]
     try:
+        selected = await stock_select(guid)
+        equipped = await accepted_selection(guid)
         assert (equipped["guid"], equipped["pawn"], equipped["actor_ammo"], equipped["stored_ammo"]) == (guid, pawn, ROUNDS, ROUNDS), equipped
         await scoped(guid, KIND)
         pressed = (await control(guest_run, native_smg_hold.LOCAL_FIXTURE, target="press", milliseconds=400))[FIXTURE]
@@ -96,7 +111,8 @@ async def verify_stock_held_queue(host, guest, pawn, probe):
         # The press fixture returns only after publishing its exact sequence. The accepted host edge and
         # absent mailbox files prove that press used the same in-process bridge as the release receipt.
         return {"stock_held_queue": {"press": pressed, "release": released, "release_publication": expected,
+                                     "guest_selection": selected, "host_selection": equipped,
                                      "guest_edges": edges, "host_terminal": terminal}}
     finally:
-        await control(guest_run, "native-guest-weapon-equip", target=previous["guid"])
+        await stock_select(previous["guid"])
         await scoped(previous["guid"], previous["kind"])
