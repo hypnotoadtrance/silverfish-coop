@@ -1,6 +1,7 @@
 """Witness the stock authored Lab East Wing pool on both installed co-op seats."""
 
 import asyncio
+import json
 import math
 from pathlib import Path
 
@@ -16,13 +17,13 @@ _CONTROL = "AcidPool_BP_C_9"
 def acid_pool_overlay(game, portable_script_overlay):
     fixture = (Path(__file__).with_name("fixtures") / "portable_acid_pool_probe.lua").read_text(encoding="utf-8")
     declarations = "function pools.rows(state, phase, row)\n"
-    publication = "    if current.guest then\n"
+    publication = "    if not current or not current.complete or #current.ids == 0 then return end\n"
 
     def add_fixture(script):
         if script.count(declarations) != 1 or script.count(publication) != 1:
             raise ValueError("The private package lacks the authored acid pool lifecycle module")
         return (script.replace(declarations, fixture + "\n" + declarations, 1)
-                .replace(publication, "    poll_acid_fixture(state, current)\n" + publication, 1))
+                .replace(publication, "    poll_acid_fixture(state, phase, current)\n" + publication, 1))
 
     return portable_script_overlay(game, "native_acid_pools.lua", add_fixture)
 
@@ -91,14 +92,22 @@ async def verify_acid_pool(host, guest, probe):
     host_run, guest_run = host.campaign / "run", guest.client / "run"
     visits = await cross_to_east_wing(host, guest, probe)
     epoch = visits[-1]["epoch"]
-    await wait_resident_status(host_run, lambda f: {_POOL + ":a", _CONTROL + ":a"} <=
-                               set(f.get("game", {}).get(ACID_POOLS, ())))
-    await wait_resident_status(guest_run, lambda f: f.get("game", {}).get(ACID_POOL_VIEW) ==
-                               {"map": EAST_WING, "epoch": epoch})
-    before = campaign_save_hashes(host.campaign)
 
     async def operate(seat, action):
         return await probe(seat.bridge, "portable-acid-pool", action)
+
+    qualification = await asyncio.gather(*(operate(seat, "qualify") for seat in (host, guest)), return_exceptions=True)
+    evidence = dict(zip(("host", "guest"), map(str, qualification), strict=True))
+    (host_run / "portable-acid-pool-qualification.json").write_text(
+        json.dumps({"stock_route": visits, "qualification": evidence}, indent=2) + "\n", encoding="utf-8")
+    for result in qualification:
+        if isinstance(result, BaseException):
+            raise result
+    await wait_resident_status(host_run, lambda f: {_POOL + ":a", _CONTROL + ":a"} <=
+                               set(f.get("game", {}).get(ACID_POOLS, ())), timeout=12)
+    await wait_resident_status(guest_run, lambda f: f.get("game", {}).get(ACID_POOL_VIEW) ==
+                               {"map": EAST_WING, "epoch": epoch})
+    before = campaign_save_hashes(host.campaign)
 
     authority, observer = await asyncio.gather(*(operate(seat, "read") for seat in (host, guest)))
     host_initial, host_control = pool_readback(authority)

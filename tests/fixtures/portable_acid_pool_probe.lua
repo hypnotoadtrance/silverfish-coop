@@ -71,7 +71,66 @@ local function enter_acid(current, actor, victim, other)
     error("No isolated stock pool overlap accepted the authoritative guest", 0)
 end
 
-local function acid_fixture(command, state, current)
+local function acid_qualification(state, phase, current)
+    local function read(get)
+        local ok, result = pcall(get)
+        return ok and tostring(result) or "unavailable"
+    end
+    local native = type(SilverfishNativeAuthoredAcidPool) == "function"
+    local actors = FindAllOf("AcidPool_BP_C") or {}
+    local rows = {("phase=%s;native=%s;found=%d;accepted=%s;complete=%s"):format(
+        phase, tostring(native), #actors, tostring(current and #current.ids), tostring(current and current.complete))}
+    local level = state.world.PersistentLevel
+    for _, id in ipairs({acid_id, acid_control}) do
+        local expected = acid_area .. ".Lab_EastWing_P:PersistentLevel." .. id
+        local actor = StaticFindObject(expected)
+        local found = valid(actor)
+        if not found then
+            for index = 1, math.min(64, #actors) do
+                local candidate = actors[index]
+                if live(candidate) and same(candidate:GetWorld(), state.world) and candidate:GetFName():ToString() == id then
+                    actor = candidate
+                    break
+                end
+            end
+        end
+        local fields = {id, "static=" .. tostring(found), "object=" .. tostring(live(actor))}
+        local function record(name, getter)
+            fields[#fields + 1] = name .. "=" .. read(getter)
+        end
+        if live(actor) then
+            local full = actor:GetFullName()
+            local dot = actor.DotVolume
+            record("path", function() return full end)
+            record("same_world", function() return same(actor:GetWorld(), state.world) end)
+            record("level_outer", function() return same(actor:GetOuter(), level) end)
+            record("was_loaded", function() return actor:HasAnyFlags(EObjectFlags.RF_WasLoaded) end)
+            record("role", function() return actor:GetLocalRole() end)
+            record("authority", function() return actor:HasAuthority() end)
+            record("replicates", function() return actor.bReplicates end)
+            record("dot", function() return valid(dot) and dot:GetClass():GetFullName() end)
+            if valid(dot) then
+                record("dot_outer", function() return dot:GetOuter():GetFullName() end)
+                record("dot_outer_is_pool", function() return same(dot:GetOuter(), actor) end)
+                record("dot_owner_is_pool", function() return same(dot:GetOwner(), actor) end)
+                record("dot_active", function() return dot.DotActive end)
+            end
+            local path = full:match("^AcidPool_BP_C (.+)$")
+            if native and path then
+                record("native_result", function()
+                    local qualified, guest = SilverfishNativeAuthoredAcidPool(path, state.world:GetAddress())
+                    return tostring(qualified) .. "/" .. tostring(guest)
+                end)
+            end
+        end
+        rows[#rows + 1] = table.concat(fields, ";")
+    end
+    return table.concat(rows, "|")
+end
+
+local function acid_fixture(command, state, phase, current)
+    if command == "qualify" then return acid_qualification(state, phase, current) end
+    assert(current and current.complete, "the authored pool census is unavailable")
     local entry, sibling = current.entries[acid_id], current.entries[acid_control]
     assert(entry and sibling and entry.path == acid_area .. ".Lab_EastWing_P:PersistentLevel." .. acid_id,
         "the qualified Lab East Wing pool and its control are not present")
@@ -129,7 +188,7 @@ local function acid_fixture(command, state, current)
         trial.host_before, host.Save.PlayerHealth)
 end
 
-local function poll_acid_fixture(state, current)
+local function poll_acid_fixture(state, phase, current)
     if state.map ~= acid_area or os.getenv("SILVERFISH_COOP_HEADLESS") ~= "1"
         or os.getenv("SILVERFISH_COOP_TITLE_FIXTURES") ~= "1" or not acid_mailbox
         or not acid_mailbox:match("[/\\]portable%-title%-%x+[/\\][%a]+[/\\]titles[/\\]local[/\\]run[/\\]game%-bridge[/\\]%x+$") then
@@ -144,7 +203,7 @@ local function poll_acid_fixture(state, current)
     if request then ticket, command = request:match("^([0-9a-f]+)\t([a-z%-]+)$") end
     if not ticket or #ticket ~= 32 or ticket == acid_ticket then return end
     acid_ticket = ticket
-    local ok, response = pcall(acid_fixture, command, state, current)
+    local ok, response = pcall(acid_fixture, command, state, phase, current)
     local output = assert(io.open(prefix .. "-reply.tsv", "wb"))
     output:write(ticket, "\t", ok and "ok" or "error", "\t", (tostring(response):gsub("[\r\n\t]", " ")))
     output:close()
