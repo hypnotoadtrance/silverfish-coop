@@ -295,6 +295,26 @@ function pickup.clear()
     if enabled and type(SilverfishClearNativeAuthoredPickup) == "function" then SilverfishClearNativeAuthoredPickup() end
 end
 
+function pickup.refresh_loose(current_world)
+    local current = binding
+    if not current or type(SilverfishDiscoverLoosePickups) ~= "function" then return end
+    local now = os.clock()
+    if now < current.next_loose or not same(current.world, current_world()) then return end
+    current.next_loose = now + 0.125
+    local pawn = current.pawn
+    if not valid(pawn) or not same(pawn:GetWorld(), current.world) then return end
+    local count, eligible, generation = SilverfishDiscoverLoosePickups(pawn:GetAddress(), current.host)
+    current.loose_count, current.loose_generation = count, generation
+    if not current.host or type(eligible) ~= "string" or eligible == "" then return end
+    local carry = require("native_prop_carry")
+    for path in eligible:gmatch("[^\n]+") do
+        local actor = StaticFindObject(path)
+        if carry.enroll_loose(actor) and type(SilverfishAcknowledgeLooseCarry) == "function" then
+            SilverfishAcknowledgeLooseCarry(path, actor:GetAddress())
+        end
+    end
+end
+
 function pickup.update(state, phase)
     local detail = state.local_pawn
     local pawn = detail and detail.pawn
@@ -308,21 +328,8 @@ function pickup.update(state, phase)
     end
     if not binding or binding.placements ~= placements or binding.host ~= host
         or not same(binding.pawn, pawn) or not same(binding.world, state.world) then
-        binding = {pawn = pawn, world = state.world, host = host, placements = placements}
+        binding = {pawn = pawn, world = state.world, host = host, placements = placements, next_loose = 0}
         report, loose_check = nil, nil
-    end
-    if type(SilverfishDiscoverLoosePickups) == "function" then
-        local count, eligible, generation = SilverfishDiscoverLoosePickups(pawn:GetAddress(), host)
-        binding.loose_count, binding.loose_generation = count, generation
-        if host and type(eligible) == "string" and eligible ~= "" then
-            local carry = require("native_prop_carry")
-            for path in eligible:gmatch("[^\n]+") do
-                local actor = StaticFindObject(path)
-                if carry.enroll_loose(actor) and type(SilverfishAcknowledgeLooseCarry) == "function" then
-                    SilverfishAcknowledgeLooseCarry(path, actor:GetAddress())
-                end
-            end
-        end
     end
     local active, unavailable, reason = {}, {}, nil
     for _, profile in ipairs(placements) do

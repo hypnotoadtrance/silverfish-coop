@@ -713,13 +713,21 @@ end
 
 local function sample_slice()
     local scan = sampler
-    if not scan or not same(active_world, scan.state.world) then return end
+    if not scan then return end
     local started = os.clock()
+    if started < scan.resume_at or not same(active_world, scan.state.world) then return end
+    if scan.next == 1 then scan.cycle_started = started end
     for _ = 1, math.ceil(#scan.profiles / 20) do
         local profile = scan.profiles[scan.next]
         local ok, observed = pcall(sample_profile, scan.state, scan.phase, scan.status_row, profile)
         scan.readings[profile.index] = ok and observed or nil
-        scan.next = scan.next % #scan.profiles + 1
+        if scan.next == #scan.profiles then
+            scan.next = 1
+            -- A short sweep should run at the same cadence as a long sweep.
+            scan.resume_at = scan.cycle_started + 0.25
+            break
+        end
+        scan.next = scan.next + 1
         if os.clock() - started >= 0.002 then break end
     end
 end
@@ -786,15 +794,17 @@ function input.rows(state, phase, status_row, fields, separate_details, requeste
     end
     if not same(active_world, state.world) then reset_world(state.world) end
     local readings
-    if periodic_sampling and #profiles > 12 then
+    if periodic_sampling then
         local pawn = detail.pawn
         if not sampler or not same(sampler.pawn, pawn) or sampler.phase ~= phase then
-            sampler = {pawn = pawn, profiles = profiles, phase = phase, status_row = status_row, readings = {}, next = 1}
+            sampler = {pawn = pawn, profiles = profiles, phase = phase, status_row = status_row,
+                readings = {}, next = 1, resume_at = 0}
         end
         sampler.state = state
         readings = sampler.readings
-        -- Command acknowledgements include immediate readback for affected containers.
-        if fields and fields[2] ~= "native-loot-crate-diagnostic" then
+        -- Crate commands retain immediate readback for the exact affected containers.
+        local command = fields and fields[2]
+        if command and command:match("^native%-loot%-") and command ~= "native-loot-crate-diagnostic" then
             for index = 3, #fields do
                 local profile = loot.profile(state.map, fields[index])
                 if profile then readings[profile.index] = sample_profile(state, phase, status_row, profile) end

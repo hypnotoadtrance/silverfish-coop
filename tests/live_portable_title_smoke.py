@@ -4973,7 +4973,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                        or resident_cabinet_archive is not None)
     try:
         if crossroads_profile:
-            from portable_crossroads_profile import instrument_input_mappings, instrument_profile
+            from portable_crossroads_profile import (instrument_inline_crate_scan, instrument_input_mappings,
+                                                     instrument_loose_discovery, instrument_profile)
 
             crate_probe = ((Path(__file__).with_name("fixtures") / "portable_crate_input_probe.lua").read_text(encoding="utf-8")
                            if stock_crate_ring else None)
@@ -4990,6 +4991,14 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["crossroads_input_overlays"] = [
                 probes.enter_context(portable_script_overlay(game, "players.lua", instrument_input_mappings))
                 for game in games
+            ]
+            proof["crossroads_loot_overlays"] = [
+                probes.enter_context(portable_script_overlay(game, name, instrument))
+                for game in games
+                for name, instrument in (
+                    ("native_loot_crate_input.lua", instrument_inline_crate_scan),
+                    ("native_authored_pickup.lua", instrument_loose_discovery),
+                )
             ]
         if stock_weather_travel:
             for game in games:

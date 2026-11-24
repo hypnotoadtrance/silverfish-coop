@@ -1929,6 +1929,7 @@ LoopInGameThreadWithDelay(25, function()
     if not leaving and role == "host" then pcall(native_mushrooms.update, current_world) end
     if not leaving and (role == "host" or role == "client") then
         pcall(native_anomaly_fields.update_destructibles, current_world)
+        pcall(native_authored_pickup.refresh_loose, current_world)
     end
     if not leaving then pcall(native_prop_carry.update) end
     if role == "client" and not leaving then pcall(native_corpse_view.animate, current_world) end

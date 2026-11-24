@@ -47,6 +47,22 @@ def instrument_input_mappings(source):
     return source.replace(original, "local function collect_mapping(").replace(anchor, wrapper + anchor)
 
 
+def instrument_inline_crate_scan(source):
+    anchor = "readings = sample(state, phase, status_row, profiles)"
+    if source.count(anchor) != 1:
+        raise ValueError("The inline crate sampling anchor changed")
+    return source.replace(anchor, 'readings = SilverfishProfileCrossroadsCall("crate_inline_scan", '
+                          'sample, state, phase, status_row, profiles)')
+
+
+def instrument_loose_discovery(source):
+    anchor = "SilverfishDiscoverLoosePickups(pawn:GetAddress(), current.host)"
+    if source.count(anchor) != 1:
+        raise ValueError("The loose-item discovery anchor changed")
+    return source.replace(anchor, 'SilverfishProfileCrossroadsCall("loose_discovery", '
+                          'SilverfishDiscoverLoosePickups, pawn:GetAddress(), current.host)')
+
+
 def read_comparison(raw):
     summary, slow_frame = raw.split("!")
     duration, *sections = summary.split(";")
@@ -81,7 +97,11 @@ async def profile_world(host, guest, area, probe):
 
     async def collect():
         profiles = await asyncio.gather(*(read(seat) for seat in seats.values()))
-        assert all("command_mailbox" not in profile["timings"] for profile in profiles), profiles
+        for profile in profiles:
+            timings = profile["timings"]
+            assert "command_mailbox" not in timings and "crate_inline_scan" not in timings, profile
+            discoveries = timings["loose_discovery"]["count"]
+            assert 0 < discoveries <= math.ceil(profile["seconds"] / .125) + 1, profile
         return dict(zip(seats, profiles, strict=True))
 
     def position(status):
