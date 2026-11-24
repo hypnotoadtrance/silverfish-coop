@@ -109,7 +109,7 @@ end
 local function filter_root(entry, grip)
     local actor = entry.actor
     local root = rigid_root(entry, grip, FName("None", EFindName.FNAME_Find))
-    if root and same(root, prop_mesh(actor)) and actor.bReplicates == true
+    if root and same(root, prop_mesh(actor))
         and same(actor:GetOuter(), world.PersistentLevel) then return root end
 end
 
