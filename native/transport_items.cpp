@@ -1475,30 +1475,29 @@ namespace
             restore->HasAnyFunctionFlags(Unreal::FUNC_Native | Unreal::FUNC_Net) ||
             !item_struct(item, held.structure) || item->GetOffset_Internal() != 0 || item->GetSize() != 0x50 ||
             !success || success->GetOffset_Internal() != 0x50) return;
-        if (equipped_index && !worn_index && !*stacks && pack_equipment_drop(manager, panel, origin, guid, item_class))
+        if (equipped_index && !*stacks && pack_equipment_drop(manager, panel, origin, guid, item_class))
         {
             if (exact_canonical_drop_row(save, held, guid, saved_ammo, item_class))
                 host_drop_request = HostDropRequest{guid, 1, ++host_drop_sequence, false,
                     now + request_lease, manager, screen, panel, "equipped_drag_to_floor"};
             return;
         }
-        if (equipped_index && !worn_index) return;
-        // Stock drag has already taken the item. Restore its exact source row
-        // before the coordinator captures and debits it.
+        if (equipped_index) return;
+        // Stock drag has already taken the item from the backpack. Restore that
+        // stock row before the coordinator captures and debits its exact GUID.
         alignas(std::max_align_t) std::array<std::byte, 96> arguments{};
         item->InitializeValue(arguments.data());
         item->CopyCompleteValue(arguments.data(), held.value);
         manager->ProcessEvent(restore, arguments.data());
         const bool returned = success->GetPropertyValueInContainer(arguments.data());
         const ItemView original{held.artifact, held.structure, arguments.data()};
-        const bool exact_return = returned && exact_canonical_drop_row(save, original, guid, saved_ammo, item_class, worn_index);
+        const bool exact_return = returned && exact_canonical_drop_row(save, original, guid, saved_ammo, item_class);
         item->DestroyValue(arguments.data());
         if (!returned) return;
         manager->ProcessEvent(clear, nullptr);
         if (!exact_return) return;
         host_drop_request = HostDropRequest{guid, *stacks ? saved_ammo : 1, ++host_drop_sequence, false,
-                                           now + request_lease, manager, screen, panel,
-                                           worn_index ? "equipped_drag_to_floor" : "drag_to_floor"};
+                                           now + request_lease, manager, screen, panel, "drag_to_floor"};
     }
 
     [[nodiscard]] std::string_view stock_backpack_use(Unreal::UObject* item_class)
@@ -1692,7 +1691,7 @@ namespace
                                       !using_item && action != "equip" && !unequipping && !unload)) return;
         Unreal::UObject* prior_held{};
         if (unequipping) prior_held = selected_unequip_actor(save, item_class, *equipped_index);
-        else if (!unload && equipped_index && !worn_drop)
+        else if (!unload && equipped_index && (!worn_drop || scope.host))
         {
             auto* hover = field<Unreal::FObjectProperty>(manager, STR("HoveredCard"));
             auto* begin = stock_no_args(manager, Unreal::FName(STR("InitiateItemTake")));

@@ -1,5 +1,4 @@
 #include "guest_armor.hpp"
-#include "interaction_input.hpp"
 
 #include <algorithm>
 #include <array>
@@ -181,25 +180,16 @@ namespace
     {
         U::UObject *pawn{}, *guest{}, *stock{}, *instance{}, *controller{}, *connection{};
         U::UWorld* world{};
-        bool host_drop{};
 
         bool current() const
         {
             if (!live(world) || !authority(pawn, world) || !authority(controller, world) ||
-                !live(guest) || !live(stock) || !live(instance) ||
+                !live(guest) || !live(stock) || guest == stock || !live(instance) || !live(connection) ||
                 object(pawn, STR("Save")) != guest || object(world, STR("OwningGameInstance")) != instance ||
                 object(pawn, STR("As Game Instance FP")) != instance || object(instance, STR("SaveSlot_Ref")) != stock ||
                 object(pawn, STR("Controller")) != controller || object(controller, STR("Pawn")) != pawn ||
                 object(controller, STR("Player")) != connection) return false;
             auto* driver = object(world, STR("NetDriver"));
-            if (host_drop)
-            {
-                return guest == stock && live(driver) && object(driver, STR("World")) == world &&
-                    field<U::FObjectProperty>(driver, STR("ServerConnection")) &&
-                    !object(driver, STR("ServerConnection")) &&
-                    silverfish::native_interaction_input::current_local_pawn(reinterpret_cast<std::uintptr_t>(pawn)) == pawn;
-            }
-            if (guest == stock || !live(connection)) return false;
             auto* clients = field<U::FArrayProperty>(driver, STR("ClientConnections"));
             auto* entry = clients ? U::CastField<U::FObjectProperty>(clients->GetInner()) : nullptr;
             auto* net_connection = find<U::UClass>(STR("/Script/Engine.NetConnection"));
@@ -222,7 +212,7 @@ namespace
             return matched == 1;
         }
 
-        bool bind(std::uintptr_t pawn_address, std::uintptr_t save_address, bool allow_host_drop = false)
+        bool bind(std::uintptr_t pawn_address, std::uintptr_t save_address)
         {
             auto* klass = find<U::UClass>(pawn_path);
             U::UObjectGlobals::ForEachUObject([&](U::UObject* candidate, int, int) {
@@ -235,7 +225,6 @@ namespace
             guest = object(pawn, STR("Save"));
             instance = object(world, STR("OwningGameInstance"));
             stock = object(instance, STR("SaveSlot_Ref"));
-            host_drop = allow_host_drop && guest == stock;
             controller = object(pawn, STR("Controller"));
             connection = object(controller, STR("Player"));
             auto* save_class = find<U::UClass>(save_path);
@@ -520,23 +509,18 @@ namespace
             return inventory.locate(save, selected, index, worn) && index < 0 && !worn &&
                 (replaced == Guid{} || (inventory.locate(save, replaced, index, worn) && index < 0 && !worn));
         };
-        if (!isolated(scope.guest, true) || (!scope.host_drop && !isolated(scope.stock, false))) return false;
+        if (!isolated(scope.guest, true) || !isolated(scope.stock, false)) return false;
         auto* driver = object(scope.world, STR("NetDriver"));
         auto* connections = field<U::FArrayProperty>(driver, STR("ClientConnections"));
         auto* entry = connections ? U::CastField<U::FObjectProperty>(connections->GetInner()) : nullptr;
         if (!entry) return false;
         U::FScriptArrayHelper clients(connections, connections->ContainerPtrToValuePtr<void>(driver));
-        if (clients.Num() < (scope.host_drop ? 0 : 1) || clients.Num() > max_clients) return false;
+        if (clients.Num() < 1 || clients.Num() > max_clients) return false;
         for (int i = 0; i < clients.Num(); ++i)
         {
             auto* connection = entry->GetObjectPropertyValue(clients.GetRawPtr(i));
             auto* saved = object(object(object(connection, STR("PlayerController")), STR("Pawn")), STR("Save"));
-            if (connection == scope.connection || !saved) continue;
-            if (saved == scope.stock)
-            {
-                if (scope.host_drop) return false;
-                continue;
-            }
+            if (connection == scope.connection || !saved || saved == scope.stock) continue;
             if (saved == scope.guest || !exact(saved, scope.stock->GetClassPrivate()) || !isolated(saved, false)) return false;
         }
         return true;
@@ -1090,7 +1074,7 @@ namespace
         Guid guid{};
         Scope scope;
         if (pawn <= 0 || guest <= 0 || !read_guid(lua.get_string(), guid) ||
-            !scope.bind(static_cast<std::uintptr_t>(pawn), static_cast<std::uintptr_t>(guest), drop))
+            !scope.bind(static_cast<std::uintptr_t>(pawn), static_cast<std::uintptr_t>(guest)))
             return report(lua, false, "native_guest_armor_exact_owner_required");
         constexpr bool project = operation == Operation::Project || operation == Operation::ProjectHelmet;
         const bool head = operation == Operation::EquipHelmet || operation == Operation::ProjectHelmet || (remove && slot == 8);
@@ -1099,8 +1083,7 @@ namespace
             auto* health = field<U::FDoubleProperty>(scope.guest, STR("PlayerHealth"));
             if (!health || !std::isfinite(health->GetPropertyValueInContainer(scope.guest)) ||
                 health->GetPropertyValueInContainer(scope.guest) <= 0 ||
-                !boolean(scope.pawn, STR("Dead"), false) ||
-                (!scope.host_drop && !boolean(scope.pawn, STR("IsWeaponBlocked"), false)) ||
+                !boolean(scope.pawn, STR("Dead"), false) || !boolean(scope.pawn, STR("IsWeaponBlocked"), false) ||
                 !boolean(scope.pawn, STR("UsingItem"), false) || !boolean(scope.pawn, STR("Reloading"), false))
                 return report(lua, false, "native_guest_armor_pawn_ineligible");
         }

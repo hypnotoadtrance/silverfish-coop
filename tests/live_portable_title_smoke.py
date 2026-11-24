@@ -4543,7 +4543,7 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
                                                       before_join=startup.arm, on_join=startup.joined,
                                                       after_reconnect=check_reconnect,
                                                       wait_status=wait_resident_status, **exit_options))
-        elif stock_unequip:
+        elif stock_unequip and not resident_campaigns:
             proof["sessions"].append(await verify_stock_unequip(first, second, proof.setdefault("stock_unequip", {})))
         elif stock_prop_grip:
             proof["sessions"].append(await start_pair(first, second, "Lantern scout", on_join=verify_stock_prop_grip))
@@ -4559,6 +4559,8 @@ async def verify(work: Path, first_game: Path, second_game: Path, original: Path
             proof["resident_campaigns"] = {campaign: [name for name, _ in checks]
                                            for campaign, checks in resident_campaigns.items()}
             used_ports = {first.port, second.port}
+            if stock_unequip:
+                proof["sessions"].append(await verify_stock_unequip(first, second, proof.setdefault("stock_unequip", {})))
 
             async def run_resident_campaign(campaign, checks, host):
                 campaign_started = time.perf_counter()
