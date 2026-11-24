@@ -2989,6 +2989,14 @@ class Bridge:
                     row = [values[:3], *values[3:]]
                     if len(observers) < native_anomaly_effects.MAX_ANGLER_LAMPS and native_anomaly_effects.valid_observer_opacity(row):
                         observers.append(row)
+                elif (fields[0] == "native-glass-thread-work" and len(fields) == 6
+                      and data.get("state") == "hosting"):
+                    batches, peak, micros, deferred, pending = map(int, fields[1:])
+                    if 0 < peak <= 8 and 0 <= deferred <= batches <= 100000 and micros >= 0 and pending in {0, 1}:
+                        data["native_glass_thread_work"] = {
+                            "batches": batches, "peak": peak, "max_us": micros,
+                            "deferred_batches": deferred, "pending": bool(pending),
+                        }
                 elif fields[0] == "native-glass-thread-mesh" and len(fields) == 14:
                     meshes = data.setdefault("native_glass_thread_meshes", [])
                     if len(meshes) < 2048 and fields[4] in {"0", "1"}:

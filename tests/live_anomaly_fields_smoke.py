@@ -59,6 +59,9 @@ async def verify_glass_web(host, guest, positions):
         return result
 
     initial = {}
+    work = (await wait(host, lambda state: (work := state.get("game", {}).get("native_glass_thread_work", {}))
+                       and work["deferred_batches"] > 0 and not work["pending"]))["game"]["native_glass_thread_work"]
+    assert work["batches"] > 1 and 0 < work["peak"] <= 8, work
 
     def geometry_matches(client):
         nonlocal initial
@@ -161,7 +164,7 @@ async def verify_glass_web(host, guest, positions):
         assert all(not row["collision"] for row in strands(synced)), strands(synced)
         return {"host_strands": len(host_strands), "guest_relevant_strands": len(guest_strands),
                 "guest_relevant_meshes": len(meshes(passive)), "guest_passive": True,
-                "contacts": observed,
+                "contacts": observed, "mesh_publication": work,
                 "guest_health": [health["guest"]["health"], synced["game"]["pawns"]["local"]["health"]]}
     raise AssertionError(f"No contact produced the stock 25-point cut after {len(observed)} verified snaps")
 

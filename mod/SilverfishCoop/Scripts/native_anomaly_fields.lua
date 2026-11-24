@@ -37,6 +37,9 @@ local pending, active, pending_fires, fires, fixtures = {}, {}, {}, {}, {}
 local wandering_hooks, wandering_retry = {}, {}
 local world, world_map, fixture_kind, wandering_probe
 local recovery, glass_break_hook
+local glass_pending, glass_live = {}, {}
+local glass_work = {}
+local glass_batch_limit, glass_time_budget = 8, .002
 
 local function valid(object)
     return object ~= nil and object ~= false and object:IsValid()
@@ -202,6 +205,20 @@ local function glass_meshes(actor)
     return meshes
 end
 
+local function bind_glass_break()
+    if glass_break_hook or type(RegisterHook) ~= "function" then return end
+    local path = classes["glass-thread"] .. ":Break"
+    if not valid(StaticFindObject(path)) then return end
+    RegisterHook(path, function(context)
+        local thread = context:get()
+        if not in_world(thread, world) or not thread:HasAuthority() then return end
+        local address = thread:GetAddress()
+        local entry = glass_live[address] or glass_pending[address]
+        if entry and same(entry.actor, thread) then entry.break_requested = true end
+    end)
+    glass_break_hook = true
+end
+
 local function share_glass_meshes(actor)
     local meshes = glass_meshes(actor)
     local main, root = actor.StaticMesh, actor.RootComponent
@@ -209,20 +226,6 @@ local function share_glass_meshes(actor)
     local math_api = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
     local mesh_class = StaticFindObject("/Script/Engine.StaticMeshComponent")
     if not valid(math_api) or not valid(mesh_class) then return false end
-    if not glass_break_hook and type(RegisterHook) == "function" then
-        local path = classes["glass-thread"] .. ":Break"
-        if valid(StaticFindObject(path)) then
-            RegisterHook(path, function(context)
-                local thread = context:get()
-                if not in_world(thread, world) or not thread:HasAuthority() then return end
-                local entry = active[thread:GetAddress()]
-                if entry and entry.kind == "glass-thread" and same(entry.actor, thread) then
-                    entry.break_requested = true
-                end
-            end)
-            glass_break_hook = true
-        end
-    end
     actor.NetUpdateFrequency = math.min(actor.NetUpdateFrequency, 5)
     actor:SetReplicates(true)
     main:SetIsReplicated(true)
@@ -253,6 +256,30 @@ local function share_glass_meshes(actor)
     return true
 end
 
+local function publish_glass(current)
+    if not next(glass_pending) or not same(current(), world) then return end
+    local started, count = os.clock(), 0
+    for _ = 1, glass_batch_limit do
+        local address, entry = next(glass_pending)
+        if not entry then break end
+        glass_pending[address] = nil
+        local actor = entry.actor
+        if in_world(actor, world) and actor:HasAuthority() and share_glass_meshes(actor) then
+            actor:SetReplicateMovement(true)
+            actor:ForceNetUpdate()
+            glass_live[address] = entry
+        end
+        count = count + 1
+        if os.clock() - started >= glass_time_budget then break end
+    end
+    if headless then
+        glass_work.batches = (glass_work.batches or 0) + 1
+        glass_work.peak_batch = math.max(glass_work.peak_batch or 0, count)
+        glass_work.peak_us = math.max(glass_work.peak_us or 0, math.floor((os.clock() - started) * 1e6))
+        if next(glass_pending) then glass_work.deferred = (glass_work.deferred or 0) + 1 end
+    end
+end
+
 local function burner_source(actor)
     local point, source = actor:K2_GetActorLocation(), nil
     local duration = actor.BurnTime
@@ -270,13 +297,15 @@ local function burner_source(actor)
     return source
 end
 
-function fields.start(role)
+function fields.start(role, current)
     if type(SilverfishSetNativeAnomalyGuest) ~= "function" or type(RegisterBeginPlayPreHook) ~= "function"
         or type(RegisterBeginPlayPostHook) ~= "function" then return end
     lamps.start()
     observers.start()
     LoopInGameThreadWithDelay(25, function()
-        if recovery and role() == (recovery.phase == "hosting" and "host" or "client") then recover_family() end
+        local seat = role()
+        if recovery and seat == (recovery.phase == "hosting" and "host" or "client") then recover_family() end
+        if seat == "host" and next(glass_pending) then publish_glass(current) end
     end)
     RegisterBeginPlayPreHook(function(context)
         local seat = role()
@@ -331,6 +360,11 @@ function fields.start(role)
         local placed, local_copy
         if kind then placed, local_copy = placement(actor) end
         if seat == "host" and not actor:HasAuthority() then return end
+        if seat == "host" and kind == "glass-thread" then
+            bind_glass_break()
+            glass_pending[actor:GetAddress()] = {actor = actor}
+            return
+        end
         if seat == "client" and not local_copy and not replica(actor) then
             if (kind == "glass-thread" or disables_replica_tick(kind)) and actor:GetLocalRole() == 1 then
                 pending[actor:GetAddress()] = {actor = actor, kind = kind}
@@ -361,9 +395,10 @@ function fields.start(role)
             local destroyed = reason:get() == 0
             if seat == "host" and entry and entry.kind == "electrode" and destroyed then
                 electrodes.retire(entry)
-            elseif seat == "host" and entry and entry.kind == "glass-thread" and entry.break_requested and destroyed then
-                effects.observe_glass_break(actor)
             end
+            local strand = glass_live[address] or glass_pending[address]
+            if seat == "host" and strand and strand.break_requested and destroyed then effects.observe_glass_break(actor) end
+            glass_live[address], glass_pending[address] = nil, nil
             active[address], pending[address], fires[address], pending_fires[address] = nil, nil, nil, nil
             pyrogeist.ended(address)
             canisters.ended(address, destroyed)
@@ -420,9 +455,9 @@ function fields.command(args, state, phase)
     if headless and #args == 3 and glass_point
         and (args[2] == "native-placed-anomaly-guest-fixture" and phase == "connected" and not glass_contact
             or args[2] == "native-anomaly-trigger-fixture" and phase == "hosting" and host_fixture) then
-        for _, entry in pairs(active) do
+        for _, entry in pairs(glass_live) do
             local actor = entry.actor
-            if entry.kind == "glass-thread" and in_world(actor, state.world)
+            if in_world(actor, state.world)
                 and (phase == "hosting" and actor:HasAuthority() or phase == "connected" and replica(actor)) then
                 local point = actor:K2_GetActorLocation()
                 if ("%.0f,%.0f,%.0f"):format(point.X, point.Y, point.Z) == glass_point then
@@ -543,6 +578,7 @@ function fields.rows(state, phase, row)
     end
     if not same(world, state.world) or world_map ~= state.map then
         active, fires, fixtures, world, world_map = {}, {}, {}, state.world, state.map
+        glass_live, glass_work = {}, {}
         recovery, wandering_retry = nil, {}
         effects.clear()
         electrodes.clear()
@@ -578,13 +614,11 @@ function fields.rows(state, phase, row)
                     actor:SetActorEnableCollision(false)
                     if disables_replica_tick(entry.kind) then actor:SetActorTickEnabled(false) end
                 end
-                if actor:GetActorEnableCollision() == false and (entry.kind ~= "glass-thread" or replica(actor)) then
+                if entry.kind == "glass-thread" then
+                    if replica(actor) then glass_live[address] = entry end
+                elseif actor:GetActorEnableCollision() == false then
                     active[address] = entry
                 end
-            elseif entry.kind == "glass-thread" and share_glass_meshes(actor) then
-                actor:SetReplicateMovement(true)
-                actor:ForceNetUpdate()
-                active[address] = entry
             elseif entry.placed or entry.travel_source or actor:ActorHasTag(FName("Anomaly")) then
                 -- SpawnField applies its stock tag after finishing the spawned actor's BeginPlay.
                 actor.NetUpdateFrequency = math.min(actor.NetUpdateFrequency, 5)
@@ -636,24 +670,10 @@ function fields.rows(state, phase, row)
             if phase == "connected" and entry.placed and actor:GetActorEnableCollision() then
                 actor:SetActorEnableCollision(false)
             end
-            if entry.kind ~= "glass-thread" then live = live + 1 end
+            live = live + 1
             local position = actor:K2_GetActorLocation()
             local collision = actor:GetActorEnableCollision() and 1 or 0
-            if entry.kind ~= "glass-thread" or headless then
-                rows[#rows + 1] = row("native-anomaly-position", entry.kind, position.X, position.Y, position.Z, collision)
-            end
-            if headless and entry.kind == "glass-thread" then
-                for _, mesh in ipairs(glass_meshes(actor)) do
-                    local root = same(mesh, actor.StaticMesh) and 1 or 0
-                    -- Compare branch geometry in actor space so stock movement
-                    -- quantization of the actor pose does not amplify at the ends.
-                    local location = root == 1 and mesh:K2_GetComponentLocation() or mesh.RelativeLocation
-                    local rotation = root == 1 and mesh:K2_GetComponentRotation() or mesh.RelativeRotation
-                    local scale = mesh.RelativeScale3D
-                    rows[#rows + 1] = row("native-glass-thread-mesh", position.X, position.Y, position.Z, root,
-                        location.X, location.Y, location.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, scale.X, scale.Y, scale.Z)
-                end
-            end
+            rows[#rows + 1] = row("native-anomaly-position", entry.kind, position.X, position.Y, position.Z, collision)
             if entry.placed then
                 rows[#rows + 1] = row("native-placed-anomaly", entry.placed, entry.kind, position.X, position.Y, position.Z,
                     collision, actor:GetLocalRole())
@@ -675,6 +695,29 @@ function fields.rows(state, phase, row)
         else
             if phase == "hosting" and entry.kind == "electrode" then electrodes.retire(entry) end
             active[address] = nil
+        end
+    end
+    if headless then
+        if phase == "hosting" and glass_work.batches then
+            rows[#rows + 1] = row("native-glass-thread-work", glass_work.batches, glass_work.peak_batch,
+                glass_work.peak_us, glass_work.deferred or 0, next(glass_pending) and 1 or 0)
+        end
+        for _, entry in pairs(glass_live) do
+            local actor = entry.actor
+            if in_world(actor, world) and valid(actor.RootComponent) then
+                local position = actor:K2_GetActorLocation()
+                rows[#rows + 1] = row("native-anomaly-position", "glass-thread", position.X, position.Y, position.Z,
+                    actor:GetActorEnableCollision() and 1 or 0)
+                for _, mesh in ipairs(glass_meshes(actor)) do
+                    local root = same(mesh, actor.StaticMesh)
+                    -- Compare branches in actor space so root movement quantization does not amplify at the ends.
+                    local location = root and mesh:K2_GetComponentLocation() or mesh.RelativeLocation
+                    local rotation = root and mesh:K2_GetComponentRotation() or mesh.RelativeRotation
+                    local scale = mesh.RelativeScale3D
+                    rows[#rows + 1] = row("native-glass-thread-mesh", position.X, position.Y, position.Z, root and 1 or 0,
+                        location.X, location.Y, location.Z, rotation.Pitch, rotation.Yaw, rotation.Roll, scale.X, scale.Y, scale.Z)
+                end
+            end
         end
     end
     local skipped, blocked, blocked_canisters, blocked_fixed = 0, 0, 0, 0
