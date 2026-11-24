@@ -3,7 +3,7 @@ local guest_save = require("guest_save")
 local host_save = require("native_host_save")
 local statics_path = "/Script/Engine.Default__GameplayStatics"
 local stash_class = "/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C"
-local site_cache, report, moved
+local site_cache, construction_notifications, report, moved
 local snapshots = {}
 local snapshot_lifetime, max_snapshots = 45, 5
 local page_size, snapshot_page_size, max_items = 16, 32, 4096
@@ -30,11 +30,18 @@ local function queue_site(cache, actor, now)
     end
 end
 
--- Construction is earlier than the stock BeginPlay that binds GameInstanceFP and initializes Stash_ID.
-local construction_notifications = type(NotifyOnNewObject) == "function" and pcall(NotifyOnNewObject, stash_class,
-    function(actor)
-        if site_cache then queue_site(site_cache, actor, os.clock()) end
-    end)
+local function watch_site_construction()
+    if construction_notifications ~= nil then return end
+    -- Construction is earlier than the stock BeginPlay that binds GameInstanceFP and initializes Stash_ID.
+    construction_notifications = type(NotifyOnNewObject) == "function" and pcall(NotifyOnNewObject, stash_class,
+        function(actor)
+            if not site_cache then
+                construction_notifications = nil
+                return true
+            end
+            queue_site(site_cache, actor, os.clock())
+        end)
+end
 
 local function seed_sites(cache, now)
     if (cache.seeded and construction_notifications) or now < cache.retry_at then return end
@@ -126,6 +133,7 @@ local function selected_sites(state, phase)
         if not leaf then return end
         site_cache = {world = state.world, map = state.map, instance = instance, actors = {}, retry_at = 0,
             prefix = state.map .. "." .. leaf .. ":PersistentLevel."}
+        watch_site_construction()
     end
     return current_sites(site_cache), pawn, combined
 end

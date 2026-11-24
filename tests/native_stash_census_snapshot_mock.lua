@@ -29,9 +29,10 @@ local function site_actor(index, id)
         GetFullName = function() return "Stash_Crate_BP_C " .. map .. ".Observitory_P:PersistentLevel.Stash_Crate_BP_C_" .. index end})
 end
 local actor, world_scans, class_loaded = site_actor(0, 1), 0, true
+local constructed
 local statics = object({
     GetAllActorsOfClass = function(_, requested_world, type, found)
-        assert(requested_world == world and type == base)
+        assert(requested_world == world and type == base and constructed)
         world_scans = world_scans + 1
         found[1] = actor
     end,
@@ -64,7 +65,6 @@ local live_reads, legacy_reads, count, clock = 0, 0, 34, 10
 local real_time, real_clock, census_clock = os.time, os.clock, 0
 os.time = function() return clock end
 os.clock = function() return census_clock end
-local constructed
 function NotifyOnNewObject(path, callback)
     assert(path == "/Game/Classes/Actors/Stash_Master_BP.Stash_Master_BP_C" and not constructed)
     constructed = callback
@@ -85,6 +85,7 @@ end
 local stash = require("native_stash")
 local token, other_token = string.rep("a", 32), string.rep("b", 32)
 local function row(...) return {...} end
+assert(not constructed and #stash.rows(state, "singleplayer", row) == 0 and world_scans == 0)
 local function read(offset, nonce, slot)
     stash.reset()
     stash.command({"ticket", "native-stash-census", "Guest", slot or "-", site, tostring(offset), nonce}, state, "hosting")
@@ -174,5 +175,12 @@ constructed(late)
 assert(visible_sites()[site] == late:GetFullName() and world_scans == 2)
 state.map = "/Game/Classes/Maps/Maps_OverWorld/CrossRoads_P"
 assert(not visible_sites()[site] and world_scans == 3)
+assert(#stash.rows(state, "singleplayer", row) == 0)
+assert(constructed(late) == true)
+constructed = nil
+state.map = map
+assert(not visible_sites()[site] and world_scans == 4)
+constructed(late)
+assert(visible_sites()[site] == late:GetFullName() and world_scans == 4)
 os.time, os.clock = real_time, real_clock
 print("Stock stash snapshots and site discovery preserve ownership, pages, and world lifecycle")
