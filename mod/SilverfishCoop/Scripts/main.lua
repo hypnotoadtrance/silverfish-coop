@@ -1374,21 +1374,25 @@ local function write_status(state, current_phase, failure, fields, pending, crat
             for _, row in ipairs(native_world_view.ambience_rows(status_row)) do rows[#rows + 1] = row end
         end
     end
-    local viewed_health, viewed_food, viewed_regen, viewed_stim = native_save_scope.guest_vitals(state, current_phase)
+    local viewed_health, viewed_food, viewed_regen, viewed_stim, viewed_save = native_save_scope.guest_vitals(state, current_phase)
     for _, details in ipairs(state.pawns) do
         if finite(details.x) and finite(details.y) and finite(details.z) then
             local health = details == state.local_pawn and viewed_health or details.health
             rows[#rows + 1] = status_row("pawn", details.slot or details.kind, details.name, health or "-",
                 details.x, details.y, details.z, details.controller, details.max_health or "-")
-            local food, regen, stim
+            local food, regen, stim, personal_save
             if details == state.local_pawn then
                 food, regen, stim = viewed_food, viewed_regen, viewed_stim
+                personal_save = viewed_save
             elseif current_phase == "hosting" and valid(details.save) and guest_save.matches(details.pawn) then
                 food, regen, stim = details.save.PlayerFood, details.save.PlayerRegen, details.save.PlayerStim
+                personal_save = details.save
             end
             if finite(food) or finite(regen) or finite(stim) then
+                local fatigue, intox = native_save_scope.personal_flags(personal_save)
                 rows[#rows + 1] = status_row("native-guest-vitals", details.name, finite(food) and food or "-",
-                    finite(regen) and regen or "-", finite(stim) and stim or "-")
+                    finite(regen) and regen or "-", finite(stim) and stim or "-",
+                    math.type(fatigue) == "integer" and fatigue or "-", math.type(intox) == "integer" and intox or "-")
             end
         end
     end

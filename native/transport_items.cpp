@@ -2909,36 +2909,53 @@ namespace
         return true;
     }
 
-    bool personal_preview_flags_match(Unreal::FMapProperty* flags, Unreal::UObject* save, Unreal::UObject* scratch)
+    std::optional<std::array<int, 2>> personal_preview_flags(Unreal::FMapProperty* flags, Unreal::UObject* save,
+                                                            Unreal::UObject* scratch)
     {
         auto* before = flags->ContainerPtrToValuePtr<Unreal::FScriptMap>(save);
         auto* after = flags->ContainerPtrToValuePtr<Unreal::FScriptMap>(scratch);
-        if (flags->Identical(before, after)) return true;
+        if (flags->Identical(before, after)) return std::array{0, 0};
         auto* key = Unreal::CastField<Unreal::FNameProperty>(flags->GetKeyProp());
         auto* number = Unreal::CastField<Unreal::FIntProperty>(flags->GetValueProp());
         if (!key || !number || key->GetOffset_Internal() != 0 || !key->HasAnyPropertyFlags(Unreal::CPF_HasGetValueTypeHash) ||
-            before->Num() < 0 || after->Num() != before->Num() + 1 || after->GetMaxIndex() > inventory_limit)
-            return false;
+            before->Num() < 0 || before->Num() > before->GetMaxIndex() || before->GetMaxIndex() > inventory_limit ||
+            after->Num() < before->Num() || after->Num() > before->Num() + 2 ||
+            after->Num() > after->GetMaxIndex() || after->GetMaxIndex() > inventory_limit)
+            return {};
         const auto layout = Unreal::FScriptMap::GetScriptLayout(
             key->GetSize(), key->GetMinAlignment(), number->GetSize(), number->GetMinAlignment());
-        if (number->GetOffset_Internal() != layout.ValueOffset) return false;
-        const Unreal::FName intox{STR("Player_Intox")};
+        if (number->GetOffset_Internal() != layout.ValueOffset) return {};
+
+        const Unreal::FName fatigue{STR("Player_Fatigue")}, intox{STR("Player_Intox")};
+        const auto find = [&](Unreal::FScriptMap* entries, const Unreal::FName& name) {
+            return entries->FindValue(&name, layout,
+                [&](const void* value) { return key->GetValueTypeHash(value); },
+                [&](const void* first, const void* second) { return key->Identical(first, second); });
+        };
+        // The stock graph may add an explicit zero to an absent personal flag.
+        // Every unrelated flag must still have its original key and value.
+        int preserved = 0;
+        std::array<int, 2> differences{};
         for (int index = 0; index < after->GetMaxIndex(); ++index)
         {
             if (!after->IsValidIndex(index)) continue;
             const auto* entry = after->GetData(index, layout);
-            if (!entry) return false;
+            if (!entry) return {};
             const auto name = key->GetPropertyValue(entry);
-            const auto current = number->GetPropertyValueInContainer(entry);
-            const auto* previous = before->FindValue(&name, layout,
-                [&](const void* value) { return key->GetValueTypeHash(value); },
-                [&](const void* first, const void* second) { return key->Identical(first, second); });
-            if (previous ? current != number->GetPropertyValue(previous) : name != intox || current != 0)
-                return false;
+            const auto actual = number->GetPropertyValueInContainer(entry);
+            const auto* previous = find(before, name);
+            preserved += previous != nullptr;
+            const int original = previous ? number->GetPropertyValue(previous) : 0;
+            if (name == fatigue || name == intox)
+            {
+                if (original < 0 || original > 100 || actual < 0 || actual > 100) return {};
+                differences[name == fatigue ? 0 : 1] = actual - original;
+            }
+            else if (!previous || actual != original)
+                return {};
         }
-        // Stock food writes this flag even when its intoxication difference is
-        // zero. A missing flag and an explicit zero have the same meaning.
-        return true;
+        if (preserved != before->Num()) return {};
+        return differences;
     }
 
     int lua_preview_personal_consumable(const Lua& lua)
@@ -3076,7 +3093,8 @@ namespace
         if (canonical_host_save() != save || !drop_argument(address, epoch, false))
             return refuse("personal_preview_restore");
         if (!preview.applied) return refuse("personal_preview_no_effect");
-        if (!personal_preview_flags_match(flags, save, scratch)) return refuse("personal_preview_unhandled_flags");
+        const auto flags_delta = personal_preview_flags(flags, save, scratch);
+        if (!flags_delta) return refuse("personal_preview_unhandled_flags");
         for (auto* property : unchanged)
             if (!property->Identical(property->ContainerPtrToValuePtr<void>(save), property->ContainerPtrToValuePtr<void>(scratch)))
                 return refuse("personal_preview_unhandled_effect");
@@ -3124,7 +3142,8 @@ namespace
         lua.set_integer(source_count);
         lua.set_integer(remaining);
         for (const auto delta : deltas) lua.set_number(delta);
-        return 9;
+        for (const auto delta : *flags_delta) lua.set_integer(delta);
+        return 11;
     }
 
     template <bool host>

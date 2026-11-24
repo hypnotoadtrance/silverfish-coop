@@ -24,24 +24,31 @@ end
 local function settle_personal(fields, state, pawn, detached, stock)
     local class, quantity = fields[5], math.tointeger(tonumber(fields[6]))
     local food, health, regen, stim = tonumber(fields[7]), tonumber(fields[8]), tonumber(fields[9]), tonumber(fields[10])
+    local fatigue, intox = 0, 0
+    if #fields == 12 then fatigue, intox = math.tointeger(fields[11]), math.tointeger(fields[12]) end
     if type(SilverfishSettleNativeGuestPersonalConsumable) ~= "function" or type(class) ~= "string"
         or #class > 256 or not class:match("^/[%w_/%-]+%.[%w_%-]+_C$")
         or not quantity or quantity < 1 or quantity >= 2^31 or tostring(quantity) ~= fields[6]
-        or not finite(food) or not finite(health) or not finite(regen) or not finite(stim) then
+        or not finite(food) or not finite(health) or not finite(regen) or not finite(stim)
+        or not fatigue or not intox or math.abs(fatigue) > 100 or math.abs(intox) > 100 then
         error("guest_personal_consumable_refused_arguments", 0)
     end
-    local called, used, status, before, after, remaining_food, remaining_health, remaining_regen, remaining_stim =
+    local called, used, status, before, after, remaining_food, remaining_health, remaining_regen, remaining_stim,
+        remaining_fatigue, remaining_intox =
         pcall(SilverfishSettleNativeGuestPersonalConsumable, pawn:GetAddress(), detached:GetAddress(),
-            stock:GetAddress(), fields[4], class, quantity, food, health, regen, stim)
+            stock:GetAddress(), fields[4], class, quantity, food, health, regen, stim, fatigue, intox)
     if called and used == false and type(status) == "string"
         and (status:match("^guest_personal_consumable_refused_[a-z0-9_]+$")
             or status:match("^mutation_unverified_guest_personal_consumable_[a-z0-9_]+$")) then error(status, 0) end
     if not called or used ~= true or status ~= "used" or before ~= quantity or after ~= quantity - 1
-        or not finite(remaining_food) or not finite(remaining_health) or not finite(remaining_regen) or not finite(remaining_stim) then
+        or not finite(remaining_food) or not finite(remaining_health) or not finite(remaining_regen) or not finite(remaining_stim)
+        or math.type(remaining_fatigue) ~= "integer" or not (0 <= remaining_fatigue and remaining_fatigue <= 100)
+        or math.type(remaining_intox) ~= "integer" or not (0 <= remaining_intox and remaining_intox <= 100) then
         error("mutation_unverified_guest_personal_consumable_proof", 0)
     end
     observation = {map = state.map, pawn = fields[3], guid = fields[4], before = before, after = after,
-        personal_class = class, food = remaining_food, health = remaining_health, regen = remaining_regen, stim = remaining_stim}
+        personal_class = class, food = remaining_food, health = remaining_health, regen = remaining_regen, stim = remaining_stim,
+        fatigue = remaining_fatigue, intox = remaining_intox}
     pcall(use_presentation.consumed, pawn, class, false)
     return "native guest personal consumable used"
 end
@@ -68,7 +75,8 @@ function consumable.command(fields, state, phase)
     local personal = action == personal_consumable
     local prefix = personal and "guest_personal_consumable_refused_"
         or bag and "guest_starter_bag_refused_" or "guest_bandage_refused_"
-    if not enabled or #fields ~= (personal and 10 or 4) or phase ~= "hosting" or not state.listening or not exact_guid(guid) then
+    local valid_count = personal and (#fields == 10 or #fields == 12) or not personal and #fields == 4
+    if not enabled or not valid_count or phase ~= "hosting" or not state.listening or not exact_guid(guid) then
         error(prefix .. "scope", 0)
     end
 
@@ -155,7 +163,7 @@ function consumable.rows(state, phase, status_row)
     if row.personal_class then
         return {status_row(personal_consumable, "used", row.map, row.pawn, row.guid, row.personal_class, row.before, row.after,
             string.format("%.17g", row.food), string.format("%.17g", row.health),
-            string.format("%.17g", row.regen), string.format("%.17g", row.stim))}
+            string.format("%.17g", row.regen), string.format("%.17g", row.stim), row.fatigue, row.intox)}
     end
     if row.kind then
         return {status_row(starter_bag, "used", row.map, row.pawn, row.guid, row.kind, row.awards)}

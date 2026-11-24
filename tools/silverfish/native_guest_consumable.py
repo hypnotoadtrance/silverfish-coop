@@ -29,8 +29,9 @@ PERSONAL_ENTRY = "use-personal-consumable"
 PERSONAL_PREVIEW = "native-guest-personal-consumable-preview"
 PERSONAL_PREVIEW_KEY = "native_guest_personal_consumable_preview"
 PERSONAL_PREVIEW_COMMAND = "native-inventory-stock-personal-preview"
-PERSONAL_VITALS = ("food", "health", "regen", "stim")
-_PERSONAL_LIMITS = (200, 1_000_000, 1_000_000, 1_000_000)
+PERSONAL_VITALS = ("food", "health", "regen", "stim", "fatigue", "intox")
+_PERSONAL_LIMITS = (200, 1_000_000, 1_000_000, 1_000_000, 100, 100)
+_INTEGER = re.compile(r"-?(?:0|[1-9][0-9]*)\Z", re.ASCII)
 _GENERATED_CLASS = re.compile(r"/[A-Za-z0-9_/-]+\.[A-Za-z0-9_-]+_C\Z")
 _DECIMAL = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?\Z", re.ASCII)
 STARTER_BAGS = {
@@ -103,10 +104,13 @@ def _personal_identity(guid, item_class, quantity):
 
 
 def _personal_values(values, *, delta):
+    if len(values) == 4:
+        values = [*values, "0", "0"]
     if (len(values) != len(PERSONAL_VITALS)
-            or any(not 1 <= len(value) <= 25 or _DECIMAL.fullmatch(value) is None for value in values)):
+            or any(not 1 <= len(value) <= 25 or _DECIMAL.fullmatch(value) is None for value in values)
+            or any(_INTEGER.fullmatch(value) is None for value in values[4:])):
         raise ValueError("Invalid personal consumable vitals")
-    parsed = tuple(map(float, values))
+    parsed = (*map(float, values[:4]), *map(int, values[4:]))
     if any(not math.isfinite(value) or not (-limit if delta else 0) <= value <= limit
            for value, limit in zip(parsed, _PERSONAL_LIMITS, strict=True)):
         raise ValueError("Personal consumable vitals exceeded their bounds")
@@ -117,11 +121,11 @@ def _personal_values(values, *, delta):
 
 def parse_personal(fields, *, preview=False):
     if preview:
-        if len(fields) != 11 or fields[0] != PERSONAL_PREVIEW:
+        if len(fields) not in (11, 13) or fields[0] != PERSONAL_PREVIEW:
             raise ValueError("Invalid personal consumable preview")
         _, area, pawn, guid, item_class, before, after, *values = fields
     else:
-        if len(fields) != 12 or fields[:2] != [PERSONAL, "used"]:
+        if len(fields) not in (12, 14) or fields[:2] != [PERSONAL, "used"]:
             raise ValueError("Invalid personal consumable receipt")
         _, _, area, pawn, guid, item_class, before, after, *values = fields
     count = _personal_identity(guid, item_class, before)

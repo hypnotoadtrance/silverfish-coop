@@ -81,32 +81,43 @@ async def verify_stock_personal_consumable(host, guest, pawn, probe):
                       and event["items"] == len(items) for event in await resident_events(guest_run, frame)):
             await asyncio.sleep(.08)
 
-    async def projected_vitals(food, regen):
+    async def projected_vitals(food, regen, fatigue, intox):
         async with asyncio.timeout(10):
             while True:
-                current_food, current_regen = map(float, (await command(guest, "guest-personal-vitals")).split(","))
-                if abs(current_food - food) <= .6 and math.isclose(current_regen, regen, abs_tol=.02):
-                    return current_food, current_regen
+                current_food, current_regen, tired, saved_intox, pawn_intox = map(
+                    float, (await command(guest, "guest-personal-vitals")).split(","))
+                if (abs(current_food - food) <= .6 and math.isclose(current_regen, regen, abs_tol=.02)
+                        and tired == fatigue and saved_intox == pawn_intox == intox):
+                    return
                 await asyncio.sleep(.08)
 
     registered = await use_stock_item(guest_run, frame, mre, native_guest_consumable.RESULT[native_guest_consumable.MRE])
     assert registered["guid"] == mre and registered["quantity_after"] == 0, registered
     expected_regen = registered["regen_after"]
     assert expected_regen > 110
-    await projected_vitals(registered["food_after"], expected_regen)
+    canonical_flags, guest_flags = (await command(host, "host-personal-flags")).split(";")
+    fatigue_before, intox_before = map(int, guest_flags.split(","))
+    await projected_vitals(registered["food_after"], expected_regen, fatigue_before, intox_before)
     assert campaign_save_hashes(host.campaign) == saves, "Normal item use wrote an early checkpoint"
 
     _, _, food_before, _ = map(float, (await command(host, "host-read")).split(","))
-    fallback = await use_stock_item(guest_run, frame, weta, FALLBACK_RECEIPT)
+    assert await command(guest, "modded-weta") == "patched"
+    try:
+        fallback = await use_stock_item(guest_run, frame, weta, FALLBACK_RECEIPT)
+    finally:
+        assert await command(guest, "restore-weta") == "restored"
     assert (fallback["guid"], fallback["class_path"], fallback["quantity_before"], fallback["quantity_after"]) == (
         weta, LIVE_WETA, 1, 0), fallback
     food, regen = fallback["vitals"]["food"], fallback["vitals"]["regen"]
-    assert math.isclose(food - food_before, 7, abs_tol=1) and math.isclose(regen, expected_regen, abs_tol=.02), fallback
+    fatigue, intox = fallback["vitals"]["fatigue"], fallback["vitals"]["intox"]
+    assert math.isclose(food - food_before, 21, abs_tol=1) and math.isclose(regen, expected_regen, abs_tol=.02), fallback
+    assert (fatigue, intox) == (fatigue_before + 5, intox_before - 2), fallback
     canonical, detached = (await command(host, "host-medical-vitals")).split(";")
     assert canonical == baseline and math.isclose(float(detached.split(",")[1]), regen, abs_tol=.02), (canonical, detached)
     _, _, current_food, _ = map(float, (await command(host, "host-read")).split(","))
     assert abs(current_food - food) < .6, (current_food, food)
-    await projected_vitals(food, regen)
+    assert (await command(host, "host-personal-flags")).split(";") == [canonical_flags, f"{fatigue},{intox}"]
+    await projected_vitals(food, regen, fatigue, intox)
     after = await inventory(guest_run)
     assert weta not in after and mre not in after and after[spare]["quantity"] == 1, after
     assert await inventory(host_run) == starting_host
@@ -114,6 +125,7 @@ async def verify_stock_personal_consumable(host, guest, pawn, probe):
     await stock_inventory_open(guest_run, False)
     return {"stock_personal_consumable": {
         "pawn": pawn, "character_id": frame["character_id"], "guid": spare, "remaining": 1, "food": food, "regen": regen,
+        "fatigue": fatigue, "intox": intox,
         "fallback": fallback, "ordinary_recipe": registered, "original_host_state_unchanged": True,
         "deferred_save": True,
     }}
@@ -130,8 +142,9 @@ async def verify_personal_consumable_reconnect(host, guest, proof, probe):
     async with asyncio.timeout(8):
         while True:
             sample = await probe(guest.bridge, "portable-guest-food", "guest-personal-vitals")
-            food, regen = map(float, sample.split(","))
-            if abs(food - proof["food"]) <= 1.5 and math.isclose(regen, proof["regen"], abs_tol=.02):
+            food, regen, fatigue, intox, pawn_intox = map(float, sample.split(","))
+            if (abs(food - proof["food"]) <= 1.5 and math.isclose(regen, proof["regen"], abs_tol=.02)
+                    and fatigue == proof["fatigue"] and intox == pawn_intox == proof["intox"]):
                 break
             await asyncio.sleep(.08)
     proof["verified_after_reconnect"] = True

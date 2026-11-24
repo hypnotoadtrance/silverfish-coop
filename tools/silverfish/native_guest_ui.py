@@ -33,6 +33,10 @@ def _vital_values(frame, maximum):
         value = frame.get(field)
         if type(value) in (int, float) and 0 <= value <= limit:
             values[field] = value
+    for field in ("fatigue", "intox"):
+        value = frame.get(field)
+        if type(value) is int and 0 <= value <= 100:
+            values[field] = value
     return values
 
 
@@ -177,7 +181,10 @@ class GuestView:
                 and (current is None or _matches_vital(current, health)) and current_maximum == maximum
                 and all(_matches_vital(current_vitals.get(field), value) for field, value in vitals.items())):
             return
-        fields = ("food", "regen", "stim") if "stim" in vitals else ("food", "regen") if vitals else ()
+        if "fatigue" in vitals or "intox" in vitals:
+            fields = ("food", "regen", "stim", "fatigue", "intox")
+        else:
+            fields = ("food", "regen", "stim") if "stim" in vitals else ("food", "regen") if vitals else ()
         try:
             updated = await client.bridge.command(HEALTH_PROJECT, area, session, epoch, token, name,
                                                   str(health), str(maximum),

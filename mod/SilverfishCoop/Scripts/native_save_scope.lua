@@ -118,13 +118,21 @@ function scope.bind_guest(state, phase)
     return guest.save, pawn, active.id
 end
 
+function scope.personal_flags(save)
+    if not valid(save) or not save.Flags then return end
+    local flags = save.Flags
+    local fatigue, intox = FName("Player_Fatigue"), FName("Player_Intox")
+    return flags:Contains(fatigue) and flags:Find(fatigue):get() or 0,
+        flags:Contains(intox) and flags:Find(intox):get() or 0
+end
+
 function scope.guest_vitals(state, phase)
     local guest = active and active.guest
     local pawn = state.local_pawn and state.local_pawn.pawn
     if phase == "connected" and state.server and guest and valid(state.world) and valid(pawn)
         and same(state.world.OwningGameInstance, guest.instance) and same(guest.instance.SaveSlot_Ref, guest.save)
         and same(pawn.Save, guest.save) then
-        return guest.save.PlayerHealth, guest.save.PlayerFood, guest.save.PlayerRegen, guest.save.PlayerStim
+        return guest.save.PlayerHealth, guest.save.PlayerFood, guest.save.PlayerRegen, guest.save.PlayerStim, guest.save
     end
 end
 

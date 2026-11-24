@@ -6,13 +6,14 @@ local prefix = mailbox .. "/portable-guest-food-"
 local map = "World /Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P"
 local camp = "/Game/Classes/Maps/Maps_OverWorld/Observitory_P.Observitory_P:PersistentLevel.CampFire_02_BP_C_1"
 local meal_path = "/Game/Classes/Items/Item_MRE.Item_MRE_C"
+local weta_path = "/Game/Classes/Items/Item_LiveWeta.Item_LiveWeta_C"
 local factory = "/Game/Classes/Libraries/Fuctions_Lib/FL_Inventory.Default__FL_Inventory_C"
 local item_class = "Item_Class_3_2813641E42AA35FC0693029E4EE49F81"
 local item_guid = "GUID_27_E1095FFF4FE869D46C601BAD3A1A0F9A"
 local ammo = "Ammo_6_4B455DAC4579E0B5AA2B1794FFE3E788"
 local stock_cases = {"Leftovers", "HoneyEgg", "DirtyBandage", "Gauze", "MedSalve", "MedKit_Large", "StimPills",
     "Antibiotics", "BrownMushroom"}
-local last
+local last, original_weta
 
 local function valid(value) return value and value:IsValid() end
 local function same(a, b) return valid(a) and valid(b) and a:GetAddress() == b:GetAddress() end
@@ -96,6 +97,12 @@ local function host_read(pawn, save, world, action)
         return ("%.6f,%.6f,%.6f,%.6f"):format(save.PlayerFood, save.PlayerRegen, detached.PlayerFood, detached.PlayerRegen)
     end
     if action == "host-medical-vitals" then return medical_vitals(save) .. ";" .. medical_vitals(detached) end
+    if action == "host-personal-flags" then
+        local function report(current)
+            return ("%d,%d"):format(stock_flag(current, "Player_Fatigue"), stock_flag(current, "Player_Intox"))
+        end
+        return report(save) .. ";" .. report(detached)
+    end
     if action == "host-cooking-state" then
         return cooking_stats(save) .. ";" .. cooking_stats(detached) .. ";" .. tostring(asset(camp).Food_AmmountReady)
     end
@@ -105,12 +112,15 @@ local function host_read(pawn, save, world, action)
         return "seeded"
     end
     if action == "seed-personal-compatibility" then
-        local weta = asset("/Game/Classes/Items/Item_LiveWeta.Item_LiveWeta_C")
+        local weta = asset(weta_path)
         local unsupported = stock_item(remote, weta, 1)
         local spare = stock_item(remote, weta, 1)
         local known = stock_item(remote, asset(meal_path), 1)
         detached.PlayerHealth, detached.PlayerRegen, detached.PlayerStim = 100, 110, 0
         detached.PlayerFood = 40
+        detached.Flags:Add(FName("Player_Fatigue"), 35)
+        detached.Flags:Add(FName("Player_Intox"), 25)
+        remote.Intoxication = 25
         return unsupported .. ";" .. spare .. ";" .. known
     end
     if action == "seed-use-cases" then
@@ -157,7 +167,23 @@ local function run(action)
     end
     if action == "guest-personal-vitals" then
         assert(not pawn:HasAuthority(), "the personal stat readback needs an enrolled guest")
-        return ("%.6f,%.6f"):format(save.PlayerFood, save.PlayerRegen)
+        return ("%.6f,%.6f,%d,%d,%d"):format(save.PlayerFood, save.PlayerRegen, stock_flag(save, "Player_Fatigue"),
+            stock_flag(save, "Player_Intox"), pawn.Intoxication)
+    end
+    if action == "modded-weta" or action == "restore-weta" then
+        assert(not pawn:HasAuthority(), "the modded recipe fixture needs the isolated guest")
+        local defaults = asset(weta_path):GetCDO()
+        if action == "modded-weta" then
+            assert(not original_weta, "the recipe fixture was already active")
+            original_weta = {food = defaults.Regen_Boost, fatigue = defaults.Ammount_Fatigue}
+            defaults.Regen_Boost, defaults.Ammount_Fatigue = 21, 5
+            assert(defaults.Regen_Boost == 21 and defaults.Ammount_Fatigue == 5)
+            return "patched"
+        end
+        assert(original_weta, "the recipe fixture was not active")
+        defaults.Regen_Boost, defaults.Ammount_Fatigue = original_weta.food, original_weta.fatigue
+        original_weta = nil
+        return "restored"
     end
     if action == "cook" or action == "cook-empty" then return eat_all(pawn, save, action == "cook-empty") end
     if action == "guest-cooking-state" then return cooking_stats(save) end

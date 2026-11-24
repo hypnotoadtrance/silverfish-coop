@@ -549,17 +549,94 @@ namespace
         return value;
     }
 
+    struct Intoxication
+    {
+        Unreal::FMapProperty* map{};
+        Unreal::FNameProperty* key{};
+        Unreal::FIntProperty* number{};
+        Unreal::FScriptMapLayout layout{};
+        Unreal::FName flag{STR("Player_Intox"), Unreal::FNAME_Find};
+
+        bool bind(Unreal::UObject* save)
+        {
+            map = field<Unreal::FMapProperty>(save, STR("Flags"));
+            key = map ? Unreal::CastField<Unreal::FNameProperty>(map->GetKeyProp()) : nullptr;
+            number = map ? Unreal::CastField<Unreal::FIntProperty>(map->GetValueProp()) : nullptr;
+            if (!key || !number || key->GetArrayDim() != 1 || number->GetArrayDim() != 1 ||
+                key->GetSize() != sizeof(Unreal::FName) || key->GetOffset_Internal() != 0 ||
+                number->GetSize() != sizeof(int) || flag.IsNone() || flag.ToString() != STR("Player_Intox") ||
+                !key->HasAnyPropertyFlags(Unreal::CPF_HasGetValueTypeHash)) return false;
+            layout = Unreal::FScriptMap::GetScriptLayout(key->GetSize(), key->GetMinAlignment(),
+                number->GetSize(), number->GetMinAlignment());
+            return number->GetOffset_Internal() == layout.ValueOffset && usable(data(save));
+        }
+
+        Unreal::FScriptMap* data(Unreal::UObject* save) const
+        {
+            return map->ContainerPtrToValuePtr<Unreal::FScriptMap>(save);
+        }
+
+        bool usable(const Unreal::FScriptMap* entries) const
+        {
+            return entries && entries->Num() >= 0 && entries->Num() <= entries->GetMaxIndex() && entries->GetMaxIndex() < 16384;
+        }
+
+        auto hash() const { return [this](const void* raw) { return key->GetValueTypeHash(raw); }; }
+        auto identical_key() const { return [this](const void* a, const void* b) { return key->Identical(a, b); }; }
+
+        void* find_value(Unreal::FScriptMap* entries, const Unreal::FName& name) const
+        {
+            return entries->FindValue(&name, layout, hash(), identical_key());
+        }
+
+        int read(Unreal::FScriptMap* entries, const Unreal::FName& name) const
+        {
+            const auto* value = find_value(entries, name);
+            return value ? number->GetPropertyValue(value) : 0;
+        }
+
+        int read(Unreal::FScriptMap* entries) const { return read(entries, flag); }
+
+        bool write(Unreal::FScriptMap* entries, const Unreal::FName& name, int expected) const
+        {
+            if (!usable(entries) || name.IsNone()) return false;
+            const int count = entries->Num();
+            const bool existed = find_value(entries, name) != nullptr;
+            auto* value = entries->FindOrAdd(&name, layout, hash(), identical_key(), [&](void* destination, void* data) {
+                key->InitializeValue(destination);
+                key->SetPropertyValue(destination, name);
+                number->InitializeValue(data);
+            });
+            if (!value) return false;
+            number->SetPropertyValue(value, expected);
+            return entries->Num() == count + !existed && read(entries, name) == expected;
+        }
+
+        bool write(Unreal::FScriptMap* entries, int expected) const
+        {
+            return expected >= 0 && expected <= 100 && write(entries, flag, expected);
+        }
+    };
+
+    const Unreal::FName& fatigue_flag()
+    {
+        static const Unreal::FName name{STR("Player_Fatigue")};
+        return name;
+    }
+
     int settle_personal_consumable(const Lua& lua)
     {
         const auto refuse = [&](std::string_view reason) {
             return result(lua, false, std::string("guest_personal_consumable_refused_").append(reason));
         };
-        if (!enabled() || !Unreal::IsInGameThreadRaw() || lua.get_stack_size() != 10 ||
+        const auto arguments = lua.get_stack_size();
+        if (!enabled() || !Unreal::IsInGameThreadRaw() || (arguments != 10 && arguments != 12) ||
             !lua.is_integer(1) || !lua.is_integer(2) || !lua.is_integer(3) ||
             !lua.is_string(4) || !lua.is_string(5) || !lua.is_integer(6))
             return refuse("arguments");
         for (int index = 7; index <= 10; ++index)
             if (!lua.is_number(index)) return refuse("arguments");
+        if (arguments == 12 && (!lua.is_integer(11) || !lua.is_integer(12))) return refuse("arguments");
 
         const auto pawn = lua.get_integer(), detached = lua.get_integer(), canonical = lua.get_integer();
         Guid guid{};
@@ -572,8 +649,11 @@ namespace
         delta.health = lua.get_number();
         delta.regen = lua.get_number();
         delta.stim = lua.get_number();
+        const auto fatigue_change = arguments == 12 ? lua.get_integer() : 0;
+        const auto intox_change = arguments == 12 ? lua.get_integer() : 0;
         if (!path.starts_with('/') || !path.ends_with("_C") || path.size() > 512 ||
-            observed_count < 1 || observed_count > INT32_MAX || !delta.finite())
+            observed_count < 1 || observed_count > INT32_MAX || !delta.finite() ||
+            fatigue_change < -100 || fatigue_change > 100 || intox_change < -100 || intox_change > 100)
             return refuse("observation");
 
         Scope scope;
@@ -612,28 +692,49 @@ namespace
         auto* bag = inventory.backpack;
         auto* rows = inventory.bag_data(scope.guest);
         auto* stock_rows = inventory.bag_data(scope.stock);
-        auto* flags = field<Unreal::FMapProperty>(scope.guest, STR("Flags"));
+        Intoxication personal, stock;
+        auto* pawn_intox = field<Unreal::FIntProperty>(scope.pawn, STR("Intoxication"));
         const Vitals stock_vitals = health.read(scope.stock);
-        if (!flags || !stock_vitals.finite()) return refuse("protected_state");
-        auto* guest_flags = flags->ContainerPtrToValuePtr<void>(scope.guest);
-        auto* stock_flags = flags->ContainerPtrToValuePtr<void>(scope.stock);
+        if (!pawn_intox || !stock_vitals.finite() || !personal.bind(scope.guest) || !stock.bind(scope.stock) ||
+            personal.map != stock.map) return refuse("protected_state");
+        auto* flags = personal.map;
+        auto* guest_flags = personal.data(scope.guest);
+        auto* stock_flags = stock.data(scope.stock);
+        const auto fatigue_before = personal.read(guest_flags, fatigue_flag());
+        const auto intox_before = personal.read(guest_flags);
+        const auto pawn_before = pawn_intox->GetPropertyValueInContainer(scope.pawn);
+        if (fatigue_before < 0 || fatigue_before > 100 || intox_before < 0 || intox_before > 100)
+            return refuse("personal_flags");
+        std::int32_t trauma{};
+        if (fatigue_change && !silverfish::native_enemy_loot::count_save_passive(
+                scope.guest, Unreal::FName{STR("LingeringTrauma"), Unreal::FNAME_Find}, trauma))
+            return refuse("fatigue_schema");
+        const int fatigue_after = fatigue_change ?
+            std::clamp(fatigue_before + static_cast<int>(fatigue_change), trauma > 0 ? 15 : 0, 100) : fatigue_before;
+        const int intox_after = std::clamp(intox_before + static_cast<int>(intox_change), 0, 100);
+        const int pawn_after = intox_change ? intox_after : pawn_before;
         const auto before_rows = copy_value(bag, rows);
         const auto next_rows = copy_value(bag, rows);
         const auto stock_before = copy_value(bag, stock_rows);
         const auto guest_flags_before = copy_value(flags, guest_flags);
         const auto stock_flags_before = copy_value(flags, stock_flags);
-        if (!before_rows || !next_rows || !stock_before || !guest_flags_before || !stock_flags_before)
+        const auto guest_flags_after = copy_value(flags, guest_flags);
+        if (!before_rows || !next_rows || !stock_before || !guest_flags_before || !stock_flags_before || !guest_flags_after)
             return refuse("snapshot");
+        auto* prepared_flags = static_cast<Unreal::FScriptMap*>(guest_flags_after.get());
+        if ((fatigue_change && !personal.write(prepared_flags, fatigue_flag(), fatigue_after)) ||
+            (intox_change && !personal.write(prepared_flags, intox_after))) return refuse("prepared_flags");
         const auto protected_unchanged = [&] {
             return scope.current() && health.read(scope.stock) == stock_vitals &&
                 health.maximum->GetPropertyValueInContainer(scope.pawn) == health.max_health &&
                 bag->Identical(stock_rows, stock_before.get()) &&
-                flags->Identical(guest_flags, guest_flags_before.get()) &&
                 flags->Identical(stock_flags, stock_flags_before.get());
         };
-        const auto verified = [&](const Vitals& expected, const void* expected_rows) {
-            return protected_unchanged() && health.read(scope.guest) == expected &&
-                bag->Identical(rows, expected_rows);
+        const auto verified = [&](const Vitals& expected, const void* expected_rows,
+                                  const void* expected_flags, int expected_intox) {
+            return protected_unchanged() && health.read(scope.guest) == expected && bag->Identical(rows, expected_rows) &&
+                flags->Identical(guest_flags, expected_flags) &&
+                pawn_intox->GetPropertyValueInContainer(scope.pawn) == expected_intox;
         };
 
         const int remaining = inventory.units - 1;
@@ -656,20 +757,25 @@ namespace
             inventory.row.set_remaining(item, remaining, unit_weight, unit_value);
             const bool stock_math = silverfish::loot_escrow::stock_stack_matches(
                 scope.pawn, row_property, original.GetRawPtr(inventory.selected), item, -1);
-            if (!verified(health.before, before_rows.get()))
+            if (!verified(health.before, before_rows.get(), guest_flags_before.get(), pawn_before))
                 return result(lua, false, "mutation_unverified_guest_personal_consumable_stack_calculation");
             if (!stock_math) return refuse("stock_stack_calculation");
         }
 
         health.write(scope.guest, after);
         bag->CopyCompleteValue(rows, next_rows.get());
-        if (!verified(after, next_rows.get()))
+        if (fatigue_change || intox_change) flags->CopyCompleteValue(guest_flags, prepared_flags);
+        if (intox_change) pawn_intox->SetPropertyValueInContainer(scope.pawn, pawn_after);
+        if (!verified(after, next_rows.get(), prepared_flags, pawn_after))
         {
             if (protected_unchanged())
             {
                 health.write(scope.guest, health.before);
                 bag->CopyCompleteValue(rows, before_rows.get());
-                if (verified(health.before, before_rows.get())) return refuse("commit_rolled_back");
+                flags->CopyCompleteValue(guest_flags, guest_flags_before.get());
+                pawn_intox->SetPropertyValueInContainer(scope.pawn, pawn_before);
+                if (verified(health.before, before_rows.get(), guest_flags_before.get(), pawn_before))
+                    return refuse("commit_rolled_back");
             }
             return result(lua, false, "mutation_unverified_guest_personal_consumable_commit");
         }
@@ -681,7 +787,9 @@ namespace
         lua.set_number(after.health);
         lua.set_number(after.regen);
         lua.set_number(after.stim);
-        return 8;
+        lua.set_integer(fatigue_after);
+        lua.set_integer(intox_after);
+        return 10;
     }
 
     int use(const Lua& lua)
@@ -999,75 +1107,6 @@ namespace
         return 4;
     }
 
-    struct Intoxication
-    {
-        Unreal::FMapProperty* map{};
-        Unreal::FNameProperty* key{};
-        Unreal::FIntProperty* number{};
-        Unreal::FScriptMapLayout layout{};
-        Unreal::FName flag{STR("Player_Intox"), Unreal::FNAME_Find};
-
-        bool bind(Unreal::UObject* save)
-        {
-            map = field<Unreal::FMapProperty>(save, STR("Flags"));
-            key = map ? Unreal::CastField<Unreal::FNameProperty>(map->GetKeyProp()) : nullptr;
-            number = map ? Unreal::CastField<Unreal::FIntProperty>(map->GetValueProp()) : nullptr;
-            if (!key || !number || key->GetArrayDim() != 1 || number->GetArrayDim() != 1 ||
-                key->GetSize() != sizeof(Unreal::FName) || key->GetOffset_Internal() != 0 ||
-                number->GetSize() != sizeof(int) || flag.IsNone() || flag.ToString() != STR("Player_Intox") ||
-                !key->HasAnyPropertyFlags(Unreal::CPF_HasGetValueTypeHash)) return false;
-            layout = Unreal::FScriptMap::GetScriptLayout(key->GetSize(), key->GetMinAlignment(),
-                number->GetSize(), number->GetMinAlignment());
-            return number->GetOffset_Internal() == layout.ValueOffset && usable(data(save));
-        }
-
-        Unreal::FScriptMap* data(Unreal::UObject* save) const
-        {
-            return map->ContainerPtrToValuePtr<Unreal::FScriptMap>(save);
-        }
-
-        bool usable(const Unreal::FScriptMap* entries) const
-        {
-            return entries && entries->Num() >= 0 && entries->Num() <= entries->GetMaxIndex() && entries->GetMaxIndex() < 16384;
-        }
-
-        auto hash() const { return [this](const void* raw) { return key->GetValueTypeHash(raw); }; }
-        auto identical_key() const { return [this](const void* a, const void* b) { return key->Identical(a, b); }; }
-
-        void* find_value(Unreal::FScriptMap* entries, const Unreal::FName& name) const
-        {
-            return entries->FindValue(&name, layout, hash(), identical_key());
-        }
-
-        int read(Unreal::FScriptMap* entries, const Unreal::FName& name) const
-        {
-            const auto* value = find_value(entries, name);
-            return value ? number->GetPropertyValue(value) : 0;
-        }
-
-        int read(Unreal::FScriptMap* entries) const { return read(entries, flag); }
-
-        bool write(Unreal::FScriptMap* entries, const Unreal::FName& name, int expected) const
-        {
-            if (!usable(entries) || name.IsNone()) return false;
-            const int count = entries->Num();
-            const bool existed = find_value(entries, name) != nullptr;
-            auto* value = entries->FindOrAdd(&name, layout, hash(), identical_key(), [&](void* destination, void* data) {
-                key->InitializeValue(destination);
-                key->SetPropertyValue(destination, name);
-                number->InitializeValue(data);
-            });
-            if (!value) return false;
-            number->SetPropertyValue(value, expected);
-            return entries->Num() == count + !existed && read(entries, name) == expected;
-        }
-
-        bool write(Unreal::FScriptMap* entries, int expected) const
-        {
-            return expected >= 0 && expected <= 100 && write(entries, flag, expected);
-        }
-    };
-
     struct CookingEffect
     {
         double food{}, health{}, regen{};
@@ -1080,12 +1119,6 @@ namespace
         }
         bool operator==(const CookingEffect&) const = default;
     };
-
-    const Unreal::FName& fatigue_flag()
-    {
-        static const Unreal::FName name{STR("Player_Fatigue")};
-        return name;
-    }
 
     CookingEffect cooking_vitals(const Scope& scope, const Health& health, const Intoxication& flags)
     {

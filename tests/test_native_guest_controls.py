@@ -342,7 +342,7 @@ class NativeGuestHealthViewTests(unittest.IsolatedAsyncioTestCase):
             self.body.update(health=float(health), max_health=float(maximum))
             if vitals:
                 view = self.game.setdefault(native_guest_ui.VITALS, {}).setdefault(name, {})
-                for field, value in zip(("food", "regen", "stim"), vitals):
+                for field, value in zip(("food", "regen", "stim", "fatigue", "intox"), vitals):
                     if value != "-":
                         view[field] = float(value)
             return self.game
@@ -402,6 +402,15 @@ class NativeGuestHealthViewTests(unittest.IsolatedAsyncioTestCase):
             self.client.gameplay_seen = time.monotonic()
             await self.view.sync_health(self.client, True)
             self.assertEqual(view["stim"], stim)
+
+    async def test_personal_flags_update_even_when_other_vitals_are_unchanged(self):
+        self.frame.update(fatigue=31, intox=9)
+        await self.view.sync_health(self.client, True)
+        self.assertEqual(self.game[native_guest_ui.VITALS][self.pawn], {"fatigue": 31, "intox": 9})
+        self.frame.update(fatigue=32, intox=0)
+        self.client.gameplay_seen = time.monotonic()
+        await self.view.sync_health(self.client, True)
+        self.assertEqual(self.game[native_guest_ui.VITALS][self.pawn], {"fatigue": 32, "intox": 0})
 
     async def test_unqualified_optional_values_leave_the_legacy_health_projection_usable(self):
         self.frame.update(food=True, regen=251, stim=float("inf"))
