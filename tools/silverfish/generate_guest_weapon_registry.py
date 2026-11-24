@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .guest_weapon_profiles import (
     BOLT_ACTION_UNLOAD_CAPACITY, BOLT_ACTION_UNLOADS, FIREARMS, MAX_TAKE_AMMO_ROUNDS, NINE_MM_BALL, STOCK_AMMO,
+    STOCK_SELECTABLE_AUTOMATIC_KINDS,
 )
 
 
@@ -60,6 +61,9 @@ def outputs() -> dict[str, str]:
         lua_magazine = f", {ammo}, {magazine.capacity}" if magazine else ""
         header.append(f'        Profile{{"{firearm.kind}", STR("{firearm.path}"), {headless}, {shape}}},')
         lua.append(f'    {{ "{firearm.kind}", "{firearm.path}", {headless}{lua_magazine} }},')
+    header.extend(("    };", "    inline constexpr std::array stock_selectable_automatic_kinds{"))
+    for kind in STOCK_SELECTABLE_AUTOMATIC_KINDS:
+        header.append(f'        std::string_view{{"{kind}"}},')
     header.extend(("    };", f"    inline constexpr int bolt_action_magazine = {BOLT_ACTION_UNLOAD_CAPACITY};", "}", ""))
     lua.extend((
         "}) do",

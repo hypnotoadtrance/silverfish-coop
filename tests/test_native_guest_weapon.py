@@ -130,6 +130,17 @@ class NativeGuestWeaponProfilesTests(unittest.TestCase):
                 self.assertEqual(profile.magazine, guest_weapon_profiles.Magazine(
                     24, 0, 0.1, require_default_payload=True, ammo=ammo, reload_first_stack=True))
 
+    def test_audited_selectable_automatic_receivers_use_stock_single_projectile_magazines(self):
+        profiles = {profile.kind: profile for profile in guest_weapon_profiles.FIREARMS}
+        kinds = guest_weapon_profiles.STOCK_SELECTABLE_AUTOMATIC_KINDS
+        self.assertEqual(set(kinds), {
+            "smg-standard", "light-ar-01", "light-ar-02", "light-ar-03", "light-ar-cqc", "light-ar-silenced",
+        })
+        for kind in kinds:
+            with self.subTest(kind=kind):
+                magazine = profiles[kind].magazine
+                self.assertEqual((magazine.burst_length, magazine.ammo.projectile_count), (0, 1))
+
 
 class NativeGuestInventoryLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def host(self):
