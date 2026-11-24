@@ -944,8 +944,14 @@ local function pursuit_frame(pawn, world, host, aim)
     local function angles(value)
         return ("%.3f,%.3f"):format(value.Yaw, value.Pitch)
     end
+    local blockers = {}
+    if controller.Loading then blockers[#blockers + 1] = "Loading" end
+    for _, field in ipairs({"Dead", "IsWeaponBlocked", "UsingItem", "Reloading", "IsChangingAmmo",
+        "Speaking", "HeadUnderWater", "Wep_HeldAside", "OnLadder"}) do
+        if shooter[field] ~= false then blockers[#blockers + 1] = field end
+    end
     return table.concat({vector(point), vector(target), angles(desired), angles(controller:GetControlRotation()),
-        angles(camera:K2_GetComponentRotation()), angles(barrel), tostring(shooter.IsWeaponBlocked)}, ";")
+        angles(camera:K2_GetComponentRotation()), angles(barrel), table.concat(blockers, ",")}, ";")
 end
 
 local function dock_swing(world, host, action)

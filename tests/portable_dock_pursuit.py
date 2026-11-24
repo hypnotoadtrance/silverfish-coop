@@ -22,11 +22,11 @@ def aim_error(current, desired):
 
 
 def view_frame(fields):
-    seat, target, desired, control, camera, muzzle, blocked = fields.split(";")
+    seat, target, desired, control, camera, muzzle, blockers = fields.split(";")
     seat, target = coordinates(seat), coordinates(target)
     return {"seat": seat, "target": target, "clearance_cm": math.dist(seat[:2], target[:2]), "desired": coordinates(desired),
             "controller": coordinates(control), "camera": coordinates(camera), "muzzle": coordinates(muzzle),
-            "blocked": blocked == "true"}
+            "blockers": blockers.split(",") if blockers else []}
 
 
 def combat_frame(fields):
@@ -141,11 +141,10 @@ async def verify_dock_pursuit(host, guest, frame, command):
                 await retreat(local_frame, side)
                 next_retreat = time.monotonic() + .75 * RETREAT_MILLISECONDS / 1000
                 return None
-            if (local_frame["clearance_cm"] < MINIMUM_CLEARANCE_CM or local_frame["blocked"]
+            if (local_frame["clearance_cm"] < MINIMUM_CLEARANCE_CM or local_frame["blockers"]
                     or aim_error(local_frame["camera"], local_frame["desired"]) > 8):
                 return None
-            authority = await command(host, "dock-pursuit-view")
-            return {"guest": local_frame, "host": view_frame(authority)} if authority != "absent" else None
+            return local_frame
 
         return await wait_for(find_window, "No clear and unblocked firing lane during the warehouse pursuit", 7)
 
@@ -154,10 +153,13 @@ async def verify_dock_pursuit(host, guest, frame, command):
         history.append(record)
         for attempt_index in range(2):
             view = await firing_window(side or attempt_index)
-            record.update(view)
-            attempt = {"clearance_cm": round(view["guest"]["clearance_cm"], 1)}
+            record["guest"] = view
+            attempt = {"clearance_cm": round(view["clearance_cm"], 1)}
             record["attempts"].append(attempt)
-            shot = await trigger(remaining, attempt)
+            # Read the other seat without spending the guest's firing window waiting for its result.
+            shot, authority = await asyncio.gather(trigger(remaining, attempt), command(host, "dock-pursuit-view"))
+            assert authority != "absent", ("The host lost the warehouse worker before the shot was witnessed", history)
+            record["host"] = view_frame(authority)
             if shot:
                 record["round"] = shot
                 return record
